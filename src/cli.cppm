@@ -11,6 +11,8 @@ export module scpp.cli;
 import scpp.lexer;
 import scpp.parser;
 import scpp.ast;
+import scpp.codegen;
+import scpp.driver;
 
 namespace {
 
@@ -195,6 +197,30 @@ int run_parse(std::string_view path) {
     return 0;
 }
 
+int run_build(std::string_view input_path, std::string_view output_path) {
+    std::string source;
+    try {
+        source = read_file(input_path);
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+
+    try {
+        scpp::compile_to_executable(source, std::string(output_path));
+    } catch (const scpp::ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const scpp::CodegenError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const scpp::DriverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 export namespace scpp {
@@ -208,11 +234,19 @@ int run(int argc, char** argv) {
     if (argc >= 3 && std::string_view(argv[1]) == "parse") {
         return run_parse(argv[2]);
     }
+    if (argc >= 3 && std::string_view(argv[1]) == "build") {
+        std::string_view output_path = "a.out";
+        for (int i = 3; i + 1 < argc; i++) {
+            if (std::string_view(argv[i]) == "-o") output_path = argv[i + 1];
+        }
+        return run_build(argv[2], output_path);
+    }
 
     std::string_view name = argc > 0 ? argv[0] : "scpp";
     std::cout << "Hello from " << name << " " << version << "!\n";
     std::cout << "Usage: " << name << " lex <file>\n";
     std::cout << "       " << name << " parse <file>\n";
+    std::cout << "       " << name << " build <file> [-o <output>]\n";
     return 0;
 }
 

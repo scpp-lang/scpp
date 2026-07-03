@@ -46,12 +46,40 @@ The language specification is maintained in both languages:
 - English: [`docs/language-spec-v0.1.en.md`](docs/language-spec-v0.1.en.md)
 - 中文: [`docs/language-spec-v0.1.zh.md`](docs/language-spec-v0.1.zh.md)
 
+## Building
+
+Requires Clang with C++23 modules support, CMake 3.28+, Ninja, and an LLVM
+development package. On Debian/Ubuntu:
+
+```sh
+sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev
+```
+
+(`libzstd-dev` is needed because LLVM's CMake config links against it;
+without it, `find_package(LLVM)` fails with a missing `zstd::libzstd_shared`
+target.)
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=<path to LLVM's lib/cmake/llvm>
+cmake --build build
+ctest --test-dir build
+```
+
+The `scpp` CLI supports:
+
+```sh
+scpp lex <file>              # dump the token stream
+scpp parse <file>            # dump the AST
+scpp build <file> [-o <out>] # compile to a native executable via LLVM
+```
+
 ## Status
 
-Early design stage. Current milestone: **M0 — freezing the spec** before
-building the M1 minimal end-to-end pipeline (scalars + locals + control flow +
-functions → AST → LLVM IR → executable). See the milestones section of the spec
-for the full roadmap.
+Early design stage. Milestone **M1 — minimal end-to-end pipeline** (scalars +
+locals + control flow + functions → AST → LLVM IR → executable, no `safe`
+checks yet) is implemented: lexer, parser/AST, and an LLVM-based backend that
+compiles and links a native executable. See the milestones section of the
+spec for the full roadmap.
 
 ## License
 

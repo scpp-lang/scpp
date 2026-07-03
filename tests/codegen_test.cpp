@@ -1,0 +1,92 @@
+import scpp.codegen;
+import scpp.parser;
+import scpp.ast;
+
+#include <iostream>
+#include <string>
+
+namespace {
+
+int failures = 0;
+
+void expect(bool condition, std::string_view message) {
+    if (!condition) {
+        std::cerr << "FAILED: " << message << "\n";
+        failures++;
+    }
+}
+
+std::string generate_ir(std::string_view source) {
+    scpp::Program program = scpp::parse(source);
+    scpp::Codegen codegen("test_module");
+    codegen.generate(program);
+    return codegen.module_ir();
+}
+
+void test_return_constant() {
+    std::string ir = generate_ir("int main() { return 42; }");
+    expect(ir.find("define i32 @main()") != std::string::npos,
+           "return_constant: expected 'define i32 @main()' in IR");
+    expect(ir.find("ret i32 42") != std::string::npos, "return_constant: expected 'ret i32 42' in IR");
+}
+
+void test_function_with_params_and_call() {
+    std::string ir = generate_ir(
+        "int add(int a, int b) { return a + b; }"
+        "int main() { return add(1, 2); }");
+    expect(ir.find("define i32 @add(i32") != std::string::npos,
+           "function_with_params_and_call: expected 'add' function definition");
+    expect(ir.find("call i32 @add(") != std::string::npos,
+           "function_with_params_and_call: expected a call to 'add'");
+}
+
+void test_if_else_generates_branches() {
+    std::string ir = generate_ir("int f(int x) { if (x < 2) { return 1; } else { return 0; } }");
+    expect(ir.find("br i1") != std::string::npos, "if_else_generates_branches: expected a conditional branch");
+    expect(ir.find("if.then") != std::string::npos, "if_else_generates_branches: expected an 'if.then' block");
+    expect(ir.find("if.else") != std::string::npos, "if_else_generates_branches: expected an 'if.else' block");
+}
+
+void test_while_generates_loop() {
+    std::string ir = generate_ir("int f() { int x = 0; while (x < 10) { x = x + 1; } return x; }");
+    expect(ir.find("while.cond") != std::string::npos, "while_generates_loop: expected a 'while.cond' block");
+    expect(ir.find("while.body") != std::string::npos, "while_generates_loop: expected a 'while.body' block");
+}
+
+void test_missing_return_is_rejected() {
+    bool threw = false;
+    try {
+        generate_ir("int f() { int x = 1; }");
+    } catch (const scpp::CodegenError&) {
+        threw = true;
+    }
+    expect(threw, "missing_return_is_rejected: expected a CodegenError");
+}
+
+void test_call_to_unknown_function_is_rejected() {
+    bool threw = false;
+    try {
+        generate_ir("int main() { return unknown(); }");
+    } catch (const scpp::CodegenError&) {
+        threw = true;
+    }
+    expect(threw, "call_to_unknown_function_is_rejected: expected a CodegenError");
+}
+
+} // namespace
+
+int main() {
+    test_return_constant();
+    test_function_with_params_and_call();
+    test_if_else_generates_branches();
+    test_while_generates_loop();
+    test_missing_return_is_rejected();
+    test_call_to_unknown_function_is_rejected();
+
+    if (failures > 0) {
+        std::cerr << failures << " test(s) failed.\n";
+        return 1;
+    }
+    std::cout << "All codegen tests passed.\n";
+    return 0;
+}

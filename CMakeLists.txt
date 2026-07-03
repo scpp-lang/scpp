@@ -13,6 +13,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
+find_package(LLVM REQUIRED CONFIG)
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+llvm_map_components_to_libnames(LLVM_LIBS core support target native)
+
 add_library(scpp_lexer)
 target_sources(scpp_lexer
     PUBLIC
@@ -35,6 +39,26 @@ target_sources(scpp_parser
 target_link_libraries(scpp_parser PUBLIC scpp_lexer scpp_ast)
 target_compile_features(scpp_parser PRIVATE cxx_std_23)
 
+separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+
+add_library(scpp_codegen)
+target_sources(scpp_codegen
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/codegen.cppm)
+target_include_directories(scpp_codegen SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
+target_link_libraries(scpp_codegen PUBLIC scpp_ast ${LLVM_LIBS})
+target_compile_features(scpp_codegen PRIVATE cxx_std_23)
+
+add_library(scpp_driver)
+target_sources(scpp_driver
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/driver.cppm)
+target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen ${LLVM_LIBS})
+target_compile_features(scpp_driver PRIVATE cxx_std_23)
+
 add_executable(scpp)
 
 target_sources(scpp
@@ -43,7 +67,7 @@ target_sources(scpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/cli.cppm)
-target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser)
+target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_driver)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
 
@@ -60,3 +84,15 @@ target_link_libraries(parser_test PRIVATE scpp_parser scpp_ast scpp_lexer)
 target_compile_features(parser_test PRIVATE cxx_std_23)
 
 add_test(NAME parser_test COMMAND parser_test)
+
+add_executable(codegen_test tests/codegen_test.cpp)
+target_link_libraries(codegen_test PRIVATE scpp_codegen scpp_parser scpp_ast scpp_lexer)
+target_compile_features(codegen_test PRIVATE cxx_std_23)
+
+add_test(NAME codegen_test COMMAND codegen_test)
+
+add_executable(driver_test tests/driver_test.cpp)
+target_link_libraries(driver_test PRIVATE scpp_driver scpp_codegen scpp_parser scpp_ast scpp_lexer)
+target_compile_features(driver_test PRIVATE cxx_std_23)
+
+add_test(NAME driver_test COMMAND driver_test)
