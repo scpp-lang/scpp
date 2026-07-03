@@ -1,0 +1,11 @@
+int f(bool cond) {
+    int x;
+    if (cond) {
+        x = 5;
+    }
+    return x;
+}
+
+int main() {
+    return f(false);
+}

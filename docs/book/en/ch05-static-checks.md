@@ -35,10 +35,23 @@ the following properties:
     pointer". (No explicit annotation syntax is introduced in v0.1.)
 
 ## 5.4 Initialization
-- Reading an uninitialized variable is forbidden.
-- All paths must initialize before use (dataflow analysis).
-- `struct` already satisfies this trivially via the zero-init guarantee in
-  [§4.1](ch04-struct-vs-class.md), with no flow-sensitive analysis needed.
+- scpp has **no concept of an "uninitialized variable"**: any local or
+  member that has no explicit initializer is always guaranteed by the
+  compiler to be **zero-initialized** (bitwise) -- scalars become `0` /
+  `false` / `0.0`, raw pointers become `nullptr`, and aggregate types like
+  `struct`, arrays, and `std::unique_ptr` are zeroed field-by-field /
+  element-by-element (see [§4.1](ch04-struct-vs-class.md) for `struct`'s
+  specific rules). This applies uniformly to every type, not just a
+  special case for some of them.
+- Reading an uninitialized variable is therefore **structurally
+  impossible**: a variable is well-defined from the moment it's declared,
+  with no flow-sensitive dataflow analysis needed to prove "every path
+  initializes it before use".
+- This differs from both Rust (requires explicit initialization; reading
+  an uninitialized value is a compile error) and ordinary C++ (no
+  initialization by default; reading is undefined behavior): scpp always
+  provides a well-defined default value, leaving "is this default value
+  the one you wanted" up to the programmer.
 
 ## 5.5 Prohibited in Safe Regions (unless in `unsafe { }`)
 - Raw pointer dereference, pointer arithmetic.

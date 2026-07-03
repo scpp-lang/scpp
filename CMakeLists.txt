@@ -39,6 +39,14 @@ target_sources(scpp_parser
 target_link_libraries(scpp_parser PUBLIC scpp_lexer scpp_ast)
 target_compile_features(scpp_parser PRIVATE cxx_std_23)
 
+add_library(scpp_mir)
+target_sources(scpp_mir
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/mir.cppm)
+target_link_libraries(scpp_mir PUBLIC scpp_ast)
+target_compile_features(scpp_mir PRIVATE cxx_std_23)
+
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
 add_library(scpp_codegen)
@@ -56,7 +64,7 @@ target_sources(scpp_movecheck
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/movecheck.cppm)
-target_link_libraries(scpp_movecheck PUBLIC scpp_ast)
+target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir)
 target_compile_features(scpp_movecheck PRIVATE cxx_std_23)
 
 add_library(scpp_driver)

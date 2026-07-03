@@ -1,0 +1,7 @@
+int f(bool cond) {
+    int x;
+    if (cond) {
+        x = 1;
+    }
+    return x;
+}

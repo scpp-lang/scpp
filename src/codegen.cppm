@@ -104,10 +104,6 @@ private:
     std::map<std::string, LocalSlot> locals_;
     std::unordered_map<std::string, StructInfo> structs_;
 
-    [[nodiscard]] bool is_struct_type(const Type& type) const {
-        return type.kind == TypeKind::Named && structs_.contains(type.name);
-    }
-
     const StructDef* find_struct_def(const std::string& name) const {
         for (const StructDef& def : program_->structs) {
             if (def.name == name) return &def;
@@ -256,12 +252,12 @@ private:
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
                 if (stmt.init) {
                     builder_->CreateStore(codegen_expr(*stmt.init), slot);
-                } else if (is_struct_type(stmt.type) || stmt.type.kind == TypeKind::UniquePtr) {
-                    // struct locals are always zero-initialized when no
-                    // initializer is given (spec ch04.1); a default-declared
-                    // unique_ptr is likewise an empty/null owner (mirroring
-                    // real C++'s default constructor). Scalars are left
-                    // uninitialized, matching ordinary C++ semantics.
+                } else {
+                    // scpp has no concept of an uninitialized variable: a
+                    // local declared without an initializer is always
+                    // zero-initialized (0 / false / null / all-zero
+                    // fields), for every type -- scalars and raw pointers
+                    // included, not just struct/array/unique_ptr.
                     builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
                 }
                 locals_[stmt.var_name] = LocalSlot{slot, stmt.type};

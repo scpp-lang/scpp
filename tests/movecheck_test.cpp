@@ -49,7 +49,7 @@ bool throws_move_error(std::string_view source) {
     try {
         scpp::Program program = scpp::parse(source);
         scpp::check_moves(program);
-    } catch (const scpp::MoveError&) {
+    } catch (const scpp::DataflowError&) {
         return true;
     }
     return false;
@@ -58,7 +58,7 @@ bool throws_move_error(std::string_view source) {
 // Runs every `<name>.cpp` case file under SCPP_MOVETEST_SOURCE_DIR against
 // its paired `<name>.expected` file, which contains exactly "ok" (the move
 // checker must accept the program) or "error" (it must reject it with a
-// MoveError). Adding a new case is just dropping in 2 new files -- no
+// DataflowError). Adding a new case is just dropping in 2 new files -- no
 // changes to this file or a rebuild of the test harness are needed, just
 // re-running the already-built binary.
 void run_test_case_files() {

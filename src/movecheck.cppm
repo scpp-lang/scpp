@@ -1,258 +1,363 @@
 module;
 
+#include <deque>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 export module scpp.movecheck;
 
 import scpp.ast;
+import scpp.mir;
 
 export namespace scpp {
 
-struct MoveError : std::runtime_error {
-    explicit MoveError(const std::string& message) : std::runtime_error(message) {}
+struct DataflowError : std::runtime_error {
+    explicit DataflowError(const std::string& message) : std::runtime_error(message) {}
 };
 
-// A minimal, function-local move-out checker: the "simplest sound check"
-// called for by M2 (spec ch05.1), implemented as a direct walk of the AST
-// rather than the MIR-based dataflow analysis planned for M3+. Only
-// `std::unique_ptr<T>` locals/params are tracked; every other type is
-// Copy (scalars) or not yet move-checked (structs, per ch04, never need
-// tracking since they're always trivially copyable).
+} // namespace scpp
+
+namespace scpp {
+namespace {
+
+// The lattice tracked per local variable:
+//   Bottom      -- not yet declared on this path (shouldn't be readable;
+//                  this can currently only happen because scpp doesn't
+//                  yet enforce lexical scoping -- e.g. a variable declared
+//                  inside one `if` branch and read after it -- since every
+//                  *reachable* VarDecl always produces at least Initialized,
+//                  see below)
+//   Initialized -- holds a valid, readable value. scpp has no concept of an
+//                  "uninitialized" scalar: every local without an explicit
+//                  initializer is zero-initialized (0 / false / null / all-
+//                  zero fields) by codegen, for every type, so a `Declare`
+//                  MIR statement always yields Initialized, never a
+//                  separate "not yet given a value" state.
+//   MovedOut    -- was holding a unique_ptr value that has been moved away
+//   Conflict    -- different incoming paths disagree (e.g. Initialized on
+//                  one, MovedOut on another) -- treated as unsafe to read,
+//                  same as Bottom/MovedOut.
+// Only `Initialized` is safe to read; every other state is rejected (with a
+// tailored message) if the checker sees a use of it.
+enum class LocalState { Bottom, Initialized, MovedOut, Conflict };
+
+using StateMap = std::unordered_map<std::string, LocalState>;
+
+LocalState join(LocalState a, LocalState b) {
+    if (a == b) return a;
+    if (a == LocalState::Bottom) return b;
+    if (b == LocalState::Bottom) return a;
+    return LocalState::Conflict;
+}
+
+// Joins two per-block state snapshots (e.g. the OUT states of two
+// predecessors flowing into a shared successor block).
+StateMap join_maps(const StateMap& a, const StateMap& b) {
+    StateMap result = a;
+    for (const auto& [name, state] : b) {
+        auto it = result.find(name);
+        result[name] = it == result.end() ? state : join(it->second, state);
+    }
+    return result;
+}
+
+std::string describe_bad_state(const std::string& name, LocalState state) {
+    switch (state) {
+        case LocalState::MovedOut:
+            return "use of moved-out variable '" + name + "'";
+        case LocalState::Conflict:
+            return "use of variable '" + name +
+                   "' whose initialization state is inconsistent across incoming control-flow paths "
+                   "(initialized on some, not on others)";
+        case LocalState::Bottom:
+        case LocalState::Initialized:
+        default:
+            return "use of possibly-uninitialized variable '" + name + "'";
+    }
+}
+
+[[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
+
+[[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
+    auto it = state.find(name);
+    return it == state.end() ? LocalState::Bottom : it->second;
+}
+
+std::vector<size_t> successors(const Terminator& term) {
+    switch (term.kind) {
+        case TerminatorKind::Goto: return {term.target};
+        case TerminatorKind::Branch: return {term.true_target, term.false_target};
+        case TerminatorKind::Return:
+        case TerminatorKind::Unreachable:
+        case TerminatorKind::None:
+        default: return {};
+    }
+}
+
+// Walks `expr`, updating `state` for any std::move / assignment side
+// effects and, when `report_errors` is true, throwing DataflowError on an
+// unsafe read. `is_unique_ptr_rvalue_context` is true exactly where a bare
+// `std::move(x)` is allowed to appear: a var-decl initializer, an
+// assignment RHS, a return value, or a call argument.
 //
-// Rules enforced:
-//   - A unique_ptr value can only be produced by `std::move(x)` (moving `x`
-//     out) or by a fresh declaration with no initializer (an empty/null
-//     unique_ptr, mirroring the real default constructor).
-//   - Reading a unique_ptr variable any other way (bare use in an
-//     expression, passed by value without `std::move`, etc.) is rejected --
-//     real C++ has no copy constructor for unique_ptr either.
-//   - `std::move(x)` requires `x` to currently be Initialized; using
-//     `std::move` on an already-moved-out variable is an error.
-//   - Assigning any value into a variable (via `=` or through
-//     std::move(...)) returns it to the Initialized state, regardless of
-//     its previous state.
-//   - `if`/`while` branches are checked independently from the same
-//     pre-branch state; the state after is merged conservatively (a
-//     variable moved in *either* branch is treated as moved-out
-//     afterwards). This is a sound but imprecise approximation of full
-//     dataflow analysis, acceptable for M2's "simplest check" scope.
-class MoveChecker {
-public:
-    void check(const Program& program) {
-        for (const Function& fn : program.functions) {
-            check_function(fn);
-        }
-    }
+// This function is run twice per program point: once during the
+// worklist's fixed-point iteration (report_errors=false, just to compute
+// stable per-block states) and once more in the final reporting pass
+// (report_errors=true). Both runs must apply the *same* state mutations so
+// the two phases stay consistent.
+void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, StateMap& state, const Body& body,
+                 bool report_errors) {
+    switch (expr.kind) {
+        case ExprKind::IntegerLiteral:
+        case ExprKind::BoolLiteral:
+            return;
 
-private:
-    enum class State { Initialized, MovedOut };
-
-    std::unordered_map<std::string, State> states_;
-    std::unordered_map<std::string, Type> types_;
-
-    [[nodiscard]] static bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
-
-    void check_function(const Function& fn) {
-        states_.clear();
-        types_.clear();
-        for (const Param& param : fn.params) {
-            if (is_unique_ptr(param.type)) {
-                states_[param.name] = State::Initialized;
-                types_[param.name] = param.type;
-            }
-        }
-        check_stmt(*fn.body, fn.return_type);
-    }
-
-    // Merges two post-branch state maps conservatively: a unique_ptr
-    // variable is MovedOut after the merge if it was moved in *either*
-    // branch (see class comment).
-    static std::unordered_map<std::string, State> merge_states(
-        const std::unordered_map<std::string, State>& a, const std::unordered_map<std::string, State>& b) {
-        std::unordered_map<std::string, State> merged = a;
-        for (const auto& [name, state] : b) {
-            if (state == State::MovedOut) merged[name] = State::MovedOut;
-            else if (!merged.contains(name)) merged[name] = state;
-        }
-        return merged;
-    }
-
-    void check_stmt(const Stmt& stmt, const Type& current_function_return_type) {
-        switch (stmt.kind) {
-            case StmtKind::Block:
-                for (const auto& s : stmt.statements) {
-                    check_stmt(*s, current_function_return_type);
-                }
-                return;
-
-            case StmtKind::VarDecl: {
-                if (stmt.init) {
-                    check_expr(*stmt.init, /*is_unique_ptr_rvalue_context=*/is_unique_ptr(stmt.type));
-                }
-                if (is_unique_ptr(stmt.type)) {
-                    if (stmt.init && stmt.init->kind != ExprKind::Move) {
-                        throw MoveError("variable '" + stmt.var_name +
-                                         "' of type std::unique_ptr must be initialized via std::move "
-                                         "(copying a unique_ptr is not allowed)");
-                    }
-                    states_[stmt.var_name] = State::Initialized;
-                    types_[stmt.var_name] = stmt.type;
-                }
-                return;
-            }
-
-            case StmtKind::Return: {
-                if (stmt.expr) {
-                    bool return_is_unique_ptr = is_unique_ptr(current_function_return_type);
-                    check_expr(*stmt.expr, return_is_unique_ptr);
-                    if (return_is_unique_ptr && stmt.expr->kind != ExprKind::Move) {
-                        throw MoveError("returning a std::unique_ptr requires std::move (copying is not allowed)");
-                    }
-                }
-                return;
-            }
-
-            case StmtKind::ExprStmt:
-                check_expr(*stmt.expr, /*is_unique_ptr_rvalue_context=*/false);
-                return;
-
-            case StmtKind::If: {
-                check_expr(*stmt.condition, /*is_unique_ptr_rvalue_context=*/false);
-                auto pre_states = states_;
-
-                check_stmt(*stmt.then_branch, current_function_return_type);
-                auto then_states = states_;
-
-                states_ = pre_states;
-                if (stmt.else_branch) {
-                    check_stmt(*stmt.else_branch, current_function_return_type);
-                }
-                auto else_states = states_;
-
-                states_ = merge_states(then_states, else_states);
-                return;
-            }
-
-            case StmtKind::While: {
-                check_expr(*stmt.condition, /*is_unique_ptr_rvalue_context=*/false);
-                auto pre_states = states_;
-
-                check_stmt(*stmt.then_branch, current_function_return_type);
-
-                // The loop may execute zero or more times; conservatively
-                // merge "didn't run" (pre_states) with "ran the body once"
-                // (states_ after one pass) rather than computing a true
-                // fixed point -- sound but imprecise, matching M2's scope.
-                states_ = merge_states(pre_states, states_);
-                return;
-            }
-        }
-    }
-
-    // `is_unique_ptr_rvalue_context` is true when this expression's *value*
-    // will be stored into a unique_ptr-typed place (a var decl initializer,
-    // an assignment RHS, a return value, or a unique_ptr-typed call
-    // argument): in that position the expression must be exactly
-    // `std::move(x)`. Elsewhere, a bare reference to a unique_ptr variable
-    // is rejected outright (see class comment).
-    void check_expr(const Expr& expr, bool is_unique_ptr_rvalue_context) {
-        switch (expr.kind) {
-            case ExprKind::IntegerLiteral:
-            case ExprKind::BoolLiteral:
-                return;
-
-            case ExprKind::Identifier: {
-                auto it = types_.find(expr.name);
-                if (it != types_.end() && is_unique_ptr(it->second)) {
-                    throw MoveError("use of std::unique_ptr variable '" + expr.name +
+        case ExprKind::Identifier: {
+            if (!report_errors) return;
+            auto type_it = body.local_types.find(expr.name);
+            if (type_it == body.local_types.end()) return; // unknown name: left to codegen's own check
+            if (is_unique_ptr(type_it->second)) {
+                throw DataflowError("use of std::unique_ptr variable '" + expr.name +
                                      "' requires std::move (copying is not allowed)");
+            }
+            LocalState current = lookup(state, expr.name);
+            if (current != LocalState::Initialized) {
+                throw DataflowError(describe_bad_state(expr.name, current));
+            }
+            return;
+        }
+
+        case ExprKind::Move: {
+            if (expr.lhs->kind != ExprKind::Identifier) {
+                if (report_errors) {
+                    throw DataflowError("std::move currently only supports a plain local variable "
+                                         "(not a member, subscript, or other expression)");
                 }
                 return;
             }
-
-            case ExprKind::Move: {
-                if (expr.lhs->kind != ExprKind::Identifier) {
-                    throw MoveError("std::move currently only supports a plain local variable "
-                                     "(not a member, subscript, or other expression)");
-                }
-                const std::string& name = expr.lhs->name;
-                auto type_it = types_.find(name);
-                if (type_it == types_.end() || !is_unique_ptr(type_it->second)) {
-                    throw MoveError("std::move is only supported for std::unique_ptr variables in this "
-                                     "version; '" +
-                                     name + "' is not one");
-                }
-                auto state_it = states_.find(name);
-                if (state_it != states_.end() && state_it->second == State::MovedOut) {
-                    throw MoveError("use of moved-out variable '" + name + "'");
-                }
-                states_[name] = State::MovedOut;
-                if (!is_unique_ptr_rvalue_context) {
-                    throw MoveError("std::move(" + name +
-                                     ") must be used to initialize or assign into a std::unique_ptr");
+            const std::string& name = expr.lhs->name;
+            auto type_it = body.local_types.find(name);
+            if (type_it == body.local_types.end() || !is_unique_ptr(type_it->second)) {
+                if (report_errors) {
+                    throw DataflowError("std::move is only supported for std::unique_ptr variables in this "
+                                         "version; '" +
+                                         name + "' is not one");
                 }
                 return;
             }
+            LocalState current = lookup(state, name);
+            if (report_errors && current != LocalState::Initialized) {
+                throw DataflowError(describe_bad_state(name, current));
+            }
+            state[name] = LocalState::MovedOut;
+            if (report_errors && !is_unique_ptr_rvalue_context) {
+                throw DataflowError("std::move(" + name + ") must be used to initialize or assign into a "
+                                                            "std::unique_ptr");
+            }
+            return;
+        }
 
-            case ExprKind::Unary:
-                check_expr(*expr.lhs, /*is_unique_ptr_rvalue_context=*/false);
-                return;
+        case ExprKind::Unary:
+            apply_expr(*expr.lhs, false, state, body, report_errors);
+            return;
 
-            case ExprKind::Binary:
-                if (expr.binary_op == BinaryOp::Assign) {
-                    // The assignment target is never a "read": moving into
-                    // it always returns it to Initialized, regardless of
-                    // its current state, so it is intentionally not
-                    // checked via the generic Identifier-read path.
-                    bool target_is_unique_ptr = false;
-                    if (expr.lhs->kind == ExprKind::Identifier) {
-                        auto it = types_.find(expr.lhs->name);
-                        target_is_unique_ptr = it != types_.end() && is_unique_ptr(it->second);
-                    }
-                    check_expr(*expr.rhs, target_is_unique_ptr);
-                    if (target_is_unique_ptr && expr.rhs->kind != ExprKind::Move) {
-                        throw MoveError("assigning to a std::unique_ptr variable requires std::move "
+        case ExprKind::Binary:
+            if (expr.binary_op == BinaryOp::Assign) {
+                bool target_is_unique_ptr = false;
+                if (expr.lhs->kind == ExprKind::Identifier) {
+                    auto it = body.local_types.find(expr.lhs->name);
+                    target_is_unique_ptr = it != body.local_types.end() && is_unique_ptr(it->second);
+                }
+                apply_expr(*expr.rhs, target_is_unique_ptr, state, body, report_errors);
+                if (report_errors && target_is_unique_ptr && expr.rhs->kind != ExprKind::Move) {
+                    throw DataflowError("assigning to a std::unique_ptr variable requires std::move "
                                         "(copying is not allowed)");
-                    }
-                    if (expr.lhs->kind == ExprKind::Identifier && target_is_unique_ptr) {
-                        states_[expr.lhs->name] = State::Initialized;
-                    } else {
-                        check_expr(*expr.lhs, /*is_unique_ptr_rvalue_context=*/false);
-                    }
-                    return;
                 }
-                check_expr(*expr.lhs, /*is_unique_ptr_rvalue_context=*/false);
-                check_expr(*expr.rhs, /*is_unique_ptr_rvalue_context=*/false);
-                return;
-
-            case ExprKind::Call:
-                for (const auto& arg : expr.args) {
-                    // Parameter types aren't threaded through here (the
-                    // checker doesn't currently resolve call targets to
-                    // their declared signatures); a unique_ptr argument
-                    // must be `std::move(x)` regardless of position, so we
-                    // simply allow std::move in every argument slot.
-                    check_expr(*arg, /*is_unique_ptr_rvalue_context=*/true);
+                if (expr.lhs->kind == ExprKind::Identifier) {
+                    // The assignment target is never a "read": whatever
+                    // its previous state, assigning any value returns it
+                    // to Initialized (spec ch05.1).
+                    state[expr.lhs->name] = LocalState::Initialized;
+                } else {
+                    // e.g. `p.x = 1;` or `arr[i] = 1;`: the base
+                    // object/index are evaluated (as addresses / an
+                    // index value), not read as "the assignment target",
+                    // so still worth walking for nested reads.
+                    apply_expr(*expr.lhs, false, state, body, report_errors);
                 }
                 return;
+            }
+            apply_expr(*expr.lhs, false, state, body, report_errors);
+            apply_expr(*expr.rhs, false, state, body, report_errors);
+            return;
 
-            case ExprKind::Member:
-                check_expr(*expr.lhs, /*is_unique_ptr_rvalue_context=*/false);
-                return;
+        case ExprKind::Call:
+            for (const auto& arg : expr.args) {
+                // Parameter types aren't threaded through here (the
+                // checker doesn't resolve call targets to their declared
+                // signatures); a unique_ptr argument must be
+                // `std::move(x)` regardless of position, so std::move is
+                // simply allowed in every argument slot.
+                apply_expr(*arg, /*is_unique_ptr_rvalue_context=*/true, state, body, report_errors);
+            }
+            return;
 
-            case ExprKind::Subscript:
-                check_expr(*expr.lhs, /*is_unique_ptr_rvalue_context=*/false);
-                check_expr(*expr.rhs, /*is_unique_ptr_rvalue_context=*/false);
-                return;
+        case ExprKind::Member:
+            apply_expr(*expr.lhs, false, state, body, report_errors);
+            return;
+
+        case ExprKind::Subscript:
+            apply_expr(*expr.lhs, false, state, body, report_errors);
+            apply_expr(*expr.rhs, false, state, body, report_errors);
+            return;
+    }
+}
+
+void apply_statement(const MirStatement& stmt, StateMap& state, const Body& body, bool report_errors) {
+    switch (stmt.kind) {
+        case MirStatementKind::Declare:
+            // scpp has no "uninitialized" state (see the LocalState
+            // comment above): a bare declaration always zero-initializes,
+            // so it's always Initialized from this point on.
+            state[stmt.local] = LocalState::Initialized;
+            return;
+
+        case MirStatementKind::Assign: {
+            bool target_is_unique_ptr =
+                body.local_types.contains(stmt.local) && is_unique_ptr(body.local_types.at(stmt.local));
+            apply_expr(*stmt.expr, target_is_unique_ptr, state, body, report_errors);
+            if (report_errors && target_is_unique_ptr && stmt.expr->kind != ExprKind::Move) {
+                throw DataflowError("variable '" + stmt.local +
+                                    "' of type std::unique_ptr must be initialized via std::move "
+                                    "(copying a unique_ptr is not allowed)");
+            }
+            state[stmt.local] = LocalState::Initialized;
+            return;
+        }
+
+        case MirStatementKind::Eval:
+            apply_expr(*stmt.expr, /*is_unique_ptr_rvalue_context=*/false, state, body, report_errors);
+            return;
+
+        case MirStatementKind::Drop:
+            // Purely a codegen-facing marker (no-op until heap-allocated
+            // owning types exist); no dataflow state effect here.
+            return;
+    }
+}
+
+void check_terminator(const Terminator& term, StateMap& state, const Function& fn, const Body& body) {
+    switch (term.kind) {
+        case TerminatorKind::Branch:
+            apply_expr(*term.condition, false, state, body, /*report_errors=*/true);
+            return;
+        case TerminatorKind::Return: {
+            if (term.return_value == nullptr) return;
+            bool return_is_unique_ptr = is_unique_ptr(fn.return_type);
+            apply_expr(*term.return_value, return_is_unique_ptr, state, body, /*report_errors=*/true);
+            if (return_is_unique_ptr && term.return_value->kind != ExprKind::Move) {
+                throw DataflowError("returning a std::unique_ptr requires std::move (copying is not allowed)");
+            }
+            return;
+        }
+        case TerminatorKind::Goto:
+        case TerminatorKind::Unreachable:
+        case TerminatorKind::None:
+            return;
+    }
+}
+
+// Runs the worklist algorithm (see spec ch07/M3) to a fixed point over
+// `body`'s CFG, computing a stable per-block entry ("IN") state for the
+// definite-initialization/move lattice above, then makes one more pass
+// reporting any unsafe use found using those now-stable states. Splitting
+// into these two phases avoids both false positives (from not-yet-stable
+// intermediate states) and duplicate diagnostics (a block can be visited
+// many times during fixed-point iteration).
+void check_function(const Function& fn) {
+    Body body = build_mir(fn);
+    size_t n = body.blocks.size();
+
+    std::vector<std::vector<size_t>> preds(n);
+    for (size_t i = 0; i < n; i++) {
+        for (size_t succ : successors(body.blocks[i].terminator)) {
+            preds[succ].push_back(i);
         }
     }
-};
+
+    StateMap entry_state;
+    for (const Param& param : fn.params) {
+        entry_state[param.name] = LocalState::Initialized;
+    }
+
+    std::vector<StateMap> in_states(n);
+    std::vector<StateMap> out_states(n);
+    if (n > 0) in_states[0] = entry_state;
+
+    std::deque<size_t> worklist;
+    std::vector<bool> queued(n, false);
+    for (size_t i = 0; i < n; i++) {
+        worklist.push_back(i);
+        queued[i] = true;
+    }
+
+    while (!worklist.empty()) {
+        size_t b = worklist.front();
+        worklist.pop_front();
+        queued[b] = false;
+
+        StateMap new_in;
+        if (b == 0) {
+            new_in = entry_state;
+        } else {
+            bool first = true;
+            for (size_t p : preds[b]) {
+                new_in = first ? out_states[p] : join_maps(new_in, out_states[p]);
+                first = false;
+            }
+        }
+
+        StateMap new_out = new_in;
+        for (const MirStatement& stmt : body.blocks[b].statements) {
+            apply_statement(stmt, new_out, body, /*report_errors=*/false);
+        }
+
+        in_states[b] = new_in;
+        bool out_changed = new_out != out_states[b];
+        out_states[b] = std::move(new_out);
+
+        if (out_changed) {
+            for (size_t succ : successors(body.blocks[b].terminator)) {
+                if (!queued[succ]) {
+                    worklist.push_back(succ);
+                    queued[succ] = true;
+                }
+            }
+        }
+    }
+
+    // Fixed point reached: `in_states` is now stable. Walk every block
+    // once more, this time actually reporting diagnostics.
+    for (size_t b = 0; b < n; b++) {
+        StateMap state = in_states[b];
+        for (const MirStatement& stmt : body.blocks[b].statements) {
+            apply_statement(stmt, state, body, /*report_errors=*/true);
+        }
+        check_terminator(body.blocks[b].terminator, state, fn, body);
+    }
+}
+
+} // namespace
+} // namespace scpp
+
+export namespace scpp {
 
 void check_moves(const Program& program) {
-    MoveChecker checker;
-    checker.check(program);
+    for (const Function& fn : program.functions) {
+        check_function(fn);
+    }
 }
 
 } // namespace scpp

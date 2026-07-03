@@ -24,9 +24,9 @@ completely different semantics.
 
 **Initialization**: an uninitialized `struct` local/member is guaranteed by
 the compiler to be entirely **zero-initialized** (bitwise). Scalar members
-become `0` / `false` / `0.0`; raw pointer members become `nullptr`. This is a
-stronger guarantee than flow-sensitive initialization checking — a `struct`
-can never be read in an uninitialized state.
+become `0` / `false` / `0.0`; raw pointer members become `nullptr`. This
+isn't special to `struct` -- it's a general rule shared by **every** type in
+scpp; see [§5.4](ch05-static-checks.md) for the full explanation.
 
 **Copy semantics**: `struct` values may be freely and implicitly copied
 bitwise, and do not participate in the move/borrow checking described in

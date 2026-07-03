@@ -252,7 +252,7 @@ int run_build(std::string_view input_path, std::string_view output_path) {
     } catch (const scpp::ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
-    } catch (const scpp::MoveError& e) {
+    } catch (const scpp::DataflowError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const scpp::CodegenError& e) {
