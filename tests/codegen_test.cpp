@@ -73,6 +73,14 @@ void test_call_to_unknown_function_is_rejected() {
     expect(threw, "call_to_unknown_function_is_rejected: expected a CodegenError");
 }
 
+void test_print_builtins_generate_printf_calls() {
+    std::string ir = generate_ir("int main() { print_int(1); print_bool(true); return 0; }");
+    expect(ir.find("declare i32 @printf(") != std::string::npos,
+           "print_builtins_generate_printf_calls: expected a printf declaration");
+    expect(ir.find("call i32 (ptr, ...) @printf(") != std::string::npos,
+           "print_builtins_generate_printf_calls: expected calls to printf");
+}
+
 } // namespace
 
 int main() {
@@ -82,6 +90,7 @@ int main() {
     test_while_generates_loop();
     test_missing_return_is_rejected();
     test_call_to_unknown_function_is_rejected();
+    test_print_builtins_generate_printf_calls();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

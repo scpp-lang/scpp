@@ -29,6 +29,25 @@ int compile_and_run(std::string_view source, const std::string& case_name) {
     return WEXITSTATUS(status);
 }
 
+// Same as compile_and_run, but also captures the program's stdout so tests
+// can check output produced by print_int/print_bool.
+std::string compile_and_capture_output(std::string_view source, const std::string& case_name) {
+    std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
+    scpp::compile_to_executable(source, exe_path.string());
+    FILE* pipe = popen(exe_path.string().c_str(), "r");
+    std::string output;
+    char buffer[256];
+    if (pipe) {
+        size_t n;
+        while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
+            output.append(buffer, n);
+        }
+        pclose(pipe);
+    }
+    std::filesystem::remove(exe_path);
+    return output;
+}
+
 void test_return_constant() {
     int exit_code = compile_and_run("int main() { return 42; }", "return_constant");
     expect(exit_code == 42, "return_constant: expected exit code 42");
@@ -65,6 +84,20 @@ void test_logical_short_circuit() {
     expect(exit_code == 1, "logical_short_circuit: expected exit code 1");
 }
 
+void test_print_int_and_bool() {
+    std::string output = compile_and_capture_output(
+        "int main() {"
+        "    int x = 7;"
+        "    print_int(x);"
+        "    print_int(x + 35);"
+        "    print_bool(x < 10);"
+        "    print_bool(x > 100);"
+        "    return 0;"
+        "}",
+        "print_int_and_bool");
+    expect(output == "7\n42\ntrue\nfalse\n", "print_int_and_bool: unexpected output '" + output + "'");
+}
+
 } // namespace
 
 int main() {
@@ -74,6 +107,7 @@ int main() {
     test_while_loop();
     test_function_call();
     test_logical_short_circuit();
+    test_print_int_and_bool();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

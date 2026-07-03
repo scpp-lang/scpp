@@ -232,6 +232,9 @@ private:
                 return codegen_binary(expr);
 
             case ExprKind::Call: {
+                if (expr.name == "print_int" || expr.name == "print_bool") {
+                    return codegen_builtin_print(expr);
+                }
                 llvm::Function* callee = module_->getFunction(expr.name);
                 if (callee == nullptr) {
                     throw CodegenError("call to unknown function '" + expr.name + "'");
@@ -245,6 +248,41 @@ private:
             }
         }
         throw CodegenError("unhandled expression kind");
+    }
+
+    // `print_int`/`print_bool` are temporary builtins that shell out to
+    // libc's `printf` so programs can produce visible output before the
+    // language grows a real string type (tracked for M2+). Both return the
+    // usual `printf` result (an i32) so they can be used like any other call.
+    llvm::Value* codegen_builtin_print(const Expr& expr) {
+        if (expr.args.size() != 1) {
+            throw CodegenError(expr.name + " expects exactly 1 argument");
+        }
+        llvm::Function* printf_fn = get_or_declare_printf();
+        llvm::Value* arg = codegen_expr(*expr.args[0]);
+
+        llvm::Value* format;
+        llvm::Value* printf_arg;
+        if (expr.name == "print_int") {
+            format = builder_->CreateGlobalString("%d\n", "fmt_int");
+            printf_arg = arg;
+        } else {
+            format = builder_->CreateGlobalString("%s\n", "fmt_bool");
+            llvm::Value* true_str = builder_->CreateGlobalString("true", "str_true");
+            llvm::Value* false_str = builder_->CreateGlobalString("false", "str_false");
+            printf_arg = builder_->CreateSelect(arg, true_str, false_str, "booltmp");
+        }
+        return builder_->CreateCall(printf_fn, {format, printf_arg});
+    }
+
+    llvm::Function* get_or_declare_printf() {
+        if (llvm::Function* existing = module_->getFunction("printf")) {
+            return existing;
+        }
+        llvm::PointerType* char_ptr_type = llvm::PointerType::getUnqual(*context_);
+        llvm::FunctionType* printf_type =
+            llvm::FunctionType::get(llvm::Type::getInt32Ty(*context_), {char_ptr_type}, /*isVarArg=*/true);
+        return llvm::Function::Create(printf_type, llvm::Function::ExternalLinkage, "printf", *module_);
     }
 
     llvm::Value* codegen_binary(const Expr& expr) {
