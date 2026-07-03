@@ -22,7 +22,9 @@
   一样），有意当作未来"泛型 + 泛型生命周期"机制的具体原型。`std::vector`、
   `std::string`/`string_view`（需要先有 `char` 类型）、`for`/range-for、
   `unsafe {}` 语句块均留待后续。）**
-- **M7+**：泛型/模板、trait/concept、跨函数生命周期、标准库扩展、增量编译。
+- **M7+**：泛型/模板、trait/concept、`[[scpp::lifetime(name)]]` 多组
+  跨函数生命周期机制（设计已在 [§5.3](ch05-static-checks.md) 定稿；尚未
+  实现）、标准库扩展、增量编译。
 
 ---
 

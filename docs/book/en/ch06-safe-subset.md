@@ -29,6 +29,9 @@ meaning "sound checking not yet implemented"):
   statement form in the parser/AST yet.)
 - Member access, subscript (fixed-size arrays, `span` -- `span` carries a
   runtime bounds check, see [§8](ch08-open-questions.md)).
+- `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
+  for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)
+  -- **design finalized, not yet implemented**).
 
 **Not yet supported (safe-region backlog)**
 - Templates / generics, `concept`.
@@ -38,7 +41,10 @@ meaning "sound checking not yet implemented"):
 - Exceptions.
 - Lifetime checking of lambdas capturing references.
 - The full aliasing model for `shared_ptr`.
-- Complex cross-function lifetimes (cases requiring explicit annotations).
+- Implementation of the `[[scpp::lifetime(name)]]` multi-group mechanism
+  spec'd in [§5.3](ch05-static-checks.md) (design only so far; every
+  cross-function case still falls back to the single-reference-parameter/
+  `this` elision or the new default-group rule until this lands).
 - `for`/range-for, `char`/`float`/`double`, `std::vector`,
   `std::string`/`std::string_view`, `unsafe { }` blocks (and, with them,
   raw pointer dereference).

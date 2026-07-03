@@ -29,8 +29,10 @@
   future "generics + generic lifetimes" mechanism. `std::vector`,
   `std::string`/`string_view` (need a `char` type first), `for`/
   range-for, and `unsafe { }` blocks are all left for later.)**
-- **M7+**: Generics/templates, traits/concepts, cross-function lifetimes,
-  standard-library expansion, incremental compilation.
+- **M7+**: Generics/templates, traits/concepts, the `[[scpp::lifetime(name)]]`
+  multi-group cross-function lifetime mechanism (design finalized in
+  [§5.3](ch05-static-checks.md); not yet implemented), standard-library
+  expansion, incremental compilation.
 
 ---
 

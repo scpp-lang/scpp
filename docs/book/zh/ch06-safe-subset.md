@@ -25,6 +25,9 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   对应的语句形式。）
 - 成员访问、下标（定长数组、`span`，span 带运行时边界检查——见
   [§8](ch08-open-questions.md)）。
+- `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
+  跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)——**设计已
+  定稿，尚未实现**）。
 
 **暂不支持（safe 区 backlog）**
 - 模板 / 泛型、`concept`。
@@ -34,7 +37,9 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - 异常。
 - lambda 捕获引用的生命周期检查。
 - `shared_ptr` 的完整别名模型。
-- 跨函数复杂生命周期（需显式标注的情形）。
+- [§5.3](ch05-static-checks.md) 定稿的 `[[scpp::lifetime(name)]]` 多组
+  机制的**实现**（目前只有设计，还没写进编译器；在它落地之前，跨函数
+  情形一律走单引用参数/`this` 省略规则或新的默认分组规则）。
 - `for`/range-for、`char`/`float`/`double`、`std::vector`、
   `std::string`/`std::string_view`、`unsafe {}` 语句块（连带裸指针解
   引用）。

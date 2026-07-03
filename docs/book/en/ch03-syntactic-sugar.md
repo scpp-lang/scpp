@@ -16,6 +16,7 @@ semantics. In an unsafe context they keep their ordinary C++ meaning.
 | `std::span<T>` / `std::span<const T>` | A lifetime-checked, non-owning view (a "fat pointer": `{data pointer, length}`). **v0.1 can only construct one from a fixed-size array** (`std::vector` doesn't exist yet), and it cannot be reassigned after construction (conservatively treated like a reference for now: bound once, never rebound). `.size` reads the length -- **note this is not** a real C++ `.size()` method call: scpp has no member-function-call syntax yet, so this is exposed as a read-only computed field instead. Subscript `s[i]` carries a runtime bounds check, calling `abort()` on failure (ch08's settled decision: v0.1 inserts bounds checks by default, panics via `abort()`). `std::string_view` doesn't exist yet (needs a `char` type first). |
 | local variable `T x;` | Owns its value; dropped (destroyed) at end of scope. |
 | `new` / `delete` / raw `T*` | **Forbidden by default** in safe regions; require `unsafe { }`. |
+| `[[scpp::lifetime(name)]]` | Attribute (not a new keyword) grouping reference parameters/declarators into named cross-function lifetime groups -- scpp's opt-out alternative to Rust's `'a`/Circle's `/a`; see [§5.3](ch05-static-checks.md). **Design finalized, not yet implemented.** |
 
 **Key principle**: these semantic shifts are "invisible" to the user — they
 still write familiar C++, they just get extra compile-time errors in safe
