@@ -26,7 +26,8 @@
   留待后续。）**
 - **M7+**：泛型/模板、trait/concept、`[[scpp::lifetime(name)]]` 多组
   跨函数生命周期机制（设计已在 [§5.3](ch05-static-checks.md) 定稿；尚未
-  实现）、标准库扩展、增量编译。
+  实现）、`extern "C"` 声明（设计已在 [§2.1](ch02-boundary-rules.md) 定稿；
+  尚未实现）、标准库扩展、增量编译。
 
 ---
 

@@ -42,6 +42,11 @@ meaning "sound checking not yet implemented"):
   [§5.5](ch05-static-checks.md)'s prohibited operations reachable in v0.1
   today), while every other check in [§5](ch05-static-checks.md) keeps
   running unconditionally.
+- `extern "C"` function declarations/definitions (see
+  [§2.1](ch02-boundary-rules.md) -- **design finalized, not yet
+  implemented**), restricted to C-ABI-compatible signature types.
+  Needs `extern`, minimal string-literal lexing, and `void` as a type
+  first (none exist yet -- see below).
 
 **Not yet supported (safe-region backlog)**
 - Templates / generics, `concept`.
@@ -57,6 +62,11 @@ meaning "sound checking not yet implemented"):
   `this` elision or the new default-group rule until this lands).
 - Implementation of `unsafe { }` blocks spec'd in
   [§1.3](ch01-safety-context.md) (design only so far).
+- Implementation of `extern "C"` spec'd in [§2.1](ch02-boundary-rules.md)
+  (design only so far), and its three prerequisites: an `extern` keyword,
+  minimal string-literal lexing (just the token `"C"`, not general string
+  literals), and `void` as a valid type name (no void-returning functions
+  or `void*` exist yet either, independent of `extern "C"`).
 - `for`/range-for, `char`/`float`/`double`, `std::vector`,
   `std::string`/`std::string_view`. `reinterpret_cast`, `union`, raw
   `new`/`delete`, and global variables have no syntax at all yet, so

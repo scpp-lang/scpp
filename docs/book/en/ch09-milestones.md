@@ -33,8 +33,9 @@
   [§1.3](ch01-safety-context.md)) are all left for later.)**
 - **M7+**: Generics/templates, traits/concepts, the `[[scpp::lifetime(name)]]`
   multi-group cross-function lifetime mechanism (design finalized in
-  [§5.3](ch05-static-checks.md); not yet implemented), standard-library
-  expansion, incremental compilation.
+  [§5.3](ch05-static-checks.md); not yet implemented), `extern "C"`
+  declarations (design finalized in [§2.1](ch02-boundary-rules.md); not
+  yet implemented), standard-library expansion, incremental compilation.
 
 ---
 

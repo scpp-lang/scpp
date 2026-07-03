@@ -17,6 +17,7 @@ semantics. In an unsafe context they keep their ordinary C++ meaning.
 | local variable `T x;` | Owns its value; dropped (destroyed) at end of scope. |
 | `new` / `delete` / raw `T*` | **Forbidden by default** in safe regions; require `unsafe { }`. |
 | `[[scpp::lifetime(name)]]` | Attribute (not a new keyword) grouping reference parameters/declarators into named cross-function lifetime groups -- scpp's opt-out alternative to Rust's `'a`/Circle's `/a`; see [§5.3](ch05-static-checks.md). **Design finalized, not yet implemented.** |
+| `extern "C" ...;` / `extern "C" ... { ... }` | Not resemantified, just restricted: declares/defines a C-linkage function, signature types limited to C-ABI-compatible ones. A bodyless declaration is always implicitly `unsafe` (nothing to verify); a definition may still be `safe` internally. See [§2.1](ch02-boundary-rules.md). **Design finalized, not yet implemented.** |
 
 **Key principle**: these semantic shifts are "invisible" to the user — they
 still write familiar C++, they just get extra compile-time errors in safe

@@ -36,6 +36,10 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   裸指针解引用和调用非 `safe` 函数（这是 v0.1 里
   [§5.5](ch05-static-checks.md) 禁止项中唯二能真正碰到的两条），
   [§5](ch05-static-checks.md) 里的其余检查照常无条件继续跑。
+- `extern "C"` 函数声明/定义（见 [§2.1](ch02-boundary-rules.md)——**设计
+  已定稿，尚未实现**），签名类型限定为 C-ABI 兼容类型。需要先有 `extern`
+  关键字、最小限度的字符串字面量词法支持、以及 `void` 类型（这三样现在
+  都还没有，见下面）。
 
 **暂不支持（safe 区 backlog）**
 - 模板 / 泛型、`concept`。
@@ -50,6 +54,11 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   情形一律走单引用参数/`this` 省略规则或新的默认分组规则）。
 - [§1.3](ch01-safety-context.md) 定稿的 `unsafe { }` 语句块的**实现**
   （目前只有设计）。
+- [§2.1](ch02-boundary-rules.md) 定稿的 `extern "C"` 的**实现**（目前
+  只有设计），以及它的三个前置条件：`extern` 关键字、最小限度的字符串
+  字面量词法支持（只认 `"C"` 这个 token，不是通用字符串字面量）、以及
+  `void` 作为合法类型名（现在既没法声明返回 `void` 的函数，也没有
+  `void*`，跟 `extern "C"` 无关，是独立的缺口）。
 - `for`/range-for、`char`/`float`/`double`、`std::vector`、
   `std::string`/`std::string_view`。`reinterpret_cast`、`union`、裸
   `new`/`delete`、全局变量目前完全没有语法支持，`unsafe { }` 对它们的
