@@ -266,6 +266,66 @@ void test_struct_before_use_is_required() {
     expect(threw, "struct_before_use_is_required: expected a ParseError when Point is used before declaration");
 }
 
+void test_unique_ptr_type_declaration() {
+    scpp::Program program = scpp::parse("int f() { std::unique_ptr<int> a; return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "unique_ptr_type_declaration: statement 0 should be VarDecl");
+    expect(decl.type.kind == scpp::TypeKind::UniquePtr,
+           "unique_ptr_type_declaration: type should be UniquePtr");
+    expect(decl.type.pointee != nullptr && is_named_type(*decl.type.pointee, "int"),
+           "unique_ptr_type_declaration: pointee should be 'int'");
+    expect(decl.var_name == "a", "unique_ptr_type_declaration: variable name should be 'a'");
+    expect(decl.init == nullptr, "unique_ptr_type_declaration: no initializer given");
+}
+
+void test_unique_ptr_of_struct_type() {
+    scpp::Program program = scpp::parse(
+        "struct Point { int x; int y; };"
+        "int f() { std::unique_ptr<Point> a; return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.type.kind == scpp::TypeKind::UniquePtr,
+           "unique_ptr_of_struct_type: type should be UniquePtr");
+    expect(decl.type.pointee != nullptr && is_named_type(*decl.type.pointee, "Point"),
+           "unique_ptr_of_struct_type: pointee should be 'Point'");
+}
+
+void test_move_expression() {
+    scpp::Program program = scpp::parse(
+        "int f() {"
+        "    std::unique_ptr<int> a;"
+        "    std::unique_ptr<int> b = std::move(a);"
+        "    return 0;"
+        "}");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[1];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "move_expression: statement 1 should be VarDecl");
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::Move,
+           "move_expression: initializer should be a Move expression");
+    expect(decl.init->lhs->kind == scpp::ExprKind::Identifier && decl.init->lhs->name == "a",
+           "move_expression: moved expression should be identifier 'a'");
+}
+
+void test_move_as_function_argument() {
+    scpp::Program program = scpp::parse(
+        "int consume(std::unique_ptr<int> p) { return 0; }"
+        "int f() {"
+        "    std::unique_ptr<int> a;"
+        "    return consume(std::move(a));"
+        "}");
+    const scpp::Function& consume_fn = program.functions[0];
+    expect(consume_fn.params.size() == 1 && consume_fn.params[0].type.kind == scpp::TypeKind::UniquePtr,
+           "move_as_function_argument: 'consume' should take a UniquePtr param");
+
+    const scpp::Function& f_fn = program.functions[1];
+    const scpp::Stmt& ret = *f_fn.body->statements[1];
+    expect(ret.expr->kind == scpp::ExprKind::Call && ret.expr->name == "consume",
+           "move_as_function_argument: return expr should be a call to 'consume'");
+    expect(ret.expr->args.size() == 1 && ret.expr->args[0]->kind == scpp::ExprKind::Move,
+           "move_as_function_argument: call argument should be a Move expression");
+}
+
 } // namespace
 
 int main() {
@@ -284,6 +344,10 @@ int main() {
     test_array_field_and_subscript();
     test_local_array_declaration();
     test_struct_before_use_is_required();
+    test_unique_ptr_type_declaration();
+    test_unique_ptr_of_struct_type();
+    test_move_expression();
+    test_move_as_function_argument();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

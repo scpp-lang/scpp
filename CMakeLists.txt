@@ -51,12 +51,20 @@ target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
 target_link_libraries(scpp_codegen PUBLIC scpp_ast ${LLVM_LIBS})
 target_compile_features(scpp_codegen PRIVATE cxx_std_23)
 
+add_library(scpp_movecheck)
+target_sources(scpp_movecheck
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/movecheck.cppm)
+target_link_libraries(scpp_movecheck PUBLIC scpp_ast)
+target_compile_features(scpp_movecheck PRIVATE cxx_std_23)
+
 add_library(scpp_driver)
 target_sources(scpp_driver
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/driver.cppm)
-target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen ${LLVM_LIBS})
+target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck ${LLVM_LIBS})
 target_compile_features(scpp_driver PRIVATE cxx_std_23)
 
 add_executable(scpp)
@@ -67,7 +75,7 @@ target_sources(scpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/cli.cppm)
-target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_driver)
+target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
 
@@ -91,8 +99,16 @@ target_compile_features(codegen_test PRIVATE cxx_std_23)
 
 add_test(NAME codegen_test COMMAND codegen_test)
 
+add_executable(movecheck_test tests/movecheck_test.cpp)
+target_link_libraries(movecheck_test PRIVATE scpp_movecheck scpp_parser scpp_ast scpp_lexer)
+target_compile_features(movecheck_test PRIVATE cxx_std_23)
+target_compile_definitions(movecheck_test PRIVATE
+    SCPP_MOVETEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/movetest_source")
+
+add_test(NAME movecheck_test COMMAND movecheck_test)
+
 add_executable(driver_test tests/driver_test.cpp)
-target_link_libraries(driver_test PRIVATE scpp_driver scpp_codegen scpp_parser scpp_ast scpp_lexer)
+target_link_libraries(driver_test PRIVATE scpp_driver scpp_codegen scpp_movecheck scpp_parser scpp_ast scpp_lexer)
 target_compile_features(driver_test PRIVATE cxx_std_23)
 target_compile_definitions(driver_test PRIVATE
     SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source")

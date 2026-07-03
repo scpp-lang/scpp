@@ -21,6 +21,7 @@ export module scpp.driver;
 
 import scpp.ast;
 import scpp.codegen;
+import scpp.movecheck;
 import scpp.parser;
 
 export namespace scpp {
@@ -30,10 +31,11 @@ struct DriverError : std::runtime_error {
 };
 
 // Compiles scpp source text down to a native object file at `object_path`.
-// This is the M1 backend: AST -> LLVM IR -> native object code, with no
-// `safe` checks performed yet.
+// This is the M1/M2 backend: AST -> [move check] -> LLVM IR -> native
+// object code. Borrow/lifetime checks (M4/M5) aren't implemented yet.
 void emit_object_file(std::string_view source, const std::string& object_path) {
     Program program = parse(source);
+    check_moves(program);
 
     Codegen codegen("scpp_module");
     llvm::Module& module = codegen.generate(program);

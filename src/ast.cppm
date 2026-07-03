@@ -14,9 +14,10 @@ using ExprPtr = std::unique_ptr<Expr>;
 using StmtPtr = std::unique_ptr<Stmt>;
 
 enum class TypeKind {
-    Named,   // scalar (int/bool) or a user-declared struct name
-    Pointer, // T*
-    Array,   // T[N]
+    Named,     // scalar (int/bool) or a user-declared struct name
+    Pointer,   // T*
+    Array,     // T[N]
+    UniquePtr, // std::unique_ptr<T> -- unique ownership, move-only (see ch05)
 };
 
 // A type reference. `pointee`/`element` use shared_ptr (not unique_ptr) so
@@ -29,7 +30,7 @@ struct Type {
     // Named
     std::string name;
 
-    // Pointer
+    // Pointer / UniquePtr (element type)
     std::shared_ptr<Type> pointee;
 
     // Array
@@ -46,6 +47,7 @@ enum class ExprKind {
     Call,
     Member,
     Subscript,
+    Move, // std::move(x) -- compiler builtin move hint, not an ordinary call
 };
 
 enum class BinaryOp {
@@ -97,6 +99,9 @@ struct Expr {
 
     // Member: object stored in `lhs`, field name in `name`.
     // Subscript: array/collection stored in `lhs`, index expr in `rhs`.
+    // Move: moved expression stored in `lhs` (must resolve to a plain
+    // local variable of unique_ptr type; enforced by the move checker,
+    // not the parser).
 };
 
 enum class StmtKind {

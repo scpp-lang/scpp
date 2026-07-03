@@ -149,6 +149,46 @@ void test_nested_struct_field() {
            "nested_struct_field: expected Outer struct type embedding Inner");
 }
 
+void test_unique_ptr_zero_init() {
+    std::string ir = generate_ir(
+        "int main() {"
+        "    std::unique_ptr<int> a;"
+        "    return 0;"
+        "}");
+    expect(ir.find("%a = alloca ptr") != std::string::npos,
+           "unique_ptr_zero_init: expected 'a' to be allocated as a ptr");
+    expect(ir.find("store ptr null, ptr %a") != std::string::npos,
+           "unique_ptr_zero_init: expected a null store for the zero-initialized unique_ptr");
+}
+
+void test_move_generates_load_and_null_store() {
+    std::string ir = generate_ir(
+        "int main() {"
+        "    std::unique_ptr<int> a;"
+        "    std::unique_ptr<int> b = std::move(a);"
+        "    return 0;"
+        "}");
+    // The move should load a's current value, null it out, then store the
+    // loaded value into b -- i.e. a real (if degenerate, since there's no
+    // heap allocation yet) pointer transfer rather than a duplicate.
+    expect(ir.find("%movetmp = load ptr, ptr %a") != std::string::npos,
+           "move_generates_load_and_null_store: expected a load of 'a' into %movetmp");
+    expect(ir.find("store ptr null, ptr %a") != std::string::npos,
+           "move_generates_load_and_null_store: expected 'a' to be nulled out after the move");
+    expect(ir.find("store ptr %movetmp, ptr %b") != std::string::npos,
+           "move_generates_load_and_null_store: expected the moved value stored into 'b'");
+}
+
+void test_unique_ptr_field_in_struct_is_rejected() {
+    bool threw = false;
+    try {
+        generate_ir("struct Bad { std::unique_ptr<int> p; }; int main() { return 0; }");
+    } catch (const scpp::CodegenError&) {
+        threw = true;
+    }
+    expect(threw, "unique_ptr_field_in_struct_is_rejected: expected a CodegenError");
+}
+
 } // namespace
 
 int main() {
@@ -166,6 +206,9 @@ int main() {
     test_struct_self_reference_by_pointer_is_allowed();
     test_array_field_and_subscript_generates_gep();
     test_nested_struct_field();
+    test_unique_ptr_zero_init();
+    test_move_generates_load_and_null_store();
+    test_unique_ptr_field_in_struct_is_rejected();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

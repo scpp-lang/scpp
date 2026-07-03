@@ -38,6 +38,7 @@ enum class TokenKind {
     Semicolon,
     Comma,
     Dot,
+    ColonColon,
 
     // operators
     Plus,
@@ -203,6 +204,9 @@ private:
                 return make_token(TokenKind::Unknown, start, start_line, start_col);
             case '|':
                 if (peek() == '|') { advance(); return make_token(TokenKind::PipePipe, start, start_line, start_col); }
+                return make_token(TokenKind::Unknown, start, start_line, start_col);
+            case ':':
+                if (peek() == ':') { advance(); return make_token(TokenKind::ColonColon, start, start_line, start_col); }
                 return make_token(TokenKind::Unknown, start, start_line, start_col);
             default:
                 return make_token(TokenKind::Unknown, start, start_line, start_col);

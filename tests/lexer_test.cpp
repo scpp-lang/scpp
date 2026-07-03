@@ -154,6 +154,21 @@ void test_struct_punctuation() {
         "struct_punctuation");
 }
 
+void test_scope_resolution_operator() {
+    expect_kinds(
+        "std::move(a)",
+        {
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::ColonColon,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::LParen,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::RParen,
+            scpp::TokenKind::EndOfFile,
+        },
+        "scope_resolution_operator");
+}
+
 } // namespace
 
 int main() {
@@ -167,6 +182,7 @@ int main() {
     test_line_and_column_tracking();
     test_unknown_character();
     test_struct_punctuation();
+    test_scope_resolution_operator();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

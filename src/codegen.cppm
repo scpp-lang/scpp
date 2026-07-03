@@ -125,6 +125,9 @@ private:
         switch (type.kind) {
             case TypeKind::Pointer:
                 return;
+            case TypeKind::UniquePtr:
+                throw CodegenError("std::unique_ptr carries ownership and cannot be a struct field; "
+                                    "use class instead");
             case TypeKind::Array:
                 validate_trivial(*type.element, in_progress);
                 return;
@@ -176,6 +179,12 @@ private:
     llvm::Type* to_llvm_type(const Type& type) {
         switch (type.kind) {
             case TypeKind::Pointer:
+            case TypeKind::UniquePtr:
+                // A unique_ptr is just a possibly-null owning pointer at the
+                // ABI/codegen level in v0.1: no destructor/drop codegen
+                // exists yet (that's M3's "drop insertion"), so it lowers
+                // identically to a raw pointer. The move checker is what
+                // enforces the ownership discipline on top of this.
                 return llvm::PointerType::getUnqual(*context_);
             case TypeKind::Array:
                 return llvm::ArrayType::get(to_llvm_type(*type.element), type.array_size);
@@ -247,9 +256,11 @@ private:
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
                 if (stmt.init) {
                     builder_->CreateStore(codegen_expr(*stmt.init), slot);
-                } else if (is_struct_type(stmt.type)) {
+                } else if (is_struct_type(stmt.type) || stmt.type.kind == TypeKind::UniquePtr) {
                     // struct locals are always zero-initialized when no
-                    // initializer is given (spec ch04.1); scalars are left
+                    // initializer is given (spec ch04.1); a default-declared
+                    // unique_ptr is likewise an empty/null owner (mirroring
+                    // real C++'s default constructor). Scalars are left
                     // uninitialized, matching ordinary C++ semantics.
                     builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
                 }
@@ -366,6 +377,20 @@ private:
                     args.push_back(codegen_expr(*arg));
                 }
                 return builder_->CreateCall(callee, args);
+            }
+
+            case ExprKind::Move: {
+                // The move checker has already verified `expr.lhs` is a
+                // plain, currently-Initialized unique_ptr variable. At the
+                // IR level a move is: read the old value, then null out the
+                // source slot -- so even code that (incorrectly) bypassed
+                // the move checker would observe a null pointer rather than
+                // an aliased/duplicated one.
+                LValue lv = codegen_lvalue(*expr.lhs);
+                llvm::Type* llvm_type = to_llvm_type(lv.type);
+                llvm::Value* old_value = builder_->CreateLoad(llvm_type, lv.ptr, "movetmp");
+                builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), lv.ptr);
+                return old_value;
             }
         }
         throw CodegenError("unhandled expression kind");

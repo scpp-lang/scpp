@@ -65,10 +65,16 @@ scpp build <file> [-o <out>] # 通过 LLVM 编译为本地可执行文件
 
 ## 状态
 
-早期设计阶段。里程碑 **M1 — 最小端到端管线**（标量 + 局部变量 + 控制流 +
-函数 → AST → LLVM IR → 可执行文件，暂不含 `safe` 检查）已实现：词法分析器、
-解析器/AST，以及能编译并链接出本地可执行文件的 LLVM 后端。完整路线图见
-[本书](docs/book/zh/README.md)的里程碑章节。
+早期设计阶段。
+
+- **M1 — 最小端到端管线**（标量 + 局部变量 + 控制流 + 函数 → AST → LLVM IR
+  → 可执行文件，暂不含 `safe` 检查）：已完成。
+- **M2 — 类型系统 + `struct` + `unique_ptr` + move 语义**（内存布局固定
+  遵循 Clang ABI 的纯平凡 `struct`；`std::move` 作为编译器识别的 move
+  hint；move-out 检查，move 出去的 `std::unique_ptr` 不能再被读取）：
+  已完成。
+
+完整路线图见[本书](docs/book/zh/README.md)的里程碑章节。
 
 ## 许可
 

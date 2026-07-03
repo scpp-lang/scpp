@@ -1,0 +1,9 @@
+int consume(std::unique_ptr<int> p) {
+    return 1;
+}
+
+int main() {
+    std::unique_ptr<int> a;
+    std::unique_ptr<int> b = std::move(a);
+    return consume(std::move(b));
+}

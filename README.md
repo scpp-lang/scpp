@@ -78,11 +78,17 @@ scpp build <file> [-o <out>] # compile to a native executable via LLVM
 
 ## Status
 
-Early design stage. Milestone **M1 — minimal end-to-end pipeline** (scalars +
-locals + control flow + functions → AST → LLVM IR → executable, no `safe`
-checks yet) is implemented: lexer, parser/AST, and an LLVM-based backend that
-compiles and links a native executable. See the milestones chapter of
-[the book](docs/book/en/README.md) for the full roadmap.
+Early design stage.
+
+- **M1 — minimal end-to-end pipeline** (scalars + locals + control flow +
+  functions → AST → LLVM IR → executable, no `safe` checks yet): done.
+- **M2 — type system + `struct` + `unique_ptr` + move semantics** (trivial
+  `struct`s with a fixed, Clang-ABI-compatible memory layout; `std::move` as
+  a compiler-recognized move hint; move-out checking so a moved-from
+  `std::unique_ptr` can't be read again): done.
+
+See the milestones chapter of [the book](docs/book/en/README.md) for the
+full roadmap.
 
 ## License
 

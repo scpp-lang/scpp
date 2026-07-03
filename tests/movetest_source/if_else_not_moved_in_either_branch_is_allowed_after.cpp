@@ -1,0 +1,10 @@
+int f(bool cond) {
+    std::unique_ptr<int> a;
+    if (cond) {
+        int x = 1;
+    } else {
+        int y = 2;
+    }
+    std::unique_ptr<int> b = std::move(a);
+    return 0;
+}

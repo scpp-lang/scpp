@@ -12,6 +12,7 @@ import scpp.lexer;
 import scpp.parser;
 import scpp.ast;
 import scpp.codegen;
+import scpp.movecheck;
 import scpp.driver;
 
 namespace {
@@ -41,6 +42,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Semicolon: return "Semicolon";
         case scpp::TokenKind::Comma: return "Comma";
         case scpp::TokenKind::Dot: return "Dot";
+        case scpp::TokenKind::ColonColon: return "ColonColon";
         case scpp::TokenKind::Plus: return "Plus";
         case scpp::TokenKind::Minus: return "Minus";
         case scpp::TokenKind::Star: return "Star";
@@ -69,6 +71,8 @@ std::string type_to_string(const scpp::Type& type) {
             return type_to_string(*type.pointee) + "*";
         case scpp::TypeKind::Array:
             return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
+        case scpp::TypeKind::UniquePtr:
+            return "std::unique_ptr<" + type_to_string(*type.pointee) + ">";
     }
     return "?";
 }
@@ -159,6 +163,10 @@ void print_expr(const scpp::Expr& expr, int depth) {
             print_expr(*expr.lhs, depth + 1);
             print_expr(*expr.rhs, depth + 1);
             break;
+        case scpp::ExprKind::Move:
+            std::cout << "Move\n";
+            print_expr(*expr.lhs, depth + 1);
+            break;
     }
 }
 
@@ -242,6 +250,9 @@ int run_build(std::string_view input_path, std::string_view output_path) {
     try {
         scpp::compile_to_executable(source, std::string(output_path));
     } catch (const scpp::ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const scpp::MoveError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const scpp::CodegenError& e) {

@@ -76,14 +76,51 @@ private:
     [[nodiscard]] bool looks_like_type_start() const {
         const Token& tok = peek();
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool) return true;
+        if (check_std_qualified("unique_ptr")) return true;
         return tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text));
     }
 
-    // Parses a base type name (`int`, `bool`, or a known struct name)
-    // followed by zero or more `*` for pointer levels. Array suffixes
-    // (`[N]`) are handled separately by parse_array_suffix, since in C-style
-    // declarators the array size follows the *declared name*, not the type.
+    // Bounds-safe lookahead: returns the token `offset` positions ahead of
+    // the current one, or the (always-last) EndOfFile token if that would
+    // run past the end of the stream.
+    [[nodiscard]] const Token& peek_at(size_t offset) const {
+        size_t idx = pos_ + offset;
+        return idx < tokens_.size() ? tokens_[idx] : tokens_.back();
+    }
+
+    // Checks (without consuming) for the 3-token sequence `std :: <member>`,
+    // e.g. `std::unique_ptr` or `std::move`. These are recognized as fixed,
+    // special-cased spellings rather than via a general `::`-qualified-name
+    // grammar, matching the "minimal additions" design philosophy.
+    [[nodiscard]] bool check_std_qualified(std::string_view member) const {
+        return peek().kind == TokenKind::Identifier && peek().text == "std" &&
+               peek_at(1).kind == TokenKind::ColonColon && peek_at(2).kind == TokenKind::Identifier &&
+               peek_at(2).text == member;
+    }
+
+    void consume_std_qualified() {
+        advance(); // std
+        advance(); // ::
+        advance(); // <member>
+    }
+
+    // Parses a base type name (`int`, `bool`, `std::unique_ptr<T>`, or a
+    // known struct name) followed by zero or more `*` for pointer levels.
+    // Array suffixes (`[N]`) are handled separately by parse_array_suffix,
+    // since in C-style declarators the array size follows the *declared
+    // name*, not the type.
     Type parse_type() {
+        if (check_std_qualified("unique_ptr")) {
+            consume_std_qualified();
+            expect(TokenKind::Less, "'<'");
+            Type element = parse_type();
+            expect(TokenKind::Greater, "'>'");
+            Type type;
+            type.kind = TypeKind::UniquePtr;
+            type.pointee = std::make_shared<Type>(std::move(element));
+            return type;
+        }
+
         const Token& tok = peek();
         Type type;
         type.kind = TypeKind::Named;
@@ -389,6 +426,17 @@ private:
 
     ExprPtr parse_primary() {
         const Token& tok = peek();
+
+        if (check_std_qualified("move")) {
+            consume_std_qualified();
+            expect(TokenKind::LParen, "'('");
+            ExprPtr inner = parse_expr();
+            expect(TokenKind::RParen, "')'");
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Move;
+            node->lhs = std::move(inner);
+            return node;
+        }
 
         if (match(TokenKind::IntegerLiteral)) {
             auto node = std::make_unique<Expr>();
