@@ -20,6 +20,21 @@ target_sources(scpp_lexer
             src/lexer.cppm)
 target_compile_features(scpp_lexer PRIVATE cxx_std_23)
 
+add_library(scpp_ast)
+target_sources(scpp_ast
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/ast.cppm)
+target_compile_features(scpp_ast PRIVATE cxx_std_23)
+
+add_library(scpp_parser)
+target_sources(scpp_parser
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/parser.cppm)
+target_link_libraries(scpp_parser PUBLIC scpp_lexer scpp_ast)
+target_compile_features(scpp_parser PRIVATE cxx_std_23)
+
 add_executable(scpp)
 
 target_sources(scpp
@@ -28,7 +43,7 @@ target_sources(scpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/cli.cppm)
-target_link_libraries(scpp PRIVATE scpp_lexer)
+target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
 
@@ -39,3 +54,9 @@ target_link_libraries(lexer_test PRIVATE scpp_lexer)
 target_compile_features(lexer_test PRIVATE cxx_std_23)
 
 add_test(NAME lexer_test COMMAND lexer_test)
+
+add_executable(parser_test tests/parser_test.cpp)
+target_link_libraries(parser_test PRIVATE scpp_parser scpp_ast scpp_lexer)
+target_compile_features(parser_test PRIVATE cxx_std_23)
+
+add_test(NAME parser_test COMMAND parser_test)

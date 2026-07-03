@@ -9,6 +9,8 @@ module;
 export module scpp.cli;
 
 import scpp.lexer;
+import scpp.parser;
+import scpp.ast;
 
 namespace {
 
@@ -53,15 +55,24 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
     return "?";
 }
 
-int run_lex(std::string_view path) {
+std::string read_file(std::string_view path) {
     std::ifstream file{std::string(path)};
     if (!file) {
-        std::cerr << "error: cannot open file '" << path << "'\n";
-        return 1;
+        throw std::runtime_error("cannot open file '" + std::string(path) + "'");
     }
     std::ostringstream buffer;
     buffer << file.rdbuf();
-    std::string source = buffer.str();
+    return buffer.str();
+}
+
+int run_lex(std::string_view path) {
+    std::string source;
+    try {
+        source = read_file(path);
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
 
     for (const scpp::Token& tok : scpp::tokenize(source)) {
         std::cout << tok.line << ":" << tok.column << "\t" << token_kind_name(tok.kind);
@@ -69,6 +80,117 @@ int run_lex(std::string_view path) {
             std::cout << "\t'" << tok.text << "'";
         }
         std::cout << "\n";
+    }
+    return 0;
+}
+
+std::string_view binary_op_name(scpp::BinaryOp op) {
+    switch (op) {
+        case scpp::BinaryOp::Add: return "+";
+        case scpp::BinaryOp::Sub: return "-";
+        case scpp::BinaryOp::Mul: return "*";
+        case scpp::BinaryOp::Div: return "/";
+        case scpp::BinaryOp::Eq: return "==";
+        case scpp::BinaryOp::Ne: return "!=";
+        case scpp::BinaryOp::Lt: return "<";
+        case scpp::BinaryOp::Gt: return ">";
+        case scpp::BinaryOp::Le: return "<=";
+        case scpp::BinaryOp::Ge: return ">=";
+        case scpp::BinaryOp::And: return "&&";
+        case scpp::BinaryOp::Or: return "||";
+        case scpp::BinaryOp::Assign: return "=";
+    }
+    return "?";
+}
+
+void print_indent(int depth) {
+    for (int i = 0; i < depth; i++) std::cout << "  ";
+}
+
+void print_expr(const scpp::Expr& expr, int depth) {
+    print_indent(depth);
+    switch (expr.kind) {
+        case scpp::ExprKind::IntegerLiteral:
+            std::cout << "IntegerLiteral " << expr.int_value << "\n";
+            break;
+        case scpp::ExprKind::BoolLiteral:
+            std::cout << "BoolLiteral " << (expr.bool_value ? "true" : "false") << "\n";
+            break;
+        case scpp::ExprKind::Identifier:
+            std::cout << "Identifier " << expr.name << "\n";
+            break;
+        case scpp::ExprKind::Binary:
+            std::cout << "Binary " << binary_op_name(expr.binary_op) << "\n";
+            print_expr(*expr.lhs, depth + 1);
+            print_expr(*expr.rhs, depth + 1);
+            break;
+        case scpp::ExprKind::Unary:
+            std::cout << "Unary " << (expr.unary_op == scpp::UnaryOp::Neg ? "-" : "!") << "\n";
+            print_expr(*expr.lhs, depth + 1);
+            break;
+        case scpp::ExprKind::Call:
+            std::cout << "Call " << expr.name << "\n";
+            for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
+            break;
+    }
+}
+
+void print_stmt(const scpp::Stmt& stmt, int depth) {
+    print_indent(depth);
+    switch (stmt.kind) {
+        case scpp::StmtKind::VarDecl:
+            std::cout << "VarDecl " << stmt.type_name << " " << stmt.var_name << "\n";
+            if (stmt.init) print_expr(*stmt.init, depth + 1);
+            break;
+        case scpp::StmtKind::Return:
+            std::cout << "Return\n";
+            if (stmt.expr) print_expr(*stmt.expr, depth + 1);
+            break;
+        case scpp::StmtKind::If:
+            std::cout << "If\n";
+            print_expr(*stmt.condition, depth + 1);
+            print_stmt(*stmt.then_branch, depth + 1);
+            if (stmt.else_branch) print_stmt(*stmt.else_branch, depth + 1);
+            break;
+        case scpp::StmtKind::While:
+            std::cout << "While\n";
+            print_expr(*stmt.condition, depth + 1);
+            print_stmt(*stmt.then_branch, depth + 1);
+            break;
+        case scpp::StmtKind::ExprStmt:
+            std::cout << "ExprStmt\n";
+            print_expr(*stmt.expr, depth + 1);
+            break;
+        case scpp::StmtKind::Block:
+            std::cout << "Block\n";
+            for (const auto& s : stmt.statements) print_stmt(*s, depth + 1);
+            break;
+    }
+}
+
+int run_parse(std::string_view path) {
+    std::string source;
+    try {
+        source = read_file(path);
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+
+    try {
+        scpp::Program program = scpp::parse(source);
+        for (const scpp::Function& fn : program.functions) {
+            std::cout << "Function " << (fn.is_safe ? "safe " : "") << fn.return_type << " " << fn.name << "(";
+            for (size_t i = 0; i < fn.params.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << fn.params[i].type_name << " " << fn.params[i].name;
+            }
+            std::cout << ")\n";
+            print_stmt(*fn.body, 1);
+        }
+    } catch (const scpp::ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     }
     return 0;
 }
@@ -83,10 +205,14 @@ int run(int argc, char** argv) {
     if (argc >= 3 && std::string_view(argv[1]) == "lex") {
         return run_lex(argv[2]);
     }
+    if (argc >= 3 && std::string_view(argv[1]) == "parse") {
+        return run_parse(argv[2]);
+    }
 
     std::string_view name = argc > 0 ? argv[0] : "scpp";
     std::cout << "Hello from " << name << " " << version << "!\n";
     std::cout << "Usage: " << name << " lex <file>\n";
+    std::cout << "       " << name << " parse <file>\n";
     return 0;
 }
 
