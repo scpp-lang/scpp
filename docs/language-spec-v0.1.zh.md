@@ -25,7 +25,7 @@
 编译器为每个函数体、lambda、块、类型维护一个 **safety context**，取值：
 
 - **`unsafe`（默认）**：普通 C++ 语义。不做任何所有权/借用/别名检查。
-- **`safe`**：启用全部静态安全检查（见 §4）。
+- **`safe`**：启用全部静态安全检查（见 §5）。
 
 ### 1.1 上下文的确定规则
 
@@ -90,22 +90,89 @@ backlog。
 
 ---
 
-## 4. safe 区的静态检查（健全性核心）
+## 4. struct 与 class 的语义区分（内存布局 / ABI 固定）
+
+这是与 C++ 的一个关键差异：C++ 里 `struct` 和 `class` 几乎等价（仅默认可见性
+不同）；scpp 里两者语义完全不同。
+
+### 4.1 struct：纯平凡数据（trivial aggregate）
+
+- `struct` 只能包含**平凡（trivial）类型**的成员，递归定义如下：
+  - 标量类型：`bool`、整型、浮点、`char`。
+  - 裸指针 `T*`（不带编译器跟踪的生命周期；解引用仍需 `unsafe {}`，见 §2）。
+  - 其他同样满足本规则的 `struct` 类型（递归）。
+  - 平凡类型的定长数组。
+- 以下类型**禁止**作为 `struct` 成员，必须改用 `class`：
+  - 引用 `T&` / `const T&`。
+  - `std::span<T>`、`std::string_view`（带生命周期检查的借用视图）。
+  - `std::unique_ptr<T>`、`std::shared_ptr<T>`、`std::vector<T>`、
+    `std::string`，或任何参与所有权/借用检查的类型。
+- 未通过此规则的 `struct` 定义是编译错误（提示"改用 class"），而不是静默
+  降级。
+
+**初始化**：`struct` 局部变量/成员若未显式初始化，编译器保证整个对象**按
+位清零**（zero-init）。标量成员等价于 `0` / `false` / `0.0`；裸指针成员
+等价于 `nullptr`。这是比"流敏感初始化检查"更强的保证——`struct` 永远不
+存在"未初始化读取"的可能。
+
+**Copy 语义**：`struct` 值可以自由、隐式地按位复制，不参与 §5 描述的
+move/借用检查——因为它不携带任何生命周期或独占所有权语义。这不是一个
+"可选的 Copy trait"（对比 Rust 需要显式 `#[derive(Copy)]`）：一个类型只要
+声明为 `struct`，编译器就会验证并保证它满足平凡性，`struct` 关键字本身
+就是显式声明。
+
+### 4.2 class：拥有资源/参与检查的类型
+
+- `class` 可以包含任意类型的成员，包括 `unique_ptr`、`vector`、`span`、
+  其他 `class`，或本身携带生命周期/所有权语义的字段。
+- `class` 参与 §5 描述的所有权/移动/借用/生命周期检查；**不**保证
+  zero-init（需要显式构造）。
+- v0.1 阶段用户自定义 `class` 类型的完整检查规则（构造/析构、方法体内部
+  借用等）超出范围，见 §8 的 backlog；v0.1 首先只对标准库提供的
+  `unique_ptr` 等类型做检查（M2 里程碑）。
+
+### 4.3 内存布局与 ABI（固定，不作为 impl-defined 留白）
+
+scpp 把 `struct` 的内存布局**钉死**为目标平台的 **Clang ABI**：在相同
+target triple 下，scpp 编译器产出的 `struct` 布局必须与 Clang 编译等价
+C 结构体产生的布局逐字节一致。具体规则：
+
+1. 成员按源码声明顺序排列，编译器**不做重排**。
+2. 每个成员按其类型在目标 Clang ABI 下的对齐要求对齐；相邻成员之间按需
+   插入 padding。
+3. 结构体自身对齐 = 所有成员对齐要求的最大值；总大小向上取整为该对齐的
+   倍数（保证数组场景每个元素都正确对齐）。
+4. 第一个成员偏移量固定为 0（结构体地址即第一个成员地址）。
+
+实现上：编译器生成非 packed 的 LLVM 具名 struct 类型，交给目标 target 的
+`DataLayout` 计算布局——该 `DataLayout` 与 Clang 针对同一 target triple
+使用的完全一致，因此自动获得与 Clang/C 兼容的布局，无需 scpp 自行定义
+对齐算法。
+
+**v0.1 明确不支持**：
+- 位域（bit-field）——各平台/编译器版本实现差异大，暂不纳入。
+- 压缩布局（等价于 `#pragma pack(1)` / `__attribute__((packed))`）——留待
+  后续版本通过显式属性（如 `alignas` / `packed`）支持，映射到 LLVM 的
+  packed struct 类型。
+
+---
+
+## 5. safe 区的静态检查（健全性核心）
 
 在 safe 上下文中，编译器保证（对所支持的子集）以下性质：
 
-### 4.1 所有权与移动（Move / Ownership）
+### 5.1 所有权与移动（Move / Ownership）
 - 每个值有唯一所有者。
 - `std::move(x)` 后，`x` 进入 *moved-out* 状态；读取 moved-out 值 → 错误。
 - 重新赋值可使变量回到 *initialized* 状态。
 - 作用域结束时对仍 *initialized* 的值执行 drop；对 moved-out 值不 drop。
 
-### 4.2 借用与别名（Borrow / Aliasing）
+### 5.2 借用与别名（Borrow / Aliasing）
 - **别名 XOR 可变**：同一对象在同一时刻，要么存在任意数量 `const T&`
   （共享借用），要么存在恰好一个 `T&`（可变借用），二者不可同时存在。
 - 存在活跃借用时，不可移动或销毁被借用对象。
 
-### 4.3 生命周期（Lifetime）
+### 5.3 生命周期（Lifetime）
 - 借用不得超过被借用者的生命周期（**禁止悬垂引用**）。
 - v0.1 **只做函数内（intraprocedural）借用检查**，基于 NLL 风格的
   数据流分析（活跃性驱动的 region 推断）。
@@ -116,11 +183,12 @@ backlog。
   - 其余无法推断的情形 → 报错，提示"该签名暂不支持，请重构或使用值/
     智能指针返回"。（不在 v0.1 引入显式标注语法。）
 
-### 4.4 初始化（Initialization）
+### 5.4 初始化（Initialization）
 - 禁止读取未初始化变量。
 - 所有路径必须在使用前初始化（数据流分析）。
+- `struct` 见 §4.1 的 zero-init 保证，天然满足本条，不需要流敏感分析。
 
-### 4.5 禁止项（safe 区，除非 `unsafe {}`）
+### 5.5 禁止项（safe 区，除非 `unsafe {}`）
 - 裸指针解引用、指针算术。
 - `reinterpret_cast`、C 风格强制转换到不兼容类型。
 - `union`（未加标签的）。
@@ -130,14 +198,14 @@ backlog。
 
 ---
 
-## 5. v0.1 支持的 safe 子集
+## 6. v0.1 支持的 safe 子集
 
 safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-SAFE`
 （明确区别于"不安全"，表示"尚未实现健全检查"）：
 
 **类型**
 - 基础标量：`bool`、整型、浮点、`char`。
-- `struct`（仅含受支持类型的字段）。
+- `struct`（规则见 §4.1；仅含受支持类型的字段）。
 - `std::unique_ptr<T>`、`std::vector<T>`、`std::span<T>`、`std::string_view`、
   `std::string`（最小子集）。
 
@@ -148,10 +216,11 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - 函数调用（被调方须 `safe`，否则 `unsafe {}`）。
 - 算术/逻辑/比较运算。
 - `if` / `while` / `for`（含 range-for）/ `return`。
-- 成员访问、下标（`vector`/`span`，带边界语义——运行时检查策略见 §7）。
+- 成员访问、下标（`vector`/`span`，带边界语义——运行时检查策略见 §8）。
 
 **暂不支持（safe 区 backlog）**
 - 模板 / 泛型、`concept`。
+- 用户自定义 `class` 的完整检查（构造/析构、方法体内部借用；见 §4.2）。
 - 继承、虚函数。
 - 异常。
 - lambda 捕获引用的生命周期检查。
@@ -160,7 +229,7 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 
 ---
 
-## 6. 编译管线（架构）
+## 7. 编译管线（架构）
 
 ```
 源码
@@ -182,7 +251,7 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 
 ---
 
-## 7. 未决问题（Open Questions，需后续拍板）
+## 8. 未决问题（Open Questions，需后续拍板）
 
 1. **下标越界**：safe 区 `vector[i]` / `span[i]` 是插入运行时边界检查
    （像 Rust），还是要求用带检查的 API？倾向：safe 区默认插入边界检查。
@@ -198,7 +267,7 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 
 ---
 
-## 8. MVP 里程碑（实现顺序，端到端优先）
+## 9. MVP 里程碑（实现顺序，端到端优先）
 
 - **M0**：定死本规范 + 选定实现语言与 LLVM 绑定。**（当前阶段）**
 - **M1**：最小端到端。子集：标量 + 局部变量 + `if`/`while` + 函数 →
@@ -214,7 +283,7 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 
 ---
 
-## 9. 参考实现（务必先研读）
+## 10. 参考实现（务必先研读）
 
 - **Circle**（Sean Baxter）：C++ 超集 + borrow checker，与本设计几乎同路。
 - **Hylo / Val**：mutable value semantics，规避借用检查复杂度的另一思路。

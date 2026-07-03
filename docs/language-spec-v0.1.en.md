@@ -33,7 +33,7 @@ block, and type:
 
 - **`unsafe` (default)**: ordinary C++ semantics. No ownership / borrow / alias
   checking.
-- **`safe`**: all static safety checks enabled (see §4).
+- **`safe`**: all static safety checks enabled (see §5).
 
 ### 1.1 How the context is determined
 
@@ -104,45 +104,130 @@ regions that block bugs.
 
 ---
 
-## 4. Static Checks in Safe Regions (the soundness core)
+## 4. Struct vs Class Semantics (Fixed Memory Layout / ABI)
 
-Within a safe context, the compiler guarantees (for the supported subset) the
-following properties:
+This is a key departure from C++: in C++, `struct` and `class` are nearly
+identical (differing only in default visibility). In scpp they have
+completely different semantics.
 
-### 4.1 Ownership & Move
+### 4.1 `struct`: a purely trivial aggregate
+
+- `struct` may only contain members of **trivial** types, defined
+  recursively:
+  - Scalar types: `bool`, integers, floats, `char`.
+  - Raw pointers `T*` (carry no compiler-tracked lifetime; dereferencing
+    still requires `unsafe {}`, see §2).
+  - Other `struct` types that themselves satisfy this rule (recursively).
+  - Fixed-size arrays of trivial types.
+- The following are **forbidden** as `struct` members and must instead be
+  wrapped in a `class`:
+  - References `T&` / `const T&`.
+  - `std::span<T>`, `std::string_view` (lifetime-checked borrowed views).
+  - `std::unique_ptr<T>`, `std::shared_ptr<T>`, `std::vector<T>`,
+    `std::string`, or any type participating in ownership/borrow checking.
+- A `struct` definition that violates this rule is a compile error (advising
+  "use `class` instead"), not a silent downgrade.
+
+**Initialization**: an uninitialized `struct` local/member is guaranteed by
+the compiler to be entirely **zero-initialized** (bitwise). Scalar members
+become `0` / `false` / `0.0`; raw pointer members become `nullptr`. This is a
+stronger guarantee than flow-sensitive initialization checking — a `struct`
+can never be read in an uninitialized state.
+
+**Copy semantics**: `struct` values may be freely and implicitly copied
+bitwise, and do not participate in the move/borrow checking described in §5
+— they carry no lifetime or exclusive-ownership semantics at all. This is
+not an opt-in `Copy` trait (contrast Rust's explicit `#[derive(Copy)]`):
+declaring a type `struct` is itself the explicit declaration, and the
+compiler verifies triviality.
+
+### 4.2 `class`: types that own resources / participate in checking
+
+- `class` may contain members of any type, including `unique_ptr`, `vector`,
+  `span`, other `class` types, or fields that themselves carry lifetime or
+  ownership semantics.
+- `class` participates in the ownership/move/borrow/lifetime checks
+  described in §5; it is **not** guaranteed to be zero-initialized (requires
+  explicit construction).
+- Full checking rules for user-defined `class` types (constructors/
+  destructors, borrows across method bodies, etc.) are out of scope for
+  v0.1 — see the backlog in §8. v0.1 first checks only the
+  standard-library-provided owning type `unique_ptr` (milestone M2).
+
+### 4.3 Memory Layout & ABI (fixed, not left implementation-defined)
+
+scpp pins `struct` memory layout to the target platform's **Clang ABI**: for
+a given target triple, the layout scpp produces for a `struct` must be
+byte-for-byte identical to what Clang produces for the equivalent C struct.
+Concretely:
+
+1. Members are laid out in source declaration order; the compiler **never
+   reorders** them.
+2. Each member is aligned per its type's alignment requirement under the
+   target's Clang ABI; padding is inserted between members as needed.
+3. The struct's own alignment is the maximum alignment of any member; its
+   total size is rounded up to a multiple of that alignment (so arrays of
+   the struct keep every element correctly aligned).
+4. The first member is always at offset 0 (the struct's address equals its
+   first member's address).
+
+Implementation: the compiler emits a non-packed, named LLVM struct type and
+lets the target's `DataLayout` compute the layout — the same `DataLayout`
+Clang uses for the same target triple — so Clang/C-compatible layout falls
+out automatically, with no separate alignment algorithm to maintain in scpp.
+
+**Explicitly unsupported in v0.1**:
+- Bit-fields — layout varies too much across platforms/compiler versions to
+  pin down confidently right now.
+- Packed layout (the equivalent of `#pragma pack(1)` /
+  `__attribute__((packed))`) — deferred to a later version via an explicit
+  attribute (e.g. `alignas` / `packed`) mapped to LLVM's packed struct type.
+
+---
+
+## 5. Static Checks in Safe Regions (the soundness core)
+
+Within a safe context, the compiler guarantees (for the supported subset)
+the following properties:
+
+### 5.1 Ownership & Move
 - Every value has a unique owner.
-- After `std::move(x)`, `x` enters the *moved-out* state; reading a moved-out
-  value -> error.
+- After `std::move(x)`, `x` enters the *moved-out* state; reading a
+  moved-out value -> error.
 - Reassignment returns a variable to the *initialized* state.
-- At end of scope, values still *initialized* are dropped; moved-out values are
-  not dropped.
+- At end of scope, values still *initialized* are dropped; moved-out values
+  are not dropped.
 
-### 4.2 Borrow & Aliasing
-- **Alias XOR mutability**: at any instant an object may have either any number
-  of `const T&` (shared borrows), or exactly one `T&` (mutable borrow), never
-  both.
+### 5.2 Borrow & Aliasing
+- **Alias XOR mutability**: at any instant an object may have either any
+  number of `const T&` (shared borrows), or exactly one `T&` (mutable
+  borrow), never both.
 - While an active borrow exists, the borrowed object may not be moved or
   destroyed.
 
-### 4.3 Lifetime
-- A borrow must not outlive the borrowed value (**no dangling references**).
-- v0.1 performs **intraprocedural borrow checking only**, based on NLL-style
-  dataflow analysis (liveness-driven region inference).
-- **No lifetime syntax is exposed.** Cross-function signatures use the following
-  **elision defaults** (a simplified version of Rust's lifetime elision):
+### 5.3 Lifetime
+- A borrow must not outlive the borrowed value (**no dangling
+  references**).
+- v0.1 performs **intraprocedural borrow checking only**, based on
+  NLL-style dataflow analysis (liveness-driven region inference).
+- **No lifetime syntax is exposed.** Cross-function signatures use the
+  following **elision defaults** (a simplified version of Rust's lifetime
+  elision):
   - If a function has exactly one reference input parameter, all reference
     outputs borrow from its lifetime.
   - If there is a `this` and the function returns a reference, the output
     borrows from `this`'s lifetime.
-  - Any other case that cannot be inferred -> error, advising "this signature is
-    not yet supported; refactor or return by value / smart pointer". (No
-    explicit annotation syntax is introduced in v0.1.)
+  - Any other case that cannot be inferred -> error, advising "this
+    signature is not yet supported; refactor or return by value / smart
+    pointer". (No explicit annotation syntax is introduced in v0.1.)
 
-### 4.4 Initialization
+### 5.4 Initialization
 - Reading an uninitialized variable is forbidden.
 - All paths must initialize before use (dataflow analysis).
+- `struct` already satisfies this trivially via the zero-init guarantee in
+  §4.1, with no flow-sensitive analysis needed.
 
-### 4.5 Prohibited in Safe Regions (unless in `unsafe { }`)
+### 5.5 Prohibited in Safe Regions (unless in `unsafe { }`)
 - Raw pointer dereference, pointer arithmetic.
 - `reinterpret_cast`, C-style casts to incompatible types.
 - (Untagged) `union`.
@@ -152,15 +237,15 @@ following properties:
 
 ---
 
-## 5. The Safe Subset Supported in v0.1
+## 6. The Safe Subset Supported in v0.1
 
-Inside safe regions, **only** the following syntax is supported; everything else
-reports `E-UNSUPPORTED-IN-SAFE` (explicitly distinct from "unsafe", meaning
-"sound checking not yet implemented"):
+Inside safe regions, **only** the following syntax is supported; everything
+else reports `E-UNSUPPORTED-IN-SAFE` (explicitly distinct from "unsafe",
+meaning "sound checking not yet implemented"):
 
 **Types**
 - Scalar primitives: `bool`, integers, floats, `char`.
-- `struct` (with fields of supported types only).
+- `struct` (rules in §4.1; fields of supported types only).
 - `std::unique_ptr<T>`, `std::vector<T>`, `std::span<T>`, `std::string_view`,
   `std::string` (minimal subset).
 
@@ -171,11 +256,13 @@ reports `E-UNSUPPORTED-IN-SAFE` (explicitly distinct from "unsafe", meaning
 - Function calls (callee must be `safe`, otherwise `unsafe {}`).
 - Arithmetic / logical / comparison operators.
 - `if` / `while` / `for` (incl. range-for) / `return`.
-- Member access, subscript (`vector`/`span`, with bounds semantics — runtime
-  check policy per §7).
+- Member access, subscript (`vector`/`span`, with bounds semantics —
+  runtime check policy per §8).
 
 **Not yet supported (safe-region backlog)**
 - Templates / generics, `concept`.
+- Full checking for user-defined `class` types (constructors/destructors,
+  borrows inside method bodies; see §4.2).
 - Inheritance, virtual functions.
 - Exceptions.
 - Lifetime checking of lambdas capturing references.
@@ -184,7 +271,7 @@ reports `E-UNSUPPORTED-IN-SAFE` (explicitly distinct from "unsafe", meaning
 
 ---
 
-## 6. Compilation Pipeline (architecture)
+## 7. Compilation Pipeline (architecture)
 
 ```
 source
@@ -210,7 +297,7 @@ Key points:
 
 ---
 
-## 7. Open Questions (to be decided later)
+## 8. Open Questions (to be decided later)
 
 1. **Out-of-bounds subscript**: in safe regions, does `vector[i]` / `span[i]`
    insert a runtime bounds check (like Rust), or require a checked API?
@@ -229,7 +316,7 @@ Key points:
 
 ---
 
-## 8. MVP Milestones (implementation order, end-to-end first)
+## 9. MVP Milestones (implementation order, end-to-end first)
 
 - **M0**: Freeze this spec + choose the implementation language and LLVM
   bindings. **(current stage)**
@@ -249,7 +336,7 @@ Key points:
 
 ---
 
-## 9. Reference Implementations (required reading)
+## 10. Reference Implementations (required reading)
 
 - **Circle** (Sean Baxter): a C++ superset with a borrow checker — almost the
   same path as this design.
