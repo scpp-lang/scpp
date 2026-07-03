@@ -117,6 +117,10 @@
 - 可变全局/静态变量的访问。
 - 调用未标注 `safe` 的函数。
 
+`unsafe { }` 的具体规则见 [§1.3](ch01-safety-context.md)：它**只**放宽
+这个列表，别的一概不动——本章其余检查（§5.1-§5.4）在 `unsafe { }` 块内
+依旧无条件继续跑。
+
 ---
 
 [← 上一章：struct 与 class 的语义区分](ch04-struct-vs-class.md) · [目录](README.md) · [下一章：v0.1 支持的 safe 子集 →](ch06-safe-subset.md)

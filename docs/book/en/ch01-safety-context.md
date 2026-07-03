@@ -43,6 +43,73 @@ leading position to begin with: `safe int& foo(...) [[scpp::lifetime(a)]] { ... 
 v0.1 **only requires function-level `safe` and block-level `unsafe { }`**. All
 other annotation positions go to the backlog.
 
+## 1.3 The `unsafe { }` block (design finalized, not yet implemented)
+
+- **Grammar**: `unsafe` followed by an ordinary brace-delimited statement
+  list, usable anywhere a statement is expected inside a function body:
+  `unsafe { stmt; stmt; ... }`. v0.1 only supports this block-statement
+  form. Circle/Safe C++ also allows an `unsafe` prefix directly on a
+  single condition expression, a match-arm body, or a constructor's
+  mem-initializer; scpp defers all of those since it has no
+  match-expressions or constructors yet -- they can be added as their own
+  grammar productions later without changing anything specified here.
+- **Scoping**: unlike Circle (where `unsafe { }` deliberately does *not*
+  open a new lexical scope), scpp's `unsafe { }` is an **ordinary block**:
+  it behaves exactly like a plain `{ }` compound statement -- locals
+  declared inside go out of scope at the closing `}`, exactly as in
+  unannotated C++. A `{ }` that silently scoped differently from every
+  other `{ }` in the language would violate scpp's own "looks like C++,
+  no surprises" rule. If a value computed inside `unsafe { }` needs to
+  survive past it, declare it in the enclosing scope first and assign
+  inside -- ordinary C++ already works this way.
+- **What gets unlocked**: exactly, and only, the operations listed in
+  [§5.5](ch05-static-checks.md) become legal again inside `unsafe { }`,
+  with the same meaning they'd have in an ordinary (unannotated/`unsafe`)
+  function: raw pointer dereference/arithmetic, `reinterpret_cast`/
+  incompatible C-style casts, untagged `union` member access, raw
+  `new`/`delete`, mutable global/static access, and calling a function not
+  annotated `safe`. Of these, **only two are reachable in the current
+  implementation**: raw-pointer `*p` dereference (`T*` already exists as a
+  type) and calling a non-`safe` function (calls and `Function::is_safe`
+  already exist -- though the "callee must be `safe`" rejection itself has
+  never been implemented yet either, so shipping `unsafe { }` means
+  shipping that check too, gated the same way). The other four have no
+  syntax at all yet in v0.1 (`union`, `reinterpret_cast`, `new`/`delete`,
+  and global variables aren't lexed/parsed) -- there's nothing to gate for
+  them until their own syntax lands; wire up the identical mechanism for
+  each at that point.
+- **What stays exactly as strict**: everything in
+  [§5.1-§5.4](ch05-static-checks.md) -- ownership/move state,
+  alias-XOR-mutability, lifetime/dangling checks, and zero-init -- keeps
+  running **unconditionally** through an `unsafe { }` block's statements.
+  `unsafe { }` is a narrow, operation-level escape hatch, **not** a
+  "stop checking this region" switch, and must not be implemented by
+  skipping movecheck for the block's statements -- only by relaxing the
+  specific checks listed above. A `std::unique_ptr` can't be double-moved
+  and alias-XOR-mutability can't be violated whether or not the code sits
+  inside `unsafe { }`; otherwise, code right after the block (still under
+  full `safe` checking) could observe corrupted state that was never
+  actually proven sound. (Raw pointers themselves are still never
+  move/borrow-tracked, inside or outside `unsafe { }` -- that's unchanged;
+  it's the same "raw pointers aren't a tracked type" rule that already
+  applies everywhere.)
+- **Nesting**: `unsafe { }` may nest inside another `unsafe { }`, or appear
+  (as a harmless no-op) inside an already-`unsafe` function body -- neither
+  is an error. `safe { }` re-enabling checks inside an `unsafe` context is
+  still not supported (unchanged from [§1.1](#11-how-the-context-is-determined)).
+- **Implementation shape** (for whoever builds this): reuse the existing
+  `StmtKind::Block` AST node (add an `is_unsafe` flag), and mirror the
+  existing `ScopeExit` MIR pattern with a matching pair of marker
+  statements (e.g. `UnsafeEnter`/`UnsafeExit`) bracketing the block's
+  lowered statements. The movecheck walker keeps a simple nesting counter
+  (increment on `UnsafeEnter`, decrement on `UnsafeExit`) alongside its
+  existing traversal -- this does **not** need to join across CFG branches
+  the way `DataflowState` does, since it's a purely lexical/structural
+  fact at each program point, never a flow-sensitive one (every branch of
+  an `if` already closes out its own `unsafe { }` blocks, if any, before
+  reaching the merge point). Gate each of the two currently-reachable
+  checks above on `counter == 0`.
+
 ---
 
 [← Previous: Design Philosophy](ch00-design-philosophy.md) · [Table of Contents](README.md) · [Next: Boundary Rules →](ch02-boundary-rules.md)

@@ -17,6 +17,14 @@ This is critical for soundness and must be strict.
 - The compiler should be able to mark whether an `unsafe` function has been
   "manually reviewed as safe to call" — v0.1 does not formalize this and relies
   on `unsafe { }` vouching.
+- Mechanism: see [§1.3](ch01-safety-context.md) for the concrete rules of
+  `unsafe { }` (design finalized, not yet implemented). In short, the
+  checker rejects a `Call` whose callee's `Function::is_safe` is false
+  unless the call site is lexically inside an `unsafe { }` block (or the
+  caller itself is an `unsafe` function) -- the same
+  currently-inside-`unsafe` bit also gates raw pointer dereference, and
+  will gate the rest of [§5.5](ch05-static-checks.md)'s list once their
+  syntax exists.
 
 ---
 

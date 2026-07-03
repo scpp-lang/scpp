@@ -13,7 +13,8 @@
   `a.b`/`arr[i]` 借用、引用指向 `std::unique_ptr` 指向的对象（`*p`/
   `p->x`）、调用返回引用的函数的结果可绑定新引用/继续传引用实参，详见
   [§5.2](ch05-static-checks.md)/[§5.3](ch05-static-checks.md)。裸指针
-  `T*` 的解引用留待 `unsafe {}` 语句块实现之后。）**
+  `T*` 的解引用留待 `unsafe {}` 语句块实现之后（设计已在
+  [§1.3](ch01-safety-context.md) 定稿）。）**
 - **M6**：`vector`/`span`/`string_view` 支持 + 边界检查策略 + 诊断质量。
   **（第一阶段已完成：`std::span<T>`/`std::span<const T>`——从定长数组
   构造、`.size` 字段、运行时边界检查 + `abort()` panic，详见
@@ -21,7 +22,8 @@
   [§8](ch08-open-questions.md)。作为编译器内置类型实现（跟 `unique_ptr`
   一样），有意当作未来"泛型 + 泛型生命周期"机制的具体原型。`std::vector`、
   `std::string`/`string_view`（需要先有 `char` 类型）、`for`/range-for、
-  `unsafe {}` 语句块均留待后续。）**
+  `unsafe {}` 语句块（设计已在 [§1.3](ch01-safety-context.md) 定稿）均
+  留待后续。）**
 - **M7+**：泛型/模板、trait/concept、`[[scpp::lifetime(name)]]` 多组
   跨函数生命周期机制（设计已在 [§5.3](ch05-static-checks.md) 定稿；尚未
   实现）、标准库扩展、增量编译。

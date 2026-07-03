@@ -18,7 +18,8 @@
   reference-returning call's result to a new reference or reference
   argument -- see [§5.2](ch05-static-checks.md)/
   [§5.3](ch05-static-checks.md). Raw pointer (`T*`) dereference is left
-  for whenever `unsafe { }` blocks are implemented.)**
+  for whenever `unsafe { }` blocks are implemented (design finalized in
+  [§1.3](ch01-safety-context.md)).)**
 - **M6**: `vector`/`span`/`string_view` support + bounds-check policy +
   diagnostic quality. **(Slice 1 done: `std::span<T>`/
   `std::span<const T>` -- construction from a fixed-size array, a
@@ -28,7 +29,8 @@
   (like `unique_ptr`), deliberately meant as a concrete prototype for a
   future "generics + generic lifetimes" mechanism. `std::vector`,
   `std::string`/`string_view` (need a `char` type first), `for`/
-  range-for, and `unsafe { }` blocks are all left for later.)**
+  range-for, and `unsafe { }` blocks (design finalized in
+  [§1.3](ch01-safety-context.md)) are all left for later.)**
 - **M7+**: Generics/templates, traits/concepts, the `[[scpp::lifetime(name)]]`
   multi-group cross-function lifetime mechanism (design finalized in
   [§5.3](ch05-static-checks.md); not yet implemented), standard-library

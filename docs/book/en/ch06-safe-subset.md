@@ -21,7 +21,10 @@ meaning "sound checking not yet implemented"):
 - Local variable declaration and initialization.
 - `&` / `const &` borrows; `std::span`/`std::span<const T>` views.
 - `std::move`.
-- Function calls (callee must be `safe`, otherwise `unsafe {}`).
+- Function calls. (The "callee must be `safe`, otherwise `unsafe {}`"
+  rule from [§2](ch02-boundary-rules.md) is **not yet enforced** -- calling
+  a non-`safe` function from a `safe` one currently isn't rejected at all;
+  this ships together with `unsafe { }` itself, see below.)
 - Arithmetic / logical / comparison operators.
 - `if` / `while` / `return`. (`for`/range-for are **not implemented yet**
   -- iteration has to be hand-written with `while` for now; the lexer
@@ -32,6 +35,13 @@ meaning "sound checking not yet implemented"):
 - `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
   for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)
   -- **design finalized, not yet implemented**).
+- `unsafe { }` blocks (see [§1.3](ch01-safety-context.md) -- **design
+  finalized, not yet implemented**): a lexically-scoped escape hatch
+  inside a `safe` function that locally permits raw pointer dereference
+  and calling a non-`safe` function (the only two of
+  [§5.5](ch05-static-checks.md)'s prohibited operations reachable in v0.1
+  today), while every other check in [§5](ch05-static-checks.md) keeps
+  running unconditionally.
 
 **Not yet supported (safe-region backlog)**
 - Templates / generics, `concept`.
@@ -45,9 +55,12 @@ meaning "sound checking not yet implemented"):
   spec'd in [§5.3](ch05-static-checks.md) (design only so far; every
   cross-function case still falls back to the single-reference-parameter/
   `this` elision or the new default-group rule until this lands).
+- Implementation of `unsafe { }` blocks spec'd in
+  [§1.3](ch01-safety-context.md) (design only so far).
 - `for`/range-for, `char`/`float`/`double`, `std::vector`,
-  `std::string`/`std::string_view`, `unsafe { }` blocks (and, with them,
-  raw pointer dereference).
+  `std::string`/`std::string_view`. `reinterpret_cast`, `union`, raw
+  `new`/`delete`, and global variables have no syntax at all yet, so
+  `unsafe { }`'s permission for them is moot until each lands.
 
 ---
 

@@ -157,6 +157,11 @@ the following properties:
 - Access to mutable global/static variables.
 - Calling a function not annotated `safe`.
 
+See [§1.3](ch01-safety-context.md) for `unsafe { }`'s exact rules: it
+relaxes precisely this list and nothing else -- every other check in this
+chapter (§5.1-§5.4) keeps running unconditionally inside an `unsafe { }`
+block.
+
 ---
 
 [← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The Safe Subset Supported in v0.1 →](ch06-safe-subset.md)

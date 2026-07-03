@@ -18,7 +18,10 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - 局部变量声明与初始化。
 - `&` / `const &` 借用；`std::span`/`std::span<const T>` 视图。
 - `std::move`。
-- 函数调用（被调方须 `safe`，否则 `unsafe {}`）。
+- 函数调用。（[§2](ch02-boundary-rules.md) 里"被调方须 `safe`，否则
+  `unsafe {}`"这条规则**尚未强制执行**——目前从 `safe` 函数调用非
+  `safe` 函数完全不会被拒绝；这条规则会跟 `unsafe { }` 一起落地，见
+  下面。）
 - 算术/逻辑/比较运算。
 - `if` / `while` / `return`。（`for`/range-for **尚未实现**——目前只能用
   `while` 手写迭代；词法层面保留了 `for` 关键字，但 parser/AST 还没有
@@ -28,6 +31,11 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
   跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)——**设计已
   定稿，尚未实现**）。
+- `unsafe { }` 语句块（见 [§1.3](ch01-safety-context.md)——**设计已定稿，
+  尚未实现**）：在 `safe` 函数内部开一个词法作用域的逃生窗口，局部放行
+  裸指针解引用和调用非 `safe` 函数（这是 v0.1 里
+  [§5.5](ch05-static-checks.md) 禁止项中唯二能真正碰到的两条），
+  [§5](ch05-static-checks.md) 里的其余检查照常无条件继续跑。
 
 **暂不支持（safe 区 backlog）**
 - 模板 / 泛型、`concept`。
@@ -40,9 +48,12 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - [§5.3](ch05-static-checks.md) 定稿的 `[[scpp::lifetime(name)]]` 多组
   机制的**实现**（目前只有设计，还没写进编译器；在它落地之前，跨函数
   情形一律走单引用参数/`this` 省略规则或新的默认分组规则）。
+- [§1.3](ch01-safety-context.md) 定稿的 `unsafe { }` 语句块的**实现**
+  （目前只有设计）。
 - `for`/range-for、`char`/`float`/`double`、`std::vector`、
-  `std::string`/`std::string_view`、`unsafe {}` 语句块（连带裸指针解
-  引用）。
+  `std::string`/`std::string_view`。`reinterpret_cast`、`union`、裸
+  `new`/`delete`、全局变量目前完全没有语法支持，`unsafe { }` 对它们的
+  放行也就无从谈起，等各自语法落地后再说。
 
 ---
 
