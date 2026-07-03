@@ -17,12 +17,16 @@ void expect(bool condition, std::string_view message) {
     }
 }
 
+bool is_named_type(const scpp::Type& type, std::string_view name) {
+    return type.kind == scpp::TypeKind::Named && type.name == name;
+}
+
 void test_int_main_return() {
     scpp::Program program = scpp::parse("int main() { return 42; }");
     expect(program.functions.size() == 1, "int_main_return: expected 1 function");
     const scpp::Function& fn = program.functions[0];
     expect(!fn.is_safe, "int_main_return: function should not be safe");
-    expect(fn.return_type == "int", "int_main_return: return type should be 'int'");
+    expect(is_named_type(fn.return_type, "int"), "int_main_return: return type should be 'int'");
     expect(fn.name == "main", "int_main_return: name should be 'main'");
     expect(fn.params.empty(), "int_main_return: no params expected");
     expect(fn.body->kind == scpp::StmtKind::Block, "int_main_return: body should be a block");
@@ -41,9 +45,9 @@ void test_safe_function_with_params() {
     const scpp::Function& fn = program.functions[0];
     expect(fn.is_safe, "safe_function_with_params: function should be safe");
     expect(fn.params.size() == 2, "safe_function_with_params: expected 2 params");
-    expect(fn.params[0].type_name == "int" && fn.params[0].name == "a",
+    expect(is_named_type(fn.params[0].type, "int") && fn.params[0].name == "a",
            "safe_function_with_params: param 0 should be 'int a'");
-    expect(fn.params[1].type_name == "int" && fn.params[1].name == "b",
+    expect(is_named_type(fn.params[1].type, "int") && fn.params[1].name == "b",
            "safe_function_with_params: param 1 should be 'int b'");
 
     const scpp::Stmt& ret = *fn.body->statements[0];
@@ -66,7 +70,7 @@ void test_var_decl_and_if_else() {
 
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "var_decl_and_if_else: statement 0 should be VarDecl");
-    expect(decl.type_name == "int" && decl.var_name == "x",
+    expect(is_named_type(decl.type, "int") && decl.var_name == "x",
            "var_decl_and_if_else: decl should be 'int x'");
     expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::IntegerLiteral &&
                decl.init->int_value == 1,
@@ -139,6 +143,129 @@ void test_parse_error_on_missing_semicolon() {
     expect(threw, "parse_error_on_missing_semicolon: expected a ParseError to be thrown");
 }
 
+void test_struct_declaration() {
+    scpp::Program program = scpp::parse("struct Point { int x; int y; }; int f() { return 0; }");
+    expect(program.structs.size() == 1, "struct_declaration: expected 1 struct");
+    const scpp::StructDef& def = program.structs[0];
+    expect(def.name == "Point", "struct_declaration: name should be 'Point'");
+    expect(def.fields.size() == 2, "struct_declaration: expected 2 fields");
+    expect(is_named_type(def.fields[0].type, "int") && def.fields[0].name == "x",
+           "struct_declaration: field 0 should be 'int x'");
+    expect(is_named_type(def.fields[1].type, "int") && def.fields[1].name == "y",
+           "struct_declaration: field 1 should be 'int y'");
+    expect(program.functions.size() == 1, "struct_declaration: expected 1 function after the struct");
+}
+
+void test_struct_variable_and_member_access() {
+    scpp::Program program = scpp::parse(
+        "struct Point { int x; int y; };"
+        "int f() {"
+        "    Point p;"
+        "    p.x = 1;"
+        "    return p.x + p.y;"
+        "}");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "struct_variable_and_member_access: statement 0 should be VarDecl");
+    expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "Point" && decl.var_name == "p",
+           "struct_variable_and_member_access: decl should be 'Point p'");
+    expect(decl.init == nullptr, "struct_variable_and_member_access: no initializer given");
+
+    const scpp::Stmt& assign_stmt = *fn.body->statements[1];
+    expect(assign_stmt.kind == scpp::StmtKind::ExprStmt,
+           "struct_variable_and_member_access: statement 1 should be ExprStmt");
+    const scpp::Expr& assign = *assign_stmt.expr;
+    expect(assign.kind == scpp::ExprKind::Binary && assign.binary_op == scpp::BinaryOp::Assign,
+           "struct_variable_and_member_access: expr should be an Assign");
+    expect(assign.lhs->kind == scpp::ExprKind::Member && assign.lhs->name == "x",
+           "struct_variable_and_member_access: assign target should be Member 'x'");
+    expect(assign.lhs->lhs->kind == scpp::ExprKind::Identifier && assign.lhs->lhs->name == "p",
+           "struct_variable_and_member_access: member base should be identifier 'p'");
+
+    const scpp::Stmt& ret = *fn.body->statements[2];
+    expect(ret.expr->kind == scpp::ExprKind::Binary && ret.expr->binary_op == scpp::BinaryOp::Add,
+           "struct_variable_and_member_access: return expr should be Add");
+    expect(ret.expr->lhs->kind == scpp::ExprKind::Member && ret.expr->lhs->name == "x",
+           "struct_variable_and_member_access: lhs should be Member 'x'");
+    expect(ret.expr->rhs->kind == scpp::ExprKind::Member && ret.expr->rhs->name == "y",
+           "struct_variable_and_member_access: rhs should be Member 'y'");
+}
+
+void test_nested_member_access() {
+    scpp::Program program = scpp::parse(
+        "struct Inner { int v; };"
+        "struct Outer { Inner inner; };"
+        "int f() {"
+        "    Outer o;"
+        "    return o.inner.v;"
+        "}");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& ret = *fn.body->statements[1];
+    const scpp::Expr& expr = *ret.expr;
+    expect(expr.kind == scpp::ExprKind::Member && expr.name == "v", "nested_member_access: outer should be Member 'v'");
+    expect(expr.lhs->kind == scpp::ExprKind::Member && expr.lhs->name == "inner",
+           "nested_member_access: inner should be Member 'inner'");
+    expect(expr.lhs->lhs->kind == scpp::ExprKind::Identifier && expr.lhs->lhs->name == "o",
+           "nested_member_access: base should be identifier 'o'");
+}
+
+void test_pointer_field_type() {
+    scpp::Program program = scpp::parse("struct Node { int value; Node* next; };");
+    const scpp::StructDef& def = program.structs[0];
+    expect(def.fields[1].name == "next", "pointer_field_type: field 1 should be named 'next'");
+    const scpp::Type& next_type = def.fields[1].type;
+    expect(next_type.kind == scpp::TypeKind::Pointer, "pointer_field_type: field 1 should be a Pointer type");
+    expect(next_type.pointee != nullptr && is_named_type(*next_type.pointee, "Node"),
+           "pointer_field_type: pointee should be named 'Node'");
+}
+
+void test_array_field_and_subscript() {
+    scpp::Program program = scpp::parse(
+        "struct Buffer { int values[4]; };"
+        "int f() {"
+        "    Buffer b;"
+        "    b.values[0] = 1;"
+        "    return b.values[0];"
+        "}");
+    const scpp::StructDef& def = program.structs[0];
+    const scpp::Type& values_type = def.fields[0].type;
+    expect(values_type.kind == scpp::TypeKind::Array, "array_field_and_subscript: field should be an Array type");
+    expect(values_type.array_size == 4, "array_field_and_subscript: array size should be 4");
+    expect(values_type.element != nullptr && is_named_type(*values_type.element, "int"),
+           "array_field_and_subscript: element type should be 'int'");
+
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& assign_stmt = *fn.body->statements[1];
+    const scpp::Expr& assign = *assign_stmt.expr;
+    expect(assign.lhs->kind == scpp::ExprKind::Subscript,
+           "array_field_and_subscript: assign target should be Subscript");
+    expect(assign.lhs->lhs->kind == scpp::ExprKind::Member && assign.lhs->lhs->name == "values",
+           "array_field_and_subscript: subscript base should be Member 'values'");
+    expect(assign.lhs->rhs->kind == scpp::ExprKind::IntegerLiteral && assign.lhs->rhs->int_value == 0,
+           "array_field_and_subscript: subscript index should be 0");
+}
+
+void test_local_array_declaration() {
+    scpp::Program program = scpp::parse("int f() { int values[8]; return values[0]; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "local_array_declaration: statement 0 should be VarDecl");
+    expect(decl.type.kind == scpp::TypeKind::Array && decl.type.array_size == 8,
+           "local_array_declaration: type should be an Array of size 8");
+    expect(decl.type.element != nullptr && is_named_type(*decl.type.element, "int"),
+           "local_array_declaration: element type should be 'int'");
+}
+
+void test_struct_before_use_is_required() {
+    bool threw = false;
+    try {
+        scpp::parse("int f() { Point p; return 0; } struct Point { int x; };");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "struct_before_use_is_required: expected a ParseError when Point is used before declaration");
+}
+
 } // namespace
 
 int main() {
@@ -150,6 +277,13 @@ int main() {
     test_unary_and_call();
     test_parenthesized_expression();
     test_parse_error_on_missing_semicolon();
+    test_struct_declaration();
+    test_struct_variable_and_member_access();
+    test_nested_member_access();
+    test_pointer_field_type();
+    test_array_field_and_subscript();
+    test_local_array_declaration();
+    test_struct_before_use_is_required();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

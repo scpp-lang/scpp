@@ -26,14 +26,18 @@ enum class TokenKind {
     KwUnsafe,
     KwTrue,
     KwFalse,
+    KwStruct,
 
     // punctuation
     LParen,
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
     Semicolon,
     Comma,
+    Dot,
 
     // operators
     Plus,
@@ -137,6 +141,7 @@ private:
         if (text == "unsafe") return TokenKind::KwUnsafe;
         if (text == "true") return TokenKind::KwTrue;
         if (text == "false") return TokenKind::KwFalse;
+        if (text == "struct") return TokenKind::KwStruct;
         return TokenKind::Identifier;
     }
 
@@ -172,8 +177,11 @@ private:
             case ')': return make_token(TokenKind::RParen, start, start_line, start_col);
             case '{': return make_token(TokenKind::LBrace, start, start_line, start_col);
             case '}': return make_token(TokenKind::RBrace, start, start_line, start_col);
+            case '[': return make_token(TokenKind::LBracket, start, start_line, start_col);
+            case ']': return make_token(TokenKind::RBracket, start, start_line, start_col);
             case ';': return make_token(TokenKind::Semicolon, start, start_line, start_col);
             case ',': return make_token(TokenKind::Comma, start, start_line, start_col);
+            case '.': return make_token(TokenKind::Dot, start, start_line, start_col);
             case '+': return make_token(TokenKind::Plus, start, start_line, start_col);
             case '-': return make_token(TokenKind::Minus, start, start_line, start_col);
             case '*': return make_token(TokenKind::Star, start, start_line, start_col);

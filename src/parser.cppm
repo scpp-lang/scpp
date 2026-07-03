@@ -4,6 +4,7 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 export module scpp.parser;
@@ -29,7 +30,11 @@ public:
     Program parse_program() {
         Program program;
         while (!check(TokenKind::EndOfFile)) {
-            program.functions.push_back(parse_function());
+            if (check(TokenKind::KwStruct)) {
+                program.structs.push_back(parse_struct_def());
+            } else {
+                program.functions.push_back(parse_function());
+            }
         }
         return program;
     }
@@ -37,6 +42,12 @@ public:
 private:
     std::vector<Token> tokens_;
     size_t pos_ = 0;
+    // Names introduced by `struct X { ... };` seen so far. The parser is
+    // single-pass, so (like C) a struct must be declared before it is used
+    // as a type; this set is what lets `looks_like_type_start()` recognize
+    // `Point p;` as a variable declaration rather than an expression
+    // statement starting with the identifier `Point`.
+    std::unordered_set<std::string> struct_names_;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -62,30 +73,91 @@ private:
         return advance();
     }
 
-    [[nodiscard]] static bool is_type_token(TokenKind kind) {
-        return kind == TokenKind::KwInt || kind == TokenKind::KwBool;
+    [[nodiscard]] bool looks_like_type_start() const {
+        const Token& tok = peek();
+        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool) return true;
+        return tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text));
     }
 
-    std::string parse_type_name() {
+    // Parses a base type name (`int`, `bool`, or a known struct name)
+    // followed by zero or more `*` for pointer levels. Array suffixes
+    // (`[N]`) are handled separately by parse_array_suffix, since in C-style
+    // declarators the array size follows the *declared name*, not the type.
+    Type parse_type() {
         const Token& tok = peek();
-        if (!is_type_token(tok.kind)) {
+        Type type;
+        type.kind = TypeKind::Named;
+        if (tok.kind == TokenKind::KwInt) {
+            type.name = "int";
+            advance();
+        } else if (tok.kind == TokenKind::KwBool) {
+            type.name = "bool";
+            advance();
+        } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text))) {
+            type.name = std::string(tok.text);
+            advance();
+        } else {
             throw ParseError(tok.line, tok.column, "expected a type name");
         }
-        advance();
-        return std::string(tok.text);
+
+        while (match(TokenKind::Star)) {
+            auto pointee = std::make_shared<Type>(type);
+            type = Type{};
+            type.kind = TypeKind::Pointer;
+            type.pointee = std::move(pointee);
+        }
+        return type;
+    }
+
+    // Wraps `base` in Array types for each trailing `[N]` found after a
+    // declared name (e.g. the `[8]` in `int values[8];`).
+    Type parse_array_suffix(Type base) {
+        while (check(TokenKind::LBracket)) {
+            advance();
+            const Token& size_tok = expect(TokenKind::IntegerLiteral, "array size");
+            expect(TokenKind::RBracket, "']'");
+            auto element = std::make_shared<Type>(base);
+            base = Type{};
+            base.kind = TypeKind::Array;
+            base.element = std::move(element);
+            base.array_size = std::stoll(std::string(size_tok.text));
+        }
+        return base;
+    }
+
+    StructDef parse_struct_def() {
+        expect(TokenKind::KwStruct, "'struct'");
+        StructDef def;
+        def.name = std::string(expect(TokenKind::Identifier, "struct name").text);
+        // Register the name before parsing the body so a field can refer to
+        // the enclosing struct via a pointer (e.g. `Node* next;`).
+        struct_names_.insert(def.name);
+
+        expect(TokenKind::LBrace, "'{'");
+        while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+            StructField field;
+            Type base = parse_type();
+            field.name = std::string(expect(TokenKind::Identifier, "field name").text);
+            field.type = parse_array_suffix(base);
+            expect(TokenKind::Semicolon, "';'");
+            def.fields.push_back(std::move(field));
+        }
+        expect(TokenKind::RBrace, "'}'");
+        expect(TokenKind::Semicolon, "';'");
+        return def;
     }
 
     Function parse_function() {
         Function fn;
         fn.is_safe = match(TokenKind::KwSafe);
-        fn.return_type = parse_type_name();
+        fn.return_type = parse_type();
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
 
         expect(TokenKind::LParen, "'('");
         if (!check(TokenKind::RParen)) {
             do {
                 Param param;
-                param.type_name = parse_type_name();
+                param.type = parse_type();
                 param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
                 fn.params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
@@ -109,7 +181,7 @@ private:
 
     StmtPtr parse_statement() {
         if (check(TokenKind::LBrace)) return parse_block();
-        if (is_type_token(peek().kind)) return parse_var_decl();
+        if (looks_like_type_start()) return parse_var_decl();
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
         if (check(TokenKind::KwWhile)) return parse_while();
@@ -119,8 +191,9 @@ private:
     StmtPtr parse_var_decl() {
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
-        stmt->type_name = parse_type_name();
+        Type base = parse_type();
         stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+        stmt->type = parse_array_suffix(base);
         if (match(TokenKind::Assign)) {
             stmt->init = parse_expr();
         }
@@ -285,7 +358,33 @@ private:
             node->lhs = parse_unary();
             return node;
         }
-        return parse_primary();
+        return parse_postfix(parse_primary());
+    }
+
+    // Applies trailing `.field` (Member) and `[index]` (Subscript)
+    // operators, e.g. `p.x`, `arr[i]`, `p.inner.x`, `arr[i].x`.
+    ExprPtr parse_postfix(ExprPtr expr) {
+        for (;;) {
+            if (match(TokenKind::Dot)) {
+                std::string field = std::string(expect(TokenKind::Identifier, "field name").text);
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Member;
+                node->name = field;
+                node->lhs = std::move(expr);
+                expr = std::move(node);
+            } else if (match(TokenKind::LBracket)) {
+                ExprPtr index = parse_expr();
+                expect(TokenKind::RBracket, "']'");
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Subscript;
+                node->lhs = std::move(expr);
+                node->rhs = std::move(index);
+                expr = std::move(node);
+            } else {
+                break;
+            }
+        }
+        return expr;
     }
 
     ExprPtr parse_primary() {

@@ -1,118 +1,134 @@
 import scpp.driver;
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/wait.h>
+#include <vector>
+
+// SCPP_TEST_SOURCE_DIR is injected by CMake (see the driver_test target in
+// the top-level CMakeLists.txt) and points at tests/test_source, so this
+// binary finds its fixtures regardless of the working directory it's run
+// from.
+#ifndef SCPP_TEST_SOURCE_DIR
+#error "SCPP_TEST_SOURCE_DIR must be defined by the build"
+#endif
 
 namespace {
 
 int failures = 0;
+int cases_run = 0;
 
-void expect(bool condition, std::string_view message) {
+void expect(bool condition, const std::string& message) {
     if (!condition) {
         std::cerr << "FAILED: " << message << "\n";
         failures++;
     }
 }
 
-// Compiles `source` to a temporary executable, runs it, and returns its exit
-// code (as a plain 0-255 value, matching POSIX wait status semantics).
-int compile_and_run(std::string_view source, const std::string& case_name) {
-    std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
-    scpp::compile_to_executable(source, exe_path.string());
-    int status = std::system(exe_path.string().c_str());
-    std::filesystem::remove(exe_path);
-    return WEXITSTATUS(status);
+std::string read_file(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
 }
 
-// Same as compile_and_run, but also captures the program's stdout so tests
-// can check output produced by print_int/print_bool.
-std::string compile_and_capture_output(std::string_view source, const std::string& case_name) {
+struct RunResult {
+    int exit_code;
+    std::string stdout_text;
+};
+
+// Compiles `source` to a temporary executable, runs it, and captures both
+// its stdout and exit code (0-255, matching POSIX wait status semantics).
+RunResult compile_and_run(std::string_view source, const std::string& case_name) {
     std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
     scpp::compile_to_executable(source, exe_path.string());
+
     FILE* pipe = popen(exe_path.string().c_str(), "r");
     std::string output;
-    char buffer[256];
-    if (pipe) {
+    if (pipe != nullptr) {
+        char buffer[256];
         size_t n;
         while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
             output.append(buffer, n);
         }
-        pclose(pipe);
     }
+    int status = pipe != nullptr ? pclose(pipe) : -1;
+
     std::filesystem::remove(exe_path);
-    return output;
+    return RunResult{WEXITSTATUS(status), output};
 }
 
-void test_return_constant() {
-    int exit_code = compile_and_run("int main() { return 42; }", "return_constant");
-    expect(exit_code == 42, "return_constant: expected exit code 42");
+// A `<name>.expected` file's first line is the expected exit code; anything
+// after the first newline is the expected stdout, compared exactly.
+struct ExpectedResult {
+    int exit_code;
+    std::string stdout_text;
+};
+
+ExpectedResult parse_expected(const std::string& content) {
+    size_t newline = content.find('\n');
+    std::string exit_code_line = newline == std::string::npos ? content : content.substr(0, newline);
+    std::string stdout_text = newline == std::string::npos ? "" : content.substr(newline + 1);
+    return ExpectedResult{std::stoi(exit_code_line), stdout_text};
 }
 
-void test_arithmetic() {
-    int exit_code = compile_and_run("int main() { return 2 + 3 * 4; }", "arithmetic");
-    expect(exit_code == 14, "arithmetic: expected exit code 14 (2 + 3*4)");
-}
+// Runs every `<name>.cpp` case file under SCPP_TEST_SOURCE_DIR against its
+// paired `<name>.expected` file (see parse_expected). Adding a new test case
+// is just dropping in 2 new files -- no changes to this file or a rebuild of
+// the test harness are needed, just re-running the already-built binary.
+void run_test_case_files() {
+    std::filesystem::path dir(SCPP_TEST_SOURCE_DIR);
+    std::vector<std::filesystem::path> source_files;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.path().extension() == ".cpp") {
+            source_files.push_back(entry.path());
+        }
+    }
+    std::sort(source_files.begin(), source_files.end());
 
-void test_if_else() {
-    int exit_code = compile_and_run(
-        "int f(int x) { if (x < 10) { return 1; } else { return 0; } }"
-        "int main() { return f(5); }",
-        "if_else");
-    expect(exit_code == 1, "if_else: expected exit code 1");
-}
+    expect(!source_files.empty(), "expected at least one *.cpp test case in " + dir.string());
 
-void test_while_loop() {
-    int exit_code = compile_and_run(
-        "int main() { int x = 0; while (x < 10) { x = x + 1; } return x; }", "while_loop");
-    expect(exit_code == 10, "while_loop: expected exit code 10");
-}
+    for (const std::filesystem::path& source_path : source_files) {
+        std::string case_name = source_path.stem().string();
+        std::filesystem::path expected_path = dir / (case_name + ".expected");
+        if (!std::filesystem::exists(expected_path)) {
+            expect(false, case_name + ": missing " + expected_path.filename().string());
+            continue;
+        }
 
-void test_function_call() {
-    int exit_code = compile_and_run(
-        "int add(int a, int b) { return a + b; } int main() { return add(3, 4); }", "function_call");
-    expect(exit_code == 7, "function_call: expected exit code 7");
-}
+        ExpectedResult expected = parse_expected(read_file(expected_path));
+        cases_run++;
 
-void test_logical_short_circuit() {
-    int exit_code = compile_and_run(
-        "int main() { bool b = true || false; if (b) { return 1; } return 0; }", "logical_short_circuit");
-    expect(exit_code == 1, "logical_short_circuit: expected exit code 1");
-}
-
-void test_print_int_and_bool() {
-    std::string output = compile_and_capture_output(
-        "int main() {"
-        "    int x = 7;"
-        "    print_int(x);"
-        "    print_int(x + 35);"
-        "    print_bool(x < 10);"
-        "    print_bool(x > 100);"
-        "    return 0;"
-        "}",
-        "print_int_and_bool");
-    expect(output == "7\n42\ntrue\nfalse\n", "print_int_and_bool: unexpected output '" + output + "'");
+        try {
+            RunResult result = compile_and_run(read_file(source_path), case_name);
+            expect(result.exit_code == expected.exit_code, case_name + ": expected exit code " +
+                                                                std::to_string(expected.exit_code) + ", got " +
+                                                                std::to_string(result.exit_code));
+            expect(result.stdout_text == expected.stdout_text, case_name + ": expected stdout '" +
+                                                                    expected.stdout_text + "', got '" +
+                                                                    result.stdout_text + "'");
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+    }
 }
 
 } // namespace
 
 int main() {
-    test_return_constant();
-    test_arithmetic();
-    test_if_else();
-    test_while_loop();
-    test_function_call();
-    test_logical_short_circuit();
-    test_print_int_and_bool();
+    run_test_case_files();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
         return 1;
     }
-    std::cout << "All driver tests passed.\n";
+    std::cout << "All driver tests passed (" << cases_run << " case file(s)).\n";
     return 0;
 }

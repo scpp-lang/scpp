@@ -31,12 +31,16 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwUnsafe: return "KwUnsafe";
         case scpp::TokenKind::KwTrue: return "KwTrue";
         case scpp::TokenKind::KwFalse: return "KwFalse";
+        case scpp::TokenKind::KwStruct: return "KwStruct";
         case scpp::TokenKind::LParen: return "LParen";
         case scpp::TokenKind::RParen: return "RParen";
         case scpp::TokenKind::LBrace: return "LBrace";
         case scpp::TokenKind::RBrace: return "RBrace";
+        case scpp::TokenKind::LBracket: return "LBracket";
+        case scpp::TokenKind::RBracket: return "RBracket";
         case scpp::TokenKind::Semicolon: return "Semicolon";
         case scpp::TokenKind::Comma: return "Comma";
+        case scpp::TokenKind::Dot: return "Dot";
         case scpp::TokenKind::Plus: return "Plus";
         case scpp::TokenKind::Minus: return "Minus";
         case scpp::TokenKind::Star: return "Star";
@@ -53,6 +57,18 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Bang: return "Bang";
         case scpp::TokenKind::EndOfFile: return "EndOfFile";
         case scpp::TokenKind::Unknown: return "Unknown";
+    }
+    return "?";
+}
+
+std::string type_to_string(const scpp::Type& type) {
+    switch (type.kind) {
+        case scpp::TypeKind::Named:
+            return type.name;
+        case scpp::TypeKind::Pointer:
+            return type_to_string(*type.pointee) + "*";
+        case scpp::TypeKind::Array:
+            return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
     }
     return "?";
 }
@@ -134,6 +150,15 @@ void print_expr(const scpp::Expr& expr, int depth) {
             std::cout << "Call " << expr.name << "\n";
             for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
             break;
+        case scpp::ExprKind::Member:
+            std::cout << "Member ." << expr.name << "\n";
+            print_expr(*expr.lhs, depth + 1);
+            break;
+        case scpp::ExprKind::Subscript:
+            std::cout << "Subscript\n";
+            print_expr(*expr.lhs, depth + 1);
+            print_expr(*expr.rhs, depth + 1);
+            break;
     }
 }
 
@@ -141,7 +166,7 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
     print_indent(depth);
     switch (stmt.kind) {
         case scpp::StmtKind::VarDecl:
-            std::cout << "VarDecl " << stmt.type_name << " " << stmt.var_name << "\n";
+            std::cout << "VarDecl " << type_to_string(stmt.type) << " " << stmt.var_name << "\n";
             if (stmt.init) print_expr(*stmt.init, depth + 1);
             break;
         case scpp::StmtKind::Return:
@@ -181,11 +206,19 @@ int run_parse(std::string_view path) {
 
     try {
         scpp::Program program = scpp::parse(source);
+        for (const scpp::StructDef& def : program.structs) {
+            std::cout << "Struct " << def.name << "\n";
+            for (const scpp::StructField& field : def.fields) {
+                print_indent(1);
+                std::cout << "Field " << type_to_string(field.type) << " " << field.name << "\n";
+            }
+        }
         for (const scpp::Function& fn : program.functions) {
-            std::cout << "Function " << (fn.is_safe ? "safe " : "") << fn.return_type << " " << fn.name << "(";
+            std::cout << "Function " << (fn.is_safe ? "safe " : "") << type_to_string(fn.return_type) << " "
+                       << fn.name << "(";
             for (size_t i = 0; i < fn.params.size(); i++) {
                 if (i > 0) std::cout << ", ";
-                std::cout << fn.params[i].type_name << " " << fn.params[i].name;
+                std::cout << type_to_string(fn.params[i].type) << " " << fn.params[i].name;
             }
             std::cout << ")\n";
             print_stmt(*fn.body, 1);

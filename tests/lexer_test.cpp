@@ -51,7 +51,7 @@ void test_int_main_return() {
 
 void test_keywords() {
     expect_kinds(
-        "safe unsafe bool if else while for true false",
+        "safe unsafe bool if else while for true false struct",
         {
             scpp::TokenKind::KwSafe,
             scpp::TokenKind::KwUnsafe,
@@ -62,6 +62,7 @@ void test_keywords() {
             scpp::TokenKind::KwFor,
             scpp::TokenKind::KwTrue,
             scpp::TokenKind::KwFalse,
+            scpp::TokenKind::KwStruct,
             scpp::TokenKind::EndOfFile,
         },
         "keywords");
@@ -130,6 +131,29 @@ void test_unknown_character() {
     expect(tokens[0].kind == scpp::TokenKind::Unknown, "unknown_character: kind should be Unknown");
 }
 
+void test_struct_punctuation() {
+    expect_kinds(
+        "struct Point { int x; }; p.x[0]",
+        {
+            scpp::TokenKind::KwStruct,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::LBrace,
+            scpp::TokenKind::KwInt,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Semicolon,
+            scpp::TokenKind::RBrace,
+            scpp::TokenKind::Semicolon,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Dot,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::LBracket,
+            scpp::TokenKind::IntegerLiteral,
+            scpp::TokenKind::RBracket,
+            scpp::TokenKind::EndOfFile,
+        },
+        "struct_punctuation");
+}
+
 } // namespace
 
 int main() {
@@ -142,6 +166,7 @@ int main() {
     test_comments_are_skipped();
     test_line_and_column_tracking();
     test_unknown_character();
+    test_struct_punctuation();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

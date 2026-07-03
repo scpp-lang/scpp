@@ -13,6 +13,30 @@ struct Stmt;
 using ExprPtr = std::unique_ptr<Expr>;
 using StmtPtr = std::unique_ptr<Stmt>;
 
+enum class TypeKind {
+    Named,   // scalar (int/bool) or a user-declared struct name
+    Pointer, // T*
+    Array,   // T[N]
+};
+
+// A type reference. `pointee`/`element` use shared_ptr (not unique_ptr) so
+// Type stays copyable: Param/StructField/Stmt store Type by value, and
+// copying a pointer/array type is just a cheap refcount bump, not a deep
+// clone.
+struct Type {
+    TypeKind kind = TypeKind::Named;
+
+    // Named
+    std::string name;
+
+    // Pointer
+    std::shared_ptr<Type> pointee;
+
+    // Array
+    std::shared_ptr<Type> element;
+    long long array_size = 0;
+};
+
 enum class ExprKind {
     IntegerLiteral,
     BoolLiteral,
@@ -20,6 +44,8 @@ enum class ExprKind {
     Binary,
     Unary,
     Call,
+    Member,
+    Subscript,
 };
 
 enum class BinaryOp {
@@ -55,7 +81,7 @@ struct Expr {
     // BoolLiteral
     bool bool_value = false;
 
-    // Identifier / Call (callee name)
+    // Identifier / Call (callee name) / Member (field name)
     std::string name;
 
     // Binary
@@ -68,6 +94,9 @@ struct Expr {
 
     // Call arguments
     std::vector<ExprPtr> args;
+
+    // Member: object stored in `lhs`, field name in `name`.
+    // Subscript: array/collection stored in `lhs`, index expr in `rhs`.
 };
 
 enum class StmtKind {
@@ -83,7 +112,7 @@ struct Stmt {
     StmtKind kind;
 
     // VarDecl
-    std::string type_name;
+    Type type;
     std::string var_name;
     ExprPtr init; // optional
 
@@ -100,19 +129,30 @@ struct Stmt {
 };
 
 struct Param {
-    std::string type_name;
+    Type type;
     std::string name;
 };
 
 struct Function {
     bool is_safe = false;
-    std::string return_type;
+    Type return_type;
     std::string name;
     std::vector<Param> params;
     StmtPtr body;
 };
 
+struct StructField {
+    Type type;
+    std::string name;
+};
+
+struct StructDef {
+    std::string name;
+    std::vector<StructField> fields;
+};
+
 struct Program {
+    std::vector<StructDef> structs;
     std::vector<Function> functions;
 };
 

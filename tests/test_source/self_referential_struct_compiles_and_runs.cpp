@@ -1,0 +1,10 @@
+struct Node {
+    int value;
+    Node* next;
+};
+
+int main() {
+    Node n;
+    n.value = 9;
+    return n.value;
+}

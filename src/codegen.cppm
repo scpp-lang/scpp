@@ -1,9 +1,11 @@
 module;
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <llvm/IR/BasicBlock.h>
@@ -27,8 +29,8 @@ struct CodegenError : std::runtime_error {
     explicit CodegenError(const std::string& message) : std::runtime_error(message) {}
 };
 
-// Lowers the M1 AST subset (scalars + locals + control flow + functions,
-// no `safe` checks yet) directly to LLVM IR.
+// Lowers the M1/M2 AST subset (scalars + locals + control flow + functions +
+// trivial structs, no borrow/move checks yet) directly to LLVM IR.
 class Codegen {
 public:
     explicit Codegen(const std::string& module_name)
@@ -37,8 +39,17 @@ public:
           builder_(std::make_unique<llvm::IRBuilder<>>(*context_)) {}
 
     llvm::Module& generate(const Program& program) {
-        // Declare every function signature up front so calls to
-        // not-yet-defined functions resolve correctly.
+        // Structs are declared first (validated + turned into named LLVM
+        // struct types) since function signatures and locals may reference
+        // them. The single-pass parser only allows a struct to reference
+        // itself via pointer or an *earlier* struct by value, so processing
+        // program.structs in declaration order is always sufficient (no
+        // separate opaque-then-setBody phase is needed: LLVM pointers are
+        // opaque, so pointer fields never need the pointee's type up front).
+        program_ = &program;
+        for (const StructDef& def : program.structs) {
+            declare_struct(def);
+        }
         for (const Function& fn : program.functions) {
             declare_function(fn);
         }
@@ -66,22 +77,125 @@ public:
     std::unique_ptr<llvm::Module> take_module() { return std::move(module_); }
 
 private:
+    struct StructInfo {
+        llvm::StructType* llvm_type = nullptr;
+        std::vector<std::string> field_names;
+        std::vector<Type> field_types;
+    };
+
+    // A storage location: an LLVM pointer plus the scpp-level Type stored
+    // there. Needed (rather than just an llvm::Value*) so Member/Subscript
+    // chains can resolve field indices and element types as they walk down
+    // (e.g. `p.inner.x` needs to know `p.inner`'s struct type to find `x`).
+    struct LValue {
+        llvm::Value* ptr;
+        Type type;
+    };
+
+    struct LocalSlot {
+        llvm::AllocaInst* alloca;
+        Type type;
+    };
+
+    const Program* program_ = nullptr;
     std::unique_ptr<llvm::LLVMContext> context_;
     std::unique_ptr<llvm::Module> module_;
     std::unique_ptr<llvm::IRBuilder<>> builder_;
-    std::map<std::string, llvm::AllocaInst*> locals_;
+    std::map<std::string, LocalSlot> locals_;
+    std::unordered_map<std::string, StructInfo> structs_;
 
-    llvm::Type* to_llvm_type(const std::string& type_name) {
-        if (type_name == "int") return llvm::Type::getInt32Ty(*context_);
-        if (type_name == "bool") return llvm::Type::getInt1Ty(*context_);
-        throw CodegenError("unsupported type '" + type_name + "'");
+    [[nodiscard]] bool is_struct_type(const Type& type) const {
+        return type.kind == TypeKind::Named && structs_.contains(type.name);
+    }
+
+    const StructDef* find_struct_def(const std::string& name) const {
+        for (const StructDef& def : program_->structs) {
+            if (def.name == name) return &def;
+        }
+        return nullptr;
+    }
+
+    // Recursively verifies a type is trivial per the language spec (ch04):
+    // scalars, raw pointers (any pointee), fixed-size arrays of trivial
+    // types, and structs whose fields are themselves all trivial.
+    // `in_progress` detects a struct containing itself *by value*, which
+    // must be rejected (as in C, this would be an infinitely-sized type);
+    // self-reference via pointer is fine since pointers don't recurse here.
+    void validate_trivial(const Type& type, std::vector<std::string>& in_progress) {
+        switch (type.kind) {
+            case TypeKind::Pointer:
+                return;
+            case TypeKind::Array:
+                validate_trivial(*type.element, in_progress);
+                return;
+            case TypeKind::Named: {
+                if (type.name == "int" || type.name == "bool") return;
+                const StructDef* def = find_struct_def(type.name);
+                if (def == nullptr) {
+                    throw CodegenError("unknown type '" + type.name + "'");
+                }
+                if (std::find(in_progress.begin(), in_progress.end(), type.name) != in_progress.end()) {
+                    throw CodegenError("struct '" + type.name + "' cannot contain itself by value "
+                                                                 "(did you mean a pointer '" +
+                                        type.name + "*'?)");
+                }
+                in_progress.push_back(type.name);
+                for (const StructField& field : def->fields) {
+                    validate_trivial(field.type, in_progress);
+                }
+                in_progress.pop_back();
+                return;
+            }
+        }
+    }
+
+    void declare_struct(const StructDef& def) {
+        std::vector<std::string> in_progress;
+        for (const StructField& field : def.fields) {
+            try {
+                validate_trivial(field.type, in_progress);
+            } catch (const CodegenError& e) {
+                throw CodegenError("struct '" + def.name + "' field '" + field.name + "': " + e.what() +
+                                    " (only scalars, pointers, trivial structs, and fixed-size arrays "
+                                    "of trivial types are allowed in a struct; see spec ch04)");
+            }
+        }
+
+        StructInfo info;
+        std::vector<llvm::Type*> llvm_field_types;
+        llvm_field_types.reserve(def.fields.size());
+        for (const StructField& field : def.fields) {
+            info.field_names.push_back(field.name);
+            info.field_types.push_back(field.type);
+            llvm_field_types.push_back(to_llvm_type(field.type));
+        }
+        info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "struct." + def.name);
+        structs_[def.name] = std::move(info);
+    }
+
+    llvm::Type* to_llvm_type(const Type& type) {
+        switch (type.kind) {
+            case TypeKind::Pointer:
+                return llvm::PointerType::getUnqual(*context_);
+            case TypeKind::Array:
+                return llvm::ArrayType::get(to_llvm_type(*type.element), type.array_size);
+            case TypeKind::Named:
+                if (type.name == "int") return llvm::Type::getInt32Ty(*context_);
+                if (type.name == "bool") return llvm::Type::getInt1Ty(*context_);
+                {
+                    auto it = structs_.find(type.name);
+                    if (it != structs_.end()) return it->second.llvm_type;
+                }
+                throw CodegenError("unsupported type '" + type.name + "'");
+        }
+        throw CodegenError("unhandled type kind");
     }
 
     void declare_function(const Function& fn) {
         std::vector<llvm::Type*> param_types;
         param_types.reserve(fn.params.size());
         for (const Param& param : fn.params) {
-            param_types.push_back(to_llvm_type(param.type_name));
+            param_types.push_back(to_llvm_type(param.type));
         }
         llvm::FunctionType* fn_type =
             llvm::FunctionType::get(to_llvm_type(fn.return_type), param_types, /*isVarArg=*/false);
@@ -104,7 +218,7 @@ private:
             arg.setName(param.name);
             llvm::AllocaInst* slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
             builder_->CreateStore(&arg, slot);
-            locals_[param.name] = slot;
+            locals_[param.name] = LocalSlot{slot, param.type};
         }
 
         codegen_stmt(*fn.body, llvm_fn);
@@ -129,12 +243,17 @@ private:
                 return;
 
             case StmtKind::VarDecl: {
-                llvm::Type* type = to_llvm_type(stmt.type_name);
-                llvm::AllocaInst* slot = builder_->CreateAlloca(type, nullptr, stmt.var_name);
+                llvm::Type* llvm_type = to_llvm_type(stmt.type);
+                llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
                 if (stmt.init) {
                     builder_->CreateStore(codegen_expr(*stmt.init), slot);
+                } else if (is_struct_type(stmt.type)) {
+                    // struct locals are always zero-initialized when no
+                    // initializer is given (spec ch04.1); scalars are left
+                    // uninitialized, matching ordinary C++ semantics.
+                    builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
                 }
-                locals_[stmt.var_name] = slot;
+                locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                 return;
             }
 
@@ -217,9 +336,11 @@ private:
             case ExprKind::BoolLiteral:
                 return llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context_), expr.bool_value ? 1 : 0);
 
-            case ExprKind::Identifier: {
-                llvm::AllocaInst* slot = lookup(expr.name);
-                return builder_->CreateLoad(slot->getAllocatedType(), slot, expr.name);
+            case ExprKind::Identifier:
+            case ExprKind::Member:
+            case ExprKind::Subscript: {
+                LValue lv = codegen_lvalue(expr);
+                return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
             }
 
             case ExprKind::Unary: {
@@ -248,6 +369,56 @@ private:
             }
         }
         throw CodegenError("unhandled expression kind");
+    }
+
+    // Computes the storage location (pointer + scpp Type) of an lvalue
+    // expression, i.e. anything that can appear on the left of `=` or be
+    // read via a plain load: a variable, or a chain of `.field`/`[index]`
+    // off of one. Member-of-call-result (e.g. `f().x` where f returns a
+    // struct by value) is intentionally not supported yet since it has no
+    // backing storage to take a pointer to; that is deferred to whenever
+    // by-value struct temporaries need addressable storage.
+    LValue codegen_lvalue(const Expr& expr) {
+        switch (expr.kind) {
+            case ExprKind::Identifier: {
+                auto it = locals_.find(expr.name);
+                if (it == locals_.end()) {
+                    throw CodegenError("use of undeclared variable '" + expr.name + "'");
+                }
+                return LValue{it->second.alloca, it->second.type};
+            }
+
+            case ExprKind::Member: {
+                LValue base = codegen_lvalue(*expr.lhs);
+                if (base.type.kind != TypeKind::Named || !structs_.contains(base.type.name)) {
+                    throw CodegenError("member access '." + expr.name + "' on a non-struct type");
+                }
+                const StructInfo& info = structs_.at(base.type.name);
+                auto field_it = std::find(info.field_names.begin(), info.field_names.end(), expr.name);
+                if (field_it == info.field_names.end()) {
+                    throw CodegenError("struct '" + base.type.name + "' has no field '" + expr.name + "'");
+                }
+                size_t field_index = static_cast<size_t>(field_it - info.field_names.begin());
+                llvm::Value* field_ptr =
+                    builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
+                return LValue{field_ptr, info.field_types[field_index]};
+            }
+
+            case ExprKind::Subscript: {
+                LValue base = codegen_lvalue(*expr.lhs);
+                if (base.type.kind != TypeKind::Array) {
+                    throw CodegenError("subscript on a non-array type");
+                }
+                llvm::Value* index = codegen_expr(*expr.rhs);
+                llvm::Value* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0);
+                llvm::Value* elem_ptr =
+                    builder_->CreateGEP(to_llvm_type(base.type), base.ptr, {zero, index}, "elemtmp");
+                return LValue{elem_ptr, *base.type.element};
+            }
+
+            default:
+                throw CodegenError("expression is not assignable");
+        }
     }
 
     // `print_int`/`print_bool` are temporary builtins that shell out to
@@ -287,12 +458,9 @@ private:
 
     llvm::Value* codegen_binary(const Expr& expr) {
         if (expr.binary_op == BinaryOp::Assign) {
-            if (expr.lhs->kind != ExprKind::Identifier) {
-                throw CodegenError("left-hand side of assignment must be a variable");
-            }
+            LValue lv = codegen_lvalue(*expr.lhs);
             llvm::Value* value = codegen_expr(*expr.rhs);
-            llvm::AllocaInst* slot = lookup(expr.lhs->name);
-            builder_->CreateStore(value, slot);
+            builder_->CreateStore(value, lv.ptr);
             return value;
         }
 
@@ -347,14 +515,6 @@ private:
         phi->addIncoming(lhs, lhs_block);
         phi->addIncoming(rhs, rhs_end_block);
         return phi;
-    }
-
-    llvm::AllocaInst* lookup(const std::string& name) {
-        auto it = locals_.find(name);
-        if (it == locals_.end()) {
-            throw CodegenError("use of undeclared variable '" + name + "'");
-        }
-        return it->second;
     }
 };
 
