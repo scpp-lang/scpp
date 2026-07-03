@@ -27,6 +27,7 @@ enum class TokenKind {
     KwTrue,
     KwFalse,
     KwStruct,
+    KwConst,
 
     // punctuation
     LParen,
@@ -53,6 +54,7 @@ enum class TokenKind {
     LessEqual,
     GreaterEqual,
     AmpAmp,
+    Amp,
     PipePipe,
     Bang,
 
@@ -143,6 +145,7 @@ private:
         if (text == "true") return TokenKind::KwTrue;
         if (text == "false") return TokenKind::KwFalse;
         if (text == "struct") return TokenKind::KwStruct;
+        if (text == "const") return TokenKind::KwConst;
         return TokenKind::Identifier;
     }
 
@@ -201,7 +204,7 @@ private:
                 return make_token(TokenKind::Greater, start, start_line, start_col);
             case '&':
                 if (peek() == '&') { advance(); return make_token(TokenKind::AmpAmp, start, start_line, start_col); }
-                return make_token(TokenKind::Unknown, start, start_line, start_col);
+                return make_token(TokenKind::Amp, start, start_line, start_col);
             case '|':
                 if (peek() == '|') { advance(); return make_token(TokenKind::PipePipe, start, start_line, start_col); }
                 return make_token(TokenKind::Unknown, start, start_line, start_col);

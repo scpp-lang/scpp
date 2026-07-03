@@ -86,6 +86,17 @@ Early design stage.
   `struct`s with a fixed, Clang-ABI-compatible memory layout; `std::move` as
   a compiler-recognized move hint; move-out checking so a moved-from
   `std::unique_ptr` can't be read again): done.
+- **M3 — MIR + initialization checking + drop insertion** (a CFG-based MIR;
+  a 2-phase worklist dataflow analysis for move/initialization checking,
+  lexically scope-aware on both the codegen side — real per-scope
+  `std::unique_ptr` drop insertion — and the move-checker side): done.
+- **M4 — borrow & alias-XOR-mutability checking** (intraprocedural, first
+  slice): `T&` (mutable/exclusive borrow) and `const T&` (shared borrow) for
+  local reference variables and function reference parameters, with
+  alias-XOR-mutability enforced via a per-place borrow lattice; borrow
+  duration is lexically scoped (not yet NLL-style liveness — that's M5).
+  References to `std::unique_ptr`, returning a reference, and reference
+  struct fields are deferred to a later version.
 
 See the milestones chapter of [the book](docs/book/en/README.md) for the
 full roadmap.

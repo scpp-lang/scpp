@@ -1,0 +1,6 @@
+int f() {
+    int a = 1;
+    const int& r = a;
+    int& m = a;
+    return 0;
+}

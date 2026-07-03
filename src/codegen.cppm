@@ -134,6 +134,13 @@ private:
         return nullptr;
     }
 
+    const Function* find_function_def(const std::string& name) const {
+        for (const Function& fn : program_->functions) {
+            if (fn.name == name) return &fn;
+        }
+        return nullptr;
+    }
+
     // Recursively verifies a type is trivial per the language spec (ch04):
     // scalars, raw pointers (any pointee), fixed-size arrays of trivial
     // types, and structs whose fields are themselves all trivial.
@@ -147,6 +154,8 @@ private:
             case TypeKind::UniquePtr:
                 throw CodegenError("std::unique_ptr carries ownership and cannot be a struct field; "
                                     "use class instead");
+            case TypeKind::Reference:
+                throw CodegenError("a reference cannot be a struct field in this version");
             case TypeKind::Array:
                 validate_trivial(*type.element, in_progress);
                 return;
@@ -199,11 +208,17 @@ private:
         switch (type.kind) {
             case TypeKind::Pointer:
             case TypeKind::UniquePtr:
+            case TypeKind::Reference:
                 // A unique_ptr is just a possibly-null owning pointer at the
                 // ABI/codegen level in v0.1: no destructor/drop codegen
                 // exists yet (that's M3's "drop insertion"), so it lowers
                 // identically to a raw pointer. The move checker is what
                 // enforces the ownership discipline on top of this.
+                // A reference is likewise ABI-identical to a pointer (same
+                // as Clang lowers C++ references): the frontend is what
+                // makes it auto-dereference on every use (see
+                // codegen_lvalue's Identifier case) and enforces borrow
+                // discipline (scpp.movecheck), not the IR shape itself.
                 return llvm::PointerType::getUnqual(*context_);
             case TypeKind::Array:
                 return llvm::ArrayType::get(to_llvm_type(*type.element), type.array_size);
@@ -219,10 +234,41 @@ private:
         throw CodegenError("unhandled type kind");
     }
 
+    // A reference's referent may not itself be a std::unique_ptr in this
+    // version: that would require the borrow checker to also reason about
+    // moving/dropping the owner out from under a live borrow, which is
+    // deferred (see spec ch05.2/M4 scope notes near BorrowState below).
+    // Nor may it be another reference: reference-to-reference aliasing
+    // analysis is likewise out of scope for v0.1's intraprocedural,
+    // first-order borrow checking.
+    void validate_reference_pointee(const Type& pointee) {
+        if (pointee.kind == TypeKind::UniquePtr) {
+            throw CodegenError("a reference to std::unique_ptr is not yet supported in this version");
+        }
+        if (pointee.kind == TypeKind::Reference) {
+            throw CodegenError("a reference to a reference is not supported");
+        }
+    }
+
     void declare_function(const Function& fn) {
+        if (fn.return_type.kind == TypeKind::Reference) {
+            // Returning a reference requires tracking whether it dangles
+            // once the callee returns -- real lifetime/dangling analysis,
+            // which spec ch05.3 explicitly defers to M5 (NLL-style
+            // lifetime inference + elision rules). Rejecting it here
+            // keeps v0.1's borrow checking honest: every reference this
+            // version can create is provably scoped to the current
+            // function, since it can never escape through a return.
+            throw CodegenError("function '" + fn.name +
+                                "' returns a reference, which is not yet supported (requires lifetime "
+                                "inference; deferred to a later version, see spec ch05.3)");
+        }
         std::vector<llvm::Type*> param_types;
         param_types.reserve(fn.params.size());
         for (const Param& param : fn.params) {
+            if (param.type.kind == TypeKind::Reference) {
+                validate_reference_pointee(*param.type.pointee);
+            }
             param_types.push_back(to_llvm_type(param.type));
         }
         llvm::FunctionType* fn_type =
@@ -274,6 +320,32 @@ private:
                 return;
 
             case StmtKind::VarDecl: {
+                if (stmt.type.kind == TypeKind::Reference) {
+                    // Real C++ references must be bound at declaration
+                    // (there's no such thing as a later-bound or
+                    // "null" reference) -- unlike every other type, which
+                    // zero-initializes when no initializer is given.
+                    if (!stmt.init) {
+                        throw CodegenError("reference '" + stmt.var_name +
+                                            "' must be initialized (bound to a variable) at declaration");
+                    }
+                    validate_reference_pointee(*stmt.type.pointee);
+                    // Store the *address* of the referent (not its value)
+                    // -- codegen_lvalue on the initializer gives exactly
+                    // that, and also enforces it resolves to a real,
+                    // addressable place (a plain variable, or a further
+                    // member/subscript chain off one).
+                    llvm::Value* referent_addr = codegen_lvalue(*stmt.init).ptr;
+                    llvm::AllocaInst* slot =
+                        builder_->CreateAlloca(llvm::PointerType::getUnqual(*context_), nullptr, stmt.var_name);
+                    builder_->CreateStore(referent_addr, slot);
+                    locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    if (!scope_stack_.empty()) {
+                        scope_stack_.back().push_back(stmt.var_name);
+                    }
+                    return;
+                }
+
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
                 if (stmt.init) {
@@ -420,10 +492,20 @@ private:
                 if (callee == nullptr) {
                     throw CodegenError("call to unknown function '" + expr.name + "'");
                 }
+                const Function* callee_def = find_function_def(expr.name);
                 std::vector<llvm::Value*> args;
                 args.reserve(expr.args.size());
-                for (const auto& arg : expr.args) {
-                    args.push_back(codegen_expr(*arg));
+                for (size_t i = 0; i < expr.args.size(); i++) {
+                    bool param_is_reference = callee_def != nullptr && i < callee_def->params.size() &&
+                                               callee_def->params[i].type.kind == TypeKind::Reference;
+                    if (param_is_reference) {
+                        // Bind the reference parameter to the argument's
+                        // address rather than passing its value, exactly
+                        // like a local reference's own VarDecl.
+                        args.push_back(codegen_lvalue(*expr.args[i]).ptr);
+                    } else {
+                        args.push_back(codegen_expr(*expr.args[i]));
+                    }
                 }
                 return builder_->CreateCall(callee, args);
             }
@@ -564,6 +646,18 @@ private:
                 auto it = locals_.find(expr.name);
                 if (it == locals_.end()) {
                     throw CodegenError("use of undeclared variable '" + expr.name + "'");
+                }
+                if (it->second.type.kind == TypeKind::Reference) {
+                    // A reference-typed local's own alloca just holds the
+                    // address it's bound to (see the VarDecl case below,
+                    // and how a Reference parameter arrives already as
+                    // that address): auto-dereference once so every
+                    // caller (reads, writes-through, and Member/Subscript
+                    // base resolution) transparently operates on the
+                    // referent, exactly like a real C++ reference.
+                    llvm::Value* referent_ptr = builder_->CreateLoad(
+                        llvm::PointerType::getUnqual(*context_), it->second.alloca, "deref");
+                    return LValue{referent_ptr, *it->second.type.pointee};
                 }
                 return LValue{it->second.alloca, it->second.type};
             }

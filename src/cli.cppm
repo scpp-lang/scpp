@@ -33,6 +33,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwTrue: return "KwTrue";
         case scpp::TokenKind::KwFalse: return "KwFalse";
         case scpp::TokenKind::KwStruct: return "KwStruct";
+        case scpp::TokenKind::KwConst: return "KwConst";
         case scpp::TokenKind::LParen: return "LParen";
         case scpp::TokenKind::RParen: return "RParen";
         case scpp::TokenKind::LBrace: return "LBrace";
@@ -55,6 +56,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::LessEqual: return "LessEqual";
         case scpp::TokenKind::GreaterEqual: return "GreaterEqual";
         case scpp::TokenKind::AmpAmp: return "AmpAmp";
+        case scpp::TokenKind::Amp: return "Amp";
         case scpp::TokenKind::PipePipe: return "PipePipe";
         case scpp::TokenKind::Bang: return "Bang";
         case scpp::TokenKind::EndOfFile: return "EndOfFile";
@@ -73,6 +75,9 @@ std::string type_to_string(const scpp::Type& type) {
             return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
         case scpp::TypeKind::UniquePtr:
             return "std::unique_ptr<" + type_to_string(*type.pointee) + ">";
+        case scpp::TypeKind::Reference:
+            return (type.is_mutable_ref ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
+                   "&";
     }
     return "?";
 }

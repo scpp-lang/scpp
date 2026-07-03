@@ -18,6 +18,7 @@ enum class TypeKind {
     Pointer,   // T*
     Array,     // T[N]
     UniquePtr, // std::unique_ptr<T> -- unique ownership, move-only (see ch05)
+    Reference, // T& (mutable borrow) / const T& (shared borrow) -- see ch05.2
 };
 
 // A type reference. `pointee`/`element` use shared_ptr (not unique_ptr) so
@@ -30,12 +31,16 @@ struct Type {
     // Named
     std::string name;
 
-    // Pointer / UniquePtr (element type)
+    // Pointer / UniquePtr / Reference (element/referent type)
     std::shared_ptr<Type> pointee;
 
     // Array
     std::shared_ptr<Type> element;
     long long array_size = 0;
+
+    // Reference: true for `T&` (mutable/exclusive borrow), false for
+    // `const T&` (shared borrow). Meaningless for every other kind.
+    bool is_mutable_ref = true;
 };
 
 enum class ExprKind {

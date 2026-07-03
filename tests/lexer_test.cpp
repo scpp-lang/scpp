@@ -51,7 +51,7 @@ void test_int_main_return() {
 
 void test_keywords() {
     expect_kinds(
-        "safe unsafe bool if else while for true false struct",
+        "safe unsafe bool if else while for true false struct const",
         {
             scpp::TokenKind::KwSafe,
             scpp::TokenKind::KwUnsafe,
@@ -63,6 +63,7 @@ void test_keywords() {
             scpp::TokenKind::KwTrue,
             scpp::TokenKind::KwFalse,
             scpp::TokenKind::KwStruct,
+            scpp::TokenKind::KwConst,
             scpp::TokenKind::EndOfFile,
         },
         "keywords");
@@ -84,7 +85,7 @@ void test_integer_literal_text() {
 
 void test_operators() {
     expect_kinds(
-        "+ - * / = == != < > <= >= && || !",
+        "+ - * / = == != < > <= >= && || ! &",
         {
             scpp::TokenKind::Plus,
             scpp::TokenKind::Minus,
@@ -100,6 +101,7 @@ void test_operators() {
             scpp::TokenKind::AmpAmp,
             scpp::TokenKind::PipePipe,
             scpp::TokenKind::Bang,
+            scpp::TokenKind::Amp,
             scpp::TokenKind::EndOfFile,
         },
         "operators");

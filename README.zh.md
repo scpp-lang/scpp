@@ -73,6 +73,16 @@ scpp build <file> [-o <out>] # 通过 LLVM 编译为本地可执行文件
   遵循 Clang ABI 的纯平凡 `struct`；`std::move` 作为编译器识别的 move
   hint；move-out 检查，move 出去的 `std::unique_ptr` 不能再被读取）：
   已完成。
+- **M3 — MIR + 初始化检查 + drop 插入**（基于 CFG 的 MIR；两阶段 worklist
+  数据流分析做 move/初始化检查，在 codegen（真正的按作用域插入
+  `std::unique_ptr` drop）和 move-checker 两侧都具备词法作用域感知）：
+  已完成。
+- **M4 — borrow 与 alias-XOR-mutability 检查**（仅函数内，第一阶段）：
+  局部引用变量和函数引用参数支持 `T&`（可变/独占借用）和 `const T&`
+  （共享借用），通过按变量记录的借用格来强制 alias-XOR-mutability；借用
+  期长遵循词法作用域（尚非 NLL 风格的生命周期分析，那是 M5 的工作）。
+  引用指向 `std::unique_ptr`、函数返回引用、以及引用类型的 struct 字段
+  暂不支持，留待后续版本。
 
 完整路线图见[本书](docs/book/zh/README.md)的里程碑章节。
 

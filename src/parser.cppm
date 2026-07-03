@@ -75,7 +75,9 @@ private:
 
     [[nodiscard]] bool looks_like_type_start() const {
         const Token& tok = peek();
-        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool) return true;
+        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst) {
+            return true;
+        }
         if (check_std_qualified("unique_ptr")) return true;
         return tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text));
     }
@@ -109,7 +111,7 @@ private:
     // Array suffixes (`[N]`) are handled separately by parse_array_suffix,
     // since in C-style declarators the array size follows the *declared
     // name*, not the type.
-    Type parse_type() {
+    Type parse_unqualified_type() {
         if (check_std_qualified("unique_ptr")) {
             consume_std_qualified();
             expect(TokenKind::Less, "'<'");
@@ -146,10 +148,46 @@ private:
         return type;
     }
 
+    // Parses a full type, including the borrow-checking sugar from ch03:
+    // an optional leading `const` plus a trailing `&` turns the
+    // unqualified type into a Reference -- `T&` is a mutable/exclusive
+    // borrow, `const T&` a shared borrow (ch05.2). `const` is only
+    // meaningful directly before a reference in this version; scpp has no
+    // general const-qualification yet, so a bare `const T` (no `&`) is
+    // rejected rather than silently ignored.
+    Type parse_type() {
+        bool has_const_prefix = match(TokenKind::KwConst);
+        Type type = parse_unqualified_type();
+
+        if (match(TokenKind::Amp)) {
+            auto pointee = std::make_shared<Type>(std::move(type));
+            type = Type{};
+            type.kind = TypeKind::Reference;
+            type.pointee = std::move(pointee);
+            type.is_mutable_ref = !has_const_prefix;
+            return type;
+        }
+
+        if (has_const_prefix) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "'const' is only supported directly before a reference type ('const T&') in "
+                              "this version");
+        }
+        return type;
+    }
+
     // Wraps `base` in Array types for each trailing `[N]` found after a
-    // declared name (e.g. the `[8]` in `int values[8];`).
+    // declared name (e.g. the `[8]` in `int values[8];`). Arrays of
+    // references aren't valid C++ (there's no storage layout for a raw
+    // reference), so reject up front rather than let it silently codegen
+    // as an array of addresses.
     Type parse_array_suffix(Type base) {
         while (check(TokenKind::LBracket)) {
+            const Token& bracket_tok = peek();
+            if (base.kind == TypeKind::Reference) {
+                throw ParseError(bracket_tok.line, bracket_tok.column, "arrays of references are not supported");
+            }
             advance();
             const Token& size_tok = expect(TokenKind::IntegerLiteral, "array size");
             expect(TokenKind::RBracket, "']'");

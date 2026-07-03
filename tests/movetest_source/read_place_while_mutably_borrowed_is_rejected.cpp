@@ -1,0 +1,6 @@
+int f() {
+    int a = 1;
+    int& r = a;
+    int x = a;
+    return x;
+}
