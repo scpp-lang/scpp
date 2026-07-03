@@ -167,6 +167,10 @@ void print_expr(const scpp::Expr& expr, int depth) {
             std::cout << "Move\n";
             print_expr(*expr.lhs, depth + 1);
             break;
+        case scpp::ExprKind::MakeUnique:
+            std::cout << "MakeUnique " << type_to_string(expr.type) << "\n";
+            for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
+            break;
     }
 }
 

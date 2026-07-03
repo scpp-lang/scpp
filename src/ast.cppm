@@ -47,7 +47,8 @@ enum class ExprKind {
     Call,
     Member,
     Subscript,
-    Move, // std::move(x) -- compiler builtin move hint, not an ordinary call
+    Move,       // std::move(x) -- compiler builtin move hint, not an ordinary call
+    MakeUnique, // std::make_unique<T>(args...) -- compiler builtin heap allocation
 };
 
 enum class BinaryOp {
@@ -94,8 +95,11 @@ struct Expr {
     // Unary (operand stored in `lhs`)
     UnaryOp unary_op{};
 
-    // Call arguments
+    // Call arguments / MakeUnique constructor arguments
     std::vector<ExprPtr> args;
+
+    // MakeUnique: the allocated element type `T` in `make_unique<T>(...)`.
+    Type type;
 
     // Member: object stored in `lhs`, field name in `name`.
     // Subscript: array/collection stored in `lhs`, index expr in `rhs`.

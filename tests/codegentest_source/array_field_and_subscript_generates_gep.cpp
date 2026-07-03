@@ -1,0 +1,2 @@
+struct Buffer { int values[4]; };
+int main() { Buffer b; b.values[0] = 7; return b.values[0]; }

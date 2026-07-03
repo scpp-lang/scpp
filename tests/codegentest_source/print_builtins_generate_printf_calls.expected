@@ -1,0 +1,2 @@
+contains: declare i32 @printf(
+contains: call i32 (ptr, ...) @printf(

@@ -10,6 +10,7 @@ module;
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
@@ -37,6 +38,18 @@ public:
         : context_(std::make_unique<llvm::LLVMContext>()),
           module_(std::make_unique<llvm::Module>(module_name, *context_)),
           builder_(std::make_unique<llvm::IRBuilder<>>(*context_)) {}
+
+    // Sets the target triple and data layout on the module. Must be called
+    // (if at all) before generate(), since generate() may need
+    // target-accurate type sizes (e.g. for std::make_unique's malloc
+    // call). Optional: without it, the module keeps LLVM's default,
+    // non-target-specific data layout, which is fine for callers (like
+    // codegen_test) that only inspect the generated IR text and don't need
+    // bit-perfect target sizing.
+    void set_target(const llvm::Triple& triple, const llvm::DataLayout& data_layout) {
+        module_->setTargetTriple(triple);
+        module_->setDataLayout(data_layout);
+    }
 
     llvm::Module& generate(const Program& program) {
         // Structs are declared first (validated + turned into named LLVM
@@ -103,6 +116,16 @@ private:
     std::unique_ptr<llvm::IRBuilder<>> builder_;
     std::map<std::string, LocalSlot> locals_;
     std::unordered_map<std::string, StructInfo> structs_;
+    // A stack of block scopes, each holding the names declared directly in
+    // that block (in declaration order). Pushed/popped around every Block,
+    // and around the (possibly brace-less) branches of if/while, so a
+    // unique_ptr local is dropped at the end of *its own* scope rather
+    // than only at function return -- this is what makes e.g. a
+    // unique_ptr re-declared on every loop iteration not leak the
+    // previous iteration's allocation. Function parameters are not part
+    // of any pushed scope; they live for the whole function and are only
+    // freed at Return, same as before.
+    std::vector<std::vector<std::string>> scope_stack_;
 
     const StructDef* find_struct_def(const std::string& name) const {
         for (const StructDef& def : program_->structs) {
@@ -217,6 +240,7 @@ private:
         builder_->SetInsertPoint(entry);
 
         locals_.clear();
+        scope_stack_.clear();
         size_t index = 0;
         for (auto& arg : llvm_fn->args()) {
             const Param& param = fn.params[index++];
@@ -239,12 +263,14 @@ private:
     void codegen_stmt(const Stmt& stmt, llvm::Function* current_function) {
         switch (stmt.kind) {
             case StmtKind::Block:
+                push_scope();
                 for (const auto& s : stmt.statements) {
                     // Once a block has a terminator (return), skip anything
                     // after it: unreachable code shouldn't be lowered.
                     if (builder_->GetInsertBlock()->getTerminator() != nullptr) break;
                     codegen_stmt(*s, current_function);
                 }
+                pop_scope();
                 return;
 
             case StmtKind::VarDecl: {
@@ -261,12 +287,23 @@ private:
                     builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
                 }
                 locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                if (!scope_stack_.empty()) {
+                    scope_stack_.back().push_back(stmt.var_name);
+                }
                 return;
             }
 
             case StmtKind::Return: {
-                if (stmt.expr) {
-                    builder_->CreateRet(codegen_expr(*stmt.expr));
+                // Evaluate the return value *before* freeing owned locals:
+                // `return std::move(a);` nulls out `a`'s slot as a side
+                // effect of the move, so by the time we free every
+                // unique_ptr local below, an already-moved-from one is
+                // safely a no-op (free(NULL) is well-defined) while a
+                // still-owning one is correctly released.
+                llvm::Value* value = stmt.expr ? codegen_expr(*stmt.expr) : nullptr;
+                free_unique_ptr_locals();
+                if (value != nullptr) {
+                    builder_->CreateRet(value);
                 } else {
                     builder_->CreateRetVoid();
                 }
@@ -285,16 +322,25 @@ private:
 
                 builder_->CreateCondBr(cond, then_block, else_block);
 
+                // then/else each get their own scope so a unique_ptr
+                // declared in one branch (with or without braces -- a
+                // bare `if (c) unique_ptr<T> x = ...;` is valid grammar,
+                // same as real C++) is dropped at the end of *that*
+                // branch, not left dangling in the flat locals_ map.
                 builder_->SetInsertPoint(then_block);
+                push_scope();
                 codegen_stmt(*stmt.then_branch, current_function);
+                pop_scope();
                 if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
                     builder_->CreateBr(merge_block);
                 }
 
                 builder_->SetInsertPoint(else_block);
+                push_scope();
                 if (stmt.else_branch) {
                     codegen_stmt(*stmt.else_branch, current_function);
                 }
+                pop_scope();
                 if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
                     builder_->CreateBr(merge_block);
                 }
@@ -323,8 +369,15 @@ private:
                 llvm::Value* cond = codegen_expr(*stmt.condition);
                 builder_->CreateCondBr(cond, body_block, end_block);
 
+                // The body's scope is popped (and its unique_ptr locals
+                // dropped) at the end of *every* iteration, right before
+                // jumping back to re-check the condition -- so a
+                // unique_ptr re-declared each iteration doesn't leak the
+                // previous iteration's allocation.
                 builder_->SetInsertPoint(body_block);
+                push_scope();
                 codegen_stmt(*stmt.then_branch, current_function);
+                pop_scope();
                 if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
                     builder_->CreateBr(cond_block);
                 }
@@ -388,8 +441,114 @@ private:
                 builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), lv.ptr);
                 return old_value;
             }
+
+            case ExprKind::MakeUnique:
+                return codegen_make_unique(expr);
         }
         throw CodegenError("unhandled expression kind");
+    }
+
+    // `std::make_unique<T>(...)` is a compiler builtin (like std::move),
+    // not a real generic function call -- scpp has no `new` expression at
+    // all; make_unique is the only sanctioned way to heap-allocate. v0.1
+    // supports exactly two forms: zero arguments (zero-initializes T, like
+    // a bare `T x;`) or one argument when T is a scalar (int/bool),
+    // initializing it to that value. Everything else (multiple arguments,
+    // or one argument for a struct/array/pointer T) needs real constructor
+    // support that doesn't exist yet.
+    llvm::Value* codegen_make_unique(const Expr& expr) {
+        llvm::Type* element_type = to_llvm_type(expr.type);
+        bool element_is_scalar =
+            expr.type.kind == TypeKind::Named && (expr.type.name == "int" || expr.type.name == "bool");
+
+        llvm::Value* initial_value;
+        if (expr.args.empty()) {
+            initial_value = llvm::Constant::getNullValue(element_type);
+        } else if (expr.args.size() == 1 && element_is_scalar) {
+            initial_value = codegen_expr(*expr.args[0]);
+        } else {
+            throw CodegenError(
+                "std::make_unique<T>(...) currently only supports zero arguments (zero-initializes "
+                "T) or exactly one argument when T is a scalar (int/bool)");
+        }
+
+        llvm::Function* malloc_fn = get_or_declare_malloc();
+        uint64_t size_in_bytes = module_->getDataLayout().getTypeAllocSize(element_type);
+        llvm::Value* size_arg = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), size_in_bytes);
+        llvm::Value* heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
+        builder_->CreateStore(initial_value, heap_ptr);
+        return heap_ptr;
+    }
+
+    // Releases every *currently in-scope* unique_ptr local's owned
+    // resource. Called right before each `return` (see StmtKind::Return).
+    // `free(NULL)` is a well-defined no-op in C, so unconditionally
+    // freeing whatever value is *currently* in each slot is always
+    // correct, regardless of whether that local still owns a value, was
+    // moved-out (its slot was nulled by Move's codegen), or was never
+    // assigned past its own zero-init. Locals whose block scope already
+    // closed before reaching this return were already dropped by
+    // pop_scope() and removed from `locals_`, so they aren't
+    // double-freed here.
+    void free_unique_ptr_locals() {
+        llvm::Function* free_fn = get_or_declare_free();
+        for (const auto& [name, slot] : locals_) {
+            if (slot.type.kind != TypeKind::UniquePtr) continue;
+            llvm::Value* current = builder_->CreateLoad(to_llvm_type(slot.type), slot.alloca, "droptmp");
+            builder_->CreateCall(free_fn, {current});
+        }
+    }
+
+    void push_scope() { scope_stack_.emplace_back(); }
+
+    // Drops every unique_ptr declared directly in the scope being popped
+    // (in reverse declaration order, matching C++/Rust destruction
+    // order), then removes all of that scope's names from `locals_` so
+    // they're correctly treated as out-of-scope afterward (e.g. a
+    // variable declared only inside an `if` branch can no longer be
+    // referenced once that branch ends). If the current block already
+    // has a terminator (e.g. the scope ended in `return`, which already
+    // freed everything via free_unique_ptr_locals), no drop instructions
+    // are emitted here -- there both to avoid inserting unreachable code
+    // after a terminator and to avoid a double free.
+    void pop_scope() {
+        std::vector<std::string> names = std::move(scope_stack_.back());
+        scope_stack_.pop_back();
+
+        bool already_terminated = builder_->GetInsertBlock()->getTerminator() != nullptr;
+        if (!already_terminated) {
+            llvm::Function* free_fn = get_or_declare_free();
+            for (auto it = names.rbegin(); it != names.rend(); ++it) {
+                auto slot_it = locals_.find(*it);
+                if (slot_it == locals_.end() || slot_it->second.type.kind != TypeKind::UniquePtr) continue;
+                llvm::Value* current =
+                    builder_->CreateLoad(to_llvm_type(slot_it->second.type), slot_it->second.alloca, "scopedroptmp");
+                builder_->CreateCall(free_fn, {current});
+            }
+        }
+        for (const std::string& name : names) {
+            locals_.erase(name);
+        }
+    }
+
+    llvm::Function* get_or_declare_malloc() {
+        if (llvm::Function* existing = module_->getFunction("malloc")) {
+            return existing;
+        }
+        llvm::PointerType* ptr_type = llvm::PointerType::getUnqual(*context_);
+        llvm::FunctionType* malloc_type =
+            llvm::FunctionType::get(ptr_type, {llvm::Type::getInt64Ty(*context_)}, /*isVarArg=*/false);
+        return llvm::Function::Create(malloc_type, llvm::Function::ExternalLinkage, "malloc", *module_);
+    }
+
+    llvm::Function* get_or_declare_free() {
+        if (llvm::Function* existing = module_->getFunction("free")) {
+            return existing;
+        }
+        llvm::PointerType* ptr_type = llvm::PointerType::getUnqual(*context_);
+        llvm::FunctionType* free_type =
+            llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {ptr_type}, /*isVarArg=*/false);
+        return llvm::Function::Create(free_type, llvm::Function::ExternalLinkage, "free", *module_);
     }
 
     // Computes the storage location (pointer + scpp Type) of an lvalue
@@ -481,6 +640,17 @@ private:
         if (expr.binary_op == BinaryOp::Assign) {
             LValue lv = codegen_lvalue(*expr.lhs);
             llvm::Value* value = codegen_expr(*expr.rhs);
+            if (lv.type.kind == TypeKind::UniquePtr) {
+                // Move-assignment semantics: release whatever this
+                // unique_ptr currently owns *before* overwriting it with
+                // the new value, so reassigning one that already owns a
+                // real allocation doesn't leak it. free(NULL) is a safe
+                // no-op, so this is correct whether or not there was a
+                // real prior allocation (freshly declared, already moved
+                // out, etc).
+                llvm::Value* old_value = builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "oldtmp");
+                builder_->CreateCall(get_or_declare_free(), {old_value});
+            }
             builder_->CreateStore(value, lv.ptr);
             return value;
         }

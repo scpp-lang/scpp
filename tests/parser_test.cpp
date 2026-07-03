@@ -326,6 +326,38 @@ void test_move_as_function_argument() {
            "move_as_function_argument: call argument should be a Move expression");
 }
 
+void test_make_unique_zero_args() {
+    scpp::Program program = scpp::parse("int f() { std::unique_ptr<int> a = std::make_unique<int>(); return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::MakeUnique,
+           "make_unique_zero_args: initializer should be a MakeUnique expression");
+    expect(is_named_type(decl.init->type, "int"), "make_unique_zero_args: element type should be 'int'");
+    expect(decl.init->args.empty(), "make_unique_zero_args: expected 0 arguments");
+}
+
+void test_make_unique_with_arg() {
+    scpp::Program program = scpp::parse("int f() { std::unique_ptr<int> a = std::make_unique<int>(42); return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::MakeUnique,
+           "make_unique_with_arg: initializer should be a MakeUnique expression");
+    expect(decl.init->args.size() == 1 && decl.init->args[0]->kind == scpp::ExprKind::IntegerLiteral &&
+               decl.init->args[0]->int_value == 42,
+           "make_unique_with_arg: expected a single IntegerLiteral 42 argument");
+}
+
+void test_make_unique_of_struct_type() {
+    scpp::Program program = scpp::parse(
+        "struct Point { int x; int y; };"
+        "int f() { std::unique_ptr<Point> a = std::make_unique<Point>(); return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::MakeUnique,
+           "make_unique_of_struct_type: initializer should be a MakeUnique expression");
+    expect(is_named_type(decl.init->type, "Point"), "make_unique_of_struct_type: element type should be 'Point'");
+}
+
 } // namespace
 
 int main() {
@@ -348,6 +380,9 @@ int main() {
     test_unique_ptr_of_struct_type();
     test_move_expression();
     test_move_as_function_argument();
+    test_make_unique_zero_args();
+    test_make_unique_with_arg();
+    test_make_unique_of_struct_type();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

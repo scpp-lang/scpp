@@ -1,0 +1,2 @@
+contains: define i32 @main()
+contains: ret i32 42

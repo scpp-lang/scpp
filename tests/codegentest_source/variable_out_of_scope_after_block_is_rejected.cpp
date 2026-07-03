@@ -1,0 +1,1 @@
+int main() { if (true) { int x; x = 1; } return x; }

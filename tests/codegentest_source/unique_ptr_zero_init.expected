@@ -1,0 +1,2 @@
+contains: %a = alloca ptr
+contains: store ptr null, ptr %a

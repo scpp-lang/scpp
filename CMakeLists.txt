@@ -104,6 +104,8 @@ add_test(NAME parser_test COMMAND parser_test)
 add_executable(codegen_test tests/codegen_test.cpp)
 target_link_libraries(codegen_test PRIVATE scpp_codegen scpp_parser scpp_ast scpp_lexer)
 target_compile_features(codegen_test PRIVATE cxx_std_23)
+target_compile_definitions(codegen_test PRIVATE
+    SCPP_CODEGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source")
 
 add_test(NAME codegen_test COMMAND codegen_test)
 

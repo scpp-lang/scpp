@@ -23,12 +23,12 @@ namespace scpp {
 namespace {
 
 // The lattice tracked per local variable:
-//   Bottom      -- not yet declared on this path (shouldn't be readable;
-//                  this can currently only happen because scpp doesn't
-//                  yet enforce lexical scoping -- e.g. a variable declared
-//                  inside one `if` branch and read after it -- since every
-//                  *reachable* VarDecl always produces at least Initialized,
-//                  see below)
+//   Bottom      -- not currently in scope on this path: either not yet
+//                  declared here (e.g. a name declared only in a sibling
+//                  `if` branch), or already gone out of lexical scope (a
+//                  `ScopeExit` MIR statement resets a local back to this
+//                  state at the end of its enclosing block/if-branch/
+//                  while-body, mirroring codegen's own scope_stack_).
 //   Initialized -- holds a valid, readable value. scpp has no concept of an
 //                  "uninitialized" scalar: every local without an explicit
 //                  initializer is zero-initialized (0 / false / null / all-
@@ -72,6 +72,7 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
                    "' whose initialization state is inconsistent across incoming control-flow paths "
                    "(initialized on some, not on others)";
         case LocalState::Bottom:
+            return "use of variable '" + name + "' that is out of scope here";
         case LocalState::Initialized:
         default:
             return "use of possibly-uninitialized variable '" + name + "'";
@@ -79,6 +80,15 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 }
 
 [[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
+
+// The only expressions allowed to produce a std::unique_ptr rvalue:
+// moving an existing one out, or freshly heap-allocating one via
+// std::make_unique (scpp has no `new` expression at all -- make_unique is
+// the sole sanctioned allocation syntax, and is itself a compiler builtin
+// rather than a real generic call, same treatment as std::move).
+[[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr) {
+    return expr.kind == ExprKind::Move || expr.kind == ExprKind::MakeUnique;
+}
 
 [[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
     auto it = state.find(name);
@@ -171,9 +181,9 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, StateMap& s
                     target_is_unique_ptr = it != body.local_types.end() && is_unique_ptr(it->second);
                 }
                 apply_expr(*expr.rhs, target_is_unique_ptr, state, body, report_errors);
-                if (report_errors && target_is_unique_ptr && expr.rhs->kind != ExprKind::Move) {
-                    throw DataflowError("assigning to a std::unique_ptr variable requires std::move "
-                                        "(copying is not allowed)");
+                if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*expr.rhs)) {
+                    throw DataflowError("assigning to a std::unique_ptr variable requires std::move or "
+                                        "std::make_unique (copying is not allowed)");
                 }
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     // The assignment target is never a "read": whatever
@@ -212,6 +222,15 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, StateMap& s
             apply_expr(*expr.lhs, false, state, body, report_errors);
             apply_expr(*expr.rhs, false, state, body, report_errors);
             return;
+
+        case ExprKind::MakeUnique:
+            // std::make_unique<T>(args...) itself never reads a
+            // unique_ptr (it *produces* one); its constructor arguments
+            // are ordinary values, checked as plain reads.
+            for (const auto& arg : expr.args) {
+                apply_expr(*arg, /*is_unique_ptr_rvalue_context=*/false, state, body, report_errors);
+            }
+            return;
     }
 }
 
@@ -228,10 +247,10 @@ void apply_statement(const MirStatement& stmt, StateMap& state, const Body& body
             bool target_is_unique_ptr =
                 body.local_types.contains(stmt.local) && is_unique_ptr(body.local_types.at(stmt.local));
             apply_expr(*stmt.expr, target_is_unique_ptr, state, body, report_errors);
-            if (report_errors && target_is_unique_ptr && stmt.expr->kind != ExprKind::Move) {
+            if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*stmt.expr)) {
                 throw DataflowError("variable '" + stmt.local +
-                                    "' of type std::unique_ptr must be initialized via std::move "
-                                    "(copying a unique_ptr is not allowed)");
+                                    "' of type std::unique_ptr must be initialized via std::move or "
+                                    "std::make_unique (copying a unique_ptr is not allowed)");
             }
             state[stmt.local] = LocalState::Initialized;
             return;
@@ -245,6 +264,15 @@ void apply_statement(const MirStatement& stmt, StateMap& state, const Body& body
             // Purely a codegen-facing marker (no-op until heap-allocated
             // owning types exist); no dataflow state effect here.
             return;
+
+        case MirStatementKind::ScopeExit:
+            // `stmt.local` just went out of lexical scope: forget its
+            // tracked state entirely. Erasing is equivalent to setting it
+            // to Bottom (lookup() treats a missing key as Bottom) and
+            // keeps the map from growing with entries the rest of the
+            // analysis no longer cares about.
+            state.erase(stmt.local);
+            return;
     }
 }
 
@@ -257,8 +285,9 @@ void check_terminator(const Terminator& term, StateMap& state, const Function& f
             if (term.return_value == nullptr) return;
             bool return_is_unique_ptr = is_unique_ptr(fn.return_type);
             apply_expr(*term.return_value, return_is_unique_ptr, state, body, /*report_errors=*/true);
-            if (return_is_unique_ptr && term.return_value->kind != ExprKind::Move) {
-                throw DataflowError("returning a std::unique_ptr requires std::move (copying is not allowed)");
+            if (return_is_unique_ptr && !produces_unique_ptr_rvalue(*term.return_value)) {
+                throw DataflowError(
+                    "returning a std::unique_ptr requires std::move or std::make_unique (copying is not allowed)");
             }
             return;
         }

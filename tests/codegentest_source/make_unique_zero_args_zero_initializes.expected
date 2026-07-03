@@ -1,0 +1,1 @@
+contains: store i32 0, ptr %newptr

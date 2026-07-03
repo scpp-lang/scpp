@@ -1,0 +1,1 @@
+contains: call ptr @malloc(i64 8)

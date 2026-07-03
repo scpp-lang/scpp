@@ -1,0 +1,2 @@
+contains: declare void @free(ptr)
+count_at_least: 2 | call void @free(

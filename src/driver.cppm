@@ -31,21 +31,17 @@ struct DriverError : std::runtime_error {
 };
 
 // Compiles scpp source text down to a native object file at `object_path`.
-// This is the M1/M2 backend: AST -> [move check] -> LLVM IR -> native
+// This is the M1/M2/M3 backend: AST -> [move check] -> LLVM IR -> native
 // object code. Borrow/lifetime checks (M4/M5) aren't implemented yet.
 void emit_object_file(std::string_view source, const std::string& object_path) {
     Program program = parse(source);
     check_moves(program);
-
-    Codegen codegen("scpp_module");
-    llvm::Module& module = codegen.generate(program);
 
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
     std::string triple = llvm::sys::getDefaultTargetTriple();
     llvm::Triple target_triple(triple);
-    module.setTargetTriple(target_triple);
 
     std::string lookup_error;
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(target_triple, lookup_error);
@@ -60,7 +56,12 @@ void emit_object_file(std::string_view source, const std::string& object_path) {
         throw DriverError("failed to create target machine for '" + triple + "'");
     }
 
-    module.setDataLayout(target_machine->createDataLayout());
+    // The data layout must be set *before* codegen runs: std::make_unique
+    // needs a target-accurate sizeof(T) to call malloc with, which comes
+    // from the module's DataLayout.
+    Codegen codegen("scpp_module");
+    codegen.set_target(target_triple, target_machine->createDataLayout());
+    llvm::Module& module = codegen.generate(program);
 
     std::error_code error_code;
     llvm::raw_fd_ostream dest(object_path, error_code, llvm::sys::fs::OF_None);

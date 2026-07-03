@@ -1,0 +1,2 @@
+contains: %oldtmp = load ptr, ptr %a
+sequence: %oldtmp = load ptr, ptr %a | call void @free(ptr %oldtmp)

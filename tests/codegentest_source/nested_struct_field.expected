@@ -1,0 +1,2 @@
+contains: %struct.Inner = type { i32 }
+contains: %struct.Outer = type { %struct.Inner }

@@ -2,18 +2,40 @@ import scpp.codegen;
 import scpp.parser;
 import scpp.ast;
 
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <string_view>
+#include <vector>
+
+// SCPP_CODEGEN_TEST_SOURCE_DIR is injected by CMake (see the codegen_test
+// target in the top-level CMakeLists.txt) and points at
+// tests/codegentest_source, so this binary finds its fixtures regardless of
+// the working directory it's run from.
+#ifndef SCPP_CODEGEN_TEST_SOURCE_DIR
+#error "SCPP_CODEGEN_TEST_SOURCE_DIR must be defined by the build"
+#endif
 
 namespace {
 
 int failures = 0;
+int cases_run = 0;
 
-void expect(bool condition, std::string_view message) {
+void expect(bool condition, const std::string& message) {
     if (!condition) {
         std::cerr << "FAILED: " << message << "\n";
         failures++;
     }
+}
+
+std::string read_file(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
 }
 
 std::string generate_ir(std::string_view source) {
@@ -23,197 +45,183 @@ std::string generate_ir(std::string_view source) {
     return codegen.module_ir();
 }
 
-void test_return_constant() {
-    std::string ir = generate_ir("int main() { return 42; }");
-    expect(ir.find("define i32 @main()") != std::string::npos,
-           "return_constant: expected 'define i32 @main()' in IR");
-    expect(ir.find("ret i32 42") != std::string::npos, "return_constant: expected 'ret i32 42' in IR");
-}
-
-void test_function_with_params_and_call() {
-    std::string ir = generate_ir(
-        "int add(int a, int b) { return a + b; }"
-        "int main() { return add(1, 2); }");
-    expect(ir.find("define i32 @add(i32") != std::string::npos,
-           "function_with_params_and_call: expected 'add' function definition");
-    expect(ir.find("call i32 @add(") != std::string::npos,
-           "function_with_params_and_call: expected a call to 'add'");
-}
-
-void test_if_else_generates_branches() {
-    std::string ir = generate_ir("int f(int x) { if (x < 2) { return 1; } else { return 0; } }");
-    expect(ir.find("br i1") != std::string::npos, "if_else_generates_branches: expected a conditional branch");
-    expect(ir.find("if.then") != std::string::npos, "if_else_generates_branches: expected an 'if.then' block");
-    expect(ir.find("if.else") != std::string::npos, "if_else_generates_branches: expected an 'if.else' block");
-}
-
-void test_while_generates_loop() {
-    std::string ir = generate_ir("int f() { int x = 0; while (x < 10) { x = x + 1; } return x; }");
-    expect(ir.find("while.cond") != std::string::npos, "while_generates_loop: expected a 'while.cond' block");
-    expect(ir.find("while.body") != std::string::npos, "while_generates_loop: expected a 'while.body' block");
-}
-
-void test_missing_return_is_rejected() {
-    bool threw = false;
-    try {
-        generate_ir("int f() { int x = 1; }");
-    } catch (const scpp::CodegenError&) {
-        threw = true;
+// Splits on " | ", used by the `sequence:` and `count_at_least:` assertion
+// kinds to separate their pipe-delimited operands.
+std::vector<std::string> split_pipe(const std::string& s) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (true) {
+        size_t bar = s.find(" | ", start);
+        if (bar == std::string::npos) {
+            parts.push_back(s.substr(start));
+            break;
+        }
+        parts.push_back(s.substr(start, bar - start));
+        start = bar + 3;
     }
-    expect(threw, "missing_return_is_rejected: expected a CodegenError");
+    return parts;
 }
 
-void test_call_to_unknown_function_is_rejected() {
-    bool threw = false;
-    try {
-        generate_ir("int main() { return unknown(); }");
-    } catch (const scpp::CodegenError&) {
-        threw = true;
+// One parsed line of a `.expected` file. See the comment on
+// run_test_case_files() below for the supported assertion kinds and syntax.
+struct Assertion {
+    std::string kind;
+    std::vector<std::string> args;
+};
+
+std::vector<Assertion> parse_expected(const std::string& content) {
+    std::vector<Assertion> assertions;
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.empty()) continue;
+
+        size_t colon = line.find(": ");
+        std::string kind = colon == std::string::npos ? "" : line.substr(0, colon);
+        std::string rest = colon == std::string::npos ? "" : line.substr(colon + 2);
+        if (kind == "contains" || kind == "throws") {
+            assertions.push_back(Assertion{kind, {rest}});
+        } else if (kind == "sequence" || kind == "count_at_least") {
+            assertions.push_back(Assertion{kind, split_pipe(rest)});
+        } else {
+            assertions.push_back(Assertion{"__malformed__", {line}});
+        }
     }
-    expect(threw, "call_to_unknown_function_is_rejected: expected a CodegenError");
+    return assertions;
 }
 
-void test_print_builtins_generate_printf_calls() {
-    std::string ir = generate_ir("int main() { print_int(1); print_bool(true); return 0; }");
-    expect(ir.find("declare i32 @printf(") != std::string::npos,
-           "print_builtins_generate_printf_calls: expected a printf declaration");
-    expect(ir.find("call i32 (ptr, ...) @printf(") != std::string::npos,
-           "print_builtins_generate_printf_calls: expected calls to printf");
-}
-
-void test_struct_type_and_zero_init() {
-    std::string ir = generate_ir(
-        "struct Point { int x; int y; };"
-        "int main() { Point p; return p.x; }");
-    expect(ir.find("%struct.Point = type { i32, i32 }") != std::string::npos,
-           "struct_type_and_zero_init: expected the Point struct type in IR");
-    expect(ir.find("zeroinitializer") != std::string::npos,
-           "struct_type_and_zero_init: expected a zeroinitializer store for the uninitialized struct");
-}
-
-void test_struct_member_access_generates_gep() {
-    std::string ir = generate_ir(
-        "struct Point { int x; int y; };"
-        "int main() { Point p; p.x = 1; return p.x + p.y; }");
-    expect(ir.find("getelementptr inbounds nuw %struct.Point") != std::string::npos,
-           "struct_member_access_generates_gep: expected a struct GEP in IR");
-}
-
-void test_struct_field_unknown_type_is_rejected() {
-    // The parser itself rejects an unrecognized type name (it only accepts
-    // scalars or already-declared struct names), so this surfaces as a
-    // ParseError rather than reaching codegen's trivial-type validation.
-    bool threw = false;
-    try {
-        scpp::parse("struct Bad { Nonexistent x; }; int main() { return 0; }");
-    } catch (const scpp::ParseError&) {
-        threw = true;
+// Checks one non-`throws` assertion against `ir`, reporting via `expect`.
+void check_ir_assertion(const Assertion& assertion, const std::string& ir, const std::string& case_name) {
+    if (assertion.kind == "contains") {
+        const std::string& needle = assertion.args[0];
+        expect(ir.find(needle) != std::string::npos, case_name + ": expected IR to contain '" + needle + "'");
+        return;
     }
-    expect(threw, "struct_field_unknown_type_is_rejected: expected a ParseError");
-}
-
-void test_struct_self_reference_by_value_is_rejected() {
-    bool threw = false;
-    try {
-        generate_ir("struct Node { Node inner; }; int main() { return 0; }");
-    } catch (const scpp::CodegenError&) {
-        threw = true;
+    if (assertion.kind == "sequence") {
+        // Each marker must be found in order; the search for the next one
+        // starts right after the previous match ends, so this also
+        // correctly skips an earlier, unrelated occurrence of a later
+        // marker (e.g. a loop preheader's branch to `while.cond`, which
+        // must be distinguished from the loop body's own back-edge).
+        size_t pos = 0;
+        for (const std::string& marker : assertion.args) {
+            size_t found = ir.find(marker, pos);
+            if (found == std::string::npos) {
+                expect(false, case_name + ": expected to find '" + marker +
+                                  "' after the previous marker in the sequence");
+                return;
+            }
+            pos = found + marker.size();
+        }
+        return;
     }
-    expect(threw, "struct_self_reference_by_value_is_rejected: expected a CodegenError");
-}
-
-void test_struct_self_reference_by_pointer_is_allowed() {
-    std::string ir = generate_ir(
-        "struct Node { int value; Node* next; };"
-        "int main() { Node n; return n.value; }");
-    expect(ir.find("%struct.Node = type { i32, ptr }") != std::string::npos,
-           "struct_self_reference_by_pointer_is_allowed: expected Node struct type with a ptr field");
-}
-
-void test_array_field_and_subscript_generates_gep() {
-    std::string ir = generate_ir(
-        "struct Buffer { int values[4]; };"
-        "int main() { Buffer b; b.values[0] = 7; return b.values[0]; }");
-    expect(ir.find("%struct.Buffer = type { [4 x i32] }") != std::string::npos,
-           "array_field_and_subscript_generates_gep: expected Buffer struct type with an array field");
-}
-
-void test_nested_struct_field() {
-    std::string ir = generate_ir(
-        "struct Inner { int v; };"
-        "struct Outer { Inner inner; };"
-        "int main() { Outer o; o.inner.v = 5; return o.inner.v; }");
-    expect(ir.find("%struct.Inner = type { i32 }") != std::string::npos,
-           "nested_struct_field: expected Inner struct type in IR");
-    expect(ir.find("%struct.Outer = type { %struct.Inner }") != std::string::npos,
-           "nested_struct_field: expected Outer struct type embedding Inner");
-}
-
-void test_unique_ptr_zero_init() {
-    std::string ir = generate_ir(
-        "int main() {"
-        "    std::unique_ptr<int> a;"
-        "    return 0;"
-        "}");
-    expect(ir.find("%a = alloca ptr") != std::string::npos,
-           "unique_ptr_zero_init: expected 'a' to be allocated as a ptr");
-    expect(ir.find("store ptr null, ptr %a") != std::string::npos,
-           "unique_ptr_zero_init: expected a null store for the zero-initialized unique_ptr");
-}
-
-void test_move_generates_load_and_null_store() {
-    std::string ir = generate_ir(
-        "int main() {"
-        "    std::unique_ptr<int> a;"
-        "    std::unique_ptr<int> b = std::move(a);"
-        "    return 0;"
-        "}");
-    // The move should load a's current value, null it out, then store the
-    // loaded value into b -- i.e. a real (if degenerate, since there's no
-    // heap allocation yet) pointer transfer rather than a duplicate.
-    expect(ir.find("%movetmp = load ptr, ptr %a") != std::string::npos,
-           "move_generates_load_and_null_store: expected a load of 'a' into %movetmp");
-    expect(ir.find("store ptr null, ptr %a") != std::string::npos,
-           "move_generates_load_and_null_store: expected 'a' to be nulled out after the move");
-    expect(ir.find("store ptr %movetmp, ptr %b") != std::string::npos,
-           "move_generates_load_and_null_store: expected the moved value stored into 'b'");
-}
-
-void test_unique_ptr_field_in_struct_is_rejected() {
-    bool threw = false;
-    try {
-        generate_ir("struct Bad { std::unique_ptr<int> p; }; int main() { return 0; }");
-    } catch (const scpp::CodegenError&) {
-        threw = true;
+    if (assertion.kind == "count_at_least") {
+        int min_count = std::stoi(assertion.args[0]);
+        const std::string& needle = assertion.args[1];
+        int count = 0;
+        size_t pos = 0;
+        while (true) {
+            size_t found = ir.find(needle, pos);
+            if (found == std::string::npos) break;
+            count++;
+            pos = found + needle.size();
+        }
+        expect(count >= min_count, case_name + ": expected at least " + std::to_string(min_count) +
+                                        " occurrence(s) of '" + needle + "', found " + std::to_string(count));
+        return;
     }
-    expect(threw, "unique_ptr_field_in_struct_is_rejected: expected a CodegenError");
+    expect(false, case_name + ": malformed .expected line: '" + assertion.args[0] + "'");
+}
+
+// Runs every `<name>.cpp` case file under SCPP_CODEGEN_TEST_SOURCE_DIR
+// against its paired `<name>.expected` file. Each non-blank line of
+// `.expected` is one assertion against the generated IR (as text), except
+// `throws:`, which instead asserts that parsing/codegen never produces IR
+// at all:
+//   contains: <substring>              -- the IR must contain this exact
+//                                          substring somewhere.
+//   sequence: <m1> | <m2> | ...        -- markers must appear in this
+//                                          order (each search starts right
+//                                          after the previous marker's own
+//                                          match ends).
+//   count_at_least: <n> | <substring>  -- substring occurs >= n times
+//                                          (non-overlapping count).
+//   throws: ParseError | CodegenError  -- parsing (or, if parsing
+//                                          succeeds, codegen) must throw
+//                                          exactly this error type; must
+//                                          be the only line in the file.
+// Adding a new case is just dropping in 2 new files -- no changes to this
+// file or a rebuild of the test harness are needed, just re-running the
+// already-built binary.
+void run_test_case_files() {
+    std::filesystem::path dir(SCPP_CODEGEN_TEST_SOURCE_DIR);
+    std::vector<std::filesystem::path> source_files;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.path().extension() == ".cpp") {
+            source_files.push_back(entry.path());
+        }
+    }
+    std::sort(source_files.begin(), source_files.end());
+
+    expect(!source_files.empty(), "expected at least one *.cpp test case in " + dir.string());
+
+    for (const std::filesystem::path& source_path : source_files) {
+        std::string case_name = source_path.stem().string();
+        std::filesystem::path expected_path = dir / (case_name + ".expected");
+        if (!std::filesystem::exists(expected_path)) {
+            expect(false, case_name + ": missing " + expected_path.filename().string());
+            continue;
+        }
+
+        std::vector<Assertion> assertions = parse_expected(read_file(expected_path));
+        if (assertions.empty()) {
+            expect(false, case_name + ": .expected has no assertions");
+            continue;
+        }
+
+        cases_run++;
+        std::string source = read_file(source_path);
+
+        if (assertions[0].kind == "throws") {
+            expect(assertions.size() == 1, case_name + ": 'throws:' must be the only line in .expected");
+            const std::string& expected_type = assertions[0].args[0];
+
+            std::string actual = "none";
+            try {
+                scpp::Program program = scpp::parse(source);
+                scpp::Codegen codegen("test_module");
+                codegen.generate(program);
+            } catch (const scpp::ParseError&) {
+                actual = "ParseError";
+            } catch (const scpp::CodegenError&) {
+                actual = "CodegenError";
+            }
+            expect(actual == expected_type,
+                   case_name + ": expected " + expected_type + " to be thrown, got " + actual);
+            continue;
+        }
+
+        try {
+            std::string ir = generate_ir(source);
+            for (const Assertion& assertion : assertions) {
+                check_ir_assertion(assertion, ir, case_name);
+            }
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an unexpected exception: " + std::string(e.what()));
+        }
+    }
 }
 
 } // namespace
 
 int main() {
-    test_return_constant();
-    test_function_with_params_and_call();
-    test_if_else_generates_branches();
-    test_while_generates_loop();
-    test_missing_return_is_rejected();
-    test_call_to_unknown_function_is_rejected();
-    test_print_builtins_generate_printf_calls();
-    test_struct_type_and_zero_init();
-    test_struct_member_access_generates_gep();
-    test_struct_field_unknown_type_is_rejected();
-    test_struct_self_reference_by_value_is_rejected();
-    test_struct_self_reference_by_pointer_is_allowed();
-    test_array_field_and_subscript_generates_gep();
-    test_nested_struct_field();
-    test_unique_ptr_zero_init();
-    test_move_generates_load_and_null_store();
-    test_unique_ptr_field_in_struct_is_rejected();
+    run_test_case_files();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
         return 1;
     }
-    std::cout << "All codegen tests passed.\n";
+    std::cout << "All codegen tests passed (" << cases_run << " case file(s)).\n";
     return 0;
 }

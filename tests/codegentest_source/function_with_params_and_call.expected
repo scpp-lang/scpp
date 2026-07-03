@@ -1,0 +1,2 @@
+contains: define i32 @add(i32
+contains: call i32 @add(

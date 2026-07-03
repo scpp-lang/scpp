@@ -438,6 +438,24 @@ private:
             return node;
         }
 
+        if (check_std_qualified("make_unique")) {
+            consume_std_qualified();
+            expect(TokenKind::Less, "'<'");
+            Type element_type = parse_type();
+            expect(TokenKind::Greater, "'>'");
+            expect(TokenKind::LParen, "'('");
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::MakeUnique;
+            node->type = std::move(element_type);
+            if (!check(TokenKind::RParen)) {
+                do {
+                    node->args.push_back(parse_expr());
+                } while (match(TokenKind::Comma));
+            }
+            expect(TokenKind::RParen, "')'");
+            return node;
+        }
+
         if (match(TokenKind::IntegerLiteral)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::IntegerLiteral;

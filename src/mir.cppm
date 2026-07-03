@@ -38,11 +38,19 @@ enum class MirStatementKind {
     // as a follow-up to M2's unique_ptr); the analysis and placement
     // infrastructure is what this milestone establishes.
     Drop,
+    // Marks that `local` has just gone out of lexical scope (its
+    // enclosing block/if-branch/while-body ended). The dataflow analysis
+    // resets its tracked state to Bottom here, so a reference to it after
+    // this point on this path is correctly rejected -- mirroring
+    // codegen's own scope_stack_-driven behavior (see push_scope/
+    // pop_scope in codegen.cppm), which stops tracking a block-scoped
+    // local at the exact same point.
+    ScopeExit,
 };
 
 struct MirStatement {
     MirStatementKind kind;
-    std::string local;          // Declare / Assign (target) / Drop
+    std::string local;          // Declare / Assign (target) / Drop / ScopeExit
     const Expr* expr = nullptr; // Assign (rhs) / Eval
     Type type;                  // Declare: the declared type
 };
@@ -71,10 +79,14 @@ struct BasicBlock {
 
 // The MIR for a single function: a CFG of basic blocks, plus the declared
 // type of every tracked local (parameters and every VarDecl encountered,
-// in declaration order -- matching codegen's existing flat, non-lexically-
-// scoped locals_ map, so a variable declared inside one branch is still
-// considered part of the same tracked universe as the rest of the
-// function).
+// in declaration order). `local_types`/`locals_in_order` span the whole
+// function regardless of lexical scope -- a name stays "known" for type-
+// lookup purposes (so the checker can still describe a bad read with a
+// type-aware message) even after its scope has ended. *Liveness* is what's
+// actually scoped: each local's tracked dataflow state is reset by a
+// `ScopeExit` statement at the end of its enclosing block/if-branch/
+// while-body, mirroring codegen's own scope_stack_ (see push_scope/
+// pop_scope in codegen.cppm).
 struct Body {
     std::vector<BasicBlock> blocks;
     std::unordered_map<std::string, Type> local_types;
@@ -106,12 +118,38 @@ private:
     const Function& fn_;
     Body body_;
     size_t current_block_ = 0;
+    // One frame per lexically-enclosing block/if-branch/while-body,
+    // holding the names declared directly within it -- mirrors codegen's
+    // scope_stack_. Parameters are declared before any frame is pushed
+    // (see build()), so they're never captured here: they live for the
+    // whole function, same as in codegen.
+    std::vector<std::vector<std::string>> scope_stack_;
 
     void declare_local(const std::string& name, const Type& type) {
         if (!body_.local_types.contains(name)) {
             body_.locals_in_order.push_back(name);
         }
         body_.local_types[name] = type;
+        if (!scope_stack_.empty()) {
+            scope_stack_.back().push_back(name);
+        }
+    }
+
+    void push_scope() { scope_stack_.emplace_back(); }
+
+    // Emits a ScopeExit statement (in reverse declaration order, matching
+    // codegen's drop order) for every name declared directly in the scope
+    // being popped -- unless the current block already ended in a
+    // terminator (e.g. a `return` already exited this scope; no further
+    // statements can be appended to that block anyway), matching
+    // codegen's identical pop_scope() guard.
+    void pop_scope() {
+        std::vector<std::string> names = std::move(scope_stack_.back());
+        scope_stack_.pop_back();
+        if (current_has_terminator()) return;
+        for (auto it = names.rbegin(); it != names.rend(); ++it) {
+            current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{}});
+        }
     }
 
     size_t new_block() {
@@ -128,12 +166,14 @@ private:
     void lower_stmt(const Stmt& stmt) {
         switch (stmt.kind) {
             case StmtKind::Block:
+                push_scope();
                 for (const auto& s : stmt.statements) {
                     // Dead code after a return/unreachable terminator
                     // isn't lowered, matching codegen's own behavior.
                     if (current_has_terminator()) break;
                     lower_stmt(*s);
                 }
+                pop_scope();
                 return;
 
             case StmtKind::VarDecl: {
@@ -184,13 +224,17 @@ private:
                     Terminator{TerminatorKind::Branch, 0, then_block, else_block, stmt.condition.get(), nullptr};
 
                 current_block_ = then_block;
+                push_scope();
                 lower_stmt(*stmt.then_branch);
+                pop_scope();
                 if (!current_has_terminator()) {
                     current().terminator = Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr};
                 }
 
                 current_block_ = else_block;
+                push_scope();
                 if (stmt.else_branch) lower_stmt(*stmt.else_branch);
+                pop_scope();
                 if (!current_has_terminator()) {
                     current().terminator = Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr};
                 }
@@ -210,7 +254,9 @@ private:
                     Terminator{TerminatorKind::Branch, 0, body_block, end_block, stmt.condition.get(), nullptr};
 
                 current_block_ = body_block;
+                push_scope();
                 lower_stmt(*stmt.then_branch);
+                pop_scope();
                 if (!current_has_terminator()) {
                     current().terminator = Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr};
                 }
@@ -221,12 +267,17 @@ private:
         }
     }
 
-    // Inserts `Drop` statements for every unique_ptr local (in reverse
-    // declaration order) right before each `Return` terminator. Given our
-    // flat, non-lexically-scoped locals (matching codegen), every
-    // unique_ptr local in the function is considered part of the same
-    // scope; whether it actually still owns a value by the time codegen
-    // runs is exactly what the move/init dataflow analysis determines.
+    // Inserts `Drop` statements for every unique_ptr local declared
+    // anywhere in the function (in reverse declaration order) right
+    // before each `Return` terminator. This is deliberately coarser than
+    // ScopeExit: codegen doesn't consume MIR yet (it does its own
+    // per-scope free()s directly off the AST, see push_scope/pop_scope in
+    // codegen.cppm), so these Drop markers are inert placeholders for
+    // whenever codegen switches to consuming MIR -- at which point this
+    // will need to only drop locals still in scope at the return, not
+    // every one ever declared. Harmless for now: Drop has no dataflow
+    // effect (see apply_statement in movecheck.cppm), so a marker for an
+    // already-out-of-scope local is simply never acted on by anything.
     void insert_drops_before_returns() {
         std::vector<std::string> unique_ptr_locals;
         for (const std::string& name : body_.locals_in_order) {

@@ -1,0 +1,3 @@
+contains: call ptr @malloc(i64 4)
+contains: store i32 42, ptr %newptr
+contains: declare ptr @malloc(i64)

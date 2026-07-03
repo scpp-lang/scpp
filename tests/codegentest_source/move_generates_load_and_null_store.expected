@@ -1,0 +1,3 @@
+contains: %movetmp = load ptr, ptr %a
+contains: store ptr null, ptr %a
+contains: store ptr %movetmp, ptr %b

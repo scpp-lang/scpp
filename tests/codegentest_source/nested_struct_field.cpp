@@ -1,0 +1,3 @@
+struct Inner { int v; };
+struct Outer { Inner inner; };
+int main() { Outer o; o.inner.v = 5; return o.inner.v; }
