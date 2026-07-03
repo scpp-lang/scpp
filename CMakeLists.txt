@@ -13,6 +13,13 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
+add_library(scpp_lexer)
+target_sources(scpp_lexer
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/lexer.cppm)
+target_compile_features(scpp_lexer PRIVATE cxx_std_23)
+
 add_executable(scpp)
 
 target_sources(scpp
@@ -21,5 +28,14 @@ target_sources(scpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/cli.cppm)
+target_link_libraries(scpp PRIVATE scpp_lexer)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
+
+enable_testing()
+
+add_executable(lexer_test tests/lexer_test.cpp)
+target_link_libraries(lexer_test PRIVATE scpp_lexer)
+target_compile_features(lexer_test PRIVATE cxx_std_23)
+
+add_test(NAME lexer_test COMMAND lexer_test)
