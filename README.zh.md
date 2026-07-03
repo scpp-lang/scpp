@@ -32,10 +32,10 @@ int legacy() {                               // 普通 C++，不做检查
 
 ## 文档
 
-语言规范采用中英双语维护：
+完整语言规范是《The SCPP Programming Language》一书，采用中英双语维护：
 
-- English: [`docs/language-spec-v0.1.en.md`](docs/language-spec-v0.1.en.md)
-- 中文: [`docs/language-spec-v0.1.zh.md`](docs/language-spec-v0.1.zh.md)
+- English: [`docs/book/en/README.md`](docs/book/en/README.md)
+- 中文: [`docs/book/zh/README.md`](docs/book/zh/README.md)
 
 ## 构建
 
@@ -68,7 +68,7 @@ scpp build <file> [-o <out>] # 通过 LLVM 编译为本地可执行文件
 早期设计阶段。里程碑 **M1 — 最小端到端管线**（标量 + 局部变量 + 控制流 +
 函数 → AST → LLVM IR → 可执行文件，暂不含 `safe` 检查）已实现：词法分析器、
 解析器/AST，以及能编译并链接出本地可执行文件的 LLVM 后端。完整路线图见
-规范中的里程碑章节。
+[本书](docs/book/zh/README.md)的里程碑章节。
 
 ## 许可
 

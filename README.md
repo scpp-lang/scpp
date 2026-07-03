@@ -43,10 +43,11 @@ int legacy() {                               // ordinary C++, unchecked
 
 ## Documentation
 
-The language specification is maintained in both languages:
+The full language specification is "The SCPP Programming Language" book,
+maintained in both languages:
 
-- English: [`docs/language-spec-v0.1.en.md`](docs/language-spec-v0.1.en.md)
-- 中文: [`docs/language-spec-v0.1.zh.md`](docs/language-spec-v0.1.zh.md)
+- English: [`docs/book/en/README.md`](docs/book/en/README.md)
+- 中文: [`docs/book/zh/README.md`](docs/book/zh/README.md)
 
 ## Building
 
@@ -80,8 +81,8 @@ scpp build <file> [-o <out>] # compile to a native executable via LLVM
 Early design stage. Milestone **M1 — minimal end-to-end pipeline** (scalars +
 locals + control flow + functions → AST → LLVM IR → executable, no `safe`
 checks yet) is implemented: lexer, parser/AST, and an LLVM-based backend that
-compiles and links a native executable. See the milestones section of the
-spec for the full roadmap.
+compiles and links a native executable. See the milestones chapter of
+[the book](docs/book/en/README.md) for the full roadmap.
 
 ## License
 
