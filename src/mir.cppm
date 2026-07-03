@@ -64,6 +64,20 @@ enum class MirStatementKind {
     // as an explicit, deliberately-scoped-down first slice; lifting that
     // is a follow-up, not a soundness requirement.
     BindReference,
+    // Marks lexical entry into / exit from an `unsafe { }` block (ch01
+    // §1.3) -- emitted as a bracketing pair around a Block statement's
+    // lowered statements exactly when its `is_unsafe` flag is set (see
+    // MirBuilder::lower_stmt's Block case). `local`/`expr` are unused
+    // (left default). The move checker keeps a simple nesting counter
+    // incremented/decremented by these (see DataflowState::unsafe_depth
+    // in movecheck.cppm) to know whether it's currently licensed to
+    // relax the specific checks ch05.5 lists -- this is a purely lexical/
+    // structural fact at each program point, not itself flow-sensitive
+    // (every branch of an `if`/`while` always closes out any `unsafe { }`
+    // blocks it opened before reaching a successor), so it doesn't need
+    // real join semantics the way move/borrow state does.
+    UnsafeEnter,
+    UnsafeExit,
 };
 
 struct MirStatement {
@@ -185,11 +199,24 @@ private:
         switch (stmt.kind) {
             case StmtKind::Block:
                 push_scope();
+                if (stmt.is_unsafe) {
+                    current().statements.push_back(
+                        MirStatement{MirStatementKind::UnsafeEnter, "", nullptr, Type{}});
+                }
                 for (const auto& s : stmt.statements) {
                     // Dead code after a return/unreachable terminator
                     // isn't lowered, matching codegen's own behavior.
                     if (current_has_terminator()) break;
                     lower_stmt(*s);
+                }
+                // Guarded exactly like pop_scope()'s own ScopeExit
+                // emission below: a `return` inside the unsafe block may
+                // have already left `current()` terminated, in which case
+                // appending anything more to it would be dead code after
+                // its terminator.
+                if (stmt.is_unsafe && !current_has_terminator()) {
+                    current().statements.push_back(
+                        MirStatement{MirStatementKind::UnsafeExit, "", nullptr, Type{}});
                 }
                 pop_scope();
                 return;

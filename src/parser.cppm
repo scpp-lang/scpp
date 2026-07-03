@@ -273,11 +273,26 @@ private:
 
     StmtPtr parse_statement() {
         if (check(TokenKind::LBrace)) return parse_block();
+        if (check(TokenKind::KwUnsafe)) return parse_unsafe_block();
         if (looks_like_type_start()) return parse_var_decl();
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
         if (check(TokenKind::KwWhile)) return parse_while();
         return parse_expr_stmt();
+    }
+
+    // `unsafe { stmt; stmt; ... }` (ch01 §1.3, design finalized) -- an
+    // ordinary brace-delimited block (see parse_block) that additionally
+    // marks itself `is_unsafe` so the move checker relaxes exactly the
+    // ch05.5 checks it's licensed to for its statements. v0.1 only
+    // supports this block-statement form: `unsafe` must always be
+    // followed by `{` (parse_block itself rejects anything else), never a
+    // single bare statement, a condition expression, or a match-arm body.
+    StmtPtr parse_unsafe_block() {
+        expect(TokenKind::KwUnsafe, "'unsafe'");
+        StmtPtr block = parse_block();
+        block->is_unsafe = true;
+        return block;
     }
 
     StmtPtr parse_var_decl() {

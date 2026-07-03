@@ -1,0 +1,1 @@
+sequence: store ptr %newptr, ptr %a | %scopedroptmp = load ptr, ptr %a | call void @free(ptr %scopedroptmp)

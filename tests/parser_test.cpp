@@ -99,6 +99,58 @@ void test_while_loop() {
            "while_loop: expr should be an Assign");
 }
 
+void test_unsafe_block_sets_is_unsafe_flag() {
+    // `unsafe { }` (ch01 §1.3) is an ordinary Block statement with
+    // is_unsafe set -- see parse_unsafe_block.
+    scpp::Program program = scpp::parse("int f() { unsafe { int x = 1; } return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.body->statements.size() == 2, "unsafe_block_sets_is_unsafe_flag: expected 2 statements");
+
+    const scpp::Stmt& unsafe_block = *fn.body->statements[0];
+    expect(unsafe_block.kind == scpp::StmtKind::Block,
+           "unsafe_block_sets_is_unsafe_flag: should still be an ordinary Block");
+    expect(unsafe_block.is_unsafe, "unsafe_block_sets_is_unsafe_flag: is_unsafe should be true");
+    expect(unsafe_block.statements.size() == 1,
+           "unsafe_block_sets_is_unsafe_flag: unsafe block should have 1 statement");
+    expect(unsafe_block.statements[0]->kind == scpp::StmtKind::VarDecl,
+           "unsafe_block_sets_is_unsafe_flag: nested statement should be VarDecl");
+}
+
+void test_ordinary_block_is_not_unsafe() {
+    // Sanity check for the flag's default: a plain `{ }` (no `unsafe`
+    // keyword) must never be mistaken for an unsafe block.
+    scpp::Program program = scpp::parse("int f() { { int x = 1; } return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& plain_block = *fn.body->statements[0];
+    expect(plain_block.kind == scpp::StmtKind::Block, "ordinary_block_is_not_unsafe: should be a Block");
+    expect(!plain_block.is_unsafe, "ordinary_block_is_not_unsafe: is_unsafe should be false");
+}
+
+void test_nested_unsafe_blocks_parse() {
+    // `unsafe { unsafe { ... } }` (ch01 §1.3's nesting rule) -- both
+    // levels independently set is_unsafe.
+    scpp::Program program = scpp::parse("int f() { unsafe { unsafe { int x = 1; } } return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& outer = *fn.body->statements[0];
+    expect(outer.is_unsafe, "nested_unsafe_blocks_parse: outer block should be unsafe");
+    expect(outer.statements.size() == 1, "nested_unsafe_blocks_parse: outer block should have 1 statement");
+    const scpp::Stmt& inner = *outer.statements[0];
+    expect(inner.kind == scpp::StmtKind::Block, "nested_unsafe_blocks_parse: inner statement should be a Block");
+    expect(inner.is_unsafe, "nested_unsafe_blocks_parse: inner block should also be unsafe");
+}
+
+void test_unsafe_without_brace_is_parse_error() {
+    // v0.1 only supports the block-statement form: `unsafe` must always
+    // be followed by `{`, never a single bare statement.
+    bool threw = false;
+    try {
+        scpp::parse("int f() { unsafe return 1; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "unsafe_without_brace_is_parse_error: expected a ParseError to be thrown");
+}
+
 void test_operator_precedence() {
     // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3.
     scpp::Program program = scpp::parse("int f() { return 1 + 2 * 3; }");
@@ -428,6 +480,10 @@ int main() {
     test_safe_function_with_params();
     test_var_decl_and_if_else();
     test_while_loop();
+    test_unsafe_block_sets_is_unsafe_flag();
+    test_ordinary_block_is_not_unsafe();
+    test_nested_unsafe_blocks_parse();
+    test_unsafe_without_brace_is_parse_error();
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();

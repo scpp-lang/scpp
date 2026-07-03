@@ -919,23 +919,26 @@ private:
                     throw CodegenError("expression is not assignable");
                 }
                 LValue operand = codegen_lvalue(*expr.lhs);
-                if (operand.type.kind != TypeKind::UniquePtr) {
-                    // Raw pointer dereference requires unsafe {}, which
-                    // doesn't exist yet (see spec ch02/ch05.5); a
-                    // reference operand can't reach here at all
-                    // (codegen_lvalue's own Identifier case already
-                    // auto-dereferences a reference-typed local, so `*r`
-                    // where `r` is `T&` would already have `r` resolved
-                    // to its referent by the time this runs).
-                    throw CodegenError("dereference ('*') is only supported for std::unique_ptr in this "
-                                        "version (raw pointer dereference requires unsafe {}, which isn't "
-                                        "implemented yet)");
+                if (operand.type.kind != TypeKind::UniquePtr && operand.type.kind != TypeKind::Pointer) {
+                    // Whether a raw pointer dereference is licensed here
+                    // (ch01 §1.3: only inside `unsafe {}`) is the move
+                    // checker's job (scpp.movecheck), not codegen's --
+                    // by the time a program reaches codegen it's already
+                    // been accepted, so this is purely an "operand has no
+                    // sensible address to load" guard. A reference
+                    // operand can't reach here at all (codegen_lvalue's
+                    // own Identifier case already auto-dereferences a
+                    // reference-typed local, so `*r` where `r` is `T&`
+                    // would already have `r` resolved to its referent by
+                    // the time this runs).
+                    throw CodegenError(
+                        "dereference ('*') is only supported for std::unique_ptr or a raw pointer");
                 }
-                // A unique_ptr's own storage holds the pointer *value*
-                // (see to_llvm_type's UniquePtr case); dereferencing
-                // means loading that value and using it as the new base
-                // address, exactly like a reference's own auto-deref
-                // above.
+                // A unique_ptr's/raw pointer's own storage holds the
+                // pointer *value* (see to_llvm_type's UniquePtr/Pointer
+                // case); dereferencing means loading that value and using
+                // it as the new base address, exactly like a reference's
+                // own auto-deref above.
                 llvm::Value* pointee_ptr =
                     builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), operand.ptr, "deref");
                 return LValue{pointee_ptr, *operand.type.pointee};

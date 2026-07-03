@@ -82,10 +82,11 @@ enum class BinaryOp {
 enum class UnaryOp {
     Neg,
     Not,
-    Deref, // `*p` -- p must be std::unique_ptr<T> in this version (raw
-           // pointer/reference dereference isn't supported: the former
-           // needs unsafe {}, which doesn't exist yet; the latter makes
-           // no sense, a reference already *is* its referent).
+    Deref, // `*p` -- p must be std::unique_ptr<T> (always allowed) or a raw
+           // pointer `T*` (only inside `unsafe { }`, see ch01 §1.3/movecheck's
+           // validate_deref_operand). A reference dereference makes no
+           // sense here and never reaches this: a reference already *is*
+           // its referent (see codegen_lvalue's auto-deref).
 };
 
 // A single expression node. Only the fields relevant to `kind` are populated;
@@ -151,6 +152,16 @@ struct Stmt {
 
     // Block
     std::vector<StmtPtr> statements;
+    // Block: true for an `unsafe { }` block (ch01 §1.3), false for an
+    // ordinary `{ }`. An unsafe block is otherwise a completely normal
+    // Block -- same lexical scoping, same statement list -- this flag
+    // only tells the move checker to relax the specific ch05.5 checks
+    // it's licensed to relax (raw pointer dereference, calling a
+    // non-`safe` function) for the statements directly and transitively
+    // nested inside it; every other check (ch05.1-5.4) keeps running
+    // unconditionally regardless of this flag. Meaningless for every
+    // other StmtKind.
+    bool is_unsafe = false;
 };
 
 struct Param {

@@ -210,7 +210,7 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
             print_expr(*stmt.expr, depth + 1);
             break;
         case scpp::StmtKind::Block:
-            std::cout << "Block\n";
+            std::cout << (stmt.is_unsafe ? "Block (unsafe)\n" : "Block\n");
             for (const auto& s : stmt.statements) print_stmt(*s, depth + 1);
             break;
     }

@@ -70,23 +70,36 @@ using BorrowMap = std::unordered_map<std::string, BorrowState>;
 using RefTargetMap = std::unordered_map<std::string, std::string>;
 
 // The full per-program-point dataflow state: ownership/move state per
-// local (`locals`), active borrows per root place (`borrows`), and which
-// root each currently-bound reference aliases (`ref_targets`). Bundled
-// into one struct so the worklist algorithm in check_function can thread
-// (and join) all three together as a single unit.
+// local (`locals`), active borrows per root place (`borrows`), which root
+// each currently-bound reference aliases (`ref_targets`), and the current
+// `unsafe { }` nesting depth (`unsafe_depth`). Bundled into one struct so
+// the worklist algorithm in check_function can thread (and join) all of
+// it together as a single unit.
 struct DataflowState {
     StateMap locals;
     BorrowMap borrows;
     RefTargetMap ref_targets;
+    // Ch01 §1.3's nesting counter: incremented by UnsafeEnter, decremented
+    // by UnsafeExit (see apply_statement). Zero means "not currently
+    // licensed to relax ch05.5's checks"; greater than zero means either
+    // inside a lexical `unsafe { }` block, or (see check_function) that
+    // the enclosing function itself isn't `safe` to begin with -- both
+    // cases are folded into this one counter so every call site only has
+    // to test `unsafe_depth == 0` / `> 0`, never `fn.is_safe` directly.
+    // Unlike `locals`/`borrows`/`ref_targets`, this never needs real join
+    // semantics (see join_states): it's a purely lexical/structural fact,
+    // identical via every predecessor path to a given program point.
+    int unsafe_depth = 0;
 
     bool operator==(const DataflowState&) const = default;
 };
 
 // A function's checked signature, built once for the whole Program by
 // check_moves. Needed for call-site reference-parameter binding (see
-// apply_reference_argument) and for resolving/validating a reference
-// return value against spec ch05.3's elision rule (see
-// resolve_elided_param_index and check_terminator's Return case).
+// apply_reference_argument), resolving/validating a reference return
+// value against spec ch05.3's elision rule (see resolve_elided_param_index
+// and check_terminator's Return case), and gating the "callee must be
+// `safe`" check (ch02/ch05.5) in check_call_arguments.
 struct FunctionSignature {
     std::vector<Type> param_types;
     Type return_type;
@@ -99,6 +112,10 @@ struct FunctionSignature {
     // Computed once by resolve_elided_param_index, which throws if
     // return_type is a Reference but no valid elision exists.
     std::optional<size_t> elided_param_index;
+    // Mirrors Function::is_safe. A call whose callee's is_safe is false
+    // is rejected unless the call site's DataflowState::unsafe_depth is
+    // greater than zero (ch01 §1.3/ch02) -- see check_call_arguments.
+    bool is_safe = false;
 };
 
 using Signatures = std::unordered_map<std::string, FunctionSignature>;
@@ -163,6 +180,14 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         join_maps(a.locals, b.locals),
         join_borrow_maps(a.borrows, b.borrows),
         join_ref_targets(a.ref_targets, b.ref_targets),
+        // In a well-formed program every incoming path agrees on the
+        // unsafe nesting depth at a given program point (see
+        // DataflowState::unsafe_depth) -- min is just a conservative,
+        // defensive tie-break (fail toward "not unsafe", i.e. checks stay
+        // on) for whatever a not-yet-rejected, malformed program's
+        // fixed-point iteration computes along the way, mirroring
+        // join_ref_targets' own comment above.
+        std::min(a.unsafe_depth, b.unsafe_depth),
     };
 }
 
@@ -265,8 +290,8 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 // Finds the root place to check for an *outstanding borrow* when
 // assigning through `expr` (used as an assignment target -- see
 // apply_expr's Binary/Assign case), or nullopt if no such check is
-// needed. Two different cases share the same `.field`/`[index]` chain
-// shape, and must be told apart:
+// needed. Three different cases share the same `.field`/`[index]`/`*`
+// chain shape, and must be told apart:
 //   - `a.x = 1;` where `a` is a *plain place* (not itself a reference):
 //     this writes directly to a's storage, so it must be rejected if
 //     `a` currently has *any* outstanding borrow (mutable or shared) --
@@ -281,6 +306,19 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 //     its own root necessarily shows a borrow (its own), which would
 //     cause a false rejection if checked here too, so this case returns
 //     nullopt (no additional check).
+//   - `(*p).x = 1;`/`p->x = 1;`/`*p = 1;` where `p` is a std::unique_ptr
+//     or (inside unsafe {}) a raw pointer: this writes directly through
+//     p's pointee storage, exactly like the plain-place Identifier case
+//     above -- `p` itself is the root to check (same root
+//     resolve_borrow_source_root's own Unary case uses for a *read*),
+//     since a live borrow into `*p` (e.g. `const T& r = *p;`) must
+//     forbid writing through `*p` while `r` is alive, the same as it
+//     would for a plain struct field. Only Deref ever reaches here:
+//     Neg/Not never produce an addressable place (codegen_lvalue's
+//     default case already rejects them), so this is the only unary op
+//     assignment-target parsing can produce; a non-Identifier operand
+//     (e.g. some future more-general expression) conservatively returns
+//     nullopt rather than guessing.
 // A Call target (spec ch05.3's reference-returning functions) is
 // likewise nullopt: its own mutability is checked by
 // assignment_target_is_read_only, and there is no lasting root of its
@@ -298,6 +336,11 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
         case ExprKind::Member:
         case ExprKind::Subscript:
             return direct_write_root(*expr.lhs, body);
+        case ExprKind::Unary:
+            if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) {
+                return std::nullopt;
+            }
+            return expr.lhs->name;
         default:
             return std::nullopt;
     }
@@ -317,18 +360,24 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return it == state.end() ? LocalState::Bottom : it->second;
 }
 
-// Validates that `name` currently names a readable std::unique_ptr --
-// the only thing `*p`/`p->x` (UnaryOp::Deref) supports dereferencing in
-// this version (spec ch02/ch05.5: raw pointer dereference needs
-// `unsafe {}`, which doesn't exist yet). Shared by apply_deref (reading
-// through `*p`) and resolve_borrow_source_root's Deref case (borrowing
-// through `*p`) so both apply the exact same checks.
-void validate_unique_ptr_deref_operand(const std::string& name, const DataflowState& state, const Body& body) {
+// Validates that `name` currently names a readable pointer-like value
+// that `*p`/`p->x` (UnaryOp::Deref) is licensed to dereference: always for
+// a std::unique_ptr (this is proven-safe by the move/borrow checker
+// itself, no unsafe {} needed), or, only while `state.unsafe_depth > 0`
+// (ch01 §1.3/ch02/ch05.5), for a raw pointer `T*`. Shared by apply_deref
+// (reading through `*p`) and resolve_borrow_source_root's Deref case
+// (borrowing through `*p`) so both apply the exact same checks.
+void validate_deref_operand(const std::string& name, const DataflowState& state, const Body& body) {
     auto type_it = body.local_types.find(name);
-    if (type_it == body.local_types.end() || !is_unique_ptr(type_it->second)) {
+    bool is_uptr = type_it != body.local_types.end() && is_unique_ptr(type_it->second);
+    bool is_raw_ptr = type_it != body.local_types.end() && type_it->second.kind == TypeKind::Pointer;
+    if (!is_uptr && !is_raw_ptr) {
         throw DataflowError("cannot dereference ('*') '" + name +
-                             "': only std::unique_ptr is supported in this version (raw pointer dereference "
-                             "requires unsafe {}, not yet implemented)");
+                             "': only std::unique_ptr or a raw pointer (inside unsafe {}) is supported");
+    }
+    if (is_raw_ptr && state.unsafe_depth == 0) {
+        throw DataflowError("cannot dereference raw pointer '" + name +
+                             "': requires 'unsafe { }' (spec ch01 §1.3/ch02)");
     }
     LocalState current = lookup(state.locals, name);
     if (current != LocalState::Initialized) {
@@ -342,18 +391,19 @@ void validate_unique_ptr_deref_operand(const std::string& name, const DataflowSt
 // std::move -- unlike reading the unique_ptr identifier `p` directly,
 // which always does (spec ch05.1) -- since dereferencing reads the
 // pointee's value without disturbing p's own ownership, exactly like
-// reading a struct field doesn't move the struct that owns it.
+// reading a struct field doesn't move the struct that owns it. A raw
+// pointer has no ownership/move state to disturb in the first place.
 void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, bool report_errors) {
     if (expr.lhs->kind != ExprKind::Identifier) {
         if (report_errors) {
-            throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr "
-                                 "variable (not a member, subscript, or other expression)");
+            throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr or "
+                                 "raw pointer variable (not a member, subscript, or other expression)");
         }
         return;
     }
     if (!report_errors) return; // purely diagnostic: doesn't move p or change any tracked state
     const std::string& name = expr.lhs->name;
-    validate_unique_ptr_deref_operand(name, state, body);
+    validate_deref_operand(name, state, body);
     auto borrow_it = state.borrows.find(name);
     if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
         throw DataflowError("cannot use '" + name + "' while it is mutably borrowed");
@@ -506,6 +556,8 @@ LiveSet reference_uses(const MirStatement& stmt, const Body& body) {
         case MirStatementKind::Declare:
         case MirStatementKind::Drop:
         case MirStatementKind::ScopeExit:
+        case MirStatementKind::UnsafeEnter:
+        case MirStatementKind::UnsafeExit:
             return uses;
     }
     return uses;
@@ -702,27 +754,28 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
         case ExprKind::Unary: {
-            // `*p`/`p->x` (only a plain unique_ptr local is supported --
-            // see validate_unique_ptr_deref_operand): the root is `p`
-            // itself, *not* p's pointee, so that moving or reassigning
-            // `p` while a reference into `*p` is alive is rejected by
-            // the exact same borrow-conflict checks that already guard
-            // every other root (apply_statement's Assign case, and the
-            // Move case's own borrow check above) -- freeing p's
-            // allocation out from under a live reference would
-            // otherwise be a use-after-free.
+            // `*p`/`p->x` (a std::unique_ptr local always, or -- only
+            // inside unsafe {} -- a raw pointer local; see
+            // validate_deref_operand): the root is `p` itself, *not* p's
+            // pointee, so that moving or reassigning `p` while a
+            // reference into `*p` is alive is rejected by the exact same
+            // borrow-conflict checks that already guard every other root
+            // (apply_statement's Assign case, and the Move case's own
+            // borrow check above) -- freeing or reassigning p's
+            // allocation out from under a live reference would otherwise
+            // be a use-after-free.
             if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) {
                 if (report_errors) {
                     throw DataflowError("a reference can currently only borrow a plain local variable, a "
                                          "field of one ('a.b'), an array element of one ('arr[i]'), a "
-                                         "dereferenced std::unique_ptr local ('*p'/'p->x'), or the result of "
-                                         "a call to a reference-returning function -- not an arbitrary "
-                                         "expression");
+                                         "dereferenced std::unique_ptr/raw-pointer local ('*p'/'p->x'), or "
+                                         "the result of a call to a reference-returning function -- not an "
+                                         "arbitrary expression");
                 }
                 return "";
             }
             const std::string& name = expr.lhs->name;
-            if (report_errors) validate_unique_ptr_deref_operand(name, state, body);
+            if (report_errors) validate_deref_operand(name, state, body);
             return name;
         }
 
@@ -756,8 +809,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             if (report_errors) {
                 throw DataflowError("a reference can currently only borrow a plain local variable, a field of "
                                      "one ('a.b'), an array element of one ('arr[i]'), a dereferenced "
-                                     "std::unique_ptr local ('*p'/'p->x'), or the result of a call to a "
-                                     "reference-returning function -- not an arbitrary expression");
+                                     "std::unique_ptr/raw-pointer local ('*p'/'p->x'), or the result of a call "
+                                     "to a reference-returning function -- not an arbitrary expression");
             }
             return "";
     }
@@ -840,9 +893,30 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     }
 }
 
+// Checks every argument of a Call expression against its callee's
+// signature (if known), exactly the same way regardless of context --
+// shared by apply_expr's own Call case (a call used as a plain
+// statement or value sub-expression) and resolve_borrow_source_root's
+// Call case below (a call to a reference-returning function used
+// itself as a further reference-binding source). Also the single place
+// (reached from every Call site) that enforces ch02/ch05.5's "callee
+// must be `safe`, otherwise `unsafe {}`" rule (ch01 §1.3): rejected only
+// when the callee is *known* (an unresolved/unknown callee name is left
+// to codegen's own "call to unknown function" check, same treatment as
+// elsewhere in this file) and not `safe`, and the call site itself isn't
+// currently inside an `unsafe { }` block or an already-non-`safe`
+// function (state.unsafe_depth > 0 -- see check_function's entry_state
+// setup and DataflowState::unsafe_depth). print_int/print_bool and other
+// codegen-only builtins are never in `signatures` at all, so they're
+// always callable regardless of context, same as they already bypass
+// every other signature-based check in this file.
 void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors) {
     auto sig_it = signatures.find(expr.name);
+    if (report_errors && sig_it != signatures.end() && !sig_it->second.is_safe && state.unsafe_depth == 0) {
+        throw DataflowError("cannot call non-'safe' function '" + expr.name +
+                             "' from a 'safe' context; wrap the call in 'unsafe { }' (spec ch01 §1.3/ch02)");
+    }
     // Scratch borrow-map shared by every reference argument of *this*
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
@@ -1200,6 +1274,14 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             state.locals.erase(stmt.local);
             return;
         }
+
+        case MirStatementKind::UnsafeEnter:
+            state.unsafe_depth++;
+            return;
+
+        case MirStatementKind::UnsafeExit:
+            state.unsafe_depth--;
+            return;
     }
 }
 
@@ -1279,6 +1361,15 @@ void check_function(const Function& fn, const Signatures& signatures) {
     std::vector<std::vector<LiveSet>> live_after = compute_reference_liveness(body, preds);
 
     DataflowState entry_state;
+    // ch01 §1.3's "or the caller itself is an unsafe function" clause:
+    // folding `!fn.is_safe` into the *starting* depth means every check
+    // gated on `unsafe_depth` only ever has to test that one counter,
+    // never `fn.is_safe` separately -- a non-`safe` function's entire
+    // body behaves exactly as if it were already wrapped in one implicit
+    // `unsafe { }` (matching the spec's "harmless no-op" nesting rule),
+    // while a `safe` function starts at 0 and must actually enter an
+    // `unsafe { }` block before any UnsafeEnter-gated check is relaxed.
+    entry_state.unsafe_depth = fn.is_safe ? 0 : 1;
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;
     }
@@ -1357,6 +1448,7 @@ void check_moves(const Program& program) {
         }
         sig.return_type = fn.return_type;
         sig.elided_param_index = resolve_elided_param_index(fn);
+        sig.is_safe = fn.is_safe;
         signatures[fn.name] = std::move(sig);
     }
     for (const Function& fn : program.functions) {
