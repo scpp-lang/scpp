@@ -1,0 +1,13 @@
+struct Point {
+    int x;
+    int y;
+};
+
+int f(bool cond) {
+    if (cond) {
+        Point p;
+        p.x = 1;
+    }
+    const int& r = p.x;
+    return r;
+}

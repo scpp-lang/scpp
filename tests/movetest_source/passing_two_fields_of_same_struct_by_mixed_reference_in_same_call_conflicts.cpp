@@ -1,0 +1,17 @@
+struct Point {
+    int x;
+    int y;
+};
+
+int add_into(int& dst, const int& src) {
+    dst = dst + src;
+    return 0;
+}
+
+int f() {
+    Point p;
+    p.x = 1;
+    p.y = 2;
+    add_into(p.x, p.y);
+    return p.x;
+}

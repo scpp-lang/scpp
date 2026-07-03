@@ -2,9 +2,11 @@ module;
 
 #include <algorithm>
 #include <deque>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 export module scpp.movecheck;
@@ -80,11 +82,26 @@ struct DataflowState {
     bool operator==(const DataflowState&) const = default;
 };
 
-// Function name -> parameter types, built once from the whole Program by
-// check_moves. Needed only for call-site reference-parameter binding (see
-// apply_reference_argument): the checker otherwise never resolves a call
-// target's declared signature.
-using Signatures = std::unordered_map<std::string, std::vector<Type>>;
+// A function's checked signature, built once for the whole Program by
+// check_moves. Needed for call-site reference-parameter binding (see
+// apply_reference_argument) and for resolving/validating a reference
+// return value against spec ch05.3's elision rule (see
+// resolve_elided_param_index and check_terminator's Return case).
+struct FunctionSignature {
+    std::vector<Type> param_types;
+    Type return_type;
+    // Set only when return_type is itself a Reference: the index into
+    // param_types of the sole reference parameter this function's own
+    // returned reference must (transitively) resolve back to, and that
+    // a caller's argument for it is assumed to alias for the duration
+    // of a call to this function returning a reference derived from
+    // that argument (see resolve_borrow_source_root's Call case).
+    // Computed once by resolve_elided_param_index, which throws if
+    // return_type is a Reference but no valid elision exists.
+    std::optional<size_t> elided_param_index;
+};
+
+using Signatures = std::unordered_map<std::string, FunctionSignature>;
 
 LocalState join(LocalState a, LocalState b) {
     if (a == b) return a;
@@ -168,6 +185,79 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 
+// Structurally validates and resolves spec ch05.3's elision rule for a
+// single function's signature: if `fn.return_type` is a Reference, `fn`
+// must have *exactly* one reference-typed parameter (this language has
+// no `this`/method-receiver concept at all yet, so that half of the
+// spec's elision rule never applies -- every reference-returning
+// function is a free function, so its sole eligible parameter is
+// whichever plain parameter happens to be a reference), and that
+// parameter's mutability must be able to license the return type's: a
+// `const T&` parameter can only license a `const T&` return, never a
+// plain `T&` (that would manufacture a mutable alias out of a shared
+// one). Throws DataflowError describing the mismatch otherwise; returns
+// nullopt (meaning "elision doesn't apply") when `fn.return_type` isn't
+// a Reference at all.
+[[nodiscard]] std::optional<size_t> resolve_elided_param_index(const Function& fn) {
+    if (!is_reference(fn.return_type)) return std::nullopt;
+
+    std::optional<size_t> found;
+    for (size_t i = 0; i < fn.params.size(); i++) {
+        if (!is_reference(fn.params[i].type)) continue;
+        if (found.has_value()) {
+            throw DataflowError(
+                "function '" + fn.name +
+                "' returns a reference but has more than one reference parameter; scpp v0.1 can only infer a "
+                "returned reference's lifetime when there is exactly one (spec ch05.3) -- refactor to take a "
+                "single reference parameter, or return by value/std::unique_ptr instead");
+        }
+        found = i;
+    }
+    if (!found.has_value()) {
+        throw DataflowError(
+            "function '" + fn.name +
+            "' returns a reference but has no reference parameter to infer its lifetime from (spec ch05.3) -- "
+            "refactor to take a single reference parameter, or return by value/std::unique_ptr instead");
+    }
+    if (fn.return_type.is_mutable_ref && !fn.params[*found].type.is_mutable_ref) {
+        throw DataflowError("function '" + fn.name +
+                             "' returns a mutable reference ('T&') but its sole reference parameter '" +
+                             fn.params[*found].name +
+                             "' is a shared reference ('const T&'); a mutable reference cannot be manufactured "
+                             "from a shared one");
+    }
+    return found;
+}
+
+// Whether assigning through `expr` (used as an assignment's *target* --
+// see apply_expr's Binary/Assign case) would write through a read-only
+// (`const T&`) reference somewhere in its chain. A `.field`/`[index]`
+// projection's constness always comes from its outermost base (struct
+// fields can never themselves be references -- ch04.1 permanently
+// forbids that -- so there's never a *nested* reference to find deeper
+// in the chain); a call's constness comes from its own return type. A
+// plain local (not itself a reference) is always writable here -- move/
+// initialization-state legality is checked separately, this is purely
+// about const-ness.
+[[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::Identifier: {
+            auto it = body.local_types.find(expr.name);
+            return it != body.local_types.end() && is_reference(it->second) && !it->second.is_mutable_ref;
+        }
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            return assignment_target_is_read_only(*expr.lhs, body, signatures);
+        case ExprKind::Call: {
+            auto sig_it = signatures.find(expr.name);
+            return sig_it != signatures.end() && is_reference(sig_it->second.return_type) &&
+                   !sig_it->second.return_type.is_mutable_ref;
+        }
+        default:
+            return false;
+    }
+}
+
 // The only expressions allowed to produce a std::unique_ptr rvalue:
 // moving an existing one out, or freshly heap-allocating one via
 // std::make_unique (scpp has no `new` expression at all -- make_unique is
@@ -199,6 +289,36 @@ std::string resolve_root_place(const std::string& name, const DataflowState& sta
     return it == state.ref_targets.end() ? name : it->second;
 }
 
+// Releases the borrow (if any) that reference-typed local `name` holds
+// against its root, and forgets that `name` is a currently-bound
+// reference. A no-op if `name` isn't (or is no longer) tracked in
+// `ref_targets`, so it's safe to call speculatively.
+//
+// Called from two places (see check_function): as soon as the liveness
+// analysis says `name` is no longer live (right after its last use --
+// the NLL upgrade from spec ch05.3), and as a fallback at `name`'s
+// lexical ScopeExit, for the unusual case of a reference that's never
+// read after being bound at all (liveness alone would have released it
+// immediately after its BindReference, before ScopeExit is even
+// reached). Whichever fires first does the actual work; the other is
+// then a harmless no-op, since both leave the exact same state.
+void release_reference_borrow(const std::string& name, DataflowState& state, const Body& body) {
+    auto ref_it = state.ref_targets.find(name);
+    if (ref_it == state.ref_targets.end()) return;
+    auto borrow_it = state.borrows.find(ref_it->second);
+    if (borrow_it != state.borrows.end()) {
+        if (body.local_types.at(name).is_mutable_ref) {
+            borrow_it->second.mutable_borrow = false;
+        } else if (borrow_it->second.shared_count > 0) {
+            borrow_it->second.shared_count--;
+        }
+        if (!borrow_it->second.mutable_borrow && borrow_it->second.shared_count == 0) {
+            state.borrows.erase(borrow_it);
+        }
+    }
+    state.ref_targets.erase(ref_it);
+}
+
 std::vector<size_t> successors(const Terminator& term) {
     switch (term.kind) {
         case TerminatorKind::Goto: return {term.target};
@@ -210,8 +330,332 @@ std::vector<size_t> successors(const Terminator& term) {
     }
 }
 
+using LiveSet = std::unordered_set<std::string>;
+
+// Collects the name of every currently-declared *reference*-typed local
+// mentioned anywhere in `expr` (recursively) into `out`. Used by the
+// liveness analysis below to find where a reference is "used" (in the
+// sense of needing its current borrow to stay valid), without having to
+// duplicate apply_expr's exact per-case dataflow semantics: this walk is
+// deliberately a plain, generic tree traversal, over-inclusive rather
+// than clever. A spurious extra "use" only makes a borrow's computed
+// live range *longer* than strictly necessary (a missed early-release
+// opportunity, but still sound); missing a real one would instead be an
+// actual bug (releasing a borrow while it's still genuinely needed).
+void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
+    if (expr == nullptr) return;
+    switch (expr->kind) {
+        case ExprKind::IntegerLiteral:
+        case ExprKind::BoolLiteral:
+            return;
+        case ExprKind::Identifier: {
+            auto it = body.local_types.find(expr->name);
+            if (it != body.local_types.end() && is_reference(it->second)) {
+                out.insert(expr->name);
+            }
+            return;
+        }
+        case ExprKind::Binary:
+            collect_reference_uses(expr->lhs.get(), body, out);
+            collect_reference_uses(expr->rhs.get(), body, out);
+            return;
+        case ExprKind::Unary:
+        case ExprKind::Move:
+            collect_reference_uses(expr->lhs.get(), body, out);
+            return;
+        case ExprKind::Call:
+        case ExprKind::MakeUnique:
+            for (const auto& arg : expr->args) {
+                collect_reference_uses(arg.get(), body, out);
+            }
+            return;
+        case ExprKind::Member:
+            collect_reference_uses(expr->lhs.get(), body, out);
+            return;
+        case ExprKind::Subscript:
+            collect_reference_uses(expr->lhs.get(), body, out);
+            collect_reference_uses(expr->rhs.get(), body, out);
+            return;
+    }
+}
+
+// The reference-typed local that `stmt` freshly brings into existence,
+// if any -- only a BindReference does (references are never rebound, so
+// this is also the one and only point before which `stmt.local`'s
+// liveness must not extend backward; see compute_reference_liveness).
+std::optional<std::string> reference_def(const MirStatement& stmt) {
+    if (stmt.kind == MirStatementKind::BindReference) return stmt.local;
+    return std::nullopt;
+}
+
+LiveSet reference_uses(const MirStatement& stmt, const Body& body) {
+    LiveSet uses;
+    switch (stmt.kind) {
+        case MirStatementKind::BindReference:
+        case MirStatementKind::Eval:
+            collect_reference_uses(stmt.expr, body, uses);
+            return uses;
+        case MirStatementKind::Assign: {
+            collect_reference_uses(stmt.expr, body, uses);
+            auto type_it = body.local_types.find(stmt.local);
+            if (type_it != body.local_types.end() && is_reference(type_it->second)) {
+                // A write-through (`r = expr;` where `r` is itself a
+                // reference -- see apply_reference_write_through) reads
+                // r's own stored address to know where to write, even
+                // though it never reads *through* it.
+                uses.insert(stmt.local);
+            }
+            return uses;
+        }
+        case MirStatementKind::Declare:
+        case MirStatementKind::Drop:
+        case MirStatementKind::ScopeExit:
+            return uses;
+    }
+    return uses;
+}
+
+LiveSet reference_uses(const Terminator& term, const Body& body) {
+    LiveSet uses;
+    switch (term.kind) {
+        case TerminatorKind::Branch:
+            collect_reference_uses(term.condition, body, uses);
+            return uses;
+        case TerminatorKind::Return:
+            collect_reference_uses(term.return_value, body, uses);
+            return uses;
+        case TerminatorKind::Goto:
+        case TerminatorKind::Unreachable:
+        case TerminatorKind::None:
+            return uses;
+    }
+    return uses;
+}
+
+// Computes, for every statement in `body`, the set of reference-typed
+// locals that are *live* (may still be used on some path forward from
+// here) immediately after that statement executes -- the backward dual
+// of the forward move/borrow dataflow in check_function, and what makes
+// this milestone's borrow release NLL-style (spec ch05.3) rather than
+// only lexically-scoped (pre-NLL Rust's original, more conservative
+// behavior, which is all M4 had).
+//
+// Standard backward liveness equations, solved to a fixed point over
+// the CFG (a single backward pass isn't enough whenever the CFG has a
+// loop -- see the `while` case below):
+//   live-out(block) = union of live-in(successor) for every successor
+//   live-in(block)  = (live-out(block) - defs(block)) + uses(block)
+// Verified by hand for a reference declared *and* used entirely inside
+// a `while` body: its own BindReference's `defs` kill reverses the
+// `uses` gen from later in the *same* iteration before the walk ever
+// reaches the block's own entry, so it never appears live going into
+// the loop from the back edge (i.e. as if demanded by a *previous*
+// iteration) -- exactly as it shouldn't.
+//
+// `live_after[b][i]` is the live-out set immediately after statement i
+// of block b (i.e. live-in to statement i+1, or to the terminator if i
+// is the last statement) -- exactly the set check_function needs right
+// after applying statement i to decide whether a currently-tracked
+// reference has just become dead and should have its borrow released.
+std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
+                                                              const std::vector<std::vector<size_t>>& preds) {
+    size_t n = body.blocks.size();
+    std::vector<LiveSet> block_live_in(n);
+
+    auto block_live_out = [&](size_t b) {
+        LiveSet live;
+        for (size_t succ : successors(body.blocks[b].terminator)) {
+            live.insert(block_live_in[succ].begin(), block_live_in[succ].end());
+        }
+        return live;
+    };
+
+    std::deque<size_t> worklist;
+    std::vector<bool> queued(n, false);
+    for (size_t i = 0; i < n; i++) {
+        worklist.push_back(i);
+        queued[i] = true;
+    }
+
+    while (!worklist.empty()) {
+        size_t b = worklist.front();
+        worklist.pop_front();
+        queued[b] = false;
+
+        LiveSet live = block_live_out(b);
+        const BasicBlock& block = body.blocks[b];
+        for (const std::string& use : reference_uses(block.terminator, body)) {
+            live.insert(use);
+        }
+        for (auto it = block.statements.rbegin(); it != block.statements.rend(); ++it) {
+            if (std::optional<std::string> def = reference_def(*it)) live.erase(*def);
+            for (const std::string& use : reference_uses(*it, body)) live.insert(use);
+        }
+
+        if (live != block_live_in[b]) {
+            block_live_in[b] = std::move(live);
+            for (size_t p : preds[b]) {
+                if (!queued[p]) {
+                    worklist.push_back(p);
+                    queued[p] = true;
+                }
+            }
+        }
+    }
+
+    // Fixed point reached (`block_live_in` is now stable): replay every
+    // block once more, this time also recording the live-out-after-each-
+    // statement snapshot the forward pass needs.
+    std::vector<std::vector<LiveSet>> live_after(n);
+    for (size_t b = 0; b < n; b++) {
+        const BasicBlock& block = body.blocks[b];
+        LiveSet live = block_live_out(b);
+        for (const std::string& use : reference_uses(block.terminator, body)) {
+            live.insert(use);
+        }
+        live_after[b].resize(block.statements.size());
+        for (size_t i = block.statements.size(); i-- > 0;) {
+            live_after[b][i] = live;
+            if (std::optional<std::string> def = reference_def(block.statements[i])) live.erase(*def);
+            for (const std::string& use : reference_uses(block.statements[i], body)) live.insert(use);
+        }
+    }
+    return live_after;
+}
+
+// After executing statement index `i` of a block (whose precomputed
+// live-out set is `live_after_stmt`), releases the borrow of every
+// currently-tracked reference that's no longer live -- i.e. whose last
+// use was this statement or earlier. Collects names to release first
+// rather than erasing while iterating `state.ref_targets` directly.
+void release_dead_references(DataflowState& state, const Body& body, const LiveSet& live_after_stmt) {
+    std::vector<std::string> dead;
+    for (const auto& [name, root] : state.ref_targets) {
+        if (!live_after_stmt.contains(name)) dead.push_back(name);
+    }
+    for (const std::string& name : dead) {
+        release_reference_borrow(name, state, body);
+    }
+}
+
 void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors);
+
+// Checks every argument of a Call expression against its callee's
+// signature (if known), exactly the same way regardless of context --
+// shared by apply_expr's own Call case (a call used as a plain
+// statement or value sub-expression) and resolve_borrow_source_root's
+// Call case below (a call to a reference-returning function used
+// itself as a further reference-binding source).
+void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+                           bool report_errors);
+
+// Resolves the root place that `expr` would be borrowing from if used as
+// a reference-binding (`T& r = expr;`) or reference-argument (`f(expr)`
+// where the parameter is a reference) source. Supports a plain local
+// variable, or a chain of `.field`/`[index]` projections off one --
+// root-resolved to the *outermost* variable in the chain (see the
+// whole-root conservatism note below).
+//
+// `allow_call_source` additionally permits (and, when true, is passed
+// through unchanged into every recursive call, so a chain is followed
+// end to end) a call to a function that itself returns a reference,
+// resolved transitively through its own elided parameter (spec ch05.3).
+// This is only ever passed true from check_terminator's Return case --
+// v0.1 can prove a *returned* reference doesn't dangle this way, but
+// deliberately doesn't yet support binding a call's returned reference
+// to a new named local reference, or passing it onward as a reference
+// argument (both callers below always pass false): unlike a return,
+// neither has an elided parameter of its own to fall back on if the
+// chain needs to keep going, and working out exactly when that's still
+// sound is left for a follow-up.
+//
+// v0.1 deliberately does *not* do field-sensitive aliasing: borrowing
+// `a.x` and `a.y` are both recorded against the *same* root `a`, so they
+// conflict with each other exactly as if both borrowed the whole of `a`,
+// even though the two fields never actually overlap in memory (spec
+// ch05.2). This mirrors how Rust itself treats a dynamically-indexed
+// array/slice element (`arr[i]`/`arr[j]` conflict there too, absent an
+// explicit split API scpp doesn't have yet) and applies it uniformly to
+// struct fields as well, for simplicity. Two workarounds exist for a
+// genuinely-disjoint-fields use case: pass each field as its own,
+// separate call argument (each such borrow begins and ends within its
+// own call -- see apply_reference_argument below -- so sequential calls
+// never overlap), or keep the two named reference locals' own live
+// ranges (shortened by the liveness analysis below) from overlapping.
+[[nodiscard]] std::string resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
+                                                       const Signatures& signatures, bool report_errors,
+                                                       bool allow_call_source) {
+    switch (expr.kind) {
+        case ExprKind::Identifier: {
+            const std::string& bound_name = expr.name;
+            if (report_errors) {
+                auto type_it = body.local_types.find(bound_name);
+                if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
+                    throw DataflowError("cannot borrow std::unique_ptr variable '" + bound_name +
+                                         "' in this version");
+                }
+                LocalState current = lookup(state.locals, bound_name);
+                if (current != LocalState::Initialized) {
+                    throw DataflowError(describe_bad_state(bound_name, current));
+                }
+            }
+            return resolve_root_place(bound_name, state);
+        }
+
+        case ExprKind::Member:
+            // Whole-root conservative (see above): a field projection
+            // resolves to the same root as its own base.
+            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors, allow_call_source);
+
+        case ExprKind::Subscript:
+            // The index is a genuine value-producing sub-expression (it
+            // could itself read/move/call), so it's checked exactly like
+            // any other read; the array base contributes the (whole-)
+            // root, same as Member above.
+            apply_expr(*expr.rhs, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
+            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors, allow_call_source);
+
+        case ExprKind::Call: {
+            auto sig_it = signatures.find(expr.name);
+            bool returns_reference = sig_it != signatures.end() && sig_it->second.elided_param_index.has_value();
+            if (!allow_call_source || !returns_reference) {
+                if (report_errors) {
+                    throw DataflowError(
+                        "cannot borrow the result of calling '" + expr.name +
+                        "': " + (returns_reference
+                                     ? "binding a call's returned reference to a new reference isn't supported "
+                                       "yet in this version -- assign it to a plain (non-reference) variable "
+                                       "instead"
+                                     : "it doesn't return a reference with an inferrable lifetime (spec ch05.3)"));
+                }
+                // Still check the arguments themselves so a genuinely
+                // invalid call (wrong callee, bad arguments) is still
+                // reported through the ordinary path once report_errors
+                // is true; harmless to also run silently here.
+                check_call_arguments(expr, state, body, signatures, report_errors);
+                return "";
+            }
+            check_call_arguments(expr, state, body, signatures, report_errors);
+            size_t elided_index = *sig_it->second.elided_param_index;
+            // The elided parameter's *own* argument is what the call's
+            // result transitively borrows from -- resolve it the exact
+            // same way as any other borrow source (recursively, so a
+            // chain of reference-returning calls is followed all the
+            // way back to a real place).
+            return resolve_borrow_source_root(*expr.args[elided_index], state, body, signatures, report_errors,
+                                               allow_call_source);
+        }
+
+        default:
+            if (report_errors) {
+                throw DataflowError("a reference can currently only borrow a plain local variable, a field of "
+                                     "one ('a.b'), an array element of one ('arr[i]'), or the result of a call "
+                                     "to a reference-returning function -- not an arbitrary expression");
+            }
+            return "";
+    }
+}
 
 // Checks (and, on success, has no lasting effect on `state`) a reference
 // function-call argument: a transient borrow that begins right before
@@ -226,38 +670,51 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
 // parameters are references, or one `&mut` and one `&`), which
 // `state.borrows` alone can't, since none of these transient borrows are
 // ever written back into `state`.
-void apply_reference_argument(const Expr& arg, const Type& param_type, const DataflowState& state,
-                               BorrowMap& in_call_borrows, const Body& body, bool report_errors) {
-    if (arg.kind != ExprKind::Identifier) {
-        if (report_errors) {
-            throw DataflowError("a reference argument currently only supports passing a plain local variable "
-                                 "directly (not a member, subscript, or other expression)");
-        }
-        return;
-    }
-    if (!report_errors) return; // purely diagnostic: nothing to mutate either way
+void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
+                               BorrowMap& in_call_borrows, const Body& body, const Signatures& signatures,
+                               bool report_errors) {
+    // resolve_borrow_source_root may have real (move-tracking) side
+    // effects on `state` via nested apply_expr calls (e.g. a subscript
+    // index) that must apply on *every* pass, not just the reporting
+    // one -- unlike the rest of this function, which is purely
+    // diagnostic (a call argument's borrow never outlives the call, so
+    // there's nothing else here for a later statement's fixed-point
+    // computation to observe).
+    std::string root = resolve_borrow_source_root(arg, state, body, signatures, report_errors,
+                                                   /*allow_call_source=*/false);
+    if (!report_errors) return;
 
-    const std::string& bound_name = arg.name;
-    auto type_it = body.local_types.find(bound_name);
-    if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
-        throw DataflowError("cannot pass std::unique_ptr variable '" + bound_name + "' by reference in this version");
-    }
-    LocalState current = lookup(state.locals, bound_name);
-    if (current != LocalState::Initialized) {
-        throw DataflowError(describe_bad_state(bound_name, current));
-    }
-
-    std::string root = resolve_root_place(bound_name, state);
     bool is_mutable = param_type.is_mutable_ref;
 
-    auto persistent_it = state.borrows.find(root);
-    bool persistent_conflict =
-        persistent_it != state.borrows.end() &&
-        (is_mutable ? (persistent_it->second.mutable_borrow || persistent_it->second.shared_count > 0)
-                    : persistent_it->second.mutable_borrow);
-    if (persistent_conflict) {
-        throw DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
-                             "reference: it is already borrowed");
+    // Passing an *already-bound* local reference variable directly (`f(r)`
+    // where `r` is itself `T& r = ...;`/`const T& r = ...;`) is a
+    // reborrow, not a fresh independent borrow: `r` already holds the one
+    // live access to `root` (nothing else can coexist with it -- any
+    // other attempt to borrow `root` while `r` is alive is already
+    // rejected by apply_reference_binding/this same function's
+    // persistent-conflict check below), so temporarily re-lending that
+    // same access to a callee can't create a new conflict. Only the
+    // mutability has to be checked: a shared (`const T&`) reference can't
+    // satisfy a `T&` parameter (that would manufacture a mutable alias
+    // out of a shared one), but a mutable reference may always be lent
+    // out as either mutable or shared.
+    bool is_reborrow_of_live_reference = arg.kind == ExprKind::Identifier && state.ref_targets.contains(arg.name);
+    if (is_reborrow_of_live_reference) {
+        bool source_is_mutable = body.local_types.at(arg.name).is_mutable_ref;
+        if (is_mutable && !source_is_mutable) {
+            throw DataflowError("cannot pass '" + arg.name + "' by mutable reference: it is itself only a "
+                                                              "shared (const) reference");
+        }
+    } else {
+        auto persistent_it = state.borrows.find(root);
+        bool persistent_conflict =
+            persistent_it != state.borrows.end() &&
+            (is_mutable ? (persistent_it->second.mutable_borrow || persistent_it->second.shared_count > 0)
+                        : persistent_it->second.mutable_borrow);
+        if (persistent_conflict) {
+            throw DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
+                                 "reference: it is already borrowed");
+        }
     }
 
     auto in_call_it = in_call_borrows.find(root);
@@ -275,6 +732,32 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, const Dat
         borrow.mutable_borrow = true;
     } else {
         borrow.shared_count++;
+    }
+}
+
+void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+                           bool report_errors) {
+    auto sig_it = signatures.find(expr.name);
+    // Scratch borrow-map shared by every reference argument of *this*
+    // call only (see apply_reference_argument) -- never merged into
+    // `state`, since none of these transient borrows outlive the call.
+    BorrowMap in_call_borrows;
+    for (size_t i = 0; i < expr.args.size(); i++) {
+        const Expr& arg = *expr.args[i];
+        bool param_is_reference =
+            sig_it != signatures.end() && i < sig_it->second.param_types.size() &&
+            is_reference(sig_it->second.param_types[i]);
+        if (param_is_reference) {
+            apply_reference_argument(arg, sig_it->second.param_types[i], state, in_call_borrows, body, signatures,
+                                      report_errors);
+        } else {
+            // Parameter types aren't resolved here for anything other
+            // than reference detection above; a unique_ptr argument
+            // must be `std::move(x)` regardless of position, so
+            // std::move is simply allowed in every non-reference
+            // argument slot.
+            apply_expr(arg, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
+        }
     }
 }
 
@@ -384,6 +867,10 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                     // index value), not read as "the assignment target",
                     // so still worth walking for nested reads.
                     apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+                    if (report_errors && assignment_target_is_read_only(*expr.lhs, body, signatures)) {
+                        throw DataflowError("cannot assign to this place: it is reached through a read-only "
+                                             "(const) reference");
+                    }
                 }
                 return;
             }
@@ -391,30 +878,9 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
             return;
 
-        case ExprKind::Call: {
-            auto sig_it = signatures.find(expr.name);
-            // Scratch borrow-map shared by every reference argument of
-            // *this* call only (see apply_reference_argument) -- never
-            // merged into `state`, since none of these borrows outlive
-            // the call.
-            BorrowMap in_call_borrows;
-            for (size_t i = 0; i < expr.args.size(); i++) {
-                const Expr& arg = *expr.args[i];
-                bool param_is_reference = sig_it != signatures.end() && i < sig_it->second.size() &&
-                                           is_reference(sig_it->second[i]);
-                if (param_is_reference) {
-                    apply_reference_argument(arg, sig_it->second[i], state, in_call_borrows, body, report_errors);
-                } else {
-                    // Parameter types aren't resolved here for anything
-                    // other than reference detection above; a unique_ptr
-                    // argument must be `std::move(x)` regardless of
-                    // position, so std::move is simply allowed in every
-                    // non-reference argument slot.
-                    apply_expr(arg, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
-                }
-            }
+        case ExprKind::Call:
+            check_call_arguments(expr, state, body, signatures, report_errors);
             return;
-        }
 
         case ExprKind::Member:
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
@@ -441,10 +907,11 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
 // mir.cppm). Checks the borrowed place is currently readable and not
 // already borrowed in a conflicting way (ch05.2's alias-XOR-mutability),
 // then records the new borrow -- against the place's *root* (see
-// resolve_root_place), not necessarily `place` itself, so a chain of
-// reference-to-reference bindings is tracked precisely.
+// resolve_borrow_source_root), not necessarily `place` itself, so a
+// chain of reference-to-reference bindings (and a `.field`/`[index]`
+// projection off a plain place) is tracked precisely.
 void apply_reference_binding(const MirStatement& stmt, DataflowState& state, const Body& body,
-                              bool report_errors) {
+                              const Signatures& signatures, bool report_errors) {
     if (stmt.expr == nullptr) {
         // No initializer (`int& r;`): illegal, since unlike every other
         // scpp type, a reference has no zero/default state to fall back
@@ -457,30 +924,21 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         state.locals[stmt.local] = LocalState::Initialized;
         return;
     }
-    if (stmt.expr->kind != ExprKind::Identifier) {
-        if (report_errors) {
-            throw DataflowError("a reference ('" + stmt.local + "') can currently only bind directly to a "
-                                                                 "plain local variable (not a member, subscript, "
-                                                                 "or other expression)");
-        }
+
+    std::string root = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors,
+                                                   /*allow_call_source=*/false);
+    if (root.empty()) {
+        // Only reachable when report_errors=false and the source
+        // expression's shape isn't (yet) a supported borrow source --
+        // resolve_borrow_source_root would have thrown had report_errors
+        // been true, so this whole program is already doomed to be
+        // rejected by the upcoming reporting pass; just leave `stmt.local`
+        // itself readable so this (discarded) silent fixed-point
+        // iteration has *some* defined state to continue from.
         state.locals[stmt.local] = LocalState::Initialized;
         return;
     }
 
-    const std::string& bound_name = stmt.expr->name;
-    if (report_errors) {
-        auto type_it = body.local_types.find(bound_name);
-        if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
-            throw DataflowError("cannot bind a reference to std::unique_ptr variable '" + bound_name +
-                                 "' in this version");
-        }
-        LocalState current = lookup(state.locals, bound_name);
-        if (current != LocalState::Initialized) {
-            throw DataflowError(describe_bad_state(bound_name, current));
-        }
-    }
-
-    std::string root = resolve_root_place(bound_name, state);
     bool is_mutable = stmt.type.is_mutable_ref;
     BorrowState& borrow = state.borrows[root];
     if (report_errors) {
@@ -536,7 +994,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             return;
 
         case MirStatementKind::BindReference:
-            apply_reference_binding(stmt, state, body, report_errors);
+            apply_reference_binding(stmt, state, body, signatures, report_errors);
             return;
 
         case MirStatementKind::Assign: {
@@ -574,36 +1032,23 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             return;
 
         case MirStatementKind::ScopeExit: {
-            // If `stmt.local` is a currently-bound reference, release
-            // the borrow it holds against its root before forgetting it
-            // (mirrors codegen's scope_stack_-driven drop/removal, just
-            // for borrows instead of heap ownership). Moving or
-            // dropping a *borrowed* root while a borrow is still live is
-            // not separately checked here: it can't happen in v0.1,
-            // since a reference can only ever be bound to a *plain*
-            // place declared no later than (i.e. in the same or an
-            // enclosing scope of) the reference itself, so the
-            // reference's own ScopeExit always fires first, releasing
-            // the borrow before the root's own ScopeExit (if any) is
-            // ever reached -- and the only *movable* type (unique_ptr)
-            // can't be referenced at all yet (see codegen's
-            // validate_reference_pointee), so "move a borrowed place"
-            // can't arise either.
-            auto ref_it = state.ref_targets.find(stmt.local);
-            if (ref_it != state.ref_targets.end()) {
-                auto borrow_it = state.borrows.find(ref_it->second);
-                if (borrow_it != state.borrows.end()) {
-                    if (body.local_types.at(stmt.local).is_mutable_ref) {
-                        borrow_it->second.mutable_borrow = false;
-                    } else if (borrow_it->second.shared_count > 0) {
-                        borrow_it->second.shared_count--;
-                    }
-                    if (!borrow_it->second.mutable_borrow && borrow_it->second.shared_count == 0) {
-                        state.borrows.erase(borrow_it);
-                    }
-                }
-                state.ref_targets.erase(ref_it);
-            }
+            // Releases `stmt.local`'s borrow, in the (unusual) case it's
+            // a reference that was never read after being bound, so the
+            // liveness-driven release in check_function never got a
+            // chance to fire for it (a no-op here otherwise -- see
+            // release_reference_borrow). Moving or dropping a *borrowed*
+            // root while a borrow is still live is not separately
+            // checked here: it can't happen in v0.1, since a reference
+            // can only ever be bound to a *plain* place (or a `.field`/
+            // `[index]` projection off one) declared no later than (i.e.
+            // in the same or an enclosing scope of) the reference
+            // itself, so the borrow is always released -- at the latest
+            // at the reference's own ScopeExit -- before the root's own
+            // ScopeExit (if any) is ever reached -- and the only
+            // *movable* type (unique_ptr) can't be referenced at all yet
+            // (see codegen's validate_reference_pointee), so "move a
+            // borrowed place" can't arise either.
+            release_reference_borrow(stmt.local, state, body);
             // `stmt.local` just went out of lexical scope: forget its
             // tracked state entirely. Erasing is equivalent to setting
             // it to Bottom (lookup() treats a missing key as Bottom) and
@@ -623,6 +1068,32 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             return;
         case TerminatorKind::Return: {
             if (term.return_value == nullptr) return;
+            if (is_reference(fn.return_type)) {
+                // The elision rule (spec ch05.3) was already validated
+                // structurally once for the whole program (see
+                // resolve_elided_param_index, called from check_moves)
+                // -- signatures.at(fn.name).elided_param_index is
+                // guaranteed to have a value here. What's left to check
+                // per return statement is the actual *dangling* risk:
+                // does this specific returned expression really borrow
+                // (directly, or transitively through a chain of
+                // locals/calls) from that one parameter, or does it
+                // borrow something else -- most importantly, a purely
+                // local place, which would dangle the instant this
+                // function returns and its stack frame is popped.
+                const std::string& elided_param_name =
+                    fn.params[*signatures.at(fn.name).elided_param_index].name;
+                std::string returned_root = resolve_borrow_source_root(
+                    *term.return_value, state, body, signatures, /*report_errors=*/true, /*allow_call_source=*/true);
+                if (returned_root != elided_param_name) {
+                    throw DataflowError(
+                        "function '" + fn.name + "' returns a reference derived from '" + returned_root +
+                        "', not from its sole reference parameter '" + elided_param_name +
+                        "'; scpp v0.1 can only prove a returned reference doesn't dangle when it borrows "
+                        "(directly or transitively) from that parameter (spec ch05.3)");
+                }
+                return;
+            }
             bool return_is_unique_ptr = is_unique_ptr(fn.return_type);
             apply_expr(*term.return_value, return_is_unique_ptr, state, body, signatures, /*report_errors=*/true);
             if (return_is_unique_ptr && !produces_unique_ptr_rvalue(*term.return_value)) {
@@ -655,6 +1126,14 @@ void check_function(const Function& fn, const Signatures& signatures) {
             preds[succ].push_back(i);
         }
     }
+
+    // Precomputed once, up front: which reference locals are still live
+    // (may be used again) immediately after each statement -- see
+    // compute_reference_liveness. Consulted after every apply_statement
+    // call below (in *both* passes) to release a reference's borrow as
+    // soon as its last use has happened, rather than waiting for its
+    // ScopeExit -- the NLL upgrade from spec ch05.3.
+    std::vector<std::vector<LiveSet>> live_after = compute_reference_liveness(body, preds);
 
     DataflowState entry_state;
     for (const Param& param : fn.params) {
@@ -689,8 +1168,9 @@ void check_function(const Function& fn, const Signatures& signatures) {
         }
 
         DataflowState new_out = new_in;
-        for (const MirStatement& stmt : body.blocks[b].statements) {
-            apply_statement(stmt, new_out, body, signatures, /*report_errors=*/false);
+        for (size_t i = 0; i < body.blocks[b].statements.size(); i++) {
+            apply_statement(body.blocks[b].statements[i], new_out, body, signatures, /*report_errors=*/false);
+            release_dead_references(new_out, body, live_after[b][i]);
         }
 
         in_states[b] = new_in;
@@ -711,8 +1191,9 @@ void check_function(const Function& fn, const Signatures& signatures) {
     // once more, this time actually reporting diagnostics.
     for (size_t b = 0; b < n; b++) {
         DataflowState state = in_states[b];
-        for (const MirStatement& stmt : body.blocks[b].statements) {
-            apply_statement(stmt, state, body, signatures, /*report_errors=*/true);
+        for (size_t i = 0; i < body.blocks[b].statements.size(); i++) {
+            apply_statement(body.blocks[b].statements[i], state, body, signatures, /*report_errors=*/true);
+            release_dead_references(state, body, live_after[b][i]);
         }
         check_terminator(body.blocks[b].terminator, state, fn, body, signatures);
     }
@@ -726,12 +1207,14 @@ export namespace scpp {
 void check_moves(const Program& program) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
-        std::vector<Type> param_types;
-        param_types.reserve(fn.params.size());
+        FunctionSignature sig;
+        sig.param_types.reserve(fn.params.size());
         for (const Param& param : fn.params) {
-            param_types.push_back(param.type);
+            sig.param_types.push_back(param.type);
         }
-        signatures[fn.name] = std::move(param_types);
+        sig.return_type = fn.return_type;
+        sig.elided_param_index = resolve_elided_param_index(fn);
+        signatures[fn.name] = std::move(sig);
     }
     for (const Function& fn : program.functions) {
         check_function(fn, signatures);

@@ -1,6 +1,6 @@
 int f() {
     int a = 1;
     const int& r = a;
-    int& m = a;
-    return r;
+    a = 5;
+    return 0;
 }

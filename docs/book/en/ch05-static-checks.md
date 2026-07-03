@@ -17,22 +17,61 @@ the following properties:
   borrow), never both.
 - While an active borrow exists, the borrowed object may not be moved or
   destroyed.
+- A borrow's source can be a plain variable name, or a `.field`
+  projection (`a.b`) or subscript (`arr[i]`) off one. v0.1 treats both
+  **whole-root conservatively**: borrowing `a.b` is recorded against the
+  root `a`, and so is borrowing `a.c` -- the two are considered
+  conflicting even though the fields never actually overlap in memory.
+  This matches how Rust itself treats a dynamically-indexed array/slice
+  element (`arr[i]`/`arr[j]` conflict there too, absent an explicit split
+  API like `split_at_mut`); v0.1 just applies that same conservative rule
+  to struct fields as well, rather than Rust's field-sensitive precision
+  for structs. Workarounds: pass each field as its own **separate call
+  argument** (each such borrow begins and ends within its own call, so
+  sequential calls never overlap), or keep the two named references' own
+  live ranges (see the liveness analysis in §5.3) from overlapping.
 
 ## 5.3 Lifetime
 - A borrow must not outlive the borrowed value (**no dangling
   references**).
 - v0.1 performs **intraprocedural borrow checking only**, based on
-  NLL-style dataflow analysis (liveness-driven region inference).
+  NLL-style dataflow analysis (liveness-driven region inference): a
+  reference local's borrow is released right after its **last use**,
+  rather than only at the end of its lexical scope -- implemented via a
+  backward liveness analysis over each reference local. This is more
+  precise than releasing only at lexical scope end, and accepts more
+  legal programs (e.g. a place can be borrowed again immediately after
+  its previous borrow's last use, even before the enclosing block ends).
 - **No lifetime syntax is exposed.** Cross-function signatures use the
   following **elision defaults** (a simplified version of Rust's lifetime
   elision):
   - If a function has exactly one reference input parameter, all reference
     outputs borrow from its lifetime.
   - If there is a `this` and the function returns a reference, the output
-    borrows from `this`'s lifetime.
+    borrows from `this`'s lifetime. (v0.1 has no `class` method/`this`
+    concept yet, so this rule never actually applies -- only the one
+    above does.)
   - Any other case that cannot be inferred -> error, advising "this
     signature is not yet supported; refactor or return by value / smart
     pointer". (No explicit annotation syntax is introduced in v0.1.)
+- **Dangling check**: for every `return` statement whose declared return
+  type is a reference, the compiler resolves the returned expression
+  (a plain variable, `a.b`, `arr[i]`, or a call to another
+  reference-returning function, expanded recursively) back to its root
+  place, and requires that root to be **exactly** the one reference
+  parameter selected by the elision rule above -- otherwise it's
+  rejected. This is v0.1's concrete answer to "does this function's
+  returned reference dangle".
+- Known limitations in v0.1 (left for a later version):
+  - A reference cannot point into a `std::unique_ptr` (the language has
+    no dereference/arrow syntax yet to even name "the place a
+    `unique_ptr` points to" -- that's separate, prerequisite syntax
+    work).
+  - Calling a function that returns a reference: the result can only be
+    consumed as an **ordinary value** (auto-dereferenced, e.g.
+    `int y = get_ref(x);`); it cannot be bound to a new named reference
+    (`int& r = get_ref(x);`), nor passed onward as a reference argument
+    to another function.
 
 ## 5.4 Initialization
 - scpp has **no concept of an "uninitialized variable"**: any local or

@@ -1,0 +1,13 @@
+struct Point {
+    int x;
+    int y;
+};
+
+int f() {
+    Point p;
+    Point& whole = p;
+    int& rx = p.x;
+    whole.x = 1;
+    rx = 2;
+    return whole.x + rx;
+}

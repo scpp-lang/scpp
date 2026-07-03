@@ -1,0 +1,12 @@
+struct Point {
+    int x;
+    int y;
+};
+
+int f() {
+    Point p;
+    p.x = 1;
+    const Point& cp = p;
+    cp.x = 999;
+    return 0;
+}

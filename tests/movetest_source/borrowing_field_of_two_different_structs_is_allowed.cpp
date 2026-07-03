@@ -1,0 +1,14 @@
+struct Point {
+    int x;
+    int y;
+};
+
+int f() {
+    Point a;
+    Point b;
+    int& ra = a.x;
+    int& rb = b.y;
+    ra = 1;
+    rb = 2;
+    return ra + rb;
+}

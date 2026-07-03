@@ -3,5 +3,5 @@ int f() {
     int a = 1;
     const int& r = a;
     inc(a);
-    return r;
+    return 0;
 }

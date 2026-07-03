@@ -1,0 +1,19 @@
+struct Point {
+    int x;
+    int y;
+};
+
+int& get_x(Point& p) {
+    return p.x;
+}
+
+int main() {
+    Point p;
+    p.x = 5;
+    p.y = 6;
+    print_int(get_x(p));
+    get_x(p) = 50;
+    print_int(p.x);
+    print_int(p.y);
+    return 0;
+}

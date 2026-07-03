@@ -1,0 +1,15 @@
+struct Point {
+    int x;
+    int y;
+};
+
+const int& get_x(const Point& p) {
+    return p.x;
+}
+
+int f() {
+    Point p;
+    p.x = 1;
+    get_x(p) = 42;
+    return 0;
+}

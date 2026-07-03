@@ -111,6 +111,10 @@ private:
     };
 
     const Program* program_ = nullptr;
+    // The AST-level Function currently being lowered by define_function,
+    // consulted by StmtKind::Return to tell whether *this* function's own
+    // return type is a reference (see codegen_stmt's Return case).
+    const Function* current_function_def_ = nullptr;
     std::unique_ptr<llvm::LLVMContext> context_;
     std::unique_ptr<llvm::Module> module_;
     std::unique_ptr<llvm::IRBuilder<>> builder_;
@@ -250,18 +254,47 @@ private:
         }
     }
 
+    // Structural counterpart to movecheck's resolve_elided_param_index
+    // (spec ch05.3's elision rule): a function may only declare a
+    // Reference return type if it has *exactly* one reference-typed
+    // parameter (this language has no `this`/method-receiver concept at
+    // all yet, so that half of the rule never applies), with compatible
+    // mutability (a `const T&` parameter can't license a `T&` return --
+    // that would manufacture a mutable alias out of a shared one).
+    // Codegen doesn't need the resolved parameter itself the way
+    // movecheck does (it never traces which expression a `return`
+    // statement's value came from -- that's movecheck's per-return
+    // dangling check, which runs before codegen in the driver's
+    // pipeline; see driver.cppm), so this only has to reject a
+    // structurally-invalid signature up front.
+    void validate_reference_return_elision(const Function& fn) {
+        const Param* found = nullptr;
+        for (const Param& param : fn.params) {
+            if (param.type.kind != TypeKind::Reference) continue;
+            if (found != nullptr) {
+                throw CodegenError("function '" + fn.name +
+                                    "' returns a reference but has more than one reference parameter; scpp "
+                                    "v0.1 can only infer a returned reference's lifetime when there is exactly "
+                                    "one (spec ch05.3)");
+            }
+            found = &param;
+        }
+        if (found == nullptr) {
+            throw CodegenError("function '" + fn.name +
+                                "' returns a reference but has no reference parameter to infer its lifetime "
+                                "from (spec ch05.3)");
+        }
+        if (fn.return_type.is_mutable_ref && !found->type.is_mutable_ref) {
+            throw CodegenError("function '" + fn.name +
+                                "' returns a mutable reference ('T&') but its sole reference parameter '" +
+                                found->name + "' is a shared reference ('const T&')");
+        }
+    }
+
     void declare_function(const Function& fn) {
         if (fn.return_type.kind == TypeKind::Reference) {
-            // Returning a reference requires tracking whether it dangles
-            // once the callee returns -- real lifetime/dangling analysis,
-            // which spec ch05.3 explicitly defers to M5 (NLL-style
-            // lifetime inference + elision rules). Rejecting it here
-            // keeps v0.1's borrow checking honest: every reference this
-            // version can create is provably scoped to the current
-            // function, since it can never escape through a return.
-            throw CodegenError("function '" + fn.name +
-                                "' returns a reference, which is not yet supported (requires lifetime "
-                                "inference; deferred to a later version, see spec ch05.3)");
+            validate_reference_return_elision(fn);
+            validate_reference_pointee(*fn.return_type.pointee);
         }
         std::vector<llvm::Type*> param_types;
         param_types.reserve(fn.params.size());
@@ -282,6 +315,7 @@ private:
             throw CodegenError("function '" + fn.name + "' was not declared before definition");
         }
 
+        current_function_def_ = &fn;
         llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
         builder_->SetInsertPoint(entry);
 
@@ -372,7 +406,21 @@ private:
                 // unique_ptr local below, an already-moved-from one is
                 // safely a no-op (free(NULL) is well-defined) while a
                 // still-owning one is correctly released.
-                llvm::Value* value = stmt.expr ? codegen_expr(*stmt.expr) : nullptr;
+                //
+                // When *this* function's own return type is a reference,
+                // the returned expression is an addressable place
+                // (movecheck's dangling check -- see
+                // resolve_borrow_source_root -- only allows an
+                // Identifier/Member/Subscript chain here), and returning
+                // it means returning that address, not its current value
+                // -- codegen_lvalue, not codegen_expr (which would
+                // auto-dereference it, same as any other read).
+                llvm::Value* value = nullptr;
+                if (stmt.expr) {
+                    value = current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
+                                ? codegen_lvalue(*stmt.expr).ptr
+                                : codegen_expr(*stmt.expr);
+                }
                 free_unique_ptr_locals();
                 if (value != nullptr) {
                     builder_->CreateRet(value);
@@ -460,6 +508,40 @@ private:
         }
     }
 
+    // Builds and emits the actual `call` instruction for `expr` (a Call
+    // expression naming a real, non-builtin function -- callers handle
+    // `print_int`/`print_bool` themselves before reaching here), binding
+    // each reference-typed argument to its address rather than its
+    // value. Returns the raw LLVM result: if the callee returns a
+    // reference, that result is still just the *address* at this point
+    // (see to_llvm_type's Reference case) -- it's up to the caller to
+    // decide whether to dereference it (codegen_expr, for a value
+    // context) or hand the address on as-is (codegen_lvalue, for
+    // resolve_borrow_source_root's allow_call_source case -- see its
+    // comment in movecheck.cppm).
+    llvm::Value* codegen_call(const Expr& expr) {
+        llvm::Function* callee = module_->getFunction(expr.name);
+        if (callee == nullptr) {
+            throw CodegenError("call to unknown function '" + expr.name + "'");
+        }
+        const Function* callee_def = find_function_def(expr.name);
+        std::vector<llvm::Value*> args;
+        args.reserve(expr.args.size());
+        for (size_t i = 0; i < expr.args.size(); i++) {
+            bool param_is_reference = callee_def != nullptr && i < callee_def->params.size() &&
+                                       callee_def->params[i].type.kind == TypeKind::Reference;
+            if (param_is_reference) {
+                // Bind the reference parameter to the argument's address
+                // rather than passing its value, exactly like a local
+                // reference's own VarDecl.
+                args.push_back(codegen_lvalue(*expr.args[i]).ptr);
+            } else {
+                args.push_back(codegen_expr(*expr.args[i]));
+            }
+        }
+        return builder_->CreateCall(callee, args);
+    }
+
     llvm::Value* codegen_expr(const Expr& expr) {
         switch (expr.kind) {
             case ExprKind::IntegerLiteral:
@@ -488,26 +570,25 @@ private:
                 if (expr.name == "print_int" || expr.name == "print_bool") {
                     return codegen_builtin_print(expr);
                 }
-                llvm::Function* callee = module_->getFunction(expr.name);
-                if (callee == nullptr) {
-                    throw CodegenError("call to unknown function '" + expr.name + "'");
-                }
+                llvm::Value* result = codegen_call(expr);
                 const Function* callee_def = find_function_def(expr.name);
-                std::vector<llvm::Value*> args;
-                args.reserve(expr.args.size());
-                for (size_t i = 0; i < expr.args.size(); i++) {
-                    bool param_is_reference = callee_def != nullptr && i < callee_def->params.size() &&
-                                               callee_def->params[i].type.kind == TypeKind::Reference;
-                    if (param_is_reference) {
-                        // Bind the reference parameter to the argument's
-                        // address rather than passing its value, exactly
-                        // like a local reference's own VarDecl.
-                        args.push_back(codegen_lvalue(*expr.args[i]).ptr);
-                    } else {
-                        args.push_back(codegen_expr(*expr.args[i]));
-                    }
+                if (callee_def != nullptr && callee_def->return_type.kind == TypeKind::Reference) {
+                    // The callee returns a reference -- an address,
+                    // lowered identically to a pointer (see
+                    // to_llvm_type) -- so using the call's result as a
+                    // *value* here means auto-dereferencing it, exactly
+                    // like a reference local's own read (see
+                    // codegen_lvalue's Identifier case). Movecheck
+                    // doesn't yet support binding this result to a new
+                    // named reference or passing it onward as a
+                    // reference argument (see resolve_borrow_source_root's
+                    // allow_call_source), so this is the only context a
+                    // reference-returning call's result can appear in as
+                    // a value.
+                    return builder_->CreateLoad(to_llvm_type(*callee_def->return_type.pointee), result,
+                                                 "derefcalltmp");
                 }
-                return builder_->CreateCall(callee, args);
+                return result;
             }
 
             case ExprKind::Move: {
@@ -688,6 +769,23 @@ private:
                 llvm::Value* elem_ptr =
                     builder_->CreateGEP(to_llvm_type(base.type), base.ptr, {zero, index}, "elemtmp");
                 return LValue{elem_ptr, *base.type.element};
+            }
+
+            case ExprKind::Call: {
+                // Only reachable for a `return` statement whose own
+                // function returns a reference and whose value is
+                // itself a call to another reference-returning function
+                // (movecheck's allow_call_source is only ever true for
+                // that one case -- see resolve_borrow_source_root and
+                // this file's Return case above). codegen_call's raw
+                // result is already the referent's address in that
+                // case -- no load needed, unlike codegen_expr's own
+                // Call case.
+                const Function* callee_def = find_function_def(expr.name);
+                if (callee_def == nullptr || callee_def->return_type.kind != TypeKind::Reference) {
+                    throw CodegenError("expression is not assignable");
+                }
+                return LValue{codegen_call(expr), *callee_def->return_type.pointee};
             }
 
             default:

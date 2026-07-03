@@ -9,9 +9,14 @@
   a hint); implement **move-out checking** (the simplest sound check).
 - **M3**: Build MIR + initialization checking + drop insertion.
 - **M4**: Borrow & alias-XOR-mutability checking (intraprocedural).
-  **(current stage)**
+  **(done)**
 - **M5**: NLL-style lifetime inference + dangling-reference checking
-  (intraprocedural) + elision rules.
+  (intraprocedural) + elision rules. **(Phase 1 done: liveness-driven
+  borrow release, the elision rule + dangling check for
+  reference-returning functions, and borrowing `a.b`/`arr[i]` -- see
+  [§5.2](ch05-static-checks.md)/[§5.3](ch05-static-checks.md). Deferred:
+  references into `std::unique_ptr`, and binding/forwarding a call's
+  returned reference as a new named reference or reference argument.)**
 - **M6**: `vector`/`span`/`string_view` support + bounds-check policy +
   diagnostic quality.
 - **M7+**: Generics/templates, traits/concepts, cross-function lifetimes,
