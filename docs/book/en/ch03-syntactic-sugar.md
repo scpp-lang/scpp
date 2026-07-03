@@ -10,6 +10,8 @@ semantics. In an unsafe context they keep their ordinary C++ meaning.
 | `const T&` | Shared borrow `&T`: multiple may coexist, but mutually exclusive with any `&mut`. |
 | `T&&` (parameter) | Passed by move (ownership transfer). |
 | `std::unique_ptr<T>` | Unique ownership. Move semantics fit naturally. |
+| `*p` / `p->x` (`p` a `std::unique_ptr<T>`) | Safe dereference/member access, yielding an lvalue for the pointee. `p` itself still obeys alias XOR mutability: a borrow of `*p` is recorded against `p`, so moving (`std::move(p)`) or reassigning `p` while that borrow is alive is rejected (it would otherwise dangle/use-after-free). |
+| `*p` (`p` a raw pointer `T*`) | Requires `unsafe { }` (v0.1 hasn't implemented `unsafe` blocks yet, so this isn't usable at all right now). |
 | `std::shared_ptr<T>` | Shared ownership (refcounted). Allowed in safe, but aliasing follows interior-mutability rules (refined in v0.2). |
 | `std::span<T>` / `std::string_view` | Borrowed views with a lifetime; checked for dangling. |
 | local variable `T x;` | Owns its value; dropped (destroyed) at end of scope. |

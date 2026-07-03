@@ -558,6 +558,14 @@ private:
             }
 
             case ExprKind::Unary: {
+                if (expr.unary_op == UnaryOp::Deref) {
+                    // Same lvalue-then-load pattern as Identifier/Member/
+                    // Subscript above: codegen_lvalue resolves *what*
+                    // `*p` addresses (see its own Unary case), this just
+                    // reads the value stored there.
+                    LValue lv = codegen_lvalue(expr);
+                    return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
+                }
                 llvm::Value* operand = codegen_expr(*expr.lhs);
                 if (expr.unary_op == UnaryOp::Neg) return builder_->CreateNeg(operand, "negtmp");
                 return builder_->CreateNot(operand, "nottmp");
@@ -772,20 +780,48 @@ private:
             }
 
             case ExprKind::Call: {
-                // Only reachable for a `return` statement whose own
-                // function returns a reference and whose value is
-                // itself a call to another reference-returning function
-                // (movecheck's allow_call_source is only ever true for
-                // that one case -- see resolve_borrow_source_root and
-                // this file's Return case above). codegen_call's raw
-                // result is already the referent's address in that
-                // case -- no load needed, unlike codegen_expr's own
-                // Call case.
+                // Reachable whenever a call to a reference-returning
+                // function is itself used as a reference-binding source
+                // (`T& r = f(x);`), a reference argument (`g(f(x))`), or
+                // forwarded in a `return` -- see
+                // resolve_borrow_source_root in movecheck.cppm.
+                // codegen_call's raw result is already the referent's
+                // address in that case -- no load needed, unlike
+                // codegen_expr's own Call case.
                 const Function* callee_def = find_function_def(expr.name);
                 if (callee_def == nullptr || callee_def->return_type.kind != TypeKind::Reference) {
                     throw CodegenError("expression is not assignable");
                 }
                 return LValue{codegen_call(expr), *callee_def->return_type.pointee};
+            }
+
+            case ExprKind::Unary: {
+                // Only `*p` (Deref) is addressable; Neg/Not produce a
+                // plain value with no backing storage.
+                if (expr.unary_op != UnaryOp::Deref) {
+                    throw CodegenError("expression is not assignable");
+                }
+                LValue operand = codegen_lvalue(*expr.lhs);
+                if (operand.type.kind != TypeKind::UniquePtr) {
+                    // Raw pointer dereference requires unsafe {}, which
+                    // doesn't exist yet (see spec ch02/ch05.5); a
+                    // reference operand can't reach here at all
+                    // (codegen_lvalue's own Identifier case already
+                    // auto-dereferences a reference-typed local, so `*r`
+                    // where `r` is `T&` would already have `r` resolved
+                    // to its referent by the time this runs).
+                    throw CodegenError("dereference ('*') is only supported for std::unique_ptr in this "
+                                        "version (raw pointer dereference requires unsafe {}, which isn't "
+                                        "implemented yet)");
+                }
+                // A unique_ptr's own storage holds the pointer *value*
+                // (see to_llvm_type's UniquePtr case); dereferencing
+                // means loading that value and using it as the new base
+                // address, exactly like a reference's own auto-deref
+                // above.
+                llvm::Value* pointee_ptr =
+                    builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), operand.ptr, "deref");
+                return LValue{pointee_ptr, *operand.type.pointee};
             }
 
             default:

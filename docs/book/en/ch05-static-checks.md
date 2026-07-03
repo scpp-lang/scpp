@@ -56,22 +56,26 @@ the following properties:
     pointer". (No explicit annotation syntax is introduced in v0.1.)
 - **Dangling check**: for every `return` statement whose declared return
   type is a reference, the compiler resolves the returned expression
-  (a plain variable, `a.b`, `arr[i]`, or a call to another
-  reference-returning function, expanded recursively) back to its root
-  place, and requires that root to be **exactly** the one reference
-  parameter selected by the elision rule above -- otherwise it's
-  rejected. This is v0.1's concrete answer to "does this function's
-  returned reference dangle".
-- Known limitations in v0.1 (left for a later version):
-  - A reference cannot point into a `std::unique_ptr` (the language has
-    no dereference/arrow syntax yet to even name "the place a
-    `unique_ptr` points to" -- that's separate, prerequisite syntax
-    work).
-  - Calling a function that returns a reference: the result can only be
-    consumed as an **ordinary value** (auto-dereferenced, e.g.
-    `int y = get_ref(x);`); it cannot be bound to a new named reference
-    (`int& r = get_ref(x);`), nor passed onward as a reference argument
-    to another function.
+  (a plain variable, `a.b`, `arr[i]`, `*p`/`p->x` where `p` is a
+  `std::unique_ptr<T>`, or a call to another reference-returning
+  function, expanded recursively) back to its root place, and requires
+  that root to be **exactly** the one reference parameter selected by
+  the elision rule above -- otherwise it's rejected. This is v0.1's
+  concrete answer to "does this function's returned reference dangle".
+- A reference can point into what a `std::unique_ptr` owns
+  (`int& r = *p;` / `int& r = p->field;` -- see ch03's `*`/`->` sugar):
+  the borrow is recorded against `p` itself, so moving (`std::move(p)`)
+  or reassigning `p` while that borrow is alive is rejected (it would
+  otherwise dangle / use-after-free). Dereferencing a raw pointer `T*`
+  still requires `unsafe { }`, which v0.1 hasn't implemented yet, so
+  that one is left for a later version.
+- Calling a function that returns a reference: the result can be
+  consumed as an ordinary value (auto-dereferenced,
+  `int y = get_ref(x);`), bound to a new named reference
+  (`int& r = get_ref(x);`), or passed onward as a reference argument to
+  another function (`g(get_ref(x));`) -- movecheck resolves the result
+  back through the call chain to its real root place, subject to the
+  exact same alias-XOR-mutability checks as a plain variable borrow.
 
 ## 5.4 Initialization
 - scpp has **no concept of an "uninitialized variable"**: any local or

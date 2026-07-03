@@ -75,6 +75,10 @@ enum class BinaryOp {
 enum class UnaryOp {
     Neg,
     Not,
+    Deref, // `*p` -- p must be std::unique_ptr<T> in this version (raw
+           // pointer/reference dereference isn't supported: the former
+           // needs unsafe {}, which doesn't exist yet; the latter makes
+           // no sense, a reference already *is* its referent).
 };
 
 // A single expression node. Only the fields relevant to `kind` are populated;

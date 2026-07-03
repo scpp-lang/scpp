@@ -123,6 +123,48 @@ void test_unary_and_call() {
            "unary_and_call: args should be 1 and 2");
 }
 
+void test_dereference_expression() {
+    scpp::Program program = scpp::parse("int f() { return *p; }");
+    const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Unary && expr.unary_op == scpp::UnaryOp::Deref,
+           "dereference_expression: top-level should be unary Deref");
+    expect(expr.lhs->kind == scpp::ExprKind::Identifier && expr.lhs->name == "p",
+           "dereference_expression: operand should be identifier 'p'");
+}
+
+void test_arrow_desugars_to_member_of_deref() {
+    // `p->x` is sugar for `(*p).x`, same as real C++ -- see parse_postfix.
+    scpp::Program program = scpp::parse("int f() { return p->x; }");
+    const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Member && expr.name == "x",
+           "arrow_desugars_to_member_of_deref: top-level should be Member 'x'");
+    expect(expr.lhs->kind == scpp::ExprKind::Unary && expr.lhs->unary_op == scpp::UnaryOp::Deref,
+           "arrow_desugars_to_member_of_deref: base should be unary Deref");
+    expect(expr.lhs->lhs->kind == scpp::ExprKind::Identifier && expr.lhs->lhs->name == "p",
+           "arrow_desugars_to_member_of_deref: deref operand should be identifier 'p'");
+}
+
+void test_chained_arrow_and_dot() {
+    // `p->x.y` chains a `->` (deref+member) followed by a plain `.`.
+    scpp::Program program = scpp::parse("int f() { return p->x.y; }");
+    const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Member && expr.name == "y",
+           "chained_arrow_and_dot: outer should be Member 'y'");
+    expect(expr.lhs->kind == scpp::ExprKind::Member && expr.lhs->name == "x",
+           "chained_arrow_and_dot: middle should be Member 'x'");
+    expect(expr.lhs->lhs->kind == scpp::ExprKind::Unary && expr.lhs->lhs->unary_op == scpp::UnaryOp::Deref,
+           "chained_arrow_and_dot: inner should be unary Deref");
+}
+
+void test_multiplication_is_not_confused_with_dereference() {
+    // `a * b` (binary multiply) must stay distinct from a leading `*b`
+    // (unary deref) -- see parse_unary's comment.
+    scpp::Program program = scpp::parse("int f() { return a * b; }");
+    const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Binary && expr.binary_op == scpp::BinaryOp::Mul,
+           "multiplication_is_not_confused_with_dereference: should be Binary Mul, not Unary Deref");
+}
+
 void test_parenthesized_expression() {
     // (1 + 2) * 3 should parse with the addition grouped first.
     scpp::Program program = scpp::parse("int f() { return (1 + 2) * 3; }");
@@ -367,6 +409,10 @@ int main() {
     test_while_loop();
     test_operator_precedence();
     test_unary_and_call();
+    test_dereference_expression();
+    test_arrow_desugars_to_member_of_deref();
+    test_chained_arrow_and_dot();
+    test_multiplication_is_not_confused_with_dereference();
     test_parenthesized_expression();
     test_parse_error_on_missing_semicolon();
     test_struct_declaration();

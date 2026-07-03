@@ -433,11 +433,24 @@ private:
             node->lhs = parse_unary();
             return node;
         }
+        if (match(TokenKind::Star)) {
+            // `*p` (dereference) -- unambiguous with binary `*`
+            // (multiplication) since a prefix operator only ever
+            // appears where a new operand is expected, never between
+            // two already-parsed operands.
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Unary;
+            node->unary_op = UnaryOp::Deref;
+            node->lhs = parse_unary();
+            return node;
+        }
         return parse_postfix(parse_primary());
     }
 
-    // Applies trailing `.field` (Member) and `[index]` (Subscript)
-    // operators, e.g. `p.x`, `arr[i]`, `p.inner.x`, `arr[i].x`.
+    // Applies trailing `.field` (Member), `->field` (Member off a
+    // dereference -- sugar for `(*p).field`, same as real C++), and
+    // `[index]` (Subscript) operators, e.g. `p.x`, `arr[i]`, `p.inner.x`,
+    // `arr[i].x`, `p->x`.
     ExprPtr parse_postfix(ExprPtr expr) {
         for (;;) {
             if (match(TokenKind::Dot)) {
@@ -446,6 +459,17 @@ private:
                 node->kind = ExprKind::Member;
                 node->name = field;
                 node->lhs = std::move(expr);
+                expr = std::move(node);
+            } else if (match(TokenKind::Arrow)) {
+                std::string field = std::string(expect(TokenKind::Identifier, "field name").text);
+                auto deref = std::make_unique<Expr>();
+                deref->kind = ExprKind::Unary;
+                deref->unary_op = UnaryOp::Deref;
+                deref->lhs = std::move(expr);
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Member;
+                node->name = field;
+                node->lhs = std::move(deref);
                 expr = std::move(node);
             } else if (match(TokenKind::LBracket)) {
                 ExprPtr index = parse_expr();

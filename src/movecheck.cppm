@@ -258,6 +258,45 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     }
 }
 
+// Finds the root place to check for an *outstanding borrow* when
+// assigning through `expr` (used as an assignment target -- see
+// apply_expr's Binary/Assign case), or nullopt if no such check is
+// needed. Two different cases share the same `.field`/`[index]` chain
+// shape, and must be told apart:
+//   - `a.x = 1;` where `a` is a *plain place* (not itself a reference):
+//     this writes directly to a's storage, so it must be rejected if
+//     `a` currently has *any* outstanding borrow (mutable or shared) --
+//     exactly like plain `a = 1;` already is (see apply_statement's
+//     Assign case) -- since a live borrow (of *any* field, under this
+//     version's whole-root conservatism, spec ch05.2) assumes the data
+//     won't change underneath it. Returns `a` in this case.
+//   - `r.x = 1;` where `r` is itself a reference (`T& r = ...;`): this
+//     writes *through* r, and holding a live *mutable* r is already the
+//     license to do so (checked separately by
+//     assignment_target_is_read_only) -- r's own root necessarily shows
+//     a borrow (r's own), which would cause a false rejection if
+//     checked here too, so this case returns nullopt (no additional
+//     check).
+// A Call target (spec ch05.3's reference-returning functions) is
+// likewise nullopt: its own mutability is checked by
+// assignment_target_is_read_only, and there is no lasting root of its
+// own left to re-check (its argument's borrow was already transient and
+// released by the time the call returned).
+[[nodiscard]] std::optional<std::string> direct_write_root(const Expr& expr, const Body& body) {
+    switch (expr.kind) {
+        case ExprKind::Identifier: {
+            auto it = body.local_types.find(expr.name);
+            if (it != body.local_types.end() && is_reference(it->second)) return std::nullopt;
+            return expr.name;
+        }
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            return direct_write_root(*expr.lhs, body);
+        default:
+            return std::nullopt;
+    }
+}
+
 // The only expressions allowed to produce a std::unique_ptr rvalue:
 // moving an existing one out, or freshly heap-allocating one via
 // std::make_unique (scpp has no `new` expression at all -- make_unique is
@@ -270,6 +309,49 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
     auto it = state.find(name);
     return it == state.end() ? LocalState::Bottom : it->second;
+}
+
+// Validates that `name` currently names a readable std::unique_ptr --
+// the only thing `*p`/`p->x` (UnaryOp::Deref) supports dereferencing in
+// this version (spec ch02/ch05.5: raw pointer dereference needs
+// `unsafe {}`, which doesn't exist yet). Shared by apply_deref (reading
+// through `*p`) and resolve_borrow_source_root's Deref case (borrowing
+// through `*p`) so both apply the exact same checks.
+void validate_unique_ptr_deref_operand(const std::string& name, const DataflowState& state, const Body& body) {
+    auto type_it = body.local_types.find(name);
+    if (type_it == body.local_types.end() || !is_unique_ptr(type_it->second)) {
+        throw DataflowError("cannot dereference ('*') '" + name +
+                             "': only std::unique_ptr is supported in this version (raw pointer dereference "
+                             "requires unsafe {}, not yet implemented)");
+    }
+    LocalState current = lookup(state.locals, name);
+    if (current != LocalState::Initialized) {
+        throw DataflowError(describe_bad_state(name, current));
+    }
+}
+
+// Handles a `*p` (UnaryOp::Deref) expression used as a plain read (not
+// as a borrow source -- see resolve_borrow_source_root's own Deref case
+// for that). Reading *through* a unique_ptr this way does *not* require
+// std::move -- unlike reading the unique_ptr identifier `p` directly,
+// which always does (spec ch05.1) -- since dereferencing reads the
+// pointee's value without disturbing p's own ownership, exactly like
+// reading a struct field doesn't move the struct that owns it.
+void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, bool report_errors) {
+    if (expr.lhs->kind != ExprKind::Identifier) {
+        if (report_errors) {
+            throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr "
+                                 "variable (not a member, subscript, or other expression)");
+        }
+        return;
+    }
+    if (!report_errors) return; // purely diagnostic: doesn't move p or change any tracked state
+    const std::string& name = expr.lhs->name;
+    validate_unique_ptr_deref_operand(name, state, body);
+    auto borrow_it = state.borrows.find(name);
+    if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
+        throw DataflowError("cannot use '" + name + "' while it is mutably borrowed");
+    }
 }
 
 // Resolves `name` to the root place its borrow-tracking should apply to.
@@ -553,22 +635,12 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // Resolves the root place that `expr` would be borrowing from if used as
 // a reference-binding (`T& r = expr;`) or reference-argument (`f(expr)`
 // where the parameter is a reference) source. Supports a plain local
-// variable, or a chain of `.field`/`[index]` projections off one --
+// variable, a chain of `.field`/`[index]` projections off one --
 // root-resolved to the *outermost* variable in the chain (see the
-// whole-root conservatism note below).
-//
-// `allow_call_source` additionally permits (and, when true, is passed
-// through unchanged into every recursive call, so a chain is followed
-// end to end) a call to a function that itself returns a reference,
-// resolved transitively through its own elided parameter (spec ch05.3).
-// This is only ever passed true from check_terminator's Return case --
-// v0.1 can prove a *returned* reference doesn't dangle this way, but
-// deliberately doesn't yet support binding a call's returned reference
-// to a new named local reference, or passing it onward as a reference
-// argument (both callers below always pass false): unlike a return,
-// neither has an elided parameter of its own to fall back on if the
-// chain needs to keep going, and working out exactly when that's still
-// sound is left for a follow-up.
+// whole-root conservatism note below) -- or a call to a function that
+// itself returns a reference, resolved transitively through its own
+// elided parameter (spec ch05.3), so a chain of reference-returning
+// calls is followed all the way back to a real place.
 //
 // v0.1 deliberately does *not* do field-sensitive aliasing: borrowing
 // `a.x` and `a.y` are both recorded against the *same* root `a`, so they
@@ -584,8 +656,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // never overlap), or keep the two named reference locals' own live
 // ranges (shortened by the liveness analysis below) from overlapping.
 [[nodiscard]] std::string resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
-                                                       const Signatures& signatures, bool report_errors,
-                                                       bool allow_call_source) {
+                                                       const Signatures& signatures, bool report_errors) {
     switch (expr.kind) {
         case ExprKind::Identifier: {
             const std::string& bound_name = expr.name;
@@ -606,7 +677,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         case ExprKind::Member:
             // Whole-root conservative (see above): a field projection
             // resolves to the same root as its own base.
-            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors, allow_call_source);
+            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
         case ExprKind::Subscript:
             // The index is a genuine value-producing sub-expression (it
@@ -614,20 +685,41 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // any other read; the array base contributes the (whole-)
             // root, same as Member above.
             apply_expr(*expr.rhs, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
-            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors, allow_call_source);
+            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+
+        case ExprKind::Unary: {
+            // `*p`/`p->x` (only a plain unique_ptr local is supported --
+            // see validate_unique_ptr_deref_operand): the root is `p`
+            // itself, *not* p's pointee, so that moving or reassigning
+            // `p` while a reference into `*p` is alive is rejected by
+            // the exact same borrow-conflict checks that already guard
+            // every other root (apply_statement's Assign case, and the
+            // Move case's own borrow check above) -- freeing p's
+            // allocation out from under a live reference would
+            // otherwise be a use-after-free.
+            if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) {
+                if (report_errors) {
+                    throw DataflowError("a reference can currently only borrow a plain local variable, a "
+                                         "field of one ('a.b'), an array element of one ('arr[i]'), a "
+                                         "dereferenced std::unique_ptr local ('*p'/'p->x'), or the result of "
+                                         "a call to a reference-returning function -- not an arbitrary "
+                                         "expression");
+                }
+                return "";
+            }
+            const std::string& name = expr.lhs->name;
+            if (report_errors) validate_unique_ptr_deref_operand(name, state, body);
+            return name;
+        }
 
         case ExprKind::Call: {
             auto sig_it = signatures.find(expr.name);
             bool returns_reference = sig_it != signatures.end() && sig_it->second.elided_param_index.has_value();
-            if (!allow_call_source || !returns_reference) {
+            if (!returns_reference) {
                 if (report_errors) {
-                    throw DataflowError(
-                        "cannot borrow the result of calling '" + expr.name +
-                        "': " + (returns_reference
-                                     ? "binding a call's returned reference to a new reference isn't supported "
-                                       "yet in this version -- assign it to a plain (non-reference) variable "
-                                       "instead"
-                                     : "it doesn't return a reference with an inferrable lifetime (spec ch05.3)"));
+                    throw DataflowError("cannot borrow the result of calling '" + expr.name +
+                                         "': it doesn't return a reference with an inferrable lifetime (spec "
+                                         "ch05.3)");
                 }
                 // Still check the arguments themselves so a genuinely
                 // invalid call (wrong callee, bad arguments) is still
@@ -643,15 +735,15 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // same way as any other borrow source (recursively, so a
             // chain of reference-returning calls is followed all the
             // way back to a real place).
-            return resolve_borrow_source_root(*expr.args[elided_index], state, body, signatures, report_errors,
-                                               allow_call_source);
+            return resolve_borrow_source_root(*expr.args[elided_index], state, body, signatures, report_errors);
         }
 
         default:
             if (report_errors) {
                 throw DataflowError("a reference can currently only borrow a plain local variable, a field of "
-                                     "one ('a.b'), an array element of one ('arr[i]'), or the result of a call "
-                                     "to a reference-returning function -- not an arbitrary expression");
+                                     "one ('a.b'), an array element of one ('arr[i]'), a dereferenced "
+                                     "std::unique_ptr local ('*p'/'p->x'), or the result of a call to a "
+                                     "reference-returning function -- not an arbitrary expression");
             }
             return "";
     }
@@ -680,8 +772,7 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     // diagnostic (a call argument's borrow never outlives the call, so
     // there's nothing else here for a later statement's fixed-point
     // computation to observe).
-    std::string root = resolve_borrow_source_root(arg, state, body, signatures, report_errors,
-                                                   /*allow_call_source=*/false);
+    std::string root = resolve_borrow_source_root(arg, state, body, signatures, report_errors);
     if (!report_errors) return;
 
     bool is_mutable = param_type.is_mutable_ref;
@@ -832,6 +923,13 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             if (report_errors && current != LocalState::Initialized) {
                 throw DataflowError(describe_bad_state(name, current));
             }
+            if (report_errors) {
+                auto borrow_it = state.borrows.find(name);
+                if (borrow_it != state.borrows.end() &&
+                    (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                    throw DataflowError("cannot move '" + name + "' while it is borrowed");
+                }
+            }
             state.locals[name] = LocalState::MovedOut;
             if (report_errors && !is_unique_ptr_rvalue_context) {
                 throw DataflowError("std::move(" + name + ") must be used to initialize or assign into a "
@@ -841,6 +939,10 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
         }
 
         case ExprKind::Unary:
+            if (expr.unary_op == UnaryOp::Deref) {
+                apply_deref(expr, state, body, report_errors);
+                return;
+            }
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             return;
 
@@ -867,9 +969,19 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                     // index value), not read as "the assignment target",
                     // so still worth walking for nested reads.
                     apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-                    if (report_errors && assignment_target_is_read_only(*expr.lhs, body, signatures)) {
-                        throw DataflowError("cannot assign to this place: it is reached through a read-only "
-                                             "(const) reference");
+                    if (report_errors) {
+                        if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
+                            throw DataflowError("cannot assign to this place: it is reached through a "
+                                                 "read-only (const) reference");
+                        }
+                        if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
+                            auto borrow_it = state.borrows.find(*root);
+                            if (borrow_it != state.borrows.end() &&
+                                (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                                throw DataflowError("cannot assign to this place: '" + *root +
+                                                     "' is currently borrowed");
+                            }
+                        }
                     }
                 }
                 return;
@@ -925,8 +1037,7 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         return;
     }
 
-    std::string root = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors,
-                                                   /*allow_call_source=*/false);
+    std::string root = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors);
     if (root.empty()) {
         // Only reachable when report_errors=false and the source
         // expression's shape isn't (yet) a supported borrow source --
@@ -1083,8 +1194,8 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 // function returns and its stack frame is popped.
                 const std::string& elided_param_name =
                     fn.params[*signatures.at(fn.name).elided_param_index].name;
-                std::string returned_root = resolve_borrow_source_root(
-                    *term.return_value, state, body, signatures, /*report_errors=*/true, /*allow_call_source=*/true);
+                std::string returned_root =
+                    resolve_borrow_source_root(*term.return_value, state, body, signatures, /*report_errors=*/true);
                 if (returned_root != elided_param_name) {
                     throw DataflowError(
                         "function '" + fn.name + "' returns a reference derived from '" + returned_root +

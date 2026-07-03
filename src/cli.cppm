@@ -44,6 +44,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Comma: return "Comma";
         case scpp::TokenKind::Dot: return "Dot";
         case scpp::TokenKind::ColonColon: return "ColonColon";
+        case scpp::TokenKind::Arrow: return "Arrow";
         case scpp::TokenKind::Plus: return "Plus";
         case scpp::TokenKind::Minus: return "Minus";
         case scpp::TokenKind::Star: return "Star";

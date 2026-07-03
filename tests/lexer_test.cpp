@@ -107,6 +107,20 @@ void test_operators() {
         "operators");
 }
 
+void test_arrow_operator() {
+    expect_kinds(
+        "p->x - 1",
+        {
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Arrow,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Minus,
+            scpp::TokenKind::IntegerLiteral,
+            scpp::TokenKind::EndOfFile,
+        },
+        "arrow_operator");
+}
+
 void test_comments_are_skipped() {
     expect_kinds(
         "// line comment\n"
@@ -180,6 +194,7 @@ int main() {
     test_identifier_text();
     test_integer_literal_text();
     test_operators();
+    test_arrow_operator();
     test_comments_are_skipped();
     test_line_and_column_tracking();
     test_unknown_character();

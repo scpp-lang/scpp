@@ -40,6 +40,7 @@ enum class TokenKind {
     Comma,
     Dot,
     ColonColon,
+    Arrow,
 
     // operators
     Plus,
@@ -187,7 +188,9 @@ private:
             case ',': return make_token(TokenKind::Comma, start, start_line, start_col);
             case '.': return make_token(TokenKind::Dot, start, start_line, start_col);
             case '+': return make_token(TokenKind::Plus, start, start_line, start_col);
-            case '-': return make_token(TokenKind::Minus, start, start_line, start_col);
+            case '-':
+                if (peek() == '>') { advance(); return make_token(TokenKind::Arrow, start, start_line, start_col); }
+                return make_token(TokenKind::Minus, start, start_line, start_col);
             case '*': return make_token(TokenKind::Star, start, start_line, start_col);
             case '/': return make_token(TokenKind::Slash, start, start_line, start_col);
             case '!':

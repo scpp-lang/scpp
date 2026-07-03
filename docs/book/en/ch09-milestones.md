@@ -11,12 +11,14 @@
 - **M4**: Borrow & alias-XOR-mutability checking (intraprocedural).
   **(done)**
 - **M5**: NLL-style lifetime inference + dangling-reference checking
-  (intraprocedural) + elision rules. **(Phase 1 done: liveness-driven
-  borrow release, the elision rule + dangling check for
-  reference-returning functions, and borrowing `a.b`/`arr[i]` -- see
-  [§5.2](ch05-static-checks.md)/[§5.3](ch05-static-checks.md). Deferred:
-  references into `std::unique_ptr`, and binding/forwarding a call's
-  returned reference as a new named reference or reference argument.)**
+  (intraprocedural) + elision rules. **(Done: liveness-driven borrow
+  release, the elision rule + dangling check for reference-returning
+  functions, borrowing `a.b`/`arr[i]`, references into what a
+  `std::unique_ptr` owns (`*p`/`p->x`), and binding/forwarding a
+  reference-returning call's result to a new reference or reference
+  argument -- see [§5.2](ch05-static-checks.md)/
+  [§5.3](ch05-static-checks.md). Raw pointer (`T*`) dereference is left
+  for whenever `unsafe { }` blocks are implemented.)**
 - **M6**: `vector`/`span`/`string_view` support + bounds-check policy +
   diagnostic quality.
 - **M7+**: Generics/templates, traits/concepts, cross-function lifetimes,
