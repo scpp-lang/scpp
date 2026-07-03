@@ -9,6 +9,8 @@ ordinary C++ semantics. The backend generates native binaries via **LLVM**.
 > 一门"看起来就是原汁原味现代 C++"的语言，仅加入极少量扩展（核心是 `safe`
 > 关键字）。被 `safe` 标注的区域启用 Rust 式健全的编译期安全检查；其余代码按
 > 普通 C++ 语义处理。后端经 LLVM 生成本地二进制。
+>
+> 中文版 README: [`README.zh.md`](README.zh.md)
 
 ## Design Philosophy
 
