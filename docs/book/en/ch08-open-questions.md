@@ -2,11 +2,16 @@
 
 1. **Out-of-bounds subscript**: in safe regions, does `vector[i]` / `span[i]`
    insert a runtime bounds check (like Rust), or require a checked API?
-   Leaning: insert bounds checks by default in safe regions.
+   **Settled and implemented (M6)**: `span[i]` inserts a runtime bounds
+   check by default, calling `abort()` on failure (`vector` doesn't exist
+   yet, but will follow the same policy).
 2. **Integer overflow**: does safe check signed overflow? Leaning: panic in
    debug, wrapping/UB in release? TBD.
 3. **Panic model**: how do OOB / assertion failures terminate? `std::terminate`
-   or a custom panic + stack unwinding? v0.1 uses `std::terminate` (abort).
+   or a custom panic + stack unwinding? **Settled and implemented (M6)**:
+   calls libc's `abort()` directly (lower-level than `std::terminate()`,
+   doesn't depend on the C++ runtime's terminate-handler machinery, same
+   effect -- the process ends immediately, no stack unwinding).
 4. **Interior mutability**: introduce a `Cell`/`RefCell` equivalent to carry
    legal mutable aliasing?
 5. **`safe` vs `const`**: how does a `const` member function map to borrows in a

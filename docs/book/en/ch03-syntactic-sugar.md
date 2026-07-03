@@ -13,7 +13,7 @@ semantics. In an unsafe context they keep their ordinary C++ meaning.
 | `*p` / `p->x` (`p` a `std::unique_ptr<T>`) | Safe dereference/member access, yielding an lvalue for the pointee. `p` itself still obeys alias XOR mutability: a borrow of `*p` is recorded against `p`, so moving (`std::move(p)`) or reassigning `p` while that borrow is alive is rejected (it would otherwise dangle/use-after-free). |
 | `*p` (`p` a raw pointer `T*`) | Requires `unsafe { }` (v0.1 hasn't implemented `unsafe` blocks yet, so this isn't usable at all right now). |
 | `std::shared_ptr<T>` | Shared ownership (refcounted). Allowed in safe, but aliasing follows interior-mutability rules (refined in v0.2). |
-| `std::span<T>` / `std::string_view` | Borrowed views with a lifetime; checked for dangling. |
+| `std::span<T>` / `std::span<const T>` | A lifetime-checked, non-owning view (a "fat pointer": `{data pointer, length}`). **v0.1 can only construct one from a fixed-size array** (`std::vector` doesn't exist yet), and it cannot be reassigned after construction (conservatively treated like a reference for now: bound once, never rebound). `.size` reads the length -- **note this is not** a real C++ `.size()` method call: scpp has no member-function-call syntax yet, so this is exposed as a read-only computed field instead. Subscript `s[i]` carries a runtime bounds check, calling `abort()` on failure (ch08's settled decision: v0.1 inserts bounds checks by default, panics via `abort()`). `std::string_view` doesn't exist yet (needs a `char` type first). |
 | local variable `T x;` | Owns its value; dropped (destroyed) at end of scope. |
 | `new` / `delete` / raw `T*` | **Forbidden by default** in safe regions; require `unsafe { }`. |
 

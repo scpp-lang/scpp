@@ -79,6 +79,9 @@ std::string type_to_string(const scpp::Type& type) {
         case scpp::TypeKind::Reference:
             return (type.is_mutable_ref ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
                    "&";
+        case scpp::TypeKind::Span:
+            return "std::span<" + (type.is_mutable_ref ? std::string() : std::string("const ")) +
+                   type_to_string(*type.pointee) + ">";
     }
     return "?";
 }

@@ -46,16 +46,23 @@ enum class MirStatementKind {
     // pop_scope in codegen.cppm), which stops tracking a block-scoped
     // local at the exact same point.
     ScopeExit,
-    // `local` (declared `T&` or `const T&`) is *bound* to the place named
-    // by `expr` (always a plain Identifier in this version -- see
-    // ch05.2). Emitted only by a VarDecl whose type is Reference, never
-    // by a later plain assignment: unlike every other type, a reference
+    // `local` (declared `T&`/`const T&`, or `std::span<T>`/
+    // `std::span<const T>` -- see ch03/ch06/M6) is *bound* to the place
+    // named by `expr` (a plain Identifier, a `.field`/`[index]` chain, or
+    // a call to a reference-returning function -- see ch05.2/ch05.3).
+    // Emitted only by a VarDecl whose type is Reference or Span, never by
+    // a later plain assignment: unlike every other type, a reference
     // cannot be rebound after its first binding (real C++ has no syntax
     // for that), so any subsequent `local = expr;` is an ordinary Assign
     // that means "write *through* the reference to its current
     // referent", not "rebind it" -- the dataflow analysis tells these
     // apart by which MIR statement kind produced them, not by inspecting
-    // `local`'s type at each Assign.
+    // `local`'s type at each Assign. A `std::span<T>` local is real-C++
+    // reassignable in principle (it's an ordinary value, unlike a
+    // reference), but v0.1 conservatively treats it exactly like a
+    // reference here too -- bound once at declaration, never rebound --
+    // as an explicit, deliberately-scoped-down first slice; lifting that
+    // is a follow-up, not a soundness requirement.
     BindReference,
 };
 
@@ -189,13 +196,13 @@ private:
 
             case StmtKind::VarDecl: {
                 declare_local(stmt.var_name, stmt.type);
-                if (stmt.type.kind == TypeKind::Reference) {
+                if (stmt.type.kind == TypeKind::Reference || stmt.type.kind == TypeKind::Span) {
                     // `expr` is null when the source omitted an
-                    // initializer (`int& r;`, illegal since a reference
-                    // must be bound at declaration) -- left for
-                    // movecheck to reject with a clear diagnostic rather
-                    // than validated here, keeping this builder a
-                    // straightforward, non-throwing translation.
+                    // initializer (`int& r;` / `std::span<int> s;`,
+                    // illegal since both must be bound at declaration) --
+                    // left for movecheck to reject with a clear
+                    // diagnostic rather than validated here, keeping this
+                    // builder a straightforward, non-throwing translation.
                     current().statements.push_back(MirStatement{
                         MirStatementKind::BindReference, stmt.var_name, stmt.init.get(), stmt.type});
                 } else if (stmt.init) {

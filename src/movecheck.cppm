@@ -184,6 +184,7 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 
 [[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
+[[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
 
 // Structurally validates and resolves spec ch05.3's elision rule for a
 // single function's signature: if `fn.return_type` is a Reference, `fn`
@@ -231,19 +232,22 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 
 // Whether assigning through `expr` (used as an assignment's *target* --
 // see apply_expr's Binary/Assign case) would write through a read-only
-// (`const T&`) reference somewhere in its chain. A `.field`/`[index]`
+// (`const T&` reference, or `std::span<const T>`) somewhere in its
+// chain -- both reuse the same `is_mutable_ref` flag for "is this
+// view/borrow read-only", see ast.cppm's Type. A `.field`/`[index]`
 // projection's constness always comes from its outermost base (struct
-// fields can never themselves be references -- ch04.1 permanently
-// forbids that -- so there's never a *nested* reference to find deeper
-// in the chain); a call's constness comes from its own return type. A
-// plain local (not itself a reference) is always writable here -- move/
-// initialization-state legality is checked separately, this is purely
-// about const-ness.
+// fields can never themselves be references or spans -- ch04.1
+// permanently forbids that -- so there's never a *nested* one to find
+// deeper in the chain); a call's constness comes from its own return
+// type. A plain local (not itself a reference/span) is always writable
+// here -- move/initialization-state legality is checked separately,
+// this is purely about const-ness.
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
-            return it != body.local_types.end() && is_reference(it->second) && !it->second.is_mutable_ref;
+            return it != body.local_types.end() && (is_reference(it->second) || is_span(it->second)) &&
+                   !it->second.is_mutable_ref;
         }
         case ExprKind::Member:
         case ExprKind::Subscript:
@@ -270,13 +274,13 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 //     Assign case) -- since a live borrow (of *any* field, under this
 //     version's whole-root conservatism, spec ch05.2) assumes the data
 //     won't change underneath it. Returns `a` in this case.
-//   - `r.x = 1;` where `r` is itself a reference (`T& r = ...;`): this
-//     writes *through* r, and holding a live *mutable* r is already the
-//     license to do so (checked separately by
-//     assignment_target_is_read_only) -- r's own root necessarily shows
-//     a borrow (r's own), which would cause a false rejection if
-//     checked here too, so this case returns nullopt (no additional
-//     check).
+//   - `r.x = 1;` where `r` is itself a reference (`T& r = ...;`) or
+//     `s[i] = 1;` where `s` is a `std::span<T>`: both write *through* a
+//     borrow, and holding a live *mutable* one is already the license to
+//     do so (checked separately by assignment_target_is_read_only) --
+//     its own root necessarily shows a borrow (its own), which would
+//     cause a false rejection if checked here too, so this case returns
+//     nullopt (no additional check).
 // A Call target (spec ch05.3's reference-returning functions) is
 // likewise nullopt: its own mutability is checked by
 // assignment_target_is_read_only, and there is no lasting root of its
@@ -286,7 +290,9 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     switch (expr.kind) {
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
-            if (it != body.local_types.end() && is_reference(it->second)) return std::nullopt;
+            if (it != body.local_types.end() && (is_reference(it->second) || is_span(it->second))) {
+                return std::nullopt;
+            }
             return expr.name;
         }
         case ExprKind::Member:
@@ -414,16 +420,21 @@ std::vector<size_t> successors(const Terminator& term) {
 
 using LiveSet = std::unordered_set<std::string>;
 
-// Collects the name of every currently-declared *reference*-typed local
-// mentioned anywhere in `expr` (recursively) into `out`. Used by the
-// liveness analysis below to find where a reference is "used" (in the
-// sense of needing its current borrow to stay valid), without having to
-// duplicate apply_expr's exact per-case dataflow semantics: this walk is
-// deliberately a plain, generic tree traversal, over-inclusive rather
-// than clever. A spurious extra "use" only makes a borrow's computed
-// live range *longer* than strictly necessary (a missed early-release
-// opportunity, but still sound); missing a real one would instead be an
-// actual bug (releasing a borrow while it's still genuinely needed).
+// Collects the name of every currently-declared *reference-or-span*-typed
+// local mentioned anywhere in `expr` (recursively) into `out`. Used by
+// the liveness analysis below to find where a reference/span is "used"
+// (in the sense of needing its current borrow to stay valid), without
+// having to duplicate apply_expr's exact per-case dataflow semantics:
+// this walk is deliberately a plain, generic tree traversal,
+// over-inclusive rather than clever. A spurious extra "use" only makes a
+// borrow's computed live range *longer* than strictly necessary (a
+// missed early-release opportunity, but still sound); missing a real one
+// would instead be an actual bug (releasing a borrow while it's still
+// genuinely needed) -- which is exactly why std::span must be included
+// here alongside Reference: without it, a span's borrow would look dead
+// (and be released) immediately after its own BindReference, since
+// nothing would ever record it as "live", regardless of how long it's
+// actually used for afterward.
 void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
     if (expr == nullptr) return;
     switch (expr->kind) {
@@ -432,7 +443,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
             return;
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr->name);
-            if (it != body.local_types.end() && is_reference(it->second)) {
+            if (it != body.local_types.end() && (is_reference(it->second) || is_span(it->second))) {
                 out.insert(expr->name);
             }
             return;
@@ -461,10 +472,13 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
     }
 }
 
-// The reference-typed local that `stmt` freshly brings into existence,
-// if any -- only a BindReference does (references are never rebound, so
-// this is also the one and only point before which `stmt.local`'s
-// liveness must not extend backward; see compute_reference_liveness).
+// The reference-or-span-typed local that `stmt` freshly brings into
+// existence, if any -- only a BindReference does (neither a reference
+// nor a span is rebound in this version, so this is also the one and
+// only point before which `stmt.local`'s liveness must not extend
+// backward; see compute_reference_liveness). Purely keyed off the MIR
+// statement kind here, not the local's own type, since mir.cppm already
+// emits BindReference for both.
 std::optional<std::string> reference_def(const MirStatement& stmt) {
     if (stmt.kind == MirStatementKind::BindReference) return stmt.local;
     return std::nullopt;
@@ -1014,24 +1028,29 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
     }
 }
 
-// Handles a `BindReference` MIR statement (`T& r = place;` / `const T& r
-// = place;`), emitted only by a Reference-typed VarDecl (see
-// mir.cppm). Checks the borrowed place is currently readable and not
-// already borrowed in a conflicting way (ch05.2's alias-XOR-mutability),
-// then records the new borrow -- against the place's *root* (see
-// resolve_borrow_source_root), not necessarily `place` itself, so a
-// chain of reference-to-reference bindings (and a `.field`/`[index]`
-// projection off a plain place) is tracked precisely.
+// Handles a `BindReference` MIR statement -- `T& r = place;` /
+// `const T& r = place;` (emitted only by a Reference-typed VarDecl), or
+// `std::span<T> s = arr;` / `std::span<const T> s = arr;` (emitted only
+// by a Span-typed VarDecl) -- see mir.cppm. Checks the borrowed place is
+// currently readable and not already borrowed in a conflicting way
+// (ch05.2's alias-XOR-mutability), then records the new borrow -- against
+// the place's *root* (see resolve_borrow_source_root), not necessarily
+// `place` itself, so a chain of reference-to-reference bindings (and a
+// `.field`/`[index]` projection off a plain place) is tracked precisely.
 void apply_reference_binding(const MirStatement& stmt, DataflowState& state, const Body& body,
                               const Signatures& signatures, bool report_errors) {
     if (stmt.expr == nullptr) {
-        // No initializer (`int& r;`): illegal, since unlike every other
-        // scpp type, a reference has no zero/default state to fall back
-        // to -- real C++ has no such thing as a null or later-bound
-        // reference either.
+        // No initializer (`int& r;` / `std::span<int> s;`): illegal,
+        // since unlike every other scpp type, neither a reference nor a
+        // span has a zero/default state to fall back to -- real C++ has
+        // no such thing as a null or later-bound reference either, and
+        // v0.1 conservatively requires the same discipline of span (see
+        // apply_statement's Assign case for why it isn't rebindable
+        // either).
         if (report_errors) {
-            throw DataflowError("reference '" + stmt.local + "' must be initialized (bound to a variable) at "
-                                                              "declaration");
+            const char* kind_name = is_span(stmt.type) ? "span" : "reference";
+            throw DataflowError(std::string(kind_name) + " '" + stmt.local +
+                                 "' must be initialized (bound to a variable) at declaration");
         }
         state.locals[stmt.local] = LocalState::Initialized;
         return;
@@ -1112,6 +1131,19 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             auto type_it = body.local_types.find(stmt.local);
             if (type_it != body.local_types.end() && is_reference(type_it->second)) {
                 apply_reference_write_through(stmt, state, body, signatures, report_errors);
+                return;
+            }
+            if (type_it != body.local_types.end() && is_span(type_it->second)) {
+                // Unlike real C++ (where std::span is an ordinary,
+                // freely-reassignable value), v0.1 conservatively treats
+                // it exactly like a reference: bound once at
+                // declaration, never rebound (see mir.cppm's
+                // BindReference comment) -- lifting that is a follow-up,
+                // not a soundness requirement.
+                if (report_errors) {
+                    throw DataflowError("std::span '" + stmt.local +
+                                         "' cannot be reassigned after initialization in this version");
+                }
                 return;
             }
 

@@ -1,11 +1,15 @@
 # 8. 未决问题（Open Questions，需后续拍板）
 
 1. **下标越界**：safe 区 `vector[i]` / `span[i]` 是插入运行时边界检查
-   （像 Rust），还是要求用带检查的 API？倾向：safe 区默认插入边界检查。
+   （像 Rust），还是要求用带检查的 API？**已定并实现（M6）**：`span[i]`
+   默认插入运行时边界检查，越界调用 `abort()`（`vector` 还没实现，但
+   会沿用同一策略）。
 2. **整数溢出**：safe 区是否检查有符号溢出？倾向：debug 下 panic，release
    下按 wrapping/UB？需定。
 3. **panic 模型**：越界/断言失败如何终止？`std::terminate` 还是自定义
-   panic + 栈展开？v0.1 先用 `std::terminate`（abort）。
+   panic + 栈展开？**已定并实现（M6）**：直接调用 libc 的 `abort()`（比
+   `std::terminate()` 更底层、不依赖 C++ 运行时的 terminate-handler 机制，
+   效果一致——进程立即终止，不做栈展开）。
 4. **内部可变性**：是否引入等价 `Cell`/`RefCell` 的机制承载合法可变别名？
 5. **`safe` 与 `const` 的关系**：`const` 成员函数在 safe 区如何映射借用？
 6. **ABI / 与现有 C++ 库互操作**：safe 代码调用第三方头文件（全是 unsafe）

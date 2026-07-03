@@ -333,6 +333,27 @@ void test_unique_ptr_of_struct_type() {
            "unique_ptr_of_struct_type: pointee should be 'Point'");
 }
 
+void test_span_type_declaration() {
+    scpp::Program program = scpp::parse("int f() { int arr[3]; std::span<int> s = arr; return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[1];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "span_type_declaration: statement 1 should be VarDecl");
+    expect(decl.type.kind == scpp::TypeKind::Span, "span_type_declaration: type should be Span");
+    expect(decl.type.pointee != nullptr && is_named_type(*decl.type.pointee, "int"),
+           "span_type_declaration: element type should be 'int'");
+    expect(decl.type.is_mutable_ref, "span_type_declaration: std::span<int> should be mutable (is_mutable_ref)");
+    expect(decl.var_name == "s", "span_type_declaration: variable name should be 's'");
+}
+
+void test_span_of_const_element_type() {
+    scpp::Program program = scpp::parse("int f() { int arr[3]; std::span<const int> s = arr; return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[1];
+    expect(decl.type.kind == scpp::TypeKind::Span, "span_of_const_element_type: type should be Span");
+    expect(!decl.type.is_mutable_ref,
+           "span_of_const_element_type: std::span<const int> should be read-only (!is_mutable_ref)");
+}
+
 void test_move_expression() {
     scpp::Program program = scpp::parse(
         "int f() {"
@@ -424,6 +445,8 @@ int main() {
     test_struct_before_use_is_required();
     test_unique_ptr_type_declaration();
     test_unique_ptr_of_struct_type();
+    test_span_type_declaration();
+    test_span_of_const_element_type();
     test_move_expression();
     test_move_as_function_argument();
     test_make_unique_zero_args();

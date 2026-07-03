@@ -1,0 +1,4 @@
+contains: icmp sge i64 0, %size
+contains: br i1 %oob, label %bounds.fail, label %bounds.ok
+contains: call void @abort()
+contains: unreachable

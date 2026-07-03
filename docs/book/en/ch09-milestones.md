@@ -20,7 +20,15 @@
   [§5.3](ch05-static-checks.md). Raw pointer (`T*`) dereference is left
   for whenever `unsafe { }` blocks are implemented.)**
 - **M6**: `vector`/`span`/`string_view` support + bounds-check policy +
-  diagnostic quality.
+  diagnostic quality. **(Slice 1 done: `std::span<T>`/
+  `std::span<const T>` -- construction from a fixed-size array, a
+  `.size` field, runtime bounds checks + `abort()` panics; see
+  [§3](ch03-syntactic-sugar.md)/[§6](ch06-safe-subset.md)/
+  [§8](ch08-open-questions.md). Implemented as a compiler builtin type
+  (like `unique_ptr`), deliberately meant as a concrete prototype for a
+  future "generics + generic lifetimes" mechanism. `std::vector`,
+  `std::string`/`string_view` (need a `char` type first), `for`/
+  range-for, and `unsafe { }` blocks are all left for later.)**
 - **M7+**: Generics/templates, traits/concepts, cross-function lifetimes,
   standard-library expansion, incremental compilation.
 

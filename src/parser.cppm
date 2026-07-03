@@ -78,7 +78,7 @@ private:
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst) {
             return true;
         }
-        if (check_std_qualified("unique_ptr")) return true;
+        if (check_std_qualified("unique_ptr") || check_std_qualified("span")) return true;
         return tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text));
     }
 
@@ -120,6 +120,23 @@ private:
             Type type;
             type.kind = TypeKind::UniquePtr;
             type.pointee = std::make_shared<Type>(std::move(element));
+            return type;
+        }
+
+        if (check_std_qualified("span")) {
+            consume_std_qualified();
+            expect(TokenKind::Less, "'<'");
+            // `const` here qualifies the *element* type (`std::span<const
+            // T>`, a read-only view), not a reference -- so it's parsed
+            // directly rather than through parse_type() (which only
+            // accepts a leading `const` when followed by `&`).
+            bool element_is_const = match(TokenKind::KwConst);
+            Type element = parse_unqualified_type();
+            expect(TokenKind::Greater, "'>'");
+            Type type;
+            type.kind = TypeKind::Span;
+            type.pointee = std::make_shared<Type>(std::move(element));
+            type.is_mutable_ref = !element_is_const;
             return type;
         }
 

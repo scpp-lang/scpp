@@ -19,6 +19,9 @@ enum class TypeKind {
     Array,     // T[N]
     UniquePtr, // std::unique_ptr<T> -- unique ownership, move-only (see ch05)
     Reference, // T& (mutable borrow) / const T& (shared borrow) -- see ch05.2
+    Span,      // std::span<T> (mutable view) / std::span<const T> (read-only
+               // view) -- a non-owning, lifetime-checked {pointer, size}
+               // view over a fixed-size array (see ch03/ch06; M6).
 };
 
 // A type reference. `pointee`/`element` use shared_ptr (not unique_ptr) so
@@ -31,7 +34,7 @@ struct Type {
     // Named
     std::string name;
 
-    // Pointer / UniquePtr / Reference (element/referent type)
+    // Pointer / UniquePtr / Reference / Span (element/referent type)
     std::shared_ptr<Type> pointee;
 
     // Array
@@ -39,7 +42,11 @@ struct Type {
     long long array_size = 0;
 
     // Reference: true for `T&` (mutable/exclusive borrow), false for
-    // `const T&` (shared borrow). Meaningless for every other kind.
+    // `const T&` (shared borrow). Span: true for `std::span<T>` (mutable
+    // view), false for `std::span<const T>` (read-only view) -- reuses
+    // this same flag rather than adding a new one, since the two types
+    // share the same "is this view/borrow read-only" meaning. Meaningless
+    // for every other kind.
     bool is_mutable_ref = true;
 };
 

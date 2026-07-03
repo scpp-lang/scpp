@@ -160,6 +160,9 @@ private:
                                     "use class instead");
             case TypeKind::Reference:
                 throw CodegenError("a reference cannot be a struct field in this version");
+            case TypeKind::Span:
+                throw CodegenError("a std::span cannot be a struct field in this version (it is a "
+                                    "lifetime-checked borrowed view; use class instead)");
             case TypeKind::Array:
                 validate_trivial(*type.element, in_progress);
                 return;
@@ -224,6 +227,18 @@ private:
                 // codegen_lvalue's Identifier case) and enforces borrow
                 // discipline (scpp.movecheck), not the IR shape itself.
                 return llvm::PointerType::getUnqual(*context_);
+            case TypeKind::Span:
+                // A non-owning {data pointer, element count} pair -- a
+                // literal (unnamed) two-word LLVM struct, not registered
+                // in `structs_` (span isn't a user-visible aggregate the
+                // way a `struct` is; Member/Subscript access to it is
+                // special-cased directly on TypeKind::Span in
+                // codegen_lvalue, not routed through StructInfo). LLVM
+                // deduplicates identical literal struct types itself, so
+                // there's no need to cache this beyond calling
+                // StructType::get each time.
+                return llvm::StructType::get(*context_,
+                                              {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
             case TypeKind::Array:
                 return llvm::ArrayType::get(to_llvm_type(*type.element), type.array_size);
             case TypeKind::Named:
@@ -380,6 +395,39 @@ private:
                     return;
                 }
 
+                if (stmt.type.kind == TypeKind::Span) {
+                    // Like a reference, a std::span<T> must be bound to a
+                    // place at declaration -- v0.1 only supports
+                    // constructing one from a fixed-size array (spec
+                    // ch06/M6; std::vector doesn't exist yet).
+                    if (!stmt.init) {
+                        throw CodegenError("span '" + stmt.var_name +
+                                            "' must be initialized (bound to an array) at declaration");
+                    }
+                    LValue source = codegen_lvalue(*stmt.init);
+                    if (source.type.kind != TypeKind::Array) {
+                        throw CodegenError("std::span<T> can currently only be constructed from a "
+                                            "fixed-size array in this version");
+                    }
+                    if (to_llvm_type(*source.type.element) != to_llvm_type(*stmt.type.pointee)) {
+                        throw CodegenError("cannot construct span '" + stmt.var_name +
+                                            "': array element type does not match the span's element type");
+                    }
+                    llvm::Type* span_type = to_llvm_type(stmt.type);
+                    llvm::Value* size_value =
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), source.type.array_size);
+                    llvm::Value* span_value = llvm::UndefValue::get(span_type);
+                    span_value = builder_->CreateInsertValue(span_value, source.ptr, {0});
+                    span_value = builder_->CreateInsertValue(span_value, size_value, {1});
+                    llvm::AllocaInst* slot = builder_->CreateAlloca(span_type, nullptr, stmt.var_name);
+                    builder_->CreateStore(span_value, slot);
+                    locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    if (!scope_stack_.empty()) {
+                        scope_stack_.back().push_back(stmt.var_name);
+                    }
+                    return;
+                }
+
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
                 if (stmt.init) {
@@ -516,9 +564,9 @@ private:
     // reference, that result is still just the *address* at this point
     // (see to_llvm_type's Reference case) -- it's up to the caller to
     // decide whether to dereference it (codegen_expr, for a value
-    // context) or hand the address on as-is (codegen_lvalue, for
-    // resolve_borrow_source_root's allow_call_source case -- see its
-    // comment in movecheck.cppm).
+    // context) or hand the address on as-is (codegen_lvalue, for a
+    // reference-returning call used itself as a further borrow source --
+    // see resolve_borrow_source_root in movecheck.cppm).
     llvm::Value* codegen_call(const Expr& expr) {
         llvm::Function* callee = module_->getFunction(expr.name);
         if (callee == nullptr) {
@@ -551,8 +599,27 @@ private:
                 return llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context_), expr.bool_value ? 1 : 0);
 
             case ExprKind::Identifier:
-            case ExprKind::Member:
             case ExprKind::Subscript: {
+                LValue lv = codegen_lvalue(expr);
+                return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
+            }
+
+            case ExprKind::Member: {
+                // `s.size` on a std::span<T> is a computed, read-only
+                // property (there's no backing storage to take the
+                // address of at the *scpp* type level -- it's an i64
+                // internally but exposed as a plain `int`, see
+                // to_llvm_type's Span case) -- codegen_lvalue's own
+                // Member case rejects it outright for that reason, so it
+                // has to be handled here instead, before falling back to
+                // the ordinary lvalue-then-load pattern used for a real
+                // struct field.
+                LValue base = codegen_lvalue(*expr.lhs);
+                if (base.type.kind == TypeKind::Span && expr.name == "size") {
+                    llvm::Value* size_ptr = builder_->CreateStructGEP(to_llvm_type(base.type), base.ptr, 1, "sizeptr");
+                    llvm::Value* size64 = builder_->CreateLoad(llvm::Type::getInt64Ty(*context_), size_ptr, "size64");
+                    return builder_->CreateTrunc(size64, llvm::Type::getInt32Ty(*context_), "size");
+                }
                 LValue lv = codegen_lvalue(expr);
                 return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
             }
@@ -586,13 +653,7 @@ private:
                     // to_llvm_type) -- so using the call's result as a
                     // *value* here means auto-dereferencing it, exactly
                     // like a reference local's own read (see
-                    // codegen_lvalue's Identifier case). Movecheck
-                    // doesn't yet support binding this result to a new
-                    // named reference or passing it onward as a
-                    // reference argument (see resolve_borrow_source_root's
-                    // allow_call_source), so this is the only context a
-                    // reference-returning call's result can appear in as
-                    // a value.
+                    // codegen_lvalue's Identifier case).
                     return builder_->CreateLoad(to_llvm_type(*callee_def->return_type.pointee), result,
                                                  "derefcalltmp");
                 }
@@ -722,6 +783,45 @@ private:
         return llvm::Function::Create(free_type, llvm::Function::ExternalLinkage, "free", *module_);
     }
 
+    llvm::Function* get_or_declare_abort() {
+        if (llvm::Function* existing = module_->getFunction("abort")) {
+            return existing;
+        }
+        llvm::FunctionType* abort_type = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), /*isVarArg=*/false);
+        llvm::Function* fn = llvm::Function::Create(abort_type, llvm::Function::ExternalLinkage, "abort", *module_);
+        // libc's abort() never returns -- telling LLVM this lets it treat
+        // the code right after a call to it as unreachable, same as real
+        // Clang does.
+        fn->addFnAttr(llvm::Attribute::NoReturn);
+        return fn;
+    }
+
+    // Emits a runtime bounds check for a `std::span<T>` subscript (spec
+    // ch08's "insert runtime bounds checks by default" decision): if
+    // `index` is negative or `>= size`, calls libc's `abort()` (v0.1's
+    // panic model, per ch08) instead of proceeding. Splits the current
+    // block into a `bounds.fail` block (unreachable after the call) and a
+    // `bounds.ok` block, leaving the builder's insert point at the latter
+    // so the caller can continue emitting the actual element access.
+    void emit_span_bounds_check(llvm::Value* index, llvm::Value* size) {
+        llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
+        llvm::BasicBlock* fail_block = llvm::BasicBlock::Create(*context_, "bounds.fail", current_function);
+        llvm::BasicBlock* ok_block = llvm::BasicBlock::Create(*context_, "bounds.ok", current_function);
+
+        llvm::Value* index64 = builder_->CreateSExt(index, llvm::Type::getInt64Ty(*context_), "idx64");
+        llvm::Value* too_low =
+            builder_->CreateICmpSLT(index64, llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), 0), "toolow");
+        llvm::Value* too_high = builder_->CreateICmpSGE(index64, size, "toohigh");
+        llvm::Value* out_of_bounds = builder_->CreateOr(too_low, too_high, "oob");
+        builder_->CreateCondBr(out_of_bounds, fail_block, ok_block);
+
+        builder_->SetInsertPoint(fail_block);
+        builder_->CreateCall(get_or_declare_abort(), {});
+        builder_->CreateUnreachable();
+
+        builder_->SetInsertPoint(ok_block);
+    }
+
     // Computes the storage location (pointer + scpp Type) of an lvalue
     // expression, i.e. anything that can appear on the left of `=` or be
     // read via a plain load: a variable, or a chain of `.field`/`[index]`
@@ -769,6 +869,23 @@ private:
 
             case ExprKind::Subscript: {
                 LValue base = codegen_lvalue(*expr.lhs);
+                if (base.type.kind == TypeKind::Span) {
+                    llvm::Type* span_type = to_llvm_type(base.type);
+                    llvm::Value* size_ptr = builder_->CreateStructGEP(span_type, base.ptr, 1, "sizeptr");
+                    llvm::Value* size = builder_->CreateLoad(llvm::Type::getInt64Ty(*context_), size_ptr, "size");
+                    llvm::Value* data_ptr = builder_->CreateStructGEP(span_type, base.ptr, 0, "dataptr");
+                    llvm::Value* data = builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), data_ptr, "data");
+                    llvm::Value* index = codegen_expr(*expr.rhs);
+                    // Runtime bounds check (spec ch08: safe regions insert
+                    // bounds checks by default) -- unlike a fixed-size
+                    // array's subscript below, a span's length is only
+                    // known at runtime, so there's no way to reject an
+                    // out-of-bounds constant index at compile time.
+                    emit_span_bounds_check(index, size);
+                    llvm::Value* elem_ptr =
+                        builder_->CreateGEP(to_llvm_type(*base.type.pointee), data, {index}, "elemtmp");
+                    return LValue{elem_ptr, *base.type.pointee};
+                }
                 if (base.type.kind != TypeKind::Array) {
                     throw CodegenError("subscript on a non-array type");
                 }

@@ -1,0 +1,4 @@
+int f() {
+    std::span<int> s;
+    return 0;
+}
