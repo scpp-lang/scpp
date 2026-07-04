@@ -69,6 +69,26 @@ itself the explicit declaration, and the compiler verifies triviality.
     `private`, so the factory function is the only way to obtain an
     instance -- the classic C++ "named constructor idiom" (Marshall
     Cline's C++ FAQ), requiring zero new scpp syntax.
+- **Access control** (design finalized, ahead of the rest of `class`
+  support): a member **variable** -- including a class-level constant --
+  can never be `public`; only member **functions** can be. Writing
+  `public:` above a member variable is a compile error. External code
+  can therefore only ever reach a class's data through a method call,
+  never through direct field access -- this is also what keeps the
+  method-borrow-checking design in
+  [§5.9](ch05-static-checks.md) tractable: the borrow checker only has
+  to reason about *method calls* crossing a class's boundary, never
+  about arbitrary external field-level aliasing the way it already does
+  for `struct`.
+  - A class-level constant is exposed via a `static consteval` function
+    instead of a public data member (see [§6](ch06-safe-subset.md) for
+    scpp's `consteval`-only rule for compile-time functions) -- this has
+    the exact same (zero) runtime cost a public constant would have had.
+- **No inheritance in v0.1** (deferred, not a permanent exclusion -- see
+  [§8](ch08-open-questions.md)): `protected` is consequently not a
+  recognized access specifier either, since it only has meaning
+  relative to derived classes. Revisit both together if/when
+  inheritance is designed.
 
 ## 4.3 Memory Layout & ABI (fixed, not left implementation-defined)
 

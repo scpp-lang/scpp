@@ -27,6 +27,11 @@ meaning "sound checking not yet implemented"):
 
 - `struct` (rules in [§4.1](ch04-struct-vs-class.md); fields of supported
   types only).
+- `class` (design finalized for access control and `this`/method borrow
+  mapping; full checking otherwise still backlog -- see
+  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)): member
+  variables (including class-level constants) must be `private`, only
+  member functions may be `public`; no inheritance/`protected` in v0.1.
 - `std::unique_ptr<T>` (implemented), `std::span<T>`/`std::span<const T>`
   (implemented, M6 slice 1 -- but currently only constructible from a
   fixed-size array, see [§3](ch03-syntactic-sugar.md)). `std::vector<T>`
@@ -54,6 +59,26 @@ meaning "sound checking not yet implemented"):
 - Function calls, including the "callee must be `safe`, otherwise
   `unsafe {}`" rule from [§2](ch02-boundary-rules.md) (implemented
   alongside `unsafe { }` below).
+- `consteval` functions (see [§4.2](ch04-struct-vs-class.md) -- **design
+  finalized, not yet implemented**): scpp's only compile-time-function
+  mechanism, reused verbatim from real C++20 -- every call is
+  mandatorily evaluated at compile time, a compile error if any argument
+  isn't itself a constant expression. scpp has **no `constexpr`-qualified
+  functions**: real C++'s `constexpr` function can be evaluated at
+  compile time in a constant-expression context, or silently fall back
+  to an ordinary runtime call otherwise -- *which one happens depends on
+  the calling context*, not on anything visible at the function's own
+  declaration, exactly the kind of context-dependent ambiguity scpp
+  tries to avoid elsewhere too (see [ch00](ch00-design-philosophy.md)
+  §8). Every scpp function is unambiguously one or the other: `consteval`,
+  or an ordinary, undecorated function that's always a runtime call,
+  never evaluated at compile time even if every argument happens to be
+  constant. `constexpr` **variables** are unaffected -- `constexpr int
+  x = 5;` is already unambiguous in real C++ (always a compile-time
+  constant, no calling-context dependence), so there's nothing to fix
+  there. If a genuine need for one function to serve both a
+  compile-time and a runtime caller ever arises, revisit adding
+  `constexpr` functions back rather than solving it another way.
 - Arithmetic / logical / comparison operators. `+`/`-`/`*` are
   overflow-checked in `safe` code (`abort()` on overflow, both signed
   and unsigned; see [§5.8](ch05-static-checks.md) -- **design finalized,
@@ -93,8 +118,11 @@ meaning "sound checking not yet implemented"):
 
 **Not yet supported (safe-region backlog)**
 - Templates / generics, `concept`.
-- Full checking for user-defined `class` types (constructors/destructors,
-  borrows inside method bodies; see [§4.2](ch04-struct-vs-class.md)).
+- Full checking for user-defined `class` types: access control and
+  `this`/method-borrow mapping are design-finalized (see
+  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)), but
+  not yet implemented; inheritance and virtual functions remain
+  deferred, design not started.
 - Inheritance, virtual functions.
 - Lifetime checking of lambdas capturing references.
 - The full aliasing model for `shared_ptr`.
@@ -124,6 +152,10 @@ meaning "sound checking not yet implemented"):
   (`abort()`-on-overflow) `+`/`-`/`*` in `safe` code, guaranteed-wrapping
   (never UB) in `unsafe`, and unconditional `abort()` for division/modulo
   by zero or `INT_MIN / -1`.
+- Implementation of `consteval` functions, `class` access control, and
+  the `this`/method-borrow mapping spec'd in
+  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) (design
+  only so far).
 
 ---
 

@@ -33,8 +33,20 @@
    effect -- the process ends immediately, no stack unwinding).
 4. **Interior mutability**: introduce a `Cell`/`RefCell` equivalent to carry
    legal mutable aliasing?
-5. **`safe` vs `const`**: how does a `const` member function map to borrows in a
-   safe region?
+5. **`safe` vs `const`**: how does a `const` member function map to
+   borrows in a safe region? **Settled**: `this` is treated as an
+   implicit reference parameter -- `const T&` in a `const` method, `T&`
+   otherwise -- subject to exactly the same alias-XOR-mutability,
+   whole-root-conservative field access, and lifetime-elision rules as
+   any other reference (see [§5.9](ch05-static-checks.md)). Related,
+   also settled in the same round: a `class`'s member *variables*
+   (including class-level constants) can never be `public`, only member
+   *functions* can -- external code always goes through a method call,
+   never direct field access (see [§4.2](ch04-struct-vs-class.md));
+   class-level constants are exposed via a `static consteval` function
+   instead of a public data member (see [§6](ch06-safe-subset.md) for
+   why scpp has no `constexpr`-qualified functions). Inheritance (and
+   therefore `protected`) remains deferred, not part of this round.
 6. **ABI / interop with existing C++ libraries**: how to engineer safe code
    calling third-party headers (all unsafe) — treat them all as `unsafe`?
    **Settled**: `extern "C"` ([§2.1](ch02-boundary-rules.md), design

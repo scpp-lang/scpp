@@ -94,10 +94,12 @@ the following properties:
   - **Mutable licensing per group**: a group with no `T&` (mutable) member
     can never back a `T&` return, only `const T&` -- the same rule as
     today's single-parameter case, now applied per group.
-  - If there is a `this`/`self` and the function returns a reference with
-    no other disambiguation, the output borrows from `this`'s group. (v0.1
-    has no `class` method/`this` concept yet, so this rule never actually
-    applies.)
+  - If there is a `this`/`self` and the function returns a reference
+    with no other disambiguation, the output borrows from `this`'s
+    group -- see
+    [§5.9](#59-methods-and-this-design-finalized-not-yet-implemented)
+    for `this`'s full treatment as an implicit reference parameter
+    (design finalized, not yet implemented).
   - Any other case that still cannot be resolved -> error, advising to add
     a `[[scpp::lifetime(...)]]` attribute or refactor to return by value /
     smart pointer.
@@ -451,6 +453,68 @@ one:
   without `nsw`/`nuw`. Division/modulo lower to a check for `b == 0` or
   `(a == INT_MIN && b == -1)` followed by `abort()`, unconditionally,
   regardless of the unsafe-nesting counter.
+
+## 5.9 Methods and `this` (design finalized, not yet implemented)
+
+Answers [§8](ch08-open-questions.md) Q5 ("how does a `const` member
+function map to borrows"). scpp reuses real C++ method syntax exactly
+(trailing `const` qualifier, no Rust-style `&self`/`&mut self` parameter
+spelling) -- only the *borrow-checking treatment* of the implicit `this`
+is new:
+
+- **`this` is treated as an implicit reference parameter**, exactly
+  like any other reference parameter already covered by
+  [§5.2](#52-borrow--aliasing)/[§5.3](#53-lifetime): a `const`-qualified
+  method's `this` is treated as `const T&` (a shared borrow of the
+  receiver); a non-`const` method's `this` is treated as `T&` (a
+  mutable/exclusive borrow) -- for checking purposes only; `this`'s
+  actual spelling/type at expression level (`this->x`, `(*this).x`) is
+  unchanged.
+- **Calling a method borrows the receiver**, exactly like passing a
+  reference argument to an ordinary function: `obj.f()` where `f` is
+  non-`const` requires a mutable borrow of `obj` for the call (rejected
+  if `obj` is already borrowed some other way); a `const` method
+  requires only a shared borrow (coexists with other shared borrows of
+  `obj`, rejected only against an active mutable one). The borrow is
+  released per the same liveness-driven rule as any other reference
+  ([§5.3](#53-lifetime)), not just at the end of the full statement.
+- **Field access inside a method body** (`this->field`, or bare `field`
+  if scpp's member-access sugar allows omitting `this->`) resolves back
+  to `this` as its root, exactly like `a.field` resolves to root `a`
+  today -- including the existing whole-root-conservative treatment
+  ([§5.2](#52-borrow--aliasing)): `this->field1` and `this->field2` are
+  recorded against the same root and conflict, exactly as `a.field1`/
+  `a.field2` already do for an ordinary struct-typed local `a`. No new
+  rule needed here -- this falls directly out of treating `this` as an
+  ordinary reference.
+- **`const` propagates to field access**, matching real C++: inside a
+  `const` method, `this->field = x` is rejected (writing through a
+  `const T&`-treated `this`), and calling a non-`const` method on a
+  class-typed field through `this` is rejected the same way -- both are
+  just the ordinary "can't mutate through a shared borrow" rule
+  ([§5.2](#52-borrow--aliasing)) applied to `this`, not a new check.
+- **The `this`-elision rule in [§5.3](#53-lifetime) is now active**:
+  previously specified but dormant ("v0.1 has no class method/`this`
+  concept yet, so this rule never actually applies") -- a method that
+  returns a reference, with no other lifetime-group disambiguation in
+  play, now genuinely defaults to borrowing from `this`'s group. This
+  mirrors Rust's own third lifetime-elision rule (an elided output
+  lifetime defaults to `&self`/`&mut self`'s lifetime when one is
+  present).
+- **Calling any method requires `this`'s pointee to be initialized**
+  (not moved-out) -- the same definite-initialization precondition as
+  any other dereference ([§5.4](#54-initialization)), nothing
+  method-specific about it.
+- **Moving out of a field through `this`** (e.g. a `unique_ptr` field)
+  is restricted by the same rule an ordinary reference already
+  enforces: you cannot move out of `*this` or one of its fields while
+  only holding a borrow of it (a non-`const` method only ever has `T&`,
+  never owns the receiver outright). Rust hits the identical wall and
+  works around it with `std::mem::take`/`Option::take()` ("replace with
+  a valid placeholder while moving the old value out") -- scpp doesn't
+  yet have an equivalent idiom designed; flagged here as a concrete
+  follow-up once this section is implemented, not solved by this
+  section.
 
 ---
 

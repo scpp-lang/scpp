@@ -26,6 +26,10 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 
 - `struct`（规则见 [§4.1](ch04-struct-vs-class.md)；仅含受支持类型的
   字段）。
+- `class`（访问控制和 `this`/方法借用映射设计已定稿，其余完整检查仍在
+  backlog——见 [§4.2](ch04-struct-vs-class.md)/
+  [§5.9](ch05-static-checks.md)）：成员变量（包括类级别常量）必须
+  `private`，只有成员函数可以 `public`；v0.1 没有继承/`protected`。
 - `std::unique_ptr<T>`（已实现）、`std::span<T>`/`std::span<const T>`
   （已实现，M6 第一阶段——但目前只能从定长数组构造，见
   [§3](ch03-syntactic-sugar.md)）。`std::vector<T>` 规划中但**尚未
@@ -48,6 +52,20 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - `std::move`。
 - 函数调用，包括 [§2](ch02-boundary-rules.md) 里"被调方须 `safe`，否则
   `unsafe {}`"这条规则（跟下面的 `unsafe { }` 一起已经实现）。
+- `consteval` 函数（见 [§4.2](ch04-struct-vs-class.md)——**设计已定稿，
+  尚未实现**）：scpp 唯一的编译期函数机制，原样复用真实 C++20 语法——
+  每次调用都强制在编译期求值，只要有一个实参本身不是常量表达式就编译
+  错误。scpp**没有 `constexpr` 修饰的函数**：真实 C++ 的 `constexpr`
+  函数在需要常量表达式的上下文里能编译期求值，别的地方就静默退化成
+  普通运行期调用——**具体走哪条路取决于调用点的上下文**，从函数自己
+  的声明上完全看不出来，这正是 scpp 别处也一直想避免的那种"看上下文
+  才知道行为"的模糊性（见 [ch00](ch00-design-philosophy.md) §8）。
+  scpp 里每个函数都得明确二选一：`consteval`，或者一个不加任何修饰的
+  普通函数，永远是运行期调用，哪怕所有实参碰巧都是常量也不会在编译期
+  求值。`constexpr` **变量**不受影响——`constexpr int x = 5;` 在真实
+  C++ 里本来就没有歧义（永远是编译期常量，不依赖调用上下文），不需要
+  修。如果以后真的出现"同一个函数编译期运行期都要用"的硬需求，到时候
+  再考虑把 `constexpr` 函数加回来，不用现在想别的办法解决。
 - 算术/逻辑/比较运算。`+`/`-`/`*` 在 `safe` 代码里检查溢出（溢出就
   `abort()`，有符号无符号都查；见 [§5.8](ch05-static-checks.md)——
   **设计已定稿，尚未实现**）；在 `unsafe { }` 里不检查，但保证 wrap
@@ -81,8 +99,9 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 
 **暂不支持（safe 区 backlog）**
 - 模板 / 泛型、`concept`。
-- 用户自定义 `class` 的完整检查（构造/析构、方法体内部借用；见
-  [§4.2](ch04-struct-vs-class.md)）。
+- 用户自定义 `class` 的完整检查：访问控制和 `this`/方法借用映射设计已
+  定稿（见 [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)），
+  但还没实现；继承和虚函数依然搁置，设计还没开始。
 - 继承、虚函数。
 - lambda 捕获引用的生命周期检查。
 - `shared_ptr` 的完整别名模型。
@@ -108,6 +127,9 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   设计）：`safe` 代码里检查（溢出 `abort()`）的 `+`/`-`/`*`，`unsafe`
   里保证 wrap（绝不是 UB），以及除以 0/模以 0/`INT_MIN / -1` 无条件
   `abort()`。
+- [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) 定稿的
+  `consteval` 函数、`class` 访问控制、`this`/方法借用映射的**实现**
+  （目前只有设计）。
 
 ---
 
