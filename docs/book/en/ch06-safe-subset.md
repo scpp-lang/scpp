@@ -65,7 +65,8 @@ meaning "sound checking not yet implemented"):
   keeps a `for` keyword reserved, but there's no corresponding
   statement form in the parser/AST yet.)
 - Member access, subscript (fixed-size arrays, `span` -- `span` carries a
-  runtime bounds check, see [§8](ch08-open-questions.md)).
+  runtime bounds check in `safe` code, skipped inside `unsafe { }`/a
+  native function, see [§8](ch08-open-questions.md)).
 - `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
   for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)
   -- **design finalized, not yet implemented**).

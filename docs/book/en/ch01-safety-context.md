@@ -3,19 +3,32 @@
 The compiler maintains a **safety context** for every function body, lambda,
 block, and type:
 
-- **`unsafe` (default)**: ordinary C++ semantics. No ownership / borrow / alias
-  checking.
-- **`safe`**: all static safety checks enabled (see [§5](ch05-static-checks.md)).
+- **`unsafe` (default, a.k.a. a "native function")**: ordinary C++
+  semantics. No ownership / borrow / alias checking, and no scpp-inserted
+  runtime checks either.
+- **`safe`**: all static safety checks enabled (see [§5](ch05-static-checks.md)),
+  plus scpp's own runtime checks (`span` bounds, integer overflow -- see
+  [§5.5](ch05-static-checks.md)/[§5.8](ch05-static-checks.md)).
 
 ## 1.1 How the context is determined
 
-- An unannotated function/block -> `unsafe` (default).
+- An unannotated function/block -> `unsafe` (default) -- called a
+  **native function** in this book: ordinary C++, with no scpp checking
+  of any kind, not even the compile-time checks in
+  [§5.1-§5.4](ch05-static-checks.md). This is descriptive terminology,
+  not a keyword -- there's no `native` token to write; simply omitting
+  `safe` is what puts a function here.
 - A `safe`-annotated function/block -> `safe`.
 - A nested block inherits its parent's context unless explicitly overridden.
-- An `unsafe { }` block opens an escape hatch inside a `safe` context, restoring
-  `unsafe` semantics.
-- (Not yet supported) A `safe { }` block enabling checks inside an `unsafe`
-  context — deferred to a later version.
+- An `unsafe { }` block, written inside a `safe` function, opens an
+  escape hatch that locally relaxes exactly what
+  [§1.3](#13-the-unsafe--block-design-finalized-not-yet-implemented)
+  lists.
+- `safe { }`/`unsafe { }` inside a **native** function are both a
+  compile error, permanently by design (not a temporary gap): a native
+  function has no active checking to relax or re-enable in the first
+  place -- see [§1.3](#13-the-unsafe--block-design-finalized-not-yet-implemented)'s
+  "Nesting".
 
 ## 1.2 Annotation positions
 
@@ -78,6 +91,14 @@ other annotation positions go to the backlog.
   and global variables aren't lexed/parsed) -- there's nothing to gate for
   them until their own syntax lands; wire up the identical mechanism for
   each at that point.
+- **Also relaxed inside `unsafe { }`, for a different reason**: `span`'s
+  bounds check ([§8](ch08-open-questions.md) Q1) and integer-overflow
+  checking ([§5.8](ch05-static-checks.md)) are skipped too -- but unlike
+  the operations above, neither is "illegal outside unsafe" (both are
+  always legal syntax, everywhere). They're scpp-inserted *runtime*
+  checks that happen to carry none of the "leakage into surrounding
+  safe code" risk the next bullet explains, which is why they can join
+  this list without contradicting it.
 - **What stays exactly as strict**: everything in
   [§5.1-§5.4](ch05-static-checks.md) -- ownership/move state,
   alias-XOR-mutability, lifetime/dangling checks, and zero-init -- keeps
@@ -93,10 +114,20 @@ other annotation positions go to the backlog.
   move/borrow-tracked, inside or outside `unsafe { }` -- that's unchanged;
   it's the same "raw pointers aren't a tracked type" rule that already
   applies everywhere.)
-- **Nesting**: `unsafe { }` may nest inside another `unsafe { }`, or appear
-  (as a harmless no-op) inside an already-`unsafe` function body -- neither
-  is an error. `safe { }` re-enabling checks inside an `unsafe` context is
-  still not supported (unchanged from [§1.1](#11-how-the-context-is-determined)).
+- **Nesting**: `unsafe { }` may nest inside another `unsafe { }` --
+  harmless, not an error, as long as both are still lexically inside a
+  `safe` function. `unsafe { }` (or `safe { }`) written inside a
+  **native** function's body, though, **is a compile error**: a native
+  function has no active checking for either block to relax or
+  re-enable, so the marker isn't merely redundant there, it's
+  meaningless -- and rejecting it also catches a likely leftover from
+  moving code between a `safe` function and a native one. (This
+  tightens an earlier draft of this section, which treated `unsafe { }`
+  inside a native function as a harmless no-op rather than an error.)
+  `safe { }` re-enabling checks inside a native function is, similarly,
+  a permanent design choice, not a temporary gap (unchanged from
+  [§1.1](#11-how-the-context-is-determined), just reworded there for
+  the same reason).
 - **Implementation shape** (for whoever builds this): reuse the existing
   `StmtKind::Block` AST node (add an `is_unsafe` flag), and mirror the
   existing `ScopeExit` MIR pattern with a matching pair of marker
@@ -108,7 +139,13 @@ other annotation positions go to the backlog.
   fact at each program point, never a flow-sensitive one (every branch of
   an `if` already closes out its own `unsafe { }` blocks, if any, before
   reaching the merge point). Gate each of the two currently-reachable
-  checks above on `counter == 0`.
+  checks above on `counter == 0`; `span`'s bounds check and
+  integer-overflow checking (once implemented) gate on the same counter,
+  no separate mechanism needed. Rejecting `unsafe { }`/`safe { }` inside
+  a native function is a separate, much simpler check that doesn't need
+  this counter at all -- just look at the enclosing function's own
+  `Function::is_safe` at parse/resolve time, independent of any nesting
+  state.
 
 ---
 

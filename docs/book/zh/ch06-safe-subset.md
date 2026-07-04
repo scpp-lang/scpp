@@ -56,7 +56,8 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - `if` / `while` / `return`。（`for`/range-for **尚未实现**——目前只能用
   `while` 手写迭代；词法层面保留了 `for` 关键字，但 parser/AST 还没有
   对应的语句形式。）
-- 成员访问、下标（定长数组、`span`，span 带运行时边界检查——见
+- 成员访问、下标（定长数组、`span`，span 在 `safe` 代码里带运行时边界
+  检查，在 `unsafe { }`/native 函数里跳过——见
   [§8](ch08-open-questions.md)）。
 - `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
   跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)——**设计已

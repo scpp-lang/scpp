@@ -4,7 +4,14 @@
    insert a runtime bounds check (like Rust), or require a checked API?
    **Settled and implemented (M6)**: `span[i]` inserts a runtime bounds
    check by default, calling `abort()` on failure (`vector` doesn't exist
-   yet, but will follow the same policy).
+   yet, but will follow the same policy) -- this is `safe` code's
+   behavior. Inside `unsafe { }` (or an entirely native function), the
+   check is skipped -- same treatment, and for the same reason, as
+   integer-overflow checking (Q2 below / [§5.8](ch05-static-checks.md)):
+   skipping a scpp-inserted *runtime* check carries none of the
+   "corrupted bookkeeping leaking into surrounding safe code" risk that
+   keeps move/borrow/lifetime checking unconditional (see
+   [§1.3](ch01-safety-context.md)).
 2. **Integer overflow**: does safe check signed overflow? **Settled**:
    yes -- checked in `safe` code (both signed and unsigned), `abort()`
    on overflow, unconditionally (no debug/release split); unchecked but

@@ -165,14 +165,16 @@ is always legal in a `safe` context, same as in Rust -- it's
 unconditional type-checking rule that a `const T*` can never be written
 through ([§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
 -- that check isn't on this list either, because it isn't something
-`unsafe { }` ever relaxes. Integer-overflow checking ([§5.8](#58-integer-overflow-design-finalized-not-yet-implemented))
-*does* join this list's effect (relaxed inside `unsafe { }`), but for a
-different reason than everything above: not because arithmetic is
-otherwise illegal (it never is), but because skipping that one check
-carries none of the "corrupted bookkeeping could leak into surrounding
-safe code" risk that keeps [§5.1-§5.4](#51-ownership--move)'s checks
-unconditional -- see [§5.8](#58-integer-overflow-design-finalized-not-yet-implemented)
-for why.
+`unsafe { }` ever relaxes. Two more things *do* join this list's effect
+(relaxed inside `unsafe { }`), but for a different reason than everything
+above: not because they're otherwise illegal (neither ever is), but
+because skipping them carries none of the "corrupted bookkeeping could
+leak into surrounding safe code" risk that keeps
+[§5.1-§5.4](#51-ownership--move)'s checks unconditional -- `span`'s
+bounds check ([§8](ch08-open-questions.md) Q1) and integer-overflow
+checking ([§5.8](#58-integer-overflow-design-finalized-not-yet-implemented))
+are both scpp-inserted *runtime* checks, not otherwise-illegal
+operations, and both are off inside `unsafe { }`, on everywhere else.
 
 See [§1.3](ch01-safety-context.md) for `unsafe { }`'s exact rules: it
 relaxes precisely this list and nothing else -- every other check in this
