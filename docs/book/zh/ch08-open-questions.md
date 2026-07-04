@@ -89,6 +89,27 @@
    `const T*` 写是普通的、无条件强制的类型错误，不是 `unsafe { }` 会
    放宽的东西。v0.1 没有 `const_cast` 等价物（见
    [§5.7](ch05-static-checks.md)）。
+10. **Namespace 设计**：scpp 支持 C++ namespace 特性到什么程度，跟
+    module 怎么互动？**已定**：scpp 原样复用真实 C++ 的 namespace 语法
+    （包括 C++17 单行嵌套写法），带三条永久限制——任何地方都不允许
+    `using namespace`（只允许单名的 `using foo::bar;`）；不支持匿名
+    namespace（跟 module 的导出面机制重复，见
+    [§11.3](ch11-modules-and-libraries.md)）；完全没有 ADL（参数依赖
+    查找），永远没有——调用永远只从词法作用域和显式的 `using` 声明解析，
+    不看参数类型（见 [§11.4](ch11-modules-and-libraries.md)）。有一条
+    真实 C++ 里没有对应的新规则，把 namespace 和 module 在导出这条边界
+    上绑在了一起：一个标了 `export` 的声明，只有词法上落在一个跟当前
+    module 自己点分名字匹配（作为前缀，允许更深嵌套）的 namespace 里，
+    才算真的导出了（见 [§11.5](ch11-modules-and-libraries.md)）——刻意
+    不引入隐式/默认 namespace（早期草稿考虑过，因为没法在 erasure 下
+    存活而被否决，见 [ch00](ch00-design-philosophy.md) §2/§6）。这把
+    真实 C++ "这个限定名到底哪个头文件定义的"这种猜测，变成了一个机械
+    保证的事实：任何一个完整限定名都能唯一确定该 `import` 哪个 module。
+    跨多个 import 的 module 做限定名解析，用的是对照实际被 import 的
+    module 名字集合做最长前缀匹配；如果两个被 import 的 module 恰好都
+    能解析同一个限定名，是编译错误（"限定名有歧义"），不是静默按最长
+    匹配挑一个，理由跟否决 ADL 一样：一个不相关的、后来才加的
+    `import`，永远不该悄悄改变已有代码的含义。
 
 ---
 

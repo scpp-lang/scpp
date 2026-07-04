@@ -135,6 +135,10 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) 定稿的
   `consteval` 函数、`class` 访问控制、`this`/方法借用映射、`mutable`
   （内部可变性第一阶段）的**实现**（目前只有设计）。
+- [ch11](ch11-modules-and-libraries.md) 定稿的 namespace 声明（嵌套、
+  限定名查找、`using foo::bar;`、namespace 别名）和多文件 module
+  整体的**实现**（目前只有设计），包括新的"导出必须匹配 module 名字"
+  规则——现在的编译器一次还是只能处理一个文件。
 
 ---
 

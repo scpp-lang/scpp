@@ -162,6 +162,11 @@ meaning "sound checking not yet implemented"):
   mutability) spec'd in
   [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) (design
   only so far).
+- Namespace declarations (nesting, qualified lookup, `using foo::bar;`,
+  namespace aliases) and multi-file modules generally, including the new
+  export-must-match-module-name rule, spec'd in
+  [ch11](ch11-modules-and-libraries.md) (design only so far) -- today's
+  compiler only ever processes one file at a time.
 
 ---
 

@@ -114,6 +114,34 @@
    `const T*` is an ordinary, always-enforced type error, not something
    `unsafe { }` relaxes. No `const_cast` equivalent exists in v0.1 (see
    [§5.7](ch05-static-checks.md)).
+10. **Namespace design**: how much of C++'s namespace feature does scpp
+    support, and how does it interact with modules? **Settled**: scpp
+    reuses real C++ namespace syntax verbatim (including C++17's one-line
+    nested-namespace definition) with three permanent restrictions -- no
+    `using namespace` anywhere (only single-name `using foo::bar;` is
+    allowed), no anonymous namespaces (redundant with the module
+    export-surface mechanism, [§11.3](ch11-modules-and-libraries.md)),
+    and no argument-dependent lookup (ADL) at all, ever -- a call always
+    resolves from lexical scope and explicit `using` declarations, never
+    from an argument's type (see
+    [§11.4](ch11-modules-and-libraries.md)). A new rule, with no real C++
+    analogue, ties namespaces to modules at the export boundary: an
+    `export`-marked declaration is only actually exported if it's
+    lexically inside a namespace matching (as a prefix, deeper nesting
+    allowed) the current module's own dotted name (see
+    [§11.5](ch11-modules-and-libraries.md)) -- deliberately with no
+    implicit/default namespace (an earlier draft considered one; rejected
+    because it can't survive erasure, see
+    [ch00](ch00-design-philosophy.md) §2/§6). This turns real C++'s
+    "which header defines this qualified name" guesswork into a
+    mechanically guaranteed fact: any fully-qualified name determines
+    exactly one module to `import`. Qualified-name resolution across
+    several imported modules uses longest-prefix-match against the set of
+    actually-imported module names; if two imported modules could both
+    resolve the same qualified name, it's a compile error ("ambiguous
+    qualified name") rather than a silent longest-match-wins pick, for
+    the same reason ADL is rejected: a later, unrelated `import` should
+    never silently change what existing code means.
 
 ---
 
