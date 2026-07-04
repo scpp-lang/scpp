@@ -18,6 +18,21 @@
    safe region?
 6. **ABI / interop with existing C++ libraries**: how to engineer safe code
    calling third-party headers (all unsafe) — treat them all as `unsafe`?
+   **Settled**: `extern "C"` ([§2.1](ch02-boundary-rules.md), design
+   finalized) is scpp's *only* interop mechanism with the outside world;
+   scpp-to-scpp code sharing across files is [ch11](ch11-modules-and-libraries.md)
+   (design finalized). Interop with *existing, unmodified C++ libraries*
+   specifically (arbitrary classes, templates, overloads, exceptions,
+   RTTI) is explicitly **not pursued** -- considered and rejected the
+   idea of transpiling checked scpp to real C++ text and compiling it
+   with Clang (which would have made this easy, at the cost of a full
+   rework of the already-working direct-to-LLVM-IR codegen path); direct
+   LLVM IR generation also has a strictly higher optimization ceiling for
+   safe-region code than that alternative would (scoped `alias.scope`/
+   `noalias` LLVM metadata, derived from the borrow checker's own
+   NLL-precision aliasing proofs, has no C++ source-level equivalent --
+   not even `__restrict` reaches it, since `__restrict` only ever maps to
+   the coarser, whole-parameter `noalias` attribute).
 7. **Language/compiler name, file extension.**
 
 ---

@@ -23,3 +23,4 @@
 8. [未决问题（Open Questions，需后续拍板）](ch08-open-questions.md)
 9. [MVP 里程碑（实现顺序，端到端优先）](ch09-milestones.md)
 10. [参考实现（务必先研读）](ch10-reference-implementations.md)
+11. [模块与库（Modules & Libraries）](ch11-modules-and-libraries.md)

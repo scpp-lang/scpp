@@ -28,3 +28,4 @@
 8. [Open Questions (to be decided later)](ch08-open-questions.md)
 9. [MVP Milestones (implementation order, end-to-end first)](ch09-milestones.md)
 10. [Reference Implementations (required reading)](ch10-reference-implementations.md)
+11. [Modules & Libraries](ch11-modules-and-libraries.md)
