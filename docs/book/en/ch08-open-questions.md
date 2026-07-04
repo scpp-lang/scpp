@@ -5,8 +5,20 @@
    **Settled and implemented (M6)**: `span[i]` inserts a runtime bounds
    check by default, calling `abort()` on failure (`vector` doesn't exist
    yet, but will follow the same policy).
-2. **Integer overflow**: does safe check signed overflow? Leaning: panic in
-   debug, wrapping/UB in release? TBD.
+2. **Integer overflow**: does safe check signed overflow? **Settled**:
+   yes -- checked in `safe` code (both signed and unsigned), `abort()`
+   on overflow, unconditionally (no debug/release split); unchecked but
+   guaranteed-wrapping (never UB) inside `unsafe { }` or an `unsafe`
+   function, achieved by never emitting LLVM's `nsw`/`nuw` on scpp's own
+   arithmetic codegen. Division/modulo by zero or `INT_MIN / -1` always
+   `abort()`, `safe` or `unsafe` alike -- there's no wrapped result for
+   the hardware to fall back on. Deliberately diverges from Rust's
+   debug-only default (see [§5.8](ch05-static-checks.md) for the full
+   reasoning, including why overflow-checking -- unlike
+   [§5.1-§5.4](ch05-static-checks.md)'s checks -- can safely join what
+   `unsafe { }` relaxes without risking the "leakage into surrounding
+   safe code" that [§1.3](ch01-safety-context.md) otherwise guards
+   against).
 3. **Panic model**: how do OOB / assertion failures terminate? `std::terminate`
    or a custom panic + stack unwinding? **Settled and implemented (M6)**:
    calls libc's `abort()` directly (lower-level than `std::terminate()`,

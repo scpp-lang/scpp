@@ -165,7 +165,14 @@ is always legal in a `safe` context, same as in Rust -- it's
 unconditional type-checking rule that a `const T*` can never be written
 through ([§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
 -- that check isn't on this list either, because it isn't something
-`unsafe { }` ever relaxes.
+`unsafe { }` ever relaxes. Integer-overflow checking ([§5.8](#58-integer-overflow-design-finalized-not-yet-implemented))
+*does* join this list's effect (relaxed inside `unsafe { }`), but for a
+different reason than everything above: not because arithmetic is
+otherwise illegal (it never is), but because skipping that one check
+carries none of the "corrupted bookkeeping could leak into surrounding
+safe code" risk that keeps [§5.1-§5.4](#51-ownership--move)'s checks
+unconditional -- see [§5.8](#58-integer-overflow-design-finalized-not-yet-implemented)
+for why.
 
 See [§1.3](ch01-safety-context.md) for `unsafe { }`'s exact rules: it
 relaxes precisely this list and nothing else -- every other check in this
@@ -362,6 +369,86 @@ the C++ standard itself evolves further in this area -- see
   pointer with `is_mutable_pointee == false` as an ordinary type error in
   whatever pass already checks assignment compatibility -- unconditionally,
   not gated by the `unsafe`-nesting counter from [§1.3](ch01-safety-context.md).
+
+## 5.8 Integer Overflow (design finalized, not yet implemented)
+
+Real C++ leaves signed integer overflow **undefined behavior** -- even
+after C++20 mandated two's-complement *representation* for signed
+integers, overflow *behavior* remained a separate, still-unresolved
+question (see [ch00](ch00-design-philosophy.md) §8). scpp eliminates
+this UB entirely, in both `safe` and `unsafe` code, reusing the existing
+safe/unsafe axis rather than introducing a new debug/release build-mode
+one:
+
+- **In `safe` code (the default, everywhere outside `unsafe { }`)**:
+  `+`, `-`, and `*` are checked -- for **both signed and unsigned**
+  operands (unlike real C++, where unsigned wraparound is always
+  "intentional" by definition; scpp treats an unsigned wraparound as
+  just as likely to be a bug as a signed one, matching Rust's judgment
+  here). On overflow, the program `abort()`s, via the same panic
+  mechanism as `span`'s bounds check ([§8](ch08-open-questions.md)
+  Q1/Q3) -- unconditionally, not gated by a debug/release compilation
+  mode the way Rust's is. Deliberately diverging from Rust here: Rust's
+  checks are debug-only by default, providing zero protection in the
+  release binaries that actually ship and face real attackers/real data
+  -- scpp instead reuses its existing safe/unsafe axis, which already
+  has no debug/release split anywhere else in the spec.
+- **In `unsafe { }` (and in an entire `unsafe` function -- the default,
+  unannotated context)**: the check is skipped, but the underlying
+  operation is still **not UB** -- it's a guaranteed two's-complement
+  wraparound, identical in spirit to how unsigned arithmetic already
+  behaves in real C++. Concretely: scpp's codegen never emits LLVM's
+  `nsw`/`nuw` ("no signed/unsigned wrap") flags on its `add`/`sub`/`mul`
+  instructions -- those flags are exactly what *grants* the optimizer
+  license to assume overflow never happens (turning it into a poison
+  value/UB if it does); plain LLVM `add`/`sub`/`mul`, without them, are
+  already well-defined, wrapping operations with no UB at the IR level.
+  Real C++ compiled through Clang can't get this same guarantee without
+  a blunt, whole-translation-unit `-fwrapv` flag (Clang has no choice
+  but to emit `nsw` otherwise, because the C++ standard mandates UB);
+  scpp, generating its own IR directly, simply never opts in to begin
+  with.
+- **Why this joins what `unsafe { }` relaxes, without reopening
+  [§1.3](ch01-safety-context.md)'s "narrow escape hatch, not a
+  stop-checking-this-region switch" rule**: unlike
+  [§5.1-§5.4](#51-ownership--move)'s checks (move state,
+  borrow/aliasing, lifetimes, zero-init), which must keep running
+  unconditionally inside `unsafe { }` because skipping them would let
+  *inconsistent compiler bookkeeping* leak into the surrounding `safe`
+  code once the block ends, overflow-checking carries no such risk: an
+  unchecked wraparound just produces an ordinary (if numerically wrong)
+  value in an ordinary variable -- it cannot corrupt move/borrow/
+  lifetime tracking, which is entirely independent of what value a
+  variable holds. Any actual memory-safety consequence of that wrong
+  value (e.g. using it as an out-of-bounds index) is still caught
+  independently by whatever check governs *that* operation (`span`'s
+  bounds check doesn't care why an index is wrong).
+- **Manual overflow detection becomes reliable inside `unsafe { }`**:
+  the classic `if (x + 1 < x)` idiom is unreliable for signed `x` in
+  real C++ -- compilers may (and GCC/Clang do) assume signed overflow
+  never happens and optimize the check away as unreachable. Since scpp
+  never emits `nsw`, there is no such license to exploit, so this idiom
+  works exactly as its arithmetic reads: `x = INT_MAX` wraps `x + 1` to
+  `INT_MIN`, and `INT_MIN < INT_MAX` is (correctly) true. (This idiom is
+  moot in `safe` code: the automatic check already aborts at `x + 1`
+  itself, before a comparison could ever observe the wrapped value.)
+- **Division/modulo are a separate case, not covered by "wraps"**:
+  `INT_MIN / -1` (the one case where signed division itself overflows)
+  and division/modulo by zero don't have a wrapped result to fall back
+  on -- the hardware itself traps (x86 `#DE`). Both `abort()`
+  unconditionally, in *every* context, `safe` or `unsafe` alike -- there
+  is no unchecked variant for these two.
+- **Implementation shape** (for whoever builds this): in `safe` code,
+  lower `+`/`-`/`*` to LLVM's `@llvm.{s,u}{add,sub,mul}.with.overflow.*`
+  intrinsics (which read the hardware overflow flag as a side effect of
+  the arithmetic instruction itself, at no extra computation cost --
+  see [ch08](ch08-open-questions.md) Q2) and branch to the existing
+  `abort()` call on the overflow bit. In `unsafe` contexts (nesting
+  counter from [§1.3](ch01-safety-context.md) > 0, or the enclosing
+  function isn't `safe` at all), lower to plain `add`/`sub`/`mul`
+  without `nsw`/`nuw`. Division/modulo lower to a check for `b == 0` or
+  `(a == INT_MIN && b == -1)` followed by `abort()`, unconditionally,
+  regardless of the unsafe-nesting counter.
 
 ---
 

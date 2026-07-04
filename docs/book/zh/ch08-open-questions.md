@@ -4,8 +4,17 @@
    （像 Rust），还是要求用带检查的 API？**已定并实现（M6）**：`span[i]`
    默认插入运行时边界检查，越界调用 `abort()`（`vector` 还没实现，但
    会沿用同一策略）。
-2. **整数溢出**：safe 区是否检查有符号溢出？倾向：debug 下 panic，release
-   下按 wrapping/UB？需定。
+2. **整数溢出**：safe 区是否检查有符号溢出？**已定**：查——`safe` 代码里
+   有符号无符号都查，溢出就 `abort()`，无条件生效（不分 debug/release）；
+   在 `unsafe { }` 或者 unsafe 函数里不检查，但保证 wrap（绝不是 UB），
+   靠 scpp 自己的算术 codegen 从不打 LLVM 的 `nsw`/`nuw` 做到。除以 0/
+   模以 0/`INT_MIN / -1` 无条件 `abort()`，`safe`/`unsafe` 都一样——
+   硬件本身就没有 wrap 后的结果可退回去用。这里故意跟 Rust 的
+   debug-only 默认不一样（完整理由见 [§5.8](ch05-static-checks.md)，
+   包括为什么溢出检查——跟 [§5.1-§5.4](ch05-static-checks.md) 那批检查
+   不一样——能安全地加入 `unsafe { }` 放宽的范围，而不会有
+   [§1.3](ch01-safety-context.md) 那条"泄漏到外面 safe 代码"规则想防的
+   风险）。
 3. **panic 模型**：越界/断言失败如何终止？`std::terminate` 还是自定义
    panic + 栈展开？**已定并实现（M6）**：直接调用 libc 的 `abort()`（比
    `std::terminate()` 更底层、不依赖 C++ 运行时的 terminate-handler 机制，

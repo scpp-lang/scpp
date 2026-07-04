@@ -54,7 +54,12 @@ meaning "sound checking not yet implemented"):
 - Function calls, including the "callee must be `safe`, otherwise
   `unsafe {}`" rule from [§2](ch02-boundary-rules.md) (implemented
   alongside `unsafe { }` below).
-- Arithmetic / logical / comparison operators.
+- Arithmetic / logical / comparison operators. `+`/`-`/`*` are
+  overflow-checked in `safe` code (`abort()` on overflow, both signed
+  and unsigned; see [§5.8](ch05-static-checks.md) -- **design finalized,
+  not yet implemented**); unchecked but guaranteed-wrapping (never UB)
+  inside `unsafe { }`. Division/modulo by zero (or `INT_MIN / -1`)
+  always `abort()`, `safe` or `unsafe` alike.
 - `if` / `while` / `return`. (`for`/range-for are **not implemented yet**
   -- iteration has to be hand-written with `while` for now; the lexer
   keeps a `for` keyword reserved, but there's no corresponding
@@ -113,6 +118,11 @@ meaning "sound checking not yet implemented"):
   [§5.6](ch05-static-checks.md) (design only so far), including the
   mandatory-checking rule and the fallible-construction guidance in
   [§4.2](ch04-struct-vs-class.md).
+- Implementation of integer-overflow checking spec'd in
+  [§5.8](ch05-static-checks.md) (design only so far): checked
+  (`abort()`-on-overflow) `+`/`-`/`*` in `safe` code, guaranteed-wrapping
+  (never UB) in `unsafe`, and unconditional `abort()` for division/modulo
+  by zero or `INT_MIN / -1`.
 
 ---
 

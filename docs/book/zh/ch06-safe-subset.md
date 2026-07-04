@@ -48,7 +48,11 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - `std::move`。
 - 函数调用，包括 [§2](ch02-boundary-rules.md) 里"被调方须 `safe`，否则
   `unsafe {}`"这条规则（跟下面的 `unsafe { }` 一起已经实现）。
-- 算术/逻辑/比较运算。
+- 算术/逻辑/比较运算。`+`/`-`/`*` 在 `safe` 代码里检查溢出（溢出就
+  `abort()`，有符号无符号都查；见 [§5.8](ch05-static-checks.md)——
+  **设计已定稿，尚未实现**）；在 `unsafe { }` 里不检查，但保证 wrap
+  （绝不是 UB）。除以 0/模以 0（或者 `INT_MIN / -1`）无条件 `abort()`，
+  `safe`/`unsafe` 都一样。
 - `if` / `while` / `return`。（`for`/range-for **尚未实现**——目前只能用
   `while` 手写迭代；词法层面保留了 `for` 关键字，但 parser/AST 还没有
   对应的语句形式。）
@@ -99,6 +103,10 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - [§5.6](ch05-static-checks.md) 定稿的 `std::expected<T, E>` 的**实现**
   （目前只有设计），包括强制检查规则，以及
   [§4.2](ch04-struct-vs-class.md) 里可失败构造的指导原则。
+- [§5.8](ch05-static-checks.md) 定稿的整数溢出检查的**实现**（目前只有
+  设计）：`safe` 代码里检查（溢出 `abort()`）的 `+`/`-`/`*`，`unsafe`
+  里保证 wrap（绝不是 UB），以及除以 0/模以 0/`INT_MIN / -1` 无条件
+  `abort()`。
 
 ---
 

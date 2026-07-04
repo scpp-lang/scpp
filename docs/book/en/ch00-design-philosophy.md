@@ -51,6 +51,25 @@
    London meeting. This is the baseline Principle 2's erasure property
    and Principle 6's "stick to ratified names" rule are checked against
    -- bump it forward whenever a newer standard is ratified.
+8. **No UB, ever, for anything the compiler itself controls -- not even
+   inside `unsafe`.** Developers must always be able to know their
+   code's exact behavior. Real C++ leaves some operations undefined even
+   when a program never does anything as drastic as dereferencing a
+   wild pointer -- signed integer overflow being the clearest example
+   (see [§5.8](ch05-static-checks.md)): the compiler is *licensed* to
+   assume it never happens and to miscompile code that (unknowingly)
+   relies on it, purely because the standard says so, not because
+   there's no way to define it. scpp never grants itself that license:
+   for any operation whose definedness is scpp's own codegen choice
+   (arithmetic overflow being the first concrete case), it either keeps
+   checking it unconditionally (in `safe` code), or, inside `unsafe`,
+   pins it to one specific, deterministic, documented outcome instead
+   (e.g. a guaranteed two's-complement wraparound) -- never real UB.
+   This doesn't extend to (and can't eliminate) the other kind of UB,
+   the one that comes from an unverifiable *external* precondition
+   (dereferencing a raw pointer is only ever sound if the pointer is
+   genuinely valid, which no static analysis can prove in general) --
+   `unsafe` still means exactly what it means in Rust for that kind.
 
 ---
 
