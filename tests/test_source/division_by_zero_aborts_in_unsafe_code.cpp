@@ -1,7 +1,8 @@
-int main() {
-    int a = 10;
-    int b = 0;
+safe int divide_unsafely(int a, int b) {
     unsafe {
         return a / b;
     }
+}
+int main() {
+    return divide_unsafely(10, 0);
 }

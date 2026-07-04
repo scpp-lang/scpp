@@ -490,6 +490,11 @@ private:
     // supports this block-statement form: `unsafe` must always be
     // followed by `{` (parse_block itself rejects anything else), never a
     // single bare statement, a condition expression, or a match-arm body.
+    // Grammar accepts this anywhere a statement is expected, regardless
+    // of the enclosing function's own `safe`-ness -- rejecting it inside
+    // a native (non-`safe`) function is movecheck's job (check_function),
+    // not a grammar restriction, since it needs `Function::is_safe`
+    // context this parser method doesn't have.
     StmtPtr parse_unsafe_block() {
         expect(TokenKind::KwUnsafe, "'unsafe'");
         StmtPtr block = parse_block();

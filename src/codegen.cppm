@@ -1021,7 +1021,16 @@ private:
     // block into a `bounds.fail` block (unreachable after the call) and a
     // `bounds.ok` block, leaving the builder's insert point at the latter
     // so the caller can continue emitting the actual element access.
+    // Skipped entirely inside `unsafe { }`/a native function
+    // (unsafe_depth_ > 0, ch01 §1.3) -- same treatment, and for the same
+    // reason, as codegen_checked_arith/codegen_checked_div: a scpp-
+    // inserted *runtime* check, not an otherwise-illegal operation, so
+    // skipping it carries none of the "corrupted bookkeeping leaking into
+    // surrounding safe code" risk that keeps movecheck's own checks
+    // unconditional.
     void emit_span_bounds_check(llvm::Value* index, llvm::Value* size) {
+        if (unsafe_depth_ > 0) return;
+
         llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
         llvm::BasicBlock* fail_block = llvm::BasicBlock::Create(*context_, "bounds.fail", current_function);
         llvm::BasicBlock* ok_block = llvm::BasicBlock::Create(*context_, "bounds.ok", current_function);

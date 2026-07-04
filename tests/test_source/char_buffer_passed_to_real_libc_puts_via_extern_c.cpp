@@ -1,5 +1,12 @@
 extern "C" int puts(const char* s);
 
+safe void print_buffer(char* msg) {
+    unsafe {
+        puts(msg);
+    }
+    return;
+}
+
 int main() {
     char msg[6];
     msg[0] = 'h';
@@ -8,8 +15,6 @@ int main() {
     msg[3] = 'l';
     msg[4] = 'o';
     msg[5] = '\0';
-    unsafe {
-        puts(msg);
-    }
+    print_buffer(msg);
     return 0;
 }

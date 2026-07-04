@@ -1,9 +1,10 @@
+safe bool add_one_overflows(int x) {
+    unsafe {
+        return (x + 1) < x;
+    }
+}
 int main() {
     int x = 2147483647;
-    bool overflowed = false;
-    unsafe {
-        overflowed = (x + 1) < x;
-    }
-    print_bool(overflowed);
+    print_bool(add_one_overflows(x));
     return 0;
 }

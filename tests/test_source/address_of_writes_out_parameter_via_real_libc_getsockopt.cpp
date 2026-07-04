@@ -18,14 +18,22 @@ safe int query_socket_type(int fd) {
     return value;
 }
 
-int main() {
-    int fd = 0;
+safe int open_socket() {
     unsafe {
-        fd = socket(2, 1, 0);
+        return socket(2, 1, 0);
     }
-    print_int(query_socket_type(fd));
+}
+
+safe void close_socket(int fd) {
     unsafe {
         close(fd);
     }
+    return;
+}
+
+int main() {
+    int fd = open_socket();
+    print_int(query_socket_type(fd));
+    close_socket(fd);
     return 0;
 }

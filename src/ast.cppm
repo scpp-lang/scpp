@@ -179,10 +179,15 @@ struct Stmt {
     // Block -- same lexical scoping, same statement list -- this flag
     // only tells the move checker to relax the specific ch05.5 checks
     // it's licensed to relax (raw pointer dereference, calling a
-    // non-`safe` function) for the statements directly and transitively
-    // nested inside it; every other check (ch05.1-5.4) keeps running
-    // unconditionally regardless of this flag. Meaningless for every
-    // other StmtKind.
+    // non-`safe` function), and tells codegen to skip its own runtime
+    // checks (span bounds, integer overflow -- ch05 §5.8/ch08 Q1), for
+    // the statements directly and transitively nested inside it; every
+    // other check (ch05.1-5.4) keeps running unconditionally regardless
+    // of this flag. Meaningless for every other StmtKind. Movecheck
+    // separately rejects this flag being set at all when the enclosing
+    // function isn't itself `safe` (a native function's entire body is
+    // already an implicit unsafe context, so the marker has nothing left
+    // to relax -- see check_function).
     bool is_unsafe = false;
 };
 

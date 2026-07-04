@@ -1,4 +1,4 @@
-int f(char* p) {
+safe int f(char* p) {
     unsafe {
         return *p == 'a';
     }

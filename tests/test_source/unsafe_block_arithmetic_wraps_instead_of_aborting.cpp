@@ -1,9 +1,10 @@
+safe int add_one_unsafely(int x) {
+    unsafe {
+        return x + 1;
+    }
+}
 int main() {
     int x = 2147483647;
-    int y = 0;
-    unsafe {
-        y = x + 1;
-    }
-    print_int(y);
+    print_int(add_one_unsafely(x));
     return 0;
 }

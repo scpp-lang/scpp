@@ -1,4 +1,4 @@
-int f() {
+safe int f() {
     int x = 5;
     const int* p = &x;
     unsafe {

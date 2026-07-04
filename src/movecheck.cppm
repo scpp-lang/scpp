@@ -1529,6 +1529,31 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 // can be visited many times during fixed-point iteration).
 void check_function(const Function& fn, const Signatures& signatures) {
     Body body = build_mir(fn);
+
+    // ch01 §1.3: `unsafe { }` written inside a native (non-`safe`)
+    // function is a compile error, not a harmless no-op -- the function's
+    // entire body is already an implicit unsafe context (see
+    // entry_state.unsafe_depth below), so the marker has no active
+    // checking left to relax, and rejecting it also catches a likely
+    // leftover from moving code between a `safe` function and a native
+    // one. A flat scan over every block is enough: this is a purely
+    // lexical/structural fact, never a flow-sensitive one -- MIR already
+    // flattens any nesting depth into the same UnsafeEnter marker, so
+    // there's no need to track a counter or walk the CFG for this.
+    if (!fn.is_safe) {
+        for (const auto& block : body.blocks) {
+            for (const auto& stmt : block.statements) {
+                if (stmt.kind == MirStatementKind::UnsafeEnter) {
+                    throw DataflowError("'unsafe { }' is not allowed inside native function '" + fn.name +
+                                        "': it is already unsafe everywhere in a native function, so the "
+                                        "marker has nothing left to relax (mark '" + fn.name +
+                                        "' itself 'safe' first if you meant to open a checked region with an "
+                                        "escape hatch)");
+                }
+            }
+        }
+    }
+
     size_t n = body.blocks.size();
 
     std::vector<std::vector<size_t>> preds(n);
@@ -1550,11 +1575,14 @@ void check_function(const Function& fn, const Signatures& signatures) {
     // ch01 §1.3's "or the caller itself is an unsafe function" clause:
     // folding `!fn.is_safe` into the *starting* depth means every check
     // gated on `unsafe_depth` only ever has to test that one counter,
-    // never `fn.is_safe` separately -- a non-`safe` function's entire
-    // body behaves exactly as if it were already wrapped in one implicit
-    // `unsafe { }` (matching the spec's "harmless no-op" nesting rule),
-    // while a `safe` function starts at 0 and must actually enter an
-    // `unsafe { }` block before any UnsafeEnter-gated check is relaxed.
+    // never `fn.is_safe` separately -- a native function's entire body
+    // behaves exactly as if it were already wrapped in one implicit
+    // `unsafe { }` for every unsafe_depth-gated check's purposes, while a
+    // `safe` function starts at 0 and must actually enter a real,
+    // explicitly-written `unsafe { }` block before any of them relax.
+    // (This implicit wrapping is never itself rejected by the scan above
+    // -- only an *explicit* `unsafe { }` written in the native function's
+    // own source is.)
     entry_state.unsafe_depth = fn.is_safe ? 0 : 1;
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;

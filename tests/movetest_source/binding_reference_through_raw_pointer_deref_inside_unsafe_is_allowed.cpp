@@ -1,4 +1,4 @@
-int f(int* p) {
+safe int f(int* p) {
     unsafe {
         const int& r = *p;
         return r;
