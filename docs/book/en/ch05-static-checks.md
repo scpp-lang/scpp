@@ -160,7 +160,12 @@ the following properties:
 Note what's deliberately *not* on this list: taking a raw pointer's
 address in the first place (`&expr`, [§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
 is always legal in a `safe` context, same as in Rust -- it's
-*dereferencing* one that's gated here, not creating one.
+*dereferencing* one that's gated here, not creating one. Also note that
+`unsafe { }` relaxes *dereferencing* a raw pointer, not the ordinary,
+unconditional type-checking rule that a `const T*` can never be written
+through ([§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
+-- that check isn't on this list either, because it isn't something
+`unsafe { }` ever relaxes.
 
 See [§1.3](ch01-safety-context.md) for `unsafe { }`'s exact rules: it
 relaxes precisely this list and nothing else -- every other check in this
@@ -243,10 +248,27 @@ the C++ standard itself evolves further in this area -- see
   `const T&` ([§5.2](#52-borrow--aliasing)): a plain local/parameter
   name, a `.field` projection, a `[index]` subscript, or `*p`/`p->x`
   where `p` is a `std::unique_ptr<T>` -- recursively, off any of the
-  above. `&expr` evaluates to a `T*` -- never a distinct `const T*`,
-  since scpp's `const T*` and `T*` are already the identical `Pointer`
-  type ([§2.1](ch02-boundary-rules.md)'s parser note), so there is
-  nothing for a separate `&`/`&mut` spelling to distinguish.
+  above. `&expr` evaluates to `const T*` if `expr`'s resolved place is
+  only reachable read-only (e.g. through a `const T&` parameter/binding
+  anywhere along the projection chain), or to `T*` if it's reachable
+  mutably -- the same rule real C++'s own `&expr` already follows, and
+  the same split as Rust's `&x as *const T` vs `&mut x as *mut T`.
+- **`const T*` and `T*` are genuinely distinct types.** (An earlier draft
+  of this section assumed they were unified into one untracked type --
+  they are not, in either real C++ or scpp; see
+  [§8](ch08-open-questions.md) Q9 for how that got caught and corrected.)
+  `T*` converts implicitly to `const T*` (widening -- always legal,
+  matching real C++'s own rule); `const T*` does **not** convert to
+  `T*` -- v0.1 has no `const_cast`/Rust's `.cast_mut()` equivalent, so
+  there is currently no way to obtain a `T*` from a `const T*` at all.
+  **Writing through a `const T*` is an ordinary compile-time type error,
+  in *every* context, including inside `unsafe { }`** -- it isn't on
+  [§5.5](#55-prohibited-in-safe-regions-unless-in-unsafe--)'s list
+  because `unsafe { }` only ever relaxes *that* list, and this isn't a
+  member of it: it's the same kind of ordinary type mismatch as assigning
+  a `std::string` to an `int`, which `unsafe { }` obviously doesn't
+  relax either. This exactly mirrors Rust, where `*p = x;` on a
+  `p: *const T` is rejected even inside an `unsafe` block.
 - **Safe to create; only *using* the result is unsafe -- Rust's model,
   not a new one.** In real Rust, `let p = &x as *const T;` is
   unconditionally safe to write (`&x` is a checked borrow; the cast to a
@@ -312,6 +334,10 @@ the C++ standard itself evolves further in this area -- see
     intermediate reference at all, needed there for packed structs and
     uninitialized memory) -- scpp has neither concept yet, so there's no
     case this would need to cover that plain `&expr` doesn't already.
+  - Removing const (`const T*` -> `T*`) -- no `const_cast`/Rust's
+    `.cast_mut()` equivalent exists in v0.1. If a real C API's signature
+    is honestly non-`const` where scpp's borrow-source is only reachable
+    as `const`, there is currently no way to call it -- backlog.
 - **Implementation shape** (for whoever builds this): a new
   `UnaryOp::AddressOf`, parsed at the same prefix precedence as the
   existing `*`/`-`/`!` (its natural sibling to `*`'s `UnaryOp::Deref`).
@@ -325,7 +351,17 @@ the C++ standard itself evolves further in this area -- see
   whatever `codegen_lvalue` already resolves `expr`'s address to (its
   `.ptr`) -- no new address computation logic, just a new expression case
   that returns that pointer directly as the overall expression's value,
-  instead of loading through it the way an ordinary read does.
+  instead of loading through it the way an ordinary read does. Track
+  `const T*` vs. `T*` with a new `Type::is_mutable_pointee` flag on
+  `TypeKind::Pointer` (mirroring the existing `Type::is_mutable_ref` on
+  `TypeKind::Reference`); determine it at `&expr`'s resolution time from
+  whatever mechanism already tracks a projection chain's const-reachability
+  for today's `T&`-vs-`const T&` binding check (movecheck must already
+  answer this question to reject binding a `T&` to a place only reachable
+  via `const T&`). Reject an assignment whose LHS resolves through a
+  pointer with `is_mutable_pointee == false` as an ordinary type error in
+  whatever pass already checks assignment compatibility -- unconditionally,
+  not gated by the `unsafe`-nesting counter from [§1.3](ch01-safety-context.md).
 
 ---
 

@@ -40,11 +40,16 @@ meaning "sound checking not yet implemented"):
 **Expressions / Statements**
 - Local variable declaration and initialization.
 - `&` / `const &` borrows; `std::span`/`std::span<const T>` views.
-- `&expr` address-of, yielding a raw `T*` (see [§5.7](ch05-static-checks.md)
-  -- **design finalized, not yet implemented**): always legal in a `safe`
-  function (no `unsafe { }` needed to create one -- only dereferencing a
-  raw pointer is gated, see below), the concrete way a `safe` function
-  produces a pointer value for an `extern "C"` out-parameter.
+- `&expr` address-of, yielding `const T*` or `T*` depending on whether
+  `expr`'s place is only reachable read-only or mutably (see
+  [§5.7](ch05-static-checks.md) -- **design finalized, not yet
+  implemented**): always legal in a `safe` function (no `unsafe { }`
+  needed to create one -- only dereferencing a raw pointer is gated, see
+  below), the concrete way a `safe` function produces a pointer value
+  for an `extern "C"` out-parameter. `const T*`/`T*` are genuinely
+  distinct types (a one-way implicit `T* -> const T*` conversion only,
+  no `const_cast` equivalent yet); writing through a `const T*` is an
+  ordinary type error, unconditionally, even inside `unsafe { }`.
 - `std::move`.
 - Function calls, including the "callee must be `safe`, otherwise
   `unsafe {}`" rule from [§2](ch02-boundary-rules.md) (implemented

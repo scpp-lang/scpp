@@ -37,10 +37,14 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 **表达式 / 语句**
 - 局部变量声明与初始化。
 - `&` / `const &` 借用；`std::span`/`std::span<const T>` 视图。
-- `&expr` 取地址，得到一个裸 `T*`（见 [§5.7](ch05-static-checks.md)——
-  **设计已定稿，尚未实现**）：在 `safe` 函数里始终合法（不需要
-  `unsafe { }` 就能造出来——只有解引用裸指针才需要，见下面），是 `safe`
-  函数给 `extern "C"` 输出参数产出指针值的具体办法。
+- `&expr` 取地址，根据 `expr` 的 place 是只能只读访问还是可变访问，得到
+  `const T*` 或者 `T*`（见 [§5.7](ch05-static-checks.md)——**设计已定稿，
+  尚未实现**）：在 `safe` 函数里始终合法（不需要 `unsafe { }` 就能造出
+  来——只有解引用裸指针才需要，见下面），是 `safe` 函数给 `extern "C"`
+  输出参数产出指针值的具体办法。`const T*`/`T*` 是真正不同的两个类型
+  （只有单向的隐式 `T* -> const T*` 转换，没有 `const_cast` 等价物）；
+  通过 `const T*` 写是普通类型错误，无条件成立，哪怕在 `unsafe { }` 里
+  也一样。
 - `std::move`。
 - 函数调用，包括 [§2](ch02-boundary-rules.md) 里"被调方须 `safe`，否则
   `unsafe {}`"这条规则（跟下面的 `unsafe { }` 一起已经实现）。

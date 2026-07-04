@@ -71,7 +71,10 @@ below.
 - **Signature types are restricted to C-ABI-compatible types**, checked on
   every parameter and the return type, for both the declaration and
   definition forms: scalars; raw pointers `T*` (including `void*` -- `void`
-  becomes a valid pointee-only type name for this purpose); `struct`
+  becomes a valid pointee-only type name for this purpose; `const T*` is
+  its own distinct type, see [§5.7](ch05-static-checks.md) -- `printf`'s
+  `const char* fmt` above really is read-only now, not a dropped
+  qualifier); `struct`
   (already guaranteed Clang-ABI-compatible layout, see
   [§4.3](ch04-struct-vs-class.md)), by value or by pointer; fixed-size
   arrays `T[N]` in parameter position (decay to pointer, as in ordinary

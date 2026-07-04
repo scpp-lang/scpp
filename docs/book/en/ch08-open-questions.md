@@ -56,6 +56,21 @@
    parsing past the second `?` (trigraphs, the only thing that ever gave
    `??` meaning, were removed in C++17). Revisiting this is deferred
    until the C++ standard itself evolves further in this area.
+9. **Are `const T*` and `T*` the same type?** An earlier draft of
+   [§5.7](ch05-static-checks.md) (the `&expr` design) assumed scpp's
+   `const T*`/`T*` were unified into one untracked type -- they are not,
+   in either real C++ or scpp; caught and corrected in discussion. Real
+   C++ has always treated them as distinct types (one-way implicit
+   `T* -> const T*` conversion, `const_cast` required for the reverse),
+   and Rust's `*const T`/`*mut T` enforce the identical split at compile
+   time -- rejecting a write through a `*const T` even inside `unsafe`.
+   **Settled**: scpp tracks the distinction properly (a new
+   `is_mutable_pointee` flag, mirroring how `is_mutable_ref` already
+   distinguishes `T&`/`const T&`); the one-way implicit conversion is
+   real C++'s own existing rule, not a new one; writing through a
+   `const T*` is an ordinary, always-enforced type error, not something
+   `unsafe { }` relaxes. No `const_cast` equivalent exists in v0.1 (see
+   [§5.7](ch05-static-checks.md)).
 
 ---
 

@@ -119,7 +119,11 @@
 
 注意这里**没有**列上的一项：取一个裸指针的地址本身（`&expr`，见
 [§5.7](#57-取地址expr与裸指针设计已定稿尚未实现)）在 safe 上下文里始终合法，跟 Rust 一样——
-这里被 unsafe 拦住的是**解引用**，不是"造出"一个指针这件事本身。
+这里被 unsafe 拦住的是**解引用**，不是"造出"一个指针这件事本身。另外
+`unsafe { }` 放宽的是裸指针**解引用**，不是"`const T*` 不能被写"这条
+普通、无条件的类型检查规则（见
+[§5.7](#57-取地址expr与裸指针设计已定稿尚未实现)）——这条也没列在这里，
+因为它本来就不是 `unsafe { }` 会放宽的东西。
 
 `unsafe { }` 的具体规则见 [§1.3](ch01-safety-context.md)：它**只**放宽
 这个列表，别的一概不动——本章其余检查（§5.1-§5.4）在 `unsafe { }` 块内
@@ -188,10 +192,23 @@ safe std::expected<int, ParseError> parse_and_double(const char* s) {
   [§5.2](#52-借用与别名borrow--aliasing) 里 `T&`/`const T&` 借用来源已经
   接受的那几种形式：普通局部变量/形参名、`.field` 投影、`[index]` 下标，
   或者 `*p`/`p->x`（`p` 是 `std::unique_ptr<T>`）——以及在上述任意一种
-  基础上递归组合。`&expr` 求值得到一个 `T*`——不会是单独的 `const T*`，
-  因为 scpp 的 `const T*` 和 `T*` 本来就是同一个 `Pointer` 类型（见
-  [§2.1](ch02-boundary-rules.md) 解析器那条注释），没有什么可以让单独的
-  `&`/`&mut` 拼写去区分。
+  基础上递归组合。如果 `expr` 解析出来的 place 只能只读访问（比如投影链
+  上任何一处经过了 `const T&` 形参/绑定），`&expr` 求值得到 `const T*`；
+  如果能可变访问，就得到 `T*`——这跟真实 C++ 自己的 `&expr` 规则一样，也
+  跟 Rust 的 `&x as *const T` vs `&mut x as *mut T` 是同一个划分。
+- **`const T*` 和 `T*` 是真正不同的两个类型**（这一节早先的草稿曾经假设
+  它们是统一成一个不追踪的类型——这是错的，不管在真实 C++ 还是 scpp 里都
+  不是，这一点是在讨论中被发现并纠正的，见 [§8](ch08-open-questions.md)
+  Q9）。`T*` 可以隐式转换成 `const T*`（放宽权限——总是合法，跟真实 C++
+  的规则一样）；`const T*` **不能**转换成 `T*`——v0.1 没有
+  `const_cast`/Rust 的 `.cast_mut()` 等价物，所以现在完全没有办法从
+  `const T*` 得到 `T*`。**通过 `const T*` 写，在任何上下文里都是普通的
+  编译期类型错误，包括在 `unsafe { }` 里面**——它不在
+  [§5.5](#55-禁止项safe-区除非-unsafe-) 的列表上，因为 `unsafe { }`
+  只放宽那个列表，这条根本不属于那个列表：它跟把 `std::string` 赋值给
+  `int` 是同一类普通类型不匹配，`unsafe { }` 显然也不会放宽后者。这跟
+  Rust 完全一致：`p: *const T` 时 `*p = x;` 哪怕在 `unsafe` 块里也会被
+  拒绝。
 - **造出来是 safe 的；只有拿去用才是 unsafe 的——这是 Rust 的模型，不是
   新发明的**。在真实 Rust 里，`let p = &x as *const T;` 完全是安全代码
   （`&x` 本身是一次受检查的借用；转成裸指针的强转是普通的、安全的转换）
@@ -244,6 +261,9 @@ safe std::expected<int, ParseError> parse_and_double(const char* s) {
   - Rust 的 `&raw const`/`&raw mut`（完全不经过中间引用就取地址，Rust
     那边是给 packed struct/未初始化内存用的）——scpp 现在两个概念都没有，
     所以没有普通 `&expr` 覆盖不到、需要额外补的场景。
+  - 去掉 const（`const T*` → `T*`）——v0.1 没有 `const_cast`/Rust 的
+    `.cast_mut()` 等价物。如果某个真实 C API 的签名确实要非 `const`，
+    而 scpp 这边的借用来源只能只读访问，现在就是没法调用——留到 backlog。
 - **实现形状**（给做这个的人）：新增一个 `UnaryOp::AddressOf`，按跟现有
   前缀 `*`/`-`/`!` 一样的优先级解析（是 `*` 的 `UnaryOp::Deref` 的天然
   兄弟）。在 movecheck 里，复用 `resolve_borrow_source_root` 来解析/校验
@@ -253,7 +273,15 @@ safe std::expected<int, ParseError> parse_and_double(const char* s) {
   现有"已经被借用"拒绝一样的措辞），到此为止。在 codegen 里，这就归结为
   `codegen_lvalue` 已经能解析出的 `expr` 地址（它的 `.ptr`）——不需要新的
   地址计算逻辑，只是新增一个表达式分支，把这个指针直接作为整个表达式的
-  值返回，而不是像普通读取那样再从里面 load 一次。
+  值返回，而不是像普通读取那样再从里面 load 一次。用一个新的
+  `Type::is_mutable_pointee` 标记（照抄 `TypeKind::Reference` 上现有的
+  `Type::is_mutable_ref`）追踪 `const T*` 还是 `T*`；在 `&expr` 解析的
+  那一刻，从"投影链上的 const 可达性"这套现成机制里取值——movecheck 今天
+  已经必须回答这个问题，才能拒绝把一个 `T&` 绑定到只能通过 `const T&`
+  访问的地方。凡是赋值语句的左边解析到一个 `is_mutable_pointee == false`
+  的指针，就在已有的赋值兼容性检查那一趟里当成普通类型错误拒绝——无条件
+  地拒绝，不受 [§1.3](ch01-safety-context.md) 那个 `unsafe` 嵌套计数器
+  影响。
 
 ---
 

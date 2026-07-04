@@ -57,7 +57,9 @@
     FFI-safe，函数体照样是被正常检查的 Rust。
 - **签名类型限定为 C-ABI 兼容类型**，声明和定义两种形式的每个参数和返回
   类型都要检查：标量；裸指针 `T*`（包括 `void*`——`void` 在这里成为一个
-  合法的、仅用作指针指向类型的类型名）；`struct`（本来就保证是
+  合法的、仅用作指针指向类型的类型名；`const T*` 是独立的类型，见
+  [§5.7](ch05-static-checks.md)——上面 `printf` 的 `const char* fmt`
+  现在是真的只读了，不是被丢弃的限定符）；`struct`（本来就保证是
   Clang-ABI 兼容布局，见 [§4.3](ch04-struct-vs-class.md)），按值或按指针
   均可；形参位置的定长数组 `T[N]`（退化为指针，和普通 C++ 一样）。
   **被拒绝的**：`T&`/`const T&`、`std::unique_ptr`、`std::span`、
