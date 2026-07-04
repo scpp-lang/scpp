@@ -257,16 +257,20 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 
 // Whether assigning through `expr` (used as an assignment's *target* --
 // see apply_expr's Binary/Assign case) would write through a read-only
-// (`const T&` reference, or `std::span<const T>`) somewhere in its
-// chain -- both reuse the same `is_mutable_ref` flag for "is this
-// view/borrow read-only", see ast.cppm's Type. A `.field`/`[index]`
-// projection's constness always comes from its outermost base (struct
-// fields can never themselves be references or spans -- ch04.1
-// permanently forbids that -- so there's never a *nested* one to find
-// deeper in the chain); a call's constness comes from its own return
-// type. A plain local (not itself a reference/span) is always writable
-// here -- move/initialization-state legality is checked separately,
-// this is purely about const-ness.
+// (`const T&` reference, `std::span<const T>`, or `const T*` raw
+// pointer) somewhere in its chain -- Reference/Span reuse the same
+// `is_mutable_ref` flag for "is this view/borrow read-only", Pointer has
+// its own analogous `is_mutable_pointee` flag (see ast.cppm's Type; ch05
+// §5.7 -- writing through a `const T*` is an ordinary type error,
+// unconditionally, even inside `unsafe { }`, so this is never gated by
+// `state.unsafe_depth`). A `.field`/`[index]` projection's constness
+// always comes from its outermost base (struct fields can never
+// themselves be references or spans -- ch04.1 permanently forbids that
+// -- so there's never a *nested* one to find deeper in the chain); a
+// call's constness comes from its own return type. A plain local (not
+// itself a reference/span) is always writable here -- move/
+// initialization-state legality is checked separately, this is purely
+// about const-ness.
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
         case ExprKind::Identifier: {
@@ -277,6 +281,22 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
         case ExprKind::Member:
         case ExprKind::Subscript:
             return assignment_target_is_read_only(*expr.lhs, body, signatures);
+        case ExprKind::Unary: {
+            // `*p = ...`/`p->x = ...` (`p` a raw pointer): read-only iff
+            // `p`'s own declared type says `const T*`
+            // (is_mutable_pointee == false) -- ch05 §5.7's "writing
+            // through a const T* is an ordinary type error, in *every*
+            // context, including inside unsafe { }" rule (this function
+            // is never consulted with `state.unsafe_depth` at all, so
+            // there is nothing here for `unsafe { }` to relax). A
+            // std::unique_ptr pointee has no const-qualification concept
+            // in this version (same reasoning as is_read_only_reachable),
+            // so it's never read-only through this path.
+            if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
+            auto it = body.local_types.find(expr.lhs->name);
+            return it != body.local_types.end() && it->second.kind == TypeKind::Pointer &&
+                   !it->second.is_mutable_pointee;
+        }
         case ExprKind::Call: {
             auto sig_it = signatures.find(expr.name);
             return sig_it != signatures.end() && is_reference(sig_it->second.return_type) &&
@@ -817,6 +837,96 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     }
 }
 
+// Determines whether `expr` (a borrow-source place -- the same shape
+// resolve_borrow_source_root accepts) is only reachable *read-only*,
+// i.e. whether obtaining a *mutable* `T&`/`T*` from it must be rejected.
+// This is the "projection chain's const-reachability" resolve_borrow_
+// source_root's own callers need but that function alone doesn't answer
+// (it only resolves *which root* to check for borrow conflicts, not
+// whether the path to it crossed a read-only step) -- used to reject
+// binding a `T&` (apply_reference_binding) or passing a `T&` call
+// argument (apply_reference_argument) through a `const T&`/`std::span
+// <const T>`/`const T*` anywhere along the chain, and to decide whether
+// `&expr` (ch05 §5.7) may produce a mutable `T*` or only a `const T*`.
+// Once a chain crosses a read-only step, everything beyond it stays
+// read-only: a struct field/array element can never itself be a
+// reference or span (ch04.1), so there's no way for a later `.field`/
+// `[index]` step to "regain" mutability -- only a chain that never
+// crosses one at all is mutable.
+[[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::Identifier: {
+            auto it = body.local_types.find(expr.name);
+            if (it == body.local_types.end()) return false; // unknown name: left to codegen's own check
+            if (is_reference(it->second) || is_span(it->second)) {
+                return !it->second.is_mutable_ref;
+            }
+            return false; // an owned local (or a by-value parameter) is fully mutable to its owner
+        }
+
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            return is_read_only_reachable(*expr.lhs, body, signatures);
+
+        case ExprKind::Unary: {
+            // `*p`/`p->x`: read-only iff `p` (necessarily a plain
+            // Identifier -- see resolve_borrow_source_root's own Unary
+            // case) is itself a `const T*` (is_mutable_pointee == false).
+            // A std::unique_ptr pointee has no const-qualification
+            // concept in this version (it can never be a struct field,
+            // and there is no `const std::unique_ptr<T>&` parameter form
+            // yet), so it's always mutable through this path.
+            if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
+            auto it = body.local_types.find(expr.lhs->name);
+            if (it == body.local_types.end() || it->second.kind != TypeKind::Pointer) return false;
+            return !it->second.is_mutable_pointee;
+        }
+
+        case ExprKind::Call: {
+            // The call's *own* declared return type is authoritative --
+            // it doesn't matter whether the elided argument behind it was
+            // itself mutable or read-only-reachable: a signature that
+            // promises `const T&` back hands back a read-only view
+            // regardless (exactly like a plain `const T&`-typed
+            // Identifier above), and a signature promising `T&` could
+            // only have been called successfully with a mutable-
+            // reachable argument in the first place (apply_reference_
+            // argument already enforces that at the call site).
+            auto sig_it = signatures.find(expr.name);
+            if (sig_it == signatures.end()) return false;
+            return !sig_it->second.return_type.is_mutable_ref;
+        }
+
+        default:
+            return false;
+    }
+}
+
+// Handles `&expr` (UnaryOp::AddressOf, ch05 §5.7) used as a plain value.
+// Reuses resolve_borrow_source_root to resolve/validate `expr`'s root --
+// exactly the same structural resolution (and the same nested side
+// effects, e.g. a Subscript index's own apply_expr walk) a `T&`/
+// `const T&` binding already goes through (apply_reference_binding) --
+// but, unlike that function, registers no lasting borrow afterward: the
+// produced `T*` is never move/borrow-tracked (ch05.2 is unchanged by
+// this addition), so there's nothing left to later release, and an
+// ordinary `T&`/`const T&` borrow of the same place immediately
+// afterward is unaffected. Checked only at this instant, conservatively
+// (the resulting pointer's eventual use -- read or write -- can't be
+// known here): the root must have no existing borrow at all, shared or
+// mutable -- the same exclusivity a *new* `T&` binding would require,
+// rejected the same way taking a second one would be.
+void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+                       bool report_errors) {
+    std::string root = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+    if (!report_errors || root.empty()) return;
+    auto borrow_it = state.borrows.find(root);
+    if (borrow_it != state.borrows.end() &&
+        (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+        throw DataflowError("cannot take the address of '" + root + "': it is already borrowed");
+    }
+}
+
 // Checks (and, on success, has no lasting effect on `state`) a reference
 // function-call argument: a transient borrow that begins right before
 // the call and ends right after it returns, since v0.1 never lets a
@@ -865,6 +975,20 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
                                                               "shared (const) reference");
         }
     } else {
+        // The general case: `arg` isn't itself a directly-named, locally-
+        // bound reference (that narrower case is handled above), so it
+        // may instead be a `.field`/`[index]` projection or a plain
+        // *parameter* (never entered into `ref_targets`, since a
+        // parameter is never processed through BindReference -- see
+        // apply_reference_binding) whose own declared type is `const T&`/
+        // `std::span<const T>`, or a chain that dereferences a `const T*`
+        // -- any of which must likewise reject manufacturing a mutable
+        // reference out of a read-only one (spec ch05 §5.7's "projection
+        // chain's const-reachability").
+        if (is_mutable && is_read_only_reachable(arg, body, signatures)) {
+            throw DataflowError("cannot pass '" + root + "' by mutable reference: it is only reachable "
+                                                          "through a read-only (const) reference");
+        }
         auto persistent_it = state.borrows.find(root);
         bool persistent_conflict =
             persistent_it != state.borrows.end() &&
@@ -937,6 +1061,30 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // std::move is simply allowed in every non-reference
             // argument slot.
             apply_expr(arg, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
+
+            // `&expr` (ch05 §5.7) passed directly as a call argument --
+            // the primary motivating use case (an `extern "C"` out
+            // parameter, e.g. `getsockopt(..., &value, &len)`). If the
+            // declared parameter wants a *mutable* `T*` but `expr`'s
+            // place is only reachable read-only, reject: same
+            // const-widens-only-one-way rule as everywhere else in this
+            // version (`const T*` never converts to `T*`, so there is no
+            // way to legitimately satisfy a mutable-pointee parameter
+            // here). Scoped to exactly this direct syntactic shape (not a
+            // general type-checker): a raw pointer value that has already
+            // passed through some other variable/call has no
+            // "reachability" left to check -- only its own already-
+            // enforced declared constness matters by then (see
+            // assignment_target_is_read_only's Unary case).
+            bool param_wants_mutable_pointer =
+                sig_it != signatures.end() && i < sig_it->second.param_types.size() &&
+                sig_it->second.param_types[i].kind == TypeKind::Pointer &&
+                sig_it->second.param_types[i].is_mutable_pointee;
+            if (report_errors && param_wants_mutable_pointer && arg.kind == ExprKind::Unary &&
+                arg.unary_op == UnaryOp::AddressOf && is_read_only_reachable(*arg.lhs, body, signatures)) {
+                throw DataflowError("cannot pass '&' of a read-only-reachable place as a mutable 'T*' "
+                                    "argument (would need 'const T*', which this parameter doesn't accept)");
+            }
         }
     }
 }
@@ -1031,6 +1179,10 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
         case ExprKind::Unary:
             if (expr.unary_op == UnaryOp::Deref) {
                 apply_deref(expr, state, body, report_errors);
+                return;
+            }
+            if (expr.unary_op == UnaryOp::AddressOf) {
+                apply_address_of(expr, state, body, signatures, report_errors);
                 return;
             }
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
@@ -1146,6 +1298,20 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     }
 
     bool is_mutable = stmt.type.is_mutable_ref;
+
+    // Reject manufacturing a mutable `T&`/`std::span<T>` out of a place
+    // that's only reachable read-only (e.g. `int& r = p.x;`/
+    // `std::span<int> s = p.arr;` where `p` is `const Foo&`) -- spec
+    // ch05 §5.7's "projection chain's const-reachability" check, shared
+    // with apply_reference_argument's identical guard for a call
+    // argument. A `const T&`/`std::span<const T>` binding is always fine
+    // regardless (read-only never needs to widen).
+    if (report_errors && is_mutable && is_read_only_reachable(*stmt.expr, body, signatures)) {
+        const char* kind_name = is_span(stmt.type) ? "span" : "reference";
+        throw DataflowError(std::string("cannot bind a mutable ") + kind_name + " '" + stmt.local +
+                             "': its source is only reachable through a read-only (const) reference");
+    }
+
     BorrowState& borrow = state.borrows[root];
     if (report_errors) {
         if (is_mutable && (borrow.mutable_borrow || borrow.shared_count > 0)) {
@@ -1230,6 +1396,24 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                                     "' of type std::unique_ptr must be initialized via std::move or "
                                     "std::make_unique (copying a unique_ptr is not allowed)");
             }
+
+            // `T* p = &expr;` (ch05 §5.7): if `p`'s declared type wants a
+            // *mutable* T* but `expr`'s place is only reachable
+            // read-only, reject -- the same const-widens-only-one-way
+            // rule as check_call_arguments's identical guard for a call
+            // argument (`const T*` never converts to `T*` in this
+            // version, so there is no way to legitimately satisfy a
+            // mutable-pointee declaration here). Scoped to exactly this
+            // direct syntactic shape, not a general type-checker -- see
+            // check_call_arguments's identical comment for why.
+            if (report_errors && type_it != body.local_types.end() && type_it->second.kind == TypeKind::Pointer &&
+                type_it->second.is_mutable_pointee && stmt.expr->kind == ExprKind::Unary &&
+                stmt.expr->unary_op == UnaryOp::AddressOf && is_read_only_reachable(*stmt.expr->lhs, body, signatures)) {
+                throw DataflowError("cannot assign '&' of a read-only-reachable place to '" + stmt.local +
+                                    "' (a mutable 'T*'): would need 'const T*', which '" + stmt.local +
+                                    "' isn't declared as");
+            }
+
             if (report_errors) {
                 auto borrow_it = state.borrows.find(stmt.local);
                 if (borrow_it != state.borrows.end() &&

@@ -184,6 +184,47 @@ void test_dereference_expression() {
            "dereference_expression: operand should be identifier 'p'");
 }
 
+void test_address_of_plain_variable() {
+    // `&x` (ch05 §5.7) -- a new prefix unary operator, sibling to Deref.
+    scpp::Program program = scpp::parse("int f() { return &x; }");
+    const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Unary && expr.unary_op == scpp::UnaryOp::AddressOf,
+           "address_of_plain_variable: top-level should be unary AddressOf");
+    expect(expr.lhs->kind == scpp::ExprKind::Identifier && expr.lhs->name == "x",
+           "address_of_plain_variable: operand should be identifier 'x'");
+}
+
+void test_address_of_field_and_subscript() {
+    // `&p.x` and `&arr[i]` -- same operand shapes already accepted as a
+    // borrow source for `T&`/`const T&` (ch05.2), reused here.
+    scpp::Program field_program = scpp::parse("int f() { return &p.x; }");
+    const scpp::Expr& field_expr = *field_program.functions[0].body->statements[0]->expr;
+    expect(field_expr.kind == scpp::ExprKind::Unary && field_expr.unary_op == scpp::UnaryOp::AddressOf,
+           "address_of_field_and_subscript: &p.x top-level should be unary AddressOf");
+    expect(field_expr.lhs->kind == scpp::ExprKind::Member && field_expr.lhs->name == "x",
+           "address_of_field_and_subscript: &p.x operand should be Member 'x'");
+
+    scpp::Program subscript_program = scpp::parse("int f() { return &arr[i]; }");
+    const scpp::Expr& subscript_expr = *subscript_program.functions[0].body->statements[0]->expr;
+    expect(subscript_expr.kind == scpp::ExprKind::Unary && subscript_expr.unary_op == scpp::UnaryOp::AddressOf,
+           "address_of_field_and_subscript: &arr[i] top-level should be unary AddressOf");
+    expect(subscript_expr.lhs->kind == scpp::ExprKind::Subscript,
+           "address_of_field_and_subscript: &arr[i] operand should be Subscript");
+}
+
+void test_address_of_dereference_chain() {
+    // `&*p` -- address-of applied to a dereference, recursing off Deref
+    // just like Neg/Not/Deref's own operands already do (parse_unary).
+    scpp::Program program = scpp::parse("int f() { return &*p; }");
+    const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Unary && expr.unary_op == scpp::UnaryOp::AddressOf,
+           "address_of_dereference_chain: top-level should be unary AddressOf");
+    expect(expr.lhs->kind == scpp::ExprKind::Unary && expr.lhs->unary_op == scpp::UnaryOp::Deref,
+           "address_of_dereference_chain: operand should be unary Deref");
+    expect(expr.lhs->lhs->kind == scpp::ExprKind::Identifier && expr.lhs->lhs->name == "p",
+           "address_of_dereference_chain: innermost operand should be identifier 'p'");
+}
+
 void test_arrow_desugars_to_member_of_deref() {
     // `p->x` is sugar for `(*p).x`, same as real C++ -- see parse_postfix.
     scpp::Program program = scpp::parse("int f() { return p->x; }");
@@ -674,8 +715,9 @@ void test_unsupported_char_escape_is_rejected() {
 
 void test_const_char_pointer_type() {
     // `const T*` (ch02 §2.1's realistic C signature compatibility -- e.g.
-    // `const char* fmt`) parses as a plain Pointer type; scpp doesn't
-    // track pointer constness, so the `const` is accepted but dropped.
+    // `const char* fmt`) parses as its own distinct Pointer type: scpp
+    // now properly tracks pointer constness via is_mutable_pointee (ch05
+    // §5.7, ch08 Q9), rather than silently dropping `const`.
     scpp::Program program = scpp::parse("extern \"C\" int puts(const char* s);");
     const scpp::Function& fn = program.functions[0];
     expect(fn.params.size() == 1, "const_char_pointer_type: expected 1 parameter");
@@ -683,6 +725,16 @@ void test_const_char_pointer_type() {
     expect(param_type.kind == scpp::TypeKind::Pointer, "const_char_pointer_type: parameter should be Pointer");
     expect(param_type.pointee != nullptr && is_named_type(*param_type.pointee, "char"),
            "const_char_pointer_type: pointee should be 'char'");
+    expect(!param_type.is_mutable_pointee, "const_char_pointer_type: is_mutable_pointee should be false");
+}
+
+void test_plain_pointer_defaults_to_mutable_pointee() {
+    // `T*` (no `const`) should default to is_mutable_pointee == true --
+    // the common case, unaffected by ch05 §5.7's new tracking.
+    scpp::Program program = scpp::parse("extern \"C\" int f(int* p);");
+    const scpp::Type& param_type = program.functions[0].params[0].type;
+    expect(param_type.kind == scpp::TypeKind::Pointer, "plain_pointer_defaults_to_mutable_pointee: should be Pointer");
+    expect(param_type.is_mutable_pointee, "plain_pointer_defaults_to_mutable_pointee: is_mutable_pointee should be true");
 }
 
 } // namespace
@@ -699,6 +751,9 @@ int main() {
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();
+    test_address_of_plain_variable();
+    test_address_of_field_and_subscript();
+    test_address_of_dereference_chain();
     test_arrow_desugars_to_member_of_deref();
     test_chained_arrow_and_dot();
     test_multiplication_is_not_confused_with_dereference();
@@ -738,6 +793,7 @@ int main() {
     test_multi_character_char_literal_is_rejected();
     test_unsupported_char_escape_is_rejected();
     test_const_char_pointer_type();
+    test_plain_pointer_defaults_to_mutable_pointee();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

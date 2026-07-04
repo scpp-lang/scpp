@@ -1,0 +1,1 @@
+sequence: %elemtmp = getelementptr [3 x i32], ptr %arr, i32 0, i32 1 | store ptr %elemtmp, ptr %pa

@@ -801,6 +801,19 @@ private:
                     LValue lv = codegen_lvalue(expr);
                     return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
                 }
+                if (expr.unary_op == UnaryOp::AddressOf) {
+                    // `&expr` (ch05 §5.7) -- the mirror image of Deref
+                    // just above: codegen_lvalue already resolves
+                    // expr.lhs's address (its `.ptr`); returning that
+                    // pointer directly as this expression's value --
+                    // instead of loading through it -- is the entire
+                    // codegen difference between reading a `T&`/
+                    // `const T&` (which loads) and creating a raw `T*`
+                    // (which doesn't). No new address-computation logic
+                    // needed; movecheck (apply_address_of) has already
+                    // verified expr.lhs resolves to a real place.
+                    return codegen_lvalue(*expr.lhs).ptr;
+                }
                 llvm::Value* operand = codegen_expr(*expr.lhs);
                 if (expr.unary_op == UnaryOp::Neg) return builder_->CreateNeg(operand, "negtmp");
                 // Not (`!`) -- `operand` is a `bool` value (i8; see

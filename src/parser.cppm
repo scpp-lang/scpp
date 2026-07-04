@@ -111,8 +111,14 @@ private:
     // known struct name) followed by zero or more `*` for pointer levels.
     // Array suffixes (`[N]`) are handled separately by parse_array_suffix,
     // since in C-style declarators the array size follows the *declared
-    // name*, not the type.
-    Type parse_unqualified_type() {
+    // name*, not the type. `const_qualifies_first_pointer` is set by
+    // parse_type() when it saw a leading `const` immediately before this
+    // call: it makes only the *innermost* (first-parsed) `*` level's
+    // pointee const (`const T*`, or `const T**`'s inner pointer -- matching
+    // real C++'s own reading of `const` as binding to the base type, not
+    // an outer pointer level), never a later/outer one, mirroring how
+    // real C++ reads `const int**` as "pointer to (pointer to const int)".
+    Type parse_unqualified_type(bool const_qualifies_first_pointer = false) {
         if (check_std_qualified("unique_ptr")) {
             consume_std_qualified();
             expect(TokenKind::Less, "'<'");
@@ -169,11 +175,14 @@ private:
             throw ParseError(tok.line, tok.column, "expected a type name");
         }
 
+        bool first_star = true;
         while (match(TokenKind::Star)) {
             auto pointee = std::make_shared<Type>(type);
             type = Type{};
             type.kind = TypeKind::Pointer;
             type.pointee = std::move(pointee);
+            type.is_mutable_pointee = !(first_star && const_qualifies_first_pointer);
+            first_star = false;
         }
         return type;
     }
@@ -183,18 +192,15 @@ private:
     // unqualified type into a Reference -- `T&` is a mutable/exclusive
     // borrow, `const T&` a shared borrow (ch05.2). `const` immediately
     // before a *pointer* type (`const T*`, e.g. `const char* fmt` in a
-    // realistic `extern "C"` signature -- ch02 §2.1) is also accepted,
-    // but purely as grammar compatibility with real C/C++ signatures:
-    // unlike a reference's `is_mutable_ref`, scpp doesn't track pointer
-    // constness at all yet (raw pointers have no enforcement of any
-    // invariants in this version, `unsafe {}`-gated or not), so
-    // `const T*` and `T*` produce the exact same Pointer type -- the
-    // `const` is accepted and silently dropped, not enforced. `const` is
-    // rejected everywhere else (a bare `const T`, no `&`/`*`) since
+    // realistic `extern "C"` signature -- ch02 §2.1) is also accepted and,
+    // like a reference's `is_mutable_ref`, properly tracked: `const T*`
+    // and `T*` are genuinely distinct types (ch05 §5.7, ch08 Q9), not
+    // unified the way an earlier draft of that section assumed. `const`
+    // is rejected everywhere else (a bare `const T`, no `&`/`*`) since
     // scpp has no other const-qualification yet.
     Type parse_type() {
         bool has_const_prefix = match(TokenKind::KwConst);
-        Type type = parse_unqualified_type();
+        Type type = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
 
         if (match(TokenKind::Amp)) {
             auto pointee = std::make_shared<Type>(std::move(type));
@@ -669,6 +675,23 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Unary;
             node->unary_op = UnaryOp::Deref;
+            node->lhs = parse_unary();
+            return node;
+        }
+        if (match(TokenKind::Amp)) {
+            // `&expr` (address-of, ch05 §5.7) -- unlike `*`, `Amp` never
+            // doubles as a binary operator in scpp (there is no bitwise
+            // `&`; `T&`/`const T&` reference syntax is only recognized by
+            // parse_type, never reached from an expression context), so
+            // this is unconditionally a prefix operator here, no
+            // position-based disambiguation needed. `expr.lhs`'s shape
+            // (must resolve to a place) is a semantic check, not a
+            // grammar one -- deferred to movecheck's
+            // resolve_borrow_source_root, same division of labor as
+            // Deref's operand above.
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Unary;
+            node->unary_op = UnaryOp::AddressOf;
             node->lhs = parse_unary();
             return node;
         }

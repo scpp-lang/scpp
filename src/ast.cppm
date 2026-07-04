@@ -48,6 +48,17 @@ struct Type {
     // share the same "is this view/borrow read-only" meaning. Meaningless
     // for every other kind.
     bool is_mutable_ref = true;
+
+    // Pointer only: true for `T*`, false for `const T*` -- mirrors
+    // is_mutable_ref above, but kept as its own separate flag (rather than
+    // reusing is_mutable_ref) since Pointer's const-ness has different
+    // rules from Reference's: `T*` converts implicitly to `const T*`
+    // (widening) but never the reverse (no const_cast/.cast_mut()
+    // equivalent in v0.1), whereas a reference is never converted at all
+    // (see ch05 §5.7, ch08 Q9). Writing through a `const T*` (is_mutable_
+    // pointee == false) is rejected unconditionally, even inside
+    // `unsafe { }` -- see movecheck's assignment_target_is_read_only.
+    bool is_mutable_pointee = true;
 };
 
 enum class ExprKind {
@@ -89,6 +100,13 @@ enum class UnaryOp {
            // validate_deref_operand). A reference dereference makes no
            // sense here and never reaches this: a reference already *is*
            // its referent (see codegen_lvalue's auto-deref).
+    AddressOf, // `&expr` -- always legal in a `safe` function (no `unsafe {}`
+               // needed to *create* a raw pointer, only to dereference one --
+               // ch05 §5.7). `expr` must be one of the same forms accepted as
+               // a borrow source for `T&`/`const T&` (ch05.2): a plain local/
+               // parameter, a `.field`/`[index]` projection, or `*p`/`p->x`
+               // off a std::unique_ptr. Evaluates to a `T*`, registering no
+               // lasting borrow (see movecheck's apply_address_of).
 };
 
 // A single expression node. Only the fields relevant to `kind` are populated;

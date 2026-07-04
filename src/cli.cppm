@@ -140,6 +140,16 @@ std::string_view binary_op_name(scpp::BinaryOp op) {
     return "?";
 }
 
+std::string_view unary_op_name(scpp::UnaryOp op) {
+    switch (op) {
+        case scpp::UnaryOp::Neg: return "-";
+        case scpp::UnaryOp::Not: return "!";
+        case scpp::UnaryOp::Deref: return "*";
+        case scpp::UnaryOp::AddressOf: return "&";
+    }
+    return "?";
+}
+
 void print_indent(int depth) {
     for (int i = 0; i < depth; i++) std::cout << "  ";
 }
@@ -165,7 +175,7 @@ void print_expr(const scpp::Expr& expr, int depth) {
             print_expr(*expr.rhs, depth + 1);
             break;
         case scpp::ExprKind::Unary:
-            std::cout << "Unary " << (expr.unary_op == scpp::UnaryOp::Neg ? "-" : "!") << "\n";
+            std::cout << "Unary " << unary_op_name(expr.unary_op) << "\n";
             print_expr(*expr.lhs, depth + 1);
             break;
         case scpp::ExprKind::Call:
