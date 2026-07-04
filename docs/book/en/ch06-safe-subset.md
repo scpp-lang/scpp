@@ -6,13 +6,12 @@ meaning "sound checking not yet implemented"):
 
 **Types**
 - **Scalar primitives** (design finalized for the numeric family; `bool`
-  implemented, the rest **not yet implemented** except `char`, currently
-  being implemented):
+  and `char` implemented, the rest **not yet implemented**):
 
   | scpp name | Meaning | Notes |
   |-----------|---------|-------|
   | `bool` | boolean, 1 byte wide | implemented. `false` is the bit pattern `0`, `true` is `1`. No implicit conversion to or from any other type -- unlike real C++ (`bool` implicitly promotes to `int`; any scalar contextually converts to `bool` in `if`/`while`), scpp requires an explicit cast in both directions, and `if`/`while` conditions must already be `bool`. |
-  | `int8_t` / `int16_t` / `int32_t` / `int64_t` | fixed-width signed integers | reuses real C++ `<cstdint>` names verbatim, all already-standardized. Unlike real C++ (where exact-width types are only conditionally provided), scpp guarantees all of these unconditionally on every target -- LLVM natively supports arbitrary-width integers, so there's no platform on which scpp would need to omit any of them. **No `int128_t`** for now: WG21 P1467 (a 128-bit integer type) hasn't been adopted into the C++ standard yet, and scpp's builtin vocabulary deliberately sticks to names the standard has actually ratified (see [ch00](ch00-design-philosophy.md) §2) rather than anticipating a still-pending proposal's eventual spelling -- add it back once/if the standard adopts it. |
+  | `int8_t` / `int16_t` / `int32_t` / `int64_t` | fixed-width signed integers | reuses real C++ `<cstdint>` names verbatim, all already-standardized. Unlike real C++ (where exact-width types are only conditionally provided), scpp guarantees all of these unconditionally on every target -- LLVM natively supports arbitrary-width integers, so there's no platform on which scpp would need to omit any of them. **No `int128_t`** for now: WG21 P1467 (a 128-bit integer type) hasn't been adopted into C++26 (see [ch00](ch00-design-philosophy.md) §7 for scpp's reference standard), and scpp's builtin vocabulary deliberately sticks to names the standard has actually ratified (see [ch00](ch00-design-philosophy.md) §2/§6) rather than anticipating a still-pending proposal's eventual spelling -- add it back once/if a future standard adopts it. |
   | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` | fixed-width unsigned integers | same as above -- no `uint128_t` for the same reason |
   | `int` | alias for `int32_t` | **fixed**, regardless of target platform |
   | `long` | alias for `int64_t` | **deliberately fixed** -- real C++ gives `long` a platform-defined width (64-bit on Linux/macOS's LP64, but only 32-bit on Windows's LLP64, even on a 64-bit machine). This is exactly the kind of cross-platform pitfall scpp exists to design away: scpp keeps the familiar spelling (it looks like C++) but gives it one predictable meaning everywhere (it doesn't silently change size when you switch target platforms). |
@@ -41,11 +40,15 @@ meaning "sound checking not yet implemented"):
 **Expressions / Statements**
 - Local variable declaration and initialization.
 - `&` / `const &` borrows; `std::span`/`std::span<const T>` views.
+- `&expr` address-of, yielding a raw `T*` (see [§5.7](ch05-static-checks.md)
+  -- **design finalized, not yet implemented**): always legal in a `safe`
+  function (no `unsafe { }` needed to create one -- only dereferencing a
+  raw pointer is gated, see below), the concrete way a `safe` function
+  produces a pointer value for an `extern "C"` out-parameter.
 - `std::move`.
-- Function calls. (The "callee must be `safe`, otherwise `unsafe {}`"
-  rule from [§2](ch02-boundary-rules.md) is **not yet enforced** -- calling
-  a non-`safe` function from a `safe` one currently isn't rejected at all;
-  this ships together with `unsafe { }` itself, see below.)
+- Function calls, including the "callee must be `safe`, otherwise
+  `unsafe {}`" rule from [§2](ch02-boundary-rules.md) (implemented
+  alongside `unsafe { }` below).
 - Arithmetic / logical / comparison operators.
 - `if` / `while` / `return`. (`for`/range-for are **not implemented yet**
   -- iteration has to be hand-written with `while` for now; the lexer
@@ -56,18 +59,17 @@ meaning "sound checking not yet implemented"):
 - `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
   for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)
   -- **design finalized, not yet implemented**).
-- `unsafe { }` blocks (see [§1.3](ch01-safety-context.md) -- **design
-  finalized, not yet implemented**): a lexically-scoped escape hatch
-  inside a `safe` function that locally permits raw pointer dereference
-  and calling a non-`safe` function (the only two of
-  [§5.5](ch05-static-checks.md)'s prohibited operations reachable in v0.1
-  today), while every other check in [§5](ch05-static-checks.md) keeps
-  running unconditionally.
+- `unsafe { }` blocks (see [§1.3](ch01-safety-context.md), implemented): a
+  lexically-scoped escape hatch inside a `safe` function that locally
+  permits raw pointer dereference and calling a non-`safe` function (the
+  only two of [§5.5](ch05-static-checks.md)'s prohibited operations
+  reachable in v0.1 today), while every other check in
+  [§5](ch05-static-checks.md) keeps running unconditionally.
 - `extern "C"` function declarations/definitions (see
-  [§2.1](ch02-boundary-rules.md) -- **design finalized, not yet
-  implemented**), restricted to C-ABI-compatible signature types.
-  Needs `extern`, minimal string-literal lexing, and `void` as a type
-  first (none exist yet -- see below).
+  [§2.1](ch02-boundary-rules.md), implemented), restricted to
+  C-ABI-compatible signature types. `void` (as a return type and a
+  pointer's pointee) is implemented alongside it; array parameters
+  (`T[N]`) decay to `T*`, matching ordinary C++.
 - **No exceptions** (`throw`/`try`/`catch`) -- deliberately excluded from
   scpp entirely, not a backlog item: recoverable errors are
   `std::expected<T, E>` values, propagated with ordinary `if`/`else` (see
@@ -89,23 +91,19 @@ meaning "sound checking not yet implemented"):
   spec'd in [§5.3](ch05-static-checks.md) (design only so far; every
   cross-function case still falls back to the single-reference-parameter/
   `this` elision or the new default-group rule until this lands).
-- Implementation of `unsafe { }` blocks spec'd in
-  [§1.3](ch01-safety-context.md) (design only so far).
-- Implementation of `extern "C"` spec'd in [§2.1](ch02-boundary-rules.md)
-  (design only so far), and its three prerequisites: an `extern` keyword,
-  minimal string-literal lexing (just the token `"C"`, not general string
-  literals), and `void` as a valid type name (no void-returning functions
-  or `void*` exist yet either, independent of `extern "C"`).
+- Implementation of `&expr` address-of spec'd in
+  [§5.7](ch05-static-checks.md) (design only so far) -- the last
+  clearly-identified hard blocker for realistic `extern "C"` interop
+  (e.g. POSIX socket APIs' out-parameters).
 - Implementation of the numeric scalar family spec'd above (design
-  finalized; `char` is currently being implemented, the rest are not
-  started): `int8_t`/.../`int64_t`, `uint8_t`/.../`uint64_t`, the
-  `int`/`long`/`unsigned int`/`unsigned long` fixed-width aliases,
-  `float32_t`/`float64_t` (and the `float`/`double` aliases), `size_t`,
-  `ptrdiff_t`.
-- `for`/range-for, `std::vector`, `std::string`/`std::string_view` (need
-  `char` first, in progress). `reinterpret_cast`, `union`, raw
-  `new`/`delete`, and global variables have no syntax at all yet, so
-  `unsafe { }`'s permission for them is moot until each lands.
+  finalized; `bool`/`char` done, the rest are not started): `int8_t`/.../
+  `int64_t`, `uint8_t`/.../`uint64_t`, the `int`/`long`/`unsigned int`/
+  `unsigned long` fixed-width aliases, `float32_t`/`float64_t` (and the
+  `float`/`double` aliases), `size_t`, `ptrdiff_t`.
+- `for`/range-for, `std::vector`, `std::string`/`std::string_view` (now
+  that `char` exists, unblocked but not started). `reinterpret_cast`,
+  `union`, raw `new`/`delete`, and global variables have no syntax at all
+  yet, so `unsafe { }`'s permission for them is moot until each lands.
 - Implementation of `std::expected<T, E>` spec'd in
   [§5.6](ch05-static-checks.md) (design only so far), including the
   mandatory-checking rule and the fallible-construction guidance in

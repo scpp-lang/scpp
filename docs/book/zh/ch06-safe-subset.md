@@ -4,13 +4,13 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 （明确区别于"不安全"，表示"尚未实现健全检查"）：
 
 **类型**
-- **标量基础类型**（数值家族的设计已定稿；`bool` 已实现，其余**尚未
-  实现**，`char` 除外——正在实现中）：
+- **标量基础类型**（数值家族的设计已定稿；`bool` 和 `char` 已实现，
+  其余**尚未实现**）：
 
   | scpp 名字 | 含义 | 备注 |
   |-----------|------|------|
   | `bool` | 布尔，1 字节宽 | 已实现。`false` 是位模式 `0`，`true` 是 `1`。不支持到任何其它类型的隐式转换——跟真实 C++ 不一样（那边 `bool` 会隐式提升成 `int`，`if`/`while` 里任何标量也会隐式转成 `bool`），scpp 两个方向都要求显式转换，`if`/`while` 的条件必须本来就是 `bool`。 |
-  | `int8_t` / `int16_t` / `int32_t` / `int64_t` | 定宽有符号整数 | 原样复用真实 C++ `<cstdint>` 的名字，都已经是标准化的。跟真实 C++ 不一样（那边定宽类型是条件性提供的），scpp 在任何 target 上都**无条件**保证这些类型存在——LLVM 原生支持任意位宽整数，没有哪个平台会逼 scpp 省掉其中任何一个。**暂不提供 `int128_t`**：WG21 P1467（128 位整数类型）还没被 C++ 标准采纳，scpp 的内置词汇表故意只用标准已经真正定下来的名字（见 [ch00](ch00-design-philosophy.md) §2），不去提前对齐一个还悬而未决的提案将来到底叫什么——等标准真的采纳了再加回来。 |
+  | `int8_t` / `int16_t` / `int32_t` / `int64_t` | 定宽有符号整数 | 原样复用真实 C++ `<cstdint>` 的名字，都已经是标准化的。跟真实 C++ 不一样（那边定宽类型是条件性提供的），scpp 在任何 target 上都**无条件**保证这些类型存在——LLVM 原生支持任意位宽整数，没有哪个平台会逼 scpp 省掉其中任何一个。**暂不提供 `int128_t`**：WG21 P1467（128 位整数类型）还没被 C++26 采纳（scpp 参照哪个标准版本见 [ch00](ch00-design-philosophy.md) §7），scpp 的内置词汇表故意只用标准已经真正定下来的名字（见 [ch00](ch00-design-philosophy.md) §2/§6），不去提前对齐一个还悬而未决的提案将来到底叫什么——等以后哪个标准真的采纳了再加回来。 |
   | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` | 定宽无符号整数 | 同上——同样的理由，暂不提供 `uint128_t` |
   | `int` | `int32_t` 的别名 | **不管目标平台是什么，含义都固定** |
   | `long` | `int64_t` 的别名 | **故意钉死**——真实 C++ 里 `long` 的位宽是平台决定的（Linux/macOS 的 LP64 是 64 位，Windows 的 LLP64 哪怕在 64 位机器上也是 32 位）。这正是 scpp 存在的意义要设计掉的那种跨平台天坑：scpp 保留了这个熟悉的拼写（看起来像 C++），但给它一个不管到哪个平台都一样、可预期的含义（不会因为换了目标平台就悄悄变了大小）。 |
@@ -37,11 +37,13 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 **表达式 / 语句**
 - 局部变量声明与初始化。
 - `&` / `const &` 借用；`std::span`/`std::span<const T>` 视图。
+- `&expr` 取地址，得到一个裸 `T*`（见 [§5.7](ch05-static-checks.md)——
+  **设计已定稿，尚未实现**）：在 `safe` 函数里始终合法（不需要
+  `unsafe { }` 就能造出来——只有解引用裸指针才需要，见下面），是 `safe`
+  函数给 `extern "C"` 输出参数产出指针值的具体办法。
 - `std::move`。
-- 函数调用。（[§2](ch02-boundary-rules.md) 里"被调方须 `safe`，否则
-  `unsafe {}`"这条规则**尚未强制执行**——目前从 `safe` 函数调用非
-  `safe` 函数完全不会被拒绝；这条规则会跟 `unsafe { }` 一起落地，见
-  下面。）
+- 函数调用，包括 [§2](ch02-boundary-rules.md) 里"被调方须 `safe`，否则
+  `unsafe {}`"这条规则（跟下面的 `unsafe { }` 一起已经实现）。
 - 算术/逻辑/比较运算。
 - `if` / `while` / `return`。（`for`/range-for **尚未实现**——目前只能用
   `while` 手写迭代；词法层面保留了 `for` 关键字，但 parser/AST 还没有
@@ -51,15 +53,15 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
   跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)——**设计已
   定稿，尚未实现**）。
-- `unsafe { }` 语句块（见 [§1.3](ch01-safety-context.md)——**设计已定稿，
-  尚未实现**）：在 `safe` 函数内部开一个词法作用域的逃生窗口，局部放行
-  裸指针解引用和调用非 `safe` 函数（这是 v0.1 里
-  [§5.5](ch05-static-checks.md) 禁止项中唯二能真正碰到的两条），
-  [§5](ch05-static-checks.md) 里的其余检查照常无条件继续跑。
-- `extern "C"` 函数声明/定义（见 [§2.1](ch02-boundary-rules.md)——**设计
-  已定稿，尚未实现**），签名类型限定为 C-ABI 兼容类型。需要先有 `extern`
-  关键字、最小限度的字符串字面量词法支持、以及 `void` 类型（这三样现在
-  都还没有，见下面）。
+- `unsafe { }` 语句块（见 [§1.3](ch01-safety-context.md)，已实现）：在
+  `safe` 函数内部开一个词法作用域的逃生窗口，局部放行裸指针解引用和
+  调用非 `safe` 函数（这是 v0.1 里 [§5.5](ch05-static-checks.md) 禁止项
+  中唯二能真正碰到的两条），[§5](ch05-static-checks.md) 里的其余检查
+  照常无条件继续跑。
+- `extern "C"` 函数声明/定义（见 [§2.1](ch02-boundary-rules.md)，已
+  实现），签名类型限定为 C-ABI 兼容类型。`void`（作为返回类型和指针的
+  指向类型）跟它一起已经实现；数组形参（`T[N]`）会退化成 `T*`，跟普通
+  C++ 一样。
 - **没有异常**（`throw`/`try`/`catch`）——从 scpp 里彻底排除，不是
   backlog 项：可恢复错误是 `std::expected<T, E>` 值，用普通 `if`/`else`
   传播（见 [§5.6](ch05-static-checks.md)）；它的返回值**强制要求检查**
@@ -78,22 +80,18 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - [§5.3](ch05-static-checks.md) 定稿的 `[[scpp::lifetime(name)]]` 多组
   机制的**实现**（目前只有设计，还没写进编译器；在它落地之前，跨函数
   情形一律走单引用参数/`this` 省略规则或新的默认分组规则）。
-- [§1.3](ch01-safety-context.md) 定稿的 `unsafe { }` 语句块的**实现**
-  （目前只有设计）。
-- [§2.1](ch02-boundary-rules.md) 定稿的 `extern "C"` 的**实现**（目前
-  只有设计），以及它的三个前置条件：`extern` 关键字、最小限度的字符串
-  字面量词法支持（只认 `"C"` 这个 token，不是通用字符串字面量）、以及
-  `void` 作为合法类型名（现在既没法声明返回 `void` 的函数，也没有
-  `void*`，跟 `extern "C"` 无关，是独立的缺口）。
-- 上面数值标量家族的**实现**（设计已定稿；`char` 正在实现中，其余都
+- [§5.7](ch05-static-checks.md) 定稿的 `&expr` 取地址的**实现**（目前
+  只有设计）——这是目前唯一明确剩下的、真正卡住 `extern "C"` 现实场景
+  （比如 POSIX socket API 的输出参数）的硬阻塞点。
+- 上面数值标量家族的**实现**（设计已定稿；`bool`/`char` 已完成，其余都
   还没开始）：`int8_t`/.../`int64_t`、`uint8_t`/.../`uint64_t`、
   `int`/`long`/`unsigned int`/`unsigned long` 这几个定宽别名、
   `float32_t`/`float64_t`（以及 `float`/`double` 别名）、`size_t`、
   `ptrdiff_t`。
 - `for`/range-for、`std::vector`、`std::string`/`std::string_view`
-  （需要先有 `char`，正在实现中）。`reinterpret_cast`、`union`、裸
-  `new`/`delete`、全局变量目前完全没有语法支持，`unsafe { }` 对它们的
-  放行也就无从谈起，等各自语法落地后再说。
+  （`char` 已经落地，缺口已解除但还没开始做）。`reinterpret_cast`、
+  `union`、裸 `new`/`delete`、全局变量目前完全没有语法支持，`unsafe { }`
+  对它们的放行也就无从谈起，等各自语法落地后再说。
 - [§5.6](ch05-static-checks.md) 定稿的 `std::expected<T, E>` 的**实现**
   （目前只有设计），包括强制检查规则，以及
   [§4.2](ch04-struct-vs-class.md) 里可失败构造的指导原则。

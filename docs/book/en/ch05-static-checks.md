@@ -157,6 +157,11 @@ the following properties:
 - Access to mutable global/static variables.
 - Calling a function not annotated `safe`.
 
+Note what's deliberately *not* on this list: taking a raw pointer's
+address in the first place (`&expr`, [§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
+is always legal in a `safe` context, same as in Rust -- it's
+*dereferencing* one that's gated here, not creating one.
+
 See [§1.3](ch01-safety-context.md) for `unsafe { }`'s exact rules: it
 relaxes precisely this list and nothing else -- every other check in this
 chapter (§5.1-§5.4) keeps running unconditionally inside an `unsafe { }`
@@ -220,6 +225,107 @@ This is deliberately left as the only way to propagate a `std::expected`
 error in v0.1. Whether/how to make this less verbose is revisited once
 the C++ standard itself evolves further in this area -- see
 [§8](ch08-open-questions.md) Q8.
+
+## 5.7 Address-of (`&x`) and Raw Pointers (design finalized, not yet implemented)
+
+- **Motivation.** Today a `T*` value can only ever be *received* (an
+  `extern "C"` parameter, or copied from another already-existing `T*`)
+  or *derived by decay* (a fixed-size array `T[N]` decays to `T*`,
+  [§3](ch03-syntactic-sugar.md)). There is still no way to take the
+  address of a plain scalar/struct local, a `.field`, or a `[index]`
+  element -- exactly what most real C APIs need for "out" parameters
+  (`accept(fd, &addr, &addrlen)`, `getsockopt(fd, ..., &value, &len)`,
+  `stat(path, &statbuf)`): a pointer to *your own* storage, not something
+  already handed to you as a pointer. This is the concrete gap this
+  section closes.
+- **Grammar.** A new prefix unary operator, `&expr`, where `expr` is one
+  of the same forms already accepted as a borrow source for `T&`/
+  `const T&` ([§5.2](#52-borrow--aliasing)): a plain local/parameter
+  name, a `.field` projection, a `[index]` subscript, or `*p`/`p->x`
+  where `p` is a `std::unique_ptr<T>` -- recursively, off any of the
+  above. `&expr` evaluates to a `T*` -- never a distinct `const T*`,
+  since scpp's `const T*` and `T*` are already the identical `Pointer`
+  type ([§2.1](ch02-boundary-rules.md)'s parser note), so there is
+  nothing for a separate `&`/`&mut` spelling to distinguish.
+- **Safe to create; only *using* the result is unsafe -- Rust's model,
+  not a new one.** In real Rust, `let p = &x as *const T;` is
+  unconditionally safe to write (`&x` is a checked borrow; the cast to a
+  raw pointer is an ordinary, safe conversion) -- only `unsafe { *p }`
+  needs the escape hatch. Rust's own borrow checker does not even reject
+  `fn f() -> *const i32 { let x = 5; &x as *const i32 }`: a raw pointer
+  carries no lifetime parameter for the checker to relate to `x`'s scope
+  at all, so only returning an actual `&i32` reference (not a `*const
+  i32`) would be rejected. scpp adopts the identical split: `&expr` is
+  legal directly inside a `safe` function -- no `unsafe { }` needed to
+  *write* it -- matching how it's raw-pointer *dereference*, never
+  creation, that [§5.5](#55-prohibited-in-safe-regions-unless-in-unsafe--)
+  actually lists as requiring `unsafe { }` ([§1.3](ch01-safety-context.md)).
+  The resulting `T*` may be stored, passed around, returned, or simply
+  allowed to dangle once the place it was taken from goes away -- exactly
+  as in Rust, and deliberately so: the soundness boundary is entirely at
+  the later `*p` dereference (already `unsafe`-gated), not at `&expr`
+  itself.
+- **What *is* checked at the moment `&expr` is evaluated:** the same
+  definite-initialization check as an ordinary read of `expr`
+  ([§5.1](#51-ownership--move)), and -- conservatively, since the
+  resulting pointer's eventual use (read or write) can't be known at this
+  point -- the same exclusivity a new `T&` binding would require: the
+  root must have **no existing borrow at all** (shared or mutable) at
+  this instant, or `&expr` is rejected the same way taking a second `T&`
+  would be. Unlike an actual `T&`/`const T&` binding, though, `&expr`
+  does **not** itself register a new borrow going forward: since the
+  produced `T*` is never move/borrow-tracked (unchanged --
+  [§5.2](#52-borrow--aliasing)), there is nothing to later release, and
+  an ordinary `T&`/`const T&` borrow of the same place immediately
+  afterward is unaffected. This is a deliberate, snapshot-only check: it
+  cannot (and does not try to) prevent a raw pointer taken now from later
+  aliasing a *different*, separately-checked borrow of the same place at
+  some future program point -- that's the same responsibility boundary
+  Rust places on `unsafe` code.
+- **Interaction with `extern "C"`** ([§2.1](ch02-boundary-rules.md)): this
+  is the primary motivating use case. `T*`/`const T*` are already
+  accepted `extern "C"` signature types, so `&expr` is how a `safe`
+  function produces a value to satisfy a C out-parameter:
+  ```cpp
+  extern "C" int getsockopt(int fd, int level, int optname, void* val, int* len);
+  safe int query(int fd) {
+      int value = 0;
+      int len = 4;
+      unsafe {
+          getsockopt(fd, 1, 2, &value, &len);
+      }
+      return value;
+  }
+  ```
+  Note that `&value`/`&len` themselves need no `unsafe` -- only the
+  *call* to the non-`safe` `getsockopt` does, per [§1.3](ch01-safety-context.md)'s
+  existing rule (unrelated to `&`).
+- **Deliberately not included**, to keep this a minimal, single-purpose
+  addition:
+  - Pointer arithmetic (`&x + 1`) -- already
+    [§5.5](#55-prohibited-in-safe-regions-unless-in-unsafe--)'s territory
+    (`unsafe { }`-gated), unaffected by this addition.
+  - Taking the address of an rvalue/temporary, or of a reference's own
+    storage -- `expr` must resolve to an existing place, matching the
+    borrow-source grammar it reuses.
+  - Rust's `&raw const`/`&raw mut` (address-of *without* going through an
+    intermediate reference at all, needed there for packed structs and
+    uninitialized memory) -- scpp has neither concept yet, so there's no
+    case this would need to cover that plain `&expr` doesn't already.
+- **Implementation shape** (for whoever builds this): a new
+  `UnaryOp::AddressOf`, parsed at the same prefix precedence as the
+  existing `*`/`-`/`!` (its natural sibling to `*`'s `UnaryOp::Deref`).
+  In movecheck, reuse `resolve_borrow_source_root` to resolve/validate
+  `expr`'s root -- exactly the structural resolution `T&`/`const T&`
+  binding already uses -- but, unlike `apply_reference_binding`, do
+  **not** write into the borrow map afterward: just check the root's
+  current borrow state is empty (no shared or mutable borrow), rejecting
+  otherwise with the same message shape as an existing "already
+  borrowed" rejection, and stop there. In codegen, this reduces to
+  whatever `codegen_lvalue` already resolves `expr`'s address to (its
+  `.ptr`) -- no new address computation logic, just a new expression case
+  that returns that pointer directly as the overall expression's value,
+  instead of loading through it the way an ordinary read does.
 
 ---
 
