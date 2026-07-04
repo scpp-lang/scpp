@@ -141,6 +141,29 @@ void test_line_and_column_tracking() {
     expect(tokens[1].line == 2 && tokens[1].column == 3, "line_and_column_tracking: 'x' at 2:3");
 }
 
+// The EndOfFile token's position must point immediately after the last
+// real content, not wherever the cursor lands after skipping trailing
+// whitespace/blank lines/comments -- matching Clang/GCC (e.g. `clang -c`
+// on `int sfsf\n` reports the missing-';' diagnostic at line 1 column 9,
+// never line 2 column 1 just because the file happens to end with a
+// trailing newline). See Lexer::next()'s pre_skip_line/pre_skip_col.
+void test_eof_position_ignores_trailing_whitespace() {
+    std::vector<scpp::Token> no_trailing_newline = scpp::tokenize("int sfsf");
+    expect(no_trailing_newline.back().kind == scpp::TokenKind::EndOfFile,
+           "eof_position: last token should be EndOfFile");
+    expect(no_trailing_newline.back().line == 1 && no_trailing_newline.back().column == 9,
+           "eof_position (no trailing newline): expected EOF at 1:9");
+
+    std::vector<scpp::Token> one_trailing_newline = scpp::tokenize("int sfsf\n");
+    expect(one_trailing_newline.back().line == 1 && one_trailing_newline.back().column == 9,
+           "eof_position (one trailing newline): expected EOF at 1:9, not 2:1");
+
+    std::vector<scpp::Token> trailing_blank_lines_and_comment = scpp::tokenize("int sfsf\n\n\n// trailing\n");
+    expect(trailing_blank_lines_and_comment.back().line == 1 &&
+               trailing_blank_lines_and_comment.back().column == 9,
+           "eof_position (trailing blank lines + comment): expected EOF at 1:9");
+}
+
 void test_unknown_character() {
     std::vector<scpp::Token> tokens = scpp::tokenize("@");
     expect(tokens.size() == 2, "unknown_character: expected 2 tokens");
@@ -268,6 +291,7 @@ int main() {
     test_arrow_operator();
     test_comments_are_skipped();
     test_line_and_column_tracking();
+    test_eof_position_ignores_trailing_whitespace();
     test_unknown_character();
     test_struct_punctuation();
     test_scope_resolution_operator();

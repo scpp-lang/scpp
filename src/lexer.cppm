@@ -205,10 +205,20 @@ private:
     }
 
     Token next() {
+        // Captured *before* skipping trailing whitespace/comments so the
+        // EndOfFile token below reports the position right after the
+        // last real content, not wherever the cursor lands after
+        // consuming any trailing blank lines/whitespace -- matching how
+        // Clang/GCC position an "unexpected end of file" diagnostic
+        // (e.g. `int sfsf\n` reports line 1 column 9, immediately after
+        // "sfsf", never line 2 column 1 just because the file happens to
+        // end with a trailing newline).
+        int pre_skip_line = line_;
+        int pre_skip_col = column_;
         skip_whitespace_and_comments();
 
         if (at_end()) {
-            return Token{TokenKind::EndOfFile, {}, line_, column_};
+            return Token{TokenKind::EndOfFile, {}, pre_skip_line, pre_skip_col};
         }
 
         size_t start = pos_;
