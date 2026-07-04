@@ -53,6 +53,8 @@ struct Type {
 enum class ExprKind {
     IntegerLiteral,
     BoolLiteral,
+    CharLiteral, // 'a', '\n', ... -- ordinal value stored in `int_value`
+                 // (same field as IntegerLiteral; see Expr below)
     Identifier,
     Binary,
     Unary,
@@ -95,7 +97,9 @@ enum class UnaryOp {
 struct Expr {
     ExprKind kind;
 
-    // IntegerLiteral
+    // IntegerLiteral, or CharLiteral's ordinal value (e.g. 'a' -> 97) --
+    // sharing this field rather than adding a new one keeps Expr flat;
+    // which literal kind `expr.kind` is tells the two apart.
     long long int_value = 0;
 
     // BoolLiteral

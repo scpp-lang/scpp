@@ -1,0 +1,1 @@
+contains: store ptr %buf, ptr %p

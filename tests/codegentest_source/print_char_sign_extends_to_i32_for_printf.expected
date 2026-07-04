@@ -1,0 +1,1 @@
+sequence: @fmt_char = private unnamed_addr constant [4 x i8] c"%c\0A\00" | call i32 (ptr, ...) @printf(ptr @fmt_char, i32 120)

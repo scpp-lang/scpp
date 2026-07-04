@@ -170,7 +170,7 @@ private:
                 validate_trivial(*type.element, in_progress);
                 return;
             case TypeKind::Named: {
-                if (type.name == "int" || type.name == "bool") return;
+                if (type.name == "int" || type.name == "bool" || type.name == "char") return;
                 if (type.name == "void") {
                     throw CodegenError("'void' cannot be a struct field (only a return type or a "
                                         "pointer's pointee -- 'void*' -- may be 'void')");
@@ -250,7 +250,22 @@ private:
                 return llvm::ArrayType::get(to_llvm_type(*type.element), type.array_size);
             case TypeKind::Named:
                 if (type.name == "int") return llvm::Type::getInt32Ty(*context_);
-                if (type.name == "bool") return llvm::Type::getInt1Ty(*context_);
+                // A full byte (i8), matching real C++'s sizeof(bool)==1
+                // and the spec's false=0/true=1 invariant (ch06) -- not
+                // i1, even though LLVM's own icmp/br/select instructions
+                // require i1. See bool_to_i1/i1_to_bool below for the
+                // narrow choke point that bridges the two: every
+                // consumer that needs a branch/select condition truncates
+                // down to i1 first, and every comparison/logical result
+                // gets zext'd back up to i8 before being stored, passed,
+                // or returned as an ordinary bool value.
+                if (type.name == "bool") return llvm::Type::getInt8Ty(*context_);
+                // A signed 8-bit scalar, matching the common (e.g.
+                // x86-64 Linux/Clang) default for plain `char` -- no
+                // implicit promotion to/from `int` exists yet (matching
+                // the same pre-existing lack of promotion between `bool`
+                // and `int`), so this is the type's only representation.
+                if (type.name == "char") return llvm::Type::getInt8Ty(*context_);
                 // `void` (ch02 §2.1): only meaningful as a function return
                 // type or a pointer's pointee (`void*`, whose own
                 // to_llvm_type case above never even inspects the
@@ -561,7 +576,10 @@ private:
                 return;
 
             case StmtKind::If: {
-                llvm::Value* cond = codegen_expr(*stmt.condition);
+                // `stmt.condition` is a `bool` expression, stored/passed
+                // as i8 (see to_llvm_type) -- CreateCondBr needs a 1-bit
+                // condition, so narrow it right here (see bool_to_i1).
+                llvm::Value* cond = bool_to_i1(codegen_expr(*stmt.condition));
                 llvm::BasicBlock* then_block = llvm::BasicBlock::Create(*context_, "if.then", current_function);
                 llvm::BasicBlock* else_block = llvm::BasicBlock::Create(*context_, "if.else", current_function);
                 llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(*context_, "if.end", current_function);
@@ -612,7 +630,8 @@ private:
                 builder_->CreateBr(cond_block);
 
                 builder_->SetInsertPoint(cond_block);
-                llvm::Value* cond = codegen_expr(*stmt.condition);
+                // Same bool_to_i1 narrowing as the If case above.
+                llvm::Value* cond = bool_to_i1(codegen_expr(*stmt.condition));
                 builder_->CreateCondBr(cond, body_block, end_block);
 
                 // The body's scope is popped (and its unique_ptr locals
@@ -668,18 +687,89 @@ private:
         return builder_->CreateCall(callee, args);
     }
 
+    // Reads `lv`'s value for use as an ordinary rvalue. An array decays to
+    // its own address instead of being loaded as a giant aggregate: a
+    // bare array is never meaningfully read "by value" as a whole (there
+    // is no array-copy/array-comparison support, and never will be
+    // without a real generics story) -- every place a bare array
+    // identifier/subscript/field is used where a *value* is expected is
+    // exactly the C/C++ array-to-pointer decay (e.g. `char* p = buf;`, or
+    // passing `buf` as a `char*` argument), matching how a raw pointer's
+    // own storage already holds an *address* rather than "the pointee's
+    // bytes" at this level (see to_llvm_type's Pointer case). Shared by
+    // every "resolve an lvalue, then read its value" call site below
+    // (Identifier/Subscript, Member's struct-field fallback) so all of
+    // them treat an array-typed result the same way.
+    llvm::Value* load_value(const LValue& lv) {
+        if (lv.type.kind == TypeKind::Array) {
+            return lv.ptr;
+        }
+        return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
+    }
+
+    // `bool` is stored/passed/returned as a full byte (i8; see
+    // to_llvm_type), but LLVM's branch/select instructions require a
+    // 1-bit condition -- this narrows an i8 bool value (guaranteed by
+    // the false=0/true=1 invariant, ch06, to already be exactly 0 or 1)
+    // down to i1 right before such a use. Requires the input to actually
+    // *be* i8 (not just any integer width truncated down to its lowest
+    // bit): ch06 explicitly forbids implicit scalar-to-bool conversion,
+    // including in if/while conditions (unlike real C++, where e.g.
+    // `if (5)` is legal) -- without this check, a plain `CreateTrunc`
+    // would silently accept `if (5)` (5's lowest bit happens to be 1)
+    // instead of rejecting it the way an explicit-cast-only language must.
+    // Known gap: `char` is *also* i8 (see to_llvm_type), and this check
+    // has no way to tell "an i8 that started life as a bool" from "an i8
+    // that started life as a char" -- catching `if (some_char)` would
+    // need real expression-type inference, which doesn't exist anywhere
+    // in this codebase yet (a much bigger undertaking than this narrow
+    // width check). Left as a known limitation rather than expanded scope.
+    llvm::Value* bool_to_i1(llvm::Value* v) {
+        if (!v->getType()->isIntegerTy(8)) {
+            throw CodegenError(
+                "expected a 'bool' value here (e.g. an if/while condition, or an '&&'/'||' operand); "
+                "scpp requires an explicit cast for any scalar-to-bool conversion, unlike real C++ "
+                "(spec ch06)");
+        }
+        return builder_->CreateTrunc(v, llvm::Type::getInt1Ty(*context_), "tobool");
+    }
+
+    // The inverse of bool_to_i1: widens an i1 (an icmp result, or another
+    // logical operation already in the 1-bit domain) back up to the i8
+    // representation every ordinary bool value uses -- the choke point
+    // every comparison/logical operator goes through before its result
+    // is stored, passed, or returned as an actual `bool`.
+    llvm::Value* i1_to_bool(llvm::Value* v) {
+        return builder_->CreateZExt(v, llvm::Type::getInt8Ty(*context_), "boolext");
+    }
+
     llvm::Value* codegen_expr(const Expr& expr) {
         switch (expr.kind) {
             case ExprKind::IntegerLiteral:
                 return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), expr.int_value, /*isSigned=*/true);
 
             case ExprKind::BoolLiteral:
-                return llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context_), expr.bool_value ? 1 : 0);
+                // `bool` is stored as a full byte (i8; see to_llvm_type
+                // and its false=0/true=1 invariant, ch06) -- a literal's
+                // value is already exactly 0 or 1, so no i1_to_bool
+                // widening is needed here (unlike a comparison/logical
+                // result, which starts out as a genuine i1).
+                return llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), expr.bool_value ? 1 : 0);
+
+            case ExprKind::CharLiteral:
+                // `char` is its own distinct 1-byte type (ch06) -- not an
+                // alias for any fixed-width integer type, so it takes no
+                // stance on signedness at all (no implicit arithmetic or
+                // cross-type comparison exists for it to matter for);
+                // `expr.int_value` already holds the decoded ordinal
+                // value 0-255 (see parser's decode_char_literal), which
+                // fits identically in the 8 bits either way.
+                return llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), expr.int_value, /*isSigned=*/false);
 
             case ExprKind::Identifier:
             case ExprKind::Subscript: {
                 LValue lv = codegen_lvalue(expr);
-                return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
+                return load_value(lv);
             }
 
             case ExprKind::Member: {
@@ -699,7 +789,7 @@ private:
                     return builder_->CreateTrunc(size64, llvm::Type::getInt32Ty(*context_), "size");
                 }
                 LValue lv = codegen_lvalue(expr);
-                return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
+                return load_value(lv);
             }
 
             case ExprKind::Unary: {
@@ -713,14 +803,23 @@ private:
                 }
                 llvm::Value* operand = codegen_expr(*expr.lhs);
                 if (expr.unary_op == UnaryOp::Neg) return builder_->CreateNeg(operand, "negtmp");
-                return builder_->CreateNot(operand, "nottmp");
+                // Not (`!`) -- `operand` is a `bool` value (i8; see
+                // to_llvm_type), so this goes through the i1 domain
+                // rather than a raw bitwise-not directly on the i8: NOT
+                // on the byte `0x01` gives `0xFE`, not the canonical
+                // false=`0x00` the ch06 invariant requires (every other
+                // bool-producing operation -- comparisons, `&&`/`||` --
+                // is careful to only ever produce 0 or 1; this must be
+                // too, or a later `== false` on the result would wrongly
+                // disagree with `!` itself).
+                return i1_to_bool(builder_->CreateNot(bool_to_i1(operand), "nottmp"));
             }
 
             case ExprKind::Binary:
                 return codegen_binary(expr);
 
             case ExprKind::Call: {
-                if (expr.name == "print_int" || expr.name == "print_bool") {
+                if (expr.name == "print_int" || expr.name == "print_bool" || expr.name == "print_char") {
                     return codegen_builtin_print(expr);
                 }
                 llvm::Value* result = codegen_call(expr);
@@ -762,14 +861,14 @@ private:
     // not a real generic function call -- scpp has no `new` expression at
     // all; make_unique is the only sanctioned way to heap-allocate. v0.1
     // supports exactly two forms: zero arguments (zero-initializes T, like
-    // a bare `T x;`) or one argument when T is a scalar (int/bool),
+    // a bare `T x;`) or one argument when T is a scalar (int/bool/char),
     // initializing it to that value. Everything else (multiple arguments,
     // or one argument for a struct/array/pointer T) needs real constructor
     // support that doesn't exist yet.
     llvm::Value* codegen_make_unique(const Expr& expr) {
         llvm::Type* element_type = to_llvm_type(expr.type);
-        bool element_is_scalar =
-            expr.type.kind == TypeKind::Named && (expr.type.name == "int" || expr.type.name == "bool");
+        bool element_is_scalar = expr.type.kind == TypeKind::Named &&
+                                  (expr.type.name == "int" || expr.type.name == "bool" || expr.type.name == "char");
 
         llvm::Value* initial_value;
         if (expr.args.empty()) {
@@ -779,7 +878,7 @@ private:
         } else {
             throw CodegenError(
                 "std::make_unique<T>(...) currently only supports zero arguments (zero-initializes "
-                "T) or exactly one argument when T is a scalar (int/bool)");
+                "T) or exactly one argument when T is a scalar (int/bool/char)");
         }
 
         llvm::Function* malloc_fn = get_or_declare_malloc();
@@ -1027,10 +1126,11 @@ private:
         }
     }
 
-    // `print_int`/`print_bool` are temporary builtins that shell out to
-    // libc's `printf` so programs can produce visible output before the
-    // language grows a real string type (tracked for M2+). Both return the
-    // usual `printf` result (an i32) so they can be used like any other call.
+    // `print_int`/`print_bool`/`print_char` are temporary builtins that
+    // shell out to libc's `printf` so programs can produce visible output
+    // before the language grows a real string type (tracked for M2+). All
+    // three return the usual `printf` result (an i32) so they can be used
+    // like any other call.
     llvm::Value* codegen_builtin_print(const Expr& expr) {
         if (expr.args.size() != 1) {
             throw CodegenError(expr.name + " expects exactly 1 argument");
@@ -1043,11 +1143,22 @@ private:
         if (expr.name == "print_int") {
             format = builder_->CreateGlobalString("%d\n", "fmt_int");
             printf_arg = arg;
+        } else if (expr.name == "print_char") {
+            format = builder_->CreateGlobalString("%c\n", "fmt_char");
+            // C's variadic calling convention always promotes a `char`
+            // argument to `int` (the same "default argument promotion"
+            // real C/C++ applies to any variadic call) -- printf's `%c`
+            // reads a full `int`-sized argument regardless of the
+            // narrower declared parameter type, so the raw i8 value must
+            // be sign-extended before being passed through `...` here.
+            printf_arg = builder_->CreateSExt(arg, llvm::Type::getInt32Ty(*context_), "charpromo");
         } else {
             format = builder_->CreateGlobalString("%s\n", "fmt_bool");
             llvm::Value* true_str = builder_->CreateGlobalString("true", "str_true");
             llvm::Value* false_str = builder_->CreateGlobalString("false", "str_false");
-            printf_arg = builder_->CreateSelect(arg, true_str, false_str, "booltmp");
+            // `arg` is the i8 bool representation (see to_llvm_type);
+            // CreateSelect needs a 1-bit condition.
+            printf_arg = builder_->CreateSelect(bool_to_i1(arg), true_str, false_str, "booltmp");
         }
         return builder_->CreateCall(printf_fn, {format, printf_arg});
     }
@@ -1095,12 +1206,16 @@ private:
             case BinaryOp::Sub: return builder_->CreateSub(lhs, rhs, "subtmp");
             case BinaryOp::Mul: return builder_->CreateMul(lhs, rhs, "multmp");
             case BinaryOp::Div: return builder_->CreateSDiv(lhs, rhs, "divtmp");
-            case BinaryOp::Eq: return builder_->CreateICmpEQ(lhs, rhs, "eqtmp");
-            case BinaryOp::Ne: return builder_->CreateICmpNE(lhs, rhs, "netmp");
-            case BinaryOp::Lt: return builder_->CreateICmpSLT(lhs, rhs, "lttmp");
-            case BinaryOp::Gt: return builder_->CreateICmpSGT(lhs, rhs, "gttmp");
-            case BinaryOp::Le: return builder_->CreateICmpSLE(lhs, rhs, "letmp");
-            case BinaryOp::Ge: return builder_->CreateICmpSGE(lhs, rhs, "getmp");
+            // Comparisons always produce a genuine i1 from icmp, but a
+            // scpp `bool` result needs to be widened to the i8 every
+            // other bool value uses (see i1_to_bool/to_llvm_type) before
+            // it can be stored, passed, or returned like any other value.
+            case BinaryOp::Eq: return i1_to_bool(builder_->CreateICmpEQ(lhs, rhs, "eqtmp"));
+            case BinaryOp::Ne: return i1_to_bool(builder_->CreateICmpNE(lhs, rhs, "netmp"));
+            case BinaryOp::Lt: return i1_to_bool(builder_->CreateICmpSLT(lhs, rhs, "lttmp"));
+            case BinaryOp::Gt: return i1_to_bool(builder_->CreateICmpSGT(lhs, rhs, "gttmp"));
+            case BinaryOp::Le: return i1_to_bool(builder_->CreateICmpSLE(lhs, rhs, "letmp"));
+            case BinaryOp::Ge: return i1_to_bool(builder_->CreateICmpSGE(lhs, rhs, "getmp"));
             default: throw CodegenError("unhandled binary operator");
         }
     }
@@ -1109,6 +1224,10 @@ private:
         llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
         bool is_and = expr.binary_op == BinaryOp::And;
 
+        // `lhs`/`rhs` stay in the i8 bool representation throughout (so
+        // the merging PHI below can use either directly, matching how
+        // every other bool value is stored/passed/returned) -- only the
+        // branch conditions themselves need the narrower bool_to_i1 form.
         llvm::Value* lhs = codegen_expr(*expr.lhs);
         llvm::BasicBlock* rhs_block =
             llvm::BasicBlock::Create(*context_, is_and ? "and.rhs" : "or.rhs", current_function);
@@ -1117,9 +1236,9 @@ private:
         llvm::BasicBlock* lhs_block = builder_->GetInsertBlock();
 
         if (is_and) {
-            builder_->CreateCondBr(lhs, rhs_block, merge_block);
+            builder_->CreateCondBr(bool_to_i1(lhs), rhs_block, merge_block);
         } else {
-            builder_->CreateCondBr(lhs, merge_block, rhs_block);
+            builder_->CreateCondBr(bool_to_i1(lhs), merge_block, rhs_block);
         }
 
         builder_->SetInsertPoint(rhs_block);
@@ -1128,7 +1247,7 @@ private:
         builder_->CreateBr(merge_block);
 
         builder_->SetInsertPoint(merge_block);
-        llvm::PHINode* phi = builder_->CreatePHI(llvm::Type::getInt1Ty(*context_), 2, "logictmp");
+        llvm::PHINode* phi = builder_->CreatePHI(llvm::Type::getInt8Ty(*context_), 2, "logictmp");
         phi->addIncoming(lhs, lhs_block);
         phi->addIncoming(rhs, rhs_end_block);
         return phi;

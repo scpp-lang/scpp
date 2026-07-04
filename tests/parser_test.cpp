@@ -607,6 +607,84 @@ void test_safe_prefix_on_extern_c_block_is_rejected() {
     expect(threw, "safe_prefix_on_extern_c_block_is_rejected: expected a ParseError");
 }
 
+void test_char_type_declaration() {
+    scpp::Program program = scpp::parse("int f() { char c; return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "char_type_declaration: statement should be VarDecl");
+    expect(is_named_type(decl.type, "char"), "char_type_declaration: type should be 'char'");
+}
+
+void test_char_literal_expression() {
+    scpp::Program program = scpp::parse("int f() { char c = 'a'; return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::CharLiteral,
+           "char_literal_expression: initializer should be a CharLiteral");
+    expect(decl.init->int_value == 'a', "char_literal_expression: ordinal value should be 'a' (97)");
+}
+
+void test_char_literal_escape_sequences_decode_correctly() {
+    struct Case { const char* source; long long expected; };
+    const Case cases[] = {
+        {"int f() { char c = '\\n'; return 0; }", '\n'},
+        {"int f() { char c = '\\t'; return 0; }", '\t'},
+        {"int f() { char c = '\\r'; return 0; }", '\r'},
+        {"int f() { char c = '\\\\'; return 0; }", '\\'},
+        {"int f() { char c = '\\''; return 0; }", '\''},
+        {"int f() { char c = '\\0'; return 0; }", '\0'},
+    };
+    for (const Case& c : cases) {
+        scpp::Program program = scpp::parse(c.source);
+        const scpp::Stmt& decl = *program.functions[0].body->statements[0];
+        expect(decl.init->int_value == c.expected,
+               "char_literal_escape_sequences_decode_correctly: mismatch for " + std::string(c.source));
+    }
+}
+
+void test_empty_char_literal_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int f() { char c = ''; return 0; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "empty_char_literal_is_rejected: expected a ParseError");
+}
+
+void test_multi_character_char_literal_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int f() { char c = 'ab'; return 0; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "multi_character_char_literal_is_rejected: expected a ParseError");
+}
+
+void test_unsupported_char_escape_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int f() { char c = '\\z'; return 0; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "unsupported_char_escape_is_rejected: expected a ParseError");
+}
+
+void test_const_char_pointer_type() {
+    // `const T*` (ch02 §2.1's realistic C signature compatibility -- e.g.
+    // `const char* fmt`) parses as a plain Pointer type; scpp doesn't
+    // track pointer constness, so the `const` is accepted but dropped.
+    scpp::Program program = scpp::parse("extern \"C\" int puts(const char* s);");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.params.size() == 1, "const_char_pointer_type: expected 1 parameter");
+    const scpp::Type& param_type = fn.params[0].type;
+    expect(param_type.kind == scpp::TypeKind::Pointer, "const_char_pointer_type: parameter should be Pointer");
+    expect(param_type.pointee != nullptr && is_named_type(*param_type.pointee, "char"),
+           "const_char_pointer_type: pointee should be 'char'");
+}
+
 } // namespace
 
 int main() {
@@ -653,6 +731,13 @@ int main() {
     test_varargs_on_non_extern_function_is_rejected();
     test_void_return_and_void_pointer_types();
     test_safe_prefix_on_extern_c_block_is_rejected();
+    test_char_type_declaration();
+    test_char_literal_expression();
+    test_char_literal_escape_sequences_decode_correctly();
+    test_empty_char_literal_is_rejected();
+    test_multi_character_char_literal_is_rejected();
+    test_unsupported_char_escape_is_rejected();
+    test_const_char_pointer_type();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

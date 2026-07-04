@@ -490,6 +490,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
     switch (expr->kind) {
         case ExprKind::IntegerLiteral:
         case ExprKind::BoolLiteral:
+        case ExprKind::CharLiteral:
             return;
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr->name);
@@ -956,6 +957,7 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
     switch (expr.kind) {
         case ExprKind::IntegerLiteral:
         case ExprKind::BoolLiteral:
+        case ExprKind::CharLiteral:
             return;
 
         case ExprKind::Identifier: {

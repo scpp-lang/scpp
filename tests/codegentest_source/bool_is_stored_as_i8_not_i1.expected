@@ -1,0 +1,1 @@
+sequence: %b = alloca i8, align 1 | store i8 1, ptr %b

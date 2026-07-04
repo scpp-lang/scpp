@@ -1,0 +1,1 @@
+sequence: trunc i8 %loadtmp to i1 | xor i1 %tobool, true | zext i1 %nottmp to i8

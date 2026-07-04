@@ -235,6 +235,27 @@ void test_ellipsis() {
         "ellipsis");
 }
 
+void test_char_keyword() {
+    expect_kinds("char", {scpp::TokenKind::KwChar, scpp::TokenKind::EndOfFile}, "char_keyword");
+}
+
+void test_char_literal() {
+    std::vector<scpp::Token> tokens = scpp::tokenize("char c = 'a';");
+    expect(tokens.size() == 6, "char_literal: expected 6 tokens");
+    expect(tokens[3].kind == scpp::TokenKind::CharLiteral, "char_literal: kind should be CharLiteral");
+    expect(tokens[3].text == "'a'", "char_literal: text should be \"'a'\" (quotes included)");
+}
+
+void test_char_literal_escape_sequence() {
+    // A backslash-escaped character (e.g. the newline escape `\n`)
+    // doesn't end the literal early -- same mechanism as string literals.
+    std::vector<scpp::Token> tokens = scpp::tokenize("'\\n'");
+    expect(tokens.size() == 2, "char_literal_escape_sequence: expected 2 tokens");
+    expect(tokens[0].kind == scpp::TokenKind::CharLiteral,
+           "char_literal_escape_sequence: kind should be CharLiteral");
+    expect(tokens[0].text == "'\\n'", "char_literal_escape_sequence: text should include the escape");
+}
+
 } // namespace
 
 int main() {
@@ -254,6 +275,9 @@ int main() {
     test_string_literal();
     test_string_literal_with_escaped_quote();
     test_ellipsis();
+    test_char_keyword();
+    test_char_literal();
+    test_char_literal_escape_sequence();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

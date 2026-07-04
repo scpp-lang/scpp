@@ -13,6 +13,12 @@ enum class TokenKind {
     // literals / identifiers
     Identifier,
     IntegerLiteral,
+    // A char literal (`'a'`, `'\n'`, ...). `text` includes the
+    // surrounding single quotes (same exact-source-substring convention
+    // as StringLiteral below); decoding the escape sequence into an
+    // ordinal value happens in the parser (see decode_char_literal), not
+    // here -- the lexer just finds the token's extent.
+    CharLiteral,
     // Minimal string literal (ch02 §2.1): just enough to recognize the
     // linkage token `"C"` in `extern "C"`. `text` includes the
     // surrounding quotes (matching every other literal token's
@@ -24,6 +30,15 @@ enum class TokenKind {
     // keywords
     KwInt,
     KwBool,
+    KwChar, // a scalar byte type (LLVM i8, signed) -- see codegen's
+            // to_llvm_type. Parses exactly like int/bool everywhere a
+            // type is expected (locals, params, fields, arrays,
+            // pointers); no implicit promotion to/from `int` exists yet
+            // (matching the same pre-existing lack of promotion between
+            // `bool` and `int`), so mixing a `char` with a plain integer
+            // literal/expression in one arithmetic/comparison op isn't
+            // supported -- use a char literal (`'a'`) or another `char`
+            // value on both sides instead.
     KwVoid, // ch02 §2.1: valid only as a function return type or as a
             // pointer's pointee (`void*`) -- never as a bare
             // variable/parameter/field type. Needed for `extern "C"`
@@ -149,6 +164,7 @@ private:
     static TokenKind keyword_kind(std::string_view text) {
         if (text == "int") return TokenKind::KwInt;
         if (text == "bool") return TokenKind::KwBool;
+        if (text == "char") return TokenKind::KwChar;
         if (text == "void") return TokenKind::KwVoid;
         if (text == "return") return TokenKind::KwReturn;
         if (text == "if") return TokenKind::KwIf;
@@ -205,6 +221,21 @@ private:
             }
             if (!at_end()) advance(); // closing quote
             return make_token(TokenKind::StringLiteral, start, start_line, start_col);
+        }
+
+        if (c == '\'') {
+            // Char literal (`'a'`, `'\n'`, ...): finds the token's extent
+            // the same way the string literal above does (a backslash
+            // escapes the following character so e.g. `'\''` doesn't end
+            // the literal early). Decoding the escape sequence into an
+            // ordinal value is the parser's job (decode_char_literal),
+            // not the lexer's.
+            while (!at_end() && peek() != '\'') {
+                if (peek() == '\\' && !at_end()) advance();
+                advance();
+            }
+            if (!at_end()) advance(); // closing quote
+            return make_token(TokenKind::CharLiteral, start, start_line, start_col);
         }
 
         switch (c) {

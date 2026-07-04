@@ -76,7 +76,7 @@ private:
     [[nodiscard]] bool looks_like_type_start() const {
         const Token& tok = peek();
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst ||
-            tok.kind == TokenKind::KwVoid) {
+            tok.kind == TokenKind::KwVoid || tok.kind == TokenKind::KwChar) {
             return true;
         }
         if (check_std_qualified("unique_ptr") || check_std_qualified("span")) return true;
@@ -150,6 +150,9 @@ private:
         } else if (tok.kind == TokenKind::KwBool) {
             type.name = "bool";
             advance();
+        } else if (tok.kind == TokenKind::KwChar) {
+            type.name = "char";
+            advance();
         } else if (tok.kind == TokenKind::KwVoid) {
             // Valid here structurally (like int/bool) so `void*` falls
             // out of the trailing `*` loop below for free; a *bare*
@@ -178,10 +181,17 @@ private:
     // Parses a full type, including the borrow-checking sugar from ch03:
     // an optional leading `const` plus a trailing `&` turns the
     // unqualified type into a Reference -- `T&` is a mutable/exclusive
-    // borrow, `const T&` a shared borrow (ch05.2). `const` is only
-    // meaningful directly before a reference in this version; scpp has no
-    // general const-qualification yet, so a bare `const T` (no `&`) is
-    // rejected rather than silently ignored.
+    // borrow, `const T&` a shared borrow (ch05.2). `const` immediately
+    // before a *pointer* type (`const T*`, e.g. `const char* fmt` in a
+    // realistic `extern "C"` signature -- ch02 §2.1) is also accepted,
+    // but purely as grammar compatibility with real C/C++ signatures:
+    // unlike a reference's `is_mutable_ref`, scpp doesn't track pointer
+    // constness at all yet (raw pointers have no enforcement of any
+    // invariants in this version, `unsafe {}`-gated or not), so
+    // `const T*` and `T*` produce the exact same Pointer type -- the
+    // `const` is accepted and silently dropped, not enforced. `const` is
+    // rejected everywhere else (a bare `const T`, no `&`/`*`) since
+    // scpp has no other const-qualification yet.
     Type parse_type() {
         bool has_const_prefix = match(TokenKind::KwConst);
         Type type = parse_unqualified_type();
@@ -195,11 +205,11 @@ private:
             return type;
         }
 
-        if (has_const_prefix) {
+        if (has_const_prefix && type.kind != TypeKind::Pointer) {
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
-                              "'const' is only supported directly before a reference type ('const T&') in "
-                              "this version");
+                              "'const' is only supported directly before a reference type ('const T&') "
+                              "or a pointer type ('const T*') in this version");
         }
         return type;
     }
@@ -290,6 +300,45 @@ private:
                               "unsupported linkage " + std::string(tok.text) +
                                   ": only extern \"C\" is supported in this version");
         }
+    }
+
+    // Decodes a CharLiteral token's text (e.g. 'a', '\n', '\\', '\'', '\0')
+    // into its ordinal value. `tok.text` includes the surrounding single
+    // quotes (see CharLiteral's definition in lexer.cppm). Supports the
+    // same minimal named-escape set as the rest of v0.1's "just enough"
+    // lexing philosophy: \n \t \r \\ \' \" \0 -- no hex/octal escapes,
+    // matching how string literals likewise only support the bare
+    // minimum needed right now (see parse_c_linkage_string above).
+    long long decode_char_literal(const Token& tok) {
+        // A well-formed literal is always at least `''` (2 quote chars);
+        // anything shorter means the lexer hit EOF before a closing
+        // quote (an unterminated literal) -- guard before the substr
+        // below so that case reports a clear error instead of
+        // underflowing `tok.text.size() - 2`.
+        if (tok.text.size() < 2) {
+            throw ParseError(tok.line, tok.column,
+                              "unterminated char literal " + std::string(tok.text));
+        }
+        std::string_view inner = tok.text.substr(1, tok.text.size() - 2);
+        if (inner.size() == 1 && inner[0] != '\\') {
+            return static_cast<unsigned char>(inner[0]);
+        }
+        if (inner.size() == 2 && inner[0] == '\\') {
+            switch (inner[1]) {
+                case 'n': return '\n';
+                case 't': return '\t';
+                case 'r': return '\r';
+                case '0': return '\0';
+                case '\\': return '\\';
+                case '\'': return '\'';
+                case '"': return '"';
+                default: break;
+            }
+        }
+        throw ParseError(tok.line, tok.column,
+                          "invalid char literal " + std::string(tok.text) +
+                              ": must be exactly one character or one of the supported escape "
+                              "sequences (\\n \\t \\r \\\\ \\' \\\" \\0)");
     }
 
     StructDef parse_struct_def() {
@@ -701,6 +750,12 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::IntegerLiteral;
             node->int_value = std::stoll(std::string(tok.text));
+            return node;
+        }
+        if (match(TokenKind::CharLiteral)) {
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::CharLiteral;
+            node->int_value = decode_char_literal(tok);
             return node;
         }
         if (match(TokenKind::KwTrue)) {
