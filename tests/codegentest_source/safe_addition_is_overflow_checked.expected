@@ -1,0 +1,2 @@
+sequence: @llvm.sadd.with.overflow.i32 | extractvalue { i32, i1 } %addtmp, 0 | extractvalue { i32, i1 } %addtmp, 1 | br i1 %overflow, label %overflow.fail, label %overflow.ok
+sequence: overflow.fail: | call void @abort() | unreachable

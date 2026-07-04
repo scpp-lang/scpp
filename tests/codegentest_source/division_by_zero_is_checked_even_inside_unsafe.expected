@@ -1,0 +1,2 @@
+sequence: %divzero = icmp eq i32 %loadtmp3, 0 | br i1 %divtraps, label %div.fail, label %div.ok
+sequence: div.fail: | call void @abort() | unreachable

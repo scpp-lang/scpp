@@ -1,0 +1,3 @@
+sequence: %divzero = icmp eq i32 %loadtmp3, 0 | %isintmin = icmp eq i32 %loadtmp, -2147483648 | %isnegone = icmp eq i32 %loadtmp3, -1 | %divoverflow = and i1 %isintmin, %isnegone | %divtraps = or i1 %divzero, %divoverflow | br i1 %divtraps, label %div.fail, label %div.ok
+sequence: div.fail: | call void @abort() | unreachable
+sequence: div.ok: | %divtmp = sdiv i32 %loadtmp, %loadtmp3

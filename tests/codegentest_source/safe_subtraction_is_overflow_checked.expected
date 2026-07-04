@@ -1,0 +1,2 @@
+contains: @llvm.ssub.with.overflow.i32
+sequence: overflow.fail: | call void @abort() | unreachable

@@ -1,6 +1,8 @@
 module;
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -14,6 +16,7 @@ module;
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
@@ -118,6 +121,19 @@ private:
     // consulted by StmtKind::Return to tell whether *this* function's own
     // return type is a reference (see codegen_stmt's Return case).
     const Function* current_function_def_ = nullptr;
+    // `unsafe { }` nesting depth (ch01 §1.3), mirroring movecheck's own
+    // DataflowState::unsafe_depth: 0 outside any unsafe context, > 0
+    // directly or transitively inside one. Initialized per-function in
+    // define_function (0 for a `safe` function, 1 for a non-`safe` one --
+    // its *entire* body is an implicit unsafe context, same as movecheck's
+    // entry_state), then incremented/decremented around an `unsafe { }`
+    // Block in codegen_stmt. Consulted only by arithmetic codegen so far
+    // (ch05 §5.8: `+`/`-`/`*` are overflow-checked in `safe` code, plain
+    // guaranteed-wrapping inside `unsafe`) -- every other check that reads
+    // unsafe-ness (raw pointer deref, callee-must-be-safe) is movecheck's
+    // job, not codegen's, since by the time a program reaches codegen it
+    // has already been accepted (see codegen_lvalue's Deref case).
+    int unsafe_depth_ = 0;
     std::unique_ptr<llvm::LLVMContext> context_;
     std::unique_ptr<llvm::Module> module_;
     std::unique_ptr<llvm::IRBuilder<>> builder_;
@@ -419,6 +435,10 @@ private:
         }
 
         current_function_def_ = &fn;
+        // Mirrors movecheck's entry_state.unsafe_depth = fn.is_safe ? 0 : 1
+        // (ch01 §1.3): a non-`safe` function's entire body is an implicit
+        // unsafe context, same as if it were all wrapped in `unsafe { }`.
+        unsafe_depth_ = fn.is_safe ? 0 : 1;
         llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
         builder_->SetInsertPoint(entry);
 
@@ -447,12 +467,20 @@ private:
         switch (stmt.kind) {
             case StmtKind::Block:
                 push_scope();
+                // ch01 §1.3 / ch05 §5.8: an `unsafe { }` block raises the
+                // depth counter for its own statements (and anything
+                // transitively nested inside it) so codegen_binary knows
+                // to emit plain, guaranteed-wrapping arithmetic instead of
+                // the overflow-checked form -- mirrors movecheck's own
+                // UnsafeEnter/UnsafeExit MIR statements.
+                if (stmt.is_unsafe) unsafe_depth_++;
                 for (const auto& s : stmt.statements) {
                     // Once a block has a terminator (return), skip anything
                     // after it: unreachable code shouldn't be lowered.
                     if (builder_->GetInsertBlock()->getTerminator() != nullptr) break;
                     codegen_stmt(*s, current_function);
                 }
+                if (stmt.is_unsafe) unsafe_depth_--;
                 pop_scope();
                 return;
 
@@ -1012,6 +1040,88 @@ private:
         builder_->SetInsertPoint(ok_block);
     }
 
+    // `+`/`-`/`*` (ch05 §5.8): overflow-checked in `safe` code (aborting,
+    // via the same panic mechanism as emit_span_bounds_check, on overflow
+    // -- both signed and unsigned per the spec, though only scpp's signed
+    // `int` exists as an arithmetic type so far), or a plain, guaranteed-
+    // wrapping (never UB) operation inside `unsafe { }`/an `unsafe`
+    // function (unsafe_depth_ > 0) -- achieved simply by using the plain
+    // CreateAdd/CreateSub/CreateMul instructions, which (unlike real
+    // Clang's) never get an `nsw`/`nuw` flag anywhere in this codebase, so
+    // they're already well-defined, wrapping LLVM IR on their own. Only
+    // i32 (scpp's `int`) is checked: `char`/`bool` (i8) arithmetic isn't a
+    // defined part of the numeric-family spec yet (ch06), so any other
+    // width falls back to the same plain instruction regardless of
+    // context, unchanged from before this check existed.
+    llvm::Value* codegen_checked_arith(BinaryOp op, llvm::Value* lhs, llvm::Value* rhs) {
+        const char* name = op == BinaryOp::Add ? "addtmp" : op == BinaryOp::Sub ? "subtmp" : "multmp";
+        if (unsafe_depth_ > 0 || !lhs->getType()->isIntegerTy(32)) {
+            switch (op) {
+                case BinaryOp::Add: return builder_->CreateAdd(lhs, rhs, name);
+                case BinaryOp::Sub: return builder_->CreateSub(lhs, rhs, name);
+                case BinaryOp::Mul: return builder_->CreateMul(lhs, rhs, name);
+                default: throw CodegenError("unhandled checked-arithmetic operator");
+            }
+        }
+
+        llvm::Intrinsic::ID intrinsic_id = op == BinaryOp::Add   ? llvm::Intrinsic::sadd_with_overflow
+                                            : op == BinaryOp::Sub ? llvm::Intrinsic::ssub_with_overflow
+                                                                   : llvm::Intrinsic::smul_with_overflow;
+        llvm::Function* intrinsic =
+            llvm::Intrinsic::getOrInsertDeclaration(module_.get(), intrinsic_id, {lhs->getType()});
+        llvm::Value* pair = builder_->CreateCall(intrinsic, {lhs, rhs}, name);
+        llvm::Value* result = builder_->CreateExtractValue(pair, 0, name);
+        llvm::Value* overflowed = builder_->CreateExtractValue(pair, 1, "overflow");
+
+        llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
+        llvm::BasicBlock* fail_block = llvm::BasicBlock::Create(*context_, "overflow.fail", current_function);
+        llvm::BasicBlock* ok_block = llvm::BasicBlock::Create(*context_, "overflow.ok", current_function);
+        builder_->CreateCondBr(overflowed, fail_block, ok_block);
+
+        builder_->SetInsertPoint(fail_block);
+        builder_->CreateCall(get_or_declare_abort(), {});
+        builder_->CreateUnreachable();
+
+        builder_->SetInsertPoint(ok_block);
+        return result;
+    }
+
+    // `/` (ch05 §5.8): `b == 0` or (the one case signed division itself
+    // overflows) `a == INT_MIN && b == -1` always abort() -- unconditionally,
+    // in *every* context, `safe` or `unsafe` alike, unlike +/-/* above:
+    // both trap at the hardware level (x86 #DE) with no wrapped result for
+    // the hardware to fall back on, so there is no "unsafe and still
+    // defined" variant to fall back to here. Only i32 is checked, for the
+    // same reason codegen_checked_arith only checks i32.
+    llvm::Value* codegen_checked_div(llvm::Value* lhs, llvm::Value* rhs) {
+        if (!lhs->getType()->isIntegerTy(32)) {
+            return builder_->CreateSDiv(lhs, rhs, "divtmp");
+        }
+
+        llvm::Type* i32 = llvm::Type::getInt32Ty(*context_);
+        llvm::Value* zero = llvm::ConstantInt::get(i32, 0, /*isSigned=*/true);
+        llvm::Value* int_min =
+            llvm::ConstantInt::get(i32, static_cast<uint64_t>(std::numeric_limits<int32_t>::min()), /*isSigned=*/true);
+        llvm::Value* neg_one = llvm::ConstantInt::get(i32, static_cast<uint64_t>(-1), /*isSigned=*/true);
+
+        llvm::Value* divides_by_zero = builder_->CreateICmpEQ(rhs, zero, "divzero");
+        llvm::Value* overflows = builder_->CreateAnd(builder_->CreateICmpEQ(lhs, int_min, "isintmin"),
+                                                       builder_->CreateICmpEQ(rhs, neg_one, "isnegone"), "divoverflow");
+        llvm::Value* traps = builder_->CreateOr(divides_by_zero, overflows, "divtraps");
+
+        llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
+        llvm::BasicBlock* fail_block = llvm::BasicBlock::Create(*context_, "div.fail", current_function);
+        llvm::BasicBlock* ok_block = llvm::BasicBlock::Create(*context_, "div.ok", current_function);
+        builder_->CreateCondBr(traps, fail_block, ok_block);
+
+        builder_->SetInsertPoint(fail_block);
+        builder_->CreateCall(get_or_declare_abort(), {});
+        builder_->CreateUnreachable();
+
+        builder_->SetInsertPoint(ok_block);
+        return builder_->CreateSDiv(lhs, rhs, "divtmp");
+    }
+
     // Computes the storage location (pointer + scpp Type) of an lvalue
     // expression, i.e. anything that can appear on the left of `=` or be
     // read via a plain load: a variable, or a chain of `.field`/`[index]`
@@ -1215,10 +1325,11 @@ private:
         llvm::Value* rhs = codegen_expr(*expr.rhs);
 
         switch (expr.binary_op) {
-            case BinaryOp::Add: return builder_->CreateAdd(lhs, rhs, "addtmp");
-            case BinaryOp::Sub: return builder_->CreateSub(lhs, rhs, "subtmp");
-            case BinaryOp::Mul: return builder_->CreateMul(lhs, rhs, "multmp");
-            case BinaryOp::Div: return builder_->CreateSDiv(lhs, rhs, "divtmp");
+            case BinaryOp::Add:
+            case BinaryOp::Sub:
+            case BinaryOp::Mul:
+                return codegen_checked_arith(expr.binary_op, lhs, rhs);
+            case BinaryOp::Div: return codegen_checked_div(lhs, rhs);
             // Comparisons always produce a genuine i1 from icmp, but a
             // scpp `bool` result needs to be widened to the i8 every
             // other bool value uses (see i1_to_bool/to_llvm_type) before
