@@ -1,0 +1,16 @@
+// A function returning std::unique_ptr<T> by value, with its result
+// passed directly as a by-value argument to another function (no
+// intermediate named local) -- ch09 M2 says unique_ptr's "move semantics
+// fit naturally", and this is the ordinary way an owning value flows
+// out of one function and into another.
+std::unique_ptr<int> make_it() {
+    return std::make_unique<int>(11);
+}
+
+int consume(std::unique_ptr<int> p) {
+    return *p;
+}
+
+int main() {
+    return consume(make_it());
+}

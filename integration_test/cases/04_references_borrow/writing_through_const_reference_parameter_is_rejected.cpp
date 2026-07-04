@@ -1,0 +1,12 @@
+// ch05 §5.2: writing through a `const T&` (shared borrow) is rejected --
+// it grants read-only access only.
+safe void bad_write(const int& r) {
+    r = 5;
+    return;
+}
+
+int main() {
+    int x = 1;
+    bad_write(x);
+    return 0;
+}

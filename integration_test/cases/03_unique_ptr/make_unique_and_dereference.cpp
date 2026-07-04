@@ -1,0 +1,6 @@
+// ch03: `std::make_unique<T>(...)` constructs; `*p` yields an lvalue for
+// the pointee (safe dereference/member access sugar for unique_ptr).
+int main() {
+    std::unique_ptr<int> p = std::make_unique<int>(7);
+    return *p;
+}

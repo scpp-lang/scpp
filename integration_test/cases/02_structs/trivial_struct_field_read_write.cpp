@@ -1,0 +1,13 @@
+// ch04 §4.1: `struct` is a purely trivial aggregate; scalar fields can be
+// freely read and written through `.field` member access.
+struct Point {
+    int x;
+    int y;
+};
+
+int main() {
+    Point p;
+    p.x = 3;
+    p.y = 4;
+    return p.x + p.y;
+}

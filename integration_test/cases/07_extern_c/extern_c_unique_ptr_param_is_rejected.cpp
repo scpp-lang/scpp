@@ -1,0 +1,7 @@
+// ch02 §2.1: "Rejected: ... std::unique_ptr, ... none of these have a
+// defined C representation."
+extern "C" void f(std::unique_ptr<int> x);
+
+int main() {
+    return 0;
+}

@@ -1,0 +1,18 @@
+// ch04 §4.1: "struct values may be freely and implicitly copied bitwise...
+// they carry no lifetime or exclusive-ownership semantics at all." Proof:
+// mutating the copy `b` must NOT affect the original `a` -- if the
+// compiler accidentally aliased instead of copying, `a.x` would also
+// become 100 and the result would be 200 instead of 101.
+struct Point {
+    int x;
+    int y;
+};
+
+int main() {
+    Point a;
+    a.x = 1;
+    a.y = 2;
+    Point b = a;
+    b.x = 100;
+    return a.x + b.x;
+}

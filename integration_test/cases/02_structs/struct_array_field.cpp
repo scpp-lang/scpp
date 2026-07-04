@@ -1,0 +1,14 @@
+// ch04 §4.1: "Fixed-size arrays of trivial types" are allowed as struct
+// fields.
+struct Buffer {
+    int values[4];
+};
+
+int main() {
+    Buffer b;
+    b.values[0] = 1;
+    b.values[1] = 2;
+    b.values[2] = 3;
+    b.values[3] = 4;
+    return b.values[0] + b.values[1] + b.values[2] + b.values[3];
+}

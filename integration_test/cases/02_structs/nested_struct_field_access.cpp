@@ -1,0 +1,18 @@
+// ch04 §4.1: "Other struct types that themselves satisfy this rule
+// (recursively)" are allowed as struct fields -- a struct-typed field
+// nested inside another struct.
+struct Inner {
+    int value;
+};
+
+struct Outer {
+    Inner inner;
+    int extra;
+};
+
+int main() {
+    Outer o;
+    o.inner.value = 5;
+    o.extra = 2;
+    return o.inner.value + o.extra;
+}

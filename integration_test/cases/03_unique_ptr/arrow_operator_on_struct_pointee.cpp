@@ -1,0 +1,13 @@
+// ch03: `p->x` (`p` a std::unique_ptr<T>) is safe member access sugar,
+// yielding an lvalue for the pointee's field -- both read and write.
+struct Point {
+    int x;
+    int y;
+};
+
+int main() {
+    std::unique_ptr<Point> p = std::make_unique<Point>();
+    p->x = 3;
+    p->y = 4;
+    return p->x + p->y;
+}

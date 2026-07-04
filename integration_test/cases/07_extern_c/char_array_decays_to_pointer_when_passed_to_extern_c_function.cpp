@@ -1,0 +1,29 @@
+// ch03/ch06: a fixed-size char array decays to a pointer, both on an
+// ordinary call (passing `msg` to `print_buffer`) and at the `extern "C"`
+// boundary (passing it onward to real libc `puts`).
+extern "C" int puts(const char* s);
+
+safe void print_buffer(char* msg) {
+    unsafe {
+        puts(msg);
+    }
+    return;
+}
+
+int main() {
+    char msg[12];
+    msg[0] = 'i';
+    msg[1] = 'n';
+    msg[2] = 't';
+    msg[3] = 'e';
+    msg[4] = 'g';
+    msg[5] = 'r';
+    msg[6] = 'a';
+    msg[7] = 't';
+    msg[8] = 'i';
+    msg[9] = 'o';
+    msg[10] = 'n';
+    msg[11] = '\0';
+    print_buffer(msg);
+    return 0;
+}

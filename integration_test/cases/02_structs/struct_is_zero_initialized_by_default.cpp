@@ -1,0 +1,11 @@
+// ch04 §4.1 / ch05 §5.4: an uninitialized struct local is guaranteed
+// entirely zero-initialized, field-by-field -- not just for scalars.
+struct Point {
+    int x;
+    int y;
+};
+
+int main() {
+    Point p;
+    return p.x + p.y;
+}

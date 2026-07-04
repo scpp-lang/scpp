@@ -1,0 +1,8 @@
+// ch05 §5.1: every value has a unique owner -- moving twice from the same
+// source is a double-move and must be rejected.
+int main() {
+    std::unique_ptr<int> a = std::make_unique<int>(1);
+    std::unique_ptr<int> b = std::move(a);
+    std::unique_ptr<int> c = std::move(a);
+    return 0;
+}

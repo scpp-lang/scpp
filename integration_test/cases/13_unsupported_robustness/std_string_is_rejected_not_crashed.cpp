@@ -1,0 +1,9 @@
+// ch04 §4.1/ch06 backlog: std::string participates in ownership and is
+// explicitly forbidden as a struct field; the type itself is also not yet
+// implemented at all ("for/range-for, std::vector,
+// std::string/std::string_view (now that char exists, unblocked but not
+// started)").
+int main() {
+    std::string s;
+    return 0;
+}

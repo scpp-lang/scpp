@@ -1,0 +1,12 @@
+// ch05 §5.2: "Alias XOR mutability": any number of `const T&` (shared
+// borrows) may coexist.
+safe int f() {
+    int x = 5;
+    const int& r1 = x;
+    const int& r2 = x;
+    return r1 + r2;
+}
+
+int main() {
+    return f();
+}

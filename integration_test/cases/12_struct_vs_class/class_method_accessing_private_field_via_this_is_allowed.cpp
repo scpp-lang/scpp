@@ -1,0 +1,24 @@
+// ch05 §5.9: "this is treated as an implicit reference parameter ...
+// Field access inside a method body (this->field, or bare field if
+// scpp's member-access sugar allows omitting this->) resolves back to
+// this as its root." A public method reading/writing its own class's
+// private field through `this->` is the basic, intended way to expose
+// class data.
+class Counter {
+private:
+    int value;
+public:
+    void set(int v) {
+        this->value = v;
+        return;
+    }
+    int get() {
+        return this->value;
+    }
+};
+
+int main() {
+    Counter c;
+    c.set(7);
+    return c.get();
+}

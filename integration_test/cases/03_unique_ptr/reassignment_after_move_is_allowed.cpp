@@ -1,0 +1,8 @@
+// ch05 §5.1: "Reassignment returns a variable to the initialized state" --
+// a previously-moved-from unique_ptr can be reassigned and used again.
+int main() {
+    std::unique_ptr<int> a = std::make_unique<int>(1);
+    std::unique_ptr<int> b = std::move(a);
+    a = std::make_unique<int>(2);
+    return *a + *b;
+}

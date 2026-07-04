@@ -1,0 +1,9 @@
+// ch04 §4.1: `std::unique_ptr<T>` (an ownership-carrying type) is
+// forbidden as a struct member -- "must instead be wrapped in a `class`".
+struct Bad {
+    std::unique_ptr<int> p;
+};
+
+int main() {
+    return 0;
+}
