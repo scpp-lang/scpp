@@ -142,6 +142,40 @@
     qualified name") rather than a silent longest-match-wins pick, for
     the same reason ADL is rejected: a later, unrelated `import` should
     never silently change what existing code means.
+11. **Function overloading**: does scpp allow multiple functions sharing a
+    name, and how are candidates resolved? **Settled**: yes, distinguished
+    by parameter list only, never return type (see
+    [§5.10](ch05-static-checks.md)). Real C++'s own overload resolution
+    ranks implicit-conversion sequences (Exact Match > Promotion >
+    Conversion > ...) -- verified against real compiler behavior while
+    designing this, this turns out to be considerably more surprising
+    than it looks: promotion targets specifically `int`/`unsigned
+    int`/`double`, not "the nearest wider type" (so `int8_t` competing
+    for `int16_t`/`int32_t`/`int64_t` overloads picks whichever aliases
+    the platform's actual `int`, not the closest one), and two merely
+    "ordinary conversion"-tier candidates (e.g. `int16_t` and `int64_t`
+    competing for an `int32_t` argument) are flatly ambiguous, with no
+    narrower-wins tie-break at all. Considered and rejected matching
+    Java/C#'s alternative (their widening-conversion chain prefers
+    whichever candidate needs the least widening, a real, coherent, but
+    C++-incompatible rule). **Settled on matching Rust/Swift/Kotlin
+    instead**: no implicit conversions between any two distinct scpp
+    scalar types at all, extending `bool`/`char`'s existing rule to the
+    whole numeric family (see [§6](ch06-safe-subset.md)) -- every
+    conversion needs an explicit cast, full stop. This reduces overload
+    resolution to plain exact-type matching, which (since two overloads
+    can never share an identical parameter-type list) can never itself
+    produce an ambiguous result: the only outcomes are "exactly one
+    candidate matches" or "zero match" (explicit cast required).
+    By-value/by-reference (`f(T)`/`f(T&)`/`f(const T&)`) is a separate,
+    orthogonal axis, disambiguated for free by the existing
+    explicit-`std::move`-required rule ([§5.1](ch05-static-checks.md));
+    `T&` beats `const T&` for a mutable lvalue when both are viable,
+    reused from real C++ -- this is what makes const/non-const method
+    overloading (`get()`/`get() const`) work, resolving the gap flagged
+    in [§5.9](ch05-static-checks.md). Scoping, `using`-declaration
+    imports, and the deliberate absence of ADL all reuse existing rules
+    unchanged (see [§5.10](ch05-static-checks.md) for the full design).
 
 ---
 

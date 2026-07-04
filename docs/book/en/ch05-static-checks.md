@@ -524,6 +524,77 @@ is new:
   follow-up once this section is implemented, not solved by this
   section.
 
+## 5.10 Function Overloading (design finalized, not yet implemented)
+
+Answers [§8](ch08-open-questions.md) Q11. scpp allows multiple functions
+(free functions or methods) to share a name, distinguished by parameter
+list only -- **never** by return type (a rule [§11](ch11-modules-and-libraries.md)'s
+mangling scheme has reserved room for since it was first written). Real
+C++'s own overload resolution ranks implicit-conversion sequences (Exact
+Match > Promotion > Conversion > ...), which turns out to be considerably
+more surprising than it looks when actually exercised: promotion targets
+are specifically `int`/`unsigned int`/`double`, not "the nearest wider
+type", so which overload wins can depend on which built-in type happens to
+alias the platform's actual `int` -- and two candidates that are both
+merely "ordinary conversion"-tier (e.g. `int16_t` and `int64_t` competing
+for an `int32_t` argument) are flatly ambiguous in real C++, with no
+narrower-wins tie-break at all (verified against real compiler behavior
+while designing this section, not assumed).
+
+- **Resolution rule: exact type match only.** [§6](ch06-safe-subset.md)
+  establishes that no scpp scalar type implicitly converts to or from any
+  other (extending `bool`/`char`'s original rule to the whole numeric
+  family) -- so overload resolution needs no conversion-ranking algorithm
+  at all: a candidate is viable only if every parameter's type is
+  identical to the corresponding argument's type. Because two overloads
+  can never share an identical parameter-type list (that's an ordinary
+  redefinition error, not two overloads), **exact-type matching can never
+  itself produce an ambiguous result** -- the only two outcomes are
+  "exactly one candidate matches" or "zero candidates match" (a compile
+  error requiring an explicit cast at the call site, same as any other
+  type mismatch). This is a deliberate departure from real C++, matching
+  Rust/Swift/Kotlin instead (see [§8](ch08-open-questions.md) Q11).
+- **By-value vs. by-reference is a separate, orthogonal axis.**
+  `f(T)`/`f(T&)`/`f(const T&)` are three distinct, legal overloads --
+  useful in scpp specifically, since they mean take-ownership/
+  mutable-borrow/shared-borrow respectively. No new disambiguation logic
+  is needed here: [§5.1](#51-ownership--move) already requires an
+  explicit `std::move(x)` to move out of a named place, so a bare lvalue
+  argument is only ever viable against a `T&`/`const T&` parameter, never
+  a `T` one; conversely `std::move(x)` (or an ordinary prvalue/temporary)
+  is only viable against a `T` parameter. When a mutable (non-`const`)
+  lvalue makes both `T&` and `const T&` simultaneously viable, `T&` wins
+  -- reused directly from real C++'s own tie-break rule (this is what
+  makes `T& get(); const T& get() const;` work as two legitimate
+  overloads, resolving the gap flagged in
+  [§5.9](#59-methods-and-this-design-finalized-not-yet-implemented)).
+- **Scoping matches ordinary C++ name lookup.** A name declared in an
+  inner scope hides the *entire* outer overload set (no merging across
+  scope boundaries) -- the same rule that already applies to any other
+  declaration, nothing new for overloading specifically. A
+  `using foo::bar;` declaration ([§11](ch11-modules-and-libraries.md))
+  imports *every* overload of `bar` visible at `foo::bar`, not just one.
+- **No interaction with ADL.** The candidate set for an unqualified call
+  is exactly the one lexical-scope-and-`using`-declaration lookup already
+  assembles ([§11](ch11-modules-and-libraries.md)) -- consistent with, and
+  made simpler by, scpp having no argument-dependent lookup at all.
+- **`safe` is not part of an overload's signature.** Two declarations
+  differing only in `safe`-ness (e.g. `safe void f(int);` and
+  `void f(int);`) are not two overloads -- they're the same signature
+  declared twice, an ordinary redefinition error. `safe` is a scpp-only
+  annotation layered on top of a real C++ signature, not part of the
+  erasure-visible type identity overload resolution dispatches on.
+- **Ambiguity is still a hard compile error in general** -- exact-type
+  matching happens to make it unreachable for v0.1's scalar-type-only
+  overload sets, but the rule is stated as a general principle (not
+  merely "doesn't happen to arise yet") for whenever a future feature
+  (templates/generics, chiefly) reintroduces the possibility.
+- **Explicitly out of scope for this round**: overload resolution
+  involving templates/generic functions (deferred alongside templates),
+  default parameter values (a separate, undesigned feature), and taking
+  the address of an overloaded name as a function pointer (deferred until
+  function pointers themselves are designed).
+
 ---
 
 [← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The Safe Subset Supported in v0.1 →](ch06-safe-subset.md)

@@ -122,11 +122,13 @@ elsewhere in this spec:
 - **No argument-dependent lookup (ADL), ever.** Every unqualified call
   resolves purely from lexical scope and explicit `using` declarations,
   never from an argument's type. This is a **permanent** decision, not a
-  placeholder -- it costs nothing today (scpp has no function overloading
-  yet either), but the alternative would reintroduce exactly the
-  "an unrelated new import silently changes what an existing call means"
-  class of spooky action ADL is well known for in real C++, which
-  conflicts with [ch00](ch00-design-philosophy.md) §2/§6.
+  placeholder -- function overloading
+  ([§5.10](ch05-static-checks.md)) doesn't need it either (its candidate
+  set is exactly the same lexical-scope-and-`using`-declaration lookup
+  ordinary names already use), but the alternative would reintroduce
+  exactly the "an unrelated new import silently changes what an existing
+  call means" class of spooky action ADL is well known for in real C++,
+  which conflicts with [ch00](ch00-design-philosophy.md) §2/§6.
 - **Namespace aliases reuse real C++'s actual alias syntax**:
   `namespace cmath = org::lotx::cmath;` -- deliberately **not** a
   `using`-declaration. `using X = Y;` is a *type* alias in real C++, and a
@@ -316,15 +318,22 @@ actually needs to be visible outside its own compiled unit:
     `org.lotx.cmath`'s `trig::sin`. A symbol exported directly at the
     module's own required namespace (no extra nesting) has zero `N<len>_`
     blocks.
-  - **Reserved, not yet used**: v0.1 has no function overloading (the
-    `Signatures` map is one entry per name today), but real C++ does, and
-    scpp is explicitly modeled on looking like C++. Mirroring the reason
-    *C has no mangling and C++ always has*, the mangling scheme reserves
-    room to append a parameter-type encoding (`P<count>_<encoded types>`)
-    now, so that whenever overload support lands, it doesn't require an
-    incompatible mangling-format change to every already-published
-    `.scppm`. Return type is deliberately **not** encoded (C++'s own rule:
-    you cannot overload on return type alone).
+  - **Parameter-type encoding, now specified**: v0.1 has no function
+    overloading implemented yet (the `Signatures` map is one entry per
+    name today), but [§5.10](ch05-static-checks.md) (design finalized)
+    adds it, so this previously-reserved slot is now filled in:
+    `P<count>_` followed by one length-prefixed, verbatim type spelling
+    per parameter (e.g. `7_int32_t`, `8_int32_t&`, `14_const int32_t&`) --
+    consistent with this whole scheme's length-prefixed style, not a
+    bespoke single-letter abbreviation table like the Itanium ABI's. E.g.
+    `f(int32_t, const double&)` mangles its parameter segment as
+    `P2_7_int32_t13_const double&`. This is enough on its own: since
+    [§5.10](ch05-static-checks.md) resolves overloads by exact type match
+    only (no implicit-conversion ranking, per [§6](ch06-safe-subset.md)'s
+    no-implicit-scalar-conversion rule), the mangled name only ever needs
+    to record each parameter's exact spelling, never a family of
+    possible-conversion types. Return type is deliberately **not** encoded
+    (C++'s own rule: you cannot overload on return type alone).
   - **No Rust-style crate disambiguator hash.** Rust bakes an extra hash
     into every mangled symbol specifically to let *the same crate name at
     two different versions* coexist safely in one build -- scpp v0.1 does

@@ -25,6 +25,26 @@ meaning "sound checking not yet implemented"):
   | `char` | byte value, 1 byte wide | **not an alias** for `uint8_t` or any other type -- a distinct type, with the same no-implicit-conversion rule as `bool` above: converting `char` to or from any other type requires an explicit cast. Because `char` no longer has to share identity with `uint8_t`/`int8_t`, the implementation-defined signedness that plagues real C++'s plain `char` (signed on typical x86 toolchains, unsigned by default on typical ARM ones) never surfaces here -- there's no implicit arithmetic or comparison for it to affect. This also dissolves the previously-flagged conflict with concurrent implementation work that spells `char` as signed `i8`: since `char` is no longer required to be the same type as `uint8_t`, that internal representation choice is no longer in tension with the spec. |
   | *(no `wchar_t`)* | -- | not provided at all, on purpose: real C++'s `wchar_t` is 2 bytes/UTF-16 on Windows but 4 bytes/UTF-32 on Linux and macOS -- an even worse version of the same platform-pitfall pattern as `long`/`char` above (it varies in both width *and* encoding, not just width or signedness). scpp sidesteps it by simply not providing the type, rather than trying to pin down one arbitrary choice. |
 
+  **No implicit conversions between any two distinct scalar types above,
+  ever, full stop.** This was already the stated rule for `bool` and
+  `char` individually; it now applies uniformly across the entire numeric
+  family (e.g. `int8_t -> int16_t`, `int32_t -> float64_t`,
+  `unsigned int -> long`) even when the conversion is widening and
+  value-preserving -- every conversion between two distinct scpp scalar
+  types requires an explicit cast, no exceptions. scpp deliberately
+  follows Rust/Swift/Kotlin here rather than real C++'s implicit
+  promotion/usual-arithmetic-conversion rules: real C++'s own promotion
+  targets specifically `int`/`unsigned int`/`double`, not "the nearest
+  wider type", which makes which overload wins depend on which built-in
+  type happens to alias the platform's actual `int` -- and two candidates
+  that are both merely "ordinary conversion"-tier (e.g. `int16_t` and
+  `int64_t` competing for an `int32_t` argument) are flatly ambiguous in
+  real C++, with no narrower-wins tie-break at all (see
+  [§8](ch08-open-questions.md) Q11). Sidestepping implicit conversions
+  entirely keeps every conversion visible at its call site and, as a
+  direct side effect, makes function-overload resolution
+  ([§5.10](ch05-static-checks.md)) reduce to plain exact-type matching.
+
 - `struct` (rules in [§4.1](ch04-struct-vs-class.md); fields of supported
   types only).
 - `class` (design finalized for access control and `this`/method borrow
@@ -63,7 +83,13 @@ meaning "sound checking not yet implemented"):
 - `std::move`.
 - Function calls, including the "callee must be `safe`, otherwise
   `unsafe {}`" rule from [§2](ch02-boundary-rules.md) (implemented
-  alongside `unsafe { }` below).
+  alongside `unsafe { }` below). Functions (free or methods) may be
+  **overloaded** by parameter list, never by return type (see
+  [§5.10](ch05-static-checks.md) -- **design finalized, not yet
+  implemented**): resolved by exact type match only, since no scpp
+  scalar type implicitly converts to another (see the numeric family
+  note above) -- ambiguity from pure type mismatch cannot arise as a
+  result.
 - `consteval` functions (see [§4.2](ch04-struct-vs-class.md) -- **design
   finalized, not yet implemented**): scpp's only compile-time-function
   mechanism, reused verbatim from real C++20 -- every call is
@@ -167,6 +193,11 @@ meaning "sound checking not yet implemented"):
   export-must-match-module-name rule, spec'd in
   [ch11](ch11-modules-and-libraries.md) (design only so far) -- today's
   compiler only ever processes one file at a time.
+- Implementation of function overloading spec'd in
+  [§5.10](ch05-static-checks.md) (design only so far): exact-type-match
+  resolution, the by-value/by-reference axis, and the parameter-type
+  mangling encoding from [§11](ch11-modules-and-libraries.md) -- today's
+  `Signatures` map holds one entry per name.
 
 ---
 
