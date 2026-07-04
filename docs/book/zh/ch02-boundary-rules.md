@@ -61,7 +61,9 @@
   Clang-ABI 兼容布局，见 [§4.3](ch04-struct-vs-class.md)），按值或按指针
   均可；形参位置的定长数组 `T[N]`（退化为指针，和普通 C++ 一样）。
   **被拒绝的**：`T&`/`const T&`、`std::unique_ptr`、`std::span`、
-  `std::string`/`std::string_view`、`std::vector`、`std::shared_ptr`，
+  `std::string`/`std::string_view`、`std::vector`、`std::shared_ptr`、
+  `std::expected`（见 [§5.6](ch05-static-checks.md)/
+  [§6](ch06-safe-subset.md)——可恢复错误同样没有对应的 C 表示），
   以及 `[[scpp::lifetime(name)]]`（没有借用检查类型可以附着，没有意义）
   ——这些都没有对应的 C 表示。一个 `safe extern "C"` 函数如果内部需要用
   scpp 的所有权/借用类型，就在边界上用 C 兼容的原始形式收发，进函数体后

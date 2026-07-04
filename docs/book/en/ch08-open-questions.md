@@ -34,6 +34,28 @@
    not even `__restrict` reaches it, since `__restrict` only ever maps to
    the coarser, whole-parameter `noalias` attribute).
 7. **Language/compiler name, file extension.**
+8. **Recoverable error handling**: exceptions, or value-based errors?
+   **Settled**: no exceptions anywhere in scpp (no `throw`/`try`/`catch`).
+   Every failure is either a *bug* (aborts -- already settled by Q3 above)
+   or a *recoverable, expected condition* (an ordinary
+   `std::expected<T, E>` value, mandatorily checked by the compiler -- see
+   [§5.6](ch05-static-checks.md)). Constructors/destructors follow the
+   same split (see [§4.2](ch04-struct-vs-class.md)): they may abort on a
+   precondition violation, but cannot produce a recoverable error --
+   fallible construction goes through a `static` factory function
+   returning `std::expected<T, E>` instead (the classic C++
+   "named constructor idiom"). **Propagating** a `std::expected`'s error
+   up to the caller uses plain `if`/`else` in v0.1 -- a Rust-`?`-style
+   postfix operator (spelled `??`, since C++ already uses a bare `?` for
+   the ternary operator) was considered and **rejected**: unlike every
+   other piece of scpp syntax, a brand-new operator token can't be erased
+   or ignored by a real C++ compiler, which would have permanently broken
+   the property that stripping `safe`/`unsafe` out of a scpp file leaves
+   an ordinary file a real C++ compiler still accepts (see
+   [ch00](ch00-design-philosophy.md) §2) -- a real compiler hard-errors
+   parsing past the second `?` (trigraphs, the only thing that ever gave
+   `??` meaning, were removed in C++17). Revisiting this is deferred
+   until the C++ standard itself evolves further in this area.
 
 ---
 

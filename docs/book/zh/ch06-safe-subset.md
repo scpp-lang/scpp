@@ -10,8 +10,8 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   | scpp 名字 | 含义 | 备注 |
   |-----------|------|------|
   | `bool` | 布尔，1 字节宽 | 已实现。`false` 是位模式 `0`，`true` 是 `1`。不支持到任何其它类型的隐式转换——跟真实 C++ 不一样（那边 `bool` 会隐式提升成 `int`，`if`/`while` 里任何标量也会隐式转成 `bool`），scpp 两个方向都要求显式转换，`if`/`while` 的条件必须本来就是 `bool`。 |
-  | `int8_t` / `int16_t` / `int32_t` / `int64_t` / `int128_t` | 定宽有符号整数 | 复用真实 C++ `<cstdint>` 的名字；`int128_t` 提前对齐了还在讨论中的 WG21 P1467 提案（还不是标准 C++，但提案一旦通过就是叫这个名字）。跟真实 C++ 不一样（那边定宽类型是条件性提供的），scpp 在任何 target 上都**无条件**保证这些类型存在——LLVM 原生支持任意位宽整数，没有哪个平台会逼 scpp 省掉 `int128_t`。 |
-  | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `uint128_t` | 定宽无符号整数 | 同上 |
+  | `int8_t` / `int16_t` / `int32_t` / `int64_t` | 定宽有符号整数 | 原样复用真实 C++ `<cstdint>` 的名字，都已经是标准化的。跟真实 C++ 不一样（那边定宽类型是条件性提供的），scpp 在任何 target 上都**无条件**保证这些类型存在——LLVM 原生支持任意位宽整数，没有哪个平台会逼 scpp 省掉其中任何一个。**暂不提供 `int128_t`**：WG21 P1467（128 位整数类型）还没被 C++ 标准采纳，scpp 的内置词汇表故意只用标准已经真正定下来的名字（见 [ch00](ch00-design-philosophy.md) §2），不去提前对齐一个还悬而未决的提案将来到底叫什么——等标准真的采纳了再加回来。 |
+  | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` | 定宽无符号整数 | 同上——同样的理由，暂不提供 `uint128_t` |
   | `int` | `int32_t` 的别名 | **不管目标平台是什么，含义都固定** |
   | `long` | `int64_t` 的别名 | **故意钉死**——真实 C++ 里 `long` 的位宽是平台决定的（Linux/macOS 的 LP64 是 64 位，Windows 的 LLP64 哪怕在 64 位机器上也是 32 位）。这正是 scpp 存在的意义要设计掉的那种跨平台天坑：scpp 保留了这个熟悉的拼写（看起来像 C++），但给它一个不管到哪个平台都一样、可预期的含义（不会因为换了目标平台就悄悄变了大小）。 |
   | `unsigned int` | `uint32_t` 的别名 | 跟 `int` 一样，不管平台，含义固定。跟真实 C++ 不一样，单独一个词的简写 `unsigned`（意思是 `unsigned int`）在 scpp 里**不合法**——只接受完整的两个词拼写，保证任何 `unsigned` 开头的东西都无歧义、方便 grep。 |
@@ -30,6 +30,9 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   （已实现，M6 第一阶段——但目前只能从定长数组构造，见
   [§3](ch03-syntactic-sugar.md)）。`std::vector<T>` 规划中但**尚未
   实现**（现在只有定长数组 `T[N]`）。
+- `std::expected<T, E>`（见 [§5.6](ch05-static-checks.md)——**设计已
+  定稿，尚未实现**）：scpp 唯一的可恢复错误载体；是编译器内置类型，跟
+  `unique_ptr`/`span` 待遇一样，不是真实 libstdc++/libc++ 模板的实例化。
 
 **表达式 / 语句**
 - 局部变量声明与初始化。
@@ -57,13 +60,19 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   已定稿，尚未实现**），签名类型限定为 C-ABI 兼容类型。需要先有 `extern`
   关键字、最小限度的字符串字面量词法支持、以及 `void` 类型（这三样现在
   都还没有，见下面）。
+- **没有异常**（`throw`/`try`/`catch`）——从 scpp 里彻底排除，不是
+  backlog 项：可恢复错误是 `std::expected<T, E>` 值，用普通 `if`/`else`
+  传播（见 [§5.6](ch05-static-checks.md)）；它的返回值**强制要求检查**
+  ——悄悄丢弃是编译错误，不是 lint，就好像每个这样的函数都隐式带了
+  `[[nodiscard]]`。不可恢复的失败（违反约定、边界检查、构造/析构函数
+  里的前置条件违反）改用 `abort()`（见 [§5.6](ch05-static-checks.md)/
+  [§8](ch08-open-questions.md)）。
 
 **暂不支持（safe 区 backlog）**
 - 模板 / 泛型、`concept`。
 - 用户自定义 `class` 的完整检查（构造/析构、方法体内部借用；见
   [§4.2](ch04-struct-vs-class.md)）。
 - 继承、虚函数。
-- 异常。
 - lambda 捕获引用的生命周期检查。
 - `shared_ptr` 的完整别名模型。
 - [§5.3](ch05-static-checks.md) 定稿的 `[[scpp::lifetime(name)]]` 多组
@@ -77,7 +86,7 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   `void` 作为合法类型名（现在既没法声明返回 `void` 的函数，也没有
   `void*`，跟 `extern "C"` 无关，是独立的缺口）。
 - 上面数值标量家族的**实现**（设计已定稿；`char` 正在实现中，其余都
-  还没开始）：`int8_t`/.../`int128_t`、`uint8_t`/.../`uint128_t`、
+  还没开始）：`int8_t`/.../`int64_t`、`uint8_t`/.../`uint64_t`、
   `int`/`long`/`unsigned int`/`unsigned long` 这几个定宽别名、
   `float32_t`/`float64_t`（以及 `float`/`double` 别名）、`size_t`、
   `ptrdiff_t`。
@@ -85,6 +94,9 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   （需要先有 `char`，正在实现中）。`reinterpret_cast`、`union`、裸
   `new`/`delete`、全局变量目前完全没有语法支持，`unsafe { }` 对它们的
   放行也就无从谈起，等各自语法落地后再说。
+- [§5.6](ch05-static-checks.md) 定稿的 `std::expected<T, E>` 的**实现**
+  （目前只有设计），包括强制检查规则，以及
+  [§4.2](ch04-struct-vs-class.md) 里可失败构造的指导原则。
 
 ---
 

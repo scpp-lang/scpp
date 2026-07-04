@@ -48,6 +48,27 @@ itself the explicit declaration, and the compiler verifies triviality.
   v0.1 — see the backlog in [§8](ch08-open-questions.md). v0.1 first
   checks only the standard-library-provided owning type `unique_ptr`
   (milestone M2).
+- **Fallible construction and destruction** (design finalized, ahead of
+  the rest of `class` support): a constructor or destructor has no
+  channel to hand back a `std::expected<T, E>` -- scpp has no exceptions
+  to throw through instead (see [§5.6](ch05-static-checks.md)/
+  [§8](ch08-open-questions.md)), and neither special member function
+  returns an ordinary value. This isn't a new rule to enforce; it falls
+  out for free from scpp having no exceptions anywhere.
+  - A constructor/destructor may still validate preconditions, but a
+    violation can only be handled by aborting (a *bug*, in the
+    [§8](ch08-open-questions.md) Q3 sense) -- never by producing a
+    recoverable error.
+  - A type whose construction can genuinely fail for recoverable reasons
+    (file not found, invalid input, ...) must not expose that failure
+    through a constructor at all. Model it instead as an ordinary
+    `static` member function returning `std::expected<T, E>`, which
+    constructs the object (via an always-succeeds constructor) only once
+    success is guaranteed. Recommended, though only ordinary C++ access
+    control is needed to enforce it: make that plain constructor
+    `private`, so the factory function is the only way to obtain an
+    instance -- the classic C++ "named constructor idiom" (Marshall
+    Cline's C++ FAQ), requiring zero new scpp syntax.
 
 ## 4.3 Memory Layout & ABI (fixed, not left implementation-defined)
 

@@ -12,8 +12,8 @@ meaning "sound checking not yet implemented"):
   | scpp name | Meaning | Notes |
   |-----------|---------|-------|
   | `bool` | boolean, 1 byte wide | implemented. `false` is the bit pattern `0`, `true` is `1`. No implicit conversion to or from any other type -- unlike real C++ (`bool` implicitly promotes to `int`; any scalar contextually converts to `bool` in `if`/`while`), scpp requires an explicit cast in both directions, and `if`/`while` conditions must already be `bool`. |
-  | `int8_t` / `int16_t` / `int32_t` / `int64_t` / `int128_t` | fixed-width signed integers | reuses real C++ `<cstdint>` names; `int128_t` anticipates the pending WG21 P1467 proposal (not yet standard C++, but exactly what that proposal would call it). Unlike real C++ (where exact-width types are only conditionally provided), scpp guarantees all of these unconditionally on every target -- LLVM natively supports arbitrary-width integers, so there's no platform on which scpp would need to omit `int128_t`. |
-  | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `uint128_t` | fixed-width unsigned integers | same as above |
+  | `int8_t` / `int16_t` / `int32_t` / `int64_t` | fixed-width signed integers | reuses real C++ `<cstdint>` names verbatim, all already-standardized. Unlike real C++ (where exact-width types are only conditionally provided), scpp guarantees all of these unconditionally on every target -- LLVM natively supports arbitrary-width integers, so there's no platform on which scpp would need to omit any of them. **No `int128_t`** for now: WG21 P1467 (a 128-bit integer type) hasn't been adopted into the C++ standard yet, and scpp's builtin vocabulary deliberately sticks to names the standard has actually ratified (see [ch00](ch00-design-philosophy.md) §2) rather than anticipating a still-pending proposal's eventual spelling -- add it back once/if the standard adopts it. |
+  | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` | fixed-width unsigned integers | same as above -- no `uint128_t` for the same reason |
   | `int` | alias for `int32_t` | **fixed**, regardless of target platform |
   | `long` | alias for `int64_t` | **deliberately fixed** -- real C++ gives `long` a platform-defined width (64-bit on Linux/macOS's LP64, but only 32-bit on Windows's LLP64, even on a 64-bit machine). This is exactly the kind of cross-platform pitfall scpp exists to design away: scpp keeps the familiar spelling (it looks like C++) but gives it one predictable meaning everywhere (it doesn't silently change size when you switch target platforms). |
   | `unsigned int` | alias for `uint32_t` | same fixed-regardless-of-platform treatment as `int`. Unlike real C++, the bare single-word shorthand `unsigned` (meaning `unsigned int`) is **not** valid scpp -- only the full two-word spelling is accepted, to keep `unsigned`-anything unambiguous and grep-able. |
@@ -33,6 +33,10 @@ meaning "sound checking not yet implemented"):
   fixed-size array, see [§3](ch03-syntactic-sugar.md)). `std::vector<T>`
   is planned but **not implemented yet** (only fixed-size arrays `T[N]`
   exist today).
+- `std::expected<T, E>` (see [§5.6](ch05-static-checks.md) -- **design
+  finalized, not yet implemented**): scpp's only vehicle for recoverable
+  errors; a compiler builtin type, same treatment as `unique_ptr`/`span`,
+  not a real libstdc++/libc++ template instantiation.
 
 **Expressions / Statements**
 - Local variable declaration and initialization.
@@ -64,13 +68,21 @@ meaning "sound checking not yet implemented"):
   implemented**), restricted to C-ABI-compatible signature types.
   Needs `extern`, minimal string-literal lexing, and `void` as a type
   first (none exist yet -- see below).
+- **No exceptions** (`throw`/`try`/`catch`) -- deliberately excluded from
+  scpp entirely, not a backlog item: recoverable errors are
+  `std::expected<T, E>` values, propagated with ordinary `if`/`else` (see
+  [§5.6](ch05-static-checks.md)); its return value is **mandatorily
+  checked** -- silently discarding one is a compile error, not a lint, as
+  if every such function were implicitly declared `[[nodiscard]]`.
+  Unrecoverable failures (contract violations, bounds checks,
+  precondition violations in a constructor/destructor) `abort()` instead
+  (see [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)).
 
 **Not yet supported (safe-region backlog)**
 - Templates / generics, `concept`.
 - Full checking for user-defined `class` types (constructors/destructors,
   borrows inside method bodies; see [§4.2](ch04-struct-vs-class.md)).
 - Inheritance, virtual functions.
-- Exceptions.
 - Lifetime checking of lambdas capturing references.
 - The full aliasing model for `shared_ptr`.
 - Implementation of the `[[scpp::lifetime(name)]]` multi-group mechanism
@@ -86,7 +98,7 @@ meaning "sound checking not yet implemented"):
   or `void*` exist yet either, independent of `extern "C"`).
 - Implementation of the numeric scalar family spec'd above (design
   finalized; `char` is currently being implemented, the rest are not
-  started): `int8_t`/.../`int128_t`, `uint8_t`/.../`uint128_t`, the
+  started): `int8_t`/.../`int64_t`, `uint8_t`/.../`uint64_t`, the
   `int`/`long`/`unsigned int`/`unsigned long` fixed-width aliases,
   `float32_t`/`float64_t` (and the `float`/`double` aliases), `size_t`,
   `ptrdiff_t`.
@@ -94,6 +106,10 @@ meaning "sound checking not yet implemented"):
   `char` first, in progress). `reinterpret_cast`, `union`, raw
   `new`/`delete`, and global variables have no syntax at all yet, so
   `unsafe { }`'s permission for them is moot until each lands.
+- Implementation of `std::expected<T, E>` spec'd in
+  [§5.6](ch05-static-checks.md) (design only so far), including the
+  mandatory-checking rule and the fallible-construction guidance in
+  [§4.2](ch04-struct-vs-class.md).
 
 ---
 

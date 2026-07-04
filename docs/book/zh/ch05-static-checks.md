@@ -121,6 +121,55 @@
 这个列表，别的一概不动——本章其余检查（§5.1-§5.4）在 `unsafe { }` 块内
 依旧无条件继续跑。
 
+## 5.6 可恢复错误：`std::expected<T, E>`（设计已定稿，尚未实现）
+
+scpp **没有异常**——整个语言里、不管 safe 还是 unsafe，都没有
+`throw`/`try`/`catch`（完整理由见 [§8](ch08-open-questions.md)）。所有
+失败恰好分两类，是对 panic 那套已经定稿的分法（[§8](ch08-open-questions.md)
+Q3）的延伸：
+
+- **bug / 违反约定**（越界访问、前置条件不满足……）：按定义不可恢复——
+  用 abort 处理，`span` 的边界检查、以及构造/析构函数（见
+  [§4.2](ch04-struct-vs-class.md)）都是这个待遇。
+- **可恢复的、预期内的情况**（文件不存在、输入格式错误……）：表示成一个
+  普通的 `std::expected<T, E>` 值，像任何其它值一样返回，绝不抛出。
+
+`std::expected<T, E>` 是一个**编译器内置类型**——跟 `std::unique_ptr`/
+`std::span` 待遇一样（不是 libstdc++/libc++ 那个模板的真实实例化，也
+不依赖泛型/模板先落地）。跟真实 C++23 的 `std::expected` 不一样，它的
+访问器从不抛出——scpp 根本没有异常机制可以让它们"抛穿"：误用（比如对一个
+没有值的 `expected` 解引用）是违反约定，按 scpp 里其它 bug 一样检查后
+abort 处理，绝不会抛出 `std::bad_expected_access<E>`。
+
+**强制检查**：一次调用产生的 `std::expected<T, E>` 值不能被悄悄丢弃——
+就好像每个这样的函数都隐式带了 `[[nodiscard]]`，只不过是硬性编译错误，
+不是真实 C++ `[[nodiscard]]` 那种只警告的力度。完全无视一个
+`std::expected` 返回值——比如把返回 `std::expected` 的函数调用当成一条
+裸表达式语句、从不查看结果——在 scpp 里是**编译错误**，不是 lint。
+
+**传播方式：现在故意就用普通的 `if`/`else`**。曾经考虑过一个类似 Rust
+`?` 的后缀运算符，用来把 `std::expected` 的错误往调用者那边传播，最后
+**否决**了——完整理由见 [§8](ch08-open-questions.md) Q8。简单说：跟
+scpp 目前所有其它语法不一样，一个全新的运算符 token 没法被真正的 C++
+编译器忽略或者擦除掉，这会打破"把 `safe`/`unsafe` 从 scpp 文件里去掉，
+剩下的就是能被真 C++ 编译器原样接受的普通文件"这条性质（见
+[ch00](ch00-design-philosophy.md) §2）。所以 v0.1 要求老老实实用普通
+`if`/`else` 写传播逻辑，跟 C 用了几十年的方式一样：
+
+```cpp
+safe std::expected<int, ParseError> parse_and_double(const char* s) {
+    std::expected<int, ParseError> r = parse_int(s);
+    if (!r.has_value()) {
+        return std::unexpected(r.error());
+    }
+    return *r * 2;
+}
+```
+
+这故意是 v0.1 里传播 `std::expected` 错误的唯一方式。要不要、怎么让它
+不这么啰嗦，等 C++ 标准自己在这块进一步演进之后再看——见
+[§8](ch08-open-questions.md) Q8。
+
 ---
 
 [← 上一章：struct 与 class 的语义区分](ch04-struct-vs-class.md) · [目录](README.md) · [下一章：v0.1 支持的 safe 子集 →](ch06-safe-subset.md)

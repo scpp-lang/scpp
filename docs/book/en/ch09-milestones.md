@@ -29,8 +29,9 @@
   (like `unique_ptr`), deliberately meant as a concrete prototype for a
   future "generics + generic lifetimes" mechanism. `std::vector`,
   `std::string`/`string_view` (need a `char` type first), `for`/
-  range-for, and `unsafe { }` blocks (design finalized in
-  [§1.3](ch01-safety-context.md)) are all left for later.)**
+  range-for, `unsafe { }` blocks (design finalized in
+  [§1.3](ch01-safety-context.md)), and `std::expected<T, E>` (design
+  finalized in [§5.6](ch05-static-checks.md)) are all left for later.)**
 - **M7+**: Generics/templates, traits/concepts, the `[[scpp::lifetime(name)]]`
   multi-group cross-function lifetime mechanism (design finalized in
   [§5.3](ch05-static-checks.md); not yet implemented), modules & libraries

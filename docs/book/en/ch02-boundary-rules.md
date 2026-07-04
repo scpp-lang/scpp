@@ -76,9 +76,12 @@ below.
   [§4.3](ch04-struct-vs-class.md)), by value or by pointer; fixed-size
   arrays `T[N]` in parameter position (decay to pointer, as in ordinary
   C++). **Rejected**: `T&`/`const T&`, `std::unique_ptr`, `std::span`,
-  `std::string`/`std::string_view`, `std::vector`, `std::shared_ptr`, and
-  `[[scpp::lifetime(name)]]` (meaningless without a borrow-checked type to
-  attach to) -- none of these have a defined C representation. A `safe
+  `std::string`/`std::string_view`, `std::vector`, `std::shared_ptr`,
+  `std::expected` (see [§5.6](ch05-static-checks.md)/
+  [§6](ch06-safe-subset.md) -- recoverable errors have no defined C
+  representation either), and `[[scpp::lifetime(name)]]` (meaningless
+  without a borrow-checked type to attach to) -- none of these have a
+  defined C representation. A `safe
   extern "C"` function that needs to work with owning/borrowed scpp types
   internally takes/returns the C-compatible raw form at the boundary and
   converts on entry/exit inside its own (checked) body.

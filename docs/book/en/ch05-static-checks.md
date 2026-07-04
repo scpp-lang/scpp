@@ -162,6 +162,65 @@ relaxes precisely this list and nothing else -- every other check in this
 chapter (§5.1-§5.4) keeps running unconditionally inside an `unsafe { }`
 block.
 
+## 5.6 Recoverable Errors: `std::expected<T, E>` (design finalized, not yet implemented)
+
+scpp has **no exceptions** -- no `throw`/`try`/`catch` anywhere in the
+language, safe or unsafe (see [§8](ch08-open-questions.md) for the full
+rationale). Every failure is exactly one of two kinds, extending the same
+split already settled for panics ([§8](ch08-open-questions.md) Q3):
+
+- **A bug / contract violation** (out-of-bounds access, a failed
+  precondition, ...): unrecoverable by definition -- handled by aborting,
+  already the case for `span`'s bounds check, and for constructors/
+  destructors (see [§4.2](ch04-struct-vs-class.md)).
+- **A recoverable, expected condition** (file not found, malformed input,
+  ...): represented as an ordinary value of type `std::expected<T, E>`,
+  returned like any other value, never thrown.
+
+`std::expected<T, E>` is a **compiler builtin type** -- the same
+treatment as `std::unique_ptr`/`std::span` (not a real instantiation of
+the libstdc++/libc++ template, and not dependent on generics/templates
+landing first). Unlike real C++23's `std::expected`, its accessors never
+throw -- there is no exception mechanism in scpp for them to throw
+*through*: misusing one (e.g. dereferencing a value-less `expected`) is a
+contract violation, checked and handled by aborting the same way as every
+other bug in scpp, never a thrown `std::bad_expected_access<E>`.
+
+**Mandatory checking**: a `std::expected<T, E>` value produced by a call
+cannot be silently discarded -- as if every such function were implicitly
+declared `[[nodiscard]]`, except enforced as a hard error rather than
+real C++'s warning-only `[[nodiscard]]`. Ignoring one entirely -- e.g.
+calling a `std::expected`-returning function as a bare expression
+statement and never inspecting the result -- is a **compile error** in
+scpp, not a lint.
+
+**Propagation: plain `if`/`else`, deliberately, for now.** A
+Rust-`?`-style postfix operator for propagating a `std::expected`'s error
+up to the caller was considered and **rejected** -- see
+[§8](ch08-open-questions.md) Q8 for the full reasoning. In short: unlike
+every other piece of scpp syntax, a brand-new operator token cannot be
+erased or ignored by a real C++ compiler, which would have broken the
+property that stripping `safe`/`unsafe` out of a scpp file leaves an
+ordinary file a real C++ compiler still accepts unmodified (see
+[ch00](ch00-design-philosophy.md) §2). v0.1 therefore requires spelling
+propagation out with ordinary `if`/`else`, exactly the way C has for
+decades:
+
+```cpp
+safe std::expected<int, ParseError> parse_and_double(const char* s) {
+    std::expected<int, ParseError> r = parse_int(s);
+    if (!r.has_value()) {
+        return std::unexpected(r.error());
+    }
+    return *r * 2;
+}
+```
+
+This is deliberately left as the only way to propagate a `std::expected`
+error in v0.1. Whether/how to make this less verbose is revisited once
+the C++ standard itself evolves further in this area -- see
+[§8](ch08-open-questions.md) Q8.
+
 ---
 
 [← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The Safe Subset Supported in v0.1 →](ch06-safe-subset.md)
