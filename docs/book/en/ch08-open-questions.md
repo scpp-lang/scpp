@@ -31,8 +31,20 @@
    calls libc's `abort()` directly (lower-level than `std::terminate()`,
    doesn't depend on the C++ runtime's terminate-handler machinery, same
    effect -- the process ends immediately, no stack unwinding).
-4. **Interior mutability**: introduce a `Cell`/`RefCell` equivalent to carry
-   legal mutable aliasing?
+4. **Interior mutability**: introduce a `Cell`/`RefCell` equivalent to
+   carry legal mutable aliasing? **Settled, phase 1 only**: reuse real
+   C++'s `mutable` keyword, but stricter -- a `mutable` field must be a
+   trivial type (matching `struct`'s own field-triviality rule,
+   [§4.1](ch04-struct-vs-class.md)), readable/writable through any
+   `this` regardless of `const`, but can **never** be referenced or
+   have its address taken (see [§4.2](ch04-struct-vs-class.md)/
+   [§5.9](ch05-static-checks.md)). This gives scpp the `Cell<T>` half
+   (zero runtime cost, since a value nothing can ever reference cannot
+   alias) for free, using existing C++ syntax. The `RefCell` half
+   (borrowing an actual reference to non-trivial interior state, with a
+   runtime borrow counter panicking/aborting on violation) has no
+   existing C++ name to reuse and needs real new machinery -- deferred
+   to a later round, not part of this decision.
 5. **`safe` vs `const`**: how does a `const` member function map to
    borrows in a safe region? **Settled**: `this` is treated as an
    implicit reference parameter -- `const T&` in a `const` method, `T&`

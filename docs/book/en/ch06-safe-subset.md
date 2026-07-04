@@ -32,6 +32,11 @@ meaning "sound checking not yet implemented"):
   [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)): member
   variables (including class-level constants) must be `private`, only
   member functions may be `public`; no inheritance/`protected` in v0.1.
+  A trivial-typed member may instead be declared `mutable` (design
+  finalized -- see [§4.2](ch04-struct-vs-class.md)/
+  [§5.9](ch05-static-checks.md)): readable/writable through a `const`
+  `this`, but never referenceable, scpp's phase-1 (`Cell`-equivalent)
+  answer to interior mutability ([§8](ch08-open-questions.md) Q4).
 - `std::unique_ptr<T>` (implemented), `std::span<T>`/`std::span<const T>`
   (implemented, M6 slice 1 -- but currently only constructible from a
   fixed-size array, see [§3](ch03-syntactic-sugar.md)). `std::vector<T>`
@@ -152,8 +157,9 @@ meaning "sound checking not yet implemented"):
   (`abort()`-on-overflow) `+`/`-`/`*` in `safe` code, guaranteed-wrapping
   (never UB) in `unsafe`, and unconditional `abort()` for division/modulo
   by zero or `INT_MIN / -1`.
-- Implementation of `consteval` functions, `class` access control, and
-  the `this`/method-borrow mapping spec'd in
+- Implementation of `consteval` functions, `class` access control, the
+  `this`/method-borrow mapping, and `mutable` (phase-1 interior
+  mutability) spec'd in
   [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) (design
   only so far).
 

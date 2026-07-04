@@ -493,6 +493,14 @@ is new:
   class-typed field through `this` is rejected the same way -- both are
   just the ordinary "can't mutate through a shared borrow" rule
   ([§5.2](#52-borrow--aliasing)) applied to `this`, not a new check.
+- **`mutable` fields are the one deliberate exception to the rule
+  above** (see [§4.2](ch04-struct-vs-class.md) for the full design):
+  reading or writing a `mutable` field through `this` is allowed
+  regardless of whether `this` is `const`-treated -- but taking a
+  reference or address of a `mutable` field is rejected unconditionally
+  (not just inside `const` methods), since that's what keeps this
+  exception sound without needing any runtime check: a value that can
+  never be referenced can never alias, checked or not.
 - **The `this`-elision rule in [§5.3](#53-lifetime) is now active**:
   previously specified but dormant ("v0.1 has no class method/`this`
   concept yet, so this rule never actually applies") -- a method that

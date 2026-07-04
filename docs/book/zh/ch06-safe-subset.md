@@ -30,6 +30,11 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   backlog——见 [§4.2](ch04-struct-vs-class.md)/
   [§5.9](ch05-static-checks.md)）：成员变量（包括类级别常量）必须
   `private`，只有成员函数可以 `public`；v0.1 没有继承/`protected`。
+  平凡类型的成员可以改声明成 `mutable`（设计已定稿——见
+  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)）：
+  通过 `const` 的 `this` 也能读写，但永远不能被引用，是 scpp 对内部
+  可变性的第一阶段（`Cell` 等价）答案（[§8](ch08-open-questions.md)
+  Q4）。
 - `std::unique_ptr<T>`（已实现）、`std::span<T>`/`std::span<const T>`
   （已实现，M6 第一阶段——但目前只能从定长数组构造，见
   [§3](ch03-syntactic-sugar.md)）。`std::vector<T>` 规划中但**尚未
@@ -128,8 +133,8 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   里保证 wrap（绝不是 UB），以及除以 0/模以 0/`INT_MIN / -1` 无条件
   `abort()`。
 - [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) 定稿的
-  `consteval` 函数、`class` 访问控制、`this`/方法借用映射的**实现**
-  （目前只有设计）。
+  `consteval` 函数、`class` 访问控制、`this`/方法借用映射、`mutable`
+  （内部可变性第一阶段）的**实现**（目前只有设计）。
 
 ---
 

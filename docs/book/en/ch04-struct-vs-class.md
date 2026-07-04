@@ -89,6 +89,30 @@ itself the explicit declaration, and the compiler verifies triviality.
   recognized access specifier either, since it only has meaning
   relative to derived classes. Revisit both together if/when
   inheritance is designed.
+- **Interior mutability, phase 1** (design finalized; answers
+  [§8](ch08-open-questions.md) Q4's `Cell` half, `RefCell` deferred):
+  scpp reuses real C++'s `mutable` keyword, but with **stricter**
+  semantics than real C++'s (which gives a `mutable` field zero
+  checking of any kind). A `mutable` member variable:
+  - must be a **trivial** type, by the exact same rule §4.1 already
+    defines for `struct` fields (scalars, raw pointers, other trivial
+    types, fixed-size arrays of those) -- matching Rust's `Cell<T>`
+    requiring `T: Copy`;
+  - may be read or written through *any* `this`, `const` or not --
+    `const` no longer blocks direct access to this one field;
+  - can **never** be referenced or have its address taken (`T&`/
+    `const T&` binding, `&expr`) -- attempting either is a compile
+    error, unconditionally, `safe` or `unsafe` alike.
+  Because no reference to it can ever exist, there is no aliasing
+  hazard to check at runtime at all -- reads/writes compile to a plain
+  load/store, exactly as cheap as Rust's `Cell::get`/`Cell::set`. This
+  covers the common cases (counters, flags, small cached values); the
+  `RefCell` case (borrowing an actual reference to non-trivial interior
+  state, checked -- and panicking/aborting on violation -- at runtime)
+  has no existing C++ name to reuse and needs real new machinery (a
+  runtime borrow counter, RAII guard types); deferred to a later round.
+  `mutable` is meaningless on a `struct` (which has no `this`/methods/
+  const-access-control to begin with) and isn't accepted there.
 
 ## 4.3 Memory Layout & ABI (fixed, not left implementation-defined)
 
