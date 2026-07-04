@@ -4,9 +4,26 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 （明确区别于"不安全"，表示"尚未实现健全检查"）：
 
 **类型**
-- 基础标量：`bool`、`int`。（`float`/`char` 规划中但**尚未实现**——没有
-  对应的词法/类型支持；`std::string`/`std::string_view` 需要先有 `char`
-  类型，同样未实现。）
+- **标量基础类型**（数值家族的设计已定稿；`bool` 已实现，其余**尚未
+  实现**，`char` 除外——正在实现中）：
+
+  | scpp 名字 | 含义 | 备注 |
+  |-----------|------|------|
+  | `bool` | 布尔，1 字节宽 | 已实现。`false` 是位模式 `0`，`true` 是 `1`。不支持到任何其它类型的隐式转换——跟真实 C++ 不一样（那边 `bool` 会隐式提升成 `int`，`if`/`while` 里任何标量也会隐式转成 `bool`），scpp 两个方向都要求显式转换，`if`/`while` 的条件必须本来就是 `bool`。 |
+  | `int8_t` / `int16_t` / `int32_t` / `int64_t` / `int128_t` | 定宽有符号整数 | 复用真实 C++ `<cstdint>` 的名字；`int128_t` 提前对齐了还在讨论中的 WG21 P1467 提案（还不是标准 C++，但提案一旦通过就是叫这个名字）。跟真实 C++ 不一样（那边定宽类型是条件性提供的），scpp 在任何 target 上都**无条件**保证这些类型存在——LLVM 原生支持任意位宽整数，没有哪个平台会逼 scpp 省掉 `int128_t`。 |
+  | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `uint128_t` | 定宽无符号整数 | 同上 |
+  | `int` | `int32_t` 的别名 | **不管目标平台是什么，含义都固定** |
+  | `long` | `int64_t` 的别名 | **故意钉死**——真实 C++ 里 `long` 的位宽是平台决定的（Linux/macOS 的 LP64 是 64 位，Windows 的 LLP64 哪怕在 64 位机器上也是 32 位）。这正是 scpp 存在的意义要设计掉的那种跨平台天坑：scpp 保留了这个熟悉的拼写（看起来像 C++），但给它一个不管到哪个平台都一样、可预期的含义（不会因为换了目标平台就悄悄变了大小）。 |
+  | `unsigned int` | `uint32_t` 的别名 | 跟 `int` 一样，不管平台，含义固定。跟真实 C++ 不一样，单独一个词的简写 `unsigned`（意思是 `unsigned int`）在 scpp 里**不合法**——只接受完整的两个词拼写，保证任何 `unsigned` 开头的东西都无歧义、方便 grep。 |
+  | `unsigned long` | `uint64_t` 的别名 | 跟 `long` 一样，不管平台，含义固定 |
+  | `float32_t` / `float64_t` | IEEE-754 binary32 / binary64 | 原样复用真实的、已经标准化的 C++23 `<stdfloat>` 名字 |
+  | `float` | `float32_t` 的别名 | 跟真实 C++ 现实里的行为一致——不存在 `long` 那种平台分裂风险 |
+  | `double` | `float64_t` 的别名 | 同上 |
+  | `size_t` | 无符号、宽度等于指针宽度 | 跟真实 C++/Rust（`usize`）语义一致：这个类型就是**该**随目标 triple 的指针宽度变化的——这是它本来的职责，不是要消灭的坑。跟上面的 `long` 正好对比：问题形状一样（这个类型的位宽是不是随平台变），答案相反，因为这两个类型存在的理由不一样。 |
+  | `ptrdiff_t` | 有符号、宽度等于指针宽度 | 跟 `size_t` 一样随目标 triple 变化 |
+  | `char` | 字节值，1 字节宽 | **不是**`uint8_t`（或任何其它类型）的别名——是一个独立的类型，跟上面的 `bool` 一样不支持隐式转换：`char` 转成/转自任何其它类型都得显式转换。因为 `char` 不再需要跟 `uint8_t`/`int8_t` 共享同一个类型身份，真实 C++ 里裸 `char` 那种 implementation-defined 的符号性问题（典型 x86 工具链默认有符号，典型 ARM 工具链默认无符号）根本不会冒出来——反正没有隐式算术或比较会受它影响。这也顺带消解了之前标记的、跟正在并发进行的实现（把 `char` 写成有符号 `i8`）之间的冲突：既然 `char` 不再要求跟 `uint8_t` 是同一个类型，那个内部表示选择就不再跟规范冲突了。 |
+  | *（不提供 `wchar_t`）* | -- | 故意完全不提供：真实 C++ 的 `wchar_t` 在 Windows 上是 2 字节/UTF-16，在 Linux/macOS 上是 4 字节/UTF-32——比上面 `long`/`char` 的坑还严重（不只是位宽不一样，连编码语义都不一样）。scpp 干脆不提供这个类型，而不是去武断地钉死一个选择。 |
+
 - `struct`（规则见 [§4.1](ch04-struct-vs-class.md)；仅含受支持类型的
   字段）。
 - `std::unique_ptr<T>`（已实现）、`std::span<T>`/`std::span<const T>`
@@ -59,8 +76,13 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   字面量词法支持（只认 `"C"` 这个 token，不是通用字符串字面量）、以及
   `void` 作为合法类型名（现在既没法声明返回 `void` 的函数，也没有
   `void*`，跟 `extern "C"` 无关，是独立的缺口）。
-- `for`/range-for、`char`/`float`/`double`、`std::vector`、
-  `std::string`/`std::string_view`。`reinterpret_cast`、`union`、裸
+- 上面数值标量家族的**实现**（设计已定稿；`char` 正在实现中，其余都
+  还没开始）：`int8_t`/.../`int128_t`、`uint8_t`/.../`uint128_t`、
+  `int`/`long`/`unsigned int`/`unsigned long` 这几个定宽别名、
+  `float32_t`/`float64_t`（以及 `float`/`double` 别名）、`size_t`、
+  `ptrdiff_t`。
+- `for`/range-for、`std::vector`、`std::string`/`std::string_view`
+  （需要先有 `char`，正在实现中）。`reinterpret_cast`、`union`、裸
   `new`/`delete`、全局变量目前完全没有语法支持，`unsafe { }` 对它们的
   放行也就无从谈起，等各自语法落地后再说。
 

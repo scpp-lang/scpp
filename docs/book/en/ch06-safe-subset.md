@@ -5,10 +5,27 @@ else reports `E-UNSUPPORTED-IN-SAFE` (explicitly distinct from "unsafe",
 meaning "sound checking not yet implemented"):
 
 **Types**
-- Scalar primitives: `bool`, `int`. (`float`/`char` are planned but **not
-  implemented yet** -- no corresponding lexer/type support exists;
-  `std::string`/`std::string_view` need a `char` type first and are
-  likewise unimplemented.)
+- **Scalar primitives** (design finalized for the numeric family; `bool`
+  implemented, the rest **not yet implemented** except `char`, currently
+  being implemented):
+
+  | scpp name | Meaning | Notes |
+  |-----------|---------|-------|
+  | `bool` | boolean, 1 byte wide | implemented. `false` is the bit pattern `0`, `true` is `1`. No implicit conversion to or from any other type -- unlike real C++ (`bool` implicitly promotes to `int`; any scalar contextually converts to `bool` in `if`/`while`), scpp requires an explicit cast in both directions, and `if`/`while` conditions must already be `bool`. |
+  | `int8_t` / `int16_t` / `int32_t` / `int64_t` / `int128_t` | fixed-width signed integers | reuses real C++ `<cstdint>` names; `int128_t` anticipates the pending WG21 P1467 proposal (not yet standard C++, but exactly what that proposal would call it). Unlike real C++ (where exact-width types are only conditionally provided), scpp guarantees all of these unconditionally on every target -- LLVM natively supports arbitrary-width integers, so there's no platform on which scpp would need to omit `int128_t`. |
+  | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `uint128_t` | fixed-width unsigned integers | same as above |
+  | `int` | alias for `int32_t` | **fixed**, regardless of target platform |
+  | `long` | alias for `int64_t` | **deliberately fixed** -- real C++ gives `long` a platform-defined width (64-bit on Linux/macOS's LP64, but only 32-bit on Windows's LLP64, even on a 64-bit machine). This is exactly the kind of cross-platform pitfall scpp exists to design away: scpp keeps the familiar spelling (it looks like C++) but gives it one predictable meaning everywhere (it doesn't silently change size when you switch target platforms). |
+  | `unsigned int` | alias for `uint32_t` | same fixed-regardless-of-platform treatment as `int`. Unlike real C++, the bare single-word shorthand `unsigned` (meaning `unsigned int`) is **not** valid scpp -- only the full two-word spelling is accepted, to keep `unsigned`-anything unambiguous and grep-able. |
+  | `unsigned long` | alias for `uint64_t` | same fixed-regardless-of-platform treatment as `long` |
+  | `float32_t` / `float64_t` | IEEE-754 binary32 / binary64 | reuses real, already-standardized C++23 `<stdfloat>` names verbatim |
+  | `float` | alias for `float32_t` | matches how real C++ already behaves everywhere in practice -- no `long`-style platform-divergence risk here |
+  | `double` | alias for `float64_t` | same |
+  | `size_t` | unsigned, pointer-width | matches real C++/Rust (`usize`) semantics: this one is **meant** to vary with the target triple's pointer width -- that's its actual job, not a pitfall to eliminate the way `long`'s ambiguity was. Contrast directly with `long` above: same *shape* of question (does this type's width depend on the platform?), opposite answer, because the two types exist for different reasons. |
+  | `ptrdiff_t` | signed, pointer-width | same target-triple-following semantics as `size_t` |
+  | `char` | byte value, 1 byte wide | **not an alias** for `uint8_t` or any other type -- a distinct type, with the same no-implicit-conversion rule as `bool` above: converting `char` to or from any other type requires an explicit cast. Because `char` no longer has to share identity with `uint8_t`/`int8_t`, the implementation-defined signedness that plagues real C++'s plain `char` (signed on typical x86 toolchains, unsigned by default on typical ARM ones) never surfaces here -- there's no implicit arithmetic or comparison for it to affect. This also dissolves the previously-flagged conflict with concurrent implementation work that spells `char` as signed `i8`: since `char` is no longer required to be the same type as `uint8_t`, that internal representation choice is no longer in tension with the spec. |
+  | *(no `wchar_t`)* | -- | not provided at all, on purpose: real C++'s `wchar_t` is 2 bytes/UTF-16 on Windows but 4 bytes/UTF-32 on Linux and macOS -- an even worse version of the same platform-pitfall pattern as `long`/`char` above (it varies in both width *and* encoding, not just width or signedness). scpp sidesteps it by simply not providing the type, rather than trying to pin down one arbitrary choice. |
+
 - `struct` (rules in [§4.1](ch04-struct-vs-class.md); fields of supported
   types only).
 - `std::unique_ptr<T>` (implemented), `std::span<T>`/`std::span<const T>`
@@ -67,8 +84,14 @@ meaning "sound checking not yet implemented"):
   minimal string-literal lexing (just the token `"C"`, not general string
   literals), and `void` as a valid type name (no void-returning functions
   or `void*` exist yet either, independent of `extern "C"`).
-- `for`/range-for, `char`/`float`/`double`, `std::vector`,
-  `std::string`/`std::string_view`. `reinterpret_cast`, `union`, raw
+- Implementation of the numeric scalar family spec'd above (design
+  finalized; `char` is currently being implemented, the rest are not
+  started): `int8_t`/.../`int128_t`, `uint8_t`/.../`uint128_t`, the
+  `int`/`long`/`unsigned int`/`unsigned long` fixed-width aliases,
+  `float32_t`/`float64_t` (and the `float`/`double` aliases), `size_t`,
+  `ptrdiff_t`.
+- `for`/range-for, `std::vector`, `std::string`/`std::string_view` (need
+  `char` first, in progress). `reinterpret_cast`, `union`, raw
   `new`/`delete`, and global variables have no syntax at all yet, so
   `unsafe { }`'s permission for them is moot until each lands.
 
