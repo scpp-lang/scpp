@@ -248,6 +248,40 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return "";
 }
 
+// A Call expression's signature-lookup key, plus how many leading
+// `signatures[key].param_types` entries are already spoken for before
+// `expr.args[0]` (1 when an implicit `this` occupies param_types[0], 0
+// otherwise).
+struct CalleeSignature {
+    std::string key;
+    size_t param_offset = 0;
+};
+
+// Resolves a Call expression's signature-lookup key, accounting for a
+// method call's receiver (ch04 §4.2/ch05 §5.9): `obj.name(...)`/
+// `this->name(...)` stores its receiver in `call_expr.lhs` and only the
+// unqualified method name in `call_expr.name`, but `signatures` (like
+// codegen's own `module_->getFunction`) is keyed by the synthesized
+// `ClassName_methodName` form (see parse_class_def) -- exactly like
+// codegen_call independently resolves the same fact from the receiver's
+// type. Scoped to a plain Identifier receiver (covers `this->method()`
+// and `obj.method()` for a local/parameter `obj`, the only shape
+// movecheck can resolve a type for without a real type-checker) -- a
+// more complex receiver expression falls back to the unqualified name
+// and a zero offset, same as an ordinary free-function call. Shared by
+// check_call_arguments and produces_unique_ptr_rvalue so both resolve a
+// method call's callee identically.
+[[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body) {
+    if (call_expr.lhs && call_expr.lhs->kind == ExprKind::Identifier) {
+        auto type_it = body.local_types.find(call_expr.lhs->name);
+        if (type_it != body.local_types.end()) {
+            std::string class_name = named_type_name(type_it->second);
+            if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1};
+        }
+    }
+    return CalleeSignature{call_expr.name, 0};
+}
+
 // Structurally validates and resolves spec ch05.3's elision rule for a
 // single function's signature: if `fn.return_type` is a Reference, `fn`
 // must have *exactly* one reference-typed parameter (this language has
@@ -403,13 +437,24 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     }
 }
 
-// The only expressions allowed to produce a std::unique_ptr rvalue:
-// moving an existing one out, or freshly heap-allocating one via
-// std::make_unique (scpp has no `new` expression at all -- make_unique is
-// the sole sanctioned allocation syntax, and is itself a compiler builtin
-// rather than a real generic call, same treatment as std::move).
-[[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr) {
-    return expr.kind == ExprKind::Move || expr.kind == ExprKind::MakeUnique;
+// The expressions allowed to produce a std::unique_ptr rvalue: moving an
+// existing one out, freshly heap-allocating one via std::make_unique
+// (scpp has no `new` expression at all -- make_unique is the sole
+// sanctioned allocation syntax, and is itself a compiler builtin rather
+// than a real generic call, same treatment as std::move), or calling a
+// function/method whose own return type is std::unique_ptr<T> -- exactly
+// like real C++, a function's return value is already an rvalue at the
+// call site and needs no std::move (only a *named* variable needs an
+// explicit std::move to be treated as movable-from). Consistent with
+// check_call_arguments, which already allows this same Call expression
+// shape unconditionally when passed directly as another call's argument.
+[[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures) {
+    if (expr.kind == ExprKind::Move || expr.kind == ExprKind::MakeUnique) return true;
+    if (expr.kind == ExprKind::Call) {
+        auto sig_it = signatures.find(resolve_callee_signature(expr, body).key);
+        return sig_it != signatures.end() && is_unique_ptr(sig_it->second.return_type);
+    }
+    return false;
 }
 
 [[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
@@ -1075,33 +1120,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 // every other signature-based check in this file.
 void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors) {
-    // A method call (`obj.name(...)` / `this->name(...)`, ch04 §4.2/ch05
-    // §5.9) stores its receiver in `expr.lhs` and only the unqualified
-    // method name in `expr.name` -- but `signatures` (like codegen's own
-    // `module_->getFunction`) is keyed by the synthesized
-    // `ClassName_methodName` form (see parse_class_def), and the
-    // receiver occupies `param_types[0]` (`this`) ahead of `expr.args`'
-    // own entries (see make_this_param), exactly like codegen_call/
-    // codegen_call_args independently resolve the same two facts from
-    // the receiver's type. Scoped to a plain Identifier receiver (covers
-    // `this->method()` and `obj.method()` for a local/parameter `obj`,
-    // the only shape movecheck can resolve a type for without a real
-    // type-checker) -- a more complex receiver expression silently keeps
-    // the unqualified (therefore not-found) lookup and a zero offset,
-    // same as before this fix, rather than crashing or guessing wrong.
-    std::string callee_key = expr.name;
-    size_t param_offset = 0;
-    if (expr.lhs && expr.lhs->kind == ExprKind::Identifier) {
-        auto type_it = body.local_types.find(expr.lhs->name);
-        if (type_it != body.local_types.end()) {
-            std::string class_name = named_type_name(type_it->second);
-            if (!class_name.empty()) {
-                callee_key = class_name + "_" + expr.name;
-                param_offset = 1;
-            }
-        }
-    }
-    auto sig_it = signatures.find(callee_key);
+    CalleeSignature callee = resolve_callee_signature(expr, body);
+    auto sig_it = signatures.find(callee.key);
     if (report_errors && sig_it != signatures.end() && !sig_it->second.is_safe && state.unsafe_depth == 0) {
         throw DataflowError("cannot call non-'safe' function '" + expr.name +
                              "' from a 'safe' context; wrap the call in 'unsafe { }' (spec ch01 §1.3/ch02)");
@@ -1112,7 +1132,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     BorrowMap in_call_borrows;
     for (size_t i = 0; i < expr.args.size(); i++) {
         const Expr& arg = *expr.args[i];
-        size_t param_index = i + param_offset;
+        size_t param_index = i + callee.param_offset;
         bool param_is_reference =
             sig_it != signatures.end() && param_index < sig_it->second.param_types.size() &&
             is_reference(sig_it->second.param_types[param_index]);
@@ -1262,7 +1282,7 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                     target_is_unique_ptr = it != body.local_types.end() && is_unique_ptr(it->second);
                 }
                 apply_expr(*expr.rhs, target_is_unique_ptr, state, body, signatures, report_errors);
-                if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*expr.rhs)) {
+                if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*expr.rhs, body, signatures)) {
                     throw DataflowError("assigning to a std::unique_ptr variable requires std::move or "
                                         "std::make_unique (copying is not allowed)");
                 }
@@ -1504,7 +1524,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
 
             bool target_is_unique_ptr = type_it != body.local_types.end() && is_unique_ptr(type_it->second);
             apply_expr(*stmt.expr, target_is_unique_ptr, state, body, signatures, report_errors);
-            if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*stmt.expr)) {
+            if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*stmt.expr, body, signatures)) {
                 throw DataflowError("variable '" + stmt.local +
                                     "' of type std::unique_ptr must be initialized via std::move or "
                                     "std::make_unique (copying a unique_ptr is not allowed)");
@@ -1620,7 +1640,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             }
             bool return_is_unique_ptr = is_unique_ptr(fn.return_type);
             apply_expr(*term.return_value, return_is_unique_ptr, state, body, signatures, /*report_errors=*/true);
-            if (return_is_unique_ptr && !produces_unique_ptr_rvalue(*term.return_value)) {
+            if (return_is_unique_ptr && !produces_unique_ptr_rvalue(*term.return_value, body, signatures)) {
                 throw DataflowError(
                     "returning a std::unique_ptr requires std::move or std::make_unique (copying is not allowed)");
             }

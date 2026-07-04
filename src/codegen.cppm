@@ -628,7 +628,9 @@ private:
                     return;
                 }
                 if (stmt.init) {
-                    builder_->CreateStore(codegen_expr(*stmt.init), slot);
+                    llvm::Value* init_value = codegen_expr(*stmt.init);
+                    check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'");
+                    builder_->CreateStore(init_value, slot);
                 } else {
                     // scpp has no concept of an uninitialized variable: a
                     // local declared without an initializer is always
@@ -887,6 +889,34 @@ private:
         return builder_->CreateZExt(v, llvm::Type::getInt8Ty(*context_), "boolext");
     }
 
+    // Verifies `value`'s LLVM type exactly matches `expected` before it's
+    // stored into a place declared as `expected` (a VarDecl initializer,
+    // a plain assignment's RHS, or std::make_unique<T>(...)'s scalar
+    // argument) -- scpp has no implicit conversion between distinct
+    // scalar types (bool/char/int are all separate, ch06), and, unlike a
+    // mismatched call argument/return value/binary operand (all already
+    // rejected by LLVM's own module verifier), a *store*'s address
+    // operand is an opaque `ptr` with no embedded pointee type for the
+    // verifier to check against -- an unchecked width-mismatched store
+    // would instead silently corrupt whatever memory follows the
+    // undersized slot (a stack buffer overflow, or reading back
+    // uninitialized garbage from an oversized heap allocation) rather
+    // than failing cleanly. Same narrow width-check philosophy as
+    // bool_to_i1 above (not full expression-type inference, which
+    // doesn't exist anywhere in this codebase): this catches every
+    // *differently-sized* mismatch (bool/int, char/int, ...) but can't
+    // tell apart two scalar types that happen to share a width (bool vs.
+    // char, both i8) -- a known, accepted limitation, not a soundness
+    // gap, since same-width scalars can never corrupt memory this way.
+    void check_store_type(llvm::Value* value, llvm::Type* expected, const std::string& what) {
+        if (value->getType() != expected) {
+            throw CodegenError("type mismatch initializing/assigning " + what +
+                                ": scpp has no implicit conversion between distinct scalar types (e.g. "
+                                "bool/char/int are all distinct, spec ch06) -- an explicit cast would be "
+                                "required, but cast expressions aren't implemented in this version yet");
+        }
+    }
+
     llvm::Value* codegen_expr(const Expr& expr) {
         switch (expr.kind) {
             case ExprKind::IntegerLiteral:
@@ -1042,6 +1072,8 @@ private:
             initial_value = llvm::Constant::getNullValue(element_type);
         } else if (expr.args.size() == 1 && element_is_scalar) {
             initial_value = codegen_expr(*expr.args[0]);
+            check_store_type(initial_value, element_type,
+                              "std::make_unique<" + expr.type.name + ">(...)'s argument");
         } else {
             throw CodegenError(
                 "std::make_unique<T>(...) currently only supports zero arguments (zero-initializes "
@@ -1477,6 +1509,7 @@ private:
         if (expr.binary_op == BinaryOp::Assign) {
             LValue lv = codegen_lvalue(*expr.lhs);
             llvm::Value* value = codegen_expr(*expr.rhs);
+            check_store_type(value, to_llvm_type(lv.type), "'" + expr.lhs->name + "'");
             if (lv.type.kind == TypeKind::UniquePtr) {
                 // Move-assignment semantics: release whatever this
                 // unique_ptr currently owns *before* overwriting it with
