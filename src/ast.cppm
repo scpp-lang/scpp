@@ -66,6 +66,13 @@ enum class ExprKind {
     BoolLiteral,
     CharLiteral, // 'a', '\n', ... -- ordinal value stored in `int_value`
                  // (same field as IntegerLiteral; see Expr below)
+    StringLiteral, // "hello\n" -- decoded byte content stored in `name`
+                   // (same field Identifier/Call/Member reuse; see Expr
+                   // below). Decays to a `char*` pointing at a compiler-
+                   // emitted read-only global, exactly like a fixed-size
+                   // char array decaying to pointer (ch03) -- there is no
+                   // backing local variable/place, so (like every other
+                   // literal) it has no codegen_lvalue case.
     Identifier,
     Binary,
     Unary,
@@ -123,10 +130,17 @@ struct Expr {
     // BoolLiteral
     bool bool_value = false;
 
-    // Identifier / Call (callee name) / Member (field name)
+    // Identifier / Call (callee name) / Member (field name) / StringLiteral
+    // (decoded byte content, e.g. "a\n" -> the 2 bytes 'a','\n' -- same
+    // escape set as CharLiteral, see parser's decode_string_literal)
     std::string name;
 
-    // Binary
+    // Binary; also Call's method-call receiver (ch05 §5.9), nullptr for
+    // an ordinary free-function call -- `obj.method(args)` parses to a
+    // Call with `lhs = obj`, `name = "method"`, resolved to a concrete
+    // synthesized function symbol only once `obj`'s static type is known
+    // (movecheck/codegen, not the parser -- see codegen_call's
+    // Member-base handling)
     BinaryOp binary_op{};
     ExprPtr lhs;
     ExprPtr rhs;
@@ -163,6 +177,18 @@ struct Stmt {
     Type type;
     std::string var_name;
     ExprPtr init; // optional
+
+    // VarDecl, class-typed only (ch04 §4.2): `ClassName name(args);`,
+    // direct-initialization via an explicit constructor call --
+    // mutually exclusive with `init` above (a class type has no
+    // `=`-initializer form in this version, only this paren-args form or
+    // a bare, zero-initialized declaration calling no constructor at
+    // all). `has_ctor_args` is needed to tell an explicit-but-empty call
+    // (`ClassName name();`) apart from no call at all (a bare
+    // `ClassName name;`) -- `ctor_args` alone being empty can't
+    // distinguish those two.
+    bool has_ctor_args = false;
+    std::vector<ExprPtr> ctor_args;
 
     // Return / ExprStmt (value/expr)
     ExprPtr expr;
@@ -232,8 +258,47 @@ struct StructDef {
     std::vector<StructField> fields;
 };
 
+enum class AccessSpecifier {
+    Public,
+    Private,
+};
+
+struct ClassField {
+    Type type;
+    std::string name;
+    // ch04 §4.2: a member variable can never be Public -- rejected right
+    // where it's parsed (parse_class_def), not deferred to a later pass
+    // -- but the specifier is still recorded here (rather than simply
+    // never representing it) so this stays a plain, uniform data shape,
+    // matching StructField's own style.
+    AccessSpecifier access = AccessSpecifier::Private;
+};
+
+// ch04 §4.2 / ch05 §5.9: unlike `struct` (a purely trivial aggregate, ch04
+// §4.1), `class` may own resources, participates in move/borrow checking,
+// and restricts field access. A constructor/destructor/method's *body* is
+// not represented here at all -- each is lowered directly into an
+// ordinary top-level `Program::functions` entry at parse time (see
+// parse_class_def), since ch05 §5.9 treats `this` as nothing more than an
+// implicit Reference-typed first `Param` (`const T&` in a `const` method,
+// `T&` otherwise) -- every existing reference/borrow-checking mechanism
+// (elision, dangling checks, alias-XOR-mutability) already applies with
+// zero new logic once a method is just a `Function` shaped this way.
+// scpp has no real C++ name mangling, so these synthesized functions use
+// a simple, deterministic `ClassName_memberName` scheme (`ClassName_new`
+// for the constructor, `ClassName_delete` for the destructor) -- method
+// calls (`obj.method(args)`) and constructor calls (`ClassName obj(args);`)
+// both resolve to it by recomputing the identical scheme from the
+// receiver's/declared variable's static type, not by consulting this
+// struct or any separate registry.
+struct ClassDef {
+    std::string name;
+    std::vector<ClassField> fields;
+};
+
 struct Program {
     std::vector<StructDef> structs;
+    std::vector<ClassDef> classes;
     std::vector<Function> functions;
 };
 

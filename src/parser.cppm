@@ -32,6 +32,8 @@ public:
         while (!check(TokenKind::EndOfFile)) {
             if (check(TokenKind::KwStruct)) {
                 program.structs.push_back(parse_struct_def());
+            } else if (check(TokenKind::KwClass)) {
+                parse_class_def(program);
             } else {
                 parse_top_level_function_or_extern_group(program);
             }
@@ -42,12 +44,21 @@ public:
 private:
     std::vector<Token> tokens_;
     size_t pos_ = 0;
-    // Names introduced by `struct X { ... };` seen so far. The parser is
-    // single-pass, so (like C) a struct must be declared before it is used
-    // as a type; this set is what lets `looks_like_type_start()` recognize
-    // `Point p;` as a variable declaration rather than an expression
-    // statement starting with the identifier `Point`.
+    // Names introduced by `struct X { ... };` or `class X { ... };` seen
+    // so far. The parser is single-pass, so (like C) either must be
+    // declared before it is used as a type; this set is what lets
+    // `looks_like_type_start()` recognize `Point p;` as a variable
+    // declaration rather than an expression statement starting with the
+    // identifier `Point`. Both kinds share one set since, once parsed,
+    // they're structurally identical fixed-layout aggregates as far as
+    // "is this identifier a type name" is concerned -- `class_names_`
+    // below separately tracks *which* of those are specifically classes,
+    // for the handful of decisions that do need to tell them apart
+    // (constructor-call VarDecl syntax, access control).
     std::unordered_set<std::string> struct_names_;
+    // Class names specifically (ch04 §4.2) -- see struct_names_ above for
+    // why this is a second, narrower set rather than the only one.
+    std::unordered_set<std::string> class_names_;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -308,13 +319,53 @@ private:
         }
     }
 
+    // Decodes a StringLiteral token's text (e.g. "a\nb") into its byte
+    // content. `tok.text` includes the surrounding double quotes (see
+    // StringLiteral's definition in lexer.cppm). Supports the same
+    // minimal named-escape set as decode_char_literal above: \n \t \r \\
+    // \' \" \0 -- no hex/octal escapes. Unlike a char literal, any number
+    // of characters (including zero -- an empty string "") is valid.
+    std::string decode_string_literal(const Token& tok) {
+        if (tok.text.size() < 2) {
+            throw ParseError(tok.line, tok.column, "unterminated string literal " + std::string(tok.text));
+        }
+        std::string_view inner = tok.text.substr(1, tok.text.size() - 2);
+        std::string result;
+        result.reserve(inner.size());
+        for (size_t i = 0; i < inner.size(); i++) {
+            if (inner[i] != '\\') {
+                result.push_back(inner[i]);
+                continue;
+            }
+            if (i + 1 >= inner.size()) {
+                throw ParseError(tok.line, tok.column,
+                                  "invalid string literal " + std::string(tok.text) +
+                                      ": trailing '\\' with no following escape character");
+            }
+            i++;
+            switch (inner[i]) {
+                case 'n': result.push_back('\n'); break;
+                case 't': result.push_back('\t'); break;
+                case 'r': result.push_back('\r'); break;
+                case '0': result.push_back('\0'); break;
+                case '\\': result.push_back('\\'); break;
+                case '\'': result.push_back('\''); break;
+                case '"': result.push_back('"'); break;
+                default:
+                    throw ParseError(tok.line, tok.column,
+                                      "invalid string literal " + std::string(tok.text) +
+                                          ": unsupported escape sequence '\\" + std::string(1, inner[i]) +
+                                          "' (supported: \\n \\t \\r \\\\ \\' \\\" \\0)");
+            }
+        }
+        return result;
+    }
+
     // Decodes a CharLiteral token's text (e.g. 'a', '\n', '\\', '\'', '\0')
     // into its ordinal value. `tok.text` includes the surrounding single
     // quotes (see CharLiteral's definition in lexer.cppm). Supports the
-    // same minimal named-escape set as the rest of v0.1's "just enough"
-    // lexing philosophy: \n \t \r \\ \' \" \0 -- no hex/octal escapes,
-    // matching how string literals likewise only support the bare
-    // minimum needed right now (see parse_c_linkage_string above).
+    // same minimal named-escape set as decode_string_literal above: \n \t
+    // \r \\ \' \" \0 -- no hex/octal escapes.
     long long decode_char_literal(const Token& tok) {
         // A well-formed literal is always at least `''` (2 quote chars);
         // anything shorter means the lexer hit EOF before a closing
@@ -367,6 +418,198 @@ private:
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
         return def;
+    }
+
+    // Parses a parenthesized, comma-separated parameter list `(<type>
+    // <name>, ...)`, including the enclosing parens -- shared by every
+    // class member function (method/constructor; a destructor is always
+    // zero-arg, parsed directly). Deliberately separate from
+    // parse_function's own inline version (which also handles extern
+    // "C"'s trailing `...`, never relevant to a method/constructor): the
+    // two are simple and small enough that duplicating this one loop
+    // body is lower-risk than threading varargs-specific logic through a
+    // shared helper.
+    std::vector<Param> parse_param_list() {
+        std::vector<Param> params;
+        expect(TokenKind::LParen, "'('");
+        if (!check(TokenKind::RParen)) {
+            do {
+                Param param;
+                Type base_type = parse_type();
+                param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
+                // Same C-style declarator order (array suffix after the
+                // name, decaying to pointer) as parse_function's own
+                // parameter loop.
+                Type param_type = parse_array_suffix(base_type);
+                if (param_type.kind == TypeKind::Array) {
+                    Type decayed;
+                    decayed.kind = TypeKind::Pointer;
+                    decayed.pointee = param_type.element;
+                    param_type = std::move(decayed);
+                }
+                param.type = std::move(param_type);
+                params.push_back(std::move(param));
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::RParen, "')'");
+        return params;
+    }
+
+    // Builds the implicit `this` parameter every class member function
+    // gets as params[0] (ch05 §5.9): a Reference to `class_name` --
+    // `const T&` for a `const` method (or always for a destructor, which
+    // needs to mutate/tear down the receiver, so never `const`... wait,
+    // no: a destructor is never `const` either way, callers pass
+    // `is_const=false` for it directly), `T&` otherwise. This -- an
+    // ordinary Reference-typed parameter -- is the *entire* mechanism
+    // scpp needs for `this`: every existing reference/borrow-checking
+    // rule (elision, dangling checks, alias-XOR-mutability) already
+    // applies with no new logic once a method is shaped this way (see
+    // ClassDef's own comment).
+    Param make_this_param(const std::string& class_name, bool is_const) {
+        Param this_param;
+        this_param.name = "this";
+        Type this_type;
+        this_type.kind = TypeKind::Reference;
+        this_type.pointee = std::make_shared<Type>();
+        this_type.pointee->kind = TypeKind::Named;
+        this_type.pointee->name = class_name;
+        this_type.is_mutable_ref = !is_const;
+        this_param.type = std::move(this_type);
+        return this_param;
+    }
+
+    // Parses `class Name { ... };` (ch04 §4.2/ch05 §5.9): fields (with
+    // access-specifier sections, defaulting to `private` like real C++,
+    // unlike `struct`'s always-public fields) plus constructor/
+    // destructor/method definitions, each of which is synthesized
+    // directly into `program.functions` as an ordinary top-level
+    // Function -- see ClassDef's own comment for the full reasoning and
+    // the `ClassName_memberName` naming scheme used.
+    void parse_class_def(Program& program) {
+        expect(TokenKind::KwClass, "'class'");
+        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        // Register the name before parsing the body so a field/method can
+        // refer to the enclosing class via a pointer, and so a
+        // self-referential constructor call/access-control decision below
+        // already recognizes it -- same before-parsing-the-body
+        // registration order as parse_struct_def.
+        struct_names_.insert(class_name);
+        class_names_.insert(class_name);
+
+        ClassDef def;
+        def.name = class_name;
+
+        expect(TokenKind::LBrace, "'{'");
+        // Real C++'s own default: a class body starts `private` until the
+        // first access-specifier section (unlike `struct`, which has no
+        // access control at all -- ch04 §4.2).
+        AccessSpecifier current_access = AccessSpecifier::Private;
+        while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+            if (match(TokenKind::KwPublic)) {
+                expect(TokenKind::Colon, "':'");
+                current_access = AccessSpecifier::Public;
+                continue;
+            }
+            if (match(TokenKind::KwPrivate)) {
+                expect(TokenKind::Colon, "':'");
+                current_access = AccessSpecifier::Private;
+                continue;
+            }
+
+            bool member_is_safe = match(TokenKind::KwSafe);
+
+            if (match(TokenKind::Tilde)) {
+                // Destructor: `~ClassName() { ... }` -- no parameters, no
+                // return type, and always a mutable (non-`const`) `this`
+                // (it always needs to tear the receiver down).
+                const Token& name_tok = expect(TokenKind::Identifier, "destructor name");
+                if (std::string(name_tok.text) != class_name) {
+                    throw ParseError(name_tok.line, name_tok.column,
+                                      "destructor name '~" + std::string(name_tok.text) +
+                                          "' must match the enclosing class name '" + class_name + "'");
+                }
+                expect(TokenKind::LParen, "'('");
+                expect(TokenKind::RParen, "')'");
+                Function fn;
+                fn.is_safe = member_is_safe;
+                fn.return_type.kind = TypeKind::Named;
+                fn.return_type.name = "void";
+                fn.name = class_name + "_delete";
+                fn.params.push_back(make_this_param(class_name, /*is_const=*/false));
+                fn.body = parse_block();
+                program.functions.push_back(std::move(fn));
+                continue;
+            }
+
+            if (check(TokenKind::Identifier) && std::string(peek().text) == class_name &&
+                peek_at(1).kind == TokenKind::LParen) {
+                // Constructor: `ClassName(args) { ... }` -- distinguished
+                // from an ordinary method/field by its name matching the
+                // class exactly with *no* declared return type at all
+                // (real C++'s own rule: the constructor is the one member
+                // that never has a return type, not even `void`) --
+                // `this` is always mutable here too (it's what the
+                // constructor initializes).
+                advance(); // class name
+                Function fn;
+                fn.is_safe = member_is_safe;
+                fn.return_type.kind = TypeKind::Named;
+                fn.return_type.name = "void";
+                fn.name = class_name + "_new";
+                fn.params = parse_param_list();
+                fn.params.insert(fn.params.begin(), make_this_param(class_name, /*is_const=*/false));
+                fn.body = parse_block();
+                program.functions.push_back(std::move(fn));
+                continue;
+            }
+
+            // Otherwise: an ordinary field or method, both starting with
+            // a declared type -- same "parse a type, then a name, then
+            // see what follows" disambiguation parse_var_decl/
+            // parse_struct_def already use.
+            Type member_type = parse_type();
+            std::string member_name = std::string(expect(TokenKind::Identifier, "field or method name").text);
+            if (check(TokenKind::LParen)) {
+                Function fn;
+                fn.params = parse_param_list();
+                // `const` trails the parameter list, exactly like real
+                // C++ (`int length() const { ... }`), so it's only
+                // knowable -- and `this`'s mutability with it -- after
+                // parsing the params above.
+                bool is_const = match(TokenKind::KwConst);
+                fn.is_safe = member_is_safe;
+                fn.return_type = std::move(member_type);
+                fn.name = class_name + "_" + member_name;
+                fn.params.insert(fn.params.begin(), make_this_param(class_name, is_const));
+                fn.body = parse_block();
+                program.functions.push_back(std::move(fn));
+                continue;
+            }
+
+            // A field: `safe` makes no sense on a variable, and ch04
+            // §4.2 permanently forbids a public one.
+            if (member_is_safe) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "'safe' cannot prefix a member variable, only a member function");
+            }
+            if (current_access == AccessSpecifier::Public) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "member variable '" + member_name + "' cannot be 'public' (ch04 §4.2) -- "
+                                  "only member functions can be; expose read access through a method instead");
+            }
+            ClassField field;
+            field.type = parse_array_suffix(member_type);
+            field.name = member_name;
+            field.access = current_access;
+            expect(TokenKind::Semicolon, "';'");
+            def.fields.push_back(std::move(field));
+        }
+        expect(TokenKind::RBrace, "'}'");
+        expect(TokenKind::Semicolon, "';'");
+        program.classes.push_back(std::move(def));
     }
 
     // Parses one function declaration or definition's `<return-type>
@@ -510,6 +753,22 @@ private:
         stmt->type = parse_array_suffix(base);
         if (match(TokenKind::Assign)) {
             stmt->init = parse_expr();
+        } else if (match(TokenKind::LParen)) {
+            // `ClassName name(args);` (ch04 §4.2): direct-initialization
+            // via an explicit constructor call -- the concrete way a
+            // `class`-typed local is constructed in this version (there
+            // is no `=`-initializer form for a class type yet, only this
+            // or a bare, zero-initialized declaration calling no
+            // constructor at all, e.g. `ClassName name;`). Movecheck/
+            // codegen resolve the callee by recomputing `ClassName_new`
+            // from `stmt->type`, not from anything recorded here.
+            stmt->has_ctor_args = true;
+            if (!check(TokenKind::RParen)) {
+                do {
+                    stmt->ctor_args.push_back(parse_expr());
+                } while (match(TokenKind::Comma));
+            }
+            expect(TokenKind::RParen, "')'");
         }
         expect(TokenKind::Semicolon, "';'");
         return stmt;
@@ -703,30 +962,35 @@ private:
         return parse_postfix(parse_primary());
     }
 
-    // Applies trailing `.field` (Member), `->field` (Member off a
-    // dereference -- sugar for `(*p).field`, same as real C++), and
-    // `[index]` (Subscript) operators, e.g. `p.x`, `arr[i]`, `p.inner.x`,
-    // `arr[i].x`, `p->x`.
+    // Applies trailing `.name` (Member, or a method call -- ch05 §5.9 --
+    // if `(` follows), `->name` (same, off a dereference -- sugar for
+    // `(*p).name`, same as real C++ -- unless `p` is literally `this`,
+    // see below), and `[index]` (Subscript) operators, e.g. `p.x`,
+    // `arr[i]`, `p.inner.x`, `arr[i].x`, `p->x`, `obj.method(args)`.
     ExprPtr parse_postfix(ExprPtr expr) {
         for (;;) {
             if (match(TokenKind::Dot)) {
-                std::string field = std::string(expect(TokenKind::Identifier, "field name").text);
-                auto node = std::make_unique<Expr>();
-                node->kind = ExprKind::Member;
-                node->name = field;
-                node->lhs = std::move(expr);
-                expr = std::move(node);
+                std::string name = std::string(expect(TokenKind::Identifier, "field or method name").text);
+                expr = parse_member_or_method_call(std::move(expr), name);
             } else if (match(TokenKind::Arrow)) {
-                std::string field = std::string(expect(TokenKind::Identifier, "field name").text);
+                std::string name = std::string(expect(TokenKind::Identifier, "field or method name").text);
+                // `this->x` (ch05 §5.9): `this` is represented as an
+                // ordinary Reference-typed pseudo-parameter (see parser's
+                // make_this_param), which already auto-dereferences on
+                // every use (codegen_lvalue's Identifier case) exactly
+                // like `a.x` already does for any other reference-typed
+                // local `a` -- so unlike `p->x` for a real pointer/
+                // unique_ptr `p` below, there is no separate pointee to
+                // Deref through first.
+                if (expr->kind == ExprKind::Identifier && expr->name == "this") {
+                    expr = parse_member_or_method_call(std::move(expr), name);
+                    continue;
+                }
                 auto deref = std::make_unique<Expr>();
                 deref->kind = ExprKind::Unary;
                 deref->unary_op = UnaryOp::Deref;
                 deref->lhs = std::move(expr);
-                auto node = std::make_unique<Expr>();
-                node->kind = ExprKind::Member;
-                node->name = field;
-                node->lhs = std::move(deref);
-                expr = std::move(node);
+                expr = parse_member_or_method_call(std::move(deref), name);
             } else if (match(TokenKind::LBracket)) {
                 ExprPtr index = parse_expr();
                 expect(TokenKind::RBracket, "']'");
@@ -740,6 +1004,34 @@ private:
             }
         }
         return expr;
+    }
+
+    // Shared by parse_postfix's `.name`/(this-adjusted) `->name` cases:
+    // `name(args)` is a method call (ch05 §5.9) -- `base` (the receiver)
+    // is stored in the resulting Call's `lhs` (nullptr for an ordinary
+    // free-function call, see ast.cppm's Expr), resolved to a concrete
+    // synthesized function symbol only once `base`'s static type is known
+    // (movecheck/codegen, not the parser). Otherwise it's a plain field
+    // access, unchanged from before method calls existed.
+    ExprPtr parse_member_or_method_call(ExprPtr base, const std::string& name) {
+        if (match(TokenKind::LParen)) {
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Call;
+            node->name = name;
+            node->lhs = std::move(base);
+            if (!check(TokenKind::RParen)) {
+                do {
+                    node->args.push_back(parse_expr());
+                } while (match(TokenKind::Comma));
+            }
+            expect(TokenKind::RParen, "')'");
+            return node;
+        }
+        auto node = std::make_unique<Expr>();
+        node->kind = ExprKind::Member;
+        node->name = name;
+        node->lhs = std::move(base);
+        return node;
     }
 
     ExprPtr parse_primary() {
@@ -784,6 +1076,27 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::CharLiteral;
             node->int_value = decode_char_literal(tok);
+            return node;
+        }
+        if (match(TokenKind::StringLiteral)) {
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::StringLiteral;
+            node->name = decode_string_literal(tok);
+            return node;
+        }
+        if (match(TokenKind::KwThis)) {
+            // ch05 §5.9: `this` is a keyword (not an ordinary identifier
+            // -- so a user can never accidentally shadow it with a
+            // same-named parameter/local), but behaves exactly like an
+            // Identifier expression bound to the name "this" everywhere
+            // downstream: it resolves through the exact same
+            // `body.local_types`/`locals_` lookup as any other reference-
+            // typed local, since parse_class_def's make_this_param
+            // already registered it as an ordinary params[0] named
+            // "this".
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Identifier;
+            node->name = "this";
             return node;
         }
         if (match(TokenKind::KwTrue)) {

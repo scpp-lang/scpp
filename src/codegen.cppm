@@ -62,9 +62,18 @@ public:
         // program.structs in declaration order is always sufficient (no
         // separate opaque-then-setBody phase is needed: LLVM pointers are
         // opaque, so pointer fields never need the pointee's type up front).
+        // Classes (ch04 §4.2) are declared next, after every struct: a
+        // class field may be a trivial struct by value (never the other
+        // way around -- a struct field can never be a class, since a class
+        // isn't guaranteed trivial), and, like structs among themselves,
+        // the single-pass parser already guarantees one class only ever
+        // references an *earlier* class by value.
         program_ = &program;
         for (const StructDef& def : program.structs) {
             declare_struct(def);
+        }
+        for (const ClassDef& def : program.classes) {
+            declare_class(def);
         }
         for (const Function& fn : program.functions) {
             declare_function(fn);
@@ -109,6 +118,18 @@ private:
     struct LValue {
         llvm::Value* ptr;
         Type type;
+    };
+
+    // codegen_call's result: the raw LLVM call value, plus the resolved
+    // callee's own AST-level Function (its return type is what codegen_
+    // expr/codegen_lvalue's own Call cases need next, e.g. to decide
+    // whether to auto-dereference a reference-returning result -- see
+    // codegen_call's own comment for why a method call's receiver can
+    // only ever be resolved once, so both must come from a single call).
+    struct CallResult {
+        llvm::Value* value;
+        const Function* callee_def; // nullptr only if truly unknown (defensive; codegen_call already
+                                     // required a matching LLVM function to exist)
     };
 
     struct LocalSlot {
@@ -231,6 +252,29 @@ private:
             llvm_field_types.push_back(to_llvm_type(field.type));
         }
         info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "struct." + def.name);
+        structs_[def.name] = std::move(info);
+    }
+
+    // Registers a `class`'s layout the same way declare_struct does for a
+    // `struct` (a named LLVM struct type, keyed into the same `structs_`
+    // map -- ch04 §4.2's `class` and `struct` are both fixed-layout
+    // aggregates at the codegen level; only field access control and
+    // participation in move/borrow/lifetime checking, both handled
+    // elsewhere, tell them apart). Unlike declare_struct, a class field is
+    // *not* required to be trivial (ch04 §4.2 explicitly allows
+    // unique_ptr/span/other class members, or any other type carrying
+    // ownership/lifetime semantics), so this skips validate_trivial
+    // entirely.
+    void declare_class(const ClassDef& def) {
+        StructInfo info;
+        std::vector<llvm::Type*> llvm_field_types;
+        llvm_field_types.reserve(def.fields.size());
+        for (const ClassField& field : def.fields) {
+            info.field_names.push_back(field.name);
+            info.field_types.push_back(field.type);
+            llvm_field_types.push_back(to_llvm_type(field.type));
+        }
+        info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "class." + def.name);
         structs_[def.name] = std::move(info);
     }
 
@@ -551,6 +595,38 @@ private:
                 }
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
+                if (stmt.has_ctor_args) {
+                    // `ClassName name(args);` (ch04 §4.2): direct-
+                    // initialization via an explicit constructor call.
+                    // Storage is zero-initialized first -- same as every
+                    // other VarDecl with no initializer at all (scpp has
+                    // no concept of "uninitialized" memory, ch05.4) --
+                    // then the synthesized `ClassName_new(&name, args...)`
+                    // constructor runs in place: the same caller-
+                    // allocates/constructor-initializes-in-place ABI shape
+                    // real C++ itself already uses, so this needs no new
+                    // storage-layout logic beyond what every other
+                    // Named-type VarDecl already does above.
+                    if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
+                        throw CodegenError("'" + stmt.var_name +
+                                            "(...)' constructor-call syntax is only supported for a class type");
+                    }
+                    builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
+                    locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    if (!scope_stack_.empty()) {
+                        scope_stack_.back().push_back(stmt.var_name);
+                    }
+                    std::string ctor_name = stmt.type.name + "_new";
+                    llvm::Function* ctor = module_->getFunction(ctor_name);
+                    if (ctor == nullptr) {
+                        throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call");
+                    }
+                    const Function* ctor_def = find_function_def(ctor_name);
+                    std::vector<llvm::Value*> args = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                    args.insert(args.begin(), slot);
+                    builder_->CreateCall(ctor, args);
+                    return;
+                }
                 if (stmt.init) {
                     builder_->CreateStore(codegen_expr(*stmt.init), slot);
                 } else {
@@ -685,34 +761,74 @@ private:
     // expression naming a real, non-builtin function -- callers handle
     // `print_int`/`print_bool` themselves before reaching here), binding
     // each reference-typed argument to its address rather than its
-    // value. Returns the raw LLVM result: if the callee returns a
-    // reference, that result is still just the *address* at this point
-    // (see to_llvm_type's Reference case) -- it's up to the caller to
-    // decide whether to dereference it (codegen_expr, for a value
-    // context) or hand the address on as-is (codegen_lvalue, for a
-    // reference-returning call used itself as a further borrow source --
-    // see resolve_borrow_source_root in movecheck.cppm).
-    llvm::Value* codegen_call(const Expr& expr) {
-        llvm::Function* callee = module_->getFunction(expr.name);
-        if (callee == nullptr) {
-            throw CodegenError("call to unknown function '" + expr.name + "'");
+    // value. The raw LLVM result: if the callee returns a reference,
+    // that result is still just the *address* at this point (see
+    // to_llvm_type's Reference case) -- it's up to the caller to decide
+    // whether to dereference it (codegen_expr, for a value context) or
+    // hand the address on as-is (codegen_lvalue, for a reference-
+    // returning call used itself as a further borrow source -- see
+    // resolve_borrow_source_root in movecheck.cppm). Also returns the
+    // resolved callee's own Function record (see CallResult) so both
+    // call sites can answer that question without re-resolving anything.
+    //
+    // Method call handling (ch05 §5.9): if `expr.lhs` is non-null
+    // (`obj.method(args)`), the receiver `obj` is resolved *once* here
+    // (codegen_lvalue has real side effects -- e.g. a span subscript's
+    // bounds check -- so it must never run twice for the same syntactic
+    // receiver) to find its static type, which supplies `ClassName` for
+    // the synthesized `ClassName_method` symbol (scpp has no real C++
+    // name mangling; this recomputes the identical deterministic scheme
+    // parse_class_def used to create the method in the first place --
+    // see ClassDef's own comment) -- then `&obj` is passed as the
+    // implicit first (`this`) argument, ahead of the explicit ones.
+    CallResult codegen_call(const Expr& expr) {
+        std::string callee_name = expr.name;
+        llvm::Value* this_arg = nullptr;
+        if (expr.lhs != nullptr) {
+            LValue receiver = codegen_lvalue(*expr.lhs);
+            if (receiver.type.kind != TypeKind::Named) {
+                throw CodegenError("method call '." + expr.name + "(...)' is only supported on a class type");
+            }
+            callee_name = receiver.type.name + "_" + expr.name;
+            this_arg = receiver.ptr;
         }
-        const Function* callee_def = find_function_def(expr.name);
-        std::vector<llvm::Value*> args;
-        args.reserve(expr.args.size());
-        for (size_t i = 0; i < expr.args.size(); i++) {
-            bool param_is_reference = callee_def != nullptr && i < callee_def->params.size() &&
-                                       callee_def->params[i].type.kind == TypeKind::Reference;
+
+        llvm::Function* callee = module_->getFunction(callee_name);
+        if (callee == nullptr) {
+            throw CodegenError("call to unknown function '" + callee_name + "'");
+        }
+        const Function* callee_def = find_function_def(callee_name);
+        std::vector<llvm::Value*> args = codegen_call_args(expr.args, callee_def, this_arg != nullptr ? 1 : 0);
+        if (this_arg != nullptr) args.insert(args.begin(), this_arg);
+        return CallResult{builder_->CreateCall(callee, args), callee_def};
+    }
+
+    // Builds the LLVM argument list for a call to `callee_def` (nullable
+    // -- an unresolvable callee still needs *some* argument list, just
+    // with no reference-parameter information to consult), given how many
+    // leading parameters are already spoken for before `args[0]` --
+    // `param_offset` is 1 when an implicit `this` occupies params[0] (a
+    // method call or a constructor call, ch04 §4.2/ch05 §5.9), 0
+    // otherwise. Shared by codegen_call and the VarDecl constructor-call
+    // case below so both resolve "is this argument's target parameter a
+    // reference" identically.
+    std::vector<llvm::Value*> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
+                                                  size_t param_offset) {
+        std::vector<llvm::Value*> result;
+        result.reserve(args.size());
+        for (size_t i = 0; i < args.size(); i++) {
+            bool param_is_reference = callee_def != nullptr && i + param_offset < callee_def->params.size() &&
+                                       callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
             if (param_is_reference) {
                 // Bind the reference parameter to the argument's address
                 // rather than passing its value, exactly like a local
                 // reference's own VarDecl.
-                args.push_back(codegen_lvalue(*expr.args[i]).ptr);
+                result.push_back(codegen_lvalue(*args[i]).ptr);
             } else {
-                args.push_back(codegen_expr(*expr.args[i]));
+                result.push_back(codegen_expr(*args[i]));
             }
         }
-        return builder_->CreateCall(callee, args);
+        return result;
     }
 
     // Reads `lv`'s value for use as an ordinary rvalue. An array decays to
@@ -794,6 +910,17 @@ private:
                 // fits identically in the 8 bits either way.
                 return llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), expr.int_value, /*isSigned=*/false);
 
+            case ExprKind::StringLiteral:
+                // A read-only global byte array (null-terminated, like a
+                // real C string literal), decaying directly to a pointer
+                // to its first byte -- there is no backing local
+                // variable/place for a literal, so (unlike an array-typed
+                // identifier's load_value decay) this needs no separate
+                // lvalue-then-decay step; CreateGlobalString itself
+                // returns the pointer. Reuses the exact mechanism already
+                // used for print_bool's "true"/"false" constants.
+                return builder_->CreateGlobalString(expr.name, "str");
+
             case ExprKind::Identifier:
             case ExprKind::Subscript: {
                 LValue lv = codegen_lvalue(expr);
@@ -863,19 +990,18 @@ private:
                 if (expr.name == "print_int" || expr.name == "print_bool" || expr.name == "print_char") {
                     return codegen_builtin_print(expr);
                 }
-                llvm::Value* result = codegen_call(expr);
-                const Function* callee_def = find_function_def(expr.name);
-                if (callee_def != nullptr && callee_def->return_type.kind == TypeKind::Reference) {
+                CallResult result = codegen_call(expr);
+                if (result.callee_def != nullptr && result.callee_def->return_type.kind == TypeKind::Reference) {
                     // The callee returns a reference -- an address,
                     // lowered identically to a pointer (see
                     // to_llvm_type) -- so using the call's result as a
                     // *value* here means auto-dereferencing it, exactly
                     // like a reference local's own read (see
                     // codegen_lvalue's Identifier case).
-                    return builder_->CreateLoad(to_llvm_type(*callee_def->return_type.pointee), result,
+                    return builder_->CreateLoad(to_llvm_type(*result.callee_def->return_type.pointee), result.value,
                                                  "derefcalltmp");
                 }
-                return result;
+                return result.value;
             }
 
             case ExprKind::Move: {
@@ -930,37 +1056,65 @@ private:
         return heap_ptr;
     }
 
+    // Returns `class_name`'s destructor function, if it has one (see
+    // parse_class_def's `ClassName_delete` synthesized-name scheme) --
+    // nullptr if `class_name` isn't a class, or is one with no destructor
+    // defined. A class with no destructor needs no cleanup at scope exit
+    // at all (same as a plain struct); this is deliberately *not* an
+    // error, unlike a missing constructor for constructor-call syntax
+    // (VarDecl's own check) -- a destructor is optional, a constructor
+    // call always names one explicitly.
+    llvm::Function* find_destructor(const std::string& class_name) {
+        return module_->getFunction(class_name + "_delete");
+    }
+
     // Releases every *currently in-scope* unique_ptr local's owned
-    // resource. Called right before each `return` (see StmtKind::Return).
-    // `free(NULL)` is a well-defined no-op in C, so unconditionally
-    // freeing whatever value is *currently* in each slot is always
-    // correct, regardless of whether that local still owns a value, was
-    // moved-out (its slot was nulled by Move's codegen), or was never
-    // assigned past its own zero-init. Locals whose block scope already
-    // closed before reaching this return were already dropped by
-    // pop_scope() and removed from `locals_`, so they aren't
-    // double-freed here.
+    // resource, and runs every currently-in-scope class-typed local's
+    // destructor (ch04 §4.2), if it has one. Called right before each
+    // `return` (see StmtKind::Return). `free(NULL)` is a well-defined
+    // no-op in C, so unconditionally freeing whatever value is
+    // *currently* in each unique_ptr slot is always correct, regardless
+    // of whether that local still owns a value, was moved-out (its slot
+    // was nulled by Move's codegen), or was never assigned past its own
+    // zero-init. A class-typed local has no such "moved-out" state to
+    // account for in this version (movecheck disallows reassigning or
+    // moving one after construction -- ch04 §4.2's checking is
+    // deliberately minimal, see ClassDef's own comment), so its
+    // destructor unconditionally runs exactly once, passing the local's
+    // own address (not a loaded value -- unlike unique_ptr, the object
+    // itself lives directly in the alloca, there is no separate heap
+    // allocation this local merely points at). Locals whose block scope
+    // already closed before reaching this return were already dropped by
+    // pop_scope() and removed from `locals_`, so they aren't double-
+    // freed/double-destructed here.
     void free_unique_ptr_locals() {
         llvm::Function* free_fn = get_or_declare_free();
         for (const auto& [name, slot] : locals_) {
-            if (slot.type.kind != TypeKind::UniquePtr) continue;
-            llvm::Value* current = builder_->CreateLoad(to_llvm_type(slot.type), slot.alloca, "droptmp");
-            builder_->CreateCall(free_fn, {current});
+            if (slot.type.kind == TypeKind::UniquePtr) {
+                llvm::Value* current = builder_->CreateLoad(to_llvm_type(slot.type), slot.alloca, "droptmp");
+                builder_->CreateCall(free_fn, {current});
+            } else if (slot.type.kind == TypeKind::Named) {
+                if (llvm::Function* dtor = find_destructor(slot.type.name)) {
+                    builder_->CreateCall(dtor, {slot.alloca});
+                }
+            }
         }
     }
 
     void push_scope() { scope_stack_.emplace_back(); }
 
-    // Drops every unique_ptr declared directly in the scope being popped
-    // (in reverse declaration order, matching C++/Rust destruction
-    // order), then removes all of that scope's names from `locals_` so
-    // they're correctly treated as out-of-scope afterward (e.g. a
-    // variable declared only inside an `if` branch can no longer be
-    // referenced once that branch ends). If the current block already
-    // has a terminator (e.g. the scope ended in `return`, which already
-    // freed everything via free_unique_ptr_locals), no drop instructions
-    // are emitted here -- there both to avoid inserting unreachable code
-    // after a terminator and to avoid a double free.
+    // Drops every unique_ptr declared directly in the scope being popped,
+    // and runs the destructor of every class-typed local declared
+    // directly in it that has one (in reverse declaration order, matching
+    // C++/Rust destruction order), then removes all of that scope's names
+    // from `locals_` so they're correctly treated as out-of-scope
+    // afterward (e.g. a variable declared only inside an `if` branch can
+    // no longer be referenced once that branch ends). If the current
+    // block already has a terminator (e.g. the scope ended in `return`,
+    // which already freed/destructed everything via
+    // free_unique_ptr_locals), no drop instructions are emitted here --
+    // there both to avoid inserting unreachable code after a terminator
+    // and to avoid a double free/destruction.
     void pop_scope() {
         std::vector<std::string> names = std::move(scope_stack_.back());
         scope_stack_.pop_back();
@@ -970,10 +1124,16 @@ private:
             llvm::Function* free_fn = get_or_declare_free();
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
                 auto slot_it = locals_.find(*it);
-                if (slot_it == locals_.end() || slot_it->second.type.kind != TypeKind::UniquePtr) continue;
-                llvm::Value* current =
-                    builder_->CreateLoad(to_llvm_type(slot_it->second.type), slot_it->second.alloca, "scopedroptmp");
-                builder_->CreateCall(free_fn, {current});
+                if (slot_it == locals_.end()) continue;
+                if (slot_it->second.type.kind == TypeKind::UniquePtr) {
+                    llvm::Value* current = builder_->CreateLoad(to_llvm_type(slot_it->second.type),
+                                                                 slot_it->second.alloca, "scopedroptmp");
+                    builder_->CreateCall(free_fn, {current});
+                } else if (slot_it->second.type.kind == TypeKind::Named) {
+                    if (llvm::Function* dtor = find_destructor(slot_it->second.type.name)) {
+                        builder_->CreateCall(dtor, {slot_it->second.alloca});
+                    }
+                }
             }
         }
         for (const std::string& name : names) {
@@ -1213,12 +1373,20 @@ private:
                 // resolve_borrow_source_root in movecheck.cppm.
                 // codegen_call's raw result is already the referent's
                 // address in that case -- no load needed, unlike
-                // codegen_expr's own Call case.
-                const Function* callee_def = find_function_def(expr.name);
-                if (callee_def == nullptr || callee_def->return_type.kind != TypeKind::Reference) {
+                // codegen_expr's own Call case. Validity (must actually
+                // be reference-returning) is checked *after* codegen_call
+                // returns rather than before, unlike the pre-method-call
+                // version of this code -- codegen_call must run first
+                // regardless, to resolve a possible method-call receiver
+                // exactly once; an invalid program reaching this far
+                // would already have been rejected by movecheck, so
+                // emitting (and then discarding, via the throw below) a
+                // few extra instructions first is harmless.
+                CallResult result = codegen_call(expr);
+                if (result.callee_def == nullptr || result.callee_def->return_type.kind != TypeKind::Reference) {
                     throw CodegenError("expression is not assignable");
                 }
-                return LValue{codegen_call(expr), *callee_def->return_type.pointee};
+                return LValue{result.value, *result.callee_def->return_type.pointee};
             }
 
             case ExprKind::Unary: {

@@ -1,0 +1,2 @@
+contains: call void @Counter_new
+contains: call void @Counter_delete

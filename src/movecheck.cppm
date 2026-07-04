@@ -90,6 +90,23 @@ struct DataflowState {
     // semantics (see join_states): it's a purely lexical/structural fact,
     // identical via every predecessor path to a given program point.
     int unsafe_depth = 0;
+    // ch04 §4.2/ch05 §5.9: the class `this` belongs to, if the function
+    // currently being checked is a method (`params[0].name == "this"`) --
+    // empty otherwise. Set once in check_function from the function's own
+    // params[0], if present, and never changes afterward -- exactly like
+    // `unsafe_depth` above (a purely structural fact, identical via every
+    // predecessor path), so join_states doesn't need real join logic here
+    // either.
+    std::string current_class;
+    // All class names in the whole program (ch04 §4.2), built once by
+    // check_moves and never mutated afterward -- used only to tell a
+    // class-typed Member base (access-controlled: private-by-construction
+    // fields, ch04 §4.2) apart from a struct-typed one (never access-
+    // controlled, ch04 §4.1). A raw, non-owning pointer (not a copy)
+    // since check_moves's own local set outlives every DataflowState
+    // that references it; never null once check_function sets it (may be
+    // empty, for a program with no classes at all).
+    const std::unordered_set<std::string>* class_names = nullptr;
 
     bool operator==(const DataflowState&) const = default;
 };
@@ -188,6 +205,14 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // fixed-point iteration computes along the way, mirroring
         // join_ref_targets' own comment above.
         std::min(a.unsafe_depth, b.unsafe_depth),
+        // `current_class`/`class_names` are set once per function and
+        // never change afterward (see DataflowState's own comments) --
+        // identical on both sides in a well-formed program, so simply
+        // keeping `a`'s is enough (no real join needed, same reasoning
+        // as `unsafe_depth` just above, minus the "fail safe" tie-break
+        // since there's no meaningful direction to fail toward here).
+        a.current_class,
+        a.class_names,
     };
 }
 
@@ -210,6 +235,18 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
+
+// Returns the class/struct name `type` resolves to as a Named type,
+// seeing through a Reference (e.g. `this`'s own declared type, ch05
+// §5.9) -- or empty if `type` isn't (possibly a reference to) a Named
+// type at all. Used only by apply_expr's Member case, to tell a
+// class-typed base (access-controlled, ch04 §4.2) apart from a
+// struct-typed one (never access-controlled, ch04 §4.1).
+[[nodiscard]] std::string named_type_name(const Type& type) {
+    if (type.kind == TypeKind::Named) return type.name;
+    if (type.kind == TypeKind::Reference && type.pointee->kind == TypeKind::Named) return type.pointee->name;
+    return "";
+}
 
 // Structurally validates and resolves spec ch05.3's elision rule for a
 // single function's signature: if `fn.return_type` is a Reference, `fn`
@@ -511,6 +548,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::IntegerLiteral:
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
+        case ExprKind::StringLiteral:
             return;
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr->name);
@@ -1037,7 +1075,33 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 // every other signature-based check in this file.
 void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors) {
-    auto sig_it = signatures.find(expr.name);
+    // A method call (`obj.name(...)` / `this->name(...)`, ch04 §4.2/ch05
+    // §5.9) stores its receiver in `expr.lhs` and only the unqualified
+    // method name in `expr.name` -- but `signatures` (like codegen's own
+    // `module_->getFunction`) is keyed by the synthesized
+    // `ClassName_methodName` form (see parse_class_def), and the
+    // receiver occupies `param_types[0]` (`this`) ahead of `expr.args`'
+    // own entries (see make_this_param), exactly like codegen_call/
+    // codegen_call_args independently resolve the same two facts from
+    // the receiver's type. Scoped to a plain Identifier receiver (covers
+    // `this->method()` and `obj.method()` for a local/parameter `obj`,
+    // the only shape movecheck can resolve a type for without a real
+    // type-checker) -- a more complex receiver expression silently keeps
+    // the unqualified (therefore not-found) lookup and a zero offset,
+    // same as before this fix, rather than crashing or guessing wrong.
+    std::string callee_key = expr.name;
+    size_t param_offset = 0;
+    if (expr.lhs && expr.lhs->kind == ExprKind::Identifier) {
+        auto type_it = body.local_types.find(expr.lhs->name);
+        if (type_it != body.local_types.end()) {
+            std::string class_name = named_type_name(type_it->second);
+            if (!class_name.empty()) {
+                callee_key = class_name + "_" + expr.name;
+                param_offset = 1;
+            }
+        }
+    }
+    auto sig_it = signatures.find(callee_key);
     if (report_errors && sig_it != signatures.end() && !sig_it->second.is_safe && state.unsafe_depth == 0) {
         throw DataflowError("cannot call non-'safe' function '" + expr.name +
                              "' from a 'safe' context; wrap the call in 'unsafe { }' (spec ch01 §1.3/ch02)");
@@ -1048,12 +1112,13 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     BorrowMap in_call_borrows;
     for (size_t i = 0; i < expr.args.size(); i++) {
         const Expr& arg = *expr.args[i];
+        size_t param_index = i + param_offset;
         bool param_is_reference =
-            sig_it != signatures.end() && i < sig_it->second.param_types.size() &&
-            is_reference(sig_it->second.param_types[i]);
+            sig_it != signatures.end() && param_index < sig_it->second.param_types.size() &&
+            is_reference(sig_it->second.param_types[param_index]);
         if (param_is_reference) {
-            apply_reference_argument(arg, sig_it->second.param_types[i], state, in_call_borrows, body, signatures,
-                                      report_errors);
+            apply_reference_argument(arg, sig_it->second.param_types[param_index], state, in_call_borrows, body,
+                                      signatures, report_errors);
         } else {
             // Parameter types aren't resolved here for anything other
             // than reference detection above; a unique_ptr argument
@@ -1077,9 +1142,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // enforced declared constness matters by then (see
             // assignment_target_is_read_only's Unary case).
             bool param_wants_mutable_pointer =
-                sig_it != signatures.end() && i < sig_it->second.param_types.size() &&
-                sig_it->second.param_types[i].kind == TypeKind::Pointer &&
-                sig_it->second.param_types[i].is_mutable_pointee;
+                sig_it != signatures.end() && param_index < sig_it->second.param_types.size() &&
+                sig_it->second.param_types[param_index].kind == TypeKind::Pointer &&
+                sig_it->second.param_types[param_index].is_mutable_pointee;
             if (report_errors && param_wants_mutable_pointer && arg.kind == ExprKind::Unary &&
                 arg.unary_op == UnaryOp::AddressOf && is_read_only_reachable(*arg.lhs, body, signatures)) {
                 throw DataflowError("cannot pass '&' of a read-only-reachable place as a mutable 'T*' "
@@ -1106,6 +1171,7 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
         case ExprKind::IntegerLiteral:
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
+        case ExprKind::StringLiteral:
             return;
 
         case ExprKind::Identifier: {
@@ -1236,9 +1302,32 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             check_call_arguments(expr, state, body, signatures, report_errors);
             return;
 
-        case ExprKind::Member:
+        case ExprKind::Member: {
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+            // ch04 §4.2: a member variable is always private-by-
+            // construction (parse_class_def rejects `public` on one
+            // outright), so external code can only ever reach it through
+            // a method call -- never directly, the way it still can for
+            // a struct field (never access-controlled, ch04 §4.1).
+            // Scoped to a plain Identifier base (`this`, or an ordinary
+            // local/parameter) for now -- movecheck doesn't otherwise
+            // infer the type of an arbitrary nested expression, so a
+            // deeper chain (`a.b.field` where `a.b` is itself
+            // class-typed) isn't covered by this check yet, a known,
+            // narrow scope limitation.
+            if (report_errors && expr.lhs->kind == ExprKind::Identifier && state.class_names != nullptr) {
+                auto type_it = body.local_types.find(expr.lhs->name);
+                if (type_it != body.local_types.end()) {
+                    std::string class_name = named_type_name(type_it->second);
+                    if (!class_name.empty() && state.class_names->contains(class_name) &&
+                        class_name != state.current_class) {
+                        throw DataflowError("cannot access private member '" + expr.name + "' of class '" +
+                                             class_name + "' from outside its own methods (ch04 §4.2)");
+                    }
+                }
+            }
             return;
+        }
 
         case ExprKind::Subscript:
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
@@ -1388,6 +1477,30 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 }
                 return;
             }
+            if (type_it != body.local_types.end() && state.class_names != nullptr &&
+                type_it->second.kind == TypeKind::Named && state.class_names->contains(type_it->second.name)) {
+                // ch04 §4.2: unlike a plain `struct` (an ordinary,
+                // freely-reassignable trivial value), a class-typed local
+                // is conservatively bound once at construction and never
+                // reassigned in this version -- this *is* a soundness
+                // necessity, not just a temporary restriction: without a
+                // real copy constructor/assignment operator (out of
+                // scope for v0.1 -- ch04's own "full class checking
+                // rules" note), a plain bitwise reassignment would copy
+                // whatever resource-owning fields the class has (e.g. a
+                // raw handle its destructor later frees), and both the
+                // old and new bindings' destructors would then
+                // independently try to release the *same* resource at
+                // their respective scope exits -- a double-free/use-
+                // after-free. Lifting this needs real copy semantics
+                // designed first, not just permission to reassign.
+                if (report_errors) {
+                    throw DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
+                                         "' cannot be reassigned after construction in this version (no copy "
+                                         "semantics are defined yet -- see ch04 §4.2)");
+                }
+                return;
+            }
 
             bool target_is_unique_ptr = type_it != body.local_types.end() && is_unique_ptr(type_it->second);
             apply_expr(*stmt.expr, target_is_unique_ptr, state, body, signatures, report_errors);
@@ -1527,7 +1640,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 // Splitting into these two phases avoids both false positives (from
 // not-yet-stable intermediate states) and duplicate diagnostics (a block
 // can be visited many times during fixed-point iteration).
-void check_function(const Function& fn, const Signatures& signatures) {
+void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names) {
     Body body = build_mir(fn);
 
     // ch01 §1.3: `unsafe { }` written inside a native (non-`safe`)
@@ -1584,8 +1697,45 @@ void check_function(const Function& fn, const Signatures& signatures) {
     // -- only an *explicit* `unsafe { }` written in the native function's
     // own source is.)
     entry_state.unsafe_depth = fn.is_safe ? 0 : 1;
+    // ch04 §4.2/ch05 §5.9: `this` is always params[0] when present (see
+    // parser's make_this_param) -- a user can never spell a same-named
+    // parameter themselves, since `this` is a keyword, not an ordinary
+    // identifier token.
+    if (!fn.params.empty() && fn.params[0].name == "this") {
+        entry_state.current_class = fn.params[0].type.pointee->name;
+    }
+    entry_state.class_names = &class_names;
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;
+        // ch04 §4.2: like a class-typed local (see the Assign case
+        // below), a class-typed *parameter* cannot be passed by value
+        // either -- scpp has no copy constructor, so a by-value
+        // parameter would bitwise-copy whatever resource-owning fields
+        // the class has, and the callee's copy would then run its own
+        // destructor on the same underlying resource at scope-exit,
+        // independently of the caller's original -- a double-free. Take
+        // a `const T&`/`T&` parameter instead (this doesn't apply to
+        // `this` itself, which is always Reference-typed already, never
+        // bare Named -- see make_this_param).
+        if (param.type.kind == TypeKind::Named && class_names.contains(param.type.name)) {
+            throw DataflowError("parameter '" + param.name + "' of function '" + fn.name + "' cannot take class '" +
+                                 param.type.name +
+                                 "' by value (no copy semantics are defined yet -- take 'const " +
+                                 param.type.name + "&' or '" + param.type.name + "&' instead, see ch04 §4.2)");
+        }
+    }
+    // Symmetric to the by-value-parameter rejection above: returning a
+    // class by value would require copying it out of the callee's local
+    // scope, the exact same unsupported bitwise-copy-of-a-resource-
+    // owning-value hazard. A method/function that hands back a class
+    // instance must do so via a reference to an already-existing one
+    // (e.g. `this`, via the this-elision rule, ch05 §5.3/§5.9) or the
+    // caller must construct its own directly -- there is no by-value
+    // "return a freshly-built class instance" form in this version.
+    if (fn.return_type.kind == TypeKind::Named && class_names.contains(fn.return_type.name)) {
+        throw DataflowError("function '" + fn.name + "' cannot return class '" + fn.return_type.name +
+                             "' by value (no copy semantics are defined yet -- return '" + fn.return_type.name +
+                             "&'/'const " + fn.return_type.name + "&' instead, see ch04 §4.2)");
     }
 
     std::vector<DataflowState> in_states(n);
@@ -1665,13 +1815,21 @@ void check_moves(const Program& program) {
         sig.is_safe = fn.is_safe;
         signatures[fn.name] = std::move(sig);
     }
+    // ch04 §4.2: every class name in the program, so Member-access
+    // checking (apply_expr's own Member case) can tell a class-typed
+    // base (access-controlled) apart from a struct-typed one (never
+    // access-controlled, ch04 §4.1) -- see DataflowState::class_names.
+    std::unordered_set<std::string> class_names;
+    for (const ClassDef& def : program.classes) {
+        class_names.insert(def.name);
+    }
     for (const Function& fn : program.functions) {
         // A bodyless `extern "C"` declaration (ch02 §2.1) has no
         // statements to run the dataflow analysis over -- it's already
         // registered in `signatures` above (so call sites into it are
         // still checked normally), but there's nothing here to check.
         if (!fn.body) continue;
-        check_function(fn, signatures);
+        check_function(fn, signatures, class_names);
     }
 }
 

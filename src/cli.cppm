@@ -5,6 +5,7 @@ module;
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 export module scpp.cli;
 
@@ -39,6 +40,10 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwFalse: return "KwFalse";
         case scpp::TokenKind::KwStruct: return "KwStruct";
         case scpp::TokenKind::KwConst: return "KwConst";
+        case scpp::TokenKind::KwClass: return "KwClass";
+        case scpp::TokenKind::KwPublic: return "KwPublic";
+        case scpp::TokenKind::KwPrivate: return "KwPrivate";
+        case scpp::TokenKind::KwThis: return "KwThis";
         case scpp::TokenKind::LParen: return "LParen";
         case scpp::TokenKind::RParen: return "RParen";
         case scpp::TokenKind::LBrace: return "LBrace";
@@ -50,7 +55,9 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Dot: return "Dot";
         case scpp::TokenKind::Ellipsis: return "Ellipsis";
         case scpp::TokenKind::ColonColon: return "ColonColon";
+        case scpp::TokenKind::Colon: return "Colon";
         case scpp::TokenKind::Arrow: return "Arrow";
+        case scpp::TokenKind::Tilde: return "Tilde";
         case scpp::TokenKind::Plus: return "Plus";
         case scpp::TokenKind::Minus: return "Minus";
         case scpp::TokenKind::Star: return "Star";
@@ -77,7 +84,8 @@ std::string type_to_string(const scpp::Type& type) {
         case scpp::TypeKind::Named:
             return type.name;
         case scpp::TypeKind::Pointer:
-            return type_to_string(*type.pointee) + "*";
+            return (type.is_mutable_pointee ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
+                   "*";
         case scpp::TypeKind::Array:
             return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
         case scpp::TypeKind::UniquePtr:
@@ -166,6 +174,9 @@ void print_expr(const scpp::Expr& expr, int depth) {
         case scpp::ExprKind::CharLiteral:
             std::cout << "CharLiteral " << expr.int_value << "\n";
             break;
+        case scpp::ExprKind::StringLiteral:
+            std::cout << "StringLiteral " << expr.name << "\n";
+            break;
         case scpp::ExprKind::Identifier:
             std::cout << "Identifier " << expr.name << "\n";
             break;
@@ -180,6 +191,13 @@ void print_expr(const scpp::Expr& expr, int depth) {
             break;
         case scpp::ExprKind::Call:
             std::cout << "Call " << expr.name << "\n";
+            if (expr.lhs) {
+                // Method call receiver (ch05 §5.9) -- printed under its
+                // own label so it isn't mistaken for an ordinary argument.
+                print_indent(depth + 1);
+                std::cout << "Receiver\n";
+                print_expr(*expr.lhs, depth + 2);
+            }
             for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
             break;
         case scpp::ExprKind::Member:
@@ -208,6 +226,13 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
         case scpp::StmtKind::VarDecl:
             std::cout << "VarDecl " << type_to_string(stmt.type) << " " << stmt.var_name << "\n";
             if (stmt.init) print_expr(*stmt.init, depth + 1);
+            if (stmt.has_ctor_args) {
+                // `ClassName name(args);` (ch04 §4.2) -- printed under
+                // its own label, same reasoning as Call's Receiver above.
+                print_indent(depth + 1);
+                std::cout << "CtorArgs\n";
+                for (const auto& arg : stmt.ctor_args) print_expr(*arg, depth + 2);
+            }
             break;
         case scpp::StmtKind::Return:
             std::cout << "Return\n";
@@ -278,7 +303,8 @@ int run_parse(std::string_view path) {
     return 0;
 }
 
-int run_build(std::string_view input_path, std::string_view output_path) {
+int run_build(std::string_view input_path, std::string_view output_path,
+              const std::vector<std::string>& extra_link_inputs) {
     std::string source;
     try {
         source = read_file(input_path);
@@ -288,7 +314,7 @@ int run_build(std::string_view input_path, std::string_view output_path) {
     }
 
     try {
-        scpp::compile_to_executable(source, std::string(output_path));
+        scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs);
     } catch (const scpp::ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -320,17 +346,23 @@ int run(int argc, char** argv) {
     }
     if (argc >= 3 && std::string_view(argv[1]) == "build") {
         std::string_view output_path = "a.out";
-        for (int i = 3; i + 1 < argc; i++) {
-            if (std::string_view(argv[i]) == "-o") output_path = argv[i + 1];
+        std::vector<std::string> extra_link_inputs;
+        for (int i = 3; i < argc; i++) {
+            std::string_view arg = argv[i];
+            if (arg == "-o" && i + 1 < argc) {
+                output_path = argv[++i];
+            } else if (arg == "--link" && i + 1 < argc) {
+                extra_link_inputs.emplace_back(argv[++i]);
+            }
         }
-        return run_build(argv[2], output_path);
+        return run_build(argv[2], output_path, extra_link_inputs);
     }
 
     std::string_view name = argc > 0 ? argv[0] : "scpp";
     std::cout << "Hello from " << name << " " << version << "!\n";
     std::cout << "Usage: " << name << " lex <file>\n";
     std::cout << "       " << name << " parse <file>\n";
-    std::cout << "       " << name << " build <file> [-o <output>]\n";
+    std::cout << "       " << name << " build <file> [-o <output>] [--link <path>]...\n";
     return 0;
 }
 

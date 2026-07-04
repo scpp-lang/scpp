@@ -1,0 +1,2 @@
+contains: @str = private unnamed_addr constant [3 x i8] c"hi\00"
+contains: call i32 @puts(ptr @str)

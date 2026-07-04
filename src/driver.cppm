@@ -5,6 +5,7 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
@@ -79,19 +80,35 @@ void emit_object_file(std::string_view source, const std::string& object_path) {
 
 // Links a native object file into an executable using the system compiler
 // driver (clang/cc); this keeps us out of the business of re-implementing a
-// platform linker for M1.
-void link_executable(const std::string& object_path, const std::string& executable_path) {
-    std::string command = "cc \"" + object_path + "\" -o \"" + executable_path + "\"";
+// platform linker for M1. `extra_link_inputs` is appended verbatim after the
+// scpp object file -- additional .o/.a paths (e.g. a separately-built
+// `extern "C"` wrapper library, see stdlib/README.md) or `-lname`/`-Lpath`
+// flags a caller wants forwarded straight to the linker; empty by default
+// (an ordinary, no-C++-interop build needs none of this).
+void link_executable(const std::string& object_path, const std::string& executable_path,
+                      const std::vector<std::string>& extra_link_inputs = {}) {
+    std::string command = "cc \"" + object_path + "\"";
+    for (const std::string& input : extra_link_inputs) {
+        command += " \"" + input + "\"";
+    }
+    // A wrapper library that itself calls into real C++ (e.g. std::string)
+    // needs libstdc++'s runtime linked in too; `cc` alone (plain C mode)
+    // doesn't pull that in automatically the way `c++`/`clang++` would.
+    // Only added when there's an actual C++ wrapper to support, so a plain
+    // scpp-only build's link command is unaffected.
+    if (!extra_link_inputs.empty()) command += " -lstdc++";
+    command += " -o \"" + executable_path + "\"";
     int result = std::system(command.c_str());
     if (result != 0) {
         throw DriverError("linker command failed: " + command);
     }
 }
 
-void compile_to_executable(std::string_view source, const std::string& executable_path) {
+void compile_to_executable(std::string_view source, const std::string& executable_path,
+                            const std::vector<std::string>& extra_link_inputs = {}) {
     std::string object_path = executable_path + ".o";
     emit_object_file(source, object_path);
-    link_executable(object_path, executable_path);
+    link_executable(object_path, executable_path, extra_link_inputs);
     llvm::sys::fs::remove(object_path);
 }
 

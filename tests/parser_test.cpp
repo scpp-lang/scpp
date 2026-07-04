@@ -713,6 +713,51 @@ void test_unsupported_char_escape_is_rejected() {
     expect(threw, "unsupported_char_escape_is_rejected: expected a ParseError");
 }
 
+void test_string_literal_expression() {
+    scpp::Program program = scpp::parse("int f(char* p) { p = \"hello\"; return 0; }");
+    const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
+    expect(assign.rhs->kind == scpp::ExprKind::StringLiteral,
+           "string_literal_expression: rhs should be a StringLiteral");
+    expect(assign.rhs->name == "hello", "string_literal_expression: decoded content should be 'hello'");
+}
+
+void test_string_literal_escape_sequences_decode_correctly() {
+    struct Case { const char* source; const char* expected; };
+    const Case cases[] = {
+        {"int f(char* p) { p = \"a\\nb\"; return 0; }", "a\nb"},
+        {"int f(char* p) { p = \"\\t\\r\"; return 0; }", "\t\r"},
+        {"int f(char* p) { p = \"a\\\\b\"; return 0; }", "a\\b"},
+        {"int f(char* p) { p = \"say \\\"hi\\\"\"; return 0; }", "say \"hi\""},
+    };
+    for (const Case& c : cases) {
+        scpp::Program program = scpp::parse(c.source);
+        const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
+        expect(assign.rhs->name == c.expected,
+               "string_literal_escape_sequences_decode_correctly: mismatch for " + std::string(c.source));
+    }
+}
+
+void test_empty_string_literal_is_allowed() {
+    // Unlike an empty char literal (always rejected -- there's no ordinal
+    // value for it to hold), an empty string is a perfectly ordinary,
+    // zero-length C string.
+    scpp::Program program = scpp::parse("int f(char* p) { p = \"\"; return 0; }");
+    const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
+    expect(assign.rhs->kind == scpp::ExprKind::StringLiteral,
+           "empty_string_literal_is_allowed: rhs should be a StringLiteral");
+    expect(assign.rhs->name.empty(), "empty_string_literal_is_allowed: decoded content should be empty");
+}
+
+void test_unsupported_string_escape_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int f(char* p) { p = \"\\z\"; return 0; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "unsupported_string_escape_is_rejected: expected a ParseError");
+}
+
 void test_const_char_pointer_type() {
     // `const T*` (ch02 §2.1's realistic C signature compatibility -- e.g.
     // `const char* fmt`) parses as its own distinct Pointer type: scpp
@@ -792,6 +837,10 @@ int main() {
     test_empty_char_literal_is_rejected();
     test_multi_character_char_literal_is_rejected();
     test_unsupported_char_escape_is_rejected();
+    test_string_literal_expression();
+    test_string_literal_escape_sequences_decode_correctly();
+    test_empty_string_literal_is_allowed();
+    test_unsupported_string_escape_is_rejected();
     test_const_char_pointer_type();
     test_plain_pointer_defaults_to_mutable_pointee();
 

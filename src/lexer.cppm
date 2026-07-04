@@ -19,12 +19,13 @@ enum class TokenKind {
     // ordinal value happens in the parser (see decode_char_literal), not
     // here -- the lexer just finds the token's extent.
     CharLiteral,
-    // Minimal string literal (ch02 §2.1): just enough to recognize the
-    // linkage token `"C"` in `extern "C"`. `text` includes the
+    // String literal (`"hello\n"`), also reused as-is for the linkage
+    // token `"C"` in `extern "C"` (ch02 §2.1). `text` includes the
     // surrounding quotes (matching every other literal token's
-    // exact-source-substring convention); v0.1 has no general
-    // string-literal expression type yet, so this is never produced or
-    // consumed anywhere outside the `extern "C"` grammar.
+    // exact-source-substring convention); decoding the escape sequences
+    // into byte content happens in the parser (see decode_string_literal),
+    // not here -- the lexer just finds the token's extent, same division
+    // of labor as CharLiteral.
     StringLiteral,
 
     // keywords
@@ -55,6 +56,16 @@ enum class TokenKind {
     KwFalse,
     KwStruct,
     KwConst,
+    KwClass,   // ch04 §4.2: owns resources, participates in move/borrow
+               // checking, private-by-default access control -- unlike
+               // `struct` (trivial aggregate, always-public fields).
+    KwPublic,  // Only legal directly above a member *function* -- ch04
+               // §4.2 permanently forbids a public member variable
+               // (including a class-level constant).
+    KwPrivate, // Default access if a class body has no leading
+               // access-specifier section at all, matching real C++.
+    KwThis,    // ch05 §5.9: implicit reference parameter of every method
+               // -- `const T&` in a `const` method, `T&` otherwise.
 
     // punctuation
     LParen,
@@ -68,7 +79,11 @@ enum class TokenKind {
     Dot,
     Ellipsis, // `...` -- extern "C" variadic parameter marker only (ch02 §2.1)
     ColonColon,
+    Colon, // `:` -- class access-specifier sections (`public:`/`private:`,
+           // ch04 §4.2) only, in this version.
     Arrow,
+    Tilde, // `~` -- destructor declarator prefix only (`~ClassName()`,
+           // ch04 §4.2), in this version.
 
     // operators
     Plus,
@@ -178,6 +193,10 @@ private:
         if (text == "false") return TokenKind::KwFalse;
         if (text == "struct") return TokenKind::KwStruct;
         if (text == "const") return TokenKind::KwConst;
+        if (text == "class") return TokenKind::KwClass;
+        if (text == "public") return TokenKind::KwPublic;
+        if (text == "private") return TokenKind::KwPrivate;
+        if (text == "this") return TokenKind::KwThis;
         return TokenKind::Identifier;
     }
 
@@ -209,12 +228,12 @@ private:
         }
 
         if (c == '"') {
-            // Minimal string-literal lexing (ch02 §2.1): just enough to
-            // recognize `"C"` in `extern "C"`. Supports a backslash escape
-            // for an embedded quote/backslash (so e.g. `"\""` doesn't end
-            // the literal early), but doesn't interpret any other escape
-            // sequence -- v0.1 has no general string-literal expression
-            // type yet, so nothing downstream needs escape decoding.
+            // String literal (ch02 §2.1's linkage token "C" reuses this
+            // too): finds the token's extent the same way CharLiteral
+            // does just below (a backslash escapes the following
+            // character so e.g. `"\""` doesn't end the literal early).
+            // Decoding the escape sequences into byte content is the
+            // parser's job (decode_string_literal), not the lexer's.
             while (!at_end() && peek() != '"') {
                 if (peek() == '\\' && !at_end()) advance();
                 advance();
@@ -280,7 +299,9 @@ private:
                 return make_token(TokenKind::Unknown, start, start_line, start_col);
             case ':':
                 if (peek() == ':') { advance(); return make_token(TokenKind::ColonColon, start, start_line, start_col); }
-                return make_token(TokenKind::Unknown, start, start_line, start_col);
+                return make_token(TokenKind::Colon, start, start_line, start_col);
+            case '~':
+                return make_token(TokenKind::Tilde, start, start_line, start_col);
             default:
                 return make_token(TokenKind::Unknown, start, start_line, start_col);
         }

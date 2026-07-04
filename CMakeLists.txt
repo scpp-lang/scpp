@@ -124,3 +124,8 @@ target_compile_definitions(driver_test PRIVATE
     SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source")
 
 add_test(NAME driver_test COMMAND driver_test)
+
+# Builds and tests stdlib/string's String demo end-to-end -- see
+# stdlib/string/CMakeLists.txt for the full explanation.
+add_subdirectory(stdlib/string)
+
