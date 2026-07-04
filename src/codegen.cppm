@@ -67,7 +67,10 @@ public:
             declare_function(fn);
         }
         for (const Function& fn : program.functions) {
-            define_function(fn);
+            // A bodyless `extern "C"` declaration (ch02 §2.1) already got
+            // its LLVM `declare` from declare_function above; there's no
+            // body to lower.
+            if (fn.body != nullptr) define_function(fn);
         }
         std::string error;
         llvm::raw_string_ostream error_stream(error);
@@ -168,6 +171,10 @@ private:
                 return;
             case TypeKind::Named: {
                 if (type.name == "int" || type.name == "bool") return;
+                if (type.name == "void") {
+                    throw CodegenError("'void' cannot be a struct field (only a return type or a "
+                                        "pointer's pointee -- 'void*' -- may be 'void')");
+                }
                 const StructDef* def = find_struct_def(type.name);
                 if (def == nullptr) {
                     throw CodegenError("unknown type '" + type.name + "'");
@@ -244,6 +251,17 @@ private:
             case TypeKind::Named:
                 if (type.name == "int") return llvm::Type::getInt32Ty(*context_);
                 if (type.name == "bool") return llvm::Type::getInt1Ty(*context_);
+                // `void` (ch02 §2.1): only meaningful as a function return
+                // type or a pointer's pointee (`void*`, whose own
+                // to_llvm_type case above never even inspects the
+                // pointee, so nothing further is needed there). Callers
+                // that would put it somewhere nonsensical (a bare local,
+                // parameter, struct field, or array element) reject it
+                // *before* reaching here -- see declare_function's
+                // parameter loop and codegen_stmt's VarDecl case -- so
+                // this is never actually asked to allocate storage for a
+                // void value.
+                if (type.name == "void") return llvm::Type::getVoidTy(*context_);
                 {
                     auto it = structs_.find(type.name);
                     if (it != structs_.end()) return it->second.llvm_type;
@@ -306,10 +324,57 @@ private:
         }
     }
 
+    [[nodiscard]] static bool is_bare_void(const Type& type) {
+        return type.kind == TypeKind::Named && type.name == "void";
+    }
+
+    // ch02 §2.1: an `extern "C"` signature's parameter and return types
+    // must have a defined C representation. Allowed: scalars (`int`/
+    // `bool`) and `void` (return-type position only, checked by the
+    // caller before this is reached -- see declare_function); raw
+    // pointers `T*` (any pointee, including `void*` -- to_llvm_type never
+    // inspects a pointer's pointee, so nothing further to check there);
+    // `struct` by value or by pointer (already guaranteed Clang-ABI-
+    // compatible layout, ch04.3). A fixed-size array `T[N]` written in
+    // parameter position is already decayed to `T*` by the parser (see
+    // parse_function) -- exactly as in ordinary C++, and matching this
+    // rule's own allowance for it -- so `TypeKind::Array` itself can never
+    // actually reach here (return types have no array syntax at all,
+    // ch03; a plain local/struct-field array never becomes a signature
+    // type). Rejected: `T&`/`const T&`, `std::unique_ptr`, `std::span` --
+    // none of these have a defined C representation
+    // (`std::string`/`std::vector`/`std::shared_ptr`/`[[scpp::lifetime]]`
+    // don't exist in scpp at all yet, so there's nothing to reject for
+    // those -- see ch02 §2.1's own note on this).
+    void validate_c_abi_compatible(const Type& type, const std::string& fn_name,
+                                    const std::string& context_description) {
+        switch (type.kind) {
+            case TypeKind::Named:
+            case TypeKind::Pointer:
+            case TypeKind::Array:
+                return;
+            case TypeKind::UniquePtr:
+                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                                    " cannot be std::unique_ptr -- it has no defined C representation "
+                                    "(spec ch02 §2.1)");
+            case TypeKind::Reference:
+                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                                    " cannot be a reference -- it has no defined C representation (spec "
+                                    "ch02 §2.1)");
+            case TypeKind::Span:
+                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                                    " cannot be std::span -- it has no defined C representation (spec "
+                                    "ch02 §2.1)");
+        }
+    }
+
     void declare_function(const Function& fn) {
         if (fn.return_type.kind == TypeKind::Reference) {
             validate_reference_return_elision(fn);
             validate_reference_pointee(*fn.return_type.pointee);
+        }
+        if (fn.is_extern_c) {
+            validate_c_abi_compatible(fn.return_type, fn.name, "return type");
         }
         std::vector<llvm::Type*> param_types;
         param_types.reserve(fn.params.size());
@@ -317,10 +382,18 @@ private:
             if (param.type.kind == TypeKind::Reference) {
                 validate_reference_pointee(*param.type.pointee);
             }
+            if (fn.is_extern_c) {
+                validate_c_abi_compatible(param.type, fn.name, "parameter '" + param.name + "'");
+            }
+            if (is_bare_void(param.type)) {
+                throw CodegenError("function '" + fn.name + "': parameter '" + param.name +
+                                    "' cannot have type 'void' (only a return type or a pointer's pointee "
+                                    "-- 'void*' -- may be 'void')");
+            }
             param_types.push_back(to_llvm_type(param.type));
         }
         llvm::FunctionType* fn_type =
-            llvm::FunctionType::get(to_llvm_type(fn.return_type), param_types, /*isVarArg=*/false);
+            llvm::FunctionType::get(to_llvm_type(fn.return_type), param_types, fn.has_varargs);
         llvm::Function::Create(fn_type, llvm::Function::ExternalLinkage, fn.name, *module_);
     }
 
@@ -428,6 +501,11 @@ private:
                     return;
                 }
 
+                if (is_bare_void(stmt.type)) {
+                    throw CodegenError("variable '" + stmt.var_name +
+                                        "' cannot have type 'void' (only a return type or a pointer's "
+                                        "pointee -- 'void*' -- may be 'void')");
+                }
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
                 if (stmt.init) {

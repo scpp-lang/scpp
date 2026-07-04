@@ -1452,6 +1452,11 @@ void check_moves(const Program& program) {
         signatures[fn.name] = std::move(sig);
     }
     for (const Function& fn : program.functions) {
+        // A bodyless `extern "C"` declaration (ch02 §2.1) has no
+        // statements to run the dataflow analysis over -- it's already
+        // registered in `signatures` above (so call sites into it are
+        // still checked normally), but there's nothing here to check.
+        if (!fn.body) continue;
         check_function(fn, signatures);
     }
 }

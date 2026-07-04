@@ -185,6 +185,56 @@ void test_scope_resolution_operator() {
         "scope_resolution_operator");
 }
 
+void test_extern_and_void_keywords() {
+    // ch02 §2.1's prerequisites: `extern` and `void`.
+    expect_kinds(
+        "extern void",
+        {
+            scpp::TokenKind::KwExtern,
+            scpp::TokenKind::KwVoid,
+            scpp::TokenKind::EndOfFile,
+        },
+        "extern_and_void_keywords");
+}
+
+void test_string_literal() {
+    // Minimal string-literal lexing (ch02 §2.1): just enough to
+    // recognize `"C"`. `text` includes the surrounding quotes.
+    std::vector<scpp::Token> tokens = scpp::tokenize("extern \"C\" int f();");
+    expect(tokens.size() == 8, "string_literal: expected 8 tokens");
+    expect(tokens[1].kind == scpp::TokenKind::StringLiteral, "string_literal: kind should be StringLiteral");
+    expect(tokens[1].text == "\"C\"", "string_literal: text should be '\"C\"' (quotes included)");
+}
+
+void test_string_literal_with_escaped_quote() {
+    // A backslash-escaped quote doesn't end the literal early.
+    std::vector<scpp::Token> tokens = scpp::tokenize("\"a\\\"b\" 1");
+    expect(tokens.size() == 3, "string_literal_with_escaped_quote: expected 3 tokens");
+    expect(tokens[0].kind == scpp::TokenKind::StringLiteral,
+           "string_literal_with_escaped_quote: kind should be StringLiteral");
+    expect(tokens[0].text == "\"a\\\"b\"",
+           "string_literal_with_escaped_quote: text should include the escaped quote");
+    expect(tokens[1].kind == scpp::TokenKind::IntegerLiteral,
+           "string_literal_with_escaped_quote: next token should be the '1' after the literal ends");
+}
+
+void test_ellipsis() {
+    // `...` (ch02 §2.1's variadic parameter marker) is one Ellipsis
+    // token, not three separate Dot tokens.
+    expect_kinds(
+        "(int a, ...)",
+        {
+            scpp::TokenKind::LParen,
+            scpp::TokenKind::KwInt,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Comma,
+            scpp::TokenKind::Ellipsis,
+            scpp::TokenKind::RParen,
+            scpp::TokenKind::EndOfFile,
+        },
+        "ellipsis");
+}
+
 } // namespace
 
 int main() {
@@ -200,6 +250,10 @@ int main() {
     test_unknown_character();
     test_struct_punctuation();
     test_scope_resolution_operator();
+    test_extern_and_void_keywords();
+    test_string_literal();
+    test_string_literal_with_escaped_quote();
+    test_ellipsis();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

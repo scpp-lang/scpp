@@ -1,0 +1,1 @@
+sequence: define void @helper() | ret void | call void @helper()

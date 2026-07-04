@@ -21,8 +21,10 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
     switch (kind) {
         case scpp::TokenKind::Identifier: return "Identifier";
         case scpp::TokenKind::IntegerLiteral: return "IntegerLiteral";
+        case scpp::TokenKind::StringLiteral: return "StringLiteral";
         case scpp::TokenKind::KwInt: return "KwInt";
         case scpp::TokenKind::KwBool: return "KwBool";
+        case scpp::TokenKind::KwVoid: return "KwVoid";
         case scpp::TokenKind::KwReturn: return "KwReturn";
         case scpp::TokenKind::KwIf: return "KwIf";
         case scpp::TokenKind::KwElse: return "KwElse";
@@ -30,6 +32,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwFor: return "KwFor";
         case scpp::TokenKind::KwSafe: return "KwSafe";
         case scpp::TokenKind::KwUnsafe: return "KwUnsafe";
+        case scpp::TokenKind::KwExtern: return "KwExtern";
         case scpp::TokenKind::KwTrue: return "KwTrue";
         case scpp::TokenKind::KwFalse: return "KwFalse";
         case scpp::TokenKind::KwStruct: return "KwStruct";
@@ -43,6 +46,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Semicolon: return "Semicolon";
         case scpp::TokenKind::Comma: return "Comma";
         case scpp::TokenKind::Dot: return "Dot";
+        case scpp::TokenKind::Ellipsis: return "Ellipsis";
         case scpp::TokenKind::ColonColon: return "ColonColon";
         case scpp::TokenKind::Arrow: return "Arrow";
         case scpp::TokenKind::Plus: return "Plus";
@@ -235,14 +239,22 @@ int run_parse(std::string_view path) {
             }
         }
         for (const scpp::Function& fn : program.functions) {
-            std::cout << "Function " << (fn.is_safe ? "safe " : "") << type_to_string(fn.return_type) << " "
-                       << fn.name << "(";
+            std::cout << "Function " << (fn.is_safe ? "safe " : "") << (fn.is_extern_c ? "extern \"C\" " : "")
+                       << type_to_string(fn.return_type) << " " << fn.name << "(";
             for (size_t i = 0; i < fn.params.size(); i++) {
                 if (i > 0) std::cout << ", ";
                 std::cout << type_to_string(fn.params[i].type) << " " << fn.params[i].name;
             }
+            if (fn.has_varargs) {
+                std::cout << (fn.params.empty() ? "..." : ", ...");
+            }
             std::cout << ")\n";
-            print_stmt(*fn.body, 1);
+            if (fn.body) {
+                print_stmt(*fn.body, 1);
+            } else {
+                print_indent(1);
+                std::cout << "(no body -- external declaration)\n";
+            }
         }
     } catch (const scpp::ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";

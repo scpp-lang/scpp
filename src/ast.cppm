@@ -174,7 +174,25 @@ struct Function {
     Type return_type;
     std::string name;
     std::vector<Param> params;
+    // Null for a bodyless `extern "C"` declaration (ch02 §2.1) -- defined
+    // elsewhere, linked in externally. Always non-null for every other
+    // function (an ordinary definition, or an `extern "C"` *definition*
+    // with a body). Nothing outside parsing/movecheck/codegen's
+    // extern-declaration handling should assume this is always non-null.
     StmtPtr body;
+    // ch02 §2.1: requests C linkage. Orthogonal to `is_safe` when `body`
+    // is present (a `safe extern "C"` definition is allowed and checked
+    // like any other `safe` function); when `body` is null, `is_safe` is
+    // always false (parsing rejects `safe` on a bodyless declaration,
+    // since the compiler can't verify an implementation it can't see).
+    bool is_extern_c = false;
+    // ch02 §2.1: the declaration ends in a trailing `...` (e.g.
+    // `printf(const char* fmt, ...)`). Parsed and stored, but v0.1
+    // doesn't yet support a *call site* passing extra arguments beyond
+    // `params` to such a function (see codegen's declare_function) --
+    // only parsing/declaring the correct variadic signature shape is
+    // implemented in this first slice, per the spec's own scoping.
+    bool has_varargs = false;
 };
 
 struct StructField {

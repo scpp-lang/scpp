@@ -13,10 +13,21 @@ enum class TokenKind {
     // literals / identifiers
     Identifier,
     IntegerLiteral,
+    // Minimal string literal (ch02 §2.1): just enough to recognize the
+    // linkage token `"C"` in `extern "C"`. `text` includes the
+    // surrounding quotes (matching every other literal token's
+    // exact-source-substring convention); v0.1 has no general
+    // string-literal expression type yet, so this is never produced or
+    // consumed anywhere outside the `extern "C"` grammar.
+    StringLiteral,
 
     // keywords
     KwInt,
     KwBool,
+    KwVoid, // ch02 §2.1: valid only as a function return type or as a
+            // pointer's pointee (`void*`) -- never as a bare
+            // variable/parameter/field type. Needed for `extern "C"`
+            // signatures (e.g. `void free(void* p);`).
     KwReturn,
     KwIf,
     KwElse,
@@ -24,6 +35,7 @@ enum class TokenKind {
     KwFor,
     KwSafe,
     KwUnsafe,
+    KwExtern,
     KwTrue,
     KwFalse,
     KwStruct,
@@ -39,6 +51,7 @@ enum class TokenKind {
     Semicolon,
     Comma,
     Dot,
+    Ellipsis, // `...` -- extern "C" variadic parameter marker only (ch02 §2.1)
     ColonColon,
     Arrow,
 
@@ -136,6 +149,7 @@ private:
     static TokenKind keyword_kind(std::string_view text) {
         if (text == "int") return TokenKind::KwInt;
         if (text == "bool") return TokenKind::KwBool;
+        if (text == "void") return TokenKind::KwVoid;
         if (text == "return") return TokenKind::KwReturn;
         if (text == "if") return TokenKind::KwIf;
         if (text == "else") return TokenKind::KwElse;
@@ -143,6 +157,7 @@ private:
         if (text == "for") return TokenKind::KwFor;
         if (text == "safe") return TokenKind::KwSafe;
         if (text == "unsafe") return TokenKind::KwUnsafe;
+        if (text == "extern") return TokenKind::KwExtern;
         if (text == "true") return TokenKind::KwTrue;
         if (text == "false") return TokenKind::KwFalse;
         if (text == "struct") return TokenKind::KwStruct;
@@ -177,6 +192,21 @@ private:
             return make_token(TokenKind::IntegerLiteral, start, start_line, start_col);
         }
 
+        if (c == '"') {
+            // Minimal string-literal lexing (ch02 §2.1): just enough to
+            // recognize `"C"` in `extern "C"`. Supports a backslash escape
+            // for an embedded quote/backslash (so e.g. `"\""` doesn't end
+            // the literal early), but doesn't interpret any other escape
+            // sequence -- v0.1 has no general string-literal expression
+            // type yet, so nothing downstream needs escape decoding.
+            while (!at_end() && peek() != '"') {
+                if (peek() == '\\' && !at_end()) advance();
+                advance();
+            }
+            if (!at_end()) advance(); // closing quote
+            return make_token(TokenKind::StringLiteral, start, start_line, start_col);
+        }
+
         switch (c) {
             case '(': return make_token(TokenKind::LParen, start, start_line, start_col);
             case ')': return make_token(TokenKind::RParen, start, start_line, start_col);
@@ -186,7 +216,13 @@ private:
             case ']': return make_token(TokenKind::RBracket, start, start_line, start_col);
             case ';': return make_token(TokenKind::Semicolon, start, start_line, start_col);
             case ',': return make_token(TokenKind::Comma, start, start_line, start_col);
-            case '.': return make_token(TokenKind::Dot, start, start_line, start_col);
+            case '.':
+                if (peek() == '.' && peek(1) == '.') {
+                    advance();
+                    advance();
+                    return make_token(TokenKind::Ellipsis, start, start_line, start_col);
+                }
+                return make_token(TokenKind::Dot, start, start_line, start_col);
             case '+': return make_token(TokenKind::Plus, start, start_line, start_col);
             case '-':
                 if (peek() == '>') { advance(); return make_token(TokenKind::Arrow, start, start_line, start_col); }

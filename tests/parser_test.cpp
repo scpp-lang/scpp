@@ -339,6 +339,21 @@ void test_array_field_and_subscript() {
            "array_field_and_subscript: subscript index should be 0");
 }
 
+void test_array_parameter_decays_to_pointer() {
+    // ch02 §2.1: a fixed-size array parameter decays to a pointer to its
+    // element type, exactly as in ordinary C++ (`int arr[4]` and
+    // `int* arr` are the same parameter type) -- needed so `extern "C"`
+    // signatures can use arrays "in parameter position", per the spec.
+    scpp::Program program = scpp::parse("int f(int arr[4]) { return arr[0]; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.params.size() == 1, "array_parameter_decays_to_pointer: expected 1 parameter");
+    const scpp::Type& param_type = fn.params[0].type;
+    expect(param_type.kind == scpp::TypeKind::Pointer,
+           "array_parameter_decays_to_pointer: parameter type should be Pointer, not Array");
+    expect(param_type.pointee != nullptr && is_named_type(*param_type.pointee, "int"),
+           "array_parameter_decays_to_pointer: pointee should be 'int'");
+}
+
 void test_local_array_declaration() {
     scpp::Program program = scpp::parse("int f() { int values[8]; return values[0]; }");
     const scpp::Function& fn = program.functions[0];
@@ -473,6 +488,125 @@ void test_make_unique_of_struct_type() {
     expect(is_named_type(decl.init->type, "Point"), "make_unique_of_struct_type: element type should be 'Point'");
 }
 
+void test_extern_c_single_declaration() {
+    // ch02 §2.1: a bodyless `extern "C"` declaration.
+    scpp::Program program = scpp::parse("extern \"C\" int c_abs(int n); int main() { return 0; }");
+    expect(program.functions.size() == 2, "extern_c_single_declaration: expected 2 functions");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.is_extern_c, "extern_c_single_declaration: is_extern_c should be true");
+    expect(!fn.is_safe, "extern_c_single_declaration: is_safe should be false");
+    expect(fn.body == nullptr, "extern_c_single_declaration: body should be null (no definition)");
+    expect(fn.name == "c_abs", "extern_c_single_declaration: name should be 'c_abs'");
+    expect(fn.params.size() == 1 && is_named_type(fn.params[0].type, "int"),
+           "extern_c_single_declaration: expected 1 int parameter");
+}
+
+void test_extern_c_block_form() {
+    // ch02 §2.1: the block form is sugar for repeating `extern "C"` on
+    // each nested declaration.
+    scpp::Program program = scpp::parse(
+        "extern \"C\" {"
+        "    int c_abs(int n);"
+        "    void c_exit(int code);"
+        "}"
+        "int main() { return 0; }");
+    expect(program.functions.size() == 3, "extern_c_block_form: expected 3 functions");
+    expect(program.functions[0].is_extern_c && program.functions[0].body == nullptr,
+           "extern_c_block_form: 'c_abs' should be an extern declaration");
+    expect(program.functions[1].is_extern_c && program.functions[1].body == nullptr,
+           "extern_c_block_form: 'c_exit' should be an extern declaration");
+    expect(is_named_type(program.functions[1].return_type, "void"),
+           "extern_c_block_form: 'c_exit' should return 'void'");
+}
+
+void test_safe_extern_c_definition_is_allowed() {
+    // ch02 §2.1: `safe` and `extern "C"` are orthogonal for a definition.
+    scpp::Program program = scpp::parse("safe extern \"C\" int add(int a, int b) { return a + b; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.is_safe && fn.is_extern_c, "safe_extern_c_definition_is_allowed: both flags should be true");
+    expect(fn.body != nullptr, "safe_extern_c_definition_is_allowed: body should be present");
+}
+
+void test_safe_extern_c_declaration_is_rejected() {
+    // A bodyless declaration can never be `safe`: the compiler can't
+    // verify an implementation it doesn't see (ch02 §2.1).
+    bool threw = false;
+    try {
+        scpp::parse("safe extern \"C\" int foo(int x);");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "safe_extern_c_declaration_is_rejected: expected a ParseError");
+}
+
+void test_extern_cpp_linkage_is_rejected() {
+    // v0.1 only accepts the literal "C" linkage string.
+    bool threw = false;
+    try {
+        scpp::parse("extern \"C++\" int foo(int x);");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "extern_cpp_linkage_is_rejected: expected a ParseError");
+}
+
+void test_extern_c_varargs_declaration() {
+    // ch02 §2.1: `...` is parsed and stored as has_varargs on a bodyless
+    // extern "C" declaration.
+    scpp::Program program = scpp::parse("extern \"C\" int my_printf(int fmt, ...);");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.has_varargs, "extern_c_varargs_declaration: has_varargs should be true");
+    expect(fn.params.size() == 1, "extern_c_varargs_declaration: expected exactly 1 named parameter");
+}
+
+void test_varargs_on_definition_is_rejected() {
+    // v0.1 only supports `...` on a bodyless extern "C" declaration, not
+    // a definition (ch02 §2.1).
+    bool threw = false;
+    try {
+        scpp::parse("extern \"C\" int f(int a, ...) { return a; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "varargs_on_definition_is_rejected: expected a ParseError");
+}
+
+void test_varargs_on_non_extern_function_is_rejected() {
+    // `...` is only meaningful for extern "C" declarations (ch02 §2.1).
+    bool threw = false;
+    try {
+        scpp::parse("int f(int a, ...);");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "varargs_on_non_extern_function_is_rejected: expected a ParseError");
+}
+
+void test_void_return_and_void_pointer_types() {
+    // ch02 §2.1's `void` prerequisite: valid as a return type and as a
+    // pointer's pointee.
+    scpp::Program program = scpp::parse("extern \"C\" void free(void* p);");
+    const scpp::Function& fn = program.functions[0];
+    expect(is_named_type(fn.return_type, "void"), "void_return_and_void_pointer_types: return type should be 'void'");
+    expect(fn.params.size() == 1 && fn.params[0].type.kind == scpp::TypeKind::Pointer,
+           "void_return_and_void_pointer_types: parameter should be a pointer");
+    expect(is_named_type(*fn.params[0].type.pointee, "void"),
+           "void_return_and_void_pointer_types: parameter's pointee should be 'void'");
+}
+
+void test_safe_prefix_on_extern_c_block_is_rejected() {
+    // `safe` doesn't combine with the block form -- there's no single
+    // item for it to attach to (ch02 §2.1); mark individual items `safe`
+    // inside the block instead.
+    bool threw = false;
+    try {
+        scpp::parse("safe extern \"C\" { int f(int x); }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "safe_prefix_on_extern_c_block_is_rejected: expected a ParseError");
+}
+
 } // namespace
 
 int main() {
@@ -497,6 +631,7 @@ int main() {
     test_nested_member_access();
     test_pointer_field_type();
     test_array_field_and_subscript();
+    test_array_parameter_decays_to_pointer();
     test_local_array_declaration();
     test_struct_before_use_is_required();
     test_unique_ptr_type_declaration();
@@ -508,6 +643,16 @@ int main() {
     test_make_unique_zero_args();
     test_make_unique_with_arg();
     test_make_unique_of_struct_type();
+    test_extern_c_single_declaration();
+    test_extern_c_block_form();
+    test_safe_extern_c_definition_is_allowed();
+    test_safe_extern_c_declaration_is_rejected();
+    test_extern_cpp_linkage_is_rejected();
+    test_extern_c_varargs_declaration();
+    test_varargs_on_definition_is_rejected();
+    test_varargs_on_non_extern_function_is_rejected();
+    test_void_return_and_void_pointer_types();
+    test_safe_prefix_on_extern_c_block_is_rejected();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

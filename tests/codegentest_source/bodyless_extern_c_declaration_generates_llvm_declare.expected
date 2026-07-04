@@ -1,0 +1,1 @@
+sequence: declare i32 @c_abs(i32) | define i32 @main() | call i32 @c_abs(i32 -5)

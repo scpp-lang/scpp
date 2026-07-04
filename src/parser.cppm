@@ -33,7 +33,7 @@ public:
             if (check(TokenKind::KwStruct)) {
                 program.structs.push_back(parse_struct_def());
             } else {
-                program.functions.push_back(parse_function());
+                parse_top_level_function_or_extern_group(program);
             }
         }
         return program;
@@ -75,7 +75,8 @@ private:
 
     [[nodiscard]] bool looks_like_type_start() const {
         const Token& tok = peek();
-        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst) {
+        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst ||
+            tok.kind == TokenKind::KwVoid) {
             return true;
         }
         if (check_std_qualified("unique_ptr") || check_std_qualified("span")) return true;
@@ -149,6 +150,15 @@ private:
         } else if (tok.kind == TokenKind::KwBool) {
             type.name = "bool";
             advance();
+        } else if (tok.kind == TokenKind::KwVoid) {
+            // Valid here structurally (like int/bool) so `void*` falls
+            // out of the trailing `*` loop below for free; a *bare*
+            // (non-pointer) `void` is rejected downstream, not by the
+            // parser -- see codegen's declare_function (parameters) and
+            // VarDecl codegen (locals). A `void` return type is always
+            // fine and needs no rejection anywhere.
+            type.name = "void";
+            advance();
         } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text))) {
             type.name = std::string(tok.text);
             advance();
@@ -217,6 +227,71 @@ private:
         return base;
     }
 
+    // Parses one top-level item that isn't a `struct`: an ordinary
+    // function, or an `extern "C"` declaration/definition/block (ch02
+    // §2.1). `safe` (if present) is always consumed up front, before
+    // checking for `extern` -- matching the spec's own ordering example
+    // (`safe extern "C" int add(...) { ... }`) -- so it's available
+    // regardless of which of the three shapes below follows:
+    //   [safe] <ret> <name>(<params>) { <body> }                 -- an
+    //     ordinary definition (is_extern_c=false).
+    //   [safe] extern "C" <ret> <name>(<params>) (';' | '{' ... '}')
+    //     -- a single extern "C" item: a bodyless declaration (';') or a
+    //     definition (a `safe` one is allowed; see parse_function's own
+    //     "safe requires a body" check for the bodyless case).
+    //   extern "C" { <item> <item> ... }                          -- block
+    //     sugar for repeating `extern "C"` on each nested item, so an
+    //     item written inside the block is *not* itself re-prefixed with
+    //     `extern "C"` (matching real C++) -- but may independently start
+    //     with its own `safe`. A leading `safe` directly before this
+    //     block form isn't supported (there's no single item for it to
+    //     attach to); mark individual items `safe` inside the block
+    //     instead.
+    void parse_top_level_function_or_extern_group(Program& program) {
+        bool is_safe = match(TokenKind::KwSafe);
+        if (match(TokenKind::KwExtern)) {
+            parse_c_linkage_string();
+            if (check(TokenKind::LBrace)) {
+                if (is_safe) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "'safe' cannot prefix an 'extern \"C\"' block; mark individual "
+                                      "declarations 'safe' inside the block instead");
+                }
+                advance(); // '{'
+                while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+                    if (check(TokenKind::KwStruct)) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column,
+                                          "an 'extern \"C\"' block currently only supports function "
+                                          "declarations/definitions, not structs");
+                    }
+                    bool item_is_safe = match(TokenKind::KwSafe);
+                    program.functions.push_back(parse_function(item_is_safe, /*is_extern_c=*/true));
+                }
+                expect(TokenKind::RBrace, "'}'");
+                return;
+            }
+            program.functions.push_back(parse_function(is_safe, /*is_extern_c=*/true));
+            return;
+        }
+        program.functions.push_back(parse_function(is_safe, /*is_extern_c=*/false));
+    }
+
+    // Consumes and validates the linkage string literal after `extern`.
+    // v0.1 only accepts the literal "C" (not "C++" or anything else) --
+    // see ch02 §2.1.
+    void parse_c_linkage_string() {
+        const Token& tok = expect(TokenKind::StringLiteral, "a linkage string (e.g. \"C\")");
+        // `tok.text` includes the surrounding quotes (see StringLiteral's
+        // definition in lexer.cppm).
+        if (tok.text != "\"C\"") {
+            throw ParseError(tok.line, tok.column,
+                              "unsupported linkage " + std::string(tok.text) +
+                                  ": only extern \"C\" is supported in this version");
+        }
+    }
+
     StructDef parse_struct_def() {
         expect(TokenKind::KwStruct, "'struct'");
         StructDef def;
@@ -239,23 +314,95 @@ private:
         return def;
     }
 
-    Function parse_function() {
+    // Parses one function declaration or definition's `<return-type>
+    // <name>(<params>)` followed by either `;` (a bodyless declaration --
+    // only legal when `is_extern_c`, ch02 §2.1) or `{ <body> }` (an
+    // ordinary definition). Both `is_safe` and `is_extern_c` are decided
+    // and consumed by the caller (parse_top_level_function_or_extern_group)
+    // before this runs, since their combination affects *which* prefixes
+    // were already consumed (a `safe` inside an `extern "C" { }` block
+    // isn't preceded by its own `extern "C"` -- see that function).
+    Function parse_function(bool is_safe, bool is_extern_c) {
         Function fn;
-        fn.is_safe = match(TokenKind::KwSafe);
+        fn.is_safe = is_safe;
+        fn.is_extern_c = is_extern_c;
         fn.return_type = parse_type();
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
 
         expect(TokenKind::LParen, "'('");
         if (!check(TokenKind::RParen)) {
             do {
+                if (match(TokenKind::Ellipsis)) {
+                    // `...` must be the last thing in the parameter list
+                    // (as in real C++) -- anything after it is left
+                    // unconsumed, so the expect(RParen) below reports a
+                    // clear parse error for e.g. `(..., int x)`.
+                    fn.has_varargs = true;
+                    break;
+                }
                 Param param;
-                param.type = parse_type();
+                Type base_type = parse_type();
                 param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
+                // The array suffix (if any) follows the *declared name*,
+                // not the type -- same C-style declarator order as
+                // parse_var_decl/parse_struct_def (e.g. `int arr[4]`).
+                Type param_type = parse_array_suffix(base_type);
+                if (param_type.kind == TypeKind::Array) {
+                    // A fixed-size array parameter decays to a pointer to
+                    // its element type, exactly as in ordinary C++ (ch02
+                    // §2.1's signature-type rules explicitly require this
+                    // for `extern "C"`, and there's no reason for it to
+                    // behave differently for an ordinary function): the
+                    // array's *size* isn't part of the decayed type, only
+                    // its element type is -- `int arr[4]` and `int* arr`
+                    // are the same parameter type.
+                    Type decayed;
+                    decayed.kind = TypeKind::Pointer;
+                    decayed.pointee = param_type.element;
+                    param_type = std::move(decayed);
+                }
+                param.type = std::move(param_type);
                 fn.params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
         expect(TokenKind::RParen, "')'");
 
+        if (fn.has_varargs && !fn.is_extern_c) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "variadic parameters ('...') are only supported in an 'extern \"C\"' "
+                              "declaration (ch02 §2.1)");
+        }
+
+        if (match(TokenKind::Semicolon)) {
+            // Bodyless declaration: defined elsewhere, linked in
+            // externally. The compiler has no visibility into its
+            // implementation, so it can never be marked `safe` -- and,
+            // since `has_varargs` combined with a body isn't allowed
+            // (checked below), this is currently the *only* place a
+            // variadic function can be introduced.
+            if (!fn.is_extern_c) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "a function declaration without a body is only supported for "
+                                  "'extern \"C\"' (ch02 §2.1); every other function must have a "
+                                  "definition");
+            }
+            if (fn.is_safe) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "cannot mark an external declaration 'safe': its implementation "
+                                  "isn't visible to the compiler (ch02 §2.1)");
+            }
+            return fn;
+        }
+
+        if (fn.has_varargs) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "variadic parameters ('...') are only supported for a bodyless "
+                              "'extern \"C\"' declaration, not a definition (ch02 §2.1)");
+        }
         fn.body = parse_block();
         return fn;
     }
