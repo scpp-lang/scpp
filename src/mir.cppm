@@ -85,6 +85,11 @@ struct MirStatement {
     std::string local;          // Declare / Assign (target) / Drop / ScopeExit / BindReference (the reference)
     const Expr* expr = nullptr; // Assign (rhs) / Eval / BindReference (the place being borrowed)
     Type type;                  // Declare: the declared type; BindReference: the reference's own type
+    // The originating Stmt's position (see SourceLocation, ast.cppm) --
+    // used only so movecheck's diagnostics (DataflowState::current_loc)
+    // can point at the right source line, never consulted by any actual
+    // dataflow check.
+    SourceLocation loc;
 };
 
 enum class TerminatorKind {
@@ -102,6 +107,7 @@ struct Terminator {
     size_t false_target = 0;            // Branch (condition is false)
     const Expr* condition = nullptr;    // Branch
     const Expr* return_value = nullptr; // Return (nullable)
+    SourceLocation loc;                 // the originating Stmt's position, see MirStatement::loc
 };
 
 struct BasicBlock {
@@ -201,7 +207,7 @@ private:
                 push_scope();
                 if (stmt.is_unsafe) {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::UnsafeEnter, "", nullptr, Type{}});
+                        MirStatement{MirStatementKind::UnsafeEnter, "", nullptr, Type{}, stmt.loc});
                 }
                 for (const auto& s : stmt.statements) {
                     // Dead code after a return/unreachable terminator
@@ -216,7 +222,7 @@ private:
                 // its terminator.
                 if (stmt.is_unsafe && !current_has_terminator()) {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::UnsafeExit, "", nullptr, Type{}});
+                        MirStatement{MirStatementKind::UnsafeExit, "", nullptr, Type{}, stmt.loc});
                 }
                 pop_scope();
                 return;
@@ -231,20 +237,20 @@ private:
                     // diagnostic rather than validated here, keeping this
                     // builder a straightforward, non-throwing translation.
                     current().statements.push_back(MirStatement{
-                        MirStatementKind::BindReference, stmt.var_name, stmt.init.get(), stmt.type});
+                        MirStatementKind::BindReference, stmt.var_name, stmt.init.get(), stmt.type, stmt.loc});
                 } else if (stmt.init) {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::Assign, stmt.var_name, stmt.init.get(), stmt.type});
+                        MirStatement{MirStatementKind::Assign, stmt.var_name, stmt.init.get(), stmt.type, stmt.loc});
                 } else {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::Declare, stmt.var_name, nullptr, stmt.type});
+                        MirStatement{MirStatementKind::Declare, stmt.var_name, nullptr, stmt.type, stmt.loc});
                 }
                 return;
             }
 
             case StmtKind::Return: {
-                current().terminator =
-                    Terminator{TerminatorKind::Return, 0, 0, 0, nullptr, stmt.expr ? stmt.expr.get() : nullptr};
+                current().terminator = Terminator{TerminatorKind::Return, 0, 0, 0, nullptr,
+                                                   stmt.expr ? stmt.expr.get() : nullptr, stmt.loc};
                 return;
             }
 
@@ -261,9 +267,9 @@ private:
                 if (e.kind == ExprKind::Binary && e.binary_op == BinaryOp::Assign &&
                     e.lhs->kind == ExprKind::Identifier) {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::Assign, e.lhs->name, e.rhs.get(), Type{}});
+                        MirStatement{MirStatementKind::Assign, e.lhs->name, e.rhs.get(), Type{}, stmt.loc});
                 } else {
-                    current().statements.push_back(MirStatement{MirStatementKind::Eval, "", &e, Type{}});
+                    current().statements.push_back(MirStatement{MirStatementKind::Eval, "", &e, Type{}, stmt.loc});
                 }
                 return;
             }
@@ -274,15 +280,16 @@ private:
                 size_t else_block = new_block();
                 size_t merge_block = new_block();
 
-                body_.blocks[branch_block].terminator =
-                    Terminator{TerminatorKind::Branch, 0, then_block, else_block, stmt.condition.get(), nullptr};
+                body_.blocks[branch_block].terminator = Terminator{
+                    TerminatorKind::Branch, 0, then_block, else_block, stmt.condition.get(), nullptr, stmt.loc};
 
                 current_block_ = then_block;
                 push_scope();
                 lower_stmt(*stmt.then_branch);
                 pop_scope();
                 if (!current_has_terminator()) {
-                    current().terminator = Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr};
+                    current().terminator =
+                        Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr, stmt.loc};
                 }
 
                 current_block_ = else_block;
@@ -290,7 +297,8 @@ private:
                 if (stmt.else_branch) lower_stmt(*stmt.else_branch);
                 pop_scope();
                 if (!current_has_terminator()) {
-                    current().terminator = Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr};
+                    current().terminator =
+                        Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr, stmt.loc};
                 }
 
                 current_block_ = merge_block;
@@ -303,16 +311,17 @@ private:
                 size_t body_block = new_block();
                 size_t end_block = new_block();
 
-                body_.blocks[preheader].terminator = Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr};
-                body_.blocks[cond_block].terminator =
-                    Terminator{TerminatorKind::Branch, 0, body_block, end_block, stmt.condition.get(), nullptr};
+                body_.blocks[preheader].terminator =
+                    Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr, stmt.loc};
+                body_.blocks[cond_block].terminator = Terminator{
+                    TerminatorKind::Branch, 0, body_block, end_block, stmt.condition.get(), nullptr, stmt.loc};
 
                 current_block_ = body_block;
                 push_scope();
                 lower_stmt(*stmt.then_branch);
                 pop_scope();
                 if (!current_has_terminator()) {
-                    current().terminator = Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr};
+                    current().terminator = Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr, stmt.loc};
                 }
 
                 current_block_ = end_block;

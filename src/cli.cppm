@@ -110,6 +110,55 @@ std::string read_file(std::string_view path) {
     return buffer.str();
 }
 
+// Renders a Clang/GCC-style diagnostic: "path:line:col: error: message",
+// followed by the offending source line and a caret pointing at the
+// exact column, e.g.:
+//
+//   foo.cpp:3:9: error: use of undeclared identifier 'foo'
+//     3 |     int x = foo;
+//       |             ^
+//
+// Falls back to a bare "path: error: message" (no line/column, no source
+// excerpt) when `loc` is unknown ({0,0} -- see SourceLocation) since
+// there's nothing to point at; a DriverError (a linker failure) always
+// takes this path, as would any diagnostic from a code path that, for
+// whatever reason, couldn't determine a location.
+void print_diagnostic(std::string_view path, const std::string& source, scpp::SourceLocation loc,
+                       const std::string& message) {
+    std::cerr << path << ":";
+    if (loc.is_known()) std::cerr << loc.line << ":" << loc.column << ":";
+    std::cerr << " error: " << message << "\n";
+    if (!loc.is_known()) return;
+
+    // Find the start of line `loc.line` (1-based) by counting newlines --
+    // `source` is the exact text the lexer/parser walked, so this always
+    // agrees with however Lexer::advance() itself counted lines.
+    size_t line_start = 0;
+    int current_line = 1;
+    while (current_line < loc.line) {
+        size_t next_nl = source.find('\n', line_start);
+        if (next_nl == std::string::npos) return; // loc.line is past EOF -- defensive, shouldn't happen
+        line_start = next_nl + 1;
+        current_line++;
+    }
+    size_t line_end = source.find('\n', line_start);
+    if (line_end == std::string::npos) line_end = source.size();
+    std::string_view line_text(source.data() + line_start, line_end - line_start);
+
+    std::string line_num_str = std::to_string(loc.line);
+    std::string gutter(line_num_str.size(), ' ');
+    std::cerr << " " << line_num_str << " | " << line_text << "\n";
+    std::cerr << " " << gutter << " | ";
+    // loc.column is 1-based; print (column - 1) characters of leading
+    // context before the caret, preserving tabs so the caret still lines
+    // up correctly in a terminal that expands them (a plain space
+    // wouldn't match a tab's actual rendered width).
+    for (int i = 0; i < loc.column - 1 && static_cast<size_t>(i) < line_text.size(); i++) {
+        std::cerr << (line_text[static_cast<size_t>(i)] == '\t' ? '\t' : ' ');
+    }
+    std::cerr << "^\n";
+}
+
 int run_lex(std::string_view path) {
     std::string source;
     try {
@@ -297,7 +346,7 @@ int run_parse(std::string_view path) {
             }
         }
     } catch (const scpp::ParseError& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        print_diagnostic(path, source, e.loc, e.what());
         return 1;
     }
     return 0;
@@ -316,16 +365,16 @@ int run_build(std::string_view input_path, std::string_view output_path,
     try {
         scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs);
     } catch (const scpp::ParseError& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        print_diagnostic(input_path, source, e.loc, e.what());
         return 1;
     } catch (const scpp::DataflowError& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        print_diagnostic(input_path, source, e.loc, e.what());
         return 1;
     } catch (const scpp::CodegenError& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        print_diagnostic(input_path, source, e.loc, e.what());
         return 1;
     } catch (const scpp::DriverError& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        print_diagnostic(input_path, source, scpp::SourceLocation{}, e.what());
         return 1;
     }
     return 0;

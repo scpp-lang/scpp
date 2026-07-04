@@ -16,11 +16,13 @@ export namespace scpp {
 
 struct ParseError : std::runtime_error {
     ParseError(int line, int column, const std::string& message)
-        : std::runtime_error("parse error at " + std::to_string(line) + ":" +
-                              std::to_string(column) + ": " + message),
-          line(line), column(column) {}
+        : std::runtime_error(message), line(line), column(column), loc{line, column} {}
     int line;
     int column;
+    // Same position as line/column above, just packaged as a
+    // SourceLocation (ast.cppm) so cli.cppm's diagnostic printer can
+    // treat every error kind (Parse/Dataflow/Codegen) uniformly.
+    SourceLocation loc;
 };
 
 class Parser {
@@ -62,6 +64,12 @@ private:
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
+
+    // The position of the *next* token to be consumed -- called at the
+    // start of parsing a new Expr/Stmt/Function, before any of its own
+    // tokens are consumed, so the resulting node's `.loc` points at
+    // wherever it syntactically begins (see SourceLocation, ast.cppm).
+    [[nodiscard]] SourceLocation current_loc() const { return SourceLocation{peek().line, peek().column}; }
 
     const Token& advance() {
         const Token& tok = tokens_[pos_];
@@ -275,6 +283,7 @@ private:
     //     attach to); mark individual items `safe` inside the block
     //     instead.
     void parse_top_level_function_or_extern_group(Program& program) {
+        SourceLocation loc = current_loc();
         bool is_safe = match(TokenKind::KwSafe);
         if (match(TokenKind::KwExtern)) {
             parse_c_linkage_string();
@@ -293,16 +302,23 @@ private:
                                           "an 'extern \"C\"' block currently only supports function "
                                           "declarations/definitions, not structs");
                     }
+                    SourceLocation item_loc = current_loc();
                     bool item_is_safe = match(TokenKind::KwSafe);
-                    program.functions.push_back(parse_function(item_is_safe, /*is_extern_c=*/true));
+                    Function item_fn = parse_function(item_is_safe, /*is_extern_c=*/true);
+                    item_fn.loc = item_loc;
+                    program.functions.push_back(std::move(item_fn));
                 }
                 expect(TokenKind::RBrace, "'}'");
                 return;
             }
-            program.functions.push_back(parse_function(is_safe, /*is_extern_c=*/true));
+            Function fn = parse_function(is_safe, /*is_extern_c=*/true);
+            fn.loc = loc;
+            program.functions.push_back(std::move(fn));
             return;
         }
-        program.functions.push_back(parse_function(is_safe, /*is_extern_c=*/false));
+        Function fn = parse_function(is_safe, /*is_extern_c=*/false);
+        fn.loc = loc;
+        program.functions.push_back(std::move(fn));
     }
 
     // Consumes and validates the linkage string literal after `extern`.
@@ -517,8 +533,8 @@ private:
                 continue;
             }
 
+            SourceLocation member_loc = current_loc();
             bool member_is_safe = match(TokenKind::KwSafe);
-
             if (match(TokenKind::Tilde)) {
                 // Destructor: `~ClassName() { ... }` -- no parameters, no
                 // return type, and always a mutable (non-`const`) `this`
@@ -532,6 +548,7 @@ private:
                 expect(TokenKind::LParen, "'('");
                 expect(TokenKind::RParen, "')'");
                 Function fn;
+                fn.loc = member_loc;
                 fn.is_safe = member_is_safe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
@@ -553,6 +570,7 @@ private:
                 // constructor initializes).
                 advance(); // class name
                 Function fn;
+                fn.loc = member_loc;
                 fn.is_safe = member_is_safe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
@@ -572,6 +590,7 @@ private:
             std::string member_name = std::string(expect(TokenKind::Identifier, "field or method name").text);
             if (check(TokenKind::LParen)) {
                 Function fn;
+                fn.loc = member_loc;
                 fn.params = parse_param_list();
                 // `const` trails the parameter list, exactly like real
                 // C++ (`int length() const { ... }`), so it's only
@@ -706,9 +725,11 @@ private:
     }
 
     StmtPtr parse_block() {
+        SourceLocation loc = current_loc();
         expect(TokenKind::LBrace, "'{'");
         auto block = std::make_unique<Stmt>();
         block->kind = StmtKind::Block;
+        block->loc = loc;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             block->statements.push_back(parse_statement());
         }
@@ -746,8 +767,10 @@ private:
     }
 
     StmtPtr parse_var_decl() {
+        SourceLocation loc = current_loc();
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
+        stmt->loc = loc;
         Type base = parse_type();
         stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
         stmt->type = parse_array_suffix(base);
@@ -775,9 +798,11 @@ private:
     }
 
     StmtPtr parse_return() {
+        SourceLocation loc = current_loc();
         expect(TokenKind::KwReturn, "'return'");
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::Return;
+        stmt->loc = loc;
         if (!check(TokenKind::Semicolon)) {
             stmt->expr = parse_expr();
         }
@@ -786,10 +811,12 @@ private:
     }
 
     StmtPtr parse_if() {
+        SourceLocation loc = current_loc();
         expect(TokenKind::KwIf, "'if'");
         expect(TokenKind::LParen, "'('");
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::If;
+        stmt->loc = loc;
         stmt->condition = parse_expr();
         expect(TokenKind::RParen, "')'");
         stmt->then_branch = parse_statement();
@@ -800,10 +827,12 @@ private:
     }
 
     StmtPtr parse_while() {
+        SourceLocation loc = current_loc();
         expect(TokenKind::KwWhile, "'while'");
         expect(TokenKind::LParen, "'('");
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::While;
+        stmt->loc = loc;
         stmt->condition = parse_expr();
         expect(TokenKind::RParen, "')'");
         stmt->then_branch = parse_statement();
@@ -811,8 +840,10 @@ private:
     }
 
     StmtPtr parse_expr_stmt() {
+        SourceLocation loc = current_loc();
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::ExprStmt;
+        stmt->loc = loc;
         stmt->expr = parse_expr();
         expect(TokenKind::Semicolon, "';'");
         return stmt;
@@ -831,6 +862,7 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Binary;
             node->binary_op = BinaryOp::Assign;
+            node->loc = lhs->loc;
             node->lhs = std::move(lhs);
             node->rhs = std::move(rhs);
             return node;
@@ -917,9 +949,11 @@ private:
     }
 
     ExprPtr parse_unary() {
+        SourceLocation loc = current_loc();
         if (match(TokenKind::Minus)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Unary;
+            node->loc = loc;
             node->unary_op = UnaryOp::Neg;
             node->lhs = parse_unary();
             return node;
@@ -927,6 +961,7 @@ private:
         if (match(TokenKind::Bang)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Unary;
+            node->loc = loc;
             node->unary_op = UnaryOp::Not;
             node->lhs = parse_unary();
             return node;
@@ -938,6 +973,7 @@ private:
             // two already-parsed operands.
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Unary;
+            node->loc = loc;
             node->unary_op = UnaryOp::Deref;
             node->lhs = parse_unary();
             return node;
@@ -955,6 +991,7 @@ private:
             // Deref's operand above.
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Unary;
+            node->loc = loc;
             node->unary_op = UnaryOp::AddressOf;
             node->lhs = parse_unary();
             return node;
@@ -989,6 +1026,7 @@ private:
                 auto deref = std::make_unique<Expr>();
                 deref->kind = ExprKind::Unary;
                 deref->unary_op = UnaryOp::Deref;
+                deref->loc = expr->loc;
                 deref->lhs = std::move(expr);
                 expr = parse_member_or_method_call(std::move(deref), name);
             } else if (match(TokenKind::LBracket)) {
@@ -996,6 +1034,7 @@ private:
                 expect(TokenKind::RBracket, "']'");
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Subscript;
+                node->loc = expr->loc;
                 node->lhs = std::move(expr);
                 node->rhs = std::move(index);
                 expr = std::move(node);
@@ -1014,9 +1053,11 @@ private:
     // (movecheck/codegen, not the parser). Otherwise it's a plain field
     // access, unchanged from before method calls existed.
     ExprPtr parse_member_or_method_call(ExprPtr base, const std::string& name) {
+        SourceLocation loc = base->loc;
         if (match(TokenKind::LParen)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Call;
+            node->loc = loc;
             node->name = name;
             node->lhs = std::move(base);
             if (!check(TokenKind::RParen)) {
@@ -1029,6 +1070,7 @@ private:
         }
         auto node = std::make_unique<Expr>();
         node->kind = ExprKind::Member;
+        node->loc = loc;
         node->name = name;
         node->lhs = std::move(base);
         return node;
@@ -1036,6 +1078,7 @@ private:
 
     ExprPtr parse_primary() {
         const Token& tok = peek();
+        SourceLocation loc{tok.line, tok.column};
 
         if (check_std_qualified("move")) {
             consume_std_qualified();
@@ -1044,6 +1087,7 @@ private:
             expect(TokenKind::RParen, "')'");
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Move;
+            node->loc = loc;
             node->lhs = std::move(inner);
             return node;
         }
@@ -1056,6 +1100,7 @@ private:
             expect(TokenKind::LParen, "'('");
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::MakeUnique;
+            node->loc = loc;
             node->type = std::move(element_type);
             if (!check(TokenKind::RParen)) {
                 do {
@@ -1069,18 +1114,21 @@ private:
         if (match(TokenKind::IntegerLiteral)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::IntegerLiteral;
+            node->loc = loc;
             node->int_value = std::stoll(std::string(tok.text));
             return node;
         }
         if (match(TokenKind::CharLiteral)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::CharLiteral;
+            node->loc = loc;
             node->int_value = decode_char_literal(tok);
             return node;
         }
         if (match(TokenKind::StringLiteral)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::StringLiteral;
+            node->loc = loc;
             node->name = decode_string_literal(tok);
             return node;
         }
@@ -1096,18 +1144,21 @@ private:
             // "this".
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
+            node->loc = loc;
             node->name = "this";
             return node;
         }
         if (match(TokenKind::KwTrue)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::BoolLiteral;
+            node->loc = loc;
             node->bool_value = true;
             return node;
         }
         if (match(TokenKind::KwFalse)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::BoolLiteral;
+            node->loc = loc;
             node->bool_value = false;
             return node;
         }
@@ -1117,6 +1168,7 @@ private:
             if (match(TokenKind::LParen)) {
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Call;
+                node->loc = loc;
                 node->name = name;
                 if (!check(TokenKind::RParen)) {
                     do {
@@ -1128,6 +1180,7 @@ private:
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
+            node->loc = loc;
             node->name = name;
             return node;
         }
@@ -1145,6 +1198,7 @@ private:
         auto node = std::make_unique<Expr>();
         node->kind = ExprKind::Binary;
         node->binary_op = op;
+        node->loc = lhs->loc;
         node->lhs = std::move(lhs);
         node->rhs = std::move(rhs);
         return node;

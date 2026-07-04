@@ -30,7 +30,9 @@ import scpp.ast;
 export namespace scpp {
 
 struct CodegenError : std::runtime_error {
-    explicit CodegenError(const std::string& message) : std::runtime_error(message) {}
+    explicit CodegenError(const std::string& message, SourceLocation loc = {})
+        : std::runtime_error(message), loc(loc) {}
+    SourceLocation loc;
 };
 
 // Lowers the M1/M2 AST subset (scalars + locals + control flow + functions +
@@ -87,7 +89,8 @@ public:
         std::string error;
         llvm::raw_string_ostream error_stream(error);
         if (llvm::verifyModule(*module_, &error_stream)) {
-            throw CodegenError("module verification failed: " + error);
+            throw CodegenError("module verification failed: " + error,
+                current_loc_);
         }
         return *module_;
     }
@@ -155,6 +158,12 @@ private:
     // job, not codegen's, since by the time a program reaches codegen it
     // has already been accepted (see codegen_lvalue's Deref case).
     int unsafe_depth_ = 0;
+    // Where the statement/expression currently being lowered begins in
+    // the source (see SourceLocation, ast.cppm) -- refreshed as
+    // codegen_stmt/codegen_expr/codegen_lvalue recurse, purely so a
+    // thrown CodegenError can report a location; never consulted by any
+    // actual codegen decision.
+    SourceLocation current_loc_;
     std::unique_ptr<llvm::LLVMContext> context_;
     std::unique_ptr<llvm::Module> module_;
     std::unique_ptr<llvm::IRBuilder<>> builder_;
@@ -197,12 +206,15 @@ private:
                 return;
             case TypeKind::UniquePtr:
                 throw CodegenError("std::unique_ptr carries ownership and cannot be a struct field; "
-                                    "use class instead");
+                                    "use class instead",
+                    current_loc_);
             case TypeKind::Reference:
-                throw CodegenError("a reference cannot be a struct field in this version");
+                throw CodegenError("a reference cannot be a struct field in this version",
+                    current_loc_);
             case TypeKind::Span:
                 throw CodegenError("a std::span cannot be a struct field in this version (it is a "
-                                    "lifetime-checked borrowed view; use class instead)");
+                                    "lifetime-checked borrowed view; use class instead)",
+                    current_loc_);
             case TypeKind::Array:
                 validate_trivial(*type.element, in_progress);
                 return;
@@ -210,16 +222,19 @@ private:
                 if (type.name == "int" || type.name == "bool" || type.name == "char") return;
                 if (type.name == "void") {
                     throw CodegenError("'void' cannot be a struct field (only a return type or a "
-                                        "pointer's pointee -- 'void*' -- may be 'void')");
+                                        "pointer's pointee -- 'void*' -- may be 'void')",
+                        current_loc_);
                 }
                 const StructDef* def = find_struct_def(type.name);
                 if (def == nullptr) {
-                    throw CodegenError("unknown type '" + type.name + "'");
+                    throw CodegenError("unknown type '" + type.name + "'",
+                        current_loc_);
                 }
                 if (std::find(in_progress.begin(), in_progress.end(), type.name) != in_progress.end()) {
                     throw CodegenError("struct '" + type.name + "' cannot contain itself by value "
                                                                  "(did you mean a pointer '" +
-                                        type.name + "*'?)");
+                                        type.name + "*'?)",
+                        current_loc_);
                 }
                 in_progress.push_back(type.name);
                 for (const StructField& field : def->fields) {
@@ -239,7 +254,8 @@ private:
             } catch (const CodegenError& e) {
                 throw CodegenError("struct '" + def.name + "' field '" + field.name + "': " + e.what() +
                                     " (only scalars, pointers, trivial structs, and fixed-size arrays "
-                                    "of trivial types are allowed in a struct; see spec ch04)");
+                                    "of trivial types are allowed in a struct; see spec ch04)",
+                    current_loc_);
             }
         }
 
@@ -341,9 +357,11 @@ private:
                     auto it = structs_.find(type.name);
                     if (it != structs_.end()) return it->second.llvm_type;
                 }
-                throw CodegenError("unsupported type '" + type.name + "'");
+                throw CodegenError("unsupported type '" + type.name + "'",
+                    current_loc_);
         }
-        throw CodegenError("unhandled type kind");
+        throw CodegenError("unhandled type kind",
+            current_loc_);
     }
 
     // A reference's referent may not itself be a std::unique_ptr in this
@@ -355,10 +373,12 @@ private:
     // first-order borrow checking.
     void validate_reference_pointee(const Type& pointee) {
         if (pointee.kind == TypeKind::UniquePtr) {
-            throw CodegenError("a reference to std::unique_ptr is not yet supported in this version");
+            throw CodegenError("a reference to std::unique_ptr is not yet supported in this version",
+                current_loc_);
         }
         if (pointee.kind == TypeKind::Reference) {
-            throw CodegenError("a reference to a reference is not supported");
+            throw CodegenError("a reference to a reference is not supported",
+                current_loc_);
         }
     }
 
@@ -383,19 +403,22 @@ private:
                 throw CodegenError("function '" + fn.name +
                                     "' returns a reference but has more than one reference parameter; scpp "
                                     "v0.1 can only infer a returned reference's lifetime when there is exactly "
-                                    "one (spec ch05.3)");
+                                    "one (spec ch05.3)",
+                    current_loc_);
             }
             found = &param;
         }
         if (found == nullptr) {
             throw CodegenError("function '" + fn.name +
                                 "' returns a reference but has no reference parameter to infer its lifetime "
-                                "from (spec ch05.3)");
+                                "from (spec ch05.3)",
+                current_loc_);
         }
         if (fn.return_type.is_mutable_ref && !found->type.is_mutable_ref) {
             throw CodegenError("function '" + fn.name +
                                 "' returns a mutable reference ('T&') but its sole reference parameter '" +
-                                found->name + "' is a shared reference ('const T&')");
+                                found->name + "' is a shared reference ('const T&')",
+                current_loc_);
         }
     }
 
@@ -431,15 +454,18 @@ private:
             case TypeKind::UniquePtr:
                 throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                     " cannot be std::unique_ptr -- it has no defined C representation "
-                                    "(spec ch02 §2.1)");
+                                    "(spec ch02 §2.1)",
+                    current_loc_);
             case TypeKind::Reference:
                 throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                     " cannot be a reference -- it has no defined C representation (spec "
-                                    "ch02 §2.1)");
+                                    "ch02 §2.1)",
+                    current_loc_);
             case TypeKind::Span:
                 throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                     " cannot be std::span -- it has no defined C representation (spec "
-                                    "ch02 §2.1)");
+                                    "ch02 §2.1)",
+                    current_loc_);
         }
     }
 
@@ -463,7 +489,8 @@ private:
             if (is_bare_void(param.type)) {
                 throw CodegenError("function '" + fn.name + "': parameter '" + param.name +
                                     "' cannot have type 'void' (only a return type or a pointer's pointee "
-                                    "-- 'void*' -- may be 'void')");
+                                    "-- 'void*' -- may be 'void')",
+                    current_loc_);
             }
             param_types.push_back(to_llvm_type(param.type));
         }
@@ -475,7 +502,8 @@ private:
     void define_function(const Function& fn) {
         llvm::Function* llvm_fn = module_->getFunction(fn.name);
         if (llvm_fn == nullptr) {
-            throw CodegenError("function '" + fn.name + "' was not declared before definition");
+            throw CodegenError("function '" + fn.name + "' was not declared before definition",
+                current_loc_);
         }
 
         current_function_def_ = &fn;
@@ -503,11 +531,17 @@ private:
         // generated block has no terminator (e.g. missing trailing return),
         // that is a user error we surface instead of emitting invalid IR.
         if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
-            throw CodegenError("function '" + fn.name + "' does not return on all paths");
+            throw CodegenError("function '" + fn.name + "' does not return on all paths",
+                current_loc_);
         }
     }
 
     void codegen_stmt(const Stmt& stmt, llvm::Function* current_function) {
+        // Refreshed on every call (including each recursive call for a
+        // nested statement) so a CodegenError thrown while handling
+        // `stmt` points at `stmt` itself -- see current_loc_ and
+        // codegen_expr's identical opening comment.
+        current_loc_ = stmt.loc;
         switch (stmt.kind) {
             case StmtKind::Block:
                 push_scope();
@@ -536,7 +570,8 @@ private:
                     // zero-initializes when no initializer is given.
                     if (!stmt.init) {
                         throw CodegenError("reference '" + stmt.var_name +
-                                            "' must be initialized (bound to a variable) at declaration");
+                                            "' must be initialized (bound to a variable) at declaration",
+                            current_loc_);
                     }
                     validate_reference_pointee(*stmt.type.pointee);
                     // Store the *address* of the referent (not its value)
@@ -562,16 +597,19 @@ private:
                     // ch06/M6; std::vector doesn't exist yet).
                     if (!stmt.init) {
                         throw CodegenError("span '" + stmt.var_name +
-                                            "' must be initialized (bound to an array) at declaration");
+                                            "' must be initialized (bound to an array) at declaration",
+                            current_loc_);
                     }
                     LValue source = codegen_lvalue(*stmt.init);
                     if (source.type.kind != TypeKind::Array) {
                         throw CodegenError("std::span<T> can currently only be constructed from a "
-                                            "fixed-size array in this version");
+                                            "fixed-size array in this version",
+                            current_loc_);
                     }
                     if (to_llvm_type(*source.type.element) != to_llvm_type(*stmt.type.pointee)) {
                         throw CodegenError("cannot construct span '" + stmt.var_name +
-                                            "': array element type does not match the span's element type");
+                                            "': array element type does not match the span's element type",
+                            current_loc_);
                     }
                     llvm::Type* span_type = to_llvm_type(stmt.type);
                     llvm::Value* size_value =
@@ -591,7 +629,8 @@ private:
                 if (is_bare_void(stmt.type)) {
                     throw CodegenError("variable '" + stmt.var_name +
                                         "' cannot have type 'void' (only a return type or a pointer's "
-                                        "pointee -- 'void*' -- may be 'void')");
+                                        "pointee -- 'void*' -- may be 'void')",
+                        current_loc_);
                 }
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
@@ -609,7 +648,8 @@ private:
                     // Named-type VarDecl already does above.
                     if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
                         throw CodegenError("'" + stmt.var_name +
-                                            "(...)' constructor-call syntax is only supported for a class type");
+                                            "(...)' constructor-call syntax is only supported for a class type",
+                            current_loc_);
                     }
                     builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
@@ -619,7 +659,8 @@ private:
                     std::string ctor_name = stmt.type.name + "_new";
                     llvm::Function* ctor = module_->getFunction(ctor_name);
                     if (ctor == nullptr) {
-                        throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call");
+                        throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                            current_loc_);
                     }
                     const Function* ctor_def = find_function_def(ctor_name);
                     std::vector<llvm::Value*> args = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
@@ -629,6 +670,13 @@ private:
                 }
                 if (stmt.init) {
                     llvm::Value* init_value = codegen_expr(*stmt.init);
+                    // Refresh to `stmt`'s own position: codegen_expr just
+                    // recursed through `stmt.init` (possibly a compound
+                    // expression like `a + b`), leaving current_loc_ at
+                    // whichever sub-expression it last visited rather
+                    // than the statement check_store_type is actually
+                    // about.
+                    current_loc_ = stmt.loc;
                     check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'");
                     builder_->CreateStore(init_value, slot);
                 } else {
@@ -789,7 +837,8 @@ private:
         if (expr.lhs != nullptr) {
             LValue receiver = codegen_lvalue(*expr.lhs);
             if (receiver.type.kind != TypeKind::Named) {
-                throw CodegenError("method call '." + expr.name + "(...)' is only supported on a class type");
+                throw CodegenError("method call '." + expr.name + "(...)' is only supported on a class type",
+                    current_loc_);
             }
             callee_name = receiver.type.name + "_" + expr.name;
             this_arg = receiver.ptr;
@@ -797,7 +846,8 @@ private:
 
         llvm::Function* callee = module_->getFunction(callee_name);
         if (callee == nullptr) {
-            throw CodegenError("call to unknown function '" + callee_name + "'");
+            throw CodegenError("call to unknown function '" + callee_name + "'",
+                current_loc_);
         }
         const Function* callee_def = find_function_def(callee_name);
         std::vector<llvm::Value*> args = codegen_call_args(expr.args, callee_def, this_arg != nullptr ? 1 : 0);
@@ -875,7 +925,8 @@ private:
             throw CodegenError(
                 "expected a 'bool' value here (e.g. an if/while condition, or an '&&'/'||' operand); "
                 "scpp requires an explicit cast for any scalar-to-bool conversion, unlike real C++ "
-                "(spec ch06)");
+                "(spec ch06)",
+                current_loc_);
         }
         return builder_->CreateTrunc(v, llvm::Type::getInt1Ty(*context_), "tobool");
     }
@@ -913,11 +964,18 @@ private:
             throw CodegenError("type mismatch initializing/assigning " + what +
                                 ": scpp has no implicit conversion between distinct scalar types (e.g. "
                                 "bool/char/int are all distinct, spec ch06) -- an explicit cast would be "
-                                "required, but cast expressions aren't implemented in this version yet");
+                                "required, but cast expressions aren't implemented in this version yet",
+                current_loc_);
         }
     }
 
     llvm::Value* codegen_expr(const Expr& expr) {
+        // Refreshed on every call (including each recursive call for a
+        // child sub-expression), same reasoning as codegen_stmt above --
+        // so a CodegenError thrown while examining `expr` itself (before
+        // or after recursing into any children) reports `expr`'s own
+        // position, not whichever child was most recently visited.
+        current_loc_ = expr.loc;
         switch (expr.kind) {
             case ExprKind::IntegerLiteral:
                 return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), expr.int_value, /*isSigned=*/true);
@@ -1051,7 +1109,8 @@ private:
             case ExprKind::MakeUnique:
                 return codegen_make_unique(expr);
         }
-        throw CodegenError("unhandled expression kind");
+        throw CodegenError("unhandled expression kind",
+            current_loc_);
     }
 
     // `std::make_unique<T>(...)` is a compiler builtin (like std::move),
@@ -1072,12 +1131,16 @@ private:
             initial_value = llvm::Constant::getNullValue(element_type);
         } else if (expr.args.size() == 1 && element_is_scalar) {
             initial_value = codegen_expr(*expr.args[0]);
+            // Refresh to `expr`'s own position -- see the VarDecl case's
+            // identical comment above.
+            current_loc_ = expr.loc;
             check_store_type(initial_value, element_type,
                               "std::make_unique<" + expr.type.name + ">(...)'s argument");
         } else {
             throw CodegenError(
                 "std::make_unique<T>(...) currently only supports zero arguments (zero-initializes "
-                "T) or exactly one argument when T is a scalar (int/bool/char)");
+                "T) or exactly one argument when T is a scalar (int/bool/char)",
+                current_loc_);
         }
 
         llvm::Function* malloc_fn = get_or_declare_malloc();
@@ -1261,7 +1324,8 @@ private:
                 case BinaryOp::Add: return builder_->CreateAdd(lhs, rhs, name);
                 case BinaryOp::Sub: return builder_->CreateSub(lhs, rhs, name);
                 case BinaryOp::Mul: return builder_->CreateMul(lhs, rhs, name);
-                default: throw CodegenError("unhandled checked-arithmetic operator");
+                default: throw CodegenError("unhandled checked-arithmetic operator",
+                    current_loc_);
             }
         }
 
@@ -1331,11 +1395,14 @@ private:
     // backing storage to take a pointer to; that is deferred to whenever
     // by-value struct temporaries need addressable storage.
     LValue codegen_lvalue(const Expr& expr) {
+        // Same refresh discipline as codegen_expr above.
+        current_loc_ = expr.loc;
         switch (expr.kind) {
             case ExprKind::Identifier: {
                 auto it = locals_.find(expr.name);
                 if (it == locals_.end()) {
-                    throw CodegenError("use of undeclared variable '" + expr.name + "'");
+                    throw CodegenError("use of undeclared variable '" + expr.name + "'",
+                        current_loc_);
                 }
                 if (it->second.type.kind == TypeKind::Reference) {
                     // A reference-typed local's own alloca just holds the
@@ -1355,12 +1422,14 @@ private:
             case ExprKind::Member: {
                 LValue base = codegen_lvalue(*expr.lhs);
                 if (base.type.kind != TypeKind::Named || !structs_.contains(base.type.name)) {
-                    throw CodegenError("member access '." + expr.name + "' on a non-struct type");
+                    throw CodegenError("member access '." + expr.name + "' on a non-struct type",
+                        current_loc_);
                 }
                 const StructInfo& info = structs_.at(base.type.name);
                 auto field_it = std::find(info.field_names.begin(), info.field_names.end(), expr.name);
                 if (field_it == info.field_names.end()) {
-                    throw CodegenError("struct '" + base.type.name + "' has no field '" + expr.name + "'");
+                    throw CodegenError("struct '" + base.type.name + "' has no field '" + expr.name + "'",
+                        current_loc_);
                 }
                 size_t field_index = static_cast<size_t>(field_it - info.field_names.begin());
                 llvm::Value* field_ptr =
@@ -1388,7 +1457,8 @@ private:
                     return LValue{elem_ptr, *base.type.pointee};
                 }
                 if (base.type.kind != TypeKind::Array) {
-                    throw CodegenError("subscript on a non-array type");
+                    throw CodegenError("subscript on a non-array type",
+                        current_loc_);
                 }
                 llvm::Value* index = codegen_expr(*expr.rhs);
                 llvm::Value* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0);
@@ -1416,7 +1486,8 @@ private:
                 // few extra instructions first is harmless.
                 CallResult result = codegen_call(expr);
                 if (result.callee_def == nullptr || result.callee_def->return_type.kind != TypeKind::Reference) {
-                    throw CodegenError("expression is not assignable");
+                    throw CodegenError("expression is not assignable",
+                        current_loc_);
                 }
                 return LValue{result.value, *result.callee_def->return_type.pointee};
             }
@@ -1425,7 +1496,8 @@ private:
                 // Only `*p` (Deref) is addressable; Neg/Not produce a
                 // plain value with no backing storage.
                 if (expr.unary_op != UnaryOp::Deref) {
-                    throw CodegenError("expression is not assignable");
+                    throw CodegenError("expression is not assignable",
+                        current_loc_);
                 }
                 LValue operand = codegen_lvalue(*expr.lhs);
                 if (operand.type.kind != TypeKind::UniquePtr && operand.type.kind != TypeKind::Pointer) {
@@ -1441,7 +1513,8 @@ private:
                     // would already have `r` resolved to its referent by
                     // the time this runs).
                     throw CodegenError(
-                        "dereference ('*') is only supported for std::unique_ptr or a raw pointer");
+                        "dereference ('*') is only supported for std::unique_ptr or a raw pointer",
+                        current_loc_);
                 }
                 // A unique_ptr's/raw pointer's own storage holds the
                 // pointer *value* (see to_llvm_type's UniquePtr/Pointer
@@ -1454,7 +1527,8 @@ private:
             }
 
             default:
-                throw CodegenError("expression is not assignable");
+                throw CodegenError("expression is not assignable",
+                    current_loc_);
         }
     }
 
@@ -1465,7 +1539,8 @@ private:
     // like any other call.
     llvm::Value* codegen_builtin_print(const Expr& expr) {
         if (expr.args.size() != 1) {
-            throw CodegenError(expr.name + " expects exactly 1 argument");
+            throw CodegenError(expr.name + " expects exactly 1 argument",
+                current_loc_);
         }
         llvm::Function* printf_fn = get_or_declare_printf();
         llvm::Value* arg = codegen_expr(*expr.args[0]);
@@ -1509,6 +1584,9 @@ private:
         if (expr.binary_op == BinaryOp::Assign) {
             LValue lv = codegen_lvalue(*expr.lhs);
             llvm::Value* value = codegen_expr(*expr.rhs);
+            // Refresh to `expr`'s own position -- see the VarDecl case's
+            // identical comment in codegen_stmt.
+            current_loc_ = expr.loc;
             check_store_type(value, to_llvm_type(lv.type), "'" + expr.lhs->name + "'");
             if (lv.type.kind == TypeKind::UniquePtr) {
                 // Move-assignment semantics: release whatever this
@@ -1550,7 +1628,8 @@ private:
             case BinaryOp::Gt: return i1_to_bool(builder_->CreateICmpSGT(lhs, rhs, "gttmp"));
             case BinaryOp::Le: return i1_to_bool(builder_->CreateICmpSLE(lhs, rhs, "letmp"));
             case BinaryOp::Ge: return i1_to_bool(builder_->CreateICmpSGE(lhs, rhs, "getmp"));
-            default: throw CodegenError("unhandled binary operator");
+            default: throw CodegenError("unhandled binary operator",
+                current_loc_);
         }
     }
 

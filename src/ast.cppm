@@ -13,6 +13,23 @@ struct Stmt;
 using ExprPtr = std::unique_ptr<Expr>;
 using StmtPtr = std::unique_ptr<Stmt>;
 
+// A 1-based (line, column) position in the original source file, exactly
+// like Clang/GCC's own diagnostics -- {0, 0} (the default) means "no
+// location available" (a sentinel, since a real position is always >= 1;
+// see lexer.cppm's line_/column_ initialization). Stamped onto Expr/Stmt/
+// Function nodes by the parser (using the position of the first token
+// each one syntactically begins with) and threaded through movecheck/
+// codegen via DataflowState::current_loc / Codegen::current_loc_ so a
+// thrown ParseError/DataflowError/CodegenError can always report exactly
+// where its problem is -- see cli.cppm's print_diagnostic for how this
+// gets rendered (a source-line excerpt with a caret, like `clang -c`).
+struct SourceLocation {
+    int line = 0;
+    int column = 0;
+
+    [[nodiscard]] bool is_known() const { return line > 0; }
+};
+
 enum class TypeKind {
     Named,     // scalar (int/bool) or a user-declared struct name
     Pointer,   // T*
@@ -122,6 +139,12 @@ enum class UnaryOp {
 struct Expr {
     ExprKind kind;
 
+    // Where this expression begins in the source file (see
+    // SourceLocation) -- stamped by the parser, used only for diagnostics
+    // (movecheck/codegen error messages), never consulted by any actual
+    // check.
+    SourceLocation loc;
+
     // IntegerLiteral, or CharLiteral's ordinal value (e.g. 'a' -> 97) --
     // sharing this field rather than adding a new one keeps Expr flat;
     // which literal kind `expr.kind` is tells the two apart.
@@ -172,6 +195,10 @@ enum class StmtKind {
 
 struct Stmt {
     StmtKind kind;
+
+    // Where this statement begins in the source file -- same purpose as
+    // Expr::loc above.
+    SourceLocation loc;
 
     // VarDecl
     Type type;
@@ -226,6 +253,11 @@ struct Function {
     bool is_safe = false;
     Type return_type;
     std::string name;
+    // Where this function's declaration begins -- same purpose as
+    // Expr::loc/Stmt::loc, for diagnostics that are about the function
+    // itself (e.g. "function 'f' cannot return class 'X' by value")
+    // rather than a specific statement/expression inside it.
+    SourceLocation loc;
     std::vector<Param> params;
     // Null for a bodyless `extern "C"` declaration (ch02 §2.1) -- defined
     // elsewhere, linked in externally. Always non-null for every other

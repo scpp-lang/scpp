@@ -1,4 +1,8 @@
 import scpp.driver;
+import scpp.parser;
+import scpp.movecheck;
+import scpp.codegen;
+import scpp.ast;
 
 #include <algorithm>
 #include <cstdio>
@@ -120,10 +124,82 @@ void run_test_case_files() {
     }
 }
 
+// Regression coverage for the clang/gcc-style diagnostic location plumbing
+// (SourceLocation, ast.cppm; ParseError::loc/DataflowError::loc/
+// CodegenError::loc): a handful of known-bad snippets, each checked for
+// the *specific* error type and a plausible (non-zero, matching) line/
+// column -- not the rendered "file:line:col: error: ..." text itself,
+// which is cli.cppm's own presentation concern (an unexported, CLI-only
+// helper untestable from here without shelling out to the built `scpp`
+// binary; the integration_test/ suite -- a separate, independently
+// maintained black-box harness -- is where exercising the CLI's actual
+// stderr output belongs, not this binary).
+void run_error_location_tests() {
+    struct Case {
+        std::string name;
+        std::string source;
+        int expected_line;
+    };
+    std::vector<Case> parse_cases = {
+        {"missing_semicolon", "int main() {\n    int x = 5\n    return 0;\n}\n", 3},
+    };
+    for (const Case& c : parse_cases) {
+        cases_run++;
+        try {
+            scpp::parse(c.source);
+            expect(false, c.name + ": expected a ParseError, none was thrown");
+        } catch (const scpp::ParseError& e) {
+            expect(e.loc.is_known(), c.name + ": ParseError has no location");
+            expect(e.loc.line == c.expected_line, c.name + ": expected line " +
+                                                       std::to_string(c.expected_line) + ", got " +
+                                                       std::to_string(e.loc.line));
+        }
+    }
+
+    std::vector<Case> dataflow_cases = {
+        {"use_after_move",
+         "safe int f() {\n    std::unique_ptr<int> p = std::make_unique<int>(5);\n    std::unique_ptr<int> q = "
+         "std::move(p);\n    return *p;\n}\nint main() { return f(); }\n",
+         4},
+    };
+    for (const Case& c : dataflow_cases) {
+        cases_run++;
+        try {
+            scpp::Program program = scpp::parse(c.source);
+            scpp::check_moves(program);
+            expect(false, c.name + ": expected a DataflowError, none was thrown");
+        } catch (const scpp::DataflowError& e) {
+            expect(e.loc.is_known(), c.name + ": DataflowError has no location");
+            expect(e.loc.line == c.expected_line, c.name + ": expected line " +
+                                                       std::to_string(c.expected_line) + ", got " +
+                                                       std::to_string(e.loc.line));
+        }
+    }
+
+    std::vector<Case> codegen_cases = {
+        {"bool_int_mismatch", "int main() {\n    bool b = 5;\n    return 0;\n}\n", 2},
+    };
+    for (const Case& c : codegen_cases) {
+        cases_run++;
+        try {
+            scpp::Program program = scpp::parse(c.source);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+            expect(false, c.name + ": expected a CodegenError, none was thrown");
+        } catch (const scpp::CodegenError& e) {
+            expect(e.loc.is_known(), c.name + ": CodegenError has no location");
+            expect(e.loc.line == c.expected_line, c.name + ": expected line " +
+                                                       std::to_string(c.expected_line) + ", got " +
+                                                       std::to_string(e.loc.line));
+        }
+    }
+}
+
 } // namespace
 
 int main() {
     run_test_case_files();
+    run_error_location_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

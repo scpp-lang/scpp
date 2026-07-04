@@ -17,7 +17,9 @@ import scpp.mir;
 export namespace scpp {
 
 struct DataflowError : std::runtime_error {
-    explicit DataflowError(const std::string& message) : std::runtime_error(message) {}
+    explicit DataflowError(const std::string& message, SourceLocation loc = {})
+        : std::runtime_error(message), loc(loc) {}
+    SourceLocation loc;
 };
 
 } // namespace scpp
@@ -107,8 +109,24 @@ struct DataflowState {
     // that references it; never null once check_function sets it (may be
     // empty, for a program with no classes at all).
     const std::unordered_set<std::string>* class_names = nullptr;
+    // Where the statement/expression currently being processed begins in
+    // the source (see SourceLocation, ast.cppm) -- refreshed by
+    // apply_statement/apply_expr as they recurse, so any DataflowError
+    // thrown along the way can report a location. Purely a diagnostics
+    // aid, carrying no dataflow meaning whatsoever -- deliberately
+    // excluded from operator== below (see the fixed-point worklist loop
+    // in check_function, which relies on out-state equality to detect
+    // convergence): including it would compare *where the last-processed
+    // statement happened to be*, not any actual move/borrow fact, which
+    // has no business influencing whether the analysis has reached a
+    // fixed point.
+    SourceLocation current_loc;
 
-    bool operator==(const DataflowState&) const = default;
+    [[nodiscard]] bool operator==(const DataflowState& other) const {
+        return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
+               unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
+               class_names == other.class_names;
+    }
 };
 
 // A function's checked signature, built once for the whole Program by
@@ -213,6 +231,14 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // since there's no meaningful direction to fail toward here).
         a.current_class,
         a.class_names,
+        // `current_loc` carries no dataflow meaning at all (see its own
+        // comment on DataflowState) and is excluded from operator==, so
+        // which side's value ends up here doesn't affect correctness --
+        // apply_statement immediately overwrites it for whichever
+        // statement runs next anyway. Keeping `a`'s is just the same
+        // "no real join needed" shape as every other field above, not a
+        // deliberate choice between the two.
+        a.current_loc,
     };
 }
 
@@ -306,7 +332,8 @@ struct CalleeSignature {
                 "function '" + fn.name +
                 "' returns a reference but has more than one reference parameter; scpp v0.1 can only infer a "
                 "returned reference's lifetime when there is exactly one (spec ch05.3) -- refactor to take a "
-                "single reference parameter, or return by value/std::unique_ptr instead");
+                "single reference parameter, or return by value/std::unique_ptr instead",
+                fn.loc);
         }
         found = i;
     }
@@ -314,14 +341,16 @@ struct CalleeSignature {
         throw DataflowError(
             "function '" + fn.name +
             "' returns a reference but has no reference parameter to infer its lifetime from (spec ch05.3) -- "
-            "refactor to take a single reference parameter, or return by value/std::unique_ptr instead");
+            "refactor to take a single reference parameter, or return by value/std::unique_ptr instead",
+            fn.loc);
     }
     if (fn.return_type.is_mutable_ref && !fn.params[*found].type.is_mutable_ref) {
         throw DataflowError("function '" + fn.name +
                              "' returns a mutable reference ('T&') but its sole reference parameter '" +
                              fn.params[*found].name +
                              "' is a shared reference ('const T&'); a mutable reference cannot be manufactured "
-                             "from a shared one");
+                             "from a shared one",
+            fn.loc);
     }
     return found;
 }
@@ -475,15 +504,18 @@ void validate_deref_operand(const std::string& name, const DataflowState& state,
     bool is_raw_ptr = type_it != body.local_types.end() && type_it->second.kind == TypeKind::Pointer;
     if (!is_uptr && !is_raw_ptr) {
         throw DataflowError("cannot dereference ('*') '" + name +
-                             "': only std::unique_ptr or a raw pointer (inside unsafe {}) is supported");
+                             "': only std::unique_ptr or a raw pointer (inside unsafe {}) is supported",
+            state.current_loc);
     }
     if (is_raw_ptr && state.unsafe_depth == 0) {
         throw DataflowError("cannot dereference raw pointer '" + name +
-                             "': requires 'unsafe { }' (spec ch01 §1.3/ch02)");
+                             "': requires 'unsafe { }' (spec ch01 §1.3/ch02)",
+            state.current_loc);
     }
     LocalState current = lookup(state.locals, name);
     if (current != LocalState::Initialized) {
-        throw DataflowError(describe_bad_state(name, current));
+        throw DataflowError(describe_bad_state(name, current),
+            state.current_loc);
     }
 }
 
@@ -499,7 +531,8 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
     if (expr.lhs->kind != ExprKind::Identifier) {
         if (report_errors) {
             throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr or "
-                                 "raw pointer variable (not a member, subscript, or other expression)");
+                                 "raw pointer variable (not a member, subscript, or other expression)",
+                state.current_loc);
         }
         return;
     }
@@ -508,7 +541,12 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
     validate_deref_operand(name, state, body);
     auto borrow_it = state.borrows.find(name);
     if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
-        throw DataflowError("cannot use '" + name + "' while it is mutably borrowed");
+        // `expr.lhs->loc` (the identifier `name` itself), not
+        // `state.current_loc` (the enclosing `*`/Deref's own position,
+        // one token earlier) -- both checks above are about `name`
+        // specifically, so pointing at it directly is more precise.
+        throw DataflowError("cannot use '" + name + "' while it is mutably borrowed",
+            expr.lhs->loc);
     }
 }
 
@@ -834,11 +872,13 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 auto type_it = body.local_types.find(bound_name);
                 if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
                     throw DataflowError("cannot borrow std::unique_ptr variable '" + bound_name +
-                                         "' in this version");
+                                         "' in this version",
+                        state.current_loc);
                 }
                 LocalState current = lookup(state.locals, bound_name);
                 if (current != LocalState::Initialized) {
-                    throw DataflowError(describe_bad_state(bound_name, current));
+                    throw DataflowError(describe_bad_state(bound_name, current),
+                        state.current_loc);
                 }
             }
             return resolve_root_place(bound_name, state);
@@ -874,7 +914,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                          "field of one ('a.b'), an array element of one ('arr[i]'), a "
                                          "dereferenced std::unique_ptr/raw-pointer local ('*p'/'p->x'), or "
                                          "the result of a call to a reference-returning function -- not an "
-                                         "arbitrary expression");
+                                         "arbitrary expression",
+                        state.current_loc);
                 }
                 return "";
             }
@@ -890,7 +931,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 if (report_errors) {
                     throw DataflowError("cannot borrow the result of calling '" + expr.name +
                                          "': it doesn't return a reference with an inferrable lifetime (spec "
-                                         "ch05.3)");
+                                         "ch05.3)",
+                        state.current_loc);
                 }
                 // Still check the arguments themselves so a genuinely
                 // invalid call (wrong callee, bad arguments) is still
@@ -914,7 +956,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 throw DataflowError("a reference can currently only borrow a plain local variable, a field of "
                                      "one ('a.b'), an array element of one ('arr[i]'), a dereferenced "
                                      "std::unique_ptr/raw-pointer local ('*p'/'p->x'), or the result of a call "
-                                     "to a reference-returning function -- not an arbitrary expression");
+                                     "to a reference-returning function -- not an arbitrary expression",
+                    state.current_loc);
             }
             return "";
     }
@@ -1006,7 +1049,8 @@ void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, 
     auto borrow_it = state.borrows.find(root);
     if (borrow_it != state.borrows.end() &&
         (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-        throw DataflowError("cannot take the address of '" + root + "': it is already borrowed");
+        throw DataflowError("cannot take the address of '" + root + "': it is already borrowed",
+            state.current_loc);
     }
 }
 
@@ -1055,7 +1099,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
         bool source_is_mutable = body.local_types.at(arg.name).is_mutable_ref;
         if (is_mutable && !source_is_mutable) {
             throw DataflowError("cannot pass '" + arg.name + "' by mutable reference: it is itself only a "
-                                                              "shared (const) reference");
+                                                              "shared (const) reference",
+                state.current_loc);
         }
     } else {
         // The general case: `arg` isn't itself a directly-named, locally-
@@ -1070,7 +1115,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
         // chain's const-reachability").
         if (is_mutable && is_read_only_reachable(arg, body, signatures)) {
             throw DataflowError("cannot pass '" + root + "' by mutable reference: it is only reachable "
-                                                          "through a read-only (const) reference");
+                                                          "through a read-only (const) reference",
+                state.current_loc);
         }
         auto persistent_it = state.borrows.find(root);
         bool persistent_conflict =
@@ -1079,7 +1125,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
                         : persistent_it->second.mutable_borrow);
         if (persistent_conflict) {
             throw DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
-                                 "reference: it is already borrowed");
+                                 "reference: it is already borrowed",
+                state.current_loc);
         }
     }
 
@@ -1090,7 +1137,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
                     : in_call_it->second.mutable_borrow);
     if (in_call_conflict) {
         throw DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
-                             "reference more than once in the same call");
+                             "reference more than once in the same call",
+            state.current_loc);
     }
 
     BorrowState& borrow = in_call_borrows[root];
@@ -1124,7 +1172,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     auto sig_it = signatures.find(callee.key);
     if (report_errors && sig_it != signatures.end() && !sig_it->second.is_safe && state.unsafe_depth == 0) {
         throw DataflowError("cannot call non-'safe' function '" + expr.name +
-                             "' from a 'safe' context; wrap the call in 'unsafe { }' (spec ch01 §1.3/ch02)");
+                             "' from a 'safe' context; wrap the call in 'unsafe { }' (spec ch01 §1.3/ch02)",
+            state.current_loc);
     }
     // Scratch borrow-map shared by every reference argument of *this*
     // call only (see apply_reference_argument) -- never merged into
@@ -1168,7 +1217,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             if (report_errors && param_wants_mutable_pointer && arg.kind == ExprKind::Unary &&
                 arg.unary_op == UnaryOp::AddressOf && is_read_only_reachable(*arg.lhs, body, signatures)) {
                 throw DataflowError("cannot pass '&' of a read-only-reachable place as a mutable 'T*' "
-                                    "argument (would need 'const T*', which this parameter doesn't accept)");
+                                    "argument (would need 'const T*', which this parameter doesn't accept)",
+                    state.current_loc);
             }
         }
     }
@@ -1187,6 +1237,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // the two phases stay consistent.
 void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors) {
+    // Refreshed on every call (including each recursive call for a child
+    // sub-expression) so that, by the time *this* node's own checks run
+    // (whether before any recursive call, like the Identifier case just
+    // below, or after one, like Member's access-control check further
+    // down), `state.current_loc` reliably points at `expr` itself rather
+    // than whatever child was most recently visited -- see
+    // DataflowState::current_loc.
+    state.current_loc = expr.loc;
     switch (expr.kind) {
         case ExprKind::IntegerLiteral:
         case ExprKind::BoolLiteral:
@@ -1200,11 +1258,13 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             if (type_it == body.local_types.end()) return; // unknown name: left to codegen's own check
             if (is_unique_ptr(type_it->second)) {
                 throw DataflowError("use of std::unique_ptr variable '" + expr.name +
-                                     "' requires std::move (copying is not allowed)");
+                                     "' requires std::move (copying is not allowed)",
+                    state.current_loc);
             }
             LocalState current = lookup(state.locals, expr.name);
             if (current != LocalState::Initialized) {
-                throw DataflowError(describe_bad_state(expr.name, current));
+                throw DataflowError(describe_bad_state(expr.name, current),
+                    state.current_loc);
             }
             // A direct read is rejected if `expr.name` is currently
             // serving as the root of an active *mutable* borrow --
@@ -1220,7 +1280,8 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             // other local reference borrows from) is.
             auto borrow_it = state.borrows.find(expr.name);
             if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
-                throw DataflowError("cannot use '" + expr.name + "' while it is mutably borrowed");
+                throw DataflowError("cannot use '" + expr.name + "' while it is mutably borrowed",
+                    state.current_loc);
             }
             return;
         }
@@ -1229,7 +1290,8 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             if (expr.lhs->kind != ExprKind::Identifier) {
                 if (report_errors) {
                     throw DataflowError("std::move currently only supports a plain local variable "
-                                         "(not a member, subscript, or other expression)");
+                                         "(not a member, subscript, or other expression)",
+                        state.current_loc);
                 }
                 return;
             }
@@ -1239,25 +1301,29 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                 if (report_errors) {
                     throw DataflowError("std::move is only supported for std::unique_ptr variables in this "
                                          "version; '" +
-                                         name + "' is not one");
+                                         name + "' is not one",
+                        state.current_loc);
                 }
                 return;
             }
             LocalState current = lookup(state.locals, name);
             if (report_errors && current != LocalState::Initialized) {
-                throw DataflowError(describe_bad_state(name, current));
+                throw DataflowError(describe_bad_state(name, current),
+                    state.current_loc);
             }
             if (report_errors) {
                 auto borrow_it = state.borrows.find(name);
                 if (borrow_it != state.borrows.end() &&
                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                    throw DataflowError("cannot move '" + name + "' while it is borrowed");
+                    throw DataflowError("cannot move '" + name + "' while it is borrowed",
+                        state.current_loc);
                 }
             }
             state.locals[name] = LocalState::MovedOut;
             if (report_errors && !is_unique_ptr_rvalue_context) {
                 throw DataflowError("std::move(" + name + ") must be used to initialize or assign into a "
-                                                            "std::unique_ptr");
+                                                            "std::unique_ptr",
+                    state.current_loc);
             }
             return;
         }
@@ -1284,7 +1350,8 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                 apply_expr(*expr.rhs, target_is_unique_ptr, state, body, signatures, report_errors);
                 if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*expr.rhs, body, signatures)) {
                     throw DataflowError("assigning to a std::unique_ptr variable requires std::move or "
-                                        "std::make_unique (copying is not allowed)");
+                                        "std::make_unique (copying is not allowed)",
+                        state.current_loc);
                 }
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     // The assignment target is never a "read": whatever
@@ -1300,14 +1367,16 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                     if (report_errors) {
                         if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
                             throw DataflowError("cannot assign to this place: it is reached through a "
-                                                 "read-only (const) reference");
+                                                 "read-only (const) reference",
+                                state.current_loc);
                         }
                         if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
                             auto borrow_it = state.borrows.find(*root);
                             if (borrow_it != state.borrows.end() &&
                                 (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
                                 throw DataflowError("cannot assign to this place: '" + *root +
-                                                     "' is currently borrowed");
+                                                     "' is currently borrowed",
+                                    state.current_loc);
                             }
                         }
                     }
@@ -1342,7 +1411,8 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                     if (!class_name.empty() && state.class_names->contains(class_name) &&
                         class_name != state.current_class) {
                         throw DataflowError("cannot access private member '" + expr.name + "' of class '" +
-                                             class_name + "' from outside its own methods (ch04 §4.2)");
+                                             class_name + "' from outside its own methods (ch04 §4.2)",
+                            state.current_loc);
                     }
                 }
             }
@@ -1387,7 +1457,8 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         if (report_errors) {
             const char* kind_name = is_span(stmt.type) ? "span" : "reference";
             throw DataflowError(std::string(kind_name) + " '" + stmt.local +
-                                 "' must be initialized (bound to a variable) at declaration");
+                                 "' must be initialized (bound to a variable) at declaration",
+                state.current_loc);
         }
         state.locals[stmt.local] = LocalState::Initialized;
         return;
@@ -1418,16 +1489,19 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     if (report_errors && is_mutable && is_read_only_reachable(*stmt.expr, body, signatures)) {
         const char* kind_name = is_span(stmt.type) ? "span" : "reference";
         throw DataflowError(std::string("cannot bind a mutable ") + kind_name + " '" + stmt.local +
-                             "': its source is only reachable through a read-only (const) reference");
+                             "': its source is only reachable through a read-only (const) reference",
+            state.current_loc);
     }
 
     BorrowState& borrow = state.borrows[root];
     if (report_errors) {
         if (is_mutable && (borrow.mutable_borrow || borrow.shared_count > 0)) {
-            throw DataflowError("cannot mutably borrow '" + root + "': it is already borrowed");
+            throw DataflowError("cannot mutably borrow '" + root + "': it is already borrowed",
+                state.current_loc);
         }
         if (!is_mutable && borrow.mutable_borrow) {
-            throw DataflowError("cannot borrow '" + root + "': it is already mutably borrowed");
+            throw DataflowError("cannot borrow '" + root + "': it is already mutably borrowed",
+                state.current_loc);
         }
     }
     if (is_mutable) {
@@ -1454,11 +1528,13 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
     if (report_errors) {
         if (!ref_type.is_mutable_ref) {
             throw DataflowError("cannot assign through '" + stmt.local +
-                                 "': it is a read-only (const) reference");
+                                 "': it is a read-only (const) reference",
+                state.current_loc);
         }
         LocalState current = lookup(state.locals, stmt.local);
         if (current != LocalState::Initialized) {
-            throw DataflowError(describe_bad_state(stmt.local, current));
+            throw DataflowError(describe_bad_state(stmt.local, current),
+                state.current_loc);
         }
     }
     apply_expr(*stmt.expr, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
@@ -1466,6 +1542,9 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
 
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors) {
+    // See apply_expr's identical opening comment -- same reasoning, one
+    // level up (statement rather than expression granularity).
+    state.current_loc = stmt.loc;
     switch (stmt.kind) {
         case MirStatementKind::Declare:
             // scpp has no "uninitialized" state (see the LocalState
@@ -1493,7 +1572,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // not a soundness requirement.
                 if (report_errors) {
                     throw DataflowError("std::span '" + stmt.local +
-                                         "' cannot be reassigned after initialization in this version");
+                                         "' cannot be reassigned after initialization in this version",
+                        state.current_loc);
                 }
                 return;
             }
@@ -1517,7 +1597,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 if (report_errors) {
                     throw DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                          "' cannot be reassigned after construction in this version (no copy "
-                                         "semantics are defined yet -- see ch04 §4.2)");
+                                         "semantics are defined yet -- see ch04 §4.2)",
+                        state.current_loc);
                 }
                 return;
             }
@@ -1527,7 +1608,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*stmt.expr, body, signatures)) {
                 throw DataflowError("variable '" + stmt.local +
                                     "' of type std::unique_ptr must be initialized via std::move or "
-                                    "std::make_unique (copying a unique_ptr is not allowed)");
+                                    "std::make_unique (copying a unique_ptr is not allowed)",
+                    state.current_loc);
             }
 
             // `T* p = &expr;` (ch05 §5.7): if `p`'s declared type wants a
@@ -1544,14 +1626,16 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 stmt.expr->unary_op == UnaryOp::AddressOf && is_read_only_reachable(*stmt.expr->lhs, body, signatures)) {
                 throw DataflowError("cannot assign '&' of a read-only-reachable place to '" + stmt.local +
                                     "' (a mutable 'T*'): would need 'const T*', which '" + stmt.local +
-                                    "' isn't declared as");
+                                    "' isn't declared as",
+                    state.current_loc);
             }
 
             if (report_errors) {
                 auto borrow_it = state.borrows.find(stmt.local);
                 if (borrow_it != state.borrows.end() &&
                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                    throw DataflowError("cannot assign to '" + stmt.local + "' while it is borrowed");
+                    throw DataflowError("cannot assign to '" + stmt.local + "' while it is borrowed",
+                        state.current_loc);
                 }
             }
             state.locals[stmt.local] = LocalState::Initialized;
@@ -1606,6 +1690,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
 
 void check_terminator(const Terminator& term, DataflowState& state, const Function& fn, const Body& body,
                        const Signatures& signatures) {
+    // See apply_expr's identical opening comment.
+    state.current_loc = term.loc;
     switch (term.kind) {
         case TerminatorKind::Branch:
             apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
@@ -1634,7 +1720,8 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                         "function '" + fn.name + "' returns a reference derived from '" + returned_root +
                         "', not from its sole reference parameter '" + elided_param_name +
                         "'; scpp v0.1 can only prove a returned reference doesn't dangle when it borrows "
-                        "(directly or transitively) from that parameter (spec ch05.3)");
+                        "(directly or transitively) from that parameter (spec ch05.3)",
+                        state.current_loc);
                 }
                 return;
             }
@@ -1642,7 +1729,8 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             apply_expr(*term.return_value, return_is_unique_ptr, state, body, signatures, /*report_errors=*/true);
             if (return_is_unique_ptr && !produces_unique_ptr_rvalue(*term.return_value, body, signatures)) {
                 throw DataflowError(
-                    "returning a std::unique_ptr requires std::move or std::make_unique (copying is not allowed)");
+                    "returning a std::unique_ptr requires std::move or std::make_unique (copying is not allowed)",
+                    state.current_loc);
             }
             return;
         }
@@ -1681,7 +1769,8 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
                                         "': it is already unsafe everywhere in a native function, so the "
                                         "marker has nothing left to relax (mark '" + fn.name +
                                         "' itself 'safe' first if you meant to open a checked region with an "
-                                        "escape hatch)");
+                                        "escape hatch)",
+                                        stmt.loc);
                 }
             }
         }
@@ -1741,7 +1830,8 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
             throw DataflowError("parameter '" + param.name + "' of function '" + fn.name + "' cannot take class '" +
                                  param.type.name +
                                  "' by value (no copy semantics are defined yet -- take 'const " +
-                                 param.type.name + "&' or '" + param.type.name + "&' instead, see ch04 §4.2)");
+                                 param.type.name + "&' or '" + param.type.name + "&' instead, see ch04 §4.2)",
+                                 fn.loc);
         }
     }
     // Symmetric to the by-value-parameter rejection above: returning a
@@ -1755,7 +1845,8 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     if (fn.return_type.kind == TypeKind::Named && class_names.contains(fn.return_type.name)) {
         throw DataflowError("function '" + fn.name + "' cannot return class '" + fn.return_type.name +
                              "' by value (no copy semantics are defined yet -- return '" + fn.return_type.name +
-                             "&'/'const " + fn.return_type.name + "&' instead, see ch04 §4.2)");
+                             "&'/'const " + fn.return_type.name + "&' instead, see ch04 §4.2)",
+                             fn.loc);
     }
 
     std::vector<DataflowState> in_states(n);
