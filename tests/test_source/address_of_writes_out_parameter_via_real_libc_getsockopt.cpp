@@ -9,7 +9,7 @@ extern "C" {
 // "out" parameters need a pointer to the *caller's own* storage, which
 // &value/&len produce -- there is no other way to obtain one in this
 // version.
-safe int query_socket_type(int fd) {
+int query_socket_type(int fd) {
     int value = 0;
     int len = 4;
     unsafe {
@@ -18,13 +18,13 @@ safe int query_socket_type(int fd) {
     return value;
 }
 
-safe int open_socket() {
+int open_socket() {
     unsafe {
         return socket(2, 1, 0);
     }
 }
 
-safe void close_socket(int fd) {
+void close_socket(int fd) {
     unsafe {
         close(fd);
     }

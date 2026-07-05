@@ -148,16 +148,17 @@ private:
     const Function* current_function_def_ = nullptr;
     // `unsafe { }` nesting depth (ch01 §1.3), mirroring movecheck's own
     // DataflowState::unsafe_depth: 0 outside any unsafe context, > 0
-    // directly or transitively inside one. Initialized per-function in
-    // define_function (0 for a `safe` function, 1 for a non-`safe` one --
-    // its *entire* body is an implicit unsafe context, same as movecheck's
-    // entry_state), then incremented/decremented around an `unsafe { }`
-    // Block in codegen_stmt. Consulted only by arithmetic codegen so far
-    // (ch05 §5.8: `+`/`-`/`*` are overflow-checked in `safe` code, plain
-    // guaranteed-wrapping inside `unsafe`) -- every other check that reads
-    // unsafe-ness (raw pointer deref, callee-must-be-safe) is movecheck's
-    // job, not codegen's, since by the time a program reaches codegen it
-    // has already been accepted (see codegen_lvalue's Deref case).
+    // directly or transitively inside one. Initialized to 0 per-function
+    // in define_function (every function is checked by default, ch01 --
+    // there's no per-function way to start already unsafe), then
+    // incremented/decremented around an `unsafe { }` Block in
+    // codegen_stmt. Consulted only by arithmetic codegen so far (ch05
+    // §5.8: `+`/`-`/`*` are overflow-checked by default, plain
+    // guaranteed-wrapping inside `unsafe`) -- every other check that
+    // reads unsafe-ness (raw pointer deref, calling an `extern "C"`
+    // function) is movecheck's job, not codegen's, since by the time a
+    // program reaches codegen it has already been accepted (see
+    // codegen_lvalue's Deref case).
     int unsafe_depth_ = 0;
     // Where the statement/expression currently being lowered begins in
     // the source (see SourceLocation, ast.cppm) -- refreshed as
@@ -1001,10 +1002,13 @@ private:
         }
 
         current_function_def_ = &fn;
-        // Mirrors movecheck's entry_state.unsafe_depth = fn.is_safe ? 0 : 1
-        // (ch01 §1.3): a non-`safe` function's entire body is an implicit
-        // unsafe context, same as if it were all wrapped in `unsafe { }`.
-        unsafe_depth_ = fn.is_safe ? 0 : 1;
+        // Mirrors movecheck's entry_state.unsafe_depth (ch01 §1.3): every
+        // function is checked by default and starts outside any unsafe
+        // context -- unsafe_depth_ only ever increases via an explicit
+        // `unsafe { }` block within this same function's own body (the
+        // old "native function = implicitly unsafe everywhere" concept
+        // is fully retired).
+        unsafe_depth_ = 0;
         llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
         builder_->SetInsertPoint(entry);
 
@@ -1793,12 +1797,12 @@ private:
     // block into a `bounds.fail` block (unreachable after the call) and a
     // `bounds.ok` block, leaving the builder's insert point at the latter
     // so the caller can continue emitting the actual element access.
-    // Skipped entirely inside `unsafe { }`/a native function
-    // (unsafe_depth_ > 0, ch01 §1.3) -- same treatment, and for the same
-    // reason, as codegen_checked_arith/codegen_checked_div: a scpp-
-    // inserted *runtime* check, not an otherwise-illegal operation, so
-    // skipping it carries none of the "corrupted bookkeeping leaking into
-    // surrounding safe code" risk that keeps movecheck's own checks
+    // Skipped entirely inside `unsafe { }` (unsafe_depth_ > 0, ch01
+    // §1.3) -- same treatment, and for the same reason, as
+    // codegen_checked_arith/codegen_checked_div: a scpp-inserted
+    // *runtime* check, not an otherwise-illegal operation, so skipping
+    // it carries none of the "corrupted bookkeeping leaking into
+    // surrounding checked code" risk that keeps movecheck's own checks
     // unconditional.
     void emit_span_bounds_check(llvm::Value* index, llvm::Value* size) {
         if (unsafe_depth_ > 0) return;
@@ -1821,12 +1825,12 @@ private:
         builder_->SetInsertPoint(ok_block);
     }
 
-    // `+`/`-`/`*` (ch05 §5.8): overflow-checked in `safe` code (aborting,
+    // `+`/`-`/`*` (ch05 §5.8): overflow-checked by default (aborting,
     // via the same panic mechanism as emit_span_bounds_check, on overflow
     // -- both signed and unsigned per the spec, though only scpp's signed
     // `int` exists as an arithmetic type so far), or a plain, guaranteed-
-    // wrapping (never UB) operation inside `unsafe { }`/an `unsafe`
-    // function (unsafe_depth_ > 0) -- achieved simply by using the plain
+    // wrapping (never UB) operation inside `unsafe { }`
+    // (unsafe_depth_ > 0) -- achieved simply by using the plain
     // CreateAdd/CreateSub/CreateMul instructions, which (unlike real
     // Clang's) never get an `nsw`/`nuw` flag anywhere in this codebase, so
     // they're already well-defined, wrapping LLVM IR on their own. Only
@@ -1870,11 +1874,12 @@ private:
 
     // `/` (ch05 §5.8): `b == 0` or (the one case signed division itself
     // overflows) `a == INT_MIN && b == -1` always abort() -- unconditionally,
-    // in *every* context, `safe` or `unsafe` alike, unlike +/-/* above:
-    // both trap at the hardware level (x86 #DE) with no wrapped result for
-    // the hardware to fall back on, so there is no "unsafe and still
-    // defined" variant to fall back to here. Only i32 is checked, for the
-    // same reason codegen_checked_arith only checks i32.
+    // in *every* context, whether inside `unsafe { }` or not, unlike
+    // +/-/* above: both trap at the hardware level (x86 #DE) with no
+    // wrapped result for the hardware to fall back on, so there is no
+    // "unsafe and still defined" variant to fall back to here. Only i32
+    // is checked, for the same reason codegen_checked_arith only checks
+    // i32.
     llvm::Value* codegen_checked_div(llvm::Value* lhs, llvm::Value* rhs) {
         if (!lhs->getType()->isIntegerTy(32)) {
             return builder_->CreateSDiv(lhs, rhs, "divtmp");
@@ -1963,10 +1968,10 @@ private:
                     llvm::Value* data_ptr = builder_->CreateStructGEP(span_type, base.ptr, 0, "dataptr");
                     llvm::Value* data = builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), data_ptr, "data");
                     llvm::Value* index = codegen_expr(*expr.rhs);
-                    // Runtime bounds check (spec ch08: safe regions insert
-                    // bounds checks by default) -- unlike a fixed-size
-                    // array's subscript below, a span's length is only
-                    // known at runtime, so there's no way to reject an
+                    // Runtime bounds check (spec ch08: checked by default,
+                    // bounds checks inserted unconditionally) -- unlike a
+                    // fixed-size array's subscript below, a span's length is
+                    // only known at runtime, so there's no way to reject an
                     // out-of-bounds constant index at compile time.
                     emit_span_bounds_check(index, size);
                     llvm::Value* elem_ptr =

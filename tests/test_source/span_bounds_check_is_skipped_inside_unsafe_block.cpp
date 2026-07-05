@@ -1,4 +1,4 @@
-safe int access_unsafely(std::span<int> s, int i) {
+int access_unsafely(std::span<int> s, int i) {
     unsafe {
         return s[i];
     }

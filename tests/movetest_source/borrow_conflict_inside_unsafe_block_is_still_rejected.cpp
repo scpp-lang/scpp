@@ -1,4 +1,4 @@
-safe int f() {
+int f() {
     int a = 1;
     unsafe {
         int& r1 = a;

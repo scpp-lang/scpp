@@ -1,4 +1,4 @@
-safe int divide(int a, int b) {
+int divide(int a, int b) {
     return a / b;
 }
 int main() {

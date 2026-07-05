@@ -124,9 +124,9 @@ enum class UnaryOp {
            // validate_deref_operand). A reference dereference makes no
            // sense here and never reaches this: a reference already *is*
            // its referent (see codegen_lvalue's auto-deref).
-    AddressOf, // `&expr` -- always legal in a `safe` function (no `unsafe {}`
-               // needed to *create* a raw pointer, only to dereference one --
-               // ch05 §5.7). `expr` must be one of the same forms accepted as
+    AddressOf, // `&expr` -- always legal (no `unsafe {}` needed to *create*
+               // a raw pointer, only to dereference one -- ch05 §5.7).
+               // `expr` must be one of the same forms accepted as
                // a borrow source for `T&`/`const T&` (ch05.2): a plain local/
                // parameter, a `.field`/`[index]` projection, or `*p`/`p->x`
                // off a std::unique_ptr. Evaluates to a `T*`, registering no
@@ -231,16 +231,14 @@ struct Stmt {
     // ordinary `{ }`. An unsafe block is otherwise a completely normal
     // Block -- same lexical scoping, same statement list -- this flag
     // only tells the move checker to relax the specific ch05.5 checks
-    // it's licensed to relax (raw pointer dereference, calling a
-    // non-`safe` function), and tells codegen to skip its own runtime
+    // it's licensed to relax (raw pointer dereference, calling an
+    // `extern "C"` function), and tells codegen to skip its own runtime
     // checks (span bounds, integer overflow -- ch05 §5.8/ch08 Q1), for
     // the statements directly and transitively nested inside it; every
     // other check (ch05.1-5.4) keeps running unconditionally regardless
-    // of this flag. Meaningless for every other StmtKind. Movecheck
-    // separately rejects this flag being set at all when the enclosing
-    // function isn't itself `safe` (a native function's entire body is
-    // already an implicit unsafe context, so the marker has nothing left
-    // to relax -- see check_function).
+    // of this flag -- every function is checked by default now (ch01),
+    // so this is the *only* way any of ch05.5's operations ever becomes
+    // legal, anywhere. Meaningless for every other StmtKind.
     bool is_unsafe = false;
 };
 
@@ -250,7 +248,6 @@ struct Param {
 };
 
 struct Function {
-    bool is_safe = false;
     Type return_type;
     std::string name;
     // Where this function's declaration begins -- same purpose as
@@ -266,15 +263,18 @@ struct Function {
     // with a body). Nothing outside parsing/movecheck/codegen's
     // extern-declaration handling should assume this is always non-null.
     StmtPtr body;
-    // ch02 §2.1: requests C linkage. Orthogonal to `is_safe` when `body`
-    // is present (a `safe extern "C"` definition is allowed and checked
-    // like any other `safe` function); when `body` is null, `is_safe` is
-    // always false (parsing rejects `safe` on a bodyless declaration,
-    // since the compiler can't verify an implementation it can't see).
+    // ch02 §2.1: requests C linkage. A bodyless `extern "C"` declaration
+    // is always implicitly unchecked (no scpp compiler ever sees its
+    // real implementation), so calling it always requires `unsafe { }`
+    // (ch01/ch05 §5.5) -- the *only* remaining always-unchecked callee
+    // category, now that every ordinary function is checked by default
+    // (ch01 §1.3). An `extern "C"` *definition* (body non-null) is an
+    // ordinary, fully-checked function that additionally requests C
+    // linkage -- calling it needs no `unsafe { }` at all.
     bool is_extern_c = false;
     // ch11 §11.6: a bare `extern` (no `"C"` string) bodyless declaration
-    // -- ordinary scpp linkage, *can* be `safe` (unlike `is_extern_c`,
-    // since the module's own author is trusted to check the real
+    // -- ordinary scpp linkage; calling it needs no `unsafe { }` either
+    // (the module's own author is trusted to check the real
     // implementation elsewhere, see §11.6's own reasoning). Mutually
     // exclusive with is_extern_c (either this function requests C ABI,
     // or ordinary scpp linkage, never both).

@@ -1,4 +1,4 @@
-safe int f(int* p) {
+int f(int* p) {
     unsafe {
         return *p;
     }

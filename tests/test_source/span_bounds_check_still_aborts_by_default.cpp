@@ -1,4 +1,4 @@
-safe int access(std::span<int> s, int i) {
+int access(std::span<int> s, int i) {
     return s[i];
 }
 int main() {

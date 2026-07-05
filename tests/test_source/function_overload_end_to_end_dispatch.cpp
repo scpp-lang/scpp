@@ -1,7 +1,7 @@
-safe int f(int x) {
+int f(int x) {
     return x;
 }
-safe int f(bool b) {
+int f(bool b) {
     if (b) {
         return 100;
     }

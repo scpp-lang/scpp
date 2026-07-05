@@ -2,7 +2,7 @@ extern "C" {
     int abs(int n);
 }
 
-safe int compute(int x) {
+int compute(int x) {
     unsafe {
         return abs(x);
     }

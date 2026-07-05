@@ -84,11 +84,10 @@ struct DataflowState {
     RefTargetMap ref_targets;
     // Ch01 §1.3's nesting counter: incremented by UnsafeEnter, decremented
     // by UnsafeExit (see apply_statement). Zero means "not currently
-    // licensed to relax ch05.5's checks"; greater than zero means either
-    // inside a lexical `unsafe { }` block, or (see check_function) that
-    // the enclosing function itself isn't `safe` to begin with -- both
-    // cases are folded into this one counter so every call site only has
-    // to test `unsafe_depth == 0` / `> 0`, never `fn.is_safe` directly.
+    // licensed to relax ch05.5's checks"; greater than zero means inside
+    // a lexical `unsafe { }` block. Every function starts at zero (ch01:
+    // checking is the unconditional default, with no per-function way to
+    // start already-unsafe) -- see check_function's entry_state setup.
     // Unlike `locals`/`borrows`/`ref_targets`, this never needs real join
     // semantics (see join_states): it's a purely lexical/structural fact,
     // identical via every predecessor path to a given program point.
@@ -135,7 +134,7 @@ struct DataflowState {
 // apply_reference_argument), resolving/validating a reference return
 // value against spec ch05.3's elision rule (see resolve_elided_param_index
 // and check_terminator's Return case), and gating the "callee must be
-// `safe`" check (ch02/ch05.5) in check_call_arguments.
+// wrapped in `unsafe { }`" check (ch02/ch05.5) in check_call_arguments.
 struct FunctionSignature {
     std::vector<Type> param_types;
     Type return_type;
@@ -148,10 +147,14 @@ struct FunctionSignature {
     // Computed once by resolve_elided_param_index, which throws if
     // return_type is a Reference but no valid elision exists.
     std::optional<size_t> elided_param_index;
-    // Mirrors Function::is_safe. A call whose callee's is_safe is false
-    // is rejected unless the call site's DataflowState::unsafe_depth is
-    // greater than zero (ch01 §1.3/ch02) -- see check_call_arguments.
-    bool is_safe = false;
+    // Mirrors Function::is_extern_c. Every ordinary scpp function is
+    // checked by default (ch01) and needs no `unsafe { }` to call; an
+    // `extern "C"` *declaration* (no body -- its real implementation is
+    // never seen by any scpp compiler) is the one remaining always-
+    // unchecked callee category, so calling it is rejected unless the
+    // call site's DataflowState::unsafe_depth is greater than zero
+    // (ch01 §1.3/ch02) -- see check_call_arguments.
+    bool is_extern_c = false;
     // Where this specific overload's declaration begins -- see
     // Function::loc; needed for diagnostics that are about one
     // particular overload (e.g. a redefinition error naming the
@@ -1472,14 +1475,17 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 // statement or value sub-expression) and resolve_borrow_source_root's
 // Call case below (a call to a reference-returning function used
 // itself as a further reference-binding source). Also the single place
-// (reached from every Call site) that enforces ch02/ch05.5's "callee
-// must be `safe`, otherwise `unsafe {}`" rule (ch01 §1.3): rejected only
-// when the callee is *known* (an unresolved/unknown callee name is left
-// to codegen's own "call to unknown function" check, same treatment as
-// elsewhere in this file) and not `safe`, and the call site itself isn't
-// currently inside an `unsafe { }` block or an already-non-`safe`
-// function (state.unsafe_depth > 0 -- see check_function's entry_state
-// setup and DataflowState::unsafe_depth). print_int/print_bool and other
+// (reached from every Call site) that enforces ch02/ch05.5's "calling an
+// `extern \"C\"` function requires `unsafe {}`" rule (ch01 §1.3):
+// rejected only when the callee is *known* (an unresolved/unknown callee
+// name is left to codegen's own "call to unknown function" check, same
+// treatment as elsewhere in this file) and is an `extern "C"`
+// declaration, and the call site itself isn't currently inside an
+// `unsafe { }` block (state.unsafe_depth > 0 -- see check_function's
+// entry_state setup and DataflowState::unsafe_depth). Every other
+// callee -- an ordinary scpp function or a bare `extern` (ch11 §11.6)
+// declaration alike -- is checked by default (ch01) and needs no
+// `unsafe {}` to call at all. print_int/print_bool and other
 // codegen-only builtins are never in `signatures` at all, so they're
 // always callable regardless of context, same as they already bypass
 // every other signature-based check in this file.
@@ -1500,9 +1506,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                              "type match only; an explicit cast may be required)",
             state.current_loc);
     }
-    if (report_errors && sig != nullptr && !sig->is_safe && state.unsafe_depth == 0) {
-        throw DataflowError("cannot call non-'safe' function '" + expr.name +
-                             "' from a 'safe' context; wrap the call in 'unsafe { }' (spec ch01 §1.3/ch02)",
+    if (report_errors && sig != nullptr && sig->is_extern_c && state.unsafe_depth == 0) {
+        throw DataflowError("cannot call 'extern \"C\"' function '" + expr.name +
+                             "' outside 'unsafe { }': no scpp compiler ever sees its real implementation to "
+                             "check it (spec ch01 §1.3/ch02)",
             state.current_loc);
     }
     // Scratch borrow-map shared by every reference argument of *this*
@@ -2082,31 +2089,6 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names) {
     Body body = build_mir(fn);
 
-    // ch01 §1.3: `unsafe { }` written inside a native (non-`safe`)
-    // function is a compile error, not a harmless no-op -- the function's
-    // entire body is already an implicit unsafe context (see
-    // entry_state.unsafe_depth below), so the marker has no active
-    // checking left to relax, and rejecting it also catches a likely
-    // leftover from moving code between a `safe` function and a native
-    // one. A flat scan over every block is enough: this is a purely
-    // lexical/structural fact, never a flow-sensitive one -- MIR already
-    // flattens any nesting depth into the same UnsafeEnter marker, so
-    // there's no need to track a counter or walk the CFG for this.
-    if (!fn.is_safe) {
-        for (const auto& block : body.blocks) {
-            for (const auto& stmt : block.statements) {
-                if (stmt.kind == MirStatementKind::UnsafeEnter) {
-                    throw DataflowError("'unsafe { }' is not allowed inside native function '" + fn.name +
-                                        "': it is already unsafe everywhere in a native function, so the "
-                                        "marker has nothing left to relax (mark '" + fn.name +
-                                        "' itself 'safe' first if you meant to open a checked region with an "
-                                        "escape hatch)",
-                                        stmt.loc);
-                }
-            }
-        }
-    }
-
     size_t n = body.blocks.size();
 
     std::vector<std::vector<size_t>> preds(n);
@@ -2125,18 +2107,13 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     std::vector<std::vector<LiveSet>> live_after = compute_reference_liveness(body, preds);
 
     DataflowState entry_state;
-    // ch01 §1.3's "or the caller itself is an unsafe function" clause:
-    // folding `!fn.is_safe` into the *starting* depth means every check
-    // gated on `unsafe_depth` only ever has to test that one counter,
-    // never `fn.is_safe` separately -- a native function's entire body
-    // behaves exactly as if it were already wrapped in one implicit
-    // `unsafe { }` for every unsafe_depth-gated check's purposes, while a
-    // `safe` function starts at 0 and must actually enter a real,
-    // explicitly-written `unsafe { }` block before any of them relax.
-    // (This implicit wrapping is never itself rejected by the scan above
-    // -- only an *explicit* `unsafe { }` written in the native function's
-    // own source is.)
-    entry_state.unsafe_depth = fn.is_safe ? 0 : 1;
+    // ch01 §1.3: every function is checked by default, unconditionally --
+    // there is no per-function way to start already inside an implicit
+    // unsafe context (the old "native function" concept is fully
+    // retired). Every function's entry_state therefore starts at 0;
+    // unsafe_depth only ever increases via an explicit, lexically nested
+    // `unsafe { }` block within this same function's own body.
+    entry_state.unsafe_depth = 0;
     // ch04 §4.2/ch05 §5.9: `this` is always params[0] when present (see
     // parser's make_this_param) -- a user can never spell a same-named
     // parameter themselves, since `this` is a keyword, not an ordinary
@@ -2254,19 +2231,15 @@ void check_moves(const Program& program) {
         }
         sig.return_type = fn.return_type;
         sig.elided_param_index = resolve_elided_param_index(fn);
-        sig.is_safe = fn.is_safe;
+        sig.is_extern_c = fn.is_extern_c;
         sig.loc = fn.loc;
         // ch05 §5.10: two functions sharing a name are legitimate
         // overloads only if their parameter lists actually differ --
         // scpp cannot overload on return type alone (real C++'s own
-        // rule), and `safe`-ness is a scpp-only annotation layered on
-        // top of a real signature, not part of the identity overload
-        // resolution dispatches on (a `safe`/non-`safe` pair with
-        // otherwise-identical parameters is the same signature declared
-        // twice, not two overloads). A duplicate is a hard redefinition
-        // error, not silently overwritten -- unlike this map's previous
-        // one-entry-per-name behavior, which would have let the second
-        // definition silently replace the first.
+        // rule). A duplicate is a hard redefinition error, not silently
+        // overwritten -- unlike this map's previous one-entry-per-name
+        // behavior, which would have let the second definition silently
+        // replace the first.
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             bool same_params = existing.param_types.size() == sig.param_types.size();
@@ -2277,7 +2250,7 @@ void check_moves(const Program& program) {
                 throw DataflowError("redefinition of '" + fn.name +
                                      "': a previous declaration with an identical parameter list already "
                                      "exists (ch05 §5.10 -- functions can only be overloaded by parameter "
-                                     "list, and 'safe'-ness/return type alone don't count as a difference)",
+                                     "list, return type alone doesn't count as a difference)",
                     fn.loc);
             }
         }

@@ -49,7 +49,6 @@ enum class TokenKind {
     KwElse,
     KwWhile,
     KwFor,
-    KwSafe,
     KwUnsafe,
     KwExtern,
     KwTrue,
@@ -198,7 +197,6 @@ private:
         if (text == "else") return TokenKind::KwElse;
         if (text == "while") return TokenKind::KwWhile;
         if (text == "for") return TokenKind::KwFor;
-        if (text == "safe") return TokenKind::KwSafe;
         if (text == "unsafe") return TokenKind::KwUnsafe;
         if (text == "extern") return TokenKind::KwExtern;
         if (text == "true") return TokenKind::KwTrue;

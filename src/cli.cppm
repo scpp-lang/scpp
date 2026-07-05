@@ -34,7 +34,6 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwElse: return "KwElse";
         case scpp::TokenKind::KwWhile: return "KwWhile";
         case scpp::TokenKind::KwFor: return "KwFor";
-        case scpp::TokenKind::KwSafe: return "KwSafe";
         case scpp::TokenKind::KwUnsafe: return "KwUnsafe";
         case scpp::TokenKind::KwExtern: return "KwExtern";
         case scpp::TokenKind::KwTrue: return "KwTrue";
@@ -334,7 +333,7 @@ int run_parse(std::string_view path) {
             }
         }
         for (const scpp::Function& fn : program.functions) {
-            std::cout << "Function " << (fn.is_safe ? "safe " : "") << (fn.is_extern_c ? "extern \"C\" " : "")
+            std::cout << "Function " << (fn.is_extern_c ? "extern \"C\" " : "")
                        << type_to_string(fn.return_type) << " " << fn.name << "(";
             for (size_t i = 0; i < fn.params.size(); i++) {
                 if (i > 0) std::cout << ", ";

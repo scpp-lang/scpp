@@ -1,3 +1,3 @@
-safe int f(char* p) {
+int f(char* p) {
     return *p == 'a';
 }

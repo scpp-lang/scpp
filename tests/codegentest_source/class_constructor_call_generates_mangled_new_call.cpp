@@ -2,15 +2,15 @@ class Counter {
 private:
     int value;
 public:
-    safe Counter(int start) {
+    Counter(int start) {
         this->value = start;
         return;
     }
-    safe ~Counter() {
+    ~Counter() {
         return;
     }
 };
-safe void f() {
+void f() {
     Counter c(5);
     return;
 }

@@ -1,4 +1,4 @@
-safe int double_it(int x) {
+int double_it(int x) {
     return x * 2;
 }
 int main() {

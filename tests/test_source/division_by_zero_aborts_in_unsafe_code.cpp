@@ -1,4 +1,4 @@
-safe int divide_unsafely(int a, int b) {
+int divide_unsafely(int a, int b) {
     unsafe {
         return a / b;
     }

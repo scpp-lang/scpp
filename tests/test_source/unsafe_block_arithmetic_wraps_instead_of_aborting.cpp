@@ -1,4 +1,4 @@
-safe int add_one_unsafely(int x) {
+int add_one_unsafely(int x) {
     unsafe {
         return x + 1;
     }

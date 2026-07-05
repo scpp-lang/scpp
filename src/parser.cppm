@@ -465,7 +465,6 @@ private:
     // Function itself has no implicit copy constructor.
     static Function clone_function_declaration(const Function& fn, const std::string& owning_module) {
         Function clone;
-        clone.is_safe = fn.is_safe;
         clone.return_type = fn.return_type;
         clone.name = fn.name;
         clone.loc = fn.loc;
@@ -591,28 +590,21 @@ private:
     // Parses one top-level item that isn't a `struct`: an ordinary
     // function, or an `extern "C"` declaration/definition/block (ch02
     // §2.1), or a bare `extern` module-linkage declaration (ch11 §11.6).
-    // `safe` (if present) is always consumed up front, before checking
-    // for `extern` -- matching the spec's own ordering example (`safe
-    // extern "C" int add(...) { ... }`) -- so it's available regardless
-    // of which of the shapes below follows:
-    //   [safe] <ret> <name>(<params>) { <body> }                 -- an
+    // Every function is checked by default (ch01) -- there is no
+    // per-function keyword to consume here at all:
+    //   <ret> <name>(<params>) { <body> }                          -- an
     //     ordinary definition (is_extern_c=false).
-    //   [safe] extern "C" <ret> <name>(<params>) (';' | '{' ... '}')
-    //     -- a single extern "C" item: a bodyless declaration (';') or a
-    //     definition (a `safe` one is allowed; see parse_function's own
-    //     "safe requires a body" check for the bodyless case).
+    //   extern "C" <ret> <name>(<params>) (';' | '{' ... '}')
+    //     -- a single extern "C" item: a bodyless declaration (';',
+    //     always implicitly unchecked -- calling it needs `unsafe { }`,
+    //     ch02 §2.1) or a definition (checked like any other function).
     //   extern "C" { <item> <item> ... }                          -- block
-    //     sugar for repeating `extern "C"` on each nested item, so an
-    //     item written inside the block is *not* itself re-prefixed with
-    //     `extern "C"` (matching real C++) -- but may independently start
-    //     with its own `safe`. A leading `safe` directly before this
-    //     block form isn't supported (there's no single item for it to
-    //     attach to); mark individual items `safe` inside the block
-    //     instead.
-    //   [safe] extern <ret> <name>(<params>);                     -- a
+    //     sugar for repeating `extern "C"` on each nested item, matching
+    //     real C++.
+    //   extern <ret> <name>(<params>);                             -- a
     //     bare (non-"C") extern declaration (ch11 §11.6): ordinary scpp
-    //     linkage, *can* be `safe`, no block-sugar form (that's an
-    //     extern-"C"-only convenience for repeating a linkage string).
+    //     linkage, no block-sugar form (that's an extern-"C"-only
+    //     convenience for repeating a linkage string).
     // `is_exported` (ch11 §11.3) is only meaningful for the ordinary/bare-
     // extern cases: an `extern "C"` declaration is never namespace-
     // qualified or mangled (its name must stay the real, plain C symbol
@@ -620,12 +612,11 @@ private:
     // `export` marker on one is simply not applicable and is ignored.
     void parse_top_level_function_or_extern_group(Program& program, bool is_exported) {
         SourceLocation loc = current_loc();
-        bool is_safe = match(TokenKind::KwSafe);
         if (match(TokenKind::KwExtern)) {
             if (!check(TokenKind::StringLiteral)) {
                 // Bare extern (ch11 §11.6): always a single bodyless
-                // declaration, ordinary scpp linkage, can be `safe`.
-                Function fn = parse_function(is_safe, /*is_extern_c=*/false, /*is_module_extern=*/true);
+                // declaration, ordinary scpp linkage.
+                Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/true);
                 fn.loc = loc;
                 fn.name = qualify_name(fn.name);
                 fn.namespace_path = namespace_stack_;
@@ -636,12 +627,6 @@ private:
             }
             parse_c_linkage_string();
             if (check(TokenKind::LBrace)) {
-                if (is_safe) {
-                    const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
-                                      "'safe' cannot prefix an 'extern \"C\"' block; mark individual "
-                                      "declarations 'safe' inside the block instead");
-                }
                 advance(); // '{'
                 while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
                     if (check(TokenKind::KwStruct)) {
@@ -651,20 +636,19 @@ private:
                                           "declarations/definitions, not structs");
                     }
                     SourceLocation item_loc = current_loc();
-                    bool item_is_safe = match(TokenKind::KwSafe);
-                    Function item_fn = parse_function(item_is_safe, /*is_extern_c=*/true);
+                    Function item_fn = parse_function(/*is_extern_c=*/true);
                     item_fn.loc = item_loc;
                     program.functions.push_back(std::move(item_fn));
                 }
                 expect(TokenKind::RBrace, "'}'");
                 return;
             }
-            Function fn = parse_function(is_safe, /*is_extern_c=*/true);
+            Function fn = parse_function(/*is_extern_c=*/true);
             fn.loc = loc;
             program.functions.push_back(std::move(fn));
             return;
         }
-        Function fn = parse_function(is_safe, /*is_extern_c=*/false);
+        Function fn = parse_function(/*is_extern_c=*/false);
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
@@ -915,7 +899,6 @@ private:
             }
 
             SourceLocation member_loc = current_loc();
-            bool member_is_safe = match(TokenKind::KwSafe);
             if (match(TokenKind::Tilde)) {
                 // Destructor: `~ClassName() { ... }` -- no parameters, no
                 // return type, and always a mutable (non-`const`) `this`
@@ -930,7 +913,6 @@ private:
                 expect(TokenKind::RParen, "')'");
                 Function fn;
                 fn.loc = member_loc;
-                fn.is_safe = member_is_safe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = qualified_class_name + "_delete";
@@ -953,7 +935,6 @@ private:
                 advance(); // class name
                 Function fn;
                 fn.loc = member_loc;
-                fn.is_safe = member_is_safe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = qualified_class_name + "_new";
@@ -980,7 +961,6 @@ private:
                 // knowable -- and `this`'s mutability with it -- after
                 // parsing the params above.
                 bool is_const = match(TokenKind::KwConst);
-                fn.is_safe = member_is_safe;
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_" + member_name;
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
@@ -990,13 +970,7 @@ private:
                 continue;
             }
 
-            // A field: `safe` makes no sense on a variable, and ch04
-            // §4.2 permanently forbids a public one.
-            if (member_is_safe) {
-                const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                  "'safe' cannot prefix a member variable, only a member function");
-            }
+            // A field: ch04 §4.2 permanently forbids a public one.
             if (current_access == AccessSpecifier::Public) {
                 const Token& tok = peek();
                 throw ParseError(tok.line, tok.column,
@@ -1019,14 +993,13 @@ private:
     // <name>(<params>)` followed by either `;` (a bodyless declaration --
     // legal when `is_extern_c` (ch02 §2.1) or `is_module_extern` (bare
     // `extern`, ch11 §11.6)) or `{ <body> }` (an ordinary definition).
-    // `is_safe`/`is_extern_c`/`is_module_extern` are decided and consumed
-    // by the caller (parse_top_level_function_or_extern_group) before
-    // this runs, since their combination affects *which* prefixes were
-    // already consumed (a `safe` inside an `extern "C" { }` block isn't
+    // `is_extern_c`/`is_module_extern` are decided and consumed by the
+    // caller (parse_top_level_function_or_extern_group) before this
+    // runs, since their combination affects *which* prefixes were
+    // already consumed (an item inside an `extern "C" { }` block isn't
     // preceded by its own `extern "C"` -- see that function).
-    Function parse_function(bool is_safe, bool is_extern_c, bool is_module_extern = false) {
+    Function parse_function(bool is_extern_c, bool is_module_extern = false) {
         Function fn;
-        fn.is_safe = is_safe;
         fn.is_extern_c = is_extern_c;
         fn.is_module_extern = is_module_extern;
         fn.return_type = parse_type();
@@ -1087,19 +1060,6 @@ private:
                                   "'extern \"C\"' (ch02 §2.1) or a bare 'extern' declaration (ch11 "
                                   "§11.6); every other function must have a definition");
             }
-            // Unlike `extern "C"` -- always implicitly unsafe, since no
-            // scpp compiler ever sees the C implementation to check it --
-            // a bare `extern` (is_module_extern) declaration *can* be
-            // marked `safe` (ch11 §11.6): the module's author is trusted
-            // to check the real implementation elsewhere (a separate
-            // implementation unit or payload), not the compiler seeing
-            // this declaration.
-            if (fn.is_extern_c && fn.is_safe) {
-                const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                  "cannot mark an external declaration 'safe': its implementation "
-                                  "isn't visible to the compiler (ch02 §2.1)");
-            }
             return fn;
         }
 
@@ -1143,11 +1103,10 @@ private:
     // supports this block-statement form: `unsafe` must always be
     // followed by `{` (parse_block itself rejects anything else), never a
     // single bare statement, a condition expression, or a match-arm body.
-    // Grammar accepts this anywhere a statement is expected, regardless
-    // of the enclosing function's own `safe`-ness -- rejecting it inside
-    // a native (non-`safe`) function is movecheck's job (check_function),
-    // not a grammar restriction, since it needs `Function::is_safe`
-    // context this parser method doesn't have.
+    // Grammar accepts this anywhere a statement is expected -- every
+    // function is checked by default now (ch01), so there's no enclosing-
+    // function context to consult here at all, unlike the pre-reversal
+    // design this comment used to describe.
     StmtPtr parse_unsafe_block() {
         expect(TokenKind::KwUnsafe, "'unsafe'");
         StmtPtr block = parse_block();

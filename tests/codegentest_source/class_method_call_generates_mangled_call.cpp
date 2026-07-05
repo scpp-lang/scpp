@@ -2,18 +2,18 @@ class Counter {
 private:
     int value;
 public:
-    safe Counter(int start) {
+    Counter(int start) {
         this->value = start;
         return;
     }
-    safe ~Counter() {
+    ~Counter() {
         return;
     }
-    safe int get() const {
+    int get() const {
         return this->value;
     }
 };
-safe int f() {
+int f() {
     Counter c(5);
     return c.get();
 }

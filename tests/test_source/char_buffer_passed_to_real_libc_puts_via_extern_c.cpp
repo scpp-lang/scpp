@@ -1,6 +1,6 @@
 extern "C" int puts(const char* s);
 
-safe void print_buffer(char* msg) {
+void print_buffer(char* msg) {
     unsafe {
         puts(msg);
     }

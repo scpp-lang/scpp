@@ -1,10 +1,10 @@
-int not_safe() {
+int helper() {
     print_int(7);
     return 0;
 }
-safe int f() {
+int f() {
     unsafe {
-        return not_safe();
+        return helper();
     }
 }
 int main() {

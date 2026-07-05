@@ -1,5 +1,5 @@
 extern "C" int puts(const char* s);
-safe void greet() {
+void greet() {
     unsafe {
         puts("Hello, World!");
     }

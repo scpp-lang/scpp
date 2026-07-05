@@ -51,9 +51,8 @@ void test_int_main_return() {
 
 void test_keywords() {
     expect_kinds(
-        "safe unsafe bool if else while for true false struct const",
+        "unsafe bool if else while for true false struct const",
         {
-            scpp::TokenKind::KwSafe,
             scpp::TokenKind::KwUnsafe,
             scpp::TokenKind::KwBool,
             scpp::TokenKind::KwIf,
@@ -67,6 +66,14 @@ void test_keywords() {
             scpp::TokenKind::EndOfFile,
         },
         "keywords");
+}
+
+// ch01 (safety-context reversal): `safe` is no longer a keyword at all --
+// every function is checked by default, with no per-function annotation
+// -- so it now lexes as an ordinary Identifier, exactly like any other
+// unreserved word.
+void test_safe_is_no_longer_a_keyword() {
+    expect_kinds("safe", {scpp::TokenKind::Identifier, scpp::TokenKind::EndOfFile}, "safe_is_no_longer_a_keyword");
 }
 
 void test_identifier_text() {
@@ -317,6 +324,7 @@ int main() {
     test_empty_source();
     test_int_main_return();
     test_keywords();
+    test_safe_is_no_longer_a_keyword();
     test_identifier_text();
     test_integer_literal_text();
     test_operators();

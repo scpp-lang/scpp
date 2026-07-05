@@ -1,4 +1,4 @@
-safe int sub_one(int x) {
+int sub_one(int x) {
     return x - 1;
 }
 int main() {

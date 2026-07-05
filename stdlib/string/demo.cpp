@@ -14,7 +14,7 @@ extern "C" {
     int puts(const char* s);
 }
 
-safe void print_string(const std::string& s) {
+void print_string(const std::string& s) {
     unsafe {
         puts(s.c_str());
     }

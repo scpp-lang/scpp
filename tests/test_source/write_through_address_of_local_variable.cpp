@@ -1,4 +1,4 @@
-safe void write_via_raw_pointer() {
+void write_via_raw_pointer() {
     int x = 0;
     int* p = &x;
     unsafe {

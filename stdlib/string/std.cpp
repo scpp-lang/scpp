@@ -1,15 +1,15 @@
 // std.cpp
 //
 // scpp's "std" module: `namespace std { export class string { ... }; }`,
-// a thin, safe wrapper around the extern "C" functions declared below,
-// which are themselves a plain-C-ABI shim over real C++ `std::string`
-// (see scpp_string_wrapper.h/.cpp, built separately as a native library
-// -- stdlib/string/README.md explains the full build story). This is
+// a thin wrapper around the extern "C" functions declared below, which
+// are themselves a plain-C-ABI shim over real C++ `std::string` (see
+// scpp_string_wrapper.h/.cpp, built separately as a native library --
+// stdlib/string/README.md explains the full build story). This is
 // scpp's concrete demonstration of both calling into a real C/C++
 // library and scpp's own multi-file module system (ch11
 // docs/book/en/ch11-modules-and-libraries.md): every method's body is
-// `unsafe { <one extern "C" call> }`, exactly like any other native-
-// function call from safe code (ch01 §1.3); `std::string` itself is
+// `unsafe { <one extern "C" call> }`, exactly like any other call to an
+// `extern "C"` function (ch01 §1.3/ch02); `std::string` itself is
 // exported from a real, separately-compiled module -- a consumer writes
 // `import std;` then uses `std::string` (see demo.cpp), not a textual
 // concatenation.
@@ -42,14 +42,14 @@ private:
     void* handle;
 
 public:
-    safe string(const char* s) {
+    string(const char* s) {
         unsafe {
             this->handle = scpp_string_new(s);
         }
         return;
     }
 
-    safe ~string() {
+    ~string() {
         unsafe {
             scpp_string_delete(this->handle);
         }
@@ -57,7 +57,7 @@ public:
     }
 
     // Number of bytes currently stored (std::string::size()).
-    safe int length() const {
+    int length() const {
         unsafe {
             return scpp_string_length(this->handle);
         }
@@ -68,14 +68,14 @@ public:
     // call to append() on this same string (matches
     // std::string::c_str()'s own invalidation rule -- see
     // scpp_string_wrapper.h).
-    safe const char* c_str() const {
+    const char* c_str() const {
         unsafe {
             return scpp_string_c_str(this->handle);
         }
     }
 
     // Appends `s` to this string's content in place.
-    safe void append(const char* s) {
+    void append(const char* s) {
         unsafe {
             scpp_string_append(this->handle, s);
         }
@@ -83,7 +83,7 @@ public:
     }
 
     // True if this string's content equals `s` byte-for-byte.
-    safe bool equals(const char* s) const {
+    bool equals(const char* s) const {
         unsafe {
             return scpp_string_equals(this->handle, s) != 0;
         }

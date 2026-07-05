@@ -159,7 +159,7 @@ void run_error_location_tests() {
 
     std::vector<Case> dataflow_cases = {
         {"use_after_move",
-         "safe int f() {\n    std::unique_ptr<int> p = std::make_unique<int>(5);\n    std::unique_ptr<int> q = "
+         "int f() {\n    std::unique_ptr<int> p = std::make_unique<int>(5);\n    std::unique_ptr<int> q = "
          "std::move(p);\n    return *p;\n}\nint main() { return f(); }\n",
          4},
     };
@@ -224,9 +224,9 @@ void run_module_system_tests() {
         std::filesystem::path lib_path = write_temp_file(case_name, "lib",
             "export module mathlib;\n"
             "namespace mathlib {\n"
-            "    export safe int square(int x) { return x * x; }\n"
-            "    safe int helper(int x) { return x + 1; }\n"
-            "    export safe int square_plus_one(int x) { return mathlib::square(x) + mathlib::helper(0); }\n"
+            "    export int square(int x) { return x * x; }\n"
+            "    int helper(int x) { return x + 1; }\n"
+            "    export int square_plus_one(int x) { return mathlib::square(x) + mathlib::helper(0); }\n"
             "}\n");
         std::string main_source =
             "import mathlib;\n"
@@ -271,7 +271,7 @@ void run_module_system_tests() {
         std::filesystem::path lib_path = write_temp_file(case_name, "lib",
             "export module mathlib;\n"
             "namespace mathlib {\n"
-            "    safe int helper(int x) { return x + 1; }\n"
+            "    int helper(int x) { return x + 1; }\n"
             "}\n");
         std::string main_source =
             "import mathlib;\n"

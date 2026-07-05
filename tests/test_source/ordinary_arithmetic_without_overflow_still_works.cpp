@@ -1,4 +1,4 @@
-safe int compute(int a, int b) {
+int compute(int a, int b) {
     return a + b - 1 * b;
 }
 int main() {

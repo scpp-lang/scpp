@@ -25,7 +25,6 @@ void test_int_main_return() {
     scpp::Program program = scpp::parse("int main() { return 42; }");
     expect(program.functions.size() == 1, "int_main_return: expected 1 function");
     const scpp::Function& fn = program.functions[0];
-    expect(!fn.is_safe, "int_main_return: function should not be safe");
     expect(is_named_type(fn.return_type, "int"), "int_main_return: return type should be 'int'");
     expect(fn.name == "main", "int_main_return: name should be 'main'");
     expect(fn.params.empty(), "int_main_return: no params expected");
@@ -39,24 +38,23 @@ void test_int_main_return() {
     expect(ret.expr->int_value == 42, "int_main_return: value should be 42");
 }
 
-void test_safe_function_with_params() {
-    scpp::Program program = scpp::parse("safe int add(int a, int b) { return a + b; }");
-    expect(program.functions.size() == 1, "safe_function_with_params: expected 1 function");
+void test_function_with_params() {
+    scpp::Program program = scpp::parse("int add(int a, int b) { return a + b; }");
+    expect(program.functions.size() == 1, "function_with_params: expected 1 function");
     const scpp::Function& fn = program.functions[0];
-    expect(fn.is_safe, "safe_function_with_params: function should be safe");
-    expect(fn.params.size() == 2, "safe_function_with_params: expected 2 params");
+    expect(fn.params.size() == 2, "function_with_params: expected 2 params");
     expect(is_named_type(fn.params[0].type, "int") && fn.params[0].name == "a",
-           "safe_function_with_params: param 0 should be 'int a'");
+           "function_with_params: param 0 should be 'int a'");
     expect(is_named_type(fn.params[1].type, "int") && fn.params[1].name == "b",
-           "safe_function_with_params: param 1 should be 'int b'");
+           "function_with_params: param 1 should be 'int b'");
 
     const scpp::Stmt& ret = *fn.body->statements[0];
-    expect(ret.expr->kind == scpp::ExprKind::Binary, "safe_function_with_params: expr should be Binary");
-    expect(ret.expr->binary_op == scpp::BinaryOp::Add, "safe_function_with_params: op should be Add");
+    expect(ret.expr->kind == scpp::ExprKind::Binary, "function_with_params: expr should be Binary");
+    expect(ret.expr->binary_op == scpp::BinaryOp::Add, "function_with_params: op should be Add");
     expect(ret.expr->lhs->kind == scpp::ExprKind::Identifier && ret.expr->lhs->name == "a",
-           "safe_function_with_params: lhs should be identifier 'a'");
+           "function_with_params: lhs should be identifier 'a'");
     expect(ret.expr->rhs->kind == scpp::ExprKind::Identifier && ret.expr->rhs->name == "b",
-           "safe_function_with_params: rhs should be identifier 'b'");
+           "function_with_params: rhs should be identifier 'b'");
 }
 
 void test_var_decl_and_if_else() {
@@ -535,7 +533,6 @@ void test_extern_c_single_declaration() {
     expect(program.functions.size() == 2, "extern_c_single_declaration: expected 2 functions");
     const scpp::Function& fn = program.functions[0];
     expect(fn.is_extern_c, "extern_c_single_declaration: is_extern_c should be true");
-    expect(!fn.is_safe, "extern_c_single_declaration: is_safe should be false");
     expect(fn.body == nullptr, "extern_c_single_declaration: body should be null (no definition)");
     expect(fn.name == "c_abs", "extern_c_single_declaration: name should be 'c_abs'");
     expect(fn.params.size() == 1 && is_named_type(fn.params[0].type, "int"),
@@ -560,24 +557,15 @@ void test_extern_c_block_form() {
            "extern_c_block_form: 'c_exit' should return 'void'");
 }
 
-void test_safe_extern_c_definition_is_allowed() {
-    // ch02 §2.1: `safe` and `extern "C"` are orthogonal for a definition.
-    scpp::Program program = scpp::parse("safe extern \"C\" int add(int a, int b) { return a + b; }");
+void test_extern_c_definition_is_checked_like_any_function() {
+    // ch02 §2.1: an `extern "C"` *definition* (a body present) is an
+    // ordinary, fully-checked function that additionally requests C
+    // linkage -- every function is checked by default (ch01), so there's
+    // no separate flag to assert here beyond is_extern_c/body itself.
+    scpp::Program program = scpp::parse("extern \"C\" int add(int a, int b) { return a + b; }");
     const scpp::Function& fn = program.functions[0];
-    expect(fn.is_safe && fn.is_extern_c, "safe_extern_c_definition_is_allowed: both flags should be true");
-    expect(fn.body != nullptr, "safe_extern_c_definition_is_allowed: body should be present");
-}
-
-void test_safe_extern_c_declaration_is_rejected() {
-    // A bodyless declaration can never be `safe`: the compiler can't
-    // verify an implementation it doesn't see (ch02 §2.1).
-    bool threw = false;
-    try {
-        scpp::parse("safe extern \"C\" int foo(int x);");
-    } catch (const scpp::ParseError&) {
-        threw = true;
-    }
-    expect(threw, "safe_extern_c_declaration_is_rejected: expected a ParseError");
+    expect(fn.is_extern_c, "extern_c_definition_is_checked_like_any_function: is_extern_c should be true");
+    expect(fn.body != nullptr, "extern_c_definition_is_checked_like_any_function: body should be present");
 }
 
 void test_extern_cpp_linkage_is_rejected() {
@@ -633,19 +621,6 @@ void test_void_return_and_void_pointer_types() {
            "void_return_and_void_pointer_types: parameter should be a pointer");
     expect(is_named_type(*fn.params[0].type.pointee, "void"),
            "void_return_and_void_pointer_types: parameter's pointee should be 'void'");
-}
-
-void test_safe_prefix_on_extern_c_block_is_rejected() {
-    // `safe` doesn't combine with the block form -- there's no single
-    // item for it to attach to (ch02 §2.1); mark individual items `safe`
-    // inside the block instead.
-    bool threw = false;
-    try {
-        scpp::parse("safe extern \"C\" { int f(int x); }");
-    } catch (const scpp::ParseError&) {
-        threw = true;
-    }
-    expect(threw, "safe_prefix_on_extern_c_block_is_rejected: expected a ParseError");
 }
 
 void test_char_type_declaration() {
@@ -831,7 +806,7 @@ void test_namespace_qualifies_struct_name() {
 // ch11 §11.4: the C++17 one-line nested namespace form (`namespace
 // a::b { ... }`) records every segment in namespace_path, in order.
 void test_nested_namespace_one_liner_qualifies_function_name() {
-    scpp::Program program = scpp::parse("namespace a::b { safe int f() { return 0; } }");
+    scpp::Program program = scpp::parse("namespace a::b { int f() { return 0; } }");
     expect(program.functions.size() == 1, "nested_namespace_one_liner: expected 1 function");
     const scpp::Function& fn = program.functions[0];
     expect(fn.name == "a::b::f", "nested_namespace_one_liner: name should be 'a::b::f'");
@@ -844,7 +819,7 @@ void test_nested_namespace_one_liner_qualifies_function_name() {
 void test_qualified_type_reference_parses() {
     scpp::Program program =
         scpp::parse("namespace std { struct Point { int x; }; }\n"
-                     "safe int use_it() { std::Point p; return p.x; }");
+                     "int use_it() { std::Point p; return p.x; }");
     expect(program.functions.size() == 1, "qualified_type_reference_parses: expected 1 function");
     const scpp::Stmt& decl = *program.functions[0].body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "qualified_type_reference_parses: expected a VarDecl");
@@ -853,7 +828,7 @@ void test_qualified_type_reference_parses() {
 
 // ch11 §11.3: `export` prefixing a top-level function marks it exported.
 void test_export_prefix_marks_function_exported() {
-    scpp::Program program = scpp::parse("export module std;\nnamespace std { export safe int f() { return 0; } }");
+    scpp::Program program = scpp::parse("export module std;\nnamespace std { export int f() { return 0; } }");
     expect(program.functions.size() == 1, "export_prefix_marks_function_exported: expected 1 function");
     expect(program.functions[0].is_exported, "export_prefix_marks_function_exported: should be exported");
 }
@@ -861,7 +836,7 @@ void test_export_prefix_marks_function_exported() {
 // A declaration with no `export` prefix defaults to not-exported, even
 // inside a namespace.
 void test_no_export_prefix_leaves_function_not_exported() {
-    scpp::Program program = scpp::parse("namespace std { safe int f() { return 0; } }");
+    scpp::Program program = scpp::parse("namespace std { int f() { return 0; } }");
     expect(!program.functions[0].is_exported, "no_export_prefix_leaves_function_not_exported: should not be exported");
 }
 
@@ -870,7 +845,7 @@ void test_no_export_prefix_leaves_function_not_exported() {
 void test_export_group_marks_multiple_declarations_exported() {
     scpp::Program program = scpp::parse(
         "export module std;\n"
-        "namespace std { export { safe int f() { return 0; } safe int g() { return 1; } } }");
+        "namespace std { export { int f() { return 0; } int g() { return 1; } } }");
     expect(program.functions.size() == 2, "export_group_marks_multiple_declarations_exported: expected 2 functions");
     expect(program.functions[0].is_exported && program.functions[1].is_exported,
            "export_group_marks_multiple_declarations_exported: both should be exported");
@@ -882,7 +857,7 @@ void test_export_group_marks_multiple_declarations_exported() {
 void test_export_class_propagates_to_methods() {
     scpp::Program program = scpp::parse(
         "export module std;\n"
-        "namespace std { export class Point { public: safe Point() { return; } }; }");
+        "namespace std { export class Point { public: Point() { return; } }; }");
     expect(program.classes.size() == 1, "export_class_propagates_to_methods: expected 1 class");
     expect(program.classes[0].is_exported, "export_class_propagates_to_methods: class itself should be exported");
     expect(program.classes[0].name == "std::Point", "export_class_propagates_to_methods: name should be 'std::Point'");
@@ -898,7 +873,7 @@ void test_export_class_propagates_to_methods() {
 void test_export_outside_matching_namespace_is_rejected() {
     bool threw = false;
     try {
-        scpp::parse("export module std;\nnamespace other { export safe int f() { return 0; } }");
+        scpp::parse("export module std;\nnamespace other { export int f() { return 0; } }");
     } catch (const scpp::ParseError&) {
         threw = true;
     }
@@ -911,7 +886,7 @@ void test_export_outside_matching_namespace_is_rejected() {
 void test_export_with_no_namespace_is_rejected() {
     bool threw = false;
     try {
-        scpp::parse("export module std;\nexport safe int f() { return 0; }");
+        scpp::parse("export module std;\nexport int f() { return 0; }");
     } catch (const scpp::ParseError&) {
         threw = true;
     }
@@ -923,7 +898,7 @@ void test_export_with_no_namespace_is_rejected() {
 void test_export_in_deeper_nested_namespace_is_allowed() {
     scpp::Program program = scpp::parse(
         "export module org.lotx.cmath;\n"
-        "namespace org::lotx::cmath::trig { export safe int f() { return 0; } }");
+        "namespace org::lotx::cmath::trig { export int f() { return 0; } }");
     expect(program.functions.size() == 1, "export_in_deeper_nested_namespace_is_allowed: expected 1 function");
     expect(program.functions[0].is_exported, "export_in_deeper_nested_namespace_is_allowed: should be exported");
 }
@@ -933,7 +908,7 @@ void test_export_in_deeper_nested_namespace_is_allowed() {
 void test_export_without_any_module_declaration_is_rejected() {
     bool threw = false;
     try {
-        scpp::parse("namespace std { export safe int f() { return 0; } }");
+        scpp::parse("namespace std { export int f() { return 0; } }");
     } catch (const scpp::ParseError&) {
         threw = true;
     }
@@ -941,23 +916,21 @@ void test_export_without_any_module_declaration_is_rejected() {
 }
 
 // ch11 §11.6: a bare `extern` (no `"C"` string) declaration has ordinary
-// scpp linkage and *can* be `safe`, unlike `extern "C"`. `safe` (as with
-// `extern "C"`) precedes `extern`, matching this codebase's one
-// consistent keyword ordering for every kind of extern declaration.
-void test_bare_extern_declaration_can_be_safe() {
-    scpp::Program program = scpp::parse("safe extern int square(int x);");
-    expect(program.functions.size() == 1, "bare_extern_declaration_can_be_safe: expected 1 function");
+// scpp linkage -- a bodyless declaration distinct from `extern "C"`
+// (is_extern_c stays false, is_module_extern is set instead).
+void test_bare_extern_declaration_is_module_extern() {
+    scpp::Program program = scpp::parse("extern int square(int x);");
+    expect(program.functions.size() == 1, "bare_extern_declaration_is_module_extern: expected 1 function");
     const scpp::Function& fn = program.functions[0];
-    expect(fn.is_module_extern, "bare_extern_declaration_can_be_safe: is_module_extern should be true");
-    expect(!fn.is_extern_c, "bare_extern_declaration_can_be_safe: is_extern_c should be false");
-    expect(fn.is_safe, "bare_extern_declaration_can_be_safe: should be allowed to be safe");
-    expect(fn.body == nullptr, "bare_extern_declaration_can_be_safe: body should be null (bodyless declaration)");
+    expect(fn.is_module_extern, "bare_extern_declaration_is_module_extern: is_module_extern should be true");
+    expect(!fn.is_extern_c, "bare_extern_declaration_is_module_extern: is_extern_c should be false");
+    expect(fn.body == nullptr, "bare_extern_declaration_is_module_extern: body should be null (bodyless declaration)");
 }
 
 // A bare `extern` declaration is namespace-qualified like any ordinary
 // scpp-linkage declaration (unlike `extern "C"`, which never is).
 void test_bare_extern_declaration_is_namespace_qualified() {
-    scpp::Program program = scpp::parse("namespace org::lotx::cmath { safe extern int sqrt(int x); }");
+    scpp::Program program = scpp::parse("namespace org::lotx::cmath { extern int sqrt(int x); }");
     expect(program.functions.size() == 1, "bare_extern_declaration_is_namespace_qualified: expected 1 function");
     expect(program.functions[0].name == "org::lotx::cmath::sqrt",
            "bare_extern_declaration_is_namespace_qualified: expected qualified name");
@@ -967,7 +940,7 @@ void test_bare_extern_declaration_is_namespace_qualified() {
 
 int main() {
     test_int_main_return();
-    test_safe_function_with_params();
+    test_function_with_params();
     test_var_decl_and_if_else();
     test_while_loop();
     test_unsafe_block_sets_is_unsafe_flag();
@@ -1004,14 +977,12 @@ int main() {
     test_make_unique_of_struct_type();
     test_extern_c_single_declaration();
     test_extern_c_block_form();
-    test_safe_extern_c_definition_is_allowed();
-    test_safe_extern_c_declaration_is_rejected();
+    test_extern_c_definition_is_checked_like_any_function();
     test_extern_cpp_linkage_is_rejected();
     test_extern_c_varargs_declaration();
     test_varargs_on_definition_is_rejected();
     test_varargs_on_non_extern_function_is_rejected();
     test_void_return_and_void_pointer_types();
-    test_safe_prefix_on_extern_c_block_is_rejected();
     test_char_type_declaration();
     test_char_literal_expression();
     test_char_literal_escape_sequences_decode_correctly();
@@ -1039,7 +1010,7 @@ int main() {
     test_export_with_no_namespace_is_rejected();
     test_export_in_deeper_nested_namespace_is_allowed();
     test_export_without_any_module_declaration_is_rejected();
-    test_bare_extern_declaration_can_be_safe();
+    test_bare_extern_declaration_is_module_extern();
     test_bare_extern_declaration_is_namespace_qualified();
 
     if (failures > 0) {

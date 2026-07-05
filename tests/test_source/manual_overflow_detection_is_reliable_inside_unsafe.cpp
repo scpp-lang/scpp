@@ -1,4 +1,4 @@
-safe bool add_one_overflows(int x) {
+bool add_one_overflows(int x) {
     unsafe {
         return (x + 1) < x;
     }
