@@ -1,13 +1,13 @@
-# scpp integration tests
+# scpp black-box tests
 
 > 中文版: [README.zh.md](README.zh.md)
 
-This directory is a **black-box** integration test suite for the `scpp`
-compiler. It is maintained independently from `src/` (the implementation)
-and `docs/book/` (the language specification): tests here are written
-purely by reading `docs/book/` and invoking the built `scpp` CLI binary as
-an external tool, exactly the way any user of the language would -- there
-is no dependency on, or knowledge of, scpp's internal compiler modules.
+This directory is a **black-box** test suite for the `scpp` compiler. It is
+maintained independently from `src/` (the implementation) and `docs/book/`
+(the language specification): tests here are written purely by reading
+`docs/book/` and invoking the built `scpp` CLI binary as an external tool,
+exactly the way any user of the language would -- there is no dependency
+on, or knowledge of, scpp's internal compiler modules.
 
 ## How it works
 

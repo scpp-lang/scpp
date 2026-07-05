@@ -1,4 +1,4 @@
-// Black-box integration test runner for the scpp compiler.
+// Black-box test runner for the scpp compiler.
 //
 // This runner treats `scpp` purely as an external CLI tool -- exactly the
 // way a user following docs/book would -- and never links against any of
@@ -37,14 +37,14 @@
 // Build: cmake -S . -B build && cmake --build build (see CMakeLists.txt).
 // Usage: ./build/run_tests [filter] [--scpp-bin <path>]
 
-// SCPP_INTEGRATION_TEST_CASES_DIR / SCPP_DEFAULT_SCPP_BINARY are injected
+// SCPP_BLACKBOX_TEST_CASES_DIR / SCPP_DEFAULT_SCPP_BINARY are injected
 // by CMake (see CMakeLists.txt) as absolute paths computed at configure
 // time, so this binary finds its fixtures and a default `scpp` build
 // regardless of the working directory it's run from, or where the build
 // system places the compiled executable -- the same pattern already used
 // by tests/driver_test.cpp et al. one directory up.
-#ifndef SCPP_INTEGRATION_TEST_CASES_DIR
-#error "SCPP_INTEGRATION_TEST_CASES_DIR must be defined by the build"
+#ifndef SCPP_BLACKBOX_TEST_CASES_DIR
+#error "SCPP_BLACKBOX_TEST_CASES_DIR must be defined by the build"
 #endif
 #ifndef SCPP_DEFAULT_SCPP_BINARY
 #error "SCPP_DEFAULT_SCPP_BINARY must be defined by the build"
@@ -320,7 +320,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    fs::path cases_dir(SCPP_INTEGRATION_TEST_CASES_DIR);
+    fs::path cases_dir(SCPP_BLACKBOX_TEST_CASES_DIR);
     if (!fs::exists(cases_dir)) {
         std::cerr << "error: could not find the cases/ directory (looked at " << cases_dir << ")\n";
         return 2;
@@ -339,7 +339,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    fs::path temp_dir = fs::temp_directory_path() / ("scpp_integration_test_" + std::to_string(getpid()));
+    fs::path temp_dir = fs::temp_directory_path() / ("scpp_blackbox_test_" + std::to_string(getpid()));
     fs::create_directories(temp_dir);
     std::error_code ec;
 
