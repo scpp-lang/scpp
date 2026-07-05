@@ -4,9 +4,9 @@
    believe this is C++.
 2. **Minimal additions, and they erase cleanly**: introduce new syntax only
    when strictly necessary, and only if deleting it leaves an ordinary file
-   a real C++ compiler still accepts unmodified. The core additions are
-   just `safe` / `unsafe`: strip both keywords out (keeping `unsafe`'s
-   braces) and what remains is standard C++ -- **scpp = C++ + a checker**,
+   a real C++ compiler still accepts unmodified. The core addition is
+   just `unsafe`: strip the keyword out (keeping its braces' contents) and
+   what remains is standard C++ -- **scpp = C++ + a checker**,
    not a language with its own grammar. This is why lifetime grouping
    reuses attribute syntax rather than inventing `'a`-style tokens (see
    [§5.3](ch05-static-checks.md)), and why scpp rejected a Rust-`?`-style
@@ -16,12 +16,20 @@
    parse past a brand-new operator token at all.
 3. **Reuse known syntax, reassign semantics**: existing spellings such as
    `std::move()`, `T&`, `unique_ptr`, `span` are given stronger *static* meaning
-   inside `safe` regions (ownership / borrowing / lifetimes) without changing
+   (ownership / borrowing / lifetimes) without changing
    their outward appearance to the user.
-4. **Safety is opt-in, local, and composable**: safety is enabled per region
-   (function / block / type); unannotated code retains full C++ freedom (and
-   unsafety).
-5. **Soundness over compatibility**: within a `safe` region we would rather
+4. **Safety is the default; `unsafe` is the only opt-out, and it's local
+   and composable**: every function is checked
+   ([§5](ch05-static-checks.md)) unconditionally, with no per-function or
+   per-file annotation needed to enable it. `unsafe { }` is a lexically
+   scoped block, nestable and locally reversible, that relaxes exactly
+   the fixed, enumerated set of operations in
+   [§5.5](ch05-static-checks.md) -- never a switch that turns off
+   checking for an entire function or file. This is a deliberate reversal
+   of an earlier design (a `safe` keyword marked which functions opted
+   *into* checking, with unmarked functions checked not at all) -- see
+   [§8](ch08-open-questions.md) Q13 for the reasoning.
+5. **Soundness over compatibility**: we would rather
    temporarily report a construct as "not yet supported" than admit an unsound
    check. 100% C++ compatibility is a non-goal.
 6. **Erasure beats ergonomics and completeness**: no other attempt at
@@ -62,7 +70,7 @@
    there's no way to define it. scpp never grants itself that license:
    for any operation whose definedness is scpp's own codegen choice
    (arithmetic overflow being the first concrete case), it either keeps
-   checking it unconditionally (in `safe` code), or, inside `unsafe`,
+   checking it unconditionally (by default), or, inside `unsafe`,
    pins it to one specific, deterministic, documented outcome instead
    (e.g. a guaranteed two's-complement wraparound) -- never real UB.
    This doesn't extend to (and can't eliminate) the other kind of UB,

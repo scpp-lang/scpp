@@ -106,7 +106,7 @@ itself the explicit declaration, and the compiler verifies triviality.
     `const` no longer blocks direct access to this one field;
   - can **never** be referenced or have its address taken (`T&`/
     `const T&` binding, `&expr`) -- attempting either is a compile
-    error, unconditionally, `safe` or `unsafe` alike.
+    error, unconditionally, whether inside `unsafe { }` or not.
   Because no reference to it can ever exist, there is no aliasing
   hazard to check at runtime at all -- reads/writes compile to a plain
   load/store, exactly as cheap as Rust's `Cell::get`/`Cell::set`. This
@@ -149,4 +149,4 @@ out automatically, with no separate alignment algorithm to maintain in scpp.
 
 ---
 
-[← Previous: Syntactic Sugar](ch03-syntactic-sugar.md) · [Table of Contents](README.md) · [Next: Static Checks in Safe Regions →](ch05-static-checks.md)
+[← Previous: Syntactic Sugar](ch03-syntactic-sugar.md) · [Table of Contents](README.md) · [Next: Static Checks →](ch05-static-checks.md)

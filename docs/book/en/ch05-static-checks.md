@@ -1,7 +1,7 @@
-# 5. Static Checks in Safe Regions (the soundness core)
+# 5. Static Checks (the soundness core)
 
-Within a safe context, the compiler guarantees (for the supported subset)
-the following properties:
+By default, the compiler guarantees (for the supported subset)
+the following properties, unconditionally, everywhere:
 
 ## 5.1 Ownership & Move
 - Every value has a unique owner.
@@ -59,7 +59,7 @@ the following properties:
     of what that rule accepted), and it requires zero annotation. For
     example:
     ```cpp
-    safe const std::string& longest(const std::string& x, const std::string& y) {
+    const std::string& longest(const std::string& x, const std::string& y) {
         return x.size() > y.size() ? x : y;
     }
     ```
@@ -85,8 +85,8 @@ the following properties:
     function-level attribute always names an unambiguous, explicitly
     declared group. Example (Rust: `fn get_x<'a, 'b>(x: &'a T, y: &'b T) -> &'a T`):
     ```cpp
-    safe const int& get_x(const int& x [[scpp::lifetime(a)]],
-                          const int& y [[scpp::lifetime(b)]]) [[scpp::lifetime(a)]] {
+    const int& get_x(const int& x [[scpp::lifetime(a)]],
+                     const int& y [[scpp::lifetime(b)]]) [[scpp::lifetime(a)]] {
         return x; // returning y here is rejected: y is group b, the
                   // declared return group is a
     }
@@ -151,17 +151,17 @@ the following properties:
   provides a well-defined default value, leaving "is this default value
   the one you wanted" up to the programmer.
 
-## 5.5 Prohibited in Safe Regions (unless in `unsafe { }`)
+## 5.5 Prohibited (unless in `unsafe { }`)
 - Raw pointer dereference, pointer arithmetic.
 - `reinterpret_cast`, C-style casts to incompatible types.
 - (Untagged) `union`.
 - Raw `new` / `delete`.
 - Access to mutable global/static variables.
-- Calling a function not annotated `safe`.
+- Calling an `extern "C"` function.
 
 Note what's deliberately *not* on this list: taking a raw pointer's
 address in the first place (`&expr`, [§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
-is always legal in a `safe` context, same as in Rust -- it's
+is always legal, same as in Rust -- it's
 *dereferencing* one that's gated here, not creating one. Also note that
 `unsafe { }` relaxes *dereferencing* a raw pointer, not the ordinary,
 unconditional type-checking rule that a `const T*` can never be written
@@ -171,7 +171,7 @@ through ([§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-impl
 (relaxed inside `unsafe { }`), but for a different reason than everything
 above: not because they're otherwise illegal (neither ever is), but
 because skipping them carries none of the "corrupted bookkeeping could
-leak into surrounding safe code" risk that keeps
+leak into surrounding code" risk that keeps
 [§5.1-§5.4](#51-ownership--move)'s checks unconditional -- `span`'s
 bounds check ([§8](ch08-open-questions.md) Q1) and integer-overflow
 checking ([§5.8](#58-integer-overflow-design-finalized-not-yet-implemented))
@@ -186,7 +186,7 @@ block.
 ## 5.6 Recoverable Errors: `std::expected<T, E>` (design finalized, not yet implemented)
 
 scpp has **no exceptions** -- no `throw`/`try`/`catch` anywhere in the
-language, safe or unsafe (see [§8](ch08-open-questions.md) for the full
+language (see [§8](ch08-open-questions.md) for the full
 rationale). Every failure is exactly one of two kinds, extending the same
 split already settled for panics ([§8](ch08-open-questions.md) Q3):
 
@@ -221,14 +221,14 @@ up to the caller was considered and **rejected** -- see
 [§8](ch08-open-questions.md) Q8 for the full reasoning. In short: unlike
 every other piece of scpp syntax, a brand-new operator token cannot be
 erased or ignored by a real C++ compiler, which would have broken the
-property that stripping `safe`/`unsafe` out of a scpp file leaves an
+property that stripping `unsafe` out of a scpp file leaves an
 ordinary file a real C++ compiler still accepts unmodified (see
 [ch00](ch00-design-philosophy.md) §2). v0.1 therefore requires spelling
 propagation out with ordinary `if`/`else`, exactly the way C has for
 decades:
 
 ```cpp
-safe std::expected<int, ParseError> parse_and_double(const char* s) {
+std::expected<int, ParseError> parse_and_double(const char* s) {
     std::expected<int, ParseError> r = parse_int(s);
     if (!r.has_value()) {
         return std::unexpected(r.error());
@@ -274,7 +274,7 @@ the C++ standard itself evolves further in this area -- see
   there is currently no way to obtain a `T*` from a `const T*` at all.
   **Writing through a `const T*` is an ordinary compile-time type error,
   in *every* context, including inside `unsafe { }`** -- it isn't on
-  [§5.5](#55-prohibited-in-safe-regions-unless-in-unsafe--)'s list
+  [§5.5](#55-prohibited-unless-in-unsafe--)'s list
   because `unsafe { }` only ever relaxes *that* list, and this isn't a
   member of it: it's the same kind of ordinary type mismatch as assigning
   a `std::string` to an `int`, which `unsafe { }` obviously doesn't
@@ -289,9 +289,9 @@ the C++ standard itself evolves further in this area -- see
   carries no lifetime parameter for the checker to relate to `x`'s scope
   at all, so only returning an actual `&i32` reference (not a `*const
   i32`) would be rejected. scpp adopts the identical split: `&expr` is
-  legal directly inside a `safe` function -- no `unsafe { }` needed to
+  always legal -- no `unsafe { }` needed to
   *write* it -- matching how it's raw-pointer *dereference*, never
-  creation, that [§5.5](#55-prohibited-in-safe-regions-unless-in-unsafe--)
+  creation, that [§5.5](#55-prohibited-unless-in-unsafe--)
   actually lists as requiring `unsafe { }` ([§1.3](ch01-safety-context.md)).
   The resulting `T*` may be stored, passed around, returned, or simply
   allowed to dangle once the place it was taken from goes away -- exactly
@@ -317,11 +317,11 @@ the C++ standard itself evolves further in this area -- see
   Rust places on `unsafe` code.
 - **Interaction with `extern "C"`** ([§2.1](ch02-boundary-rules.md)): this
   is the primary motivating use case. `T*`/`const T*` are already
-  accepted `extern "C"` signature types, so `&expr` is how a `safe`
-  function produces a value to satisfy a C out-parameter:
+  accepted `extern "C"` signature types, so `&expr` is how ordinary
+  (checked-by-default) code produces a value to satisfy a C out-parameter:
   ```cpp
   extern "C" int getsockopt(int fd, int level, int optname, void* val, int* len);
-  safe int query(int fd) {
+  int query(int fd) {
       int value = 0;
       int len = 4;
       unsafe {
@@ -331,12 +331,12 @@ the C++ standard itself evolves further in this area -- see
   }
   ```
   Note that `&value`/`&len` themselves need no `unsafe` -- only the
-  *call* to the non-`safe` `getsockopt` does, per [§1.3](ch01-safety-context.md)'s
-  existing rule (unrelated to `&`).
+  *call* to `getsockopt` (an `extern "C"` declaration) does, per
+  [§1.3](ch01-safety-context.md)'s existing rule (unrelated to `&`).
 - **Deliberately not included**, to keep this a minimal, single-purpose
   addition:
   - Pointer arithmetic (`&x + 1`) -- already
-    [§5.5](#55-prohibited-in-safe-regions-unless-in-unsafe--)'s territory
+    [§5.5](#55-prohibited-unless-in-unsafe--)'s territory
     (`unsafe { }`-gated), unaffected by this addition.
   - Taking the address of an rvalue/temporary, or of a reference's own
     storage -- `expr` must resolve to an existing place, matching the
@@ -380,11 +380,11 @@ Real C++ leaves signed integer overflow **undefined behavior** -- even
 after C++20 mandated two's-complement *representation* for signed
 integers, overflow *behavior* remained a separate, still-unresolved
 question (see [ch00](ch00-design-philosophy.md) §8). scpp eliminates
-this UB entirely, in both `safe` and `unsafe` code, reusing the existing
-safe/unsafe axis rather than introducing a new debug/release build-mode
-one:
+this UB entirely, both by default and inside `unsafe { }`, reusing the
+existing checked-by-default/`unsafe { }` axis rather than introducing a
+new debug/release build-mode one:
 
-- **In `safe` code (the default, everywhere outside `unsafe { }`)**:
+- **By default (everywhere outside `unsafe { }`)**:
   `+`, `-`, and `*` are checked -- for **both signed and unsigned**
   operands (unlike real C++, where unsigned wraparound is always
   "intentional" by definition; scpp treats an unsigned wraparound as
@@ -395,10 +395,10 @@ one:
   mode the way Rust's is. Deliberately diverging from Rust here: Rust's
   checks are debug-only by default, providing zero protection in the
   release binaries that actually ship and face real attackers/real data
-  -- scpp instead reuses its existing safe/unsafe axis, which already
-  has no debug/release split anywhere else in the spec.
-- **In `unsafe { }` (and in an entire `unsafe` function -- the default,
-  unannotated context)**: the check is skipped, but the underlying
+  -- scpp instead reuses its existing checked-by-default/`unsafe`
+  axis, which already has no debug/release split anywhere else in the
+  spec.
+- **In `unsafe { }`**: the check is skipped, but the underlying
   operation is still **not UB** -- it's a guaranteed two's-complement
   wraparound, identical in spirit to how unsigned arithmetic already
   behaves in real C++. Concretely: scpp's codegen never emits LLVM's
@@ -418,7 +418,7 @@ one:
   [§5.1-§5.4](#51-ownership--move)'s checks (move state,
   borrow/aliasing, lifetimes, zero-init), which must keep running
   unconditionally inside `unsafe { }` because skipping them would let
-  *inconsistent compiler bookkeeping* leak into the surrounding `safe`
+  *inconsistent compiler bookkeeping* leak into the surrounding
   code once the block ends, overflow-checking carries no such risk: an
   unchecked wraparound just produces an ordinary (if numerically wrong)
   value in an ordinary variable -- it cannot corrupt move/borrow/
@@ -434,25 +434,24 @@ one:
   never emits `nsw`, there is no such license to exploit, so this idiom
   works exactly as its arithmetic reads: `x = INT_MAX` wraps `x + 1` to
   `INT_MIN`, and `INT_MIN < INT_MAX` is (correctly) true. (This idiom is
-  moot in `safe` code: the automatic check already aborts at `x + 1`
+  moot by default: the automatic check already aborts at `x + 1`
   itself, before a comparison could ever observe the wrapped value.)
 - **Division/modulo are a separate case, not covered by "wraps"**:
   `INT_MIN / -1` (the one case where signed division itself overflows)
   and division/modulo by zero don't have a wrapped result to fall back
   on -- the hardware itself traps (x86 `#DE`). Both `abort()`
-  unconditionally, in *every* context, `safe` or `unsafe` alike -- there
-  is no unchecked variant for these two.
-- **Implementation shape** (for whoever builds this): in `safe` code,
+  unconditionally, in *every* context, whether inside `unsafe { }` or
+  not -- there is no unchecked variant for these two.
+- **Implementation shape** (for whoever builds this): by default,
   lower `+`/`-`/`*` to LLVM's `@llvm.{s,u}{add,sub,mul}.with.overflow.*`
   intrinsics (which read the hardware overflow flag as a side effect of
   the arithmetic instruction itself, at no extra computation cost --
   see [ch08](ch08-open-questions.md) Q2) and branch to the existing
-  `abort()` call on the overflow bit. In `unsafe` contexts (nesting
-  counter from [§1.3](ch01-safety-context.md) > 0, or the enclosing
-  function isn't `safe` at all), lower to plain `add`/`sub`/`mul`
-  without `nsw`/`nuw`. Division/modulo lower to a check for `b == 0` or
-  `(a == INT_MIN && b == -1)` followed by `abort()`, unconditionally,
-  regardless of the unsafe-nesting counter.
+  `abort()` call on the overflow bit. Inside `unsafe { }` (nesting
+  counter from [§1.3](ch01-safety-context.md) > 0), lower to plain
+  `add`/`sub`/`mul` without `nsw`/`nuw`. Division/modulo lower to a
+  check for `b == 0` or `(a == INT_MIN && b == -1)` followed by
+  `abort()`, unconditionally, regardless of the unsafe-nesting counter.
 
 ## 5.9 Methods and `this` (design finalized, not yet implemented)
 
@@ -578,12 +577,6 @@ while designing this section, not assumed).
   is exactly the one lexical-scope-and-`using`-declaration lookup already
   assembles ([§11](ch11-modules-and-libraries.md)) -- consistent with, and
   made simpler by, scpp having no argument-dependent lookup at all.
-- **`safe` is not part of an overload's signature.** Two declarations
-  differing only in `safe`-ness (e.g. `safe void f(int);` and
-  `void f(int);`) are not two overloads -- they're the same signature
-  declared twice, an ordinary redefinition error. `safe` is a scpp-only
-  annotation layered on top of a real C++ signature, not part of the
-  erasure-visible type identity overload resolution dispatches on.
 - **Ambiguity is still a hard compile error in general** -- exact-type
   matching happens to make it unreachable for v0.1's scalar-type-only
   overload sets, but the rule is stated as a general principle (not
@@ -612,7 +605,7 @@ concept Shape = requires(const T& t) {
     { t.area() } -> std::same_as<double>;
 };
 
-safe void print_area(const Shape auto& s) {
+void print_area(const Shape auto& s) {
     // s.area() is legal -- the concept guarantees it; nothing else about s is
 }
 ```
@@ -704,4 +697,4 @@ safe void print_area(const Shape auto& s) {
 
 ---
 
-[← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The Safe Subset Supported in v0.1 →](ch06-safe-subset.md)
+[← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The v0.1 Supported Subset →](ch06-safe-subset.md)

@@ -1,60 +1,70 @@
 # 1. Safety Context
 
-The compiler maintains a **safety context** for every function body, lambda,
-block, and type:
+Every function is checked ([§5](ch05-static-checks.md)) **by default,
+unconditionally** -- there is no per-function or per-file annotation that
+turns this on. The only safety-context construct in the language is the
+`unsafe { }` block: a lexically scoped, local, composable escape hatch
+that relaxes exactly the fixed, enumerated set of operations in
+[§5.5](ch05-static-checks.md), and nothing else. This is a deliberate
+reversal of an earlier design (a `safe` keyword that opted individual
+functions *into* checking, with unmarked functions checked not at all) --
+see [§8](ch08-open-questions.md) Q13 for the full reasoning behind the
+reversal.
 
-- **`unsafe` (default, a.k.a. a "native function")**: ordinary C++
-  semantics. No ownership / borrow / alias checking, and no scpp-inserted
-  runtime checks either.
-- **`safe`**: all static safety checks enabled (see [§5](ch05-static-checks.md)),
-  plus scpp's own runtime checks (`span` bounds, integer overflow -- see
-  [§5.5](ch05-static-checks.md)/[§5.8](ch05-static-checks.md)).
+## 1.1 What `unsafe { }` relaxes, and what stays unconditional
 
-## 1.1 How the context is determined
+- **Everything in [§5.1-§5.4](ch05-static-checks.md)** -- ownership/move
+  state, alias-XOR-mutability, lifetime/dangling checks, and zero-init --
+  runs **unconditionally, everywhere, including inside an `unsafe { }`
+  block**. `unsafe { }` never disables this analysis; there is no
+  construct anywhere in scpp that does. This matches Rust exactly: an
+  `unsafe fn`'s body, or the inside of an `unsafe { }` block, is still
+  fully borrow-checked in Rust -- `unsafe` only unlocks a handful of
+  specific operations the borrow checker itself cannot verify, it never
+  suspends borrow checking as a whole.
+- **Only the operations [§5.5](ch05-static-checks.md) lists become legal
+  inside `unsafe { }`**: raw pointer dereference/arithmetic,
+  `reinterpret_cast`/incompatible C-style casts, untagged `union` member
+  access, raw `new`/`delete`, mutable global/static access, and calling
+  an `extern "C"` function (an `extern "C"` declaration is never itself
+  checked by any scpp compiler, see [§2.1](ch02-boundary-rules.md), so
+  calling one always needs the same vouching `unsafe { }` provides for
+  every other item on that list).
+- **`span`'s bounds check ([§8](ch08-open-questions.md) Q1) and
+  integer-overflow checking ([§5.8](ch05-static-checks.md)) are also
+  relaxed inside `unsafe { }`**, for a different reason than the
+  operations above: not because they're otherwise illegal (neither ever
+  is -- both are ordinary, always-legal syntax), but because skipping a
+  scpp-inserted *runtime* check carries none of the
+  "corrupted-bookkeeping-leaks-into-surrounding-code" risk that keeps
+  [§5.1-§5.4](ch05-static-checks.md) unconditional (see
+  [§5.8](ch05-static-checks.md) for the full reasoning).
 
-- An unannotated function/block -> `unsafe` (default) -- called a
-  **native function** in this book: ordinary C++, with no scpp checking
-  of any kind, not even the compile-time checks in
-  [§5.1-§5.4](ch05-static-checks.md). This is descriptive terminology,
-  not a keyword -- there's no `native` token to write; simply omitting
-  `safe` is what puts a function here.
-- A `safe`-annotated function/block -> `safe`.
-- A nested block inherits its parent's context unless explicitly overridden.
-- An `unsafe { }` block, written inside a `safe` function, opens an
-  escape hatch that locally relaxes exactly what
-  [§1.3](#13-the-unsafe--block-design-finalized-not-yet-implemented)
-  lists.
-- `safe { }`/`unsafe { }` inside a **native** function are both a
-  compile error, permanently by design (not a temporary gap): a native
-  function has no active checking to relax or re-enable in the first
-  place -- see [§1.3](#13-the-unsafe--block-design-finalized-not-yet-implemented)'s
-  "Nesting".
+## 1.2 No function-level marker: wrap the whole body if needed
 
-## 1.2 Annotation positions
+There is no way to mark an entire function as exempt from
+[§5.1-§5.4](ch05-static-checks.md)'s checks, by design -- not a keyword,
+not a file-level pragma, nothing. If a function's implementation
+genuinely needs broad, pervasive access to [§5.5](ch05-static-checks.md)'s
+operations throughout its body (rather than one or two isolated spots),
+the way to express that is to wrap the *entire* function body in a single
+`unsafe { }` block:
 
 ```cpp
-safe int f(...);                 // free function
-struct S { safe void g(); };     // member function
-safe struct Widget { ... };      // type-level: all members safe by default (v0.2)
-auto lam = safe [](int x){...};  // lambda (v0.2)
+int legacy_style_function(int* p, size_t n) {
+    unsafe {
+        // the whole body lives here; §5.1-§5.4 still apply throughout
+    }
+}
 ```
 
-`safe` is a **leading** annotation, before the return type -- not a
-trailing specifier like `noexcept`/`override`. This was reconsidered
-against putting it in the trailing, `noexcept`-like position (as Sean
-Baxter's Circle/Safe C++ does), but `safe` is meant to become the
-*common*, aspirational case across a codebase, not a rare exception the
-way `override`/`noexcept` are in ordinary C++. A leading keyword is the
-most scannable position -- it sits at the same, predictable spot
-regardless of how long or wrapped a parameter list is, so a reader can
-scan straight down the left edge of a file to see which functions are
-safe, the same way `virtual`/`inline`/`explicit`/`constexpr` are
-scanned for today. `[[scpp::lifetime(name)]]` ([§5.3](ch05-static-checks.md))
-is unaffected by this and stays trailing, since attributes have no
-leading position to begin with: `safe int& foo(...) [[scpp::lifetime(a)]] { ... }`.
-
-v0.1 **only requires function-level `safe` and block-level `unsafe { }`**. All
-other annotation positions go to the backlog.
+Ownership/move/alias/lifetime checking still applies to every statement
+inside that block, exactly as [§1.1](#11-what-unsafe--relaxes-and-what-stays-unconditional)
+describes -- wrapping the whole body changes nothing about that. This
+mirrors Rust's own 2024-edition tightening (`unsafe_op_in_unsafe_fn`):
+even Rust's `unsafe fn` now requires an explicit inner `unsafe { }`
+around the specific operations it performs, and its body was never
+exempt from borrow checking in the first place, at any edition.
 
 ## 1.3 The `unsafe { }` block (design finalized, not yet implemented)
 
@@ -70,34 +80,31 @@ other annotation positions go to the backlog.
   open a new lexical scope), scpp's `unsafe { }` is an **ordinary block**:
   it behaves exactly like a plain `{ }` compound statement -- locals
   declared inside go out of scope at the closing `}`, exactly as in
-  unannotated C++. A `{ }` that silently scoped differently from every
+  ordinary C++. A `{ }` that silently scoped differently from every
   other `{ }` in the language would violate scpp's own "looks like C++,
   no surprises" rule. If a value computed inside `unsafe { }` needs to
   survive past it, declare it in the enclosing scope first and assign
   inside -- ordinary C++ already works this way.
 - **What gets unlocked**: exactly, and only, the operations listed in
-  [§5.5](ch05-static-checks.md) become legal again inside `unsafe { }`,
-  with the same meaning they'd have in an ordinary (unannotated/`unsafe`)
-  function: raw pointer dereference/arithmetic, `reinterpret_cast`/
+  [§5.5](ch05-static-checks.md) become legal again inside `unsafe { }`:
+  raw pointer dereference/arithmetic, `reinterpret_cast`/
   incompatible C-style casts, untagged `union` member access, raw
-  `new`/`delete`, mutable global/static access, and calling a function not
-  annotated `safe`. Of these, **only two are reachable in the current
-  implementation**: raw-pointer `*p` dereference (`T*` already exists as a
-  type) and calling a non-`safe` function (calls and `Function::is_safe`
-  already exist -- though the "callee must be `safe`" rejection itself has
-  never been implemented yet either, so shipping `unsafe { }` means
-  shipping that check too, gated the same way). The other four have no
-  syntax at all yet in v0.1 (`union`, `reinterpret_cast`, `new`/`delete`,
-  and global variables aren't lexed/parsed) -- there's nothing to gate for
-  them until their own syntax lands; wire up the identical mechanism for
-  each at that point.
+  `new`/`delete`, mutable global/static access, and calling an
+  `extern "C"` function. Of these, **only two are reachable in the
+  current implementation**: raw-pointer `*p` dereference (`T*` already
+  exists as a type) and calling an `extern "C"` function (declarations
+  and calls already exist). The other four have no syntax at all yet in
+  v0.1 (`union`, `reinterpret_cast`, `new`/`delete`, and global variables
+  aren't lexed/parsed) -- there's nothing to gate for them until their
+  own syntax lands; wire up the identical mechanism for each at that
+  point.
 - **Also relaxed inside `unsafe { }`, for a different reason**: `span`'s
   bounds check ([§8](ch08-open-questions.md) Q1) and integer-overflow
   checking ([§5.8](ch05-static-checks.md)) are skipped too -- but unlike
   the operations above, neither is "illegal outside unsafe" (both are
   always legal syntax, everywhere). They're scpp-inserted *runtime*
   checks that happen to carry none of the "leakage into surrounding
-  safe code" risk the next bullet explains, which is why they can join
+  code" risk the next bullet explains, which is why they can join
   this list without contradicting it.
 - **What stays exactly as strict**: everything in
   [§5.1-§5.4](ch05-static-checks.md) -- ownership/move state,
@@ -109,25 +116,13 @@ other annotation positions go to the backlog.
   specific checks listed above. A `std::unique_ptr` can't be double-moved
   and alias-XOR-mutability can't be violated whether or not the code sits
   inside `unsafe { }`; otherwise, code right after the block (still under
-  full `safe` checking) could observe corrupted state that was never
-  actually proven sound. (Raw pointers themselves are still never
-  move/borrow-tracked, inside or outside `unsafe { }` -- that's unchanged;
-  it's the same "raw pointers aren't a tracked type" rule that already
-  applies everywhere.)
+  full checking) could observe corrupted state that was never actually
+  proven sound. (Raw pointers themselves are still never move/borrow-
+  tracked, inside or outside `unsafe { }` -- that's unchanged; it's the
+  same "raw pointers aren't a tracked type" rule that already applies
+  everywhere.)
 - **Nesting**: `unsafe { }` may nest inside another `unsafe { }` --
-  harmless, not an error, as long as both are still lexically inside a
-  `safe` function. `unsafe { }` (or `safe { }`) written inside a
-  **native** function's body, though, **is a compile error**: a native
-  function has no active checking for either block to relax or
-  re-enable, so the marker isn't merely redundant there, it's
-  meaningless -- and rejecting it also catches a likely leftover from
-  moving code between a `safe` function and a native one. (This
-  tightens an earlier draft of this section, which treated `unsafe { }`
-  inside a native function as a harmless no-op rather than an error.)
-  `safe { }` re-enabling checks inside a native function is, similarly,
-  a permanent design choice, not a temporary gap (unchanged from
-  [§1.1](#11-how-the-context-is-determined), just reworded there for
-  the same reason).
+  harmless, not an error.
 - **Implementation shape** (for whoever builds this): reuse the existing
   `StmtKind::Block` AST node (add an `is_unsafe` flag), and mirror the
   existing `ScopeExit` MIR pattern with a matching pair of marker
@@ -141,11 +136,7 @@ other annotation positions go to the backlog.
   reaching the merge point). Gate each of the two currently-reachable
   checks above on `counter == 0`; `span`'s bounds check and
   integer-overflow checking (once implemented) gate on the same counter,
-  no separate mechanism needed. Rejecting `unsafe { }`/`safe { }` inside
-  a native function is a separate, much simpler check that doesn't need
-  this counter at all -- just look at the enclosing function's own
-  `Function::is_safe` at parse/resolve time, independent of any nesting
-  state.
+  no separate mechanism needed.
 
 ---
 

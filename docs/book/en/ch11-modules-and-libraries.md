@@ -25,9 +25,9 @@ new. Three reasons, in order of importance:
    forward declaration. Nothing stops it from silently drifting out of
    sync with the real definition in another translation unit -- and in
    scpp, unlike ordinary C++, a function's declared *safety-relevant
-   facts* (is it `safe`? what `[[scpp::lifetime(name)]]` groups does it
-   have?) are part of what a caller's borrow check depends on. A
-   hand-copied declaration that lies about either would be a silent
+   facts* (its `[[scpp::lifetime(name)]]` groups) are part of what a
+   caller's borrow check depends on. A
+   hand-copied declaration that lies about them would be a silent
    soundness hole. This directly contradicts
    [ch00](ch00-design-philosophy.md)'s "soundness over compatibility". A
    module interface is compiled once from ground truth and *imported*,
@@ -60,11 +60,11 @@ for this chapter (see [§11.14](#1114-out-of-scope-for-v1-backlog)).
 export module mylib.math;
 
 namespace mylib::math {
-    extern safe int square(int x);          // exported, bodyless -- see §11.6
+    extern int square(int x);               // exported, bodyless -- see §11.6
     export struct Point { int x; int y; };  // exported, always has "a body" (it's data)
 }
 
-safe int internal_helper(int x) { return x * 2; }  // private, has a body -- namespace irrelevant, not exported
+int internal_helper(int x) { return x * 2; }  // private, has a body -- namespace irrelevant, not exported
 ```
 
 ```cpp
@@ -72,7 +72,7 @@ safe int internal_helper(int x) { return x * 2; }  // private, has a body -- nam
 // shared. Automatically sees mylib.math's own interface without import.
 module mylib.math;
 
-safe int mylib::math::square(int x) { return x * internal_helper(x) / 2; }
+int mylib::math::square(int x) { return x * internal_helper(x) / 2; }
 ```
 
 - A file becomes a module's **primary interface unit** by starting with
@@ -87,8 +87,8 @@ safe int mylib::math::square(int x) { return x * internal_helper(x) / 2; }
 - `export` prefixing an individual declaration (or grouping several
   inside `export { ... }`) marks it visible to importers; anything else
   is private to the module.
-- v0.1's exportable surface is exactly v0.1's safe-subset surface
-  ([§6](ch06-safe-subset.md)): free functions (`safe` or not) and
+- v0.1's exportable surface is exactly v0.1's supported subset
+  ([§6](ch06-safe-subset.md)): free functions and
   `struct` definitions. `class`, templates, etc. gain export support
   automatically whenever they exist. Every exported declaration must
   additionally live inside a namespace matching the module's own name --
@@ -133,7 +133,7 @@ elsewhere in this spec:
   `namespace cmath = org::lotx::cmath;` -- deliberately **not** a
   `using`-declaration. `using X = Y;` is a *type* alias in real C++, and a
   namespace is not a type; spelling a namespace alias that way would not
-  survive stripping `safe`/`unsafe` and handing the result to a real C++
+  survive stripping `unsafe` and handing the result to a real C++
   compiler ([ch00](ch00-design-philosophy.md) §6). This is a third,
   orthogonal mechanism alongside `using foo::bar;` (imports one *name*,
   not a whole namespace) and `import name as local;`
@@ -151,10 +151,10 @@ elsewhere in this spec:
 export module org.lotx.cmath;
 
 namespace org::lotx::cmath {
-    export safe double sqrt(double x);   // OK -- namespace matches module name
+    export double sqrt(double x);   // OK -- namespace matches module name
 }
 
-safe double helper(double x) { return x; } // OK -- not exported, namespace irrelevant
+double helper(double x) { return x; } // OK -- not exported, namespace irrelevant
 ```
 
 - **Rule**: an `export`-marked declaration only actually exports if it's
@@ -235,17 +235,20 @@ implementation unit or a separately-distributed payload
 ([§11.11](#1111-the-scppm-library-archive-format)):
 
 ```cpp
-extern safe int square(int x);       // ordinary scpp linkage, may be safe
-extern "C" int printf(const char*, ...); // C ABI, per §2.1, always unsafe
+extern int square(int x);                // ordinary scpp linkage, checked like any other function
+extern "C" int printf(const char*, ...); // C ABI, per §2.1, always requires unsafe { } to call
 ```
 
-Unlike `extern "C"` -- which is **always** implicitly `unsafe` because no
-scpp compiler ever sees the C implementation to check it (§2.1) -- a bare
-`extern` declaration **can** be marked `safe`. The trust model is
+Unlike `extern "C"` -- whose implementation no
+scpp compiler ever sees, so calling it **always** requires `unsafe { }`
+(§2.1) -- calling a bare
+`extern` declaration needs no `unsafe { }` at all. The trust model is
 different: when the module's author builds the primary interface unit
 together with its implementation unit(s), the compiler checks that every
 implementation-unit definition's signature matches its interface
-declaration *exactly*, once, at that build. This is the same
+declaration *exactly*, once, at that build, and that definition is
+checked ([§5](ch05-static-checks.md)) exactly like any other scpp
+function. This is the same
 declaration-matches-definition trust ordinary C++ already places in
 separately-compiled translation units (assumed, rarely mechanically
 verified in plain C++) -- scpp's version is actually checked, at least

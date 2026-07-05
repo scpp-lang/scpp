@@ -3,22 +3,30 @@
 ```
 source
  └─► Lexer
-     └─► recursive-descent Parser ──► unified AST (one AST for safe/unsafe, carries a safety tag)
+     └─► recursive-descent Parser ──► unified AST (carries an unsafe-block flag on nodes)
          └─► name resolution + type checking ──► HIR (desugar: std::move -> move hint, etc.)
-             ├─ [unsafe region] ─────────────────────────► lower directly
-             └─ [safe region] ─► MIR (CFG + three-address)
-                            └─► borrow check (init / move / alias / lifetime)
-                                └─► lower after checks pass
-                 └─► LLVM IR ──► LLVM opt ──► target binary
+             └─► MIR (CFG + three-address)
+                 └─► borrow check (init / move / alias / lifetime -- runs
+                     unconditionally; the unsafe-nesting counter only
+                     relaxes the specific §5.5 operations within this pass,
+                     never skips it)
+                     └─► lower after checks pass
+                          └─► LLVM IR ──► LLVM opt ──► target binary
 ```
 
 Key points:
-- **Unified AST**: safe and unsafe code share one AST, with a safety-context bit
-  on nodes.
-- **Borrow checking runs only on the MIR of safe regions**; unsafe regions skip
-  it and lower directly.
-- The frontend need only be "good enough" for unsafe/ordinary C++ — full C++
-  compatibility is not pursued.
+- **Unified AST**: every function shares one AST shape, with an
+  unsafe-block flag on nodes marking which statements are lexically
+  inside an `unsafe { }` block ([§1](ch01-safety-context.md)).
+- **Borrow checking runs on every function's MIR, unconditionally** --
+  `unsafe { }` never skips this pass; it only relaxes the fixed,
+  enumerated operations in [§5.5](ch05-static-checks.md) *within* it (raw
+  pointer dereference, calling an `extern "C"` function, etc.), exactly
+  mirroring how Rust's own borrow checker keeps running inside an
+  `unsafe fn`/`unsafe { }` block.
+- The frontend only needs to handle the constructs in
+  [§6](ch06-safe-subset.md)'s supported subset -- full C++ standard
+  compliance for arbitrary, unsupported constructs is not pursued.
 - MIR makes things explicit: ownership transfers, borrow start/end, drop
   insertion points, CFG.
 - This diagram is the pipeline for **one file** (today, the only kind
@@ -31,11 +39,11 @@ Key points:
   Clang do it**: the latter was seriously considered specifically to get
   arbitrary existing-C++-library interop almost for free (real templates,
   classes, exceptions, RTTI, all handled by a real C++ compiler). Rejected
-  because (a) it doesn't make the checked-region pipeline above any
+  because (a) it doesn't make the checked pipeline above any
   simpler or smaller -- movecheck's work is identical either way, so the
   cost of a full codegen rework wasn't justified by that alone; and
   (b) it has a strictly *lower* optimization ceiling than direct IR
-  generation for safe-region code: LLVM's `noalias`/`alias.scope`
+  generation: LLVM's `noalias`/`alias.scope`
   metadata can express aliasing facts scoped to a sub-region of a
   function's body, derived from the borrow checker's own NLL-precision
   analysis, and no C++ source-level construct (not even `__restrict`,
@@ -47,4 +55,4 @@ Key points:
 
 ---
 
-[← Previous: The Safe Subset Supported in v0.1](ch06-safe-subset.md) · [Table of Contents](README.md) · [Next: Open Questions →](ch08-open-questions.md)
+[← Previous: The v0.1 Supported Subset](ch06-safe-subset.md) · [Table of Contents](README.md) · [Next: Open Questions →](ch08-open-questions.md)

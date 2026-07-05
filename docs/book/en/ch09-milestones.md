@@ -3,7 +3,7 @@
 - **M0**: Freeze this spec + choose the implementation language and LLVM
   bindings.
 - **M1**: Minimal end-to-end. Subset: scalars + locals + `if`/`while` +
-  functions -> AST -> LLVM IR -> executable with correct return value. **No safe
+  functions -> AST -> LLVM IR -> executable with correct return value. **No
   checks yet**; get the front/back ends connected first.
 - **M2**: Type system + `struct` + `unique_ptr` + move semantics (`std::move` as
   a hint); implement **move-out checking** (the simplest sound check).

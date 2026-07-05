@@ -1,7 +1,7 @@
-# 6. v0.1 支持的 safe 子集
+# 6. v0.1 支持的子集
 
-safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-SAFE`
-（明确区别于"不安全"，表示"尚未实现健全检查"）：
+**仅**支持下列语法；其余报 `E-UNSUPPORTED`
+（"尚未实现健全检查"——跟普通的类型/借用检查错误是两回事）：
 
 **类型**
 - **标量基础类型**（数值家族的设计已定稿；`bool` 和 `char` 已实现，
@@ -62,17 +62,17 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 - `&` / `const &` 借用；`std::span`/`std::span<const T>` 视图。
 - `&expr` 取地址，根据 `expr` 的 place 是只能只读访问还是可变访问，得到
   `const T*` 或者 `T*`（见 [§5.7](ch05-static-checks.md)——**设计已定稿，
-  尚未实现**）：在 `safe` 函数里始终合法（不需要 `unsafe { }` 就能造出
-  来——只有解引用裸指针才需要，见下面），是 `safe` 函数给 `extern "C"`
-  输出参数产出指针值的具体办法。`const T*`/`T*` 是真正不同的两个类型
-  （只有单向的隐式 `T* -> const T*` 转换，没有 `const_cast` 等价物）；
-  通过 `const T*` 写是普通类型错误，无条件成立，哪怕在 `unsafe { }` 里
-  也一样。
+  尚未实现**）：始终合法（不需要 `unsafe { }` 就能造出
+  来——只有解引用裸指针才需要，见下面），是普通（默认受检查）代码给
+  `extern "C"` 输出参数产出指针值的具体办法。`const T*`/`T*` 是真正
+  不同的两个类型（只有单向的隐式 `T* -> const T*` 转换，没有
+  `const_cast` 等价物）；通过 `const T*` 写是普通类型错误，无条件
+  成立，哪怕在 `unsafe { }` 里也一样。
 - `std::move`。
-- 函数调用，包括 [§2](ch02-boundary-rules.md) 里"被调方须 `safe`，否则
-  `unsafe {}`"这条规则（跟下面的 `unsafe { }` 一起已经实现）。函数
-  （自由函数或方法）可以按参数列表**重载**，永远不能只靠返回类型区分
-  （见 [§5.10](ch05-static-checks.md)——**设计已定稿，尚未实现**）：
+- 函数调用，包括 [§2](ch02-boundary-rules.md) 里"调用 `extern "C"`
+  函数需要 `unsafe {}`"这条规则（跟下面的 `unsafe { }` 一起已经实现）。
+  函数（自由函数或方法）可以按参数列表**重载**，永远不能只靠返回类型
+  区分（见 [§5.10](ch05-static-checks.md)——**设计已定稿，尚未实现**）：
   只按类型精确匹配解析，因为 scpp 标量类型之间没有隐式转换（见上面
   数值家族那条备注）——纯类型不匹配导致的歧义因此不可能出现。
 - **受 `concept` 约束的泛型函数**（`void f(Shape auto& x)`，原样复用
@@ -95,25 +95,25 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   C++ 里本来就没有歧义（永远是编译期常量，不依赖调用上下文），不需要
   修。如果以后真的出现"同一个函数编译期运行期都要用"的硬需求，到时候
   再考虑把 `constexpr` 函数加回来，不用现在想别的办法解决。
-- 算术/逻辑/比较运算。`+`/`-`/`*` 在 `safe` 代码里检查溢出（溢出就
+- 算术/逻辑/比较运算。`+`/`-`/`*` 默认检查溢出（溢出就
   `abort()`，有符号无符号都查；见 [§5.8](ch05-static-checks.md)——
   **设计已定稿，尚未实现**）；在 `unsafe { }` 里不检查，但保证 wrap
   （绝不是 UB）。除以 0/模以 0（或者 `INT_MIN / -1`）无条件 `abort()`，
-  `safe`/`unsafe` 都一样。
+  不管在不在 `unsafe { }` 里都一样。
 - `if` / `while` / `return`。（`for`/range-for **尚未实现**——目前只能用
   `while` 手写迭代；词法层面保留了 `for` 关键字，但 parser/AST 还没有
   对应的语句形式。）
-- 成员访问、下标（定长数组、`span`，span 在 `safe` 代码里带运行时边界
-  检查，在 `unsafe { }`/native 函数里跳过——见
+- 成员访问、下标（定长数组、`span`，span 默认带运行时边界
+  检查，在 `unsafe { }` 里跳过——见
   [§8](ch08-open-questions.md)）。
 - `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
   跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)——**设计已
   定稿，尚未实现**）。
-- `unsafe { }` 语句块（见 [§1.3](ch01-safety-context.md)，已实现）：在
-  `safe` 函数内部开一个词法作用域的逃生窗口，局部放行裸指针解引用和
-  调用非 `safe` 函数（这是 v0.1 里 [§5.5](ch05-static-checks.md) 禁止项
-  中唯二能真正碰到的两条），[§5](ch05-static-checks.md) 里的其余检查
-  照常无条件继续跑。
+- `unsafe { }` 语句块（见 [§1.3](ch01-safety-context.md)，已实现）：
+  一个词法作用域的逃生窗口，局部放行裸指针解引用和
+  调用一个 `extern "C"` 函数（这是 v0.1 里 [§5.5](ch05-static-checks.md)
+  禁止项中唯二能真正碰到的两条），[§5](ch05-static-checks.md) 里的其余
+  检查照常无条件继续跑。
 - `extern "C"` 函数声明/定义（见 [§2.1](ch02-boundary-rules.md)，已
   实现），签名类型限定为 C-ABI 兼容类型。`void`（作为返回类型和指针的
   指向类型）跟它一起已经实现；数组形参（`T[N]`）会退化成 `T*`，跟普通
@@ -126,7 +126,7 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   里的前置条件违反）改用 `abort()`（见 [§5.6](ch05-static-checks.md)/
   [§8](ch08-open-questions.md)）。
 
-**暂不支持（safe 区 backlog）**
+**暂不支持（backlog）**
 - **类型**的模板/泛型（泛型 `struct`/`class`，比如以后的 `Vec<T>`）、
   变参模板、非类型模板参数、显式/偏特化、关联类型——这些
   [§5.11](ch05-static-checks.md) 里泛型**函数**的设计也明确排除在外，
@@ -156,7 +156,7 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   （目前只有设计），包括强制检查规则，以及
   [§4.2](ch04-struct-vs-class.md) 里可失败构造的指导原则。
 - [§5.8](ch05-static-checks.md) 定稿的整数溢出检查的**实现**（目前只有
-  设计）：`safe` 代码里检查（溢出 `abort()`）的 `+`/`-`/`*`，`unsafe`
+  设计）：默认检查（溢出 `abort()`）的 `+`/`-`/`*`，`unsafe`
   里保证 wrap（绝不是 UB），以及除以 0/模以 0/`INT_MIN / -1` 无条件
   `abort()`。
 - [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) 定稿的
@@ -177,4 +177,4 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
 
 ---
 
-[← 上一章：safe 区的静态检查](ch05-static-checks.md) · [目录](README.md) · [下一章：编译管线 →](ch07-compilation-pipeline.md)
+[← 上一章：静态检查](ch05-static-checks.md) · [目录](README.md) · [下一章：编译管线 →](ch07-compilation-pipeline.md)

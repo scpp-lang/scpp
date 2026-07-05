@@ -1,30 +1,32 @@
-# 2. Boundary Rules (Safe <-> Unsafe interaction)
+# 2. Boundary Rules (Interaction with `unsafe { }` and `extern "C"`)
 
 This is critical for soundness and must be strict.
 
-| Call direction | Rule |
-|----------------|------|
-| `unsafe` calls `safe` | **Freely allowed**. A safe function is safe for any caller. |
-| `safe` calls `safe` | Freely allowed; participates in checking normally. |
-| `safe` calls `unsafe` | **Must be wrapped in `unsafe { }`**, otherwise a compile error. The programmer vouches for it. |
-| Raw pointer deref in `safe` | Must be inside `unsafe { }`. |
+| Situation | Rule |
+|-----------|------|
+| Calling an ordinary (checked-by-default) function | Freely allowed; participates in checking normally, from anywhere -- including from inside an `unsafe { }` block. |
+| Calling an `extern "C"` function | **Must be wrapped in `unsafe { }`**, otherwise a compile error. No scpp compiler ever sees the C implementation to check it, so the caller vouches for it instead. |
+| Raw pointer dereference | Must be inside `unsafe { }`. |
 
-- Data contracts at the boundary: references/pointers a safe function exposes to
-  the unsafe world carry lifetime obligations that are **not enforced** on the
-  unsafe side (the unsafe side is on its own). Conversely, a reference passed
-  from unsafe into safe is **assumed valid for the duration of the call**
-  (caller's obligation).
-- The compiler should be able to mark whether an `unsafe` function has been
-  "manually reviewed as safe to call" — v0.1 does not formalize this and relies
-  on `unsafe { }` vouching.
+- Data contracts at the boundary: references/pointers exposed to an
+  `extern "C"` function, or obtained via a raw pointer inside
+  `unsafe { }`, carry lifetime obligations that are **not enforced**
+  beyond that point (the `unsafe { }` block's author is on their own).
+  Conversely, a reference or pointer value coming *from* an `extern "C"`
+  call, or produced by dereferencing a raw pointer, is **assumed valid**
+  by the code that vouched for it via `unsafe { }` (that block's
+  obligation).
+- The compiler should be able to mark whether a specific `extern "C"`
+  declaration has been "manually reviewed as safe to call" -- v0.1 does
+  not formalize this and relies on `unsafe { }` vouching at each call
+  site instead.
 - Mechanism: see [§1.3](ch01-safety-context.md) for the concrete rules of
   `unsafe { }` (design finalized, not yet implemented). In short, the
-  checker rejects a `Call` whose callee's `Function::is_safe` is false
-  unless the call site is lexically inside an `unsafe { }` block (or the
-  caller itself is an `unsafe` function) -- the same
-  currently-inside-`unsafe` bit also gates raw pointer dereference, and
-  will gate the rest of [§5.5](ch05-static-checks.md)'s list once their
-  syntax exists.
+  checker rejects a `Call` whose callee is an `extern "C"` declaration
+  unless the call site is lexically inside an `unsafe { }` block -- the
+  same currently-inside-`unsafe` bit also gates raw pointer dereference,
+  and will gate the rest of [§5.5](ch05-static-checks.md)'s list once
+  their syntax exists.
 
 ## 2.1 `extern "C"` declarations (design finalized, not yet implemented)
 
@@ -49,23 +51,20 @@ below.
   - **No body** (`extern "C" int foo(int x);`): declares a function
     that's *defined elsewhere* and linked in externally. The compiler has
     no visibility into its implementation, so it is **always implicitly
-    `unsafe`** -- writing `safe extern "C" int foo(int x);` is a compile
-    error ("cannot mark an external declaration `safe`: its
-    implementation isn't visible to the compiler"). Calling it from a
-    `safe` function therefore requires `unsafe { }`, via the exact same
-    mechanism as any other safe-calls-unsafe boundary (no new rule
-    needed -- this is the main point of this section: `extern "C"` is
-    just a new *source* of `unsafe`-by-construction function signatures,
-    riding entirely on machinery [§1.3](ch01-safety-context.md) already
-    defines).
+    unchecked** -- there is no way to mark it otherwise (no keyword
+    exists for that). Calling it therefore requires `unsafe { }`, via
+    the exact same mechanism as any other call to unchecked code (no new
+    rule needed -- this is the main point of this section: `extern "C"`
+    is just a new *source* of unchecked-by-construction function
+    signatures, riding entirely on machinery
+    [§1.3](ch01-safety-context.md) already defines).
   - **With a body** (`extern "C" int add(int a, int b) { return a + b; }`):
-    defines an ordinary scpp function that additionally gets C linkage,
-    so external C (or other-language) code can call *it*. `safe` and
-    `extern "C"` are orthogonal here -- `safe extern "C" int add(...)
-    { ... }` is allowed, and the body is checked exactly like any other
-    `safe` function; `extern "C"` only constrains the *signature's* types
-    (below) and requests C linkage, it says nothing about whether the
-    body itself is trusted. This mirrors Rust's own
+    defines an ordinary scpp function (checked by default, like every
+    other function) that additionally gets C linkage, so external C (or
+    other-language) code can call *it*. The body is checked exactly like
+    any other function; `extern "C"` only constrains the *signature's*
+    types (below) and requests C linkage, it says nothing about whether
+    the body itself is trusted. This mirrors Rust's own
     `#[no_mangle] pub extern "C" fn foo(...)`, where the signature must be
     FFI-safe but the body is ordinary checked Rust.
 - **Signature types are restricted to C-ABI-compatible types**, checked on
@@ -84,10 +83,10 @@ below.
   [§6](ch06-safe-subset.md) -- recoverable errors have no defined C
   representation either), and `[[scpp::lifetime(name)]]` (meaningless
   without a borrow-checked type to attach to) -- none of these have a
-  defined C representation. A `safe
-  extern "C"` function that needs to work with owning/borrowed scpp types
-  internally takes/returns the C-compatible raw form at the boundary and
-  converts on entry/exit inside its own (checked) body.
+  defined C representation. An `extern "C"` function that needs to work
+  with owning/borrowed scpp types internally takes/returns the
+  C-compatible raw form at the boundary and converts on entry/exit
+  inside its own (checked) body.
 - **Prerequisites this needs that don't exist yet** (none of these are
   specific to `extern "C"` -- they're general gaps it happens to be the
   first feature to need):

@@ -1,8 +1,8 @@
-# 6. The Safe Subset Supported in v0.1
+# 6. The v0.1 Supported Subset
 
-Inside safe regions, **only** the following syntax is supported; everything
-else reports `E-UNSUPPORTED-IN-SAFE` (explicitly distinct from "unsafe",
-meaning "sound checking not yet implemented"):
+**Only** the following syntax is supported; everything
+else reports `E-UNSUPPORTED` ("sound checking not yet implemented" --
+distinct from an ordinary type/borrow-check error):
 
 **Types**
 - **Scalar primitives** (design finalized for the numeric family; `bool`
@@ -73,15 +73,15 @@ meaning "sound checking not yet implemented"):
 - `&expr` address-of, yielding `const T*` or `T*` depending on whether
   `expr`'s place is only reachable read-only or mutably (see
   [§5.7](ch05-static-checks.md) -- **design finalized, not yet
-  implemented**): always legal in a `safe` function (no `unsafe { }`
+  implemented**): always legal (no `unsafe { }`
   needed to create one -- only dereferencing a raw pointer is gated, see
-  below), the concrete way a `safe` function produces a pointer value
+  below), the concrete way ordinary code produces a pointer value
   for an `extern "C"` out-parameter. `const T*`/`T*` are genuinely
   distinct types (a one-way implicit `T* -> const T*` conversion only,
   no `const_cast` equivalent yet); writing through a `const T*` is an
   ordinary type error, unconditionally, even inside `unsafe { }`.
 - `std::move`.
-- Function calls, including the "callee must be `safe`, otherwise
+- Function calls, including the "calling an `extern "C"` function requires
   `unsafe {}`" rule from [§2](ch02-boundary-rules.md) (implemented
   alongside `unsafe { }` below). Functions (free or methods) may be
   **overloaded** by parameter list, never by return type (see
@@ -120,24 +120,24 @@ meaning "sound checking not yet implemented"):
   compile-time and a runtime caller ever arises, revisit adding
   `constexpr` functions back rather than solving it another way.
 - Arithmetic / logical / comparison operators. `+`/`-`/`*` are
-  overflow-checked in `safe` code (`abort()` on overflow, both signed
+  overflow-checked by default (`abort()` on overflow, both signed
   and unsigned; see [§5.8](ch05-static-checks.md) -- **design finalized,
   not yet implemented**); unchecked but guaranteed-wrapping (never UB)
   inside `unsafe { }`. Division/modulo by zero (or `INT_MIN / -1`)
-  always `abort()`, `safe` or `unsafe` alike.
+  always `abort()`, whether inside `unsafe { }` or not.
 - `if` / `while` / `return`. (`for`/range-for are **not implemented yet**
   -- iteration has to be hand-written with `while` for now; the lexer
   keeps a `for` keyword reserved, but there's no corresponding
   statement form in the parser/AST yet.)
 - Member access, subscript (fixed-size arrays, `span` -- `span` carries a
-  runtime bounds check in `safe` code, skipped inside `unsafe { }`/a
-  native function, see [§8](ch08-open-questions.md)).
+  runtime bounds check by default, skipped inside `unsafe { }`,
+  see [§8](ch08-open-questions.md)).
 - `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
   for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)
   -- **design finalized, not yet implemented**).
 - `unsafe { }` blocks (see [§1.3](ch01-safety-context.md), implemented): a
-  lexically-scoped escape hatch inside a `safe` function that locally
-  permits raw pointer dereference and calling a non-`safe` function (the
+  lexically-scoped escape hatch that locally
+  permits raw pointer dereference and calling an `extern "C"` function (the
   only two of [§5.5](ch05-static-checks.md)'s prohibited operations
   reachable in v0.1 today), while every other check in
   [§5](ch05-static-checks.md) keeps running unconditionally.
@@ -156,7 +156,7 @@ meaning "sound checking not yet implemented"):
   precondition violations in a constructor/destructor) `abort()` instead
   (see [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)).
 
-**Not yet supported (safe-region backlog)**
+**Not yet supported (backlog)**
 - Templates / generics for **types** (generic `struct`/`class`, e.g. a
   future `Vec<T>`), variadic templates, non-type template parameters,
   explicit/partial specialization, and associated types -- all
@@ -193,7 +193,7 @@ meaning "sound checking not yet implemented"):
   [§4.2](ch04-struct-vs-class.md).
 - Implementation of integer-overflow checking spec'd in
   [§5.8](ch05-static-checks.md) (design only so far): checked
-  (`abort()`-on-overflow) `+`/`-`/`*` in `safe` code, guaranteed-wrapping
+  (`abort()`-on-overflow) `+`/`-`/`*` by default, guaranteed-wrapping
   (never UB) in `unsafe`, and unconditional `abort()` for division/modulo
   by zero or `INT_MIN / -1`.
 - Implementation of `consteval` functions, `class` access control, the
@@ -220,4 +220,4 @@ meaning "sound checking not yet implemented"):
 
 ---
 
-[← Previous: Static Checks in Safe Regions](ch05-static-checks.md) · [Table of Contents](README.md) · [Next: Compilation Pipeline →](ch07-compilation-pipeline.md)
+[← Previous: Static Checks](ch05-static-checks.md) · [Table of Contents](README.md) · [Next: Compilation Pipeline →](ch07-compilation-pipeline.md)

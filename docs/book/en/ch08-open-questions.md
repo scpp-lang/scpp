@@ -1,30 +1,30 @@
 # 8. Open Questions (to be decided later)
 
-1. **Out-of-bounds subscript**: in safe regions, does `vector[i]` / `span[i]`
+1. **Out-of-bounds subscript**: does `vector[i]` / `span[i]`
    insert a runtime bounds check (like Rust), or require a checked API?
    **Settled and implemented (M6)**: `span[i]` inserts a runtime bounds
    check by default, calling `abort()` on failure (`vector` doesn't exist
-   yet, but will follow the same policy) -- this is `safe` code's
-   behavior. Inside `unsafe { }` (or an entirely native function), the
+   yet, but will follow the same policy) -- this is the default,
+   checked-by-default behavior. Inside `unsafe { }`, the
    check is skipped -- same treatment, and for the same reason, as
    integer-overflow checking (Q2 below / [§5.8](ch05-static-checks.md)):
    skipping a scpp-inserted *runtime* check carries none of the
-   "corrupted bookkeeping leaking into surrounding safe code" risk that
+   "corrupted bookkeeping leaking into surrounding code" risk that
    keeps move/borrow/lifetime checking unconditional (see
-   [§1.3](ch01-safety-context.md)).
-2. **Integer overflow**: does safe check signed overflow? **Settled**:
-   yes -- checked in `safe` code (both signed and unsigned), `abort()`
+   [§1.1](ch01-safety-context.md)).
+2. **Integer overflow**: does scpp check signed overflow? **Settled**:
+   yes -- checked by default (both signed and unsigned), `abort()`
    on overflow, unconditionally (no debug/release split); unchecked but
-   guaranteed-wrapping (never UB) inside `unsafe { }` or an `unsafe`
-   function, achieved by never emitting LLVM's `nsw`/`nuw` on scpp's own
+   guaranteed-wrapping (never UB) inside `unsafe { }`,
+   achieved by never emitting LLVM's `nsw`/`nuw` on scpp's own
    arithmetic codegen. Division/modulo by zero or `INT_MIN / -1` always
-   `abort()`, `safe` or `unsafe` alike -- there's no wrapped result for
+   `abort()`, whether inside `unsafe { }` or not -- there's no wrapped result for
    the hardware to fall back on. Deliberately diverges from Rust's
    debug-only default (see [§5.8](ch05-static-checks.md) for the full
    reasoning, including why overflow-checking -- unlike
    [§5.1-§5.4](ch05-static-checks.md)'s checks -- can safely join what
    `unsafe { }` relaxes without risking the "leakage into surrounding
-   safe code" that [§1.3](ch01-safety-context.md) otherwise guards
+   code" that [§1.1](ch01-safety-context.md) otherwise guards
    against).
 3. **Panic model**: how do OOB / assertion failures terminate? `std::terminate`
    or a custom panic + stack unwinding? **Settled and implemented (M6)**:
@@ -45,8 +45,8 @@
    runtime borrow counter panicking/aborting on violation) has no
    existing C++ name to reuse and needs real new machinery -- deferred
    to a later round, not part of this decision.
-5. **`safe` vs `const`**: how does a `const` member function map to
-   borrows in a safe region? **Settled**: `this` is treated as an
+5. **`const` methods and borrowing**: how does a `const` member function map to
+   borrows? **Settled**: `this` is treated as an
    implicit reference parameter -- `const T&` in a `const` method, `T&`
    otherwise -- subject to exactly the same alias-XOR-mutability,
    whole-root-conservative field access, and lifetime-elision rules as
@@ -59,8 +59,9 @@
    instead of a public data member (see [§6](ch06-safe-subset.md) for
    why scpp has no `constexpr`-qualified functions). Inheritance (and
    therefore `protected`) remains deferred, not part of this round.
-6. **ABI / interop with existing C++ libraries**: how to engineer safe code
-   calling third-party headers (all unsafe) — treat them all as `unsafe`?
+6. **ABI / interop with existing C++ libraries**: how to engineer ordinary
+   (checked-by-default) code calling third-party headers (all inherently
+   unchecked) — treat them all as requiring `unsafe { }`?
    **Settled**: `extern "C"` ([§2.1](ch02-boundary-rules.md), design
    finalized) is scpp's *only* interop mechanism with the outside world;
    scpp-to-scpp code sharing across files is [ch11](ch11-modules-and-libraries.md)
@@ -71,12 +72,20 @@
    with Clang (which would have made this easy, at the cost of a full
    rework of the already-working direct-to-LLVM-IR codegen path); direct
    LLVM IR generation also has a strictly higher optimization ceiling for
-   safe-region code than that alternative would (scoped `alias.scope`/
+   this code than that alternative would (scoped `alias.scope`/
    `noalias` LLVM metadata, derived from the borrow checker's own
    NLL-precision aliasing proofs, has no C++ source-level equivalent --
    not even `__restrict` reaches it, since `__restrict` only ever maps to
    the coarser, whole-parameter `noalias` attribute).
-7. **Language/compiler name, file extension.**
+7. **Language/compiler name, file extension.** File extension **settled**:
+   `.scpp` (not `.cpp`) -- source files are now visibly distinct from
+   plain C++ at a glance, which matters more now that safety checking is
+   the unconditional default rather than an opt-in per function (see
+   [ch01](ch01-safety-context.md)): an ordinary, unmodified `.cpp` file
+   fed to the scpp compiler would have every function checked, whether
+   its author intended that or not, and would very likely fail to
+   compile unless it already happens to follow scpp's move/borrow
+   discipline. Language/compiler name remains open.
 8. **Recoverable error handling**: exceptions, or value-based errors?
    **Settled**: no exceptions anywhere in scpp (no `throw`/`try`/`catch`).
    Every failure is either a *bug* (aborts -- already settled by Q3 above)
@@ -93,7 +102,7 @@
    the ternary operator) was considered and **rejected**: unlike every
    other piece of scpp syntax, a brand-new operator token can't be erased
    or ignored by a real C++ compiler, which would have permanently broken
-   the property that stripping `safe`/`unsafe` out of a scpp file leaves
+   the property that stripping `unsafe` out of a scpp file leaves
    an ordinary file a real C++ compiler still accepts (see
    [ch00](ch00-design-philosophy.md) §2) -- a real compiler hard-errors
    parsing past the second `?` (trigraphs, the only thing that ever gave
@@ -203,6 +212,39 @@
     `Vec<T>`), variadic templates, non-type template parameters,
     specialization, associated types, and dynamic dispatch/type erasure
     all remain out of scope for this round.
+13. **Removing the `safe` keyword: is safety-by-default better than
+    safety-opt-in?** An earlier design had two keywords, `safe` and
+    `unsafe`: an unmarked function (called a "native function" in earlier
+    drafts) received *no* checking at all, not even
+    [§5.1-§5.4](ch05-static-checks.md)'s move/borrow/lifetime analysis;
+    `safe` opted a function into full checking. **Settled: reversed.**
+    scpp now has only `unsafe` -- every function is checked
+    ([§5](ch05-static-checks.md)) unconditionally, by default, with no
+    annotation; `unsafe { }` is a lexically scoped block that locally
+    relaxes exactly [§5.5](ch05-static-checks.md)'s fixed operation list,
+    never a whole-function or whole-file escape hatch (see
+    [ch01](ch01-safety-context.md)). The "native function" concept is
+    **fully retired**, not merely renamed: there is no longer any way to
+    write a function with zero move/borrow/lifetime checking -- if a
+    function's body genuinely needs broad access to
+    [§5.5](ch05-static-checks.md)'s operations, the way to express that
+    is to wrap the entire body in one `unsafe { }` block, which still
+    keeps [§5.1-§5.4](ch05-static-checks.md) fully active throughout (see
+    [§1.2](ch01-safety-context.md)) -- exactly mirroring how Rust's own
+    `unsafe fn` body is never exempt from borrow checking, at any
+    edition. This was accepted specifically because scpp has no existing
+    codebase to onboard incrementally yet (unlike a hypothetical
+    "gradually adopt scpp in a legacy C++ project" scenario, where
+    everything defaulting to fully checked would make an unmodified file
+    fail to compile) -- and because gaps in checker coverage for
+    still-unimplemented features (`std::vector`, `std::string`, templates,
+    inheritance, etc.) are expected to close quickly rather than serve as
+    a long-lived escape hatch, so no permanent "opt out of checking
+    entirely" mechanism is needed to cover them. One direct, load-bearing
+    consequence: [§8](ch08-open-questions.md) Q7's file extension
+    (`.scpp`, not `.cpp`) exists specifically so a plain, unmodified
+    `.cpp` file is never accidentally fed to the scpp compiler and
+    silently subjected to checking its author never asked for.
 
 ---
 

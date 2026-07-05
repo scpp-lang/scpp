@@ -3,19 +3,27 @@
 ```
 源码
  └─► 词法分析 (Lexer)
-     └─► 递归下降 Parser ──► 统一 AST（safe/unsafe 同一套 AST，带 safety 标记）
+     └─► 递归下降 Parser ──► 统一 AST（节点上带一个 unsafe 块标记）
          └─► 名称解析 + 类型检查 ──► HIR（去糖：std::move→move hint 等）
-             ├─ [unsafe 区] ─────────────────────────────► 直接 lower
-             └─ [safe 区] ─► MIR（CFG + 三地址）
-                            └─► 借用检查（初始化/move/别名/生命周期）
-                                └─► 检查通过后 lower
-                 └─► LLVM IR ──► LLVM 优化 ──► 目标二进制
+             └─► MIR（CFG + 三地址）
+                 └─► 借用检查（初始化/move/别名/生命周期——无条件运行；
+                     unsafe 嵌套计数器只在这一趟检查内部放宽 §5.5
+                     那几个具体操作，从不跳过这一趟检查本身）
+                     └─► 检查通过后 lower
+                          └─► LLVM IR ──► LLVM 优化 ──► 目标二进制
 ```
 
 要点：
-- **AST 统一**：safe 与 unsafe 代码共用一套 AST，节点上带 safety 上下文位。
-- **借用检查只在 safe 区的 MIR 上进行**；unsafe 区跳过，直接下降。
-- 前端对 unsafe/普通 C++ 只需"够用"——不追求完整 C++ 兼容。
+- **AST 统一**：每个函数共用同一套 AST 形状，节点上带一个 unsafe 块
+  标记，标出哪些语句词法上位于 `unsafe { }` 块内部
+  （[§1](ch01-safety-context.md)）。
+- **借用检查在每个函数的 MIR 上无条件运行**——`unsafe { }` 从不跳过
+  这一趟检查；它只在检查内部放宽 [§5.5](ch05-static-checks.md) 里那份
+  固定、列举出来的操作（裸指针解引用、调用 `extern "C"` 函数等等），
+  跟 Rust 自己的借用检查器在 `unsafe fn`/`unsafe { }` 块内部照样继续跑
+  是同一个道理。
+- 前端只需要处理 [§6](ch06-safe-subset.md) 支持的子集里的那些
+  构造——对任意的、不支持的构造，不追求完整 C++ 标准兼容。
 - MIR 显式化：所有权转移、borrow 起止、drop 插入点、CFG。
 - 这张图是**单个文件**的管线（现在也是唯一存在的一种）。
   [ch11](ch11-modules-and-libraries.md) 定义了多文件场景下，被
@@ -24,9 +32,9 @@
 - **为什么直接 lower 成 LLVM IR，而不是转成 C++ 文本交给 Clang 编译**：
   后者认真考虑过——专门为了几乎免费拿到跟既有 C++ 库互操作的能力
   （真实的模板、class、异常、RTTI，全部交给真正的 C++ 编译器处理）。
-  最后否决了，原因：(a) 这不会让上面 checked 区域这条管线变得更简单
+  最后否决了，原因：(a) 这不会让上面这条受检查的管线变得更简单
   或更小——不管选哪条路，movecheck 的工作量完全一样，光凭这一点不足
-  以justify 把 codegen 整个推翻重来；(b) 对 safe 区代码而言，它的
+  以justify 把 codegen 整个推翻重来；(b) 它的
   优化上限严格**更低**：LLVM 的 `noalias`/`alias.scope` metadata 能
   表达"只在函数体某个子区域内"这种借用检查器凭自己 NLL 精度分析出来
   的别名事实，C++ 源码层面没有任何写法（连 `__restrict` 都不行——它
@@ -37,4 +45,4 @@
 
 ---
 
-[← 上一章：v0.1 支持的 safe 子集](ch06-safe-subset.md) · [目录](README.md) · [下一章：未决问题 →](ch08-open-questions.md)
+[← 上一章：v0.1 支持的子集](ch06-safe-subset.md) · [目录](README.md) · [下一章：未决问题 →](ch08-open-questions.md)
