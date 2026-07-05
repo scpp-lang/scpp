@@ -59,14 +59,14 @@ int legacy_style_function(int* p, size_t n) {
 ```
 
 Ownership/move/alias/lifetime checking still applies to every statement
-inside that block, exactly as [§1.1](#11-what-unsafe--relaxes-and-what-stays-unconditional)
+inside that block, exactly as [§1.1](#11-what-unsafe---relaxes-and-what-stays-unconditional)
 describes -- wrapping the whole body changes nothing about that. This
 mirrors Rust's own 2024-edition tightening (`unsafe_op_in_unsafe_fn`):
 even Rust's `unsafe fn` now requires an explicit inner `unsafe { }`
 around the specific operations it performs, and its body was never
 exempt from borrow checking in the first place, at any edition.
 
-## 1.3 The `unsafe { }` block (design finalized, not yet implemented)
+## 1.3 The `unsafe { }` block
 
 - **Grammar**: `unsafe` followed by an ordinary brace-delimited statement
   list, usable anywhere a statement is expected inside a function body:
@@ -90,14 +90,7 @@ exempt from borrow checking in the first place, at any edition.
   raw pointer dereference/arithmetic, `reinterpret_cast`/
   incompatible C-style casts, untagged `union` member access, raw
   `new`/`delete`, mutable global/static access, and calling an
-  `extern "C"` function. Of these, **only two are reachable in the
-  current implementation**: raw-pointer `*p` dereference (`T*` already
-  exists as a type) and calling an `extern "C"` function (declarations
-  and calls already exist). The other four have no syntax at all yet in
-  v0.1 (`union`, `reinterpret_cast`, `new`/`delete`, and global variables
-  aren't lexed/parsed) -- there's nothing to gate for them until their
-  own syntax lands; wire up the identical mechanism for each at that
-  point.
+  `extern "C"` function.
 - **Also relaxed inside `unsafe { }`, for a different reason**: `span`'s
   bounds check ([§8](ch08-open-questions.md) Q1) and integer-overflow
   checking ([§5.8](ch05-static-checks.md)) are skipped too -- but unlike
@@ -111,8 +104,9 @@ exempt from borrow checking in the first place, at any edition.
   alias-XOR-mutability, lifetime/dangling checks, and zero-init -- keeps
   running **unconditionally** through an `unsafe { }` block's statements.
   `unsafe { }` is a narrow, operation-level escape hatch, **not** a
-  "stop checking this region" switch, and must not be implemented by
-  skipping movecheck for the block's statements -- only by relaxing the
+  "stop checking this region" switch, and must not be equivalent to
+  skipping ownership/borrow/lifetime checking for the block's statements
+  -- only to relaxing the
   specific checks listed above. A `std::unique_ptr` can't be double-moved
   and alias-XOR-mutability can't be violated whether or not the code sits
   inside `unsafe { }`; otherwise, code right after the block (still under
@@ -123,20 +117,6 @@ exempt from borrow checking in the first place, at any edition.
   everywhere.)
 - **Nesting**: `unsafe { }` may nest inside another `unsafe { }` --
   harmless, not an error.
-- **Implementation shape** (for whoever builds this): reuse the existing
-  `StmtKind::Block` AST node (add an `is_unsafe` flag), and mirror the
-  existing `ScopeExit` MIR pattern with a matching pair of marker
-  statements (e.g. `UnsafeEnter`/`UnsafeExit`) bracketing the block's
-  lowered statements. The movecheck walker keeps a simple nesting counter
-  (increment on `UnsafeEnter`, decrement on `UnsafeExit`) alongside its
-  existing traversal -- this does **not** need to join across CFG branches
-  the way `DataflowState` does, since it's a purely lexical/structural
-  fact at each program point, never a flow-sensitive one (every branch of
-  an `if` already closes out its own `unsafe { }` blocks, if any, before
-  reaching the merge point). Gate each of the two currently-reachable
-  checks above on `counter == 0`; `span`'s bounds check and
-  integer-overflow checking (once implemented) gate on the same counter,
-  no separate mechanism needed.
 
 ---
 

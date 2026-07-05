@@ -1,16 +1,15 @@
 # 6. The v0.1 Supported Subset
 
 **Only** the following syntax is supported; everything
-else reports `E-UNSUPPORTED` ("sound checking not yet implemented" --
+else reports `E-UNSUPPORTED` (a construct outside this subset --
 distinct from an ordinary type/borrow-check error):
 
 **Types**
-- **Scalar primitives** (design finalized for the numeric family; `bool`
-  and `char` implemented, the rest **not yet implemented**):
+- **Scalar primitives** (the numeric family):
 
   | scpp name | Meaning | Notes |
   |-----------|---------|-------|
-  | `bool` | boolean, 1 byte wide | implemented. `false` is the bit pattern `0`, `true` is `1`. No implicit conversion to or from any other type -- unlike real C++ (`bool` implicitly promotes to `int`; any scalar contextually converts to `bool` in `if`/`while`), scpp requires an explicit cast in both directions, and `if`/`while` conditions must already be `bool`. |
+  | `bool` | boolean, 1 byte wide | `false` is the bit pattern `0`, `true` is `1`. No implicit conversion to or from any other type -- unlike real C++ (`bool` implicitly promotes to `int`; any scalar contextually converts to `bool` in `if`/`while`), scpp requires an explicit cast in both directions, and `if`/`while` conditions must already be `bool`. |
   | `int8_t` / `int16_t` / `int32_t` / `int64_t` | fixed-width signed integers | reuses real C++ `<cstdint>` names verbatim, all already-standardized. Unlike real C++ (where exact-width types are only conditionally provided), scpp guarantees all of these unconditionally on every target -- LLVM natively supports arbitrary-width integers, so there's no platform on which scpp would need to omit any of them. **No `int128_t`** for now: WG21 P1467 (a 128-bit integer type) hasn't been adopted into C++26 (see [ch00](ch00-design-philosophy.md) §7 for scpp's reference standard), and scpp's builtin vocabulary deliberately sticks to names the standard has actually ratified (see [ch00](ch00-design-philosophy.md) §2/§6) rather than anticipating a still-pending proposal's eventual spelling -- add it back once/if a future standard adopts it. |
   | `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` | fixed-width unsigned integers | same as above -- no `uint128_t` for the same reason |
   | `int` | alias for `int32_t` | **fixed**, regardless of target platform |
@@ -22,7 +21,7 @@ distinct from an ordinary type/borrow-check error):
   | `double` | alias for `float64_t` | same |
   | `size_t` | unsigned, pointer-width | matches real C++/Rust (`usize`) semantics: this one is **meant** to vary with the target triple's pointer width -- that's its actual job, not a pitfall to eliminate the way `long`'s ambiguity was. Contrast directly with `long` above: same *shape* of question (does this type's width depend on the platform?), opposite answer, because the two types exist for different reasons. |
   | `ptrdiff_t` | signed, pointer-width | same target-triple-following semantics as `size_t` |
-  | `char` | byte value, 1 byte wide | **not an alias** for `uint8_t` or any other type -- a distinct type, with the same no-implicit-conversion rule as `bool` above: converting `char` to or from any other type requires an explicit cast. Because `char` no longer has to share identity with `uint8_t`/`int8_t`, the implementation-defined signedness that plagues real C++'s plain `char` (signed on typical x86 toolchains, unsigned by default on typical ARM ones) never surfaces here -- there's no implicit arithmetic or comparison for it to affect. This also dissolves the previously-flagged conflict with concurrent implementation work that spells `char` as signed `i8`: since `char` is no longer required to be the same type as `uint8_t`, that internal representation choice is no longer in tension with the spec. |
+  | `char` | byte value, 1 byte wide | **not an alias** for `uint8_t` or any other type -- a distinct type, with the same no-implicit-conversion rule as `bool` above: converting `char` to or from any other type requires an explicit cast. Because `char` no longer has to share identity with `uint8_t`/`int8_t`, the implementation-defined signedness that plagues real C++'s plain `char` (signed on typical x86 toolchains, unsigned by default on typical ARM ones) never surfaces here -- there's no implicit arithmetic or comparison for it to affect. |
   | *(no `wchar_t`)* | -- | not provided at all, on purpose: real C++'s `wchar_t` is 2 bytes/UTF-16 on Windows but 4 bytes/UTF-32 on Linux and macOS -- an even worse version of the same platform-pitfall pattern as `long`/`char` above (it varies in both width *and* encoding, not just width or signedness). scpp sidesteps it by simply not providing the type, rather than trying to pin down one arbitrary choice. |
 
   **No implicit conversions between any two distinct scalar types above,
@@ -47,23 +46,20 @@ distinct from an ordinary type/borrow-check error):
 
 - `struct` (rules in [§4.1](ch04-struct-vs-class.md); fields of supported
   types only).
-- `class` (design finalized for access control and `this`/method borrow
-  mapping; full checking otherwise still backlog -- see
+- `class` (see
   [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)): member
   variables (including class-level constants) must be `private`, only
   member functions may be `public`; no inheritance/`protected` in v0.1.
-  A trivial-typed member may instead be declared `mutable` (design
-  finalized -- see [§4.2](ch04-struct-vs-class.md)/
+  A trivial-typed member may instead be declared `mutable` (see
+  [§4.2](ch04-struct-vs-class.md)/
   [§5.9](ch05-static-checks.md)): readable/writable through a `const`
   `this`, but never referenceable, scpp's phase-1 (`Cell`-equivalent)
   answer to interior mutability ([§8](ch08-open-questions.md) Q4).
-- `std::unique_ptr<T>` (implemented), `std::span<T>`/`std::span<const T>`
-  (implemented, M6 slice 1 -- but currently only constructible from a
-  fixed-size array, see [§3](ch03-syntactic-sugar.md)). `std::vector<T>`
-  is planned but **not implemented yet** (only fixed-size arrays `T[N]`
-  exist today).
-- `std::expected<T, E>` (see [§5.6](ch05-static-checks.md) -- **design
-  finalized, not yet implemented**): scpp's only vehicle for recoverable
+- `std::unique_ptr<T>`, `std::span<T>`/`std::span<const T>`
+  (constructible from a fixed-size array only, see
+  [§3](ch03-syntactic-sugar.md)). `std::vector<T>`
+  is deferred (only fixed-size arrays `T[N]` are in scope for v0.1).
+- `std::expected<T, E>` (see [§5.6](ch05-static-checks.md)): scpp's only vehicle for recoverable
   errors; a compiler builtin type, same treatment as `unique_ptr`/`span`,
   not a real libstdc++/libc++ template instantiation.
 
@@ -72,8 +68,7 @@ distinct from an ordinary type/borrow-check error):
 - `&` / `const &` borrows; `std::span`/`std::span<const T>` views.
 - `&expr` address-of, yielding `const T*` or `T*` depending on whether
   `expr`'s place is only reachable read-only or mutably (see
-  [§5.7](ch05-static-checks.md) -- **design finalized, not yet
-  implemented**): always legal (no `unsafe { }`
+  [§5.7](ch05-static-checks.md)): always legal (no `unsafe { }`
   needed to create one -- only dereferencing a raw pointer is gated, see
   below), the concrete way ordinary code produces a pointer value
   for an `extern "C"` out-parameter. `const T*`/`T*` are genuinely
@@ -82,25 +77,21 @@ distinct from an ordinary type/borrow-check error):
   ordinary type error, unconditionally, even inside `unsafe { }`.
 - `std::move`.
 - Function calls, including the "calling an `extern "C"` function requires
-  `unsafe {}`" rule from [§2](ch02-boundary-rules.md) (implemented
-  alongside `unsafe { }` below). Functions (free or methods) may be
+  `unsafe {}`" rule from [§2](ch02-boundary-rules.md). Functions (free or methods) may be
   **overloaded** by parameter list, never by return type (see
-  [§5.10](ch05-static-checks.md) -- **design finalized, not yet
-  implemented**): resolved by exact type match only, since no scpp
+  [§5.10](ch05-static-checks.md)): resolved by exact type match only, since no scpp
   scalar type implicitly converts to another (see the numeric family
   note above) -- ambiguity from pure type mismatch cannot arise as a
   result.
 - **Generic functions constrained by a `concept`** (`void f(Shape auto&
   x)`, real C++20 syntax verbatim -- see
-  [§5.11](ch05-static-checks.md) -- **design finalized, not yet
-  implemented**): scpp's compile-time-polymorphism mechanism in place of
-  inheritance/virtual functions (still deferred, see backlog below).
+  [§5.11](ch05-static-checks.md)): scpp's compile-time-polymorphism mechanism in place of
+  inheritance/virtual functions (still out of scope for v0.1, see below).
   Monomorphized per concrete type (zero-cost, no vtable); a constrained
   function's body is checked once, at its own definition, against only
   what the concept's `requires`-expression guarantees -- not deferred to
   instantiation the way real C++ templates otherwise work.
-- `consteval` functions (see [§4.2](ch04-struct-vs-class.md) -- **design
-  finalized, not yet implemented**): scpp's only compile-time-function
+- `consteval` functions (see [§4.2](ch04-struct-vs-class.md)): scpp's only compile-time-function
   mechanism, reused verbatim from real C++20 -- every call is
   mandatorily evaluated at compile time, a compile error if any argument
   isn't itself a constant expression. scpp has **no `constexpr`-qualified
@@ -121,30 +112,28 @@ distinct from an ordinary type/borrow-check error):
   `constexpr` functions back rather than solving it another way.
 - Arithmetic / logical / comparison operators. `+`/`-`/`*` are
   overflow-checked by default (`abort()` on overflow, both signed
-  and unsigned; see [§5.8](ch05-static-checks.md) -- **design finalized,
-  not yet implemented**); unchecked but guaranteed-wrapping (never UB)
-  inside `unsafe { }`. Division/modulo by zero (or `INT_MIN / -1`)
-  always `abort()`, whether inside `unsafe { }` or not.
-- `if` / `while` / `return`. (`for`/range-for are **not implemented yet**
-  -- iteration has to be hand-written with `while` for now; the lexer
-  keeps a `for` keyword reserved, but there's no corresponding
-  statement form in the parser/AST yet.)
+  and unsigned; see [§5.8](ch05-static-checks.md)); unchecked but
+  guaranteed-wrapping (never UB) inside `unsafe { }`. Division/modulo by
+  zero (or `INT_MIN / -1`) always `abort()`, whether inside `unsafe { }`
+  or not.
+- `if` / `while` / `return`. (`for`/range-for are deferred beyond v0.1
+  -- iteration is expressed with `while` for now.)
 - Member access, subscript (fixed-size arrays, `span` -- `span` carries a
   runtime bounds check by default, skipped inside `unsafe { }`,
   see [§8](ch08-open-questions.md)).
 - `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
-  for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)
-  -- **design finalized, not yet implemented**).
-- `unsafe { }` blocks (see [§1.3](ch01-safety-context.md), implemented): a
+  for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)).
+- `unsafe { }` blocks (see [§1.3](ch01-safety-context.md)): a
   lexically-scoped escape hatch that locally
   permits raw pointer dereference and calling an `extern "C"` function (the
-  only two of [§5.5](ch05-static-checks.md)'s prohibited operations
-  reachable in v0.1 today), while every other check in
+  operations from [§5.5](ch05-static-checks.md)'s prohibited list that
+  are in scope for v0.1; the rest of that list is deferred beyond v0.1,
+  see below), while every other check in
   [§5](ch05-static-checks.md) keeps running unconditionally.
 - `extern "C"` function declarations/definitions (see
-  [§2.1](ch02-boundary-rules.md), implemented), restricted to
-  C-ABI-compatible signature types. `void` (as a return type and a
-  pointer's pointee) is implemented alongside it; array parameters
+  [§2.1](ch02-boundary-rules.md)), restricted to
+  C-ABI-compatible signature types, including `void` as a return type
+  and a pointer's pointee; array parameters
   (`T[N]`) decay to `T*`, matching ordinary C++.
 - **No exceptions** (`throw`/`try`/`catch`) -- deliberately excluded from
   scpp entirely, not a backlog item: recoverable errors are
@@ -156,67 +145,18 @@ distinct from an ordinary type/borrow-check error):
   precondition violations in a constructor/destructor) `abort()` instead
   (see [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)).
 
-**Not yet supported (backlog)**
+**Out of scope for v0.1**
 - Templates / generics for **types** (generic `struct`/`class`, e.g. a
   future `Vec<T>`), variadic templates, non-type template parameters,
   explicit/partial specialization, and associated types -- all
   explicitly out of scope for [§5.11](ch05-static-checks.md)'s
-  generic-*function* design too, not merely unimplemented.
-- Full checking for user-defined `class` types: access control and
-  `this`/method-borrow mapping are design-finalized (see
-  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)), but
-  not yet implemented; inheritance and virtual functions remain
-  deferred, design not started.
-- Inheritance, virtual functions.
+  generic-*function* design too.
+- Inheritance and virtual functions for `class` types (and therefore
+  `protected`) -- see [§4.2](ch04-struct-vs-class.md).
 - Lifetime checking of lambdas capturing references.
 - The full aliasing model for `shared_ptr`.
-- Implementation of the `[[scpp::lifetime(name)]]` multi-group mechanism
-  spec'd in [§5.3](ch05-static-checks.md) (design only so far; every
-  cross-function case still falls back to the single-reference-parameter/
-  `this` elision or the new default-group rule until this lands).
-- Implementation of `&expr` address-of spec'd in
-  [§5.7](ch05-static-checks.md) (design only so far) -- the last
-  clearly-identified hard blocker for realistic `extern "C"` interop
-  (e.g. POSIX socket APIs' out-parameters).
-- Implementation of the numeric scalar family spec'd above (design
-  finalized; `bool`/`char` done, the rest are not started): `int8_t`/.../
-  `int64_t`, `uint8_t`/.../`uint64_t`, the `int`/`long`/`unsigned int`/
-  `unsigned long` fixed-width aliases, `float32_t`/`float64_t` (and the
-  `float`/`double` aliases), `size_t`, `ptrdiff_t`.
-- `for`/range-for, `std::vector`, `std::string`/`std::string_view` (now
-  that `char` exists, unblocked but not started). `reinterpret_cast`,
-  `union`, raw `new`/`delete`, and global variables have no syntax at all
-  yet, so `unsafe { }`'s permission for them is moot until each lands.
-- Implementation of `std::expected<T, E>` spec'd in
-  [§5.6](ch05-static-checks.md) (design only so far), including the
-  mandatory-checking rule and the fallible-construction guidance in
-  [§4.2](ch04-struct-vs-class.md).
-- Implementation of integer-overflow checking spec'd in
-  [§5.8](ch05-static-checks.md) (design only so far): checked
-  (`abort()`-on-overflow) `+`/`-`/`*` by default, guaranteed-wrapping
-  (never UB) in `unsafe`, and unconditional `abort()` for division/modulo
-  by zero or `INT_MIN / -1`.
-- Implementation of `consteval` functions, `class` access control, the
-  `this`/method-borrow mapping, and `mutable` (phase-1 interior
-  mutability) spec'd in
-  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md) (design
-  only so far).
-- Namespace declarations (nesting, qualified lookup, `using foo::bar;`,
-  namespace aliases) and multi-file modules generally, including the new
-  export-must-match-module-name rule, spec'd in
-  [ch11](ch11-modules-and-libraries.md) (design only so far) -- today's
-  compiler only ever processes one file at a time.
-- Implementation of function overloading spec'd in
-  [§5.10](ch05-static-checks.md) (design only so far): exact-type-match
-  resolution, the by-value/by-reference axis, and the parameter-type
-  mangling encoding from [§11](ch11-modules-and-libraries.md) -- today's
-  `Signatures` map holds one entry per name.
-- Implementation of generic functions and `concept`/`requires` spec'd in
-  [§5.11](ch05-static-checks.md) (design only so far): parsing
-  `concept`/`requires` and the abbreviated `Concept auto` parameter form,
-  checking a constrained function's body once against its concept's
-  guarantees, and monomorphizing each call site -- today's parser has no
-  notion of either construct.
+- `for`/range-for, `std::vector`, `std::string`/`std::string_view`,
+  `reinterpret_cast`, `union`, raw `new`/`delete`, and global variables.
 
 ---
 

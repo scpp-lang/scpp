@@ -1,8 +1,7 @@
-# 11. 模块与库（Modules & Libraries，设计已定稿，尚未实现）
+# 11. 模块与库（Modules & Libraries）
 
-现在编译器一次只能处理一个文件：`driver.cppm` 的 `emit_object_file`
-把一段源码字符串解析成一个 `Program` 就单独 lower 完事——没有"一个
-scpp 文件调用另一个"这回事，也没有办法把一份 scpp API 分发给别的
+scpp 程序可以跨多个文件组织："一个
+scpp 文件调用另一个"是有的，也有办法把一份 scpp API 分发给别的
 scpp 代码使用。本章定义 scpp 程序如何跨多个文件组织，以及"库"在
 scpp 里是什么。这跟 [§2.1](ch02-boundary-rules.md) 的 `extern "C"`
 是两个不同的问题：那个机制是跟**真正的 C**打交道（libc、或任何其他
@@ -27,7 +26,7 @@ scpp 原样复用真实的 C++20 module 语法——`export module name;`、
    而 module 接口是从唯一真实来源编译一次、然后被**导入**的，从来
    不需要手工重打一遍——这整类 bug 因此是结构性不可能发生，而不只
    是"不鼓励"。
-2. **不需要预处理器**。scpp 从来没实现过预处理器——词法层面现在
+2. **不需要预处理器**。scpp 没有预处理器——词法层面
    完全没有 `#define`、没有宏展开、没有条件编译。C++20 modules 同样
    不需要这些东西。
 3. **复用已有语法**。`export module`/`import` 是真实的、现代的、
@@ -69,7 +68,7 @@ int mylib::math::square(int x) { return x * internal_helper(x) / 2; }
 - 一个文件只要以 `export module name;` 开头，就成为某个 module 的
   **主接口单元**（每个 module 最多一个，和真实 C++20 一样）。完全
   不写 module 声明的文件，就是一个普通的、不导出任何东西的文件，跟
-  今天每一个 scpp 文件一样。
+  完全不涉及 module 的普通 scpp 文件一样。
 - 一个以 `module name;` 开头（不带 `export`）的文件是一个**实现
   单元**：为同一个 module 贡献额外代码，自动能看到该 module 自己的
   接口，不需要 `import`。构建一个 module，就是把它的主接口单元和
@@ -230,13 +229,13 @@ scpp 编译器**实际检查过一次**，比普通 C++ 的保证只多不少。
 
 [§5.3](ch05-static-checks.md) 已经确立了 v0.1 的借用检查是**函数内
 （intraprocedural）**的：检查 `f` 里对 `g` 的调用，永远只需要查
-`g` 的**签名**（`FunctionSignature`——形参类型、返回类型、
-`Function::is_safe`、它的 `[[scpp::lifetime(name)]]` 分组），从不
-需要 `g` 的函数体。这意味着 modules 这个功能需要的**新检查器逻辑
-是零**。movecheck 现在已经为每个 `Program` 建一次的 `Signatures`
-map，只需要在检查当前文件之前，额外用从每个被导入 module 的接口里
-取出的 `FunctionSignature` 条目预先填充一遍——还是同一个 map，同样
-的查找方式，同样的检查，只是多了一个条目来源。
+`g` 的**签名**（形参类型、返回类型、
+它的 `[[scpp::lifetime(name)]]` 分组），从不
+需要 `g` 的函数体。这意味着 modules 这个功能**不需要新的检查
+模型**：普通同文件调用已经在用的签名查找方式，原样搬到跨模块调用上
+一样成立，只是额外用从每个被导入 module 的接口里
+取出的签名条目预先填充一遍——同样的查找方式、
+同样的检查，只是多了一个条目来源。
 
 struct 的内存布局也是同样道理顺带解决了：[§4.3](ch04-struct-vs-class.md)
 已经把 struct 布局钉死为（字段列表、目标 triple）的纯函数——从接口
@@ -274,9 +273,9 @@ struct 的内存布局也是同样道理顺带解决了：[§4.3](ch04-struct-vs
     `_scppM14_org.lotx.cmathN4_trigF3_sin`。如果一个符号直接导出在
     module 自己要求的那层 namespace（没有额外嵌套），就没有任何
     `N<长度>_` block。
-  - **参数类型编码，现在定下来了**：v0.1 的函数重载还没实现（`Signatures`
-    map 现在一个名字对应一条），但 [§5.10](ch05-static-checks.md)（设计
-    已定稿）加上了这个功能，所以之前预留的这个位置现在填上：`P<个数>_`
+  - **参数类型编码，现在定下来了**：这个位置原本是预留的，没有定编码，
+    等函数重载有了设计；[§5.10](ch05-static-checks.md)
+    现在给出了函数重载的设计，所以这个位置现在填上：`P<个数>_`
     后面跟着每个参数各一份、长度前缀、原样拼写的类型（比如
     `7_int32_t`、`8_int32_t&`、`14_const int32_t&`）——延续这整套方案
     一贯的长度前缀风格，不学 Itanium ABI 那种单字母缩写表。比如
@@ -381,7 +380,7 @@ mylib.scppm  (7z 归档)
   `llvm-bitcode` 是推荐的默认类型（能在消费者自己机器上做跨模块
   LTO，也能按 target triple 分开放好几份变体——scpp 的 codegen 在
   生成代码之前就已经定死了目标的 `DataLayout`，按
-  [§4.3](ch04-struct-vs-class.md)，所以今天产出的 bitcode 是绑定
+  [§4.3](ch04-struct-vs-class.md)，所以产出的 bitcode 是绑定
   具体 triple 的，不是那种通用可移植的；作者想支持好几个 triple，
   就每个 triple 各放一份 `.bc`）。`native-object`/`native-archive`
   仍然是有效的备选类型，给那些不想让消费者装 LLVM 工具链的场景用。
@@ -406,9 +405,6 @@ mylib.scppm  (7z 归档)
   module 同名。开了签名的话这个天然靠密码学保证（`DIGESTS` 本来就
   覆盖了每个文件）；不签名的话就是工具层面的一条不变式（没有任何
   支持的操作会去跨归档抽取/重组文件）。
-- 集成 `.7z` 的读写是一个新依赖（现在 CMakeLists.txt 里什么都没有）；
-  建议把这部分包一层很薄的内部归档 I/O 接口，以后真要换掉具体容器
-  格式时不会牵连到设计的其他部分。
 
 ## 11.12 多 target bitcode 与 target-triple 解析
 
@@ -458,40 +454,6 @@ mylib.scppm  (7z 归档)
 - **跟既有的、原样不改的 C++ 库互操作**（真正的 class、模板、异常、
   RTTI）——明确不追求；`extern "C"` 是 scpp 提供的唯一互操作机制
   （见 [§8](ch08-open-questions.md) 第 6 条）。
-
-## 11.15 实现形状（给做这个的人）
-
-- **Parser**：`module`、`export`、`import`、`namespace` 关键字（现在
-  都还没有词法支持）；module 声明、import 声明（带可选的 `as name`）、
-  namespace 声明（含 C++17 单行嵌套写法 `namespace a::b::c { ... }`）、
-  namespace 别名（`namespace a = b::c;`）、`export` 前缀（或
-  `export { }` 打包）的顶层声明（含无函数体的 `extern` 导出函数）这
-  几条语法产生式。
-- **一个新的构建产物**：在现有的 `scpp` CLI
-  （`lex`/`parse`/`build`，[§7](ch07-compilation-pipeline.md)）上加
-  类似 `scpp build-module <接口文件> [<实现文件>...] -o <name>.scppm`
-  这样一条命令，把接口单元和实现单元一起编译（按
-  [§11.6](#116-裸-externmodule-linkage-的无函数体声明) 核对每个
-  定义跟声明是否一致），为每个请求的 `--target` triple 各产出一份
-  `.bc`，再打包进 [§11.11](#1111-scppm-库归档格式) 那个基于 7z 的归档。
-- **导出/namespace 核对**：一个新的、纯语法层面的检查
-  （不需要借用检查器参与），拒绝任何一个 `export` 声明的外层 namespace
-  路径不是以当前 module 自己的点分名字开头的情况，按
-  [§11.5](#115-导出的声明必须落在跟-module-名字匹配的-namespace-里)。
-- **限定名解析**：把 `a::b::c::...` 这样的引用，对照当前文件
-  `import` 过的 module 集合做解析，需要
-  [§11.5](#115-导出的声明必须落在跟-module-名字匹配的-namespace-里)
-  里那个最长前缀匹配算法，包括它的"歧义就报错"这条——这是一层新的
-  查找逻辑，加在（不是替换）现有的按名字查 `Signatures` map
-  （[§11.8](#118-健全性跨模块检查器只需要签名)）前面。
-- **Codegen**：一个被导入 module 导出的函数，在导入方这个翻译单元里
-  生成为一条 LLVM `declare`（external linkage，按
-  [§11.9](#119-符号身份linkage-与-mangling) mangle，包括超出 module
-  名字之外的 namespace 嵌套所需的 `N<长度>_<段>` block）；私有函数完全
-  不跨这条边界（internal linkage）。把最终产出的 `.bc`/`.o` 文件链接
-  到一起是系统链接器的事；`driver.cppm` 的 `link_executable` 现在
-  就是靠 shell 出去调 `cc` 做这个的，只需要改成能接受多个目标文件
-  输入，而不是只能接受一个。
 
 ---
 

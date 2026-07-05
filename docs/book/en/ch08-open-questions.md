@@ -2,9 +2,10 @@
 
 1. **Out-of-bounds subscript**: does `vector[i]` / `span[i]`
    insert a runtime bounds check (like Rust), or require a checked API?
-   **Settled and implemented (M6)**: `span[i]` inserts a runtime bounds
-   check by default, calling `abort()` on failure (`vector` doesn't exist
-   yet, but will follow the same policy) -- this is the default,
+   **Settled**: `span[i]` inserts a runtime bounds
+   check by default, calling `abort()` on failure (`vector` is deferred
+   beyond v0.1, see [§6](ch06-safe-subset.md), but will follow the same
+   policy) -- this is the default,
    checked-by-default behavior. Inside `unsafe { }`, the
    check is skipped -- same treatment, and for the same reason, as
    integer-overflow checking (Q2 below / [§5.8](ch05-static-checks.md)):
@@ -27,7 +28,7 @@
    code" that [§1.1](ch01-safety-context.md) otherwise guards
    against).
 3. **Panic model**: how do OOB / assertion failures terminate? `std::terminate`
-   or a custom panic + stack unwinding? **Settled and implemented (M6)**:
+   or a custom panic + stack unwinding? **Settled**:
    calls libc's `abort()` directly (lower-level than `std::terminate()`,
    doesn't depend on the C++ runtime's terminate-handler machinery, same
    effect -- the process ends immediately, no stack unwinding).
@@ -62,10 +63,8 @@
 6. **ABI / interop with existing C++ libraries**: how to engineer ordinary
    (checked-by-default) code calling third-party headers (all inherently
    unchecked) — treat them all as requiring `unsafe { }`?
-   **Settled**: `extern "C"` ([§2.1](ch02-boundary-rules.md), design
-   finalized) is scpp's *only* interop mechanism with the outside world;
-   scpp-to-scpp code sharing across files is [ch11](ch11-modules-and-libraries.md)
-   (design finalized). Interop with *existing, unmodified C++ libraries*
+   **Settled**: `extern "C"` ([§2.1](ch02-boundary-rules.md)) is scpp's *only* interop mechanism with the outside world;
+   scpp-to-scpp code sharing across files is [ch11](ch11-modules-and-libraries.md). Interop with *existing, unmodified C++ libraries*
    specifically (arbitrary classes, templates, overloads, exceptions,
    RTTI) is explicitly **not pursued** -- considered and rejected the
    idea of transpiling checked scpp to real C++ text and compiling it
@@ -236,9 +235,9 @@
     codebase to onboard incrementally yet (unlike a hypothetical
     "gradually adopt scpp in a legacy C++ project" scenario, where
     everything defaulting to fully checked would make an unmodified file
-    fail to compile) -- and because gaps in checker coverage for
-    still-unimplemented features (`std::vector`, `std::string`, templates,
-    inheritance, etc.) are expected to close quickly rather than serve as
+    fail to compile) -- and because closing the remaining gaps in v0.1's
+    subset (`std::vector`, `std::string`, templates,
+    inheritance, etc., see [§6](ch06-safe-subset.md)) doesn't need
     a long-lived escape hatch, so no permanent "opt out of checking
     entirely" mechanism is needed to cover them. One direct, load-bearing
     consequence: [§8](ch08-open-questions.md) Q7's file extension

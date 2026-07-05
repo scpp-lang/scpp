@@ -21,14 +21,14 @@ This is critical for soundness and must be strict.
   not formalize this and relies on `unsafe { }` vouching at each call
   site instead.
 - Mechanism: see [§1.3](ch01-safety-context.md) for the concrete rules of
-  `unsafe { }` (design finalized, not yet implemented). In short, the
+  `unsafe { }`. In short, the
   checker rejects a `Call` whose callee is an `extern "C"` declaration
   unless the call site is lexically inside an `unsafe { }` block -- the
   same currently-inside-`unsafe` bit also gates raw pointer dereference,
   and will gate the rest of [§5.5](ch05-static-checks.md)'s list once
   their syntax exists.
 
-## 2.1 `extern "C"` declarations (design finalized, not yet implemented)
+## 2.1 `extern "C"` declarations
 
 This is the concrete boundary to *actual* C, not just to unchecked scpp --
 calling libc or any other C library. It reuses real C++ syntax as-is; scpp
@@ -87,32 +87,6 @@ below.
   with owning/borrowed scpp types internally takes/returns the
   C-compatible raw form at the boundary and converts on entry/exit
   inside its own (checked) body.
-- **Prerequisites this needs that don't exist yet** (none of these are
-  specific to `extern "C"` -- they're general gaps it happens to be the
-  first feature to need):
-  - An `extern` keyword (not lexed yet).
-  - Minimal string-literal lexing, just enough to recognize the token
-    `"C"` -- v0.1 doesn't need general string literals as an expression
-    type yet (that waits for `std::string`/`char`, per
-    [§6](ch06-safe-subset.md)); this is a narrow, separate slice of that
-    same eventual work.
-  - `void` as a valid type name, for `void*` params/locals and
-    void-returning functions -- scpp currently has no way to declare a
-    function returning `void` at all (`to_llvm_type` has no case for it).
-  - Variadic parameters (`...`, for `printf`-family functions) are useful
-    but **not required** for a first slice: most common libc entry points
-    (`malloc`, `free`, `memcpy`, `strlen`, ...) aren't variadic. Parse and
-    store a `has_varargs` flag on the declaration up front, but the actual
-    variadic call-site codegen (argument promotion, `isVarArg=true` on the
-    `llvm::FunctionType`) can land as a fast-follow.
-- **Implementation shape**: this generalizes a pattern already
-  hand-written three times in codegen.cppm today --
-  `get_or_declare_malloc`/`get_or_declare_free`/`get_or_declare_abort`
-  each manually build an LLVM `FunctionType` and `Function::Create` it
-  with `ExternalLinkage` and no body for one hardcoded libc function.
-  A user-facing `extern "C"` declaration should emit exactly that same
-  shape of LLVM `declare` generically, from the parsed signature, instead
-  of each new libc dependency needing its own hand-written C++ method.
 
 ---
 

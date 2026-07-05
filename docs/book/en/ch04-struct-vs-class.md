@@ -48,8 +48,7 @@ itself the explicit declaration, and the compiler verifies triviality.
   v0.1 — see the backlog in [§8](ch08-open-questions.md). v0.1 first
   checks only the standard-library-provided owning type `unique_ptr`
   (milestone M2).
-- **Fallible construction and destruction** (design finalized, ahead of
-  the rest of `class` support): a constructor or destructor has no
+- **Fallible construction and destruction**: a constructor or destructor has no
   channel to hand back a `std::expected<T, E>` -- scpp has no exceptions
   to throw through instead (see [§5.6](ch05-static-checks.md)/
   [§8](ch08-open-questions.md)), and neither special member function
@@ -69,8 +68,7 @@ itself the explicit declaration, and the compiler verifies triviality.
     `private`, so the factory function is the only way to obtain an
     instance -- the classic C++ "named constructor idiom" (Marshall
     Cline's C++ FAQ), requiring zero new scpp syntax.
-- **Access control** (design finalized, ahead of the rest of `class`
-  support): a member **variable** -- including a class-level constant --
+- **Access control**: a member **variable** -- including a class-level constant --
   can never be `public`; only member **functions** can be. Writing
   `public:` above a member variable is a compile error. External code
   can therefore only ever reach a class's data through a method call,
@@ -93,7 +91,7 @@ itself the explicit declaration, and the compiler verifies triviality.
   need to wait for this, though -- see
   [§5.11](ch05-static-checks.md)'s `concept`/`requires`-based generic
   functions.
-- **Interior mutability, phase 1** (design finalized; answers
+- **Interior mutability, phase 1** (answers
   [§8](ch08-open-questions.md) Q4's `Cell` half, `RefCell` deferred):
   scpp reuses real C++'s `mutable` keyword, but with **stricter**
   semantics than real C++'s (which gives a `mutable` field zero

@@ -15,13 +15,12 @@
   是被那个用 `unsafe { }` 背书的代码**假定为有效**的（那个块的义务）。
 - 编译器需能标记某一条具体的 `extern "C"` 声明是否"已人工审核为可安全
   调用"——v0.1 不做形式化，改成每个调用点都靠 `unsafe { }` 背书。
-- 机制：具体规则见 [§1.3](ch01-safety-context.md)（`unsafe { }`，设计已
-  定稿，尚未实现）。简单说：检查器会拒绝任何被调方是 `extern "C"`
+- 机制：具体规则见 [§1.3](ch01-safety-context.md)（`unsafe { }`）。简单说：检查器会拒绝任何被调方是 `extern "C"`
   声明的 `Call`，除非调用点在词法上位于 `unsafe { }` 块内——同一个
   "当前是否在 unsafe 里"标记，也会用来放行裸指针解引用，以及以后
   [§5.5](ch05-static-checks.md) 里其余各项语法落地后的放行。
 
-## 2.1 `extern "C"` 声明（设计已定稿，尚未实现）
+## 2.1 `extern "C"` 声明
 
 这是跟**真正的** C 打交道的边界，不只是跟不受检查的 scpp 代码打交道——
 调用 libc 或任何其他 C 库。这里完全复用 C++ 现有语法，scpp 不加任何新写
@@ -68,27 +67,6 @@
   ——这些都没有对应的 C 表示。一个 `extern "C"` 函数如果内部需要用
   scpp 的所有权/借用类型，就在边界上用 C 兼容的原始形式收发，进函数体后
   自己（受检查地）转换。
-- **这个功能还缺的前置条件**（都不是 `extern "C"` 专属的——只是它恰好是
-  第一个用到这些的功能，属于通用缺口）：
-  - `extern` 关键字（还没做词法支持）。
-  - 最小限度的字符串字面量词法支持，够认出 `"C"` 这一个 token 就行——
-    v0.1 还不需要把字符串字面量做成通用表达式类型（那要等
-    `std::string`/`char`，见 [§6](ch06-safe-subset.md)）；这里只是那项
-    未来工作里一个很窄、独立的切片。
-  - `void` 作为合法类型名，用于 `void*` 形参/局部变量和返回 `void` 的
-    函数——scpp 现在完全没办法声明一个返回 `void` 的函数
-    （`to_llvm_type` 没有处理它的分支）。
-  - 变长参数（`...`，给 `printf` 系列函数用）有用，但**不是**第一版
-    的硬性要求：大部分常用的 libc 入口（`malloc`、`free`、`memcpy`、
-    `strlen`……）都不是变长参数的。可以先在声明里解析并存一个
-    `has_varargs` 标记，真正的变长调用点 codegen（参数提升、
-    `llvm::FunctionType` 上的 `isVarArg=true`）留作后续快速跟进。
-- **实现形状**：这其实是把 codegen.cppm 里已经手写了三遍的模式泛化——
-  `get_or_declare_malloc`/`get_or_declare_free`/`get_or_declare_abort`
-  各自手动搭一个 LLVM `FunctionType`，用 `ExternalLinkage`、不带函数体
-  `Function::Create` 出来，对应一个写死的 libc 函数。用户写的
-  `extern "C"` 声明应该从解析出来的签名，通用地生成同样形状的 LLVM
-  `declare`，而不是每加一个新的 libc 依赖就得手写一个新的 C++ 方法。
 
 ---
 

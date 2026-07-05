@@ -29,8 +29,8 @@ Key points:
   compliance for arbitrary, unsupported constructs is not pursued.
 - MIR makes things explicit: ownership transfers, borrow start/end, drop
   insertion points, CFG.
-- This diagram is the pipeline for **one file** (today, the only kind
-  there is). [ch11](ch11-modules-and-libraries.md) specifies how an
+- This diagram is the pipeline for a **single file**.
+  [ch11](ch11-modules-and-libraries.md) specifies how an
   `import`ed module's signatures/struct layouts get fed into the "name
   resolution + type checking" step above for a multi-file program --
   the pipeline itself doesn't change, it's just seeded from more than one
@@ -40,7 +40,7 @@ Key points:
   arbitrary existing-C++-library interop almost for free (real templates,
   classes, exceptions, RTTI, all handled by a real C++ compiler). Rejected
   because (a) it doesn't make the checked pipeline above any
-  simpler or smaller -- movecheck's work is identical either way, so the
+  simpler or smaller -- borrow-checking work is identical either way, so the
   cost of a full codegen rework wasn't justified by that alone; and
   (b) it has a strictly *lower* optimization ceiling than direct IR
   generation: LLVM's `noalias`/`alias.scope`

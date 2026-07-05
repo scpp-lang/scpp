@@ -1,14 +1,16 @@
 # scpp
 
 A compiler frontend for a language that **looks exactly like idiomatic modern
-C++**, adding only a very small set of extensions — the core being the `safe`
-keyword. Regions annotated with `safe` enable **Rust-style sound compile-time
-safety checks** (ownership, borrowing, lifetimes); all other code follows
-ordinary C++ semantics. The backend generates native binaries via **LLVM**.
+C++**, adding only a very small set of extensions — the core being the `unsafe`
+keyword. Every function is checked by default with **Rust-style sound
+compile-time safety checks** (ownership, borrowing, lifetimes); `unsafe { }`
+blocks locally relax a fixed, enumerated set of operations the checker can't
+otherwise verify. The backend generates native binaries via **LLVM**.
 
-> 一门"看起来就是原汁原味现代 C++"的语言，仅加入极少量扩展（核心是 `safe`
-> 关键字）。被 `safe` 标注的区域启用 Rust 式健全的编译期安全检查；其余代码按
-> 普通 C++ 语义处理。后端经 LLVM 生成本地二进制。
+> 一门"看起来就是原汁原味现代 C++"的语言，仅加入极少量扩展（核心是 `unsafe`
+> 关键字）。每个函数默认都启用 Rust 式健全的编译期安全检查（所有权、借用、
+> 生命周期）；`unsafe { }` 语句块局部放宽检查器本身无法验证的一小撮固定
+> 操作。后端经 LLVM 生成本地二进制。
 >
 > 中文版 README: [`README.zh.md`](README.zh.md)
 
@@ -17,27 +19,35 @@ ordinary C++ semantics. The backend generates native binaries via **LLVM**.
 - **It looks like C++.** Anyone familiar with modern C++ should, at a glance,
   believe this is C++.
 - **Minimal additions.** New syntax only when strictly necessary. The core
-  additions are just `safe` / `unsafe`.
+  addition is just `unsafe`.
 - **Reuse known syntax, reassign semantics.** Existing spellings like
   `std::move()`, `T&`, `unique_ptr`, `span` gain stronger *static* meaning
-  inside `safe` regions without changing their outward appearance.
-- **Safety is opt-in, local, and composable.** Unannotated code keeps full C++
-  freedom (and unsafety).
-- **Soundness over compatibility.** Inside a `safe` region we would rather
+  unconditionally, everywhere, without changing their outward appearance.
+- **Safety is the default; `unsafe` is the only opt-out, and it's local and
+  composable.** `unsafe { }` blocks relax a fixed, enumerated set of
+  operations — never a switch that turns off checking for an entire function
+  or file.
+- **Soundness over compatibility.** We would rather
   report "not yet supported" than admit an unsound check. 100% C++ compatibility
   is a non-goal.
 
 ## Example
 
 ```cpp
-safe int sum(const std::vector<int>& v) {   // checks enabled for this body
+int sum(std::span<const int> v) {   // checked by default: ownership, borrowing, lifetimes
     int acc = 0;
-    for (auto x : v) acc += x;
+    int i = 0;
+    while (i < v.size) {
+        acc += v[i];   // bounds-checked by default
+        i = i + 1;
+    }
     return acc;
 }
 
-int legacy() {                               // ordinary C++, unchecked
-    int* p = nullptr; return *p;             // allowed; you are on your own
+int legacy(int* p) {
+    unsafe {
+        return *p;   // raw pointer dereference needs an explicit unsafe { } block
+    }
 }
 ```
 
@@ -75,31 +85,6 @@ scpp lex <file>              # dump the token stream
 scpp parse <file>            # dump the AST
 scpp build <file> [-o <out>] # compile to a native executable via LLVM
 ```
-
-## Status
-
-Early design stage.
-
-- **M1 — minimal end-to-end pipeline** (scalars + locals + control flow +
-  functions → AST → LLVM IR → executable, no `safe` checks yet): done.
-- **M2 — type system + `struct` + `unique_ptr` + move semantics** (trivial
-  `struct`s with a fixed, Clang-ABI-compatible memory layout; `std::move` as
-  a compiler-recognized move hint; move-out checking so a moved-from
-  `std::unique_ptr` can't be read again): done.
-- **M3 — MIR + initialization checking + drop insertion** (a CFG-based MIR;
-  a 2-phase worklist dataflow analysis for move/initialization checking,
-  lexically scope-aware on both the codegen side — real per-scope
-  `std::unique_ptr` drop insertion — and the move-checker side): done.
-- **M4 — borrow & alias-XOR-mutability checking** (intraprocedural, first
-  slice): `T&` (mutable/exclusive borrow) and `const T&` (shared borrow) for
-  local reference variables and function reference parameters, with
-  alias-XOR-mutability enforced via a per-place borrow lattice; borrow
-  duration is lexically scoped (not yet NLL-style liveness — that's M5).
-  References to `std::unique_ptr`, returning a reference, and reference
-  struct fields are deferred to a later version.
-
-See the milestones chapter of [the book](docs/book/en/README.md) for the
-full roadmap.
 
 ## License
 

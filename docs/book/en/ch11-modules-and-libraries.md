@@ -1,10 +1,8 @@
-# 11. Modules & Libraries (design finalized, not yet implemented)
+# 11. Modules & Libraries
 
-Today the compiler only ever handles one file at a time: `driver.cppm`'s
-`emit_object_file` parses a single source string into one `Program` and
-lowers it alone -- there's no notion of one scpp file calling into
-another, and no way to distribute a scpp API for other scpp code to
-consume. This chapter specifies how scpp programs span multiple files,
+scpp programs can span multiple files: there's a notion of one scpp file
+calling into another, and a way to distribute a scpp API for other scpp
+code to consume. This chapter specifies how scpp programs span multiple files,
 and what a "library" is in scpp terms. It's a distinct problem from
 [§2.1](ch02-boundary-rules.md)'s `extern "C"`: that mechanism bridges to
 *actual C* (libc, or any other C library); this chapter is about
@@ -33,9 +31,9 @@ new. Three reasons, in order of importance:
    module interface is compiled once from ground truth and *imported*,
    never retyped, so this entire class of bug is structurally impossible
    rather than merely discouraged.
-2. **No preprocessor needed.** scpp has never implemented one -- there is
+2. **No preprocessor needed.** scpp has no preprocessor -- there is
    no `#define`, no macro expansion, no conditional compilation anywhere
-   in the lexer today. C++20 modules need none of that either.
+   in the language. C++20 modules need none of that either.
 3. **Reuse known syntax.** `export module`/`import` is real, modern,
    idiomatic C++. It's also, pleasantly, already what the compiler's own
    implementation is written in: every `src/*.cppm` file is itself an
@@ -78,7 +76,8 @@ int mylib::math::square(int x) { return x * internal_helper(x) / 2; }
 - A file becomes a module's **primary interface unit** by starting with
   `export module name;` (at most one per module, exactly like real
   C++20). A file with no module declaration is an ordinary,
-  non-exporting file, exactly like every scpp file today.
+  non-exporting file, exactly like an ordinary scpp file with no module
+  involvement at all.
 - A file starting with `module name;` (no `export`) is an
   **implementation unit**: it contributes additional code to that same
   module, and automatically has access to the module's own interface
@@ -273,13 +272,13 @@ guarantees, not less.
 
 [§5.3](ch05-static-checks.md) already establishes that v0.1's borrow
 checking is **intraprocedural**: checking a call to `g` inside `f` only
-ever consults `g`'s *signature* (`FunctionSignature` -- param types,
-return type, `Function::is_safe`, its `[[scpp::lifetime(name)]]`
-groups), never `g`'s body. This means modules require **zero new checker
-logic**. The `Signatures` map movecheck already builds once per `Program`
-just needs to be seeded, before checking the current file, with the
-`FunctionSignature` entries recovered from each imported module's
-interface -- same map, same lookups, same checks, only a second source of
+ever consults `g`'s *signature* (param types,
+return type, its `[[scpp::lifetime(name)]]`
+groups), never `g`'s body. This means modules require **no new checking
+model**: the same signature lookup an ordinary same-file call already uses
+works unchanged for a cross-module call, seeded with the
+signature entries recovered from each imported module's
+interface -- same lookups, same checks, only a second source of
 entries.
 
 Struct layout carries over the same way: [§4.3](ch04-struct-vs-class.md)
@@ -321,10 +320,10 @@ actually needs to be visible outside its own compiled unit:
     `org.lotx.cmath`'s `trig::sin`. A symbol exported directly at the
     module's own required namespace (no extra nesting) has zero `N<len>_`
     blocks.
-  - **Parameter-type encoding, now specified**: v0.1 has no function
-    overloading implemented yet (the `Signatures` map is one entry per
-    name today), but [§5.10](ch05-static-checks.md) (design finalized)
-    adds it, so this previously-reserved slot is now filled in:
+  - **Parameter-type encoding, now specified**: this slot was originally
+    reserved with no encoding defined pending a function-overloading
+    design; [§5.10](ch05-static-checks.md) now specifies function
+    overloading, so the slot is filled in:
     `P<count>_` followed by one length-prefixed, verbatim type spelling
     per parameter (e.g. `7_int32_t`, `8_int32_t&`, `14_const int32_t&`) --
     consistent with this whole scheme's length-prefixed style, not a
@@ -439,8 +438,8 @@ mylib.scppm  (7z archive)
 - **Payload `kind` is tagged per entry, not hardwired to LLVM bitcode.**
   `llvm-bitcode` is the recommended default (enables cross-module LTO on
   the consumer's own machine, and per-target-triple variants -- scpp's
-  codegen already fixes a target's `DataLayout` before generating code,
-  per [§4.3](ch04-struct-vs-class.md), so today's bitcode is
+  codegen fixes a target's `DataLayout` before generating code,
+  per [§4.3](ch04-struct-vs-class.md), so its bitcode is
   target-triple-specific, not universally portable; an author wanting to
   support several triples ships one `.bc` per triple). `native-object`/
   `native-archive` remain valid alternate kinds for cases wanting zero
@@ -471,10 +470,6 @@ mylib.scppm  (7z archive)
   cryptographically enforced for free (`DIGESTS` already covers every
   file); without signing it's a tooling-level invariant (no supported
   operation ever extracts/recombines pieces across archives).
-- Integrating a `.7z` reader/writer is a new dependency (nothing in
-  today's CMakeLists.txt provides one); recommend hiding it behind a thin
-  internal archive-I/O interface so the concrete container format could
-  be swapped later without disturbing the rest of this design.
 
 ## 11.12 Multi-target bitcode and target-triple resolution
 
@@ -534,45 +529,6 @@ inlined source is an available fallback even without a matching payload.
   templates, exceptions, RTTI) -- explicitly not pursued; `extern "C"` is
   the only interop mechanism scpp provides (see
   [§8](ch08-open-questions.md) item 6).
-
-## 11.15 Implementation shape (for whoever builds this)
-
-- **Parser**: `module`, `export`, `import`, `namespace` keywords (none
-  lexed yet); grammar for a module declaration, an import declaration
-  (with optional `as name`), a namespace declaration (including the
-  C++17 one-line nested form `namespace a::b::c { ... }`), a namespace
-  alias (`namespace a = b::c;`), and `export`-prefixed (or
-  `export { }`-grouped) top-level declarations, including bodyless
-  (`extern`) exported functions.
-- **A new build artifact**: extend the `scpp` CLI
-  (`lex`/`parse`/`build`, [§7](ch07-compilation-pipeline.md)) with
-  something like `scpp build-module <interface> [<impl>...] -o
-  <name>.scppm`, compiling interface + implementation units together
-  (checking every definition against its declaration once, per
-  [§11.6](#116-bare-extern-for-module-linkage-bodyless-declarations)),
-  emitting one `.bc` per requested `--target` triple, and packing
-  everything into the 7z-based archive from
-  [§11.11](#1111-the-scppm-library-archive-format).
-- **Export/namespace check**: a new, purely syntactic validation pass
-  (needs no borrow-checker involvement) that rejects any `export`-marked
-  declaration whose enclosing namespace path doesn't start with the
-  current module's own dotted name, per
-  [§11.5](#115-exported-declarations-must-live-in-a-namespace-matching-the-module-name).
-- **Qualified-name resolution**: resolving `a::b::c::...` against the
-  current file's `import`ed module set needs the longest-prefix-match
-  algorithm from [§11.5](#115-exported-declarations-must-live-in-a-namespace-matching-the-module-name),
-  including its ambiguous-match compile error -- this is new lookup logic,
-  layered in front of (not replacing) the existing per-name `Signatures`
-  map lookups from [§11.8](#118-soundness-cross-module-signatures-are-all-the-checker-needs).
-- **Codegen**: an imported module's exported functions are declared
-  (LLVM `declare`, external linkage, mangled per
-  [§11.9](#119-symbol-identity-linkage-and-mangling), including the
-  `N<len>_<segment>` blocks for namespace nesting beyond the module name)
-  in the importing TU's module; private functions never cross this
-  boundary at all (internal linkage). Linking the resulting `.bc`/`.o`
-  files together is the system linker's job; `driver.cppm`'s
-  `link_executable` already shells out to `cc` for this and just needs to
-  accept multiple object inputs instead of one.
 
 ---
 

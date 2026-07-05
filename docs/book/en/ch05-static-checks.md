@@ -37,7 +37,7 @@ the following properties, unconditionally, everywhere:
 - v0.1 performs **intraprocedural borrow checking only**, based on
   NLL-style dataflow analysis (liveness-driven region inference): a
   reference local's borrow is released right after its **last use**,
-  rather than only at the end of its lexical scope -- implemented via a
+  rather than only at the end of its lexical scope -- determined via a
   backward liveness analysis over each reference local. This is more
   precise than releasing only at lexical scope end, and accepts more
   legal programs (e.g. a place can be borrowed again immediately after
@@ -45,8 +45,7 @@ the following properties, unconditionally, everywhere:
 - **No `'a`-style lifetime syntax.** Instead of naming lifetimes as their own
   syntactic category (Rust's `'a`, Circle's `/a`), scpp groups reference
   *parameters* using one opt-out attribute, `[[scpp::lifetime(name)]]`,
-  applied to ordinary C++ parameter/declarator syntax. (Design finalized;
-  **not yet implemented** -- tracked under ch09 M7+.)
+  applied to ordinary C++ parameter/declarator syntax.
   - **Default grouping.** Every reference-typed input parameter whose type
     is reference-compatible with the return type (see the mutable-licensing
     rule below) belongs, unless tagged otherwise, to one shared implicit
@@ -97,9 +96,8 @@ the following properties, unconditionally, everywhere:
   - If there is a `this`/`self` and the function returns a reference
     with no other disambiguation, the output borrows from `this`'s
     group -- see
-    [§5.9](#59-methods-and-this-design-finalized-not-yet-implemented)
-    for `this`'s full treatment as an implicit reference parameter
-    (design finalized, not yet implemented).
+    [§5.9](#59-methods-and-this)
+    for `this`'s full treatment as an implicit reference parameter.
   - Any other case that still cannot be resolved -> error, advising to add
     a `[[scpp::lifetime(...)]]` attribute or refactor to return by value /
     smart pointer.
@@ -117,13 +115,12 @@ the following properties, unconditionally, everywhere:
   the borrow is recorded against `p` itself, so moving (`std::move(p)`)
   or reassigning `p` while that borrow is alive is rejected (it would
   otherwise dangle / use-after-free). Dereferencing a raw pointer `T*`
-  still requires `unsafe { }`, which v0.1 hasn't implemented yet, so
-  that one is left for a later version.
+  still requires `unsafe { }`.
 - Calling a function that returns a reference: the result can be
   consumed as an ordinary value (auto-dereferenced,
   `int y = get_ref(x);`), bound to a new named reference
   (`int& r = get_ref(x);`), or passed onward as a reference argument to
-  another function (`g(get_ref(x));`) -- movecheck resolves the result
+  another function (`g(get_ref(x));`) -- the result is resolved
   back through the call chain to its real root place(s), subject to the
   exact same alias-XOR-mutability checks as a plain variable borrow. When
   the callee's return type is elided from a multi-member group (the
@@ -160,12 +157,12 @@ the following properties, unconditionally, everywhere:
 - Calling an `extern "C"` function.
 
 Note what's deliberately *not* on this list: taking a raw pointer's
-address in the first place (`&expr`, [§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
+address in the first place (`&expr`, [§5.7](#57-address-of-x-and-raw-pointers))
 is always legal, same as in Rust -- it's
 *dereferencing* one that's gated here, not creating one. Also note that
 `unsafe { }` relaxes *dereferencing* a raw pointer, not the ordinary,
 unconditional type-checking rule that a `const T*` can never be written
-through ([§5.7](#57-address-of-x-and-raw-pointers-design-finalized-not-yet-implemented))
+through ([§5.7](#57-address-of-x-and-raw-pointers))
 -- that check isn't on this list either, because it isn't something
 `unsafe { }` ever relaxes. Two more things *do* join this list's effect
 (relaxed inside `unsafe { }`), but for a different reason than everything
@@ -174,7 +171,7 @@ because skipping them carries none of the "corrupted bookkeeping could
 leak into surrounding code" risk that keeps
 [§5.1-§5.4](#51-ownership--move)'s checks unconditional -- `span`'s
 bounds check ([§8](ch08-open-questions.md) Q1) and integer-overflow
-checking ([§5.8](#58-integer-overflow-design-finalized-not-yet-implemented))
+checking ([§5.8](#58-integer-overflow))
 are both scpp-inserted *runtime* checks, not otherwise-illegal
 operations, and both are off inside `unsafe { }`, on everywhere else.
 
@@ -183,7 +180,7 @@ relaxes precisely this list and nothing else -- every other check in this
 chapter (§5.1-§5.4) keeps running unconditionally inside an `unsafe { }`
 block.
 
-## 5.6 Recoverable Errors: `std::expected<T, E>` (design finalized, not yet implemented)
+## 5.6 Recoverable Errors: `std::expected<T, E>`
 
 scpp has **no exceptions** -- no `throw`/`try`/`catch` anywhere in the
 language (see [§8](ch08-open-questions.md) for the full
@@ -242,9 +239,9 @@ error in v0.1. Whether/how to make this less verbose is revisited once
 the C++ standard itself evolves further in this area -- see
 [§8](ch08-open-questions.md) Q8.
 
-## 5.7 Address-of (`&x`) and Raw Pointers (design finalized, not yet implemented)
+## 5.7 Address-of (`&x`) and Raw Pointers
 
-- **Motivation.** Today a `T*` value can only ever be *received* (an
+- **Motivation.** So far in this spec, a `T*` value can only ever be *received* (an
   `extern "C"` parameter, or copied from another already-existing `T*`)
   or *derived by decay* (a fixed-size array `T[N]` decays to `T*`,
   [§3](ch03-syntactic-sugar.md)). There is still no way to take the
@@ -252,8 +249,7 @@ the C++ standard itself evolves further in this area -- see
   element -- exactly what most real C APIs need for "out" parameters
   (`accept(fd, &addr, &addrlen)`, `getsockopt(fd, ..., &value, &len)`,
   `stat(path, &statbuf)`): a pointer to *your own* storage, not something
-  already handed to you as a pointer. This is the concrete gap this
-  section closes.
+  already handed to you as a pointer. This section closes that gap.
 - **Grammar.** A new prefix unary operator, `&expr`, where `expr` is one
   of the same forms already accepted as a borrow source for `T&`/
   `const T&` ([§5.2](#52-borrow--aliasing)): a plain local/parameter
@@ -348,33 +344,10 @@ the C++ standard itself evolves further in this area -- see
   - Removing const (`const T*` -> `T*`) -- no `const_cast`/Rust's
     `.cast_mut()` equivalent exists in v0.1. If a real C API's signature
     is honestly non-`const` where scpp's borrow-source is only reachable
-    as `const`, there is currently no way to call it -- backlog.
-- **Implementation shape** (for whoever builds this): a new
-  `UnaryOp::AddressOf`, parsed at the same prefix precedence as the
-  existing `*`/`-`/`!` (its natural sibling to `*`'s `UnaryOp::Deref`).
-  In movecheck, reuse `resolve_borrow_source_root` to resolve/validate
-  `expr`'s root -- exactly the structural resolution `T&`/`const T&`
-  binding already uses -- but, unlike `apply_reference_binding`, do
-  **not** write into the borrow map afterward: just check the root's
-  current borrow state is empty (no shared or mutable borrow), rejecting
-  otherwise with the same message shape as an existing "already
-  borrowed" rejection, and stop there. In codegen, this reduces to
-  whatever `codegen_lvalue` already resolves `expr`'s address to (its
-  `.ptr`) -- no new address computation logic, just a new expression case
-  that returns that pointer directly as the overall expression's value,
-  instead of loading through it the way an ordinary read does. Track
-  `const T*` vs. `T*` with a new `Type::is_mutable_pointee` flag on
-  `TypeKind::Pointer` (mirroring the existing `Type::is_mutable_ref` on
-  `TypeKind::Reference`); determine it at `&expr`'s resolution time from
-  whatever mechanism already tracks a projection chain's const-reachability
-  for today's `T&`-vs-`const T&` binding check (movecheck must already
-  answer this question to reject binding a `T&` to a place only reachable
-  via `const T&`). Reject an assignment whose LHS resolves through a
-  pointer with `is_mutable_pointee == false` as an ordinary type error in
-  whatever pass already checks assignment compatibility -- unconditionally,
-  not gated by the `unsafe`-nesting counter from [§1.3](ch01-safety-context.md).
+    as `const`, there is no way to call it in v0.1 -- deferred (see
+    [§6](ch06-safe-subset.md)).
 
-## 5.8 Integer Overflow (design finalized, not yet implemented)
+## 5.8 Integer Overflow
 
 Real C++ leaves signed integer overflow **undefined behavior** -- even
 after C++20 mandated two's-complement *representation* for signed
@@ -442,18 +415,8 @@ new debug/release build-mode one:
   on -- the hardware itself traps (x86 `#DE`). Both `abort()`
   unconditionally, in *every* context, whether inside `unsafe { }` or
   not -- there is no unchecked variant for these two.
-- **Implementation shape** (for whoever builds this): by default,
-  lower `+`/`-`/`*` to LLVM's `@llvm.{s,u}{add,sub,mul}.with.overflow.*`
-  intrinsics (which read the hardware overflow flag as a side effect of
-  the arithmetic instruction itself, at no extra computation cost --
-  see [ch08](ch08-open-questions.md) Q2) and branch to the existing
-  `abort()` call on the overflow bit. Inside `unsafe { }` (nesting
-  counter from [§1.3](ch01-safety-context.md) > 0), lower to plain
-  `add`/`sub`/`mul` without `nsw`/`nuw`. Division/modulo lower to a
-  check for `b == 0` or `(a == INT_MIN && b == -1)` followed by
-  `abort()`, unconditionally, regardless of the unsafe-nesting counter.
 
-## 5.9 Methods and `this` (design finalized, not yet implemented)
+## 5.9 Methods and `this`
 
 Answers [§8](ch08-open-questions.md) Q5 ("how does a `const` member
 function map to borrows"). scpp reuses real C++ method syntax exactly
@@ -520,10 +483,9 @@ is new:
   works around it with `std::mem::take`/`Option::take()` ("replace with
   a valid placeholder while moving the old value out") -- scpp doesn't
   yet have an equivalent idiom designed; flagged here as a concrete
-  follow-up once this section is implemented, not solved by this
-  section.
+  open follow-up, not solved by this section.
 
-## 5.10 Function Overloading (design finalized, not yet implemented)
+## 5.10 Function Overloading
 
 Answers [§8](ch08-open-questions.md) Q11. scpp allows multiple functions
 (free functions or methods) to share a name, distinguished by parameter
@@ -566,7 +528,7 @@ while designing this section, not assumed).
   -- reused directly from real C++'s own tie-break rule (this is what
   makes `T& get(); const T& get() const;` work as two legitimate
   overloads, resolving the gap flagged in
-  [§5.9](#59-methods-and-this-design-finalized-not-yet-implemented)).
+  [§5.9](#59-methods-and-this)).
 - **Scoping matches ordinary C++ name lookup.** A name declared in an
   inner scope hides the *entire* outer overload set (no merging across
   scope boundaries) -- the same rule that already applies to any other
@@ -588,7 +550,7 @@ while designing this section, not assumed).
   the address of an overloaded name as a function pointer (deferred until
   function pointers themselves are designed).
 
-## 5.11 Generic Functions and Concepts (design finalized, not yet implemented)
+## 5.11 Generic Functions and Concepts
 
 Answers [§8](ch08-open-questions.md) Q12. scpp's answer to compile-time
 polymorphism, reusing real C++20 `concept`/`requires` syntax and the
