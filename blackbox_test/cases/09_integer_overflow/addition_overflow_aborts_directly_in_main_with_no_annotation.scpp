@@ -1,0 +1,8 @@
+// ch01 §1.1/ch08 Q13: checking is unconditional by default -- there is no
+// more "native function" that's exempt. `main` here has no annotation at
+// all (there is no annotation to give), and INT_MAX + 1 must still abort,
+// exactly as it would inside any other function.
+int main() {
+    int x = 2147483647;
+    return x + 1;
+}

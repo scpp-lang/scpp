@@ -1,0 +1,9 @@
+// ch02: "Raw pointer dereference | Must be inside unsafe { }."
+int f(int* p) {
+    return *p;
+}
+
+int main() {
+    int x = 5;
+    return f(&x);
+}

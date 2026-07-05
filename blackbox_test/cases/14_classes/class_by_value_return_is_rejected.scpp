@@ -1,0 +1,22 @@
+// Same no-copy-semantics rule, for a return type instead of a parameter.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+};
+
+Counter make_counter() {
+    Counter c(5);
+    return c;
+}
+
+int main() {
+    return 0;
+}

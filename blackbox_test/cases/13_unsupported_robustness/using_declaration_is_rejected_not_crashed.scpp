@@ -1,0 +1,15 @@
+// ch06 backlog / ch11 §11.4: the single-name using-declaration
+// (`using foo::bar;`) is the one legal import form once implemented, but
+// isn't parsed yet -- only the qualified-name form (`foo::bar()`) works
+// today.
+namespace foo {
+    int helper() {
+        return 5;
+    }
+}
+
+using foo::helper;
+
+int main() {
+    return helper();
+}

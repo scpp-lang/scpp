@@ -1,0 +1,11 @@
+// ch01 §1.1: `unsafe { }` locally relaxes raw pointer dereference.
+int f(int* p) {
+    unsafe {
+        return *p;
+    }
+}
+
+int main() {
+    int x = 5;
+    return f(&x);
+}

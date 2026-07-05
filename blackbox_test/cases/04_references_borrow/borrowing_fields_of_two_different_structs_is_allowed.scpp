@@ -1,0 +1,22 @@
+// Counterpart to the whole-root-conservative test: borrowing fields of
+// two *different* struct roots is unrelated aliasing and must be freely
+// allowed (ch05 §5.2's workaround: "pass each field as its own separate
+// call argument").
+struct Point {
+    int x;
+    int y;
+};
+
+int f() {
+    Point a;
+    Point b;
+    a.x = 1;
+    b.y = 2;
+    int& ra = a.x;
+    int& rb = b.y;
+    return ra + rb;
+}
+
+int main() {
+    return f();
+}

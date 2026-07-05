@@ -1,8 +1,0 @@
-// ch05 §5.8: subtraction is checked too. INT_MIN - 1 overflows.
-safe int f(int a, int b) {
-    return a - b;
-}
-
-int main() {
-    return f(-2147483648, 1);
-}

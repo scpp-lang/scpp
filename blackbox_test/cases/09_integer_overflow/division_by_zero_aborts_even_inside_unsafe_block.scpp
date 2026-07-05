@@ -1,0 +1,12 @@
+// ch05 §5.8: unlike +/-/*, which merely wrap inside unsafe { }, division
+// by zero has no wrapped result to fall back on and still aborts even
+// when the operation itself is wrapped in unsafe { }.
+int divide(int a, int b) {
+    unsafe {
+        return a / b;
+    }
+}
+
+int main() {
+    return divide(10, 0);
+}

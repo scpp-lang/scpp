@@ -1,0 +1,41 @@
+// ch05 §5.9/§5.10: "T& beats const T& for a mutable lvalue when both are
+// viable ... this is what makes const/non-const method overloading
+// (get()/get() const) work." Calling through a `const Counter&` can only
+// see the `const` overload (no mutation); calling through a plain
+// `Counter&` prefers the non-`const` overload.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+    int get() {
+        this->value = this->value + 1;
+        return this->value;
+    }
+};
+
+int use_const(const Counter& c) {
+    return c.get();
+}
+
+int use_mutable(Counter& c) {
+    return c.get();
+}
+
+// Counter(5); use_const reads 5 (no mutation); use_mutable increments to
+// 6 and returns 6. Sum = 11.
+int main() {
+    Counter c(5);
+    int a = use_const(c);
+    int b = use_mutable(c);
+    return a + b;
+}

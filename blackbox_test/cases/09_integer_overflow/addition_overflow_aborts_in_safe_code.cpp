@@ -1,9 +1,0 @@
-// ch05 §5.8: "+, -, and * are checked -- for both signed and unsigned
-// operands ... On overflow, the program abort()s." INT_MAX + 1 overflows.
-safe int f(int a, int b) {
-    return a + b;
-}
-
-int main() {
-    return f(2147483647, 1);
-}

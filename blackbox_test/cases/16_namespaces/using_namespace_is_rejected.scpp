@@ -1,0 +1,14 @@
+// ch11 §11.4: "No using namespace, anywhere -- not even function-local.
+// The only import form is a single-name using-declaration, using
+// foo::bar;" -- a permanent restriction, not a temporary gap.
+namespace foo {
+    int helper() {
+        return 5;
+    }
+}
+
+using namespace foo;
+
+int main() {
+    return helper();
+}

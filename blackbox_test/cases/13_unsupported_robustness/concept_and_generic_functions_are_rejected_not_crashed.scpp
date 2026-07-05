@@ -1,0 +1,16 @@
+// ch05 §5.11/ch06 backlog: "Generic functions constrained by a concept
+// (void f(Shape auto& x), real C++20 syntax verbatim) ... design
+// finalized, not yet implemented." Neither `concept`/`requires` nor the
+// abbreviated `Concept auto` parameter form are parsed yet.
+template<typename T>
+concept Numeric = requires(T t) {
+    { t + t } -> std::same_as<T>;
+};
+
+int double_it(Numeric auto x) {
+    return x + x;
+}
+
+int main() {
+    return double_it(5);
+}

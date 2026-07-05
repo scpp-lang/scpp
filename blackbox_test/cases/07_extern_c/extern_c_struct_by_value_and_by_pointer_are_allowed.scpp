@@ -1,0 +1,35 @@
+// ch02 §2.1: "struct (already guaranteed Clang-ABI-compatible layout), by
+// value or by pointer" are both accepted extern "C" signature types.
+// Both the raw-pointer dereference inside `sum_point_by_pointer`'s body
+// and calling either function from `main` need `unsafe { }` -- an
+// extern "C" function with a body is checked like any other function
+// internally (so its own raw-pointer deref still needs unsafe { }), and
+// calling any extern "C" function always needs unsafe { } regardless of
+// whether it has a body (ch02's boundary table).
+struct Point {
+    int x;
+    int y;
+};
+
+extern "C" int sum_point_by_value(Point p) {
+    return p.x + p.y;
+}
+
+extern "C" int sum_point_by_pointer(Point* p) {
+    unsafe {
+        return p->x + p->y;
+    }
+}
+
+int main() {
+    Point a;
+    a.x = 3;
+    a.y = 4;
+    int by_value = 0;
+    int by_pointer = 0;
+    unsafe {
+        by_value = sum_point_by_value(a);
+        by_pointer = sum_point_by_pointer(&a);
+    }
+    return by_value + by_pointer;
+}

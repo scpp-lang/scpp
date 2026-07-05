@@ -1,0 +1,11 @@
+// ch11 §11.4: "including C++17's one-line nested-namespace definition
+// (namespace a::b::c { ... })."
+namespace a::b {
+    int helper() {
+        return 9;
+    }
+}
+
+int main() {
+    return a::b::helper();
+}

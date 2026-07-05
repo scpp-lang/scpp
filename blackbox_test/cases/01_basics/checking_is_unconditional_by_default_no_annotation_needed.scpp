@@ -1,0 +1,16 @@
+// ch00 §4/ch01/ch08 Q13: "every function is checked unconditionally, by
+// default, with no per-function or per-file annotation needed to enable
+// it." There is no `safe` keyword (or any other annotation) in scpp
+// anymore -- an entirely ordinary, unannotated function still gets full
+// ownership/move checking, so a double-move is rejected here exactly as
+// it would be anywhere else.
+int f() {
+    std::unique_ptr<int> a = std::make_unique<int>(1);
+    std::unique_ptr<int> b = std::move(a);
+    std::unique_ptr<int> c = std::move(a);
+    return 0;
+}
+
+int main() {
+    return f();
+}

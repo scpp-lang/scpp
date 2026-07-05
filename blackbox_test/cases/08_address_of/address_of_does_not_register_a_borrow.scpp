@@ -1,0 +1,15 @@
+// ch05 §5.7: "&expr does NOT itself register a new borrow going forward
+// ... an ordinary T&/const T& borrow of the same place immediately
+// afterward is unaffected." Taking `&x` must not block binding `int& r =
+// x;` right after.
+int f() {
+    int x = 1;
+    int* p = &x;
+    int& r = x;
+    r = 5;
+    return x;
+}
+
+int main() {
+    return f();
+}

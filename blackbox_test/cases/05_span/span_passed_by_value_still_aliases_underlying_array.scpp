@@ -1,0 +1,18 @@
+// ch03: span is "a lifetime-checked, non-owning view" -- passing it "by
+// value" only copies the {pointer, length} pair, not the underlying
+// elements, so writes through a span parameter are visible in the
+// caller's original array.
+void zero_out(std::span<int> s) {
+    s[0] = 0;
+    return;
+}
+
+int main() {
+    int arr[3];
+    arr[0] = 5;
+    arr[1] = 6;
+    arr[2] = 7;
+    std::span<int> s = arr;
+    zero_out(s);
+    return arr[0] + arr[1] + arr[2];
+}

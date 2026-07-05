@@ -1,0 +1,14 @@
+// ch05 §5.7: "&expr evaluates to const T* if expr's resolved place is
+// only reachable read-only (e.g. through a const T& parameter/binding
+// anywhere along the projection chain)." `x` here is only reachable
+// through `const int&`, so `&x` must be `const int*`, which cannot
+// implicitly convert to (be stored in) a plain `int*`.
+int f(const int& x) {
+    int* p = &x;
+    return 0;
+}
+
+int main() {
+    int y = 1;
+    return f(y);
+}

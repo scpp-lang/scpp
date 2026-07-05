@@ -6,7 +6,7 @@
 // program (POSIX fork/exec + <filesystem>, nothing else) so running the
 // suite never requires anything beyond a C++ compiler.
 //
-// For each `<name>.cpp` file under `cases/`, it looks for a sibling
+// For each `<name>.scpp` file under `cases/`, it looks for a sibling
 // `<name>.expected` file describing the required outcome, in one of three
 // forms:
 //
@@ -24,15 +24,15 @@
 // 3. Compile + run, but the exact value is unspecified: the file contains
 //    exactly the sentinel `NO_ABORT` on its first line. Used for the
 //    handful of cases where a scpp-inserted runtime check (span bounds,
-//    overflow) is *skipped* (inside unsafe { }/a native function per ch01
-//    §1.3), so the read/computed value is genuine, unspecified garbage --
+//    overflow) is *skipped* inside an `unsafe { }` block (ch01 §1.1), so
+//    the read/computed value is genuine, unspecified garbage --
 //    not something a test can pin down -- but the process must still
 //    terminate normally (return/exit) rather than being killed by a
 //    signal.
 //
-// Adding a new case is just dropping in a matching `.cpp`/`.expected` pair
-// under `cases/` (subdirectories are just organization and are walked
-// recursively) -- no changes to this file are needed.
+// Adding a new case is just dropping in a matching `.scpp`/`.expected`
+// pair under `cases/` (subdirectories are just organization and are
+// walked recursively) -- no changes to this file are needed.
 //
 // Build: cmake -S . -B build && cmake --build build (see CMakeLists.txt).
 // Usage: ./build/run_tests [filter] [--scpp-bin <path>]
@@ -208,14 +208,14 @@ struct Outcome {
     std::string detail;
 };
 
-Outcome run_one_case(const fs::path& scpp_bin, const fs::path& cpp_path, const fs::path& expected_path,
+Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const fs::path& expected_path,
                       const fs::path& temp_dir) {
     Expected expected = parse_expected(read_file(expected_path));
     fs::path out_binary = temp_dir / "case.bin";
     std::error_code ec;
     fs::remove(out_binary, ec);
 
-    RunResult compile_result = run_process({scpp_bin.string(), "build", cpp_path.string(), "-o", out_binary.string()},
+    RunResult compile_result = run_process({scpp_bin.string(), "build", scpp_path.string(), "-o", out_binary.string()},
                                             temp_dir, std::chrono::seconds(kTimeoutSeconds));
 
     if (compile_result.timed_out) {
@@ -326,16 +326,16 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    std::vector<fs::path> cpp_files;
+    std::vector<fs::path> scpp_files;
     for (const auto& entry : fs::recursive_directory_iterator(cases_dir)) {
-        if (entry.path().extension() == ".cpp" && entry.path().string().find(filter) != std::string::npos) {
-            cpp_files.push_back(entry.path());
+        if (entry.path().extension() == ".scpp" && entry.path().string().find(filter) != std::string::npos) {
+            scpp_files.push_back(entry.path());
         }
     }
-    std::sort(cpp_files.begin(), cpp_files.end());
+    std::sort(scpp_files.begin(), scpp_files.end());
 
-    if (cpp_files.empty()) {
-        std::cerr << "error: no *.cpp case files found under " << cases_dir << " matching '" << filter << "'\n";
+    if (scpp_files.empty()) {
+        std::cerr << "error: no *.scpp case files found under " << cases_dir << " matching '" << filter << "'\n";
         return 2;
     }
 
@@ -346,10 +346,10 @@ int main(int argc, char** argv) {
     int passed = 0;
     std::vector<std::pair<std::string, std::string>> failed;
 
-    for (const fs::path& cpp_path : cpp_files) {
-        fs::path expected_path = cpp_path;
+    for (const fs::path& scpp_path : scpp_files) {
+        fs::path expected_path = scpp_path;
         expected_path.replace_extension(".expected");
-        std::string rel_name = fs::relative(cpp_path, cases_dir).string();
+        std::string rel_name = fs::relative(scpp_path, cases_dir).string();
 
         if (!fs::exists(expected_path)) {
             failed.emplace_back(rel_name, "missing " + expected_path.filename().string());
@@ -357,7 +357,7 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        Outcome outcome = run_one_case(*scpp_bin, cpp_path, expected_path, temp_dir);
+        Outcome outcome = run_one_case(*scpp_bin, scpp_path, expected_path, temp_dir);
         if (outcome.passed) {
             passed++;
             std::cout << "ok   " << rel_name << "\n";

@@ -1,0 +1,12 @@
+// ch02 §2.1: a single `extern "C"` declaration for a real libc function.
+// Calling an extern "C" function always needs unsafe { }, regardless of
+// context -- there is no more "this caller is already unchecked" case
+// (the retired "native function" concept) to exempt it.
+extern "C" int puts(const char* s);
+
+int main() {
+    unsafe {
+        puts("scpp integration test");
+    }
+    return 0;
+}

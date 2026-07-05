@@ -1,0 +1,19 @@
+// ch01 §1.2: "There is no way to mark an entire function as exempt from
+// §5.1-§5.4's checks, by design... If a function's implementation
+// genuinely needs broad, pervasive access to §5.5's operations... wrap
+// the entire function body in a single unsafe { } block" -- but
+// "ownership/move/alias/lifetime checking still applies to every
+// statement inside that block". Wrapping the whole body in unsafe { }
+// must NOT act as a blanket exemption: a double-move is still rejected.
+int f() {
+    unsafe {
+        std::unique_ptr<int> a = std::make_unique<int>(1);
+        std::unique_ptr<int> b = std::move(a);
+        std::unique_ptr<int> c = std::move(a);
+        return *c;
+    }
+}
+
+int main() {
+    return f();
+}

@@ -1,0 +1,13 @@
+// ch05 §5.7/§8 Q9: "T* converts implicitly to const T* (widening --
+// always legal, matching real C++'s own rule)."
+int f(const int* p) {
+    unsafe {
+        return *p;
+    }
+}
+
+int main() {
+    int x = 7;
+    int* p = &x;
+    return f(p);
+}

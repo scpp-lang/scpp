@@ -1,0 +1,14 @@
+// ch05 §5.8: "In unsafe { } ... the check is skipped, but the underlying
+// operation is still not UB -- it's a guaranteed two's-complement
+// wraparound." INT_MAX + 2 wraps to INT_MIN + 1 == -2147483647
+// (0x80000001), whose low byte (the process exit code, mod 256) is 1 --
+// deterministic, not garbage, unlike the span-bounds-skipped tests.
+int f(int a, int b) {
+    unsafe {
+        return a + b;
+    }
+}
+
+int main() {
+    return f(2147483647, 2);
+}
