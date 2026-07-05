@@ -42,14 +42,15 @@ new. Three reasons, in order of importance:
 
 ## 11.2 What a "library" is in scpp (no new keyword)
 
-"Library" is not a language keyword and needs none: it's the ordinary,
-build-level packaging of one or more `export module` interfaces plus
-their compiled payloads, distributed together as one `.scppm` archive
-(see [§11.11](#1111-the-scppm-library-archive-format)) -- exactly how
-"library" already works in real C++ (Boost is "a library" as a social and
-build-system convention; nothing in the C++ grammar defines the word). A
-package manager, registry, or dependency-resolution tool is out of scope
-for this chapter (see [§11.14](#1114-out-of-scope-for-v1-backlog)).
+"Library" is not a language keyword and needs none: modules distribute
+together as one `.scppkg` package -- as raw `.scpp` interface source, or
+as `.scppm` interfaces paired with their compiled `.scppa` archives
+(themselves bundling `.scppo` objects, one per contributing file), or a
+mix -- (see [§11.12](#1112-the-scppm-scppa-and-scppkg-formats)) --
+exactly how "library" already works in real C++ (Boost is "a library" as
+a social and build-system convention; nothing in the C++ grammar defines
+the word). A package manager, registry, or dependency-resolution tool is
+out of scope for this chapter (see [§11.15](#1115-out-of-scope-for-v1-backlog)).
 
 ## 11.3 Export surface and the interface/implementation split
 
@@ -58,7 +59,7 @@ for this chapter (see [§11.14](#1114-out-of-scope-for-v1-backlog)).
 export module mylib.math;
 
 namespace mylib::math {
-    extern int square(int x);               // exported, bodyless -- see §11.6
+    extern int square(int x);               // exported, bodyless -- see §11.7
     export struct Point { int x; int y; };  // exported, always has "a body" (it's data)
 }
 
@@ -82,7 +83,8 @@ int mylib::math::square(int x) { return x * internal_helper(x) / 2; }
   **implementation unit**: it contributes additional code to that same
   module, and automatically has access to the module's own interface
   without needing to `import` it. Building a module means compiling its
-  primary interface unit together with all of its implementation units.
+  primary interface unit together with all of its implementation units
+  and partitions ([§11.4](#114-module-partitions)).
 - `export` prefixing an individual declaration (or grouping several
   inside `export { ... }`) marks it visible to importers; anything else
   is private to the module.
@@ -91,17 +93,87 @@ int mylib::math::square(int x) { return x * internal_helper(x) / 2; }
   `struct` definitions. `class`, templates, etc. gain export support
   automatically whenever they exist. Every exported declaration must
   additionally live inside a namespace matching the module's own name --
-  see [§11.5](#115-exported-declarations-must-live-in-a-namespace-matching-the-module-name).
+  see [§11.6](#116-exported-declarations-must-live-in-a-namespace-matching-the-module-name).
 - **This revises an earlier scoping call.** Multi-file modules were
   originally deferred entirely as out of scope for v1; supporting
   compiled-payload distribution (not just source distribution) turns out
   to require at least the interface-unit/implementation-unit split, so
   that split is in scope for v1 after all. **Module partitions**
   (`export module foo:part;`, a finer-grained subdivision *within* one
-  module) remain deferred -- see
-  [§11.14](#1114-out-of-scope-for-v1-backlog).
+  module) are in scope for the same reason -- see
+  [§11.4](#114-module-partitions).
 
-## 11.4 Namespaces
+## 11.4 Module partitions
+
+A module's own declarations can spread across more than one file --
+without a preprocessor's textual `#include`, and without allowing more
+than one primary interface unit ([§11.3](#113-export-surface-and-the-interfaceimplementation-split))
+-- via **module partitions**, reused verbatim from real C++20:
+
+```cpp
+// mylib_math_trig.scpp -- an interface partition
+export module mylib.math:trig;
+
+namespace mylib::math {
+    export double sin_deg(double degrees);
+}
+```
+
+```cpp
+// mylib_math_detail.scpp -- an implementation partition
+module mylib.math:detail;
+
+namespace mylib::math {
+    double poly_approx(double x) { /* ... */ }
+}
+```
+
+```cpp
+// mylib_math.scpp -- the primary interface unit
+export module mylib.math;
+
+export import :trig;   // re-exports :trig's own exported declarations
+import :detail;         // uses :detail internally, does not re-export it
+
+namespace mylib::math {
+    export double sqrt(double x);
+}
+```
+
+- A partition file's module declaration names the module and, after a
+  colon, the partition: `export module name:part;` (an **interface
+  partition**, itself able to `export` declarations) or `module
+  name:part;` (an **implementation partition**, never able to export
+  anything to the outside). Each partition name designates exactly one
+  file within the module.
+- **Partitions are visible only from inside their own named module** --
+  a file outside module `mylib.math` can never `import mylib.math:trig;`
+  directly, exactly like real C++20. The only way a partition's content
+  reaches an external importer is via the primary interface unit
+  aggregating it (below).
+- **Within the module**, any unit that imports a partition (`import
+  :part;`) sees every declaration in it, exported or not -- a
+  partition's own `export` only controls whether the *primary* interface
+  unit is later allowed to re-export it, not whether sibling units of the
+  same module can see it.
+- **The primary interface unit aggregates partitions** in one of two
+  ways: `export import :part;` re-exports an interface partition's own
+  exported declarations to anyone importing the module as a whole; a
+  plain `import :part;` uses a partition's declarations internally
+  (visible to the primary and other partitions) without exposing them
+  further. **Attempting `export import` on an implementation partition is
+  a compile error** -- an implementation partition's content can never
+  reach an external importer, by construction, matching real C++20.
+- **Building a module** ([§11.3](#113-export-surface-and-the-interfaceimplementation-split))
+  means compiling its primary interface unit together with all of its
+  implementation units *and* partitions. Partitions are purely a
+  source-organization mechanism for the module's own author: the
+  distributed `.scppm` file remains exactly one file per module, holding
+  the fully merged interface -- partition names never appear inside a
+  `.scppm` file or a `.scppkg` manifest (see
+  [The `.scppm` Module Interface Format](../../standards/en/scppm-format.md)).
+
+## 11.5 Namespaces
 
 scpp reuses real C++ `namespace` syntax verbatim, including C++17's
 one-line nested-namespace definition (`namespace a::b::c { ... }`). A few
@@ -136,7 +208,7 @@ elsewhere in this spec:
   compiler ([ch00](ch00-design-philosophy.md) §6). This is a third,
   orthogonal mechanism alongside `using foo::bar;` (imports one *name*,
   not a whole namespace) and `import name as local;`
-  ([§11.7](#117-import-visibility-re-exports-and-renaming), renames a
+  ([§11.8](#118-import-visibility-re-exports-and-renaming), renames a
   *module* at the import statement, doesn't shorten any in-code path) --
   all three can be used together freely.
 - **Namespace and module are otherwise orthogonal**, exactly as in real
@@ -144,7 +216,7 @@ elsewhere in this spec:
   physical compilation/import boundary. The one deliberate exception is
   described next.
 
-## 11.5 Exported declarations must live in a namespace matching the module name
+## 11.6 Exported declarations must live in a namespace matching the module name
 
 ```cpp
 export module org.lotx.cmath;
@@ -187,7 +259,7 @@ double helper(double x) { return x; } // OK -- not exported, namespace irrelevan
   by IDE-maintained heuristic lookup tables) into a **mechanically
   guaranteed** fact in scpp: any fully-qualified name determines exactly
   one module to `import`, full stop. It also upgrades
-  [§11.9](#119-symbol-identity-linkage-and-mangling)'s existing
+  [§11.10](#1110-symbol-identity-linkage-and-mangling)'s existing
   "domain-qualified module names are a *recommended convention*, not
   compiler-enforced" note -- the namespace-matches-module-name half of
   that convention is now an enforced rule, not just a suggestion (the
@@ -199,14 +271,14 @@ double helper(double x) { return x; } // OK -- not exported, namespace irrelevan
   forward/URL style (`cmath.lotx.org`) -- reading left to right must agree
   with how the resulting namespace path reads (`org::lotx::cmath::sqrt`,
   the specific library name innermost/last).
-  [§11.9](#119-symbol-identity-linkage-and-mangling)'s convention example
+  [§11.10](#1110-symbol-identity-linkage-and-mangling)'s convention example
   uses this order.
 - **Qualified-name resolution across imported modules**: given a
   reference like `org::lotx::cmath::sqrt(...)`, resolution walks the
   name's segments and finds the **longest prefix that exactly equals an
   imported module's dotted name** (checked only against modules the
   current file actually imports, never every module that merely exists on
-  the search path, [§11.13](#1113-importlibrary-search-path)); the
+  the search path, [§11.14](#1114-importlibrary-search-path)); the
   remaining suffix is then looked up as a namespace path nested inside
   that module's export surface. E.g. with both `org.lotx.cmath` and
   `org.lotx` imported, `org::lotx::cmath::sqrt` resolves against
@@ -226,12 +298,12 @@ double helper(double x) { return x; } // OK -- not exported, namespace irrelevan
   diagnostic is the intended quality bar, not just "undeclared
   identifier").
 
-## 11.6 Bare `extern` for module-linkage bodyless declarations
+## 11.7 Bare `extern` for module-linkage bodyless declarations
 
 `extern` without a `"C"` string declares a function with **ordinary scpp
 linkage** (not C ABI), whose implementation lives in a separate
-implementation unit or a separately-distributed payload
-([§11.11](#1111-the-scppm-library-archive-format)):
+implementation unit or a separately-distributed `.scppo` object file
+([§11.12](#1112-the-scppm-scppa-and-scppkg-formats)):
 
 ```cpp
 extern int square(int x);                // ordinary scpp linkage, checked like any other function
@@ -254,7 +326,7 @@ verified in plain C++) -- scpp's version is actually checked, at least
 once, by a real scpp compiler, which is strictly *more* than plain C++
 guarantees, not less.
 
-## 11.7 Import visibility, re-exports, and renaming
+## 11.8 Import visibility, re-exports, and renaming
 
 - `import name;` is **private, non-transitive**: it makes `name`'s
   exports visible in the importing file, but does not forward them to
@@ -266,9 +338,9 @@ guarantees, not less.
   happening to share a human-readable name) and is analogous to Python's
   `import x as y` or Rust's dependency renaming; it does **not** by
   itself resolve link-level symbol collisions (see
-  [§11.10](#1110-collision-handling)) -- that's a separate mechanism.
+  [§11.11](#1111-collision-handling)) -- that's a separate mechanism.
 
-## 11.8 Soundness: cross-module signatures are all the checker needs
+## 11.9 Soundness: cross-module signatures are all the checker needs
 
 [§5.3](ch05-static-checks.md) already establishes that v0.1's borrow
 checking is **intraprocedural**: checking a call to `g` inside `f` only
@@ -286,7 +358,7 @@ already pins a struct's layout to a pure function of (field list, target
 triple) -- an imported struct's field list, recovered from the interface,
 is all codegen needs to reproduce a byte-identical layout.
 
-## 11.9 Symbol identity: linkage and mangling
+## 11.10 Symbol identity: linkage and mangling
 
 Two different rules for two different cases, matching how much a symbol
 actually needs to be visible outside its own compiled unit:
@@ -308,7 +380,7 @@ actually needs to be visible outside its own compiled unit:
   linker-visible detail -- nobody types it, so there's no need for it to
   be pretty.
   - **Namespace nesting beyond the module name**: since
-    [§11.5](#115-exported-declarations-must-live-in-a-namespace-matching-the-module-name)
+    [§11.6](#116-exported-declarations-must-live-in-a-namespace-matching-the-module-name)
     requires every exported symbol's namespace to *start with* its own
     module's dotted name, the `<module name bytes>` segment above already
     encodes that shared prefix -- there's no need to re-encode it a second
@@ -340,18 +412,18 @@ actually needs to be visible outside its own compiled unit:
     into every mangled symbol specifically to let *the same crate name at
     two different versions* coexist safely in one build -- scpp v0.1 does
     not support that (whichever `.scppm` is found first on the search
-    path wins, full stop; see [§11.13](#1113-importlibrary-search-path)),
+    path wins, full stop; see [§11.14](#1114-importlibrary-search-path)),
     so the problem that hash exists to solve doesn't arise here. The
     residual risk -- two unrelated libraries picking the literal same
     module name -- is handled exactly like C/C++ has always handled
     global symbol collisions: a hard error, fixed by renaming (see
-    [§11.10 below](#1110-collision-handling)), not a cryptographic
+    [§11.11 below](#1111-collision-handling)), not a cryptographic
     workaround.
   - **Choosing a domain-qualified name is a convention, not
     compiler-enforced** -- e.g. `org.lotx.cmath`, read
     outermost-to-innermost/reversed-domain style like a Java package (not
     forward/URL style, `cmath.lotx.org` -- see
-    [§11.5](#115-exported-declarations-must-live-in-a-namespace-matching-the-module-name)
+    [§11.6](#116-exported-declarations-must-live-in-a-namespace-matching-the-module-name)
     for why the direction matters once namespace-matching is involved).
     This is strongly recommended for anything meant to be shared, both
     because it makes accidental collisions astronomically unlikely
@@ -363,12 +435,12 @@ actually needs to be visible outside its own compiled unit:
     not meant for wide distribution. What **is** compiler-enforced,
     unlike in real C++ or Java, is that *whichever* name a module picks,
     its exports must live in the namespace that name maps to -- see
-    [§11.5](#115-exported-declarations-must-live-in-a-namespace-matching-the-module-name).
+    [§11.6](#116-exported-declarations-must-live-in-a-namespace-matching-the-module-name).
 - `extern "C"` symbols are **never** mangled by this scheme -- they use
   the bare, unmangled name, which is the entire point of C linkage. The
   two schemes are orthogonal.
 
-## 11.10 Collision handling
+## 11.11 Collision handling
 
 - Two `import`s of differently-named-but-colliding modules **directly**
   in the same file: caught at **compile time**, cleanly, before codegen
@@ -380,133 +452,93 @@ actually needs to be visible outside its own compiled unit:
   symbols collide, the **system linker** reports an ordinary duplicate-symbol
   error at link time. This is exactly how plain C/C++ has always
   behaved for colliding global symbols -- scpp isn't trying to be more
-  clever than that, on purpose (see [§11.9](#119-symbol-identity-linkage-and-mangling)'s
+  clever than that, on purpose (see [§11.10](#1110-symbol-identity-linkage-and-mangling)'s
   reasoning for not adopting Rust's disambiguator hash).
 
-## 11.11 The `.scppm` library archive format
+## 11.12 The `.scppm`, `.scppa`, and `.scppkg` formats
 
-A `.scppm` file is a **7z archive** that can hold an entire library --
-many modules, many target-triple variants, one distributable unit a user
-downloads once:
+A module's interface packages as one `.scppm` file. Its compiled machine
+code packages separately: one `.scppo` object per contributing file
+(primary interface unit, implementation unit, or partition -- §11.3,
+§11.4), bundled by the target platform's own native static-archive tool
+into one `.scppa` file per target triple -- a real static library
+(`.a`/`.lib`), not a format scpp invents. One or more modules -- as raw
+`.scpp` interface source, or as `.scppm` interfaces paired with their
+`.scppa` archives, or a mix -- package together as one `.scppkg` file for
+distribution as a whole library. `.scppm`'s byte layout is specified in
+[The `.scppm` Module Interface Format](../../standards/en/scppm-format.md);
+`.scppkg`'s byte layout and manifest schema (versioning, dependency
+records, and the per-module source/binary split) are specified in
+[The `.scppkg` Package Format](../../standards/en/scppkg-format.md).
 
-```
-mylib.scppm  (7z archive)
-├── MANIFEST.json
-├── modules/
-│   ├── mylib.math.scpp          # interface file (§11.3), shareable source
-│   └── mylib.collections.scpp
-├── payloads/
-│   ├── mylib.math/
-│   │   ├── x86_64-linux-gnu.bc  # LLVM bitcode, default/recommended kind
-│   │   ├── aarch64-linux-gnu.bc
-│   │   └── x86_64-linux-gnu.o   # native object, alternative kind
-│   └── mylib.collections/...
-└── SIGNATURE/
-    ├── DIGESTS                  # sha256 of every other file, one per line
-    └── DIGESTS.asc              # detached OpenPGP signature(s) over DIGESTS
-```
+## 11.13 Linking: which objects get linked
 
-`MANIFEST.json` sketch:
+Linking is decoupled from `import` resolution
+([§11.14](#1114-importlibrary-search-path)) -- exactly like real C++20,
+where `import` supplies declarations for compilation only and has no
+bearing on what the linker sees (a real C++ build still needs its own
+`target_link_libraries` line, or equivalent, regardless of which modules
+a file `import`s). At link time, the scpp build tool links:
 
-```json
-{
-  "format_version": 1,
-  "library": { "name": "mylib", "version": "1.2.0" },
-  "hash_algorithm": "sha256",
-  "modules": {
-    "mylib.math": {
-      "interface": "modules/mylib.math.scpp",
-      "dependencies": ["otherlib.util"],
-      "native_link_requirements": ["m"],
-      "payloads": [
-        { "target_triple": "x86_64-linux-gnu", "kind": "llvm-bitcode",
-          "path": "payloads/mylib.math/x86_64-linux-gnu.bc" },
-        { "target_triple": "x86_64-linux-gnu", "kind": "native-object",
-          "path": "payloads/mylib.math/x86_64-linux-gnu.o" }
-      ]
-    }
-  }
-}
-```
+- every `.scppo` object produced by building the current project's own
+  modules (compiled directly, same as any ordinary same-project
+  multi-file build -- no archiving needed for code that isn't being
+  distributed), and
+- every `.scppa` archive bundled inside every `.scppkg` package the
+  project depends on, transitively across the whole dependency graph --
+  regardless of which specific modules any single file actually
+  `import`s.
 
-- **`format_version` is checked first**, before anything else is parsed,
-  so an old toolchain reading a newer archive fails cleanly instead of
-  crashing on unrecognized structure.
-- **`dependencies`/`native_link_requirements`** record what else a
-  module's payload itself needs (other scpp modules, or `-l` system
-  libraries) so the final link step knows what to bring in transitively.
-- **Payload `kind` is tagged per entry, not hardwired to LLVM bitcode.**
-  `llvm-bitcode` is the recommended default (enables cross-module LTO on
-  the consumer's own machine, and per-target-triple variants -- scpp's
-  codegen fixes a target's `DataLayout` before generating code,
-  per [§4.3](ch04-struct-vs-class.md), so its bitcode is
-  target-triple-specific, not universally portable; an author wanting to
-  support several triples ships one `.bc` per triple). `native-object`/
-  `native-archive` remain valid alternate kinds for cases wanting zero
-  LLVM-toolchain dependency on the consumer side.
-- **Interface files may have per-function bodies, optionally.** A
-  function written with a full body in `modules/*.scpp` compiles on any
-  target directly from source (no payload needed for it at all); a
-  bodyless (`extern`, §11.6) one relies on a matching `payloads/` entry
-  for whichever target triple the consumer is building for. This is a
-  per-function choice, not an all-or-nothing one.
-- **Signing**: `DIGESTS` lists a SHA-256 of every other file in the
-  archive; `DIGESTS.asc` is one or more detached OpenPGP signatures over
-  it -- the same "release tarball + `.asc`" pattern the open-source world
-  has used for decades, not a bespoke scheme. Verifying means
-  recomputing every listed hash (catches tampering/corruption of
-  payloads) and checking the PGP signature (establishes who vouches for
-  the bundle). **Enforcement is a compiler flag, off by default in v1**
-  (e.g. `--require-signed-modules`); the format always has room for it
-  regardless of whether it's turned on. **"No `SIGNATURE/` at all" and
-  "`SIGNATURE/` present but verification fails" must not be treated the
-  same way** -- the latter is hard evidence of tampering or corruption and
-  should fail loudly even under a permissive policy; only the former is
-  the ordinary "this library ships unsigned" state.
-- **Atomicity**: one `.scppm`'s interface files and payloads must always
-  be treated as one indivisible unit produced by one build -- never mix a
-  `modules/*.scpp` from one archive with a `payloads/` entry from
-  another, even for a same-named module. When signing is enabled this is
-  cryptographically enforced for free (`DIGESTS` already covers every
-  file); without signing it's a tooling-level invariant (no supported
-  operation ever extracts/recombines pieces across archives).
+This is deliberately blunt, mirroring an ordinary `g++ *.o -lfoo -lbar`
+build or a `target_link_libraries` line naming every dependency
+unconditionally: the system linker already discards whatever isn't
+actually referenced -- from loose `.o` files as well as from a linked-in
+`.a`/`.lib` archive's own member index -- exactly as in any ordinary
+C/C++ build. `.scppa` being a real static-archive format means the linker
+reads it directly with zero scpp-specific handling; scpp does not need
+its own, separate per-`import` object selection to achieve any of this.
 
-## 11.12 Multi-target bitcode and target-triple resolution
+For both the project's own objects and every dependency's archives, only
+the one matching the **current build's target triple** is a candidate
+for linking; if a needed module provides no `.scppo`/`.scppa` for that
+triple at all, it's a hard error naming which triples it does provide
+(unless the interface file happens to include a full body for the
+function in question, in which case compiling that inlined source is an
+available fallback).
 
-A single `.scppm` can bundle several `.bc` variants of the same module
-(one per target triple the author chooses to support). At final link
-time, the consumer's toolchain looks for an **exact target-triple match**
-in `payloads/<module>/`; if none exists, it's a hard error naming which
-triples the library does provide. If the interface file happens to
-include a full body for the needed function (§11.11), compiling that
-inlined source is an available fallback even without a matching payload.
+## 11.14 Import/library search path
 
-## 11.13 Import/library search path
-
-- `scpp build <file> --import name=path/to/library.scppm` -- explicit,
+- `scpp build <file> --import name=path` -- explicit,
   unambiguous, always works (mirrors Clang's `-fmodule-file=name=path`
-  and Rust's `--extern name=path`).
+  and Rust's `--extern name=path`): `path` names either a `.scppm` file
+  providing module `name` directly, or a `.scppkg` file whose own manifest
+  lists a module named `name` (nested as a `.scppm` file or as raw
+  `.scpp` source).
 - `scpp build <file> -I <dir>` -- convenience search: to resolve
-  `import mylib.math;`, look in each `-I` directory (in order) for a
-  `.scppm` archive that **contains** a module literally named
-  `mylib.math`, then look up `modules/mylib.math.scpp` inside it. First
-  directory (in the order given) that contains a match wins -- no
-  ambiguity error, matching C's own `-I` header-search convention. The
-  dot in a module name carries no directory-hierarchy meaning here either
-  (consistent with [§11.3](#113-export-surface-and-the-interfaceimplementation-split)):
-  the compiler looks for one flat archive containing that exact module
-  name, not a nested path.
+  `import mylib.math;`, look in each `-I` directory (in order) for a file
+  named `mylib.math.scppm` (§11.12), or a `.scppkg` file whose own manifest
+  lists a module named `mylib.math`. First directory (in the order given)
+  that contains a match wins -- no ambiguity error, matching C's own `-I`
+  header-search convention. The dot in a module name carries no
+  directory-hierarchy meaning here either (consistent with
+  [§11.3](#113-export-surface-and-the-interfaceimplementation-split)): the
+  compiler looks for a file or manifest entry named exactly `mylib.math`,
+  never a nested path.
 - Not found via either mechanism: compile error naming the missing
   module.
-- At final link time, the same resolved `.scppm` also supplies whichever
-  `payloads/` entry matches the consumer's target triple
-  ([§11.12](#1112-multi-target-bitcode-and-target-triple-resolution)).
+- Both of the above resolve `import` for **compilation only** -- finding
+  a `.scppm` (or raw `.scpp` source) to type-check against. Neither one
+  selects what gets linked; see [§11.13](#1113-linking-which-objects-get-linked)
+  for that separate, unconditional mechanism.
 
-## 11.14 Out of scope for v1 (backlog)
+## 11.15 Out of scope for v1 (backlog)
 
-- **Module partitions** (`export module foo:part;`) -- deferred; v1 only
-  has the primary-interface-unit/implementation-unit split
-  ([§11.3](#113-export-surface-and-the-interfaceimplementation-split)).
+- **Archive signing** -- not specified yet;
+  [the `.scppkg` format](../../standards/en/scppkg-format.md) is designed
+  so this can be added later as a trailing block, with no version break.
+  `.scppm` itself carries no signature by design -- it is a language-level
+  format, not a distribution format (see
+  [The `.scppm` Module Interface Format §3](../../standards/en/scppm-format.md)).
 - **Automatic C-header ingestion** (a `bindgen`-style tool, or
   `import <cheader>;`) -- v1's entire FFI story is hand-written
   `extern "C"` ([§2.1](ch02-boundary-rules.md)); automating that needs a
@@ -516,15 +548,15 @@ inlined source is an available fallback even without a matching payload.
   a build-ecosystem concern
   ([§11.2](#112-what-a-library-is-in-scpp-no-new-keyword)), not part of
   the language.
-- **Reproducible builds** (byte-identical `.bc` from the same source) --
-  would strengthen the signing story further (independent verification
-  that a payload matches public source) but isn't required for v1.
+- **Reproducible builds** (byte-identical `.scppo` from the same source)
+  -- would strengthen the signing story further (independent verification
+  that an object matches public source) but isn't required for v1.
 - **Key revocation / trust-root management** -- a CLI/tooling policy layer
-  (like apt's separate trusted-keyring files), not part of the `.scppm`
-  format itself.
+  (like apt's separate trusted-keyring files), not part of the archive
+  formats themselves.
 - **Multi-version coexistence** of the same module name (Rust's main
   reason for its disambiguator hash) -- not supported; see
-  [§11.9](#119-symbol-identity-linkage-and-mangling).
+  [§11.10](#1110-symbol-identity-linkage-and-mangling).
 - **Interop with existing, unmodified C++ libraries** (real classes,
   templates, exceptions, RTTI) -- explicitly not pursued; `extern "C"` is
   the only interop mechanism scpp provides (see
