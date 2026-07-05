@@ -88,7 +88,11 @@ itself the explicit declaration, and the compiler verifies triviality.
   [§8](ch08-open-questions.md)): `protected` is consequently not a
   recognized access specifier either, since it only has meaning
   relative to derived classes. Revisit both together if/when
-  inheritance is designed.
+  inheritance is designed. Compile-time polymorphism (calling into
+  differently-shaped types through a shared, checked interface) doesn't
+  need to wait for this, though -- see
+  [§5.11](ch05-static-checks.md)'s `concept`/`requires`-based generic
+  functions.
 - **Interior mutability, phase 1** (design finalized; answers
   [§8](ch08-open-questions.md) Q4's `Cell` half, `RefCell` deferred):
   scpp reuses real C++'s `mutable` keyword, but with **stricter**

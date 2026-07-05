@@ -90,6 +90,15 @@ meaning "sound checking not yet implemented"):
   scalar type implicitly converts to another (see the numeric family
   note above) -- ambiguity from pure type mismatch cannot arise as a
   result.
+- **Generic functions constrained by a `concept`** (`void f(Shape auto&
+  x)`, real C++20 syntax verbatim -- see
+  [§5.11](ch05-static-checks.md) -- **design finalized, not yet
+  implemented**): scpp's compile-time-polymorphism mechanism in place of
+  inheritance/virtual functions (still deferred, see backlog below).
+  Monomorphized per concrete type (zero-cost, no vtable); a constrained
+  function's body is checked once, at its own definition, against only
+  what the concept's `requires`-expression guarantees -- not deferred to
+  instantiation the way real C++ templates otherwise work.
 - `consteval` functions (see [§4.2](ch04-struct-vs-class.md) -- **design
   finalized, not yet implemented**): scpp's only compile-time-function
   mechanism, reused verbatim from real C++20 -- every call is
@@ -148,7 +157,11 @@ meaning "sound checking not yet implemented"):
   (see [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)).
 
 **Not yet supported (safe-region backlog)**
-- Templates / generics, `concept`.
+- Templates / generics for **types** (generic `struct`/`class`, e.g. a
+  future `Vec<T>`), variadic templates, non-type template parameters,
+  explicit/partial specialization, and associated types -- all
+  explicitly out of scope for [§5.11](ch05-static-checks.md)'s
+  generic-*function* design too, not merely unimplemented.
 - Full checking for user-defined `class` types: access control and
   `this`/method-borrow mapping are design-finalized (see
   [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)), but
@@ -198,6 +211,12 @@ meaning "sound checking not yet implemented"):
   resolution, the by-value/by-reference axis, and the parameter-type
   mangling encoding from [§11](ch11-modules-and-libraries.md) -- today's
   `Signatures` map holds one entry per name.
+- Implementation of generic functions and `concept`/`requires` spec'd in
+  [§5.11](ch05-static-checks.md) (design only so far): parsing
+  `concept`/`requires` and the abbreviated `Concept auto` parameter form,
+  checking a constrained function's body once against its concept's
+  guarantees, and monomorphizing each call site -- today's parser has no
+  notion of either construct.
 
 ---
 

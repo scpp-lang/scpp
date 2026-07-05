@@ -75,6 +75,12 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   （见 [§5.10](ch05-static-checks.md)——**设计已定稿，尚未实现**）：
   只按类型精确匹配解析，因为 scpp 标量类型之间没有隐式转换（见上面
   数值家族那条备注）——纯类型不匹配导致的歧义因此不可能出现。
+- **受 `concept` 约束的泛型函数**（`void f(Shape auto& x)`，原样复用
+  真实 C++20 语法——见 [§5.11](ch05-static-checks.md)——**设计已定稿，
+  尚未实现**）：scpp 用来代替继承/虚函数（仍然搁置，见下面 backlog）的
+  编译期多态机制。按每个具体类型单态化（零开销，没有 vtable）；受约束
+  的函数体在它自己定义的地方就检查一遍，只认 concept 的 `requires`
+  表达式保证过的东西——不像真实 C++ 模板那样延迟到实例化才检查。
 - `consteval` 函数（见 [§4.2](ch04-struct-vs-class.md)——**设计已定稿，
   尚未实现**）：scpp 唯一的编译期函数机制，原样复用真实 C++20 语法——
   每次调用都强制在编译期求值，只要有一个实参本身不是常量表达式就编译
@@ -121,7 +127,10 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   [§8](ch08-open-questions.md)）。
 
 **暂不支持（safe 区 backlog）**
-- 模板 / 泛型、`concept`。
+- **类型**的模板/泛型（泛型 `struct`/`class`，比如以后的 `Vec<T>`）、
+  变参模板、非类型模板参数、显式/偏特化、关联类型——这些
+  [§5.11](ch05-static-checks.md) 里泛型**函数**的设计也明确排除在外，
+  不只是"还没实现"。
 - 用户自定义 `class` 的完整检查：访问控制和 `this`/方法借用映射设计已
   定稿（见 [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)），
   但还没实现；继承和虚函数依然搁置，设计还没开始。
@@ -161,6 +170,10 @@ safe 区内**仅**支持下列语法；其余在 safe 区报 `E-UNSUPPORTED-IN-S
   设计）：类型精确匹配解析、按值/按引用这条轴、以及
   [ch11](ch11-modules-and-libraries.md) 里的参数类型 mangling
   编码——现在的 `Signatures` map 一个名字还是只对应一条。
+- [§5.11](ch05-static-checks.md) 定稿的泛型函数和 `concept`/`requires`
+  **实现**（目前只有设计）：解析 `concept`/`requires` 和简写的
+  `Concept auto` 参数形式、按 concept 的保证把受约束函数体检查一遍、
+  以及给每个调用点做单态化——现在的 parser 对这两个东西都还没有概念。
 
 ---
 

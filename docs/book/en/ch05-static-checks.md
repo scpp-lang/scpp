@@ -595,6 +595,113 @@ while designing this section, not assumed).
   the address of an overloaded name as a function pointer (deferred until
   function pointers themselves are designed).
 
+## 5.11 Generic Functions and Concepts (design finalized, not yet implemented)
+
+Answers [§8](ch08-open-questions.md) Q12. scpp's answer to compile-time
+polymorphism, reusing real C++20 `concept`/`requires` syntax and the
+abbreviated function-template form (`Concept auto` parameters) verbatim --
+deliberately instead of inheritance/virtual functions (which stay
+deferred, see [§4.2](ch04-struct-vs-class.md)). Every call is
+monomorphized (a separate copy of the code generated per concrete type,
+exactly like real C++ templates/Rust generics), so this is zero-cost:
+no vtable, no runtime dispatch at all.
+
+```cpp
+template<typename T>
+concept Shape = requires(const T& t) {
+    { t.area() } -> std::same_as<double>;
+};
+
+safe void print_area(const Shape auto& s) {
+    // s.area() is legal -- the concept guarantees it; nothing else about s is
+}
+```
+
+- **A `concept` is a compile-time predicate over one type, spelled and
+  checked exactly like real C++20** -- no changes to the grammar or
+  semantics of `concept`/`requires` themselves.
+- **Satisfaction is structural, exactly like real C++ (not nominal, unlike
+  Rust's `impl Trait for Type`).** A type satisfies a concept purely by
+  having matching members -- no explicit "this type implements this
+  concept" declaration exists or is required. This was a deliberate,
+  considered choice: Rust's nominal model (explicit `impl` blocks) avoids
+  a real, known category of bug (a type "accidentally" satisfying a
+  concept it was never intended to support, since two unrelated concepts
+  happening to both require a same-named, same-shaped method would
+  silently both match) -- but real C++ has no `impl`-block-equivalent
+  syntax to reuse for it, and inventing one would be exactly the kind of
+  new, non-erasable grammar [ch00](ch00-design-philosophy.md) §2/§6
+  rules against. **Revisit only if a future C++ standard itself adds a
+  nominal opt-in mechanism** -- the same resolution already applied to
+  the rejected `??` operator (see [§8](ch08-open-questions.md) Q8).
+- **A concept-constrained function's body is fully checked once, at its
+  own definition, treating the constrained parameter's type abstractly**
+  -- only operations the concept's `requires`-expression actually
+  guarantees are legal inside the body; anything else is a compile error
+  at the generic function's own definition site, regardless of what any
+  particular instantiation would allow. This is a deliberate departure
+  from real C++ templates (even concept-constrained ones), which still
+  defer most body type-checking to instantiation time ("two-phase
+  lookup") -- the reason a real C++ template's error messages are
+  notoriously tied to whatever concrete type triggered instantiation,
+  rather than the generic definition itself. scpp's choice matches Rust's
+  trait-bound model instead, and is required to keep this chapter's
+  checking properly intraprocedural (see
+  [§11.6](ch11-modules-and-libraries.md)) -- a generic function has no
+  single concrete signature to check a body against otherwise.
+- **Compound requirements (`{ expr } -> Constraint;`) must constrain the
+  result to an exact type, spelled `std::same_as<T>`** -- never
+  `std::convertible_to<T>`, and never a bare type name (`-> T` is not
+  legal C++ grammar at all: a `type-constraint` there must name a
+  concept, not a type; verified against a real compiler while designing
+  this). `std::convertible_to` would be meaningless in scpp anyway, since
+  [§6](ch06-safe-subset.md) already establishes no scpp scalar type
+  implicitly converts to another -- "convertible to" and "same as"
+  collapse to the same thing. The exact type named this way is what the
+  generic function body may treat the expression's result as.
+- **Simple requirements (`{ expr };`, no `->` clause) constrain nothing
+  about the result's type** -- consistent with the point above, the
+  generic body may only use such an expression as a discarded
+  expression-statement (called for its side effect); binding its result
+  to anything, or using it in any type-dependent way, is a compile error,
+  since there is genuinely no type to reason about under
+  once-at-definition checking.
+- **Type-requirements (`typename T::Foo;`) and nested requirements
+  (arbitrary boolean constant-expressions) are not supported in v0.1** --
+  scpp has no associated-type/nested-type-alias mechanism yet for the
+  former, and the latter is a much more open-ended feature (arbitrary
+  compile-time predicates over types) than this round is scoped to
+  design.
+- **Generic functions are spelled with the abbreviated C++20 form only**
+  (`void f(Concept auto& x)`) -- the full `template<Concept T> void
+  f(T& x)` header is **not** supported in v0.1. This is a deliberate
+  scoping cut, not a claim that the two forms differ semantically in
+  real C++ (they don't): it sidesteps needing to design variadic
+  templates, non-type template parameters, explicit specialization, and
+  multi-parameter template headers before any of them are needed for
+  this feature's actual goal (compile-time polymorphism without
+  inheritance). A consequence: every constrained type parameter is tied
+  to at least one function parameter's declared position -- there is no
+  way to write a "return-type-only" generic function in this subset.
+- **No default method bodies in a concept** -- unlike a Rust trait,
+  which can supply a default implementation a type may inherit or
+  override, a real C++ `concept` is purely a structural predicate; it
+  cannot carry a method body at all. This isn't a scpp-specific
+  restriction, it's what `concept` already means in real C++.
+- **Mangling needs no new mechanism.** A monomorphized instantiation's
+  parameter types are, by the time codegen runs, ordinary concrete types
+  (e.g. `print_area(const Shape auto&)` instantiated for `Circle` is
+  exactly `print_area(const Circle&)`) --
+  [§11.9](ch11-modules-and-libraries.md)'s existing parameter-type
+  encoding already gives every distinct instantiation a distinct mangled
+  symbol, for the same reason it already disambiguates ordinary
+  overloads.
+- **Explicitly out of scope for this round**: generic `struct`/`class`
+  types (e.g. a future `Vec<T>`-shaped container), variadic templates,
+  non-type template parameters, explicit/partial specialization,
+  associated types, and dynamic dispatch/type erasure (scpp's
+  virtual-function/`dyn`-equivalent, deferred alongside inheritance).
+
 ---
 
 [← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The Safe Subset Supported in v0.1 →](ch06-safe-subset.md)

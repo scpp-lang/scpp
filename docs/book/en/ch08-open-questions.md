@@ -176,6 +176,33 @@
     in [§5.9](ch05-static-checks.md). Scoping, `using`-declaration
     imports, and the deliberate absence of ADL all reuse existing rules
     unchanged (see [§5.10](ch05-static-checks.md) for the full design).
+12. **Compile-time polymorphism without inheritance**: how does scpp let
+    differently-shaped types share an interface, given inheritance and
+    virtual functions stay deferred? **Settled**: real C++20
+    `concept`/`requires`, plus the abbreviated `Concept auto`
+    function-parameter form, reused verbatim -- monomorphized per
+    concrete type (zero-cost, no vtable), see
+    [§5.11](ch05-static-checks.md). Satisfaction is **structural**,
+    exactly like real C++ (not nominal like Rust's `impl Trait for
+    Type`) -- considered adding an explicit opt-in declaration to avoid
+    "accidental" concept satisfaction, but rejected for the same reason
+    as the `??` operator (Q8 above): real C++ has no such syntax to
+    reuse, and inventing one would break erasure; revisit only if a
+    future C++ standard adds one. A constrained function's body is
+    checked **once, at its own definition**, against only what the
+    concept guarantees -- a deliberate departure from real C++ templates
+    (which defer most body-checking to instantiation), needed to keep
+    checking intraprocedural the same way the rest of
+    [§5](ch05-static-checks.md) already is. A compound requirement's
+    return-type constraint must be spelled `std::same_as<T>` (never
+    `std::convertible_to<T>`, and never a bare type name -- verified
+    `-> T` alone is not legal C++ grammar at all); a requirement with no
+    return-type constraint may only be used for its side effect inside
+    the generic body, never bound to anything, since there is no type to
+    reason about otherwise. Generic *types* (containers like a future
+    `Vec<T>`), variadic templates, non-type template parameters,
+    specialization, associated types, and dynamic dispatch/type erasure
+    all remain out of scope for this round.
 
 ---
 
