@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -151,9 +152,21 @@ struct FunctionSignature {
     // is rejected unless the call site's DataflowState::unsafe_depth is
     // greater than zero (ch01 §1.3/ch02) -- see check_call_arguments.
     bool is_safe = false;
+    // Where this specific overload's declaration begins -- see
+    // Function::loc; needed for diagnostics that are about one
+    // particular overload (e.g. a redefinition error naming the
+    // conflicting declaration).
+    SourceLocation loc;
 };
 
-using Signatures = std::unordered_map<std::string, FunctionSignature>;
+// ch05 §5.10: a name (free function or method, post class-mangling --
+// see resolve_callee_signature) may now have *multiple* FunctionSignature
+// entries -- one per overload -- instead of exactly one. Resolving a
+// specific call to the single matching overload (exact type match only,
+// ch06: no scpp scalar type implicitly converts to any other) is
+// resolve_overload's job; nothing here assumes "one entry per name" any
+// longer.
+using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
 
 LocalState join(LocalState a, LocalState b) {
     if (a == b) return a;
@@ -274,6 +287,36 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return "";
 }
 
+// Structural (deep) equality between two Types -- needed since Type's
+// pointee/element are shared_ptr (Type's own comment: "so Type stays
+// copyable"), so two independently-parsed-but-conceptually-identical
+// types (e.g. two separate `int*` parameter declarations) are different
+// shared_ptr instances and would compare unequal under a naively
+// `=default`-ed operator==. Used only for function-overload resolution
+// (ch05 §5.10): since ch06 established no scpp scalar type implicitly
+// converts to any other, overload resolution is exact type match only --
+// this is that "exact match" test. Deliberately requires is_mutable_ref/
+// is_mutable_pointee to also match: `T&` and `const T&` (or `T*`/
+// `const T*`) are distinct parameter types for overloading purposes, not
+// interchangeable.
+[[nodiscard]] bool types_equal(const Type& a, const Type& b) {
+    if (a.kind != b.kind) return false;
+    switch (a.kind) {
+        case TypeKind::Named:
+            return a.name == b.name;
+        case TypeKind::Pointer:
+            return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
+        case TypeKind::UniquePtr:
+            return types_equal(*a.pointee, *b.pointee);
+        case TypeKind::Reference:
+        case TypeKind::Span:
+            return a.is_mutable_ref == b.is_mutable_ref && types_equal(*a.pointee, *b.pointee);
+        case TypeKind::Array:
+            return a.array_size == b.array_size && types_equal(*a.element, *b.element);
+    }
+    return false;
+}
+
 // A Call expression's signature-lookup key, plus how many leading
 // `signatures[key].param_types` entries are already spoken for before
 // `expr.args[0]` (1 when an implicit `this` occupies param_types[0], 0
@@ -306,6 +349,165 @@ struct CalleeSignature {
         }
     }
     return CalleeSignature{call_expr.name, 0};
+}
+
+// Forward declarations for a small mutually-recursive group implementing
+// ch05 §5.10's function-overload resolution:
+//  - infer_expr_type needs resolve_overload for a nested Call argument's
+//    own return type.
+//  - resolve_overload needs argument_matches_parameter to test each
+//    candidate, which in turn needs infer_expr_type (to compare argument/
+//    parameter types), produces_unique_ptr_rvalue (defined below, to
+//    validate a std::unique_ptr-typed parameter's argument), and
+//    is_read_only_reachable (defined much further below, for the
+//    T&-beats-const-T&-for-a-mutable-lvalue tie-break).
+// All of this always terminates: every recursive step is into a strictly
+// smaller sub-expression.
+[[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
+                                                          const Body& body, const Signatures& signatures);
+[[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures);
+
+// Whether `arg` is a legitimate argument for a candidate overload's
+// parameter declared as `param_type`, for exact-type-match overload
+// resolution (ch05 §5.10) -- not a full validity check (that's
+// check_call_arguments/apply_reference_argument's job, once a specific
+// overload has already been picked); this only needs to decide which of
+// several candidates is *the* match.
+[[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
+                                                const Signatures& signatures) {
+    if (is_unique_ptr(param_type)) {
+        // ch05 §5.1/§5.10: std::unique_ptr is scpp's one move-restricted
+        // type -- a bare lvalue is never a legitimate by-value (owning)
+        // argument for it (that would be an implicit, unmarked move, ch05
+        // §5.1); only std::move(x)/std::make_unique<T>(...) are.
+        if (!produces_unique_ptr_rvalue(arg, body, signatures)) return false;
+        std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
+        return arg_type.has_value() && arg_type->kind == TypeKind::UniquePtr &&
+               types_equal(*arg_type->pointee, *param_type.pointee);
+    }
+    if (is_reference(param_type)) {
+        // A bare lvalue-like place (Identifier/Member/Subscript/a
+        // unique_ptr or raw pointer's Deref -- the same shapes
+        // resolve_borrow_source_root accepts as a borrow source) is
+        // viable against a T&/const T& parameter; std::move/MakeUnique/a
+        // literal never is (there's no place to borrow from).
+        if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique ||
+            arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::BoolLiteral ||
+            arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
+            return false;
+        }
+        std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
+        return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
+    }
+    // By-value scalar/struct parameter (ch04 §4.1: freely, implicitly
+    // copyable) -- unlike std::unique_ptr above, an ordinary lvalue
+    // argument is just as viable as any rvalue here (a plain copy); no
+    // std::move required. (A class-typed by-value parameter can't occur
+    // at all -- check_function's own by-value-parameter rejection, ch04
+    // §4.2 -- so this path is only ever reached for a scalar/struct T.)
+    std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
+    return arg_type.has_value() && types_equal(*arg_type, param_type);
+}
+
+// Resolves `call_expr` to the single FunctionSignature (among possibly
+// several overloads sharing `callee.key`'s name) whose parameters match
+// this call's actual arguments (ch05 §5.10) -- exact type match only, so
+// resolution never needs a conversion-ranking algorithm. Returns nullptr
+// when no candidate matches (the caller reports a clear "no matching
+// overload" diagnostic) or when `callee.key` names nothing at all.
+//
+// When strictly more than one candidate matches (only possible via the
+// by-value/by-reference axis -- two overloads can never share an
+// identical parameter-type list, ch05 §5.10), applies the "T& beats
+// const T& for a mutable lvalue" tie-break (reused from real C++,
+// resolving the const/non-const method-overloading case, e.g.
+// get()/get() const) across every reference-typed parameter position
+// (including an implicit `this`, ch05 §5.9) where the matches disagree
+// on mutability. If that still doesn't produce a unique winner, this is
+// a genuine ambiguity this version has no further tie-break for --
+// falls back to the first match found (in declaration order) rather
+// than crashing, since v0.1's scalar-only overload sets make actually
+// reaching this exceedingly rare in a real, well-formed program.
+[[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
+                                                          const Body& body, const Signatures& signatures) {
+    auto it = signatures.find(callee.key);
+    if (it == signatures.end()) return nullptr;
+    // The overwhelmingly common case: exactly one function has ever been
+    // declared under this name, so there's nothing to *disambiguate*
+    // between -- return it unconditionally, without running any of the
+    // exact-type-match/this-mutability machinery below at all. This
+    // matters beyond just being a harmless shortcut: infer_expr_type
+    // can't resolve every expression shape (Member/Subscript chains,
+    // notably -- movecheck has no Program access to their field/element
+    // types), so *requiring* a successful match here would wrongly break
+    // an ordinary, non-overloaded call whose argument happens to be one
+    // of those shapes (e.g. `f(obj.field)`) purely because overload
+    // resolution can't prove a match, not because one doesn't exist.
+    // Whether this one candidate's parameters actually fit the call's
+    // arguments is left to the checks that already existed before
+    // overloading (apply_reference_argument, codegen's own type
+    // checking, ...), exactly as before this feature.
+    if (it->second.size() == 1) return &it->second[0];
+
+    std::vector<const FunctionSignature*> matches;
+    for (const FunctionSignature& candidate : it->second) {
+        if (candidate.param_types.size() != call_expr.args.size() + callee.param_offset) continue;
+        bool all_match = true;
+        // The receiver (`this`), for a method call: viable only if the
+        // candidate's own `this` mutability doesn't demand more than the
+        // receiver place can actually provide (mirrors
+        // apply_reference_argument's identical mutable-vs-read-only-
+        // reachable check, applied here purely for resolution purposes).
+        if (callee.param_offset == 1 && call_expr.lhs && candidate.param_types[0].is_mutable_ref &&
+            is_read_only_reachable(*call_expr.lhs, body, signatures)) {
+            all_match = false;
+        }
+        for (size_t i = 0; all_match && i < call_expr.args.size(); i++) {
+            all_match = argument_matches_parameter(*call_expr.args[i], candidate.param_types[i + callee.param_offset],
+                                                     body, signatures);
+        }
+        if (all_match) matches.push_back(&candidate);
+    }
+
+    if (matches.size() <= 1) return matches.empty() ? nullptr : matches[0];
+
+    // Tie-break: prefer whichever match has the most mutable-reference
+    // parameters among positions where the argument is itself a mutable
+    // place (including `this`, checked the same way as above) -- the
+    // higher-scoring candidate is the more "specific" one a mutable
+    // argument licenses, exactly like real C++'s own T&-over-const-T&
+    // preference.
+    auto mutable_ref_score = [&](const FunctionSignature& candidate) {
+        int score = 0;
+        if (callee.param_offset == 1 && call_expr.lhs && candidate.param_types[0].is_mutable_ref &&
+            !is_read_only_reachable(*call_expr.lhs, body, signatures)) {
+            score++;
+        }
+        for (size_t i = 0; i < call_expr.args.size(); i++) {
+            const Type& param_type = candidate.param_types[i + callee.param_offset];
+            if (is_reference(param_type) && param_type.is_mutable_ref &&
+                !is_read_only_reachable(*call_expr.args[i], body, signatures)) {
+                score++;
+            }
+        }
+        return score;
+    };
+    const FunctionSignature* best = matches[0];
+    int best_score = mutable_ref_score(*best);
+    bool unique_best = true;
+    for (size_t i = 1; i < matches.size(); i++) {
+        int score = mutable_ref_score(*matches[i]);
+        if (score > best_score) {
+            best = matches[i];
+            best_score = score;
+            unique_best = true;
+        } else if (score == best_score) {
+            unique_best = false;
+        }
+    }
+    return unique_best ? best : matches[0];
 }
 
 // Structurally validates and resolves spec ch05.3's elision rule for a
@@ -398,9 +600,9 @@ struct CalleeSignature {
                    !it->second.is_mutable_pointee;
         }
         case ExprKind::Call: {
-            auto sig_it = signatures.find(expr.name);
-            return sig_it != signatures.end() && is_reference(sig_it->second.return_type) &&
-                   !sig_it->second.return_type.is_mutable_ref;
+            CalleeSignature callee = resolve_callee_signature(expr, body);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            return sig != nullptr && is_reference(sig->return_type) && !sig->return_type.is_mutable_ref;
         }
         default:
             return false;
@@ -480,10 +682,123 @@ struct CalleeSignature {
 [[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures) {
     if (expr.kind == ExprKind::Move || expr.kind == ExprKind::MakeUnique) return true;
     if (expr.kind == ExprKind::Call) {
-        auto sig_it = signatures.find(resolve_callee_signature(expr, body).key);
-        return sig_it != signatures.end() && is_unique_ptr(sig_it->second.return_type);
+        CalleeSignature callee = resolve_callee_signature(expr, body);
+        const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+        return sig != nullptr && is_unique_ptr(sig->return_type);
     }
     return false;
+}
+
+// Infers `expr`'s scpp type, for function-overload resolution purposes
+// only (ch05 §5.10) -- a best-effort, non-exhaustive type inference
+// (movecheck has no general type-checking pass at all, by design: see
+// e.g. produces_unique_ptr_rvalue's similarly-scoped Call handling just
+// above). Covers every expression shape that can legally appear as a
+// call argument in this version: literals, a plain local (via
+// body.local_types), std::move/std::make_unique, a nested call's own
+// (resolved) return type, and the common unary/binary operators.
+// Returns nullopt for anything it can't determine -- notably Member/
+// Subscript chains, since movecheck has no access to Program's struct/
+// class field-type info here, only Body's per-local types (the same
+// scope limitation named_type_name/resolve_callee_signature already
+// accept elsewhere). A nullopt argument type makes every candidate
+// overload's corresponding parameter fail to match (see
+// argument_matches_parameter) -- conservatively rejecting the call with
+// a clear diagnostic rather than silently guessing an overload.
+[[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::IntegerLiteral: return Type{.kind = TypeKind::Named, .name = "int"};
+        case ExprKind::BoolLiteral: return Type{.kind = TypeKind::Named, .name = "bool"};
+        case ExprKind::CharLiteral: return Type{.kind = TypeKind::Named, .name = "char"};
+        case ExprKind::StringLiteral: {
+            Type result;
+            result.kind = TypeKind::Pointer;
+            result.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = "char"});
+            result.is_mutable_pointee = false;
+            return result;
+        }
+
+        case ExprKind::Identifier: {
+            auto it = body.local_types.find(expr.name);
+            return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
+        }
+
+        case ExprKind::Move: {
+            // std::move doesn't change the static type -- still whatever
+            // std::unique_ptr<T> the moved-from local was declared as.
+            if (expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
+            auto it = body.local_types.find(expr.lhs->name);
+            return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
+        }
+
+        case ExprKind::MakeUnique: {
+            Type result;
+            result.kind = TypeKind::UniquePtr;
+            result.pointee = std::make_shared<Type>(expr.type);
+            return result;
+        }
+
+        case ExprKind::Unary:
+            switch (expr.unary_op) {
+                case UnaryOp::Not: return Type{.kind = TypeKind::Named, .name = "bool"};
+                case UnaryOp::Neg: return infer_expr_type(*expr.lhs, body, signatures);
+                case UnaryOp::AddressOf: {
+                    std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
+                    if (!operand) return std::nullopt;
+                    Type result;
+                    result.kind = TypeKind::Pointer;
+                    result.pointee = std::make_shared<Type>(std::move(*operand));
+                    // `&expr` always yields a mutable T* (ch05 §5.7) --
+                    // whether the place itself is read-only-reachable is
+                    // a separate check (is_read_only_reachable), not part
+                    // of `&expr`'s own static type.
+                    result.is_mutable_pointee = true;
+                    return result;
+                }
+                case UnaryOp::Deref: {
+                    std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
+                    if (!operand || (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer)) {
+                        return std::nullopt;
+                    }
+                    return *operand->pointee;
+                }
+            }
+            return std::nullopt;
+
+        case ExprKind::Binary:
+            switch (expr.binary_op) {
+                case BinaryOp::Add:
+                case BinaryOp::Sub:
+                case BinaryOp::Mul:
+                case BinaryOp::Div:
+                case BinaryOp::Assign:
+                    return infer_expr_type(*expr.lhs, body, signatures);
+                case BinaryOp::Eq:
+                case BinaryOp::Ne:
+                case BinaryOp::Lt:
+                case BinaryOp::Gt:
+                case BinaryOp::Le:
+                case BinaryOp::Ge:
+                case BinaryOp::And:
+                case BinaryOp::Or:
+                    return Type{.kind = TypeKind::Named, .name = "bool"};
+            }
+            return std::nullopt;
+
+        case ExprKind::Call: {
+            CalleeSignature callee = resolve_callee_signature(expr, body);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            return sig == nullptr ? std::nullopt : std::optional<Type>(sig->return_type);
+        }
+
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            // See this function's own doc comment: no Program access
+            // here to resolve a struct/class field's or an array/span's
+            // element type.
+            return std::nullopt;
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
@@ -925,8 +1240,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         }
 
         case ExprKind::Call: {
-            auto sig_it = signatures.find(expr.name);
-            bool returns_reference = sig_it != signatures.end() && sig_it->second.elided_param_index.has_value();
+            CalleeSignature callee = resolve_callee_signature(expr, body);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            bool returns_reference = sig != nullptr && sig->elided_param_index.has_value();
             if (!returns_reference) {
                 if (report_errors) {
                     throw DataflowError("cannot borrow the result of calling '" + expr.name +
@@ -942,7 +1258,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 return "";
             }
             check_call_arguments(expr, state, body, signatures, report_errors);
-            size_t elided_index = *sig_it->second.elided_param_index;
+            size_t elided_index = *sig->elided_param_index;
             // The elided parameter's *own* argument is what the call's
             // result transitively borrows from -- resolve it the exact
             // same way as any other borrow source (recursively, so a
@@ -1018,9 +1334,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // only have been called successfully with a mutable-
             // reachable argument in the first place (apply_reference_
             // argument already enforces that at the call site).
-            auto sig_it = signatures.find(expr.name);
-            if (sig_it == signatures.end()) return false;
-            return !sig_it->second.return_type.is_mutable_ref;
+            CalleeSignature callee = resolve_callee_signature(expr, body);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            if (sig == nullptr) return false;
+            return !sig->return_type.is_mutable_ref;
         }
 
         default:
@@ -1169,8 +1486,21 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors) {
     CalleeSignature callee = resolve_callee_signature(expr, body);
-    auto sig_it = signatures.find(callee.key);
-    if (report_errors && sig_it != signatures.end() && !sig_it->second.is_safe && state.unsafe_depth == 0) {
+    auto name_it = signatures.find(callee.key);
+    const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+    // ch05 §5.10: a name that exists but has no overload whose parameters
+    // match this call's actual arguments is a hard error (an explicit
+    // cast/a genuinely matching overload is required) -- distinct from
+    // "the name doesn't exist at all", which this function has never
+    // rejected itself (left to codegen's own "call to unknown function"
+    // check; preserved here unchanged).
+    if (report_errors && name_it != signatures.end() && sig == nullptr) {
+        throw DataflowError("no overload of '" + expr.name +
+                             "' matches these argument types (spec ch05.10 -- overload resolution is exact "
+                             "type match only; an explicit cast may be required)",
+            state.current_loc);
+    }
+    if (report_errors && sig != nullptr && !sig->is_safe && state.unsafe_depth == 0) {
         throw DataflowError("cannot call non-'safe' function '" + expr.name +
                              "' from a 'safe' context; wrap the call in 'unsafe { }' (spec ch01 §1.3/ch02)",
             state.current_loc);
@@ -1183,11 +1513,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         const Expr& arg = *expr.args[i];
         size_t param_index = i + callee.param_offset;
         bool param_is_reference =
-            sig_it != signatures.end() && param_index < sig_it->second.param_types.size() &&
-            is_reference(sig_it->second.param_types[param_index]);
+            sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
         if (param_is_reference) {
-            apply_reference_argument(arg, sig_it->second.param_types[param_index], state, in_call_borrows, body,
-                                      signatures, report_errors);
+            apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
+                                      report_errors);
         } else {
             // Parameter types aren't resolved here for anything other
             // than reference detection above; a unique_ptr argument
@@ -1211,9 +1540,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // enforced declared constness matters by then (see
             // assignment_target_is_read_only's Unary case).
             bool param_wants_mutable_pointer =
-                sig_it != signatures.end() && param_index < sig_it->second.param_types.size() &&
-                sig_it->second.param_types[param_index].kind == TypeKind::Pointer &&
-                sig_it->second.param_types[param_index].is_mutable_pointee;
+                sig != nullptr && param_index < sig->param_types.size() &&
+                sig->param_types[param_index].kind == TypeKind::Pointer &&
+                sig->param_types[param_index].is_mutable_pointee;
             if (report_errors && param_wants_mutable_pointer && arg.kind == ExprKind::Unary &&
                 arg.unary_op == UnaryOp::AddressOf && is_read_only_reachable(*arg.lhs, body, signatures)) {
                 throw DataflowError("cannot pass '&' of a read-only-reachable place as a mutable 'T*' "
@@ -1702,17 +2031,19 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 // The elision rule (spec ch05.3) was already validated
                 // structurally once for the whole program (see
                 // resolve_elided_param_index, called from check_moves)
-                // -- signatures.at(fn.name).elided_param_index is
-                // guaranteed to have a value here. What's left to check
-                // per return statement is the actual *dangling* risk:
-                // does this specific returned expression really borrow
-                // (directly, or transitively through a chain of
-                // locals/calls) from that one parameter, or does it
-                // borrow something else -- most importantly, a purely
-                // local place, which would dangle the instant this
-                // function returns and its stack frame is popped.
-                const std::string& elided_param_name =
-                    fn.params[*signatures.at(fn.name).elided_param_index].name;
+                // -- recomputing it here (a pure function of `fn` alone,
+                // no Signatures lookup needed: `fn` is already the one
+                // specific, already-resolved overload being checked, not
+                // a name that could denote several) is guaranteed to
+                // have a value. What's left to check per return
+                // statement is the actual *dangling* risk: does this
+                // specific returned expression really borrow (directly,
+                // or transitively through a chain of locals/calls) from
+                // that one parameter, or does it borrow something else --
+                // most importantly, a purely local place, which would
+                // dangle the instant this function returns and its stack
+                // frame is popped.
+                const std::string& elided_param_name = fn.params[*resolve_elided_param_index(fn)].name;
                 std::string returned_root =
                     resolve_borrow_source_root(*term.return_value, state, body, signatures, /*report_errors=*/true);
                 if (returned_root != elided_param_name) {
@@ -1924,7 +2255,33 @@ void check_moves(const Program& program) {
         sig.return_type = fn.return_type;
         sig.elided_param_index = resolve_elided_param_index(fn);
         sig.is_safe = fn.is_safe;
-        signatures[fn.name] = std::move(sig);
+        sig.loc = fn.loc;
+        // ch05 §5.10: two functions sharing a name are legitimate
+        // overloads only if their parameter lists actually differ --
+        // scpp cannot overload on return type alone (real C++'s own
+        // rule), and `safe`-ness is a scpp-only annotation layered on
+        // top of a real signature, not part of the identity overload
+        // resolution dispatches on (a `safe`/non-`safe` pair with
+        // otherwise-identical parameters is the same signature declared
+        // twice, not two overloads). A duplicate is a hard redefinition
+        // error, not silently overwritten -- unlike this map's previous
+        // one-entry-per-name behavior, which would have let the second
+        // definition silently replace the first.
+        std::vector<FunctionSignature>& overloads = signatures[fn.name];
+        for (const FunctionSignature& existing : overloads) {
+            bool same_params = existing.param_types.size() == sig.param_types.size();
+            for (size_t i = 0; same_params && i < sig.param_types.size(); i++) {
+                same_params = types_equal(existing.param_types[i], sig.param_types[i]);
+            }
+            if (same_params) {
+                throw DataflowError("redefinition of '" + fn.name +
+                                     "': a previous declaration with an identical parameter list already "
+                                     "exists (ch05 §5.10 -- functions can only be overloaded by parameter "
+                                     "list, and 'safe'-ness/return type alone don't count as a difference)",
+                    fn.loc);
+            }
+        }
+        overloads.push_back(std::move(sig));
     }
     // ch04 §4.2: every class name in the program, so Member-access
     // checking (apply_expr's own Member case) can tell a class-typed

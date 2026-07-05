@@ -77,6 +77,7 @@ public:
         for (const ClassDef& def : program.classes) {
             declare_class(def);
         }
+        build_overload_names();
         for (const Function& fn : program.functions) {
             declare_function(fn);
         }
@@ -169,6 +170,18 @@ private:
     std::unique_ptr<llvm::IRBuilder<>> builder_;
     std::map<std::string, LocalSlot> locals_;
     std::unordered_map<std::string, StructInfo> structs_;
+    // ch05 §5.10: each Function's actual LLVM symbol name -- the plain
+    // `fn.name` unchanged for the overwhelmingly common case (exactly one
+    // function under that name; critically, this is what keeps `main`/
+    // `extern "C"` functions' names exactly as declared, since LLVM
+    // requires every function in a module to have a unique name but
+    // these are never intentionally duplicated), or, for 2+ functions
+    // genuinely sharing a name (overloading), a name disambiguated with
+    // each parameter's type (see mangle_type) -- built once up front by
+    // build_overload_names, keyed by AST node identity (not by name:
+    // that's exactly the one-to-many relationship this map exists to
+    // resolve).
+    std::unordered_map<const Function*, std::string> overload_names_;
     // A stack of block scopes, each holding the names declared directly in
     // that block (in declaration order). Pushed/popped around every Block,
     // and around the (possibly brace-less) branches of if/while, so a
@@ -192,6 +205,281 @@ private:
             if (fn.name == name) return &fn;
         }
         return nullptr;
+    }
+
+    // Infers `expr`'s scpp type, for function-overload resolution
+    // purposes only (ch05 §5.10) -- mirrors movecheck's own
+    // infer_expr_type (same overall shape and non-exhaustiveness: this
+    // is not a general type-checker), but, unlike movecheck, this *does*
+    // support Member/Subscript: codegen already has full struct/class
+    // field-type info via structs_ (declare_struct/declare_class),
+    // unlike movecheck's Body, which only ever tracked per-local types.
+    // Never has side effects (never calls codegen_expr/codegen_lvalue),
+    // so it's safe to call before actually generating any code for
+    // `expr` -- needed since resolving which overload a call targets
+    // must happen *before* generating its arguments (codegen_call_args
+    // needs to already know the callee to decide value-vs-address per
+    // parameter).
+    std::optional<Type> infer_type(const Expr& expr) {
+        switch (expr.kind) {
+            case ExprKind::IntegerLiteral: return Type{.kind = TypeKind::Named, .name = "int"};
+            case ExprKind::BoolLiteral: return Type{.kind = TypeKind::Named, .name = "bool"};
+            case ExprKind::CharLiteral: return Type{.kind = TypeKind::Named, .name = "char"};
+            case ExprKind::StringLiteral: {
+                Type result;
+                result.kind = TypeKind::Pointer;
+                result.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = "char"});
+                result.is_mutable_pointee = false;
+                return result;
+            }
+
+            case ExprKind::Identifier: {
+                auto it = locals_.find(expr.name);
+                return it == locals_.end() ? std::nullopt : std::optional<Type>(it->second.type);
+            }
+
+            case ExprKind::Move: {
+                if (expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
+                auto it = locals_.find(expr.lhs->name);
+                return it == locals_.end() ? std::nullopt : std::optional<Type>(it->second.type);
+            }
+
+            case ExprKind::MakeUnique: {
+                Type result;
+                result.kind = TypeKind::UniquePtr;
+                result.pointee = std::make_shared<Type>(expr.type);
+                return result;
+            }
+
+            case ExprKind::Member: {
+                std::optional<Type> base = infer_type(*expr.lhs);
+                if (!base) return std::nullopt;
+                // See codegen_lvalue's Identifier case: a Reference-typed
+                // base (e.g. `this`) auto-dereferences to its pointee.
+                const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
+                if (base_named.kind != TypeKind::Named) return std::nullopt;
+                auto struct_it = structs_.find(base_named.name);
+                if (struct_it == structs_.end()) return std::nullopt;
+                const StructInfo& info = struct_it->second;
+                auto field_it = std::find(info.field_names.begin(), info.field_names.end(), expr.name);
+                if (field_it == info.field_names.end()) return std::nullopt;
+                return info.field_types[static_cast<size_t>(field_it - info.field_names.begin())];
+            }
+
+            case ExprKind::Subscript: {
+                std::optional<Type> base = infer_type(*expr.lhs);
+                if (!base) return std::nullopt;
+                if (base->kind == TypeKind::Array) return *base->element;
+                if (base->kind == TypeKind::Span) return *base->pointee;
+                return std::nullopt;
+            }
+
+            case ExprKind::Unary:
+                switch (expr.unary_op) {
+                    case UnaryOp::Not: return Type{.kind = TypeKind::Named, .name = "bool"};
+                    case UnaryOp::Neg: return infer_type(*expr.lhs);
+                    case UnaryOp::AddressOf: {
+                        std::optional<Type> operand = infer_type(*expr.lhs);
+                        if (!operand) return std::nullopt;
+                        Type result;
+                        result.kind = TypeKind::Pointer;
+                        result.pointee = std::make_shared<Type>(std::move(*operand));
+                        result.is_mutable_pointee = true; // &expr always yields a mutable T* (ch05 §5.7)
+                        return result;
+                    }
+                    case UnaryOp::Deref: {
+                        std::optional<Type> operand = infer_type(*expr.lhs);
+                        if (!operand ||
+                            (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer)) {
+                            return std::nullopt;
+                        }
+                        return *operand->pointee;
+                    }
+                }
+                return std::nullopt;
+
+            case ExprKind::Binary:
+                switch (expr.binary_op) {
+                    case BinaryOp::Add:
+                    case BinaryOp::Sub:
+                    case BinaryOp::Mul:
+                    case BinaryOp::Div:
+                    case BinaryOp::Assign:
+                        return infer_type(*expr.lhs);
+                    case BinaryOp::Eq:
+                    case BinaryOp::Ne:
+                    case BinaryOp::Lt:
+                    case BinaryOp::Gt:
+                    case BinaryOp::Le:
+                    case BinaryOp::Ge:
+                    case BinaryOp::And:
+                    case BinaryOp::Or:
+                        return Type{.kind = TypeKind::Named, .name = "bool"};
+                }
+                return std::nullopt;
+
+            case ExprKind::Call: {
+                std::string callee_name = expr.name;
+                size_t param_offset = 0;
+                bool receiver_is_mutable = true;
+                if (expr.lhs != nullptr) {
+                    std::optional<Type> receiver = infer_type(*expr.lhs);
+                    if (!receiver) return std::nullopt;
+                    const Type& receiver_named =
+                        receiver->kind == TypeKind::Reference ? *receiver->pointee : *receiver;
+                    if (receiver_named.kind != TypeKind::Named) return std::nullopt;
+                    callee_name = receiver_named.name + "_" + expr.name;
+                    param_offset = 1;
+                    receiver_is_mutable = !is_read_only_place(*expr.lhs);
+                }
+                const Function* callee = resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable);
+                return callee == nullptr ? std::nullopt : std::optional<Type>(callee->return_type);
+            }
+        }
+        return std::nullopt;
+    }
+
+    // Whether `arg` is a legitimate argument for a candidate overload's
+    // parameter declared as `param_type` -- mirrors movecheck's own
+    // argument_matches_parameter (ch05 §5.10) exactly (same by-value/
+    // by-reference/std::unique_ptr distinctions), just phrased over
+    // codegen's own infer_type/types_equal instead of movecheck's.
+    bool argument_matches_parameter(const Expr& arg, const Type& param_type) {
+        if (param_type.kind == TypeKind::UniquePtr) {
+            bool produces_rvalue = arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique;
+            if (!produces_rvalue) return false;
+            std::optional<Type> arg_type = infer_type(arg);
+            return arg_type.has_value() && arg_type->kind == TypeKind::UniquePtr &&
+                   types_equal(*arg_type->pointee, *param_type.pointee);
+        }
+        if (param_type.kind == TypeKind::Reference) {
+            if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique ||
+                arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::BoolLiteral ||
+                arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
+                return false;
+            }
+            std::optional<Type> arg_type = infer_type(arg);
+            return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
+        }
+        std::optional<Type> arg_type = infer_type(arg);
+        return arg_type.has_value() && types_equal(*arg_type, param_type);
+    }
+
+    // Whether `expr` (a method-call receiver or reference-parameter
+    // argument) is only reachable *read-only* -- mirrors movecheck's own
+    // is_read_only_reachable (same overall shape/scope), needed here
+    // purely to resolve which overload a call targets when a const/
+    // non-const method pair (or an ordinary T&/const T& overload pair)
+    // makes the receiver's/argument's own mutability the only
+    // distinguishing factor (ch05 §5.10).
+    bool is_read_only_place(const Expr& expr) {
+        switch (expr.kind) {
+            case ExprKind::Identifier: {
+                auto it = locals_.find(expr.name);
+                if (it == locals_.end()) return false;
+                return it->second.type.kind == TypeKind::Reference && !it->second.type.is_mutable_ref;
+            }
+            case ExprKind::Member:
+            case ExprKind::Subscript:
+                return is_read_only_place(*expr.lhs);
+            case ExprKind::Unary:
+                if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
+                {
+                    auto it = locals_.find(expr.lhs->name);
+                    return it != locals_.end() && it->second.type.kind == TypeKind::Pointer &&
+                           !it->second.type.is_mutable_pointee;
+                }
+            case ExprKind::Call: {
+                std::optional<Type> t = infer_type(expr);
+                return t.has_value() && t->kind == TypeKind::Reference && !t->is_mutable_ref;
+            }
+            default:
+                return false;
+        }
+    }
+
+    // Resolves a call/constructor-call's callee among the (possibly
+    // several) Functions sharing `callee_name`'s exact name -- ch05
+    // §5.10, mirroring movecheck's own resolve_overload (see its much
+    // more detailed comment): exact type match only, with a
+    // single-candidate shortcut (the overwhelmingly common,
+    // non-overloaded case: no filtering at all, so an argument shape
+    // infer_type can't resolve -- e.g. a Member/Subscript chain codegen
+    // itself *can* usually resolve, but needn't be relied on -- never
+    // wrongly breaks an ordinary call). Movecheck has already fully
+    // validated the whole program by the time codegen runs, so a genuine
+    // ambiguity here would mean a movecheck/codegen resolution
+    // disagreement -- codegen falls back to the first candidate rather
+    // than crashing, same conservative choice as movecheck's own. Takes
+    // the raw argument list (not a whole Call Expr) so this is equally
+    // usable for an ordinary call (expr.args) and a `ClassName name(args);`
+    // constructor-call VarDecl (stmt.ctor_args), which has no Expr of its
+    // own to hand over. `receiver_is_mutable` is the method-call
+    // receiver's own mutability (ch05 §5.9's implicit `this`
+    // parameter) -- meaningless when `param_offset` is 0 (an ordinary
+    // free-function/constructor call, no receiver at all), and always
+    // `true` for a constructor call (there's no *existing* object yet
+    // for read-only-reachability to apply to).
+    const Function* resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
+                                              size_t param_offset, bool receiver_is_mutable = true) {
+        std::vector<const Function*> candidates;
+        for (const Function& fn : program_->functions) {
+            if (fn.name == callee_name) candidates.push_back(&fn);
+        }
+        if (candidates.empty()) return nullptr;
+        if (candidates.size() == 1) return candidates[0];
+
+        std::vector<const Function*> matches;
+        for (const Function* fn : candidates) {
+            if (fn->params.size() != args.size() + param_offset) continue;
+            // The receiver (`this`): viable only if the candidate's own
+            // `this` mutability doesn't demand more than the receiver
+            // place can actually provide.
+            if (param_offset == 1 && fn->params[0].type.is_mutable_ref && !receiver_is_mutable) continue;
+            bool all_match = true;
+            for (size_t i = 0; all_match && i < args.size(); i++) {
+                all_match = argument_matches_parameter(*args[i], fn->params[i + param_offset].type);
+            }
+            if (all_match) matches.push_back(fn);
+        }
+        if (matches.empty()) return nullptr;
+        if (matches.size() == 1) return matches[0];
+
+        // Tie-break ("T& beats const T& for a mutable lvalue", ch05
+        // §5.10): prefer whichever match has the most mutable-reference
+        // parameters (including `this`) among positions where the
+        // argument/receiver is itself a mutable place. Falls back to the
+        // first match if that still doesn't produce a unique winner.
+        auto is_read_only_arg = [&](const Expr& arg) {
+            std::optional<Type> t = infer_type(arg);
+            return t.has_value() && t->kind == TypeKind::Reference && !t->is_mutable_ref;
+        };
+        auto mutable_ref_score = [&](const Function* fn) {
+            int score = 0;
+            if (param_offset == 1 && fn->params[0].type.is_mutable_ref && receiver_is_mutable) score++;
+            for (size_t i = 0; i < args.size(); i++) {
+                const Type& param_type = fn->params[i + param_offset].type;
+                if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref &&
+                    !is_read_only_arg(*args[i])) {
+                    score++;
+                }
+            }
+            return score;
+        };
+        const Function* best = matches[0];
+        int best_score = mutable_ref_score(best);
+        bool unique_best = true;
+        for (size_t i = 1; i < matches.size(); i++) {
+            int score = mutable_ref_score(matches[i]);
+            if (score > best_score) {
+                best = matches[i];
+                best_score = score;
+                unique_best = true;
+            } else if (score == best_score) {
+                unique_best = false;
+            }
+        }
+        return unique_best ? best : matches[0];
     }
 
     // Recursively verifies a type is trivial per the language spec (ch04):
@@ -469,6 +757,92 @@ private:
         }
     }
 
+    // Structural (deep) equality between two Types -- see movecheck's own
+    // types_equal (this file has no access to it: separate module,
+    // separate data model) for why a naive `=default` comparison of
+    // Type's shared_ptr pointee/element wouldn't work. Used only for
+    // function-overload resolution (ch05 §5.10)'s exact-type-match rule.
+    [[nodiscard]] static bool types_equal(const Type& a, const Type& b) {
+        if (a.kind != b.kind) return false;
+        switch (a.kind) {
+            case TypeKind::Named: return a.name == b.name;
+            case TypeKind::Pointer: return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
+            case TypeKind::UniquePtr: return types_equal(*a.pointee, *b.pointee);
+            case TypeKind::Reference:
+            case TypeKind::Span:
+                return a.is_mutable_ref == b.is_mutable_ref && types_equal(*a.pointee, *b.pointee);
+            case TypeKind::Array: return a.array_size == b.array_size && types_equal(*a.element, *b.element);
+        }
+        return false;
+    }
+
+    // A short, LLVM-identifier-safe (alphanumeric/underscore only, no
+    // spaces) encoding of `type`, used only to build a *disambiguating*
+    // symbol-name suffix for an overloaded function (see
+    // build_overload_names) -- unlike ch11 §11.9's real mangling scheme
+    // (which spells out full, human-oriented type text for a future
+    // cross-module linker to see), this only has to be unique *within
+    // this one compiled file* today (v0.1 has no real module/namespace
+    // system yet, so there is no cross-file symbol resolution for it to
+    // matter to) -- so a compact tag scheme is simpler and just as
+    // correct for the one job this version actually needs it for.
+    [[nodiscard]] static std::string mangle_type(const Type& type) {
+        switch (type.kind) {
+            case TypeKind::Named: return type.name;
+            case TypeKind::Pointer: return mangle_type(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
+            case TypeKind::UniquePtr: return mangle_type(*type.pointee) + "_uptr";
+            case TypeKind::Reference: return mangle_type(*type.pointee) + (type.is_mutable_ref ? "_ref" : "_cref");
+            case TypeKind::Span: return mangle_type(*type.pointee) + (type.is_mutable_ref ? "_span" : "_cspan");
+            case TypeKind::Array: return mangle_type(*type.element) + "_arr" + std::to_string(type.array_size);
+        }
+        return "?";
+    }
+
+    // Builds overload_names_ for every function in the program: grouped
+    // by `fn.name`, a solitary function keeps its name unchanged, while
+    // 2+ sharing a name (ch05 §5.10) each get `fn.name + "." +
+    // <mangled param types, "this" included>` -- "this" has to be
+    // included (not skipped) so e.g. a const/non-const method pair
+    // (`get()`/`get() const`, both synthesized as "ClassName_get" with
+    // otherwise-identical --  in this case entirely empty -- parameter
+    // lists) still end up with two distinct mangled names instead of
+    // colliding.
+    void build_overload_names() {
+        std::unordered_map<std::string, std::vector<const Function*>> by_name;
+        for (const Function& fn : program_->functions) {
+            by_name[fn.name].push_back(&fn);
+        }
+        for (const auto& [name, fns] : by_name) {
+            if (fns.size() == 1) {
+                overload_names_[fns[0]] = name;
+                continue;
+            }
+            // `extern "C"` functions can never be overloaded: C itself
+            // has no such concept, and mangling one's symbol name here
+            // would silently break its link against the *real* C symbol
+            // of the same plain name (e.g. libc's own `puts`) that this
+            // declaration exists to describe -- unlike an ordinary scpp
+            // function, there is no "give it a different LLVM name" fix
+            // available at all, so this must be a hard error instead.
+            for (const Function* fn : fns) {
+                if (fn->is_extern_c) {
+                    throw CodegenError("'" + name +
+                                        "' cannot be overloaded: 'extern \"C\"' functions share real C's own "
+                                        "lack of a function-overloading concept, so every 'extern \"C\"' "
+                                        "declaration of the same name must have an identical signature",
+                        current_loc_);
+                }
+            }
+            for (const Function* fn : fns) {
+                std::string mangled = name;
+                for (const Param& param : fn->params) {
+                    mangled += "." + mangle_type(param.type);
+                }
+                overload_names_[fn] = mangled;
+            }
+        }
+    }
+
     void declare_function(const Function& fn) {
         if (fn.return_type.kind == TypeKind::Reference) {
             validate_reference_return_elision(fn);
@@ -496,11 +870,11 @@ private:
         }
         llvm::FunctionType* fn_type =
             llvm::FunctionType::get(to_llvm_type(fn.return_type), param_types, fn.has_varargs);
-        llvm::Function::Create(fn_type, llvm::Function::ExternalLinkage, fn.name, *module_);
+        llvm::Function::Create(fn_type, llvm::Function::ExternalLinkage, overload_names_.at(&fn), *module_);
     }
 
     void define_function(const Function& fn) {
-        llvm::Function* llvm_fn = module_->getFunction(fn.name);
+        llvm::Function* llvm_fn = module_->getFunction(overload_names_.at(&fn));
         if (llvm_fn == nullptr) {
             throw CodegenError("function '" + fn.name + "' was not declared before definition",
                 current_loc_);
@@ -657,12 +1031,20 @@ private:
                         scope_stack_.back().push_back(stmt.var_name);
                     }
                     std::string ctor_name = stmt.type.name + "_new";
-                    llvm::Function* ctor = module_->getFunction(ctor_name);
+                    // ch05 §5.10: a class may declare multiple
+                    // constructors (all synthesized as "ClassName_new"),
+                    // resolved by exact argument-type match exactly like
+                    // any other overloaded name.
+                    const Function* ctor_def = resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
+                    if (ctor_def == nullptr) {
+                        throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                            current_loc_);
+                    }
+                    llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
                     if (ctor == nullptr) {
                         throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                             current_loc_);
                     }
-                    const Function* ctor_def = find_function_def(ctor_name);
                     std::vector<llvm::Value*> args = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
                     args.insert(args.begin(), slot);
                     builder_->CreateCall(ctor, args);
@@ -834,6 +1216,8 @@ private:
     CallResult codegen_call(const Expr& expr) {
         std::string callee_name = expr.name;
         llvm::Value* this_arg = nullptr;
+        size_t param_offset = 0;
+        bool receiver_is_mutable = true;
         if (expr.lhs != nullptr) {
             LValue receiver = codegen_lvalue(*expr.lhs);
             if (receiver.type.kind != TypeKind::Named) {
@@ -842,15 +1226,28 @@ private:
             }
             callee_name = receiver.type.name + "_" + expr.name;
             this_arg = receiver.ptr;
+            param_offset = 1;
+            receiver_is_mutable = !is_read_only_place(*expr.lhs);
         }
 
-        llvm::Function* callee = module_->getFunction(callee_name);
+        // ch05 §5.10: resolve the specific overload this call targets
+        // (movecheck has already independently confirmed exactly one
+        // overload matches, so this is expected to agree with it -- see
+        // resolve_overload_by_type's own comment) *before* generating
+        // this call's own arguments below: codegen_call_args needs
+        // `callee_def` already in hand to decide value-vs-address per
+        // parameter.
+        const Function* callee_def = resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable);
+        if (callee_def == nullptr) {
+            throw CodegenError("call to unknown function '" + callee_name + "'",
+                current_loc_);
+        }
+        llvm::Function* callee = module_->getFunction(overload_names_.at(callee_def));
         if (callee == nullptr) {
             throw CodegenError("call to unknown function '" + callee_name + "'",
                 current_loc_);
         }
-        const Function* callee_def = find_function_def(callee_name);
-        std::vector<llvm::Value*> args = codegen_call_args(expr.args, callee_def, this_arg != nullptr ? 1 : 0);
+        std::vector<llvm::Value*> args = codegen_call_args(expr.args, callee_def, param_offset);
         if (this_arg != nullptr) args.insert(args.begin(), this_arg);
         return CallResult{builder_->CreateCall(callee, args), callee_def};
     }
