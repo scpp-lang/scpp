@@ -1,5 +1,7 @@
 # scpp integration tests
 
+> 中文版: [README.zh.md](README.zh.md)
+
 This directory is a **black-box** integration test suite for the `scpp`
 compiler. It is maintained independently from `src/` (the implementation)
 and `docs/book/` (the language specification): tests here are written
@@ -57,6 +59,26 @@ Run one category, or filter by substring:
 
 Pass `--scpp-bin <path>` to point at a different build.
 
+## Categories
+
+| Directory | Covers |
+|---|---|
+| `01_basics` | M1: scalars, locals, `if`/`while`, functions, arithmetic, zero-init |
+| `02_structs` | `struct` triviality rules, zero-init, bitwise copy, forbidden members |
+| `03_unique_ptr` | `std::make_unique`/`std::move`, move-out checking, arrow sugar |
+| `04_references_borrow` | `T&`/`const T&`, alias-XOR-mutability, NLL release, lifetime elision |
+| `05_span` | `std::span<T>` construction/indexing/bounds checks |
+| `06_unsafe_blocks` | `unsafe { }` gating and scoping rules |
+| `07_extern_c` | `extern "C"` declarations/definitions, real libc interop |
+| `08_address_of` | `&expr`, `const T*`/`T*` distinction |
+| `09_integer_overflow` | checked-abort in `safe`, wrapping in `unsafe`, div/mod special cases |
+| `10_bool_and_char` | no implicit scalar conversions, short-circuit evaluation |
+| `11_safe_unsafe_boundary` | the safe/unsafe call-direction table (ch02) |
+| `12_struct_vs_class` | `struct` vs `class` access-control divergence |
+| `13_unsupported_robustness` | not-yet-implemented syntax fails cleanly, never crashes |
+| `14_classes` | constructors/destructors, private access control, no-copy-semantics, method borrow checking, `this` |
+| `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
+
 ## Testing philosophy
 
 - Every `.cpp` file is written to be **valid per `docs/book/`** -- if a test
@@ -80,23 +102,12 @@ Pass `--scpp-bin <path>` to point at a different build.
   implemented" is not always still accurate. When in doubt, a quick probe
   with `scpp build` settles it empirically.
 
-## Known failures as of this writing
+## Status
 
-These are believed to be genuine implementation gaps, not test bugs (see
-each `.cpp`'s comment for the specific doc citation):
-
-- `03_unique_ptr/returning_unique_ptr_and_binding_to_new_local_is_allowed.cpp`
-  -- binding a factory function's `std::unique_ptr<T>` return value
-  directly to a new local (`T x = factory();`) is rejected; only
-  `std::move(place)` and `std::make_unique<T>(...)` are currently
-  recognized as unique_ptr initializer forms. Passing the same call
-  directly as a by-value argument (no intermediate local) does work --
-  see `passing_factory_function_result_directly_as_argument_is_allowed.cpp`.
-- `10_bool_and_char/bool_variable_initialized_from_int_literal_is_rejected.cpp`
-  -- `bool b = 5;` should be a compile error (ch06: no implicit
-  int<->bool conversion) but currently compiles, and the resulting binary
-  **segfaults** at runtime. This is the more serious of the two bool/int
-  findings.
-- `10_bool_and_char/int_variable_initialized_from_bool_literal_is_rejected.cpp`
-  -- `int x = true;` should likewise be a compile error but is currently
-  silently accepted (and runs, returning the expected `1`).
+123/123 passing (as of commit `274a1a8`). `14_classes` and
+`15_function_overloading` were added after `class` access control/copy
+restrictions (ch04 §4.2/ch05 §5.9) and function overloading (ch05 §5.10)
+were implemented; `mutable` (interior mutability, ch04 §4.2/ch08 Q4) and
+`namespace`/multi-file modules (ch11) remain design-only, confirmed still
+rejected cleanly in `13_unsupported_robustness`. Re-run `./build/run_tests`
+after any `src/`or `docs/book/` change to catch regressions.

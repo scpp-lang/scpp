@@ -1,0 +1,34 @@
+// ch05 §5.9: "Field access inside a method body ... resolves back to
+// this as its root ... including the existing whole-root-conservative
+// treatment: this->field1 and this->field2 are recorded against the same
+// root and conflict." Borrowing two distinct fields of the same object
+// through `this` must therefore conflict, exactly as it would for an
+// ordinary struct-typed local.
+class Pair {
+private:
+    int a;
+    int b;
+public:
+    safe Pair(int x, int y) {
+        this->a = x;
+        this->b = y;
+        return;
+    }
+    safe ~Pair() {
+        return;
+    }
+    safe int sum_via_refs() {
+        int& ra = this->a;
+        int& rb = this->b;
+        return ra + rb;
+    }
+};
+
+safe int f() {
+    Pair p(1, 2);
+    return p.sum_via_refs();
+}
+
+int main() {
+    return f();
+}
