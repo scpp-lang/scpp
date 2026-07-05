@@ -1,5 +1,6 @@
 module;
 
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -25,27 +26,46 @@ struct ParseError : std::runtime_error {
     SourceLocation loc;
 };
 
+// ch11 §11.7/§11.8: given a module's dotted name (e.g. "std"), returns a
+// reference to that module's already-parsed (and, transitively, already
+// import-resolved) Program -- called while parsing an `import name;`
+// declaration, so the imported module's exported struct/class names are
+// registered (struct_names_/class_names_) before the rest of the
+// importing file is parsed (mirrors real C++20: imports must precede
+// every other declaration). Owned and cached by the driver (which knows
+// about `--import name=path` mappings and file I/O -- the parser itself
+// never touches the filesystem); throws if `name` has no known mapping.
+// Left default-constructed (empty std::function) for any caller with no
+// imports to resolve -- never actually invoked unless the source being
+// parsed contains a real `import` declaration, so every existing
+// import-free caller (the whole test suite, today) is unaffected.
+using ModuleResolver = std::function<const Program&(const std::string&)>;
+
 class Parser {
 public:
-    explicit Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {}
+    explicit Parser(std::vector<Token> tokens, ModuleResolver resolver = {})
+        : tokens_(std::move(tokens)), resolver_(std::move(resolver)) {}
 
     Program parse_program() {
         Program program;
-        while (!check(TokenKind::EndOfFile)) {
-            if (check(TokenKind::KwStruct)) {
-                program.structs.push_back(parse_struct_def());
-            } else if (check(TokenKind::KwClass)) {
-                parse_class_def(program);
-            } else {
-                parse_top_level_function_or_extern_group(program);
-            }
-        }
+        parse_module_declaration(program);
+        parse_import_declarations(program);
+        parse_top_level_items(program);
         return program;
     }
 
 private:
     std::vector<Token> tokens_;
     size_t pos_ = 0;
+    ModuleResolver resolver_;
+    // ch11 §11.4: the namespace path currently being parsed into, e.g.
+    // inside `namespace std { ... }` this is {"std"}; empty at file
+    // scope (today's default -- every existing, non-namespaced file is
+    // unaffected). Pushed/popped around a namespace block
+    // (parse_namespace_block); qualify_name() joins this onto a bare
+    // declared name to produce the fully-qualified form used as that
+    // declaration's actual `.name` (see struct_names_ below).
+    std::vector<std::string> namespace_stack_;
     // Names introduced by `struct X { ... };` or `class X { ... };` seen
     // so far. The parser is single-pass, so (like C) either must be
     // declared before it is used as a type; this set is what lets
@@ -56,7 +76,10 @@ private:
     // "is this identifier a type name" is concerned -- `class_names_`
     // below separately tracks *which* of those are specifically classes,
     // for the handful of decisions that do need to tell them apart
-    // (constructor-call VarDecl syntax, access control).
+    // (constructor-call VarDecl syntax, access control). Entries are
+    // fully-qualified (ch11): a struct/class declared inside `namespace
+    // std { ... }` is registered as "std::string", not "string" -- see
+    // qualify_name.
     std::unordered_set<std::string> struct_names_;
     // Class names specifically (ch04 §4.2) -- see struct_names_ above for
     // why this is a second, narrower set rather than the only one.
@@ -99,7 +122,14 @@ private:
             return true;
         }
         if (check_std_qualified("unique_ptr") || check_std_qualified("span")) return true;
-        return tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text));
+        if (tok.kind != TokenKind::Identifier) return false;
+        // ch11: a bare identifier might be the *first segment* of a
+        // qualified name (`std::string`) rather than a plain type name --
+        // peek_qualified_name looks ahead through the whole `::` chain so
+        // the fully-qualified form is what gets checked against
+        // struct_names_ (which registers declarations under exactly that
+        // form -- see parse_class_def/parse_struct_def).
+        return struct_names_.contains(peek_qualified_name());
     }
 
     // Bounds-safe lookahead: returns the token `offset` positions ahead of
@@ -124,6 +154,112 @@ private:
         advance(); // std
         advance(); // ::
         advance(); // <member>
+    }
+
+    // Looks ahead (without consuming anything) at a possibly-qualified
+    // name starting at the current token -- `Identifier (:: Identifier)*`
+    // -- and returns it joined with "::" (e.g. `std::string`). Returns an
+    // empty string if the current token isn't even an Identifier. Used
+    // by looks_like_type_start to recognize a namespace-qualified type
+    // name (ch11 §11.4/§11.5): struct_names_/class_names_ register
+    // declarations under their fully-qualified name (see parse_class_def/
+    // parse_struct_def's namespace handling), so checking membership
+    // requires the *whole* qualified chain, not just its first segment.
+    [[nodiscard]] std::string peek_qualified_name() const {
+        if (peek().kind != TokenKind::Identifier) return {};
+        std::string joined(peek().text);
+        size_t offset = 1;
+        while (peek_at(offset).kind == TokenKind::ColonColon && peek_at(offset + 1).kind == TokenKind::Identifier) {
+            joined += "::";
+            joined += peek_at(offset + 1).text;
+            offset += 2;
+        }
+        return joined;
+    }
+
+    // Consumes a qualified name (`Identifier (:: Identifier)*`) and
+    // returns it joined the same way peek_qualified_name does. Only call
+    // when the current token is already known to be an Identifier (e.g.
+    // right after peek_qualified_name returned non-empty, or after
+    // check(TokenKind::Identifier)).
+    std::string parse_qualified_name() {
+        std::string joined(advance().text);
+        while (check(TokenKind::ColonColon) && peek_at(1).kind == TokenKind::Identifier) {
+            advance(); // ::
+            joined += "::";
+            joined += advance().text;
+        }
+        return joined;
+    }
+
+    // ch11 §11.4/§11.5: joins `bare_name` onto the current
+    // namespace_stack_ prefix, e.g. inside `namespace std { ... }`,
+    // qualify_name("string") -> "std::string". Outside any namespace
+    // block (namespace_stack_ empty, the overwhelmingly common case
+    // today), returns `bare_name` completely unchanged -- so every
+    // existing, non-namespaced file's declarations keep exactly the same
+    // `.name` they always have.
+    [[nodiscard]] std::string qualify_name(const std::string& bare_name) const {
+        if (namespace_stack_.empty()) return bare_name;
+        std::string joined;
+        for (const std::string& segment : namespace_stack_) {
+            joined += segment;
+            joined += "::";
+        }
+        joined += bare_name;
+        return joined;
+    }
+
+    // Splits a dotted module name ("org.lotx.cmath") into its segments
+    // ({"org", "lotx", "cmath"}), so it can be compared segment-for-
+    // segment against a `::`-based namespace_path (ch11 §11.5: module
+    // names use '.', namespace paths use '::' -- translated one to the
+    // other segment-for-segment, never string-compared directly).
+    [[nodiscard]] static std::vector<std::string> split_dotted_name(const std::string& dotted) {
+        std::vector<std::string> segments;
+        size_t start = 0;
+        while (start <= dotted.size()) {
+            size_t dot = dotted.find('.', start);
+            if (dot == std::string::npos) {
+                segments.push_back(dotted.substr(start));
+                break;
+            }
+            segments.push_back(dotted.substr(start, dot - start));
+            start = dot + 1;
+        }
+        return segments;
+    }
+
+    // ch11 §11.5: the export/namespace validation pass -- purely
+    // syntactic, no borrow-checker involvement. An `export`-marked
+    // declaration only actually exports if its namespace_path, segment
+    // for segment, starts with the enclosing module's own dotted name
+    // (a *prefix* requirement, not exact-match: deeper nesting beyond
+    // the module's own name, e.g. `org::lotx::cmath::trig`, is fine).
+    // `export` and "lives in the required namespace" are two
+    // independent, both-mandatory gates -- getting either wrong is a
+    // compile error, caught here immediately rather than deferred to a
+    // later pass.
+    void check_export_namespace(const Program& program, bool is_exported,
+                                 const std::vector<std::string>& namespace_path, SourceLocation loc,
+                                 const std::string& what) const {
+        if (!is_exported) return;
+        if (program.module_name.empty()) {
+            throw ParseError(loc.line, loc.column,
+                              "'export' on " + what +
+                                  " has no effect: this file has no 'export module'/'module' declaration "
+                                  "(ch11 §11.3)");
+        }
+        std::vector<std::string> module_segments = split_dotted_name(program.module_name);
+        bool starts_with_module_name = namespace_path.size() >= module_segments.size();
+        for (size_t i = 0; starts_with_module_name && i < module_segments.size(); i++) {
+            starts_with_module_name = namespace_path[i] == module_segments[i];
+        }
+        if (!starts_with_module_name) {
+            throw ParseError(loc.line, loc.column,
+                              "exported " + what + " must be declared inside a namespace matching this "
+                              "module's own name ('" + program.module_name + "') -- ch11 §11.5");
+        }
     }
 
     // Parses a base type name (`int`, `bool`, `std::unique_ptr<T>`, or a
@@ -187,9 +323,8 @@ private:
             // fine and needs no rejection anywhere.
             type.name = "void";
             advance();
-        } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text))) {
-            type.name = std::string(tok.text);
-            advance();
+        } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(peek_qualified_name())) {
+            type.name = parse_qualified_name();
         } else {
             throw ParseError(tok.line, tok.column, "expected a type name");
         }
@@ -262,12 +397,204 @@ private:
         return base;
     }
 
+    // ch11 §11.3: parses an optional module declaration at the very
+    // start of the file -- `export module <dotted.name>;` (a primary
+    // interface unit, may contain `export`-marked declarations) or
+    // `module <dotted.name>;` (an implementation unit, contributes more
+    // code to the same module but exports nothing of its own). Entirely
+    // absent for an ordinary, non-module file (today's default, still
+    // the overwhelmingly common case): nothing is consumed,
+    // `program.module_name` stays empty and every existing behavior is
+    // unaffected.
+    void parse_module_declaration(Program& program) {
+        bool leading_export = check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::KwModule;
+        if (!leading_export && !check(TokenKind::KwModule)) return;
+        if (leading_export) advance(); // 'export'
+        advance(); // 'module'
+        std::string dotted(expect(TokenKind::Identifier, "module name").text);
+        while (match(TokenKind::Dot)) {
+            dotted += '.';
+            dotted += std::string(expect(TokenKind::Identifier, "module name segment").text);
+        }
+        expect(TokenKind::Semicolon, "';'");
+        program.module_name = dotted;
+        program.is_module_interface = leading_export;
+        program.is_module_impl = !leading_export;
+    }
+
+    // ch11 §11.7: parses zero or more `import name;` / `export import
+    // name;` declarations (a dotted name, same grammar as the module
+    // declaration above), immediately resolving each via resolver_ (given
+    // by the driver, which knows about `--import name=path` mappings and
+    // file I/O -- the parser itself never touches the filesystem) so the
+    // imported module's exported names are visible (struct_names_/
+    // class_names_) to the rest of this file, which is parsed next --
+    // mirrors real C++20's own requirement that imports precede every
+    // other declaration.
+    void parse_import_declarations(Program& program) {
+        for (;;) {
+            bool is_reexport = check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::KwImport;
+            if (!is_reexport && !check(TokenKind::KwImport)) return;
+            if (is_reexport) advance(); // 'export'
+            const Token& import_tok = peek();
+            advance(); // 'import'
+            std::string dotted(expect(TokenKind::Identifier, "imported module name").text);
+            while (match(TokenKind::Dot)) {
+                dotted += '.';
+                dotted += std::string(expect(TokenKind::Identifier, "module name segment").text);
+            }
+            expect(TokenKind::Semicolon, "';'");
+
+            ImportDecl import;
+            import.module_name = dotted;
+            import.is_reexport = is_reexport;
+            program.imports.push_back(std::move(import));
+
+            if (!resolver_) {
+                throw ParseError(import_tok.line, import_tok.column,
+                                  "cannot resolve imported module '" + dotted +
+                                      "' -- no module resolver was configured for this build (see the "
+                                      "driver's --import name=path flag)");
+            }
+            merge_imported_module(program, resolver_(dotted), dotted);
+        }
+    }
+
+    // Manually clones a Function *declaration* (never its body -- see
+    // merge_imported_module) since Function::body is a unique_ptr and so
+    // Function itself has no implicit copy constructor.
+    static Function clone_function_declaration(const Function& fn, const std::string& owning_module) {
+        Function clone;
+        clone.is_safe = fn.is_safe;
+        clone.return_type = fn.return_type;
+        clone.name = fn.name;
+        clone.loc = fn.loc;
+        clone.params = fn.params;
+        // clone.body intentionally left null -- see merge_imported_module.
+        clone.is_extern_c = fn.is_extern_c;
+        clone.is_module_extern = fn.is_module_extern;
+        clone.has_varargs = fn.has_varargs;
+        clone.namespace_path = fn.namespace_path;
+        clone.is_exported = fn.is_exported;
+        clone.owning_module = owning_module;
+        return clone;
+    }
+
+    // Merges `imported`'s exported surface into the Program currently
+    // being parsed (ch11 §11.8): every exported StructDef/ClassDef/
+    // Function is cloned in, tagged `owning_module = imported_name` so
+    // codegen's mangling scheme (keyed off owning_module, not
+    // Program::module_name) produces exactly the symbol name the
+    // imported module's own separate compilation will define (see
+    // codegen.cppm). A cloned Function's body is always cleared (even
+    // though the source Program's own copy has a real one): check_moves/
+    // codegen's existing "body == nullptr -> already declared/defined
+    // elsewhere, don't re-check/re-define" handling (today used for
+    // `extern "C"`/bare `extern`) picks this up with zero new logic --
+    // exactly ch11 §11.8's "zero new checker logic" framing. Only
+    // `is_exported` declarations are visible to an importer at all -- a
+    // module-private helper is invisible outside its own file, matching
+    // real C++20 modules.
+    void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name) {
+        for (const StructDef& def : imported.structs) {
+            if (!def.is_exported) continue;
+            struct_names_.insert(def.name);
+            StructDef clone = def;
+            clone.owning_module = imported_name;
+            program.structs.push_back(std::move(clone));
+        }
+        for (const ClassDef& def : imported.classes) {
+            if (!def.is_exported) continue;
+            struct_names_.insert(def.name);
+            class_names_.insert(def.name);
+            ClassDef clone = def;
+            clone.owning_module = imported_name;
+            program.classes.push_back(std::move(clone));
+        }
+        for (const Function& fn : imported.functions) {
+            if (!fn.is_exported) continue;
+            program.functions.push_back(clone_function_declaration(fn, imported_name));
+        }
+    }
+
+    // The main "loop over top-level declarations" body, shared between
+    // file scope (`inside_namespace=false`, terminated only by
+    // EndOfFile -- a stray '}' here is left unconsumed, surfacing as an
+    // ordinary parse error downstream exactly as it always has) and the
+    // inside of a `namespace { ... }` block (`inside_namespace=true`,
+    // also terminated by the block's own closing '}').
+    void parse_top_level_items(Program& program, bool inside_namespace = false) {
+        while (!check(TokenKind::EndOfFile) && !(inside_namespace && check(TokenKind::RBrace))) {
+            if (check(TokenKind::KwNamespace)) {
+                parse_namespace_block(program);
+                continue;
+            }
+            if (check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::LBrace) {
+                // `export { <item> <item> ... }` -- groups several
+                // declarations under one export marker (ch11 §11.3),
+                // equivalent to writing `export` before each
+                // individually.
+                advance(); // 'export'
+                advance(); // '{'
+                while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+                    parse_top_level_item(program, /*is_exported=*/true);
+                }
+                expect(TokenKind::RBrace, "'}'");
+                continue;
+            }
+            bool is_exported = match(TokenKind::KwExport);
+            parse_top_level_item(program, is_exported);
+        }
+    }
+
+    // Parses exactly one struct/class/function(-or-extern-group)
+    // top-level item, given whether an `export` marker (individual, or
+    // inherited from an enclosing `export { }` group) applies to it.
+    void parse_top_level_item(Program& program, bool is_exported) {
+        if (check(TokenKind::KwStruct)) {
+            SourceLocation loc = current_loc();
+            StructDef def = parse_struct_def();
+            def.is_exported = is_exported;
+            check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
+            program.structs.push_back(std::move(def));
+        } else if (check(TokenKind::KwClass)) {
+            parse_class_def(program, is_exported);
+        } else {
+            parse_top_level_function_or_extern_group(program, is_exported);
+        }
+    }
+
+    // ch11 §11.4: `namespace a::b::c { ... }`, including the C++17
+    // one-line nested form (all of `a::b::c` in one declaration) --
+    // pushes every segment onto namespace_stack_, parses a nested
+    // sequence of top-level items (recursively allowing further nested
+    // namespace blocks), then pops them back off. No `export` may
+    // precede `namespace` itself -- only individual declarations
+    // *inside* it can be exported (ch11 §11.5); namespace and export are
+    // independent axes, both required for an exported declaration to
+    // actually export (see the export/namespace validation pass).
+    void parse_namespace_block(Program& program) {
+        expect(TokenKind::KwNamespace, "'namespace'");
+        size_t pushed = 0;
+        for (;;) {
+            std::string segment(expect(TokenKind::Identifier, "namespace name").text);
+            namespace_stack_.push_back(std::move(segment));
+            pushed++;
+            if (!match(TokenKind::ColonColon)) break;
+        }
+        expect(TokenKind::LBrace, "'{'");
+        parse_top_level_items(program, /*inside_namespace=*/true);
+        expect(TokenKind::RBrace, "'}'");
+        for (size_t i = 0; i < pushed; i++) namespace_stack_.pop_back();
+    }
+
     // Parses one top-level item that isn't a `struct`: an ordinary
     // function, or an `extern "C"` declaration/definition/block (ch02
-    // §2.1). `safe` (if present) is always consumed up front, before
-    // checking for `extern` -- matching the spec's own ordering example
-    // (`safe extern "C" int add(...) { ... }`) -- so it's available
-    // regardless of which of the three shapes below follows:
+    // §2.1), or a bare `extern` module-linkage declaration (ch11 §11.6).
+    // `safe` (if present) is always consumed up front, before checking
+    // for `extern` -- matching the spec's own ordering example (`safe
+    // extern "C" int add(...) { ... }`) -- so it's available regardless
+    // of which of the shapes below follows:
     //   [safe] <ret> <name>(<params>) { <body> }                 -- an
     //     ordinary definition (is_extern_c=false).
     //   [safe] extern "C" <ret> <name>(<params>) (';' | '{' ... '}')
@@ -282,10 +609,31 @@ private:
     //     block form isn't supported (there's no single item for it to
     //     attach to); mark individual items `safe` inside the block
     //     instead.
-    void parse_top_level_function_or_extern_group(Program& program) {
+    //   [safe] extern <ret> <name>(<params>);                     -- a
+    //     bare (non-"C") extern declaration (ch11 §11.6): ordinary scpp
+    //     linkage, *can* be `safe`, no block-sugar form (that's an
+    //     extern-"C"-only convenience for repeating a linkage string).
+    // `is_exported` (ch11 §11.3) is only meaningful for the ordinary/bare-
+    // extern cases: an `extern "C"` declaration is never namespace-
+    // qualified or mangled (its name must stay the real, plain C symbol
+    // regardless of enclosing namespace -- see qualify_name), so an
+    // `export` marker on one is simply not applicable and is ignored.
+    void parse_top_level_function_or_extern_group(Program& program, bool is_exported) {
         SourceLocation loc = current_loc();
         bool is_safe = match(TokenKind::KwSafe);
         if (match(TokenKind::KwExtern)) {
+            if (!check(TokenKind::StringLiteral)) {
+                // Bare extern (ch11 §11.6): always a single bodyless
+                // declaration, ordinary scpp linkage, can be `safe`.
+                Function fn = parse_function(is_safe, /*is_extern_c=*/false, /*is_module_extern=*/true);
+                fn.loc = loc;
+                fn.name = qualify_name(fn.name);
+                fn.namespace_path = namespace_stack_;
+                fn.is_exported = is_exported;
+                check_export_namespace(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+                program.functions.push_back(std::move(fn));
+                return;
+            }
             parse_c_linkage_string();
             if (check(TokenKind::LBrace)) {
                 if (is_safe) {
@@ -318,6 +666,10 @@ private:
         }
         Function fn = parse_function(is_safe, /*is_extern_c=*/false);
         fn.loc = loc;
+        fn.name = qualify_name(fn.name);
+        fn.namespace_path = namespace_stack_;
+        fn.is_exported = is_exported;
+        check_export_namespace(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
         program.functions.push_back(std::move(fn));
     }
 
@@ -417,9 +769,12 @@ private:
     StructDef parse_struct_def() {
         expect(TokenKind::KwStruct, "'struct'");
         StructDef def;
-        def.name = std::string(expect(TokenKind::Identifier, "struct name").text);
-        // Register the name before parsing the body so a field can refer to
-        // the enclosing struct via a pointer (e.g. `Node* next;`).
+        std::string bare_name = std::string(expect(TokenKind::Identifier, "struct name").text);
+        def.name = qualify_name(bare_name);
+        def.namespace_path = namespace_stack_;
+        // Register the (fully-qualified) name before parsing the body so
+        // a field can refer to the enclosing struct via a pointer (e.g.
+        // `Node* next;`).
         struct_names_.insert(def.name);
 
         expect(TokenKind::LBrace, "'{'");
@@ -501,20 +856,46 @@ private:
     // destructor/method definitions, each of which is synthesized
     // directly into `program.functions` as an ordinary top-level
     // Function -- see ClassDef's own comment for the full reasoning and
-    // the `ClassName_memberName` naming scheme used.
-    void parse_class_def(Program& program) {
+    // the `ClassName_memberName` naming scheme used. `is_exported` (ch11
+    // §11.3) marks the whole class -- and every method synthesized from
+    // it -- exported as one unit, not per-member.
+    void parse_class_def(Program& program, bool is_exported) {
+        SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
+        // The bare, unqualified name as written -- used for the
+        // constructor/destructor spelling checks below (`~string()`,
+        // `string(...)`  inside the class body itself always use the
+        // bare name, exactly like real C++, never a namespace-qualified
+        // one). `qualified_class_name` (namespace_stack_-prefixed, ch11
+        // §11.4) is the form used everywhere this class is *referred to*
+        // from outside its own body: struct_names_/class_names_
+        // registration, `this`'s declared type, and every synthesized
+        // member function's own name.
         std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        std::string qualified_class_name = qualify_name(class_name);
         // Register the name before parsing the body so a field/method can
         // refer to the enclosing class via a pointer, and so a
         // self-referential constructor call/access-control decision below
         // already recognizes it -- same before-parsing-the-body
         // registration order as parse_struct_def.
-        struct_names_.insert(class_name);
-        class_names_.insert(class_name);
+        struct_names_.insert(qualified_class_name);
+        class_names_.insert(qualified_class_name);
 
         ClassDef def;
-        def.name = class_name;
+        def.name = qualified_class_name;
+        def.namespace_path = namespace_stack_;
+        def.is_exported = is_exported;
+        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+
+        // Every method/constructor/destructor synthesized below shares
+        // this same namespace_path/is_exported (ch11 §11.3: exporting a
+        // class exports its whole member surface as one unit) --
+        // owning_module stays default-empty (this program's own
+        // declaration; only set later, at cross-module merge time).
+        auto finish_member_fn = [&](Function& fn) {
+            fn.namespace_path = namespace_stack_;
+            fn.is_exported = is_exported;
+        };
 
         expect(TokenKind::LBrace, "'{'");
         // Real C++'s own default: a class body starts `private` until the
@@ -552,9 +933,10 @@ private:
                 fn.is_safe = member_is_safe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
-                fn.name = class_name + "_delete";
-                fn.params.push_back(make_this_param(class_name, /*is_const=*/false));
+                fn.name = qualified_class_name + "_delete";
+                fn.params.push_back(make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.body = parse_block();
+                finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
             }
@@ -574,10 +956,11 @@ private:
                 fn.is_safe = member_is_safe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
-                fn.name = class_name + "_new";
+                fn.name = qualified_class_name + "_new";
                 fn.params = parse_param_list();
-                fn.params.insert(fn.params.begin(), make_this_param(class_name, /*is_const=*/false));
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.body = parse_block();
+                finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
             }
@@ -599,9 +982,10 @@ private:
                 bool is_const = match(TokenKind::KwConst);
                 fn.is_safe = member_is_safe;
                 fn.return_type = std::move(member_type);
-                fn.name = class_name + "_" + member_name;
-                fn.params.insert(fn.params.begin(), make_this_param(class_name, is_const));
+                fn.name = qualified_class_name + "_" + member_name;
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
                 fn.body = parse_block();
+                finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
             }
@@ -633,16 +1017,18 @@ private:
 
     // Parses one function declaration or definition's `<return-type>
     // <name>(<params>)` followed by either `;` (a bodyless declaration --
-    // only legal when `is_extern_c`, ch02 §2.1) or `{ <body> }` (an
-    // ordinary definition). Both `is_safe` and `is_extern_c` are decided
-    // and consumed by the caller (parse_top_level_function_or_extern_group)
-    // before this runs, since their combination affects *which* prefixes
-    // were already consumed (a `safe` inside an `extern "C" { }` block
-    // isn't preceded by its own `extern "C"` -- see that function).
-    Function parse_function(bool is_safe, bool is_extern_c) {
+    // legal when `is_extern_c` (ch02 §2.1) or `is_module_extern` (bare
+    // `extern`, ch11 §11.6)) or `{ <body> }` (an ordinary definition).
+    // `is_safe`/`is_extern_c`/`is_module_extern` are decided and consumed
+    // by the caller (parse_top_level_function_or_extern_group) before
+    // this runs, since their combination affects *which* prefixes were
+    // already consumed (a `safe` inside an `extern "C" { }` block isn't
+    // preceded by its own `extern "C"` -- see that function).
+    Function parse_function(bool is_safe, bool is_extern_c, bool is_module_extern = false) {
         Function fn;
         fn.is_safe = is_safe;
         fn.is_extern_c = is_extern_c;
+        fn.is_module_extern = is_module_extern;
         fn.return_type = parse_type();
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
 
@@ -693,19 +1079,22 @@ private:
 
         if (match(TokenKind::Semicolon)) {
             // Bodyless declaration: defined elsewhere, linked in
-            // externally. The compiler has no visibility into its
-            // implementation, so it can never be marked `safe` -- and,
-            // since `has_varargs` combined with a body isn't allowed
-            // (checked below), this is currently the *only* place a
-            // variadic function can be introduced.
-            if (!fn.is_extern_c) {
+            // externally.
+            if (!fn.is_extern_c && !fn.is_module_extern) {
                 const Token& tok = peek();
                 throw ParseError(tok.line, tok.column,
                                   "a function declaration without a body is only supported for "
-                                  "'extern \"C\"' (ch02 §2.1); every other function must have a "
-                                  "definition");
+                                  "'extern \"C\"' (ch02 §2.1) or a bare 'extern' declaration (ch11 "
+                                  "§11.6); every other function must have a definition");
             }
-            if (fn.is_safe) {
+            // Unlike `extern "C"` -- always implicitly unsafe, since no
+            // scpp compiler ever sees the C implementation to check it --
+            // a bare `extern` (is_module_extern) declaration *can* be
+            // marked `safe` (ch11 §11.6): the module's author is trusted
+            // to check the real implementation elsewhere (a separate
+            // implementation unit or payload), not the compiler seeing
+            // this declaration.
+            if (fn.is_extern_c && fn.is_safe) {
                 const Token& tok = peek();
                 throw ParseError(tok.line, tok.column,
                                   "cannot mark an external declaration 'safe': its implementation "
@@ -1163,8 +1552,12 @@ private:
             return node;
         }
         if (check(TokenKind::Identifier)) {
-            advance();
-            std::string name(tok.text);
+            // ch11: may be a plain name or a namespace-qualified one
+            // (`std::string`, `a::b::foo`) -- parse_qualified_name
+            // consumes the whole `::`-joined chain (a lone identifier,
+            // the overwhelmingly common case, is just a chain of length
+            // one).
+            std::string name = parse_qualified_name();
             if (match(TokenKind::LParen)) {
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Call;
@@ -1205,13 +1598,13 @@ private:
     }
 };
 
-Program parse(std::vector<Token> tokens) {
-    Parser parser(std::move(tokens));
+Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {}) {
+    Parser parser(std::move(tokens), resolver);
     return parser.parse_program();
 }
 
-Program parse(std::string_view source) {
-    return parse(tokenize(source));
+Program parse(std::string_view source, const ModuleResolver& resolver = {}) {
+    return parse(tokenize(source), resolver);
 }
 
 } // namespace scpp

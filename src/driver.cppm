@@ -1,10 +1,14 @@
 module;
 
 #include <cstdlib>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <llvm/IR/LegacyPassManager.h>
@@ -31,11 +35,102 @@ struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
 
-// Compiles scpp source text down to a native object file at `object_path`.
-// This is the M1/M2/M3 backend: AST -> [move check] -> LLVM IR -> native
-// object code. Borrow/lifetime checks (M4/M5) aren't implemented yet.
-void emit_object_file(std::string_view source, const std::string& object_path) {
-    Program program = parse(source);
+} // namespace scpp
+
+// Module-private helpers (ch11 §11.7/§11.8/§11.13): resolving `import
+// name;` declarations against a `--import name=path` mapping (see
+// cli.cppm) and lowering an already-parsed Program to a native object
+// file -- shared by the main source and, once per resolved module, by
+// compile_to_executable below.
+namespace scpp {
+
+// Reads an imported module's source file from disk -- the parser itself
+// never touches the filesystem (see scpp.parser's ModuleResolver); this
+// is the driver's own responsibility, mirroring cli.cppm's own read_file
+// for the main input file (a small, separate duplicate rather than a
+// shared cross-module helper -- consistent with this codebase's existing
+// precedent, e.g. movecheck.cppm/codegen.cppm's independently-duplicated
+// types_equal).
+std::string read_module_source(const std::string& path) {
+    std::ifstream file(path);
+    if (!file) {
+        throw DriverError("cannot open imported module source '" + path + "'");
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+// ch11 §11.7/§11.8: resolves `import name;` declarations against a
+// `--import name=path` mapping, recursively parsing (and caching) each
+// imported module's source the first time it's needed -- multiple files
+// importing the same module, or transitive imports (an imported module
+// itself importing something else), only ever get parsed and merged
+// once. Only the explicit, unambiguous `--import name=path` form is
+// supported (mirrors Clang's `-fmodule-file=` and Rust's `--extern`,
+// per ch11 §11.13) -- a `.scppm` archive/package search path
+// (§11.11/§11.13's `-I` convenience) is out of scope for this pass.
+class ModuleCache {
+public:
+    explicit ModuleCache(std::unordered_map<std::string, std::string> import_paths)
+        : import_paths_(std::move(import_paths)) {}
+
+    const Program& resolve(const std::string& module_name) {
+        auto cached = cache_.find(module_name);
+        if (cached != cache_.end()) return cached->second;
+
+        if (resolving_.contains(module_name)) {
+            throw DriverError("circular import detected: module '" + module_name +
+                               "' (directly or transitively) imports itself");
+        }
+        auto path_it = import_paths_.find(module_name);
+        if (path_it == import_paths_.end()) {
+            throw DriverError("cannot find module '" + module_name + "' (use --import " + module_name +
+                               "=path/to/file)");
+        }
+
+        resolving_.insert(module_name);
+        std::string source = read_module_source(path_it->second);
+        Program imported =
+            parse(source, [this](const std::string& name) -> const Program& { return resolve(name); });
+        resolving_.erase(module_name);
+
+        if (imported.module_name != module_name) {
+            throw DriverError("'" + path_it->second + "' does not declare module '" + module_name +
+                               "' (its own module declaration names '" +
+                               (imported.module_name.empty() ? std::string("<none>") : imported.module_name) +
+                               "')");
+        }
+
+        resolution_order_.push_back(module_name);
+        auto [it, inserted] = cache_.emplace(module_name, std::move(imported));
+        return it->second;
+    }
+
+    // Every module actually resolved so far, in first-resolved order (a
+    // transitively-imported module is resolved -- and so appears here --
+    // strictly before whatever imported it, since resolve() recurses
+    // into a module's own imports before that module's entry is
+    // recorded). Used by compile_to_executable to know which modules
+    // need their own separately-compiled object file.
+    [[nodiscard]] const std::vector<std::string>& resolution_order() const { return resolution_order_; }
+    [[nodiscard]] const Program& program_for(const std::string& module_name) const { return cache_.at(module_name); }
+
+private:
+    std::unordered_map<std::string, std::string> import_paths_;
+    std::unordered_map<std::string, Program> cache_;
+    std::unordered_set<std::string> resolving_;
+    std::vector<std::string> resolution_order_;
+};
+
+// Move-checks an already-parsed (and, if it has imports of its own,
+// already import-merged -- see scpp.parser's merge_imported_module)
+// Program and lowers it to a native object file at `object_path`. Shared
+// by emit_object_file (the main source) and, once per resolved module,
+// by compile_to_executable below -- exactly the same backend either way,
+// since by this point a Program is just a Program regardless of which
+// file it came from.
+void emit_object_file_for_program(const Program& program, const std::string& object_path) {
     check_moves(program);
 
     llvm::InitializeNativeTarget();
@@ -78,13 +173,35 @@ void emit_object_file(std::string_view source, const std::string& object_path) {
     dest.flush();
 }
 
+} // namespace scpp
+
+export namespace scpp {
+
+// Compiles scpp source text down to a native object file at `object_path`.
+// This is the M1/M2/M3 backend: AST -> [move check] -> LLVM IR -> native
+// object code. `import_paths` (ch11 §11.7, `--import name=path`) resolves
+// any `import name;` declarations `source` itself has; empty by default
+// (no imports -- the overwhelmingly common case, every file before this
+// chapter). Only `source`'s own object file is produced here -- an
+// imported module's *own* separate object file is compile_to_executable's
+// job below, since deciding where to put it needs an executable-level
+// path to derive from.
+void emit_object_file(std::string_view source, const std::string& object_path,
+                       const std::unordered_map<std::string, std::string>& import_paths = {}) {
+    ModuleCache cache(import_paths);
+    Program program =
+        parse(source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); });
+    emit_object_file_for_program(program, object_path);
+}
+
 // Links a native object file into an executable using the system compiler
 // driver (clang/cc); this keeps us out of the business of re-implementing a
 // platform linker for M1. `extra_link_inputs` is appended verbatim after the
 // scpp object file -- additional .o/.a paths (e.g. a separately-built
-// `extern "C"` wrapper library, see stdlib/README.md) or `-lname`/`-Lpath`
-// flags a caller wants forwarded straight to the linker; empty by default
-// (an ordinary, no-C++-interop build needs none of this).
+// `extern "C"` wrapper library, see stdlib/README.md, or another module's
+// own compiled object file, see compile_to_executable below) or
+// `-lname`/`-Lpath` flags a caller wants forwarded straight to the linker;
+// empty by default (an ordinary, no-C++-interop build needs none of this).
 void link_executable(const std::string& object_path, const std::string& executable_path,
                       const std::vector<std::string>& extra_link_inputs = {}) {
     std::string command = "cc \"" + object_path + "\"";
@@ -104,12 +221,50 @@ void link_executable(const std::string& object_path, const std::string& executab
     }
 }
 
+// `import_paths` (ch11 §11.7, `--import name=path`) resolves any
+// `import name;` declarations `source` has. Every module actually
+// resolved (directly or transitively) gets its own separately-compiled
+// object file too -- an importer's codegen only ever *declares* (LLVM
+// `extern`) an imported symbol; something else has to *define* it (see
+// codegen.cppm's mangle_exported_symbol) -- then every object file
+// (main + one per resolved module + `extra_link_inputs`) is linked
+// together in one step. This is a real, if minimal, multi-file
+// separate-compilation pipeline (ch11's own framing): each module is
+// compiled fully independently, and only the system linker unifies them,
+// exactly like ordinary multi-TU C/C++ builds always have.
 void compile_to_executable(std::string_view source, const std::string& executable_path,
-                            const std::vector<std::string>& extra_link_inputs = {}) {
+                            const std::vector<std::string>& extra_link_inputs = {},
+                            const std::unordered_map<std::string, std::string>& import_paths = {}) {
+    ModuleCache cache(import_paths);
+    Program program =
+        parse(source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); });
+
     std::string object_path = executable_path + ".o";
-    emit_object_file(source, object_path);
-    link_executable(object_path, executable_path, extra_link_inputs);
+    emit_object_file_for_program(program, object_path);
+
+    std::vector<std::string> module_object_paths;
+    for (const std::string& module_name : cache.resolution_order()) {
+        std::string module_object_path = executable_path + "." + module_name + ".o";
+        emit_object_file_for_program(cache.program_for(module_name), module_object_path);
+        module_object_paths.push_back(module_object_path);
+    }
+
+    // Each resolved module's own object file is placed *before*
+    // extra_link_inputs (e.g. a native C++ wrapper library archive) so a
+    // conventional archive-aware linker (which only pulls in an archive
+    // member actually needed by a symbol reference seen *so far*) still
+    // resolves a module's own extern "C" calls into that archive
+    // correctly -- same reasoning `--link`'s existing placement already
+    // relies on.
+    std::vector<std::string> link_inputs = module_object_paths;
+    link_inputs.insert(link_inputs.end(), extra_link_inputs.begin(), extra_link_inputs.end());
+    link_executable(object_path, executable_path, link_inputs);
+
     llvm::sys::fs::remove(object_path);
+    for (const std::string& module_object_path : module_object_paths) {
+        llvm::sys::fs::remove(module_object_path);
+    }
 }
 
 } // namespace scpp
+

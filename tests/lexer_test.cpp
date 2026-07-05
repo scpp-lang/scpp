@@ -279,6 +279,38 @@ void test_char_literal_escape_sequence() {
     expect(tokens[0].text == "'\\n'", "char_literal_escape_sequence: text should include the escape");
 }
 
+// ch11 §11.3/§11.4/§11.7: module/export/import/namespace/as keywords.
+void test_module_keywords() {
+    expect_kinds(
+        "module export import namespace as",
+        {
+            scpp::TokenKind::KwModule,
+            scpp::TokenKind::KwExport,
+            scpp::TokenKind::KwImport,
+            scpp::TokenKind::KwNamespace,
+            scpp::TokenKind::KwAs,
+            scpp::TokenKind::EndOfFile,
+        },
+        "module_keywords");
+}
+
+// A dotted module name (`std.core`) is just an ordinary Identifier/Dot/
+// Identifier sequence -- no new lexer token needed, reusing the same Dot
+// token member-access already uses.
+void test_dotted_module_name() {
+    expect_kinds(
+        "import std.core;",
+        {
+            scpp::TokenKind::KwImport,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Dot,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Semicolon,
+            scpp::TokenKind::EndOfFile,
+        },
+        "dotted_module_name");
+}
+
 } // namespace
 
 int main() {
@@ -302,6 +334,8 @@ int main() {
     test_char_keyword();
     test_char_literal();
     test_char_literal_escape_sequence();
+    test_module_keywords();
+    test_dotted_module_name();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

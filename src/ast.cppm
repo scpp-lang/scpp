@@ -259,7 +259,8 @@ struct Function {
     // rather than a specific statement/expression inside it.
     SourceLocation loc;
     std::vector<Param> params;
-    // Null for a bodyless `extern "C"` declaration (ch02 §2.1) -- defined
+    // Null for a bodyless `extern "C"` declaration (ch02 §2.1) or a bare
+    // `extern` module-linkage declaration (ch11 §11.6) -- defined
     // elsewhere, linked in externally. Always non-null for every other
     // function (an ordinary definition, or an `extern "C"` *definition*
     // with a body). Nothing outside parsing/movecheck/codegen's
@@ -271,6 +272,13 @@ struct Function {
     // always false (parsing rejects `safe` on a bodyless declaration,
     // since the compiler can't verify an implementation it can't see).
     bool is_extern_c = false;
+    // ch11 §11.6: a bare `extern` (no `"C"` string) bodyless declaration
+    // -- ordinary scpp linkage, *can* be `safe` (unlike `is_extern_c`,
+    // since the module's own author is trusted to check the real
+    // implementation elsewhere, see §11.6's own reasoning). Mutually
+    // exclusive with is_extern_c (either this function requests C ABI,
+    // or ordinary scpp linkage, never both).
+    bool is_module_extern = false;
     // ch02 §2.1: the declaration ends in a trailing `...` (e.g.
     // `printf(const char* fmt, ...)`). Parsed and stored, but v0.1
     // doesn't yet support a *call site* passing extra arguments beyond
@@ -278,6 +286,35 @@ struct Function {
     // only parsing/declaring the correct variadic signature shape is
     // implemented in this first slice, per the spec's own scoping.
     bool has_varargs = false;
+
+    // ch11 §11.4/§11.5: the namespace path this declaration lexically
+    // lives in, e.g. `namespace std { ... }` -> {"std"}, `namespace
+    // a::b { ... }` -> {"a", "b"}. Empty for a declaration at file/global
+    // scope (today's default, unaffected by any of this). `name` itself
+    // already carries the fully-qualified form (e.g. "std::string_new")
+    // -- namespace_path is tracked *separately* so the export/namespace
+    // validation pass (§11.5) and codegen's mangling scheme (§11.9) can
+    // check/encode namespace segments individually, not just as one
+    // opaque joined string.
+    std::vector<std::string> namespace_path;
+    // ch11 §11.3: true for an `export`-prefixed declaration (or one
+    // inside an `export { ... }` group, or a synthesized method of an
+    // `export class`/`export struct`). Only actually exports if
+    // namespace_path also starts with the enclosing module's own dotted
+    // name -- see the export/namespace validation pass. Meaningless
+    // (never consulted) when the enclosing Program isn't a module at
+    // all (module_name empty).
+    bool is_exported = false;
+    // ch11 §11.8/§11.9: empty for a declaration belonging to the
+    // Program currently being compiled (whether or not that Program is
+    // itself a module -- see Program::module_name); set to the imported
+    // module's own dotted name when this Function was recovered from an
+    // imported module's interface and merged in (see the driver's
+    // cross-module signature recovery) -- codegen's mangling scheme
+    // keys off this field, not Program::module_name, so a merged-in
+    // declaration is mangled exactly the way its owning module's own
+    // separate compilation will define it.
+    std::string owning_module;
 };
 
 struct StructField {
@@ -288,6 +325,12 @@ struct StructField {
 struct StructDef {
     std::string name;
     std::vector<StructField> fields;
+    // See Function::namespace_path/is_exported/owning_module above --
+    // same meaning, applied to a struct declaration (ch11 §11.3's
+    // "struct definitions" are part of v0.1's exportable surface).
+    std::vector<std::string> namespace_path;
+    bool is_exported = false;
+    std::string owning_module;
 };
 
 enum class AccessSpecifier {
@@ -326,12 +369,53 @@ struct ClassField {
 struct ClassDef {
     std::string name;
     std::vector<ClassField> fields;
+    // See Function::namespace_path/is_exported/owning_module above --
+    // same meaning. `is_exported` on the ClassDef itself (set by
+    // `export class Name { ... };`) also propagates to every method
+    // synthesized from this class into Program::functions, so exporting
+    // a class is one declaration, not one per member (ch11 §11.3).
+    std::vector<std::string> namespace_path;
+    bool is_exported = false;
+    std::string owning_module;
+};
+
+// ch11 §11.7: one `import name;` / `export import name;` declaration.
+struct ImportDecl {
+    // The imported module's dotted name (e.g. "std", "org.lotx.cmath"),
+    // exactly as written -- this is also the key the driver's
+    // ModuleResolver/import-path mapping (`--import name=path`) is
+    // looked up by.
+    std::string module_name;
+    // ch11 §11.7: true for `export import name;` (transitively
+    // re-exports `name`'s own exports to whoever imports *this* file in
+    // turn), false for a plain `import name;` (private, non-transitive).
+    bool is_reexport = false;
 };
 
 struct Program {
     std::vector<StructDef> structs;
     std::vector<ClassDef> classes;
     std::vector<Function> functions;
+
+    // ch11 §11.3: this file's own module name, e.g. "std" or
+    // "org.lotx.cmath" -- empty for an ordinary, non-module file (every
+    // scpp file before this chapter, and still the overwhelmingly common
+    // case: nothing about module_name being empty changes any existing
+    // behavior anywhere).
+    std::string module_name;
+    // True for a file starting `export module name;` (a primary
+    // interface unit -- may contain `export`-marked declarations).
+    bool is_module_interface = false;
+    // True for a file starting `module name;` with no `export` (an
+    // implementation unit -- contributes more code to the same module,
+    // but may not itself export anything; see ch11 §11.3). Mutually
+    // exclusive with is_module_interface.
+    bool is_module_impl = false;
+    // Every `import`/`export import` declaration this file has, in
+    // source order -- consulted by the driver to know which modules
+    // must be separately compiled and linked in, and by the export/
+    // namespace validation pass for re-export bookkeeping.
+    std::vector<ImportDecl> imports;
 };
 
 } // namespace scpp

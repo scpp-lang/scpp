@@ -782,6 +782,187 @@ void test_plain_pointer_defaults_to_mutable_pointee() {
     expect(param_type.is_mutable_pointee, "plain_pointer_defaults_to_mutable_pointee: is_mutable_pointee should be true");
 }
 
+// ch11 §11.3: `export module name;` marks a primary interface unit.
+void test_export_module_declaration() {
+    scpp::Program program = scpp::parse("export module std;\n");
+    expect(program.module_name == "std", "export_module_declaration: module_name should be 'std'");
+    expect(program.is_module_interface, "export_module_declaration: should be an interface unit");
+    expect(!program.is_module_impl, "export_module_declaration: should not be an implementation unit");
+}
+
+// ch11 §11.3: a dotted module name (`org.lotx.cmath`) is read segment by
+// segment (Identifier Dot Identifier ...), matching real module-name
+// syntax, not namespace `::` syntax.
+void test_dotted_module_name_declaration() {
+    scpp::Program program = scpp::parse("export module org.lotx.cmath;\n");
+    expect(program.module_name == "org.lotx.cmath", "dotted_module_name_declaration: expected 'org.lotx.cmath'");
+}
+
+// ch11 §11.3: `module name;` (no `export`) is an implementation unit.
+void test_plain_module_declaration_is_implementation_unit() {
+    scpp::Program program = scpp::parse("module std;\n");
+    expect(program.module_name == "std", "plain_module_declaration_is_implementation_unit: module_name should be 'std'");
+    expect(!program.is_module_interface,
+           "plain_module_declaration_is_implementation_unit: should not be an interface unit");
+    expect(program.is_module_impl, "plain_module_declaration_is_implementation_unit: should be an implementation unit");
+}
+
+// A file with no module declaration at all is unaffected -- module_name
+// stays empty, matching every scpp file before this chapter.
+void test_no_module_declaration_leaves_module_name_empty() {
+    scpp::Program program = scpp::parse("int main() { return 0; }");
+    expect(program.module_name.empty(), "no_module_declaration_leaves_module_name_empty: module_name should be empty");
+    expect(!program.is_module_interface && !program.is_module_impl,
+           "no_module_declaration_leaves_module_name_empty: neither interface nor impl unit");
+}
+
+// ch11 §11.4: `namespace std { ... }` qualifies every nested
+// declaration's name with the namespace prefix, and records
+// namespace_path separately.
+void test_namespace_qualifies_struct_name() {
+    scpp::Program program = scpp::parse("namespace std { struct Point { int x; }; }");
+    expect(program.structs.size() == 1, "namespace_qualifies_struct_name: expected 1 struct");
+    const scpp::StructDef& def = program.structs[0];
+    expect(def.name == "std::Point", "namespace_qualifies_struct_name: name should be 'std::Point'");
+    expect(def.namespace_path.size() == 1 && def.namespace_path[0] == "std",
+           "namespace_qualifies_struct_name: namespace_path should be ['std']");
+}
+
+// ch11 §11.4: the C++17 one-line nested namespace form (`namespace
+// a::b { ... }`) records every segment in namespace_path, in order.
+void test_nested_namespace_one_liner_qualifies_function_name() {
+    scpp::Program program = scpp::parse("namespace a::b { safe int f() { return 0; } }");
+    expect(program.functions.size() == 1, "nested_namespace_one_liner: expected 1 function");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.name == "a::b::f", "nested_namespace_one_liner: name should be 'a::b::f'");
+    expect(fn.namespace_path.size() == 2 && fn.namespace_path[0] == "a" && fn.namespace_path[1] == "b",
+           "nested_namespace_one_liner: namespace_path should be ['a', 'b']");
+}
+
+// A namespace-qualified type reference (`std::Point`) resolves once the
+// declaration itself has already registered its fully-qualified name.
+void test_qualified_type_reference_parses() {
+    scpp::Program program =
+        scpp::parse("namespace std { struct Point { int x; }; }\n"
+                     "safe int use_it() { std::Point p; return p.x; }");
+    expect(program.functions.size() == 1, "qualified_type_reference_parses: expected 1 function");
+    const scpp::Stmt& decl = *program.functions[0].body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "qualified_type_reference_parses: expected a VarDecl");
+    expect(is_named_type(decl.type, "std::Point"), "qualified_type_reference_parses: type should be 'std::Point'");
+}
+
+// ch11 §11.3: `export` prefixing a top-level function marks it exported.
+void test_export_prefix_marks_function_exported() {
+    scpp::Program program = scpp::parse("export module std;\nnamespace std { export safe int f() { return 0; } }");
+    expect(program.functions.size() == 1, "export_prefix_marks_function_exported: expected 1 function");
+    expect(program.functions[0].is_exported, "export_prefix_marks_function_exported: should be exported");
+}
+
+// A declaration with no `export` prefix defaults to not-exported, even
+// inside a namespace.
+void test_no_export_prefix_leaves_function_not_exported() {
+    scpp::Program program = scpp::parse("namespace std { safe int f() { return 0; } }");
+    expect(!program.functions[0].is_exported, "no_export_prefix_leaves_function_not_exported: should not be exported");
+}
+
+// ch11 §11.3: `export { ... }` groups several declarations under one
+// export marker, equivalent to prefixing each individually.
+void test_export_group_marks_multiple_declarations_exported() {
+    scpp::Program program = scpp::parse(
+        "export module std;\n"
+        "namespace std { export { safe int f() { return 0; } safe int g() { return 1; } } }");
+    expect(program.functions.size() == 2, "export_group_marks_multiple_declarations_exported: expected 2 functions");
+    expect(program.functions[0].is_exported && program.functions[1].is_exported,
+           "export_group_marks_multiple_declarations_exported: both should be exported");
+}
+
+// ch11 §11.3: `export class Name { ... };` exports the whole class --
+// every synthesized method inherits is_exported, not just the class
+// name entry itself.
+void test_export_class_propagates_to_methods() {
+    scpp::Program program = scpp::parse(
+        "export module std;\n"
+        "namespace std { export class Point { public: safe Point() { return; } }; }");
+    expect(program.classes.size() == 1, "export_class_propagates_to_methods: expected 1 class");
+    expect(program.classes[0].is_exported, "export_class_propagates_to_methods: class itself should be exported");
+    expect(program.classes[0].name == "std::Point", "export_class_propagates_to_methods: name should be 'std::Point'");
+    expect(program.functions.size() == 1, "export_class_propagates_to_methods: expected 1 synthesized ctor");
+    expect(program.functions[0].name == "std::Point_new",
+           "export_class_propagates_to_methods: ctor should be named 'std::Point_new'");
+    expect(program.functions[0].is_exported, "export_class_propagates_to_methods: ctor should inherit is_exported");
+}
+
+// ch11 §11.5: `export` on a declaration whose namespace doesn't match
+// the module's own name is a compile error -- both gates (export
+// marker, correct namespace) are independently mandatory.
+void test_export_outside_matching_namespace_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("export module std;\nnamespace other { export safe int f() { return 0; } }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "export_outside_matching_namespace_is_rejected: expected a ParseError");
+}
+
+// ch11 §11.5: `export` with no enclosing namespace at all (while inside
+// a module) is also rejected -- "lives in the required namespace" can't
+// be satisfied by "no namespace".
+void test_export_with_no_namespace_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("export module std;\nexport safe int f() { return 0; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "export_with_no_namespace_is_rejected: expected a ParseError");
+}
+
+// ch11 §11.5: a namespace nested *deeper* than the module's own name is
+// still fine (a prefix requirement, not exact-match).
+void test_export_in_deeper_nested_namespace_is_allowed() {
+    scpp::Program program = scpp::parse(
+        "export module org.lotx.cmath;\n"
+        "namespace org::lotx::cmath::trig { export safe int f() { return 0; } }");
+    expect(program.functions.size() == 1, "export_in_deeper_nested_namespace_is_allowed: expected 1 function");
+    expect(program.functions[0].is_exported, "export_in_deeper_nested_namespace_is_allowed: should be exported");
+}
+
+// ch11 §11.3: `export` on a declaration in a file with no module
+// declaration at all has nothing to export from -- rejected.
+void test_export_without_any_module_declaration_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("namespace std { export safe int f() { return 0; } }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "export_without_any_module_declaration_is_rejected: expected a ParseError");
+}
+
+// ch11 §11.6: a bare `extern` (no `"C"` string) declaration has ordinary
+// scpp linkage and *can* be `safe`, unlike `extern "C"`. `safe` (as with
+// `extern "C"`) precedes `extern`, matching this codebase's one
+// consistent keyword ordering for every kind of extern declaration.
+void test_bare_extern_declaration_can_be_safe() {
+    scpp::Program program = scpp::parse("safe extern int square(int x);");
+    expect(program.functions.size() == 1, "bare_extern_declaration_can_be_safe: expected 1 function");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.is_module_extern, "bare_extern_declaration_can_be_safe: is_module_extern should be true");
+    expect(!fn.is_extern_c, "bare_extern_declaration_can_be_safe: is_extern_c should be false");
+    expect(fn.is_safe, "bare_extern_declaration_can_be_safe: should be allowed to be safe");
+    expect(fn.body == nullptr, "bare_extern_declaration_can_be_safe: body should be null (bodyless declaration)");
+}
+
+// A bare `extern` declaration is namespace-qualified like any ordinary
+// scpp-linkage declaration (unlike `extern "C"`, which never is).
+void test_bare_extern_declaration_is_namespace_qualified() {
+    scpp::Program program = scpp::parse("namespace org::lotx::cmath { safe extern int sqrt(int x); }");
+    expect(program.functions.size() == 1, "bare_extern_declaration_is_namespace_qualified: expected 1 function");
+    expect(program.functions[0].name == "org::lotx::cmath::sqrt",
+           "bare_extern_declaration_is_namespace_qualified: expected qualified name");
+}
+
 } // namespace
 
 int main() {
@@ -843,6 +1024,23 @@ int main() {
     test_unsupported_string_escape_is_rejected();
     test_const_char_pointer_type();
     test_plain_pointer_defaults_to_mutable_pointee();
+    test_export_module_declaration();
+    test_dotted_module_name_declaration();
+    test_plain_module_declaration_is_implementation_unit();
+    test_no_module_declaration_leaves_module_name_empty();
+    test_namespace_qualifies_struct_name();
+    test_nested_namespace_one_liner_qualifies_function_name();
+    test_qualified_type_reference_parses();
+    test_export_prefix_marks_function_exported();
+    test_no_export_prefix_leaves_function_not_exported();
+    test_export_group_marks_multiple_declarations_exported();
+    test_export_class_propagates_to_methods();
+    test_export_outside_matching_namespace_is_rejected();
+    test_export_with_no_namespace_is_rejected();
+    test_export_in_deeper_nested_namespace_is_allowed();
+    test_export_without_any_module_declaration_is_rejected();
+    test_bare_extern_declaration_can_be_safe();
+    test_bare_extern_declaration_is_namespace_qualified();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

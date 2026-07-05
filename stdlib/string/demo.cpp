@@ -1,15 +1,20 @@
 // demo.cpp
 //
-// End-to-end demo of stdlib/string's `class String`: constructs a String
-// from a C string literal, appends to it, reads its length, converts it
-// back to a C string to print via libc's real puts(), and checks equality.
-// See build.sh for how this file gets combined with String.cpp and linked
-// against the compiled scpp_string_wrapper library into one executable.
+// End-to-end demo of stdlib/string's std::string, consumed through
+// scpp's real multi-file module system (ch11): imports the "std" module
+// (see std.cpp) and constructs a std::string from a C string literal,
+// appends to it, reads its length, converts it back to a C string to
+// print via libc's real puts(), and checks equality. See CMakeLists.txt
+// for how this file is compiled and linked against std.cpp's *own*,
+// separately-compiled object file plus the compiled scpp_string_wrapper
+// library.
+import std;
+
 extern "C" {
     int puts(const char* s);
 }
 
-safe void print_string(const String& s) {
+safe void print_string(const std::string& s) {
     unsafe {
         puts(s.c_str());
     }
@@ -17,7 +22,7 @@ safe void print_string(const String& s) {
 }
 
 int main() {
-    String greeting("Hello");
+    std::string greeting("Hello");
     greeting.append(", ");
     greeting.append("scpp");
     greeting.append("!");

@@ -66,6 +66,18 @@ enum class TokenKind {
                // access-specifier section at all, matching real C++.
     KwThis,    // ch05 §5.9: implicit reference parameter of every method
                // -- `const T&` in a `const` method, `T&` otherwise.
+    KwModule,    // ch11 §11.3: `export module name;` / `module name;` --
+                 // module declaration, must be the first thing in a file.
+    KwExport,    // ch11 §11.3/§11.7: prefixes `module` (interface unit),
+                 // `import` (re-export), or an individual top-level
+                 // declaration/`export { ... }` group (marks it visible
+                 // to importers).
+    KwImport,    // ch11 §11.7: `import name;` (private) / `export import
+                 // name;` (re-exporting).
+    KwNamespace, // ch11 §11.4: `namespace a::b::c { ... }` (real C++
+                 // syntax, including the C++17 one-line nested form).
+    KwAs,        // ch11 §11.7: `import name as local_name;` (renaming an
+                 // import -- new syntax, not present in real C++20).
 
     // punctuation
     LParen,
@@ -197,6 +209,11 @@ private:
         if (text == "public") return TokenKind::KwPublic;
         if (text == "private") return TokenKind::KwPrivate;
         if (text == "this") return TokenKind::KwThis;
+        if (text == "module") return TokenKind::KwModule;
+        if (text == "export") return TokenKind::KwExport;
+        if (text == "import") return TokenKind::KwImport;
+        if (text == "namespace") return TokenKind::KwNamespace;
+        if (text == "as") return TokenKind::KwAs;
         return TokenKind::Identifier;
     }
 

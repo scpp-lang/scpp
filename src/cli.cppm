@@ -5,6 +5,7 @@ module;
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 export module scpp.cli;
@@ -44,6 +45,11 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwPublic: return "KwPublic";
         case scpp::TokenKind::KwPrivate: return "KwPrivate";
         case scpp::TokenKind::KwThis: return "KwThis";
+        case scpp::TokenKind::KwModule: return "KwModule";
+        case scpp::TokenKind::KwExport: return "KwExport";
+        case scpp::TokenKind::KwImport: return "KwImport";
+        case scpp::TokenKind::KwNamespace: return "KwNamespace";
+        case scpp::TokenKind::KwAs: return "KwAs";
         case scpp::TokenKind::LParen: return "LParen";
         case scpp::TokenKind::RParen: return "RParen";
         case scpp::TokenKind::LBrace: return "LBrace";
@@ -353,7 +359,8 @@ int run_parse(std::string_view path) {
 }
 
 int run_build(std::string_view input_path, std::string_view output_path,
-              const std::vector<std::string>& extra_link_inputs) {
+              const std::vector<std::string>& extra_link_inputs,
+              const std::unordered_map<std::string, std::string>& import_paths) {
     std::string source;
     try {
         source = read_file(input_path);
@@ -363,7 +370,7 @@ int run_build(std::string_view input_path, std::string_view output_path,
     }
 
     try {
-        scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs);
+        scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs, import_paths);
     } catch (const scpp::ParseError& e) {
         print_diagnostic(input_path, source, e.loc, e.what());
         return 1;
@@ -396,22 +403,36 @@ int run(int argc, char** argv) {
     if (argc >= 3 && std::string_view(argv[1]) == "build") {
         std::string_view output_path = "a.out";
         std::vector<std::string> extra_link_inputs;
+        std::unordered_map<std::string, std::string> import_paths;
         for (int i = 3; i < argc; i++) {
             std::string_view arg = argv[i];
             if (arg == "-o" && i + 1 < argc) {
                 output_path = argv[++i];
             } else if (arg == "--link" && i + 1 < argc) {
                 extra_link_inputs.emplace_back(argv[++i]);
+            } else if (arg == "--import" && i + 1 < argc) {
+                // ch11 §11.7/§11.13: `--import name=path` (repeatable),
+                // mirroring Clang's `-fmodule-file=name=path` and Rust's
+                // `--extern name=path` -- explicit and unambiguous, the
+                // only import-resolution mechanism this version supports
+                // (no `.scppm`/`-I` search path yet).
+                std::string_view mapping = argv[++i];
+                size_t eq = mapping.find('=');
+                if (eq == std::string_view::npos) {
+                    std::cerr << "error: --import expects 'name=path', got '" << mapping << "'\n";
+                    return 1;
+                }
+                import_paths.emplace(std::string(mapping.substr(0, eq)), std::string(mapping.substr(eq + 1)));
             }
         }
-        return run_build(argv[2], output_path, extra_link_inputs);
+        return run_build(argv[2], output_path, extra_link_inputs, import_paths);
     }
 
     std::string_view name = argc > 0 ? argv[0] : "scpp";
     std::cout << "Hello from " << name << " " << version << "!\n";
     std::cout << "Usage: " << name << " lex <file>\n";
     std::cout << "       " << name << " parse <file>\n";
-    std::cout << "       " << name << " build <file> [-o <output>] [--link <path>]...\n";
+    std::cout << "       " << name << " build <file> [-o <output>] [--link <path>]... [--import name=path]...\n";
     return 0;
 }
 

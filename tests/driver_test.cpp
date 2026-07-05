@@ -14,6 +14,7 @@ import scpp.ast;
 #include <string>
 #include <string_view>
 #include <sys/wait.h>
+#include <unordered_map>
 #include <vector>
 
 // SCPP_TEST_SOURCE_DIR is injected by CMake (see the driver_test target in
@@ -131,7 +132,7 @@ void run_test_case_files() {
 // column -- not the rendered "file:line:col: error: ..." text itself,
 // which is cli.cppm's own presentation concern (an unexported, CLI-only
 // helper untestable from here without shelling out to the built `scpp`
-// binary; the integration_test/ suite -- a separate, independently
+// binary; the blackbox_test/ suite -- a separate, independently
 // maintained black-box harness -- is where exercising the CLI's actual
 // stderr output belongs, not this binary).
 void run_error_location_tests() {
@@ -195,11 +196,174 @@ void run_error_location_tests() {
     }
 }
 
+// ch11 (Modules & Libraries): end-to-end coverage for the multi-file
+// module system -- real separate compilation (each module gets its own
+// object file), cross-module signature recovery seeding movecheck with
+// zero new checker logic (§11.8), and ch11 §11.9's real mangling scheme,
+// all exercised through the actual public API (scpp::parse's
+// ModuleResolver + scpp::compile_to_executable's import_paths) rather
+// than by poking any single layer in isolation. Writes each case's
+// imported module source to a real temp file, since ModuleCache (driver.
+// cppm) resolves `--import name=path` against an actual file path, not
+// an in-memory string.
+void run_module_system_tests() {
+    auto write_temp_file = [](const std::string& case_name, const std::string& suffix, const std::string& content) {
+        std::filesystem::path path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_" + suffix + ".cpp");
+        std::ofstream file(path);
+        file << content;
+        file.close();
+        return path;
+    };
+
+    // A basic import: an exported function and an exported class, called
+    // from a plain (non-module) consumer file.
+    {
+        std::string case_name = "module_basic_import";
+        cases_run++;
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module mathlib;\n"
+            "namespace mathlib {\n"
+            "    export safe int square(int x) { return x * x; }\n"
+            "    safe int helper(int x) { return x + 1; }\n"
+            "    export safe int square_plus_one(int x) { return mathlib::square(x) + mathlib::helper(0); }\n"
+            "}\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() {\n"
+            "    print_int(mathlib::square(6));\n"
+            "    print_int(mathlib::square_plus_one(6));\n"
+            "    return 0;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"mathlib", lib_path.string()}});
+            FILE* pipe = popen(exe_path.string().c_str(), "r");
+            std::string output;
+            if (pipe != nullptr) {
+                char buffer[256];
+                size_t n;
+                while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
+            }
+            int status = pipe != nullptr ? pclose(pipe) : -1;
+            std::filesystem::remove(exe_path);
+            expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
+            expect(output == "36\n37\n", case_name + ": expected stdout '36\\n37\\n', got '" + output + "'");
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(lib_path);
+    }
+
+    // A module-private (non-exported) function is invisible to an
+    // importer -- calling it should fail exactly like calling any other
+    // undeclared name (ch11 §11.3: only `export`-marked declarations
+    // cross the module boundary at all). Movecheck itself has never
+    // rejected a call to a genuinely unknown name (see
+    // check_call_arguments's own comment -- that's codegen's "call to
+    // unknown function" check), so this needs to run codegen too, not
+    // movecheck alone.
+    {
+        std::string case_name = "module_private_function_not_visible";
+        cases_run++;
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module mathlib;\n"
+            "namespace mathlib {\n"
+            "    safe int helper(int x) { return x + 1; }\n"
+            "}\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() {\n"
+            "    print_int(mathlib::helper(6));\n"
+            "    return 0;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program lib_program = scpp::parse(read_file(lib_path));
+            scpp::Program program = scpp::parse(
+                main_source, [&lib_program](const std::string&) -> const scpp::Program& { return lib_program; });
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected calling a module-private function to fail");
+        std::filesystem::remove(lib_path);
+    }
+
+    // Importing a module whose own module declaration doesn't match the
+    // requested name is rejected (a mismatched --import name=path).
+    {
+        std::string case_name = "module_name_mismatch_is_rejected";
+        cases_run++;
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib", "export module actuallib;\n");
+        bool threw = false;
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable("import mathlib;\nint main() { return 0; }\n", exe_path.string(), {},
+                                         {{"mathlib", lib_path.string()}});
+            std::filesystem::remove(exe_path);
+        } catch (const scpp::DriverError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected a DriverError for a module name mismatch");
+        std::filesystem::remove(lib_path);
+    }
+
+    // Importing a module with no corresponding --import mapping at all
+    // is rejected with a clear error, not a crash.
+    {
+        std::string case_name = "missing_import_mapping_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable("import nonexistent;\nint main() { return 0; }\n", exe_path.string());
+            std::filesystem::remove(exe_path);
+        } catch (const scpp::DriverError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected a DriverError for a missing --import mapping");
+    }
+
+    // A direct circular import (A imports B, B imports A) is rejected
+    // rather than infinite-recursing.
+    {
+        std::string case_name = "circular_import_is_rejected";
+        cases_run++;
+        std::filesystem::path a_path = write_temp_file(case_name, "a", "export module a;\nimport b;\n");
+        std::filesystem::path b_path = write_temp_file(case_name, "b", "export module b;\nimport a;\n");
+        bool threw = false;
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable("import a;\nint main() { return 0; }\n", exe_path.string(), {},
+                                         {{"a", a_path.string()}, {"b", b_path.string()}});
+            std::filesystem::remove(exe_path);
+        } catch (const scpp::DriverError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected a DriverError for a circular import");
+        std::filesystem::remove(a_path);
+        std::filesystem::remove(b_path);
+    }
+}
+
 } // namespace
 
 int main() {
     run_test_case_files();
     run_error_location_tests();
+    run_module_system_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

@@ -778,14 +778,12 @@ private:
 
     // A short, LLVM-identifier-safe (alphanumeric/underscore only, no
     // spaces) encoding of `type`, used only to build a *disambiguating*
-    // symbol-name suffix for an overloaded function (see
-    // build_overload_names) -- unlike ch11 §11.9's real mangling scheme
-    // (which spells out full, human-oriented type text for a future
-    // cross-module linker to see), this only has to be unique *within
-    // this one compiled file* today (v0.1 has no real module/namespace
-    // system yet, so there is no cross-file symbol resolution for it to
-    // matter to) -- so a compact tag scheme is simpler and just as
-    // correct for the one job this version actually needs it for.
+    // symbol-name suffix for a *local* (non-cross-module) overloaded
+    // function (see build_overload_names) -- unlike ch11 §11.9's real
+    // mangling scheme (used for symbols crossing a module boundary, see
+    // mangle_exported_symbol below), this only has to be unique *within
+    // this one compiled file*, so a compact tag scheme is simpler and
+    // just as correct for the one job this specific helper needs it for.
     [[nodiscard]] static std::string mangle_type(const Type& type) {
         switch (type.kind) {
             case TypeKind::Named: return type.name;
@@ -798,21 +796,124 @@ private:
         return "?";
     }
 
-    // Builds overload_names_ for every function in the program: grouped
-    // by `fn.name`, a solitary function keeps its name unchanged, while
-    // 2+ sharing a name (ch05 §5.10) each get `fn.name + "." +
-    // <mangled param types, "this" included>` -- "this" has to be
-    // included (not skipped) so e.g. a const/non-const method pair
-    // (`get()`/`get() const`, both synthesized as "ClassName_get" with
-    // otherwise-identical --  in this case entirely empty -- parameter
-    // lists) still end up with two distinct mangled names instead of
-    // colliding.
+    // The full, human-readable-spelled-out type text ch11 §11.9's real
+    // mangling scheme requires (e.g. "int", "const int&",
+    // "std::unique_ptr<int>") -- mirrors cli.cppm's own type_to_string
+    // (a separate module, so duplicated rather than shared; both are
+    // small, stable, one-purpose functions).
+    [[nodiscard]] static std::string verbatim_type_spelling(const Type& type) {
+        switch (type.kind) {
+            case TypeKind::Named: return type.name;
+            case TypeKind::Pointer:
+                return (type.is_mutable_pointee ? std::string() : std::string("const ")) +
+                       verbatim_type_spelling(*type.pointee) + "*";
+            case TypeKind::UniquePtr: return "std::unique_ptr<" + verbatim_type_spelling(*type.pointee) + ">";
+            case TypeKind::Reference:
+                return (type.is_mutable_ref ? std::string() : std::string("const ")) +
+                       verbatim_type_spelling(*type.pointee) + "&";
+            case TypeKind::Span:
+                return "std::span<" + (type.is_mutable_ref ? std::string() : std::string("const ")) +
+                       verbatim_type_spelling(*type.pointee) + ">";
+            case TypeKind::Array:
+                return verbatim_type_spelling(*type.element) + "[" + std::to_string(type.array_size) + "]";
+        }
+        return "?";
+    }
+
+    // Splits a dotted module name ("org.lotx.cmath") into segments --
+    // codegen's own copy of the parser's split_dotted_name (separate
+    // module, no shared code; both are tiny, stable helpers).
+    [[nodiscard]] static std::vector<std::string> split_dotted(const std::string& dotted) {
+        std::vector<std::string> segments;
+        size_t start = 0;
+        while (start <= dotted.size()) {
+            size_t dot = dotted.find('.', start);
+            if (dot == std::string::npos) {
+                segments.push_back(dotted.substr(start));
+                break;
+            }
+            segments.push_back(dotted.substr(start, dot - start));
+            start = dot + 1;
+        }
+        return segments;
+    }
+
+    // ch11 §11.9: the real cross-module mangled symbol name for an
+    // exported function -- `_scppM<len>_<module>N<len>_<ns segment>...
+    // F<len>_<name>P<count>_<len>_<type>...`, e.g. `sin` exported from
+    // `org.lotx.cmath` under an extra `trig` nesting level mangles to
+    // `_scppM14_org.lotx.cmathN4_trigF3_sinP0_`. `effective_module` is
+    // `fn.owning_module` for a function recovered from an *imported*
+    // module, or the current Program's own `module_name` for a function
+    // this module exports itself -- either way, the segment this
+    // function's own separate compilation (now or originally) produces
+    // is identical, which is the entire point: an importer's `declare`
+    // must match the exporter's `define` byte-for-byte.
+    [[nodiscard]] std::string mangle_exported_symbol(const Function& fn) const {
+        const std::string& effective_module = fn.owning_module.empty() ? program_->module_name : fn.owning_module;
+        std::string mangled = "_scppM" + std::to_string(effective_module.size()) + "_" + effective_module;
+        // Namespace nesting *beyond* the module's own required prefix
+        // (ch11 §11.5 already requires every exported symbol's namespace
+        // to start with the module's dotted name -- module names use
+        // '.', namespace paths use '::', translated segment-for-segment
+        // -- so that shared prefix doesn't need re-encoding here).
+        std::vector<std::string> module_segments = split_dotted(effective_module);
+        for (size_t i = module_segments.size(); i < fn.namespace_path.size(); i++) {
+            const std::string& segment = fn.namespace_path[i];
+            mangled += "N" + std::to_string(segment.size()) + "_" + segment;
+        }
+        // fn.name is already fully namespace-qualified (e.g.
+        // "std::string_new", see the parser's qualify_name) -- the
+        // mangled symbol's own <function name bytes> segment is just the
+        // last "::"-separated piece (namespace nesting is separately
+        // encoded by the N blocks above).
+        std::string bare_name = fn.name;
+        size_t last_separator = bare_name.rfind("::");
+        if (last_separator != std::string::npos) bare_name = bare_name.substr(last_separator + 2);
+        mangled += "F" + std::to_string(bare_name.size()) + "_" + bare_name;
+        mangled += "P" + std::to_string(fn.params.size()) + "_";
+        for (const Param& param : fn.params) {
+            std::string spelling = verbatim_type_spelling(param.type);
+            mangled += std::to_string(spelling.size()) + "_" + spelling;
+        }
+        return mangled;
+    }
+
+    // Builds overload_names_ for every function in the program. Three
+    // cases, in priority order:
+    //   1. Cross-module (ch11 §11.9): either exported from *this*
+    //      Program's own module (fn.owning_module empty, but
+    //      program_->module_name isn't, and fn.is_exported), or recovered
+    //      from a *different*, already-separately-compiled module
+    //      (fn.owning_module non-empty -- see the parser's
+    //      merge_imported_module). Always gets the real mangled name,
+    //      external linkage; already globally unique per (module,
+    //      namespace, name, param types), so no extra "which overload"
+    //      bookkeeping is needed on top of the mangled name itself.
+    //   2. A solitary function under a name (the overwhelmingly common
+    //      case for everything else) keeps its name unchanged -- this is
+    //      what keeps `main`/`extern "C"` functions' names exactly as
+    //      declared, and (new) what gives a module-private, non-exported
+    //      function's the plain, un-mangled name ch11 §11.9 says it
+    //      needs (internal linkage never risks a cross-file collision).
+    //   3. 2+ functions genuinely sharing a name within this same file,
+    //      *none* of which are cross-module (ch05 §5.10, local
+    //      overloading) -- each gets a compact, file-local disambiguating
+    //      suffix (mangle_type).
     void build_overload_names() {
         std::unordered_map<std::string, std::vector<const Function*>> by_name;
         for (const Function& fn : program_->functions) {
             by_name[fn.name].push_back(&fn);
         }
         for (const auto& [name, fns] : by_name) {
+            bool recovered_from_elsewhere = !fns[0]->owning_module.empty();
+            bool exported_from_this_module = program_->module_name.empty() ? false : fns[0]->is_exported;
+            if (recovered_from_elsewhere || exported_from_this_module) {
+                for (const Function* fn : fns) {
+                    overload_names_[fn] = mangle_exported_symbol(*fn);
+                }
+                continue;
+            }
             if (fns.size() == 1) {
                 overload_names_[fns[0]] = name;
                 continue;
@@ -870,7 +971,26 @@ private:
         }
         llvm::FunctionType* fn_type =
             llvm::FunctionType::get(to_llvm_type(fn.return_type), param_types, fn.has_varargs);
-        llvm::Function::Create(fn_type, llvm::Function::ExternalLinkage, overload_names_.at(&fn), *module_);
+        // ch11 §11.9: a module-private (non-exported) function *defined*
+        // in this same translation unit never needs to be visible
+        // outside it -- LLVM internal linkage (the same mechanism as C's
+        // `static`) guarantees zero risk of colliding with an unrelated
+        // module's own same-named private helper, with no mangling
+        // needed at all. A bodyless declaration (extern "C", bare
+        // `extern` awaiting a separate implementation unit, or a
+        // function recovered from an *imported* module -- see the
+        // parser's merge_imported_module, which always clears the
+        // cloned Function's body) always keeps external linkage: LLVM
+        // requires a definition for internal linkage, and there's
+        // nothing here to hide regardless. Every other case (a
+        // non-module file's own function, or an exported one, handled
+        // via overload_names_'s mangled name already) is unaffected --
+        // external linkage, exactly as before this chapter.
+        llvm::Function::LinkageTypes linkage = llvm::Function::ExternalLinkage;
+        if (fn.body != nullptr && fn.owning_module.empty() && !program_->module_name.empty() && !fn.is_exported) {
+            linkage = llvm::Function::InternalLinkage;
+        }
+        llvm::Function::Create(fn_type, linkage, overload_names_.at(&fn), *module_);
     }
 
     void define_function(const Function& fn) {
