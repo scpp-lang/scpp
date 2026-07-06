@@ -50,15 +50,25 @@
    Q8 for the `??` operator as the first concrete instance of this call).
    Verbosity and missing features are an acceptable, recoverable cost; a
    broken erasure guarantee is not.
-7. **Reference C++ standard: C++26.** Wherever this document calls a name
-   or feature "real"/"already-standardized" C++ (e.g. `<cstdint>`,
-   `<stdfloat>`, `std::expected`, C++20 modules) versus "not yet
-   standard" (e.g. `int128_t`/WG21 P1467 -- see [§6](ch06-safe-subset.md)),
-   the cutoff is **C++26 specifically**: feature-frozen since the June
-   2025 Sofia meeting and through its final ballot as of the March 2026
-   London meeting. This is the baseline Principle 2's erasure property
-   and Principle 6's "stick to ratified names" rule are checked against
-   -- bump it forward whenever a newer standard is ratified.
+7. **Formal name: SCPP26. Reference C++ standard: C++26.** scpp's formal,
+   versioned name ties it explicitly to its reference standard. The
+   overarching goal: support *all* of C++26's syntax by default,
+   excluding only the small, explicitly-enumerated set of cases where
+   real C++ itself already recognizes a drawback (a documented footgun,
+   an outright deprecation, or similar) -- never merely because scpp's
+   own design would prefer something more explicit or different (see
+   [§5.12](ch05-static-checks.md)'s `this`-capture rule, built on real
+   C++20's own P0806R2 deprecation, as the template every other
+   restriction in this document follows). Separately, wherever this
+   document calls a name or feature "real"/"already-standardized" C++
+   (e.g. `<cstdint>`, `<stdfloat>`, `std::expected`, C++20 modules)
+   versus "not yet standard" (e.g. `int128_t`/WG21 P1467 -- see
+   [§6](ch06-safe-subset.md)), the cutoff is **C++26 specifically**:
+   feature-frozen since the June 2025 Sofia meeting and through its
+   final ballot as of the March 2026 London meeting. This is the
+   baseline Principle 2's erasure property and Principle 6's "stick to
+   ratified names" rule are checked against -- bump it forward whenever
+   a newer standard is ratified.
 8. **No UB, ever, for anything the compiler itself controls -- not even
    inside `unsafe`.** Developers must always be able to know their
    code's exact behavior. Real C++ leaves some operations undefined even

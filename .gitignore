@@ -1,6 +1,7 @@
 # Build output
 /build/
 build*/
+docs/spec/dist/
 
 # CMake
 CMakeCache.txt
