@@ -1,0 +1,9 @@
+export module b;
+
+import a;
+
+namespace b {
+    export int helper() {
+        return a::value() + 1;
+    }
+}

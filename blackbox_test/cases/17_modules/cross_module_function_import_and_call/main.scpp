@@ -1,0 +1,10 @@
+// ch11 §11.9: "the same signature lookup an ordinary same-file call
+// already uses works unchanged for a cross-module call". Calling an
+// imported, ordinary (non-`extern "C"`) function needs no `unsafe { }` --
+// unlike extern "C", scpp's own compiler checked this function's body
+// when the module was built (ch11 §11.7's trust model).
+import mylib;
+
+int main() {
+    return mylib::add_one(4);
+}

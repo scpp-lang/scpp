@@ -1,0 +1,7 @@
+# b.scpp itself needs `a` resolvable to be parsed/checked at all (its own
+# `import a;`); this does not, by itself, make `a` directly usable from
+# main.scpp (see main.scpp's own comment) -- ch11 §11.8's non-transitivity
+# is about source-level visibility, independent of how this test harness
+# happens to locate each module's source.
+a=a.scpp
+b=b.scpp

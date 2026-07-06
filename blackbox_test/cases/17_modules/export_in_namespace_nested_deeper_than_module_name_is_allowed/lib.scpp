@@ -1,0 +1,7 @@
+export module org.lotx.cmath;
+
+namespace org::lotx::cmath::trig {
+    export int helper(int x) {
+        return x + 1;
+    }
+}

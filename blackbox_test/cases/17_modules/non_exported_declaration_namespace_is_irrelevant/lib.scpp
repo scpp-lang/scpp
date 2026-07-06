@@ -1,0 +1,13 @@
+export module foo;
+
+namespace bar {
+    int helper() {
+        return 9;
+    }
+}
+
+namespace foo {
+    export int call_helper() {
+        return bar::helper();
+    }
+}

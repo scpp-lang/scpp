@@ -1,0 +1,9 @@
+// ch11 §11.8: "export import name; re-exports, transitively." Unlike the
+// plain-`import`/non-transitive counterpart case, `b` here re-exports
+// `a` (`export import a;`), so this file -- importing only `b`, not `a`
+// directly -- can still reach `a::value()` through `b`'s re-export.
+import b;
+
+int main() {
+    return a::value() + b::helper();
+}

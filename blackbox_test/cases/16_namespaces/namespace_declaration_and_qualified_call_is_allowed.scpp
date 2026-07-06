@@ -1,4 +1,4 @@
-// ch11 §11.4: "scpp reuses real C++ namespace syntax verbatim." A basic
+// ch11 §11.5: "scpp reuses real C++ namespace syntax verbatim." A basic
 // namespace declaration and a qualified call to a function inside it.
 namespace foo {
     int helper() {

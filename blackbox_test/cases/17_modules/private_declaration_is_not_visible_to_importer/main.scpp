@@ -1,0 +1,10 @@
+// ch11 §11.3: "anything else is private to the module." `internal_helper`
+// is never `export`-ed, so an importer can use `mylib::public_fn()` but
+// cannot reach `internal_helper` at all -- it was never brought into this
+// file's scope in the first place (not merely access-controlled: from the
+// importer's perspective, the name simply doesn't exist).
+import mylib;
+
+int main() {
+    return internal_helper();
+}

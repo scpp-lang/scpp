@@ -1,0 +1,11 @@
+// ch11 §11.6: "Non-exported declarations are unaffected by any of this
+// and may live in any namespace (or none)." `bar::helper` (defined in the
+// module, non-exported) lives in `namespace bar`, unrelated to the
+// module's own name `foo` -- this is fine since it's never exported.
+// `call_helper` (exported, correctly namespaced under `foo`) exposes its
+// result so this external consumer file can observe it.
+import foo;
+
+int main() {
+    return foo::call_helper();
+}

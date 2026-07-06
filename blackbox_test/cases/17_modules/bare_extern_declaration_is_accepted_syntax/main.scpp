@@ -1,0 +1,14 @@
+// ch11 §11.7: "extern without a "C" string declares a function with
+// ordinary scpp linkage (not C ABI), whose implementation lives in a
+// separate implementation unit or a separately-distributed `.scppo`
+// object file." This module's bare, bodyless `extern int square(int x);`
+// declaration has no implementation supplied anywhere in this test (a
+// real implementation unit/`.scppo` pairing isn't modeled here), so it is
+// never called -- this only confirms bare `extern` (distinct from
+// `extern "C"`) is accepted as valid syntax for an exported, bodyless
+// declaration, and that importing a module containing one compiles fine.
+import mylib;
+
+int main() {
+    return 0;
+}

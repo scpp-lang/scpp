@@ -1,0 +1,13 @@
+// ch11 §11.6: "This is a prefix requirement, not an exact-match one: a
+// module may nest arbitrarily deeper for its own internal organization
+// ... and every such nested declaration is still exportable, since its
+// namespace still starts with the required prefix." Module
+// `org.lotx.cmath` maps to the required namespace prefix
+// `org::lotx::cmath`; exporting from one level deeper
+// (`org::lotx::cmath::trig`) is still allowed and reachable by an
+// importer via its full qualified name.
+import org.lotx.cmath;
+
+int main() {
+    return org::lotx::cmath::trig::helper(4);
+}

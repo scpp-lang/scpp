@@ -1,0 +1,11 @@
+// ch11 §11.8: "import name; is private, non-transitive: it makes name's
+// exports visible in the importing file, but does not forward them to
+// whoever imports that file in turn." `b` imports `a` privately (a plain
+// `import a;`, not `export import a;`), so this file -- which imports
+// only `b`, not `a` directly -- cannot reach `a::value()` at all, even
+// though `b` itself uses it internally.
+import b;
+
+int main() {
+    return a::value();
+}

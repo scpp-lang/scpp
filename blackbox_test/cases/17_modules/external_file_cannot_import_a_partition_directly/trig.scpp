@@ -1,0 +1,7 @@
+export module mylib.math:trig;
+
+namespace mylib::math {
+    export int sin_deg(int x) {
+        return x;
+    }
+}

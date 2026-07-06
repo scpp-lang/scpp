@@ -1,0 +1,15 @@
+// `import name as local_name;` is NOT scpp syntax. It briefly appeared in
+// ch11 §11.8 as a proposed feature, but turned out to not be real C++20
+// syntax (only `import name;`/`import name:part;` are standard) and was
+// removed as a documentation bug (commit 0413530) -- scpp intentionally
+// introduces no syntax beyond real C++. Since this is exactly the kind of
+// thing a Python/Rust programmer might instinctively try, it's still
+// worth confirming scpp rejects it as a clean compile error rather than
+// crashing or being silently misparsed. The aliasing target module
+// doesn't even need to exist for this to be exercised: the rejection
+// happens at parse time, before any module resolution.
+import foo as bar;
+
+int main() {
+    return 0;
+}

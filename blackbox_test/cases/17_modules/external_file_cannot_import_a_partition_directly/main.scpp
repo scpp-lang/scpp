@@ -1,0 +1,12 @@
+// ch11 §11.4: "Partitions are visible only from inside their own named
+// module -- a file outside module mylib.math can never
+// import mylib.math:trig; directly, exactly like real C++20. The only
+// way a partition's content reaches an external importer is via the
+// primary interface unit aggregating it." This file is not part of
+// module `mylib.math` at all, so importing its `:trig` partition
+// directly must be rejected.
+import mylib.math:trig;
+
+int main() {
+    return 0;
+}

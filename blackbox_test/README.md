@@ -34,6 +34,20 @@ on, or knowledge of, scpp's internal compiler modules.
      value is genuine, unspecified garbage that can't be pinned down --
      but the process must still terminate normally, not be killed by a
      signal.
+- **Multi-file (ch11 module) cases**: some rules (import/export across
+  files, partitions, ...) genuinely need more than one source file. A
+  directory containing a `main.scpp` file is instead treated as one
+  *module test case*, named after the directory:
+  - `main.scpp` -- the entry point, compiled and run exactly like an
+    ordinary single-file case; `main.expected` is its outcome (same three
+    forms as above).
+  - `main.imports` (optional) -- one `module_name=relative_path` mapping
+    per non-blank, non-`#`-comment line, passed to `scpp build` as
+    `--import module_name=path` (ch11 §11.14) -- list every module
+    `main.scpp` needs, direct or transitive, since `main.scpp` is the only
+    file actually compiled as the entry point.
+  - any other `.scpp` files in the directory -- the modules referenced by
+    `main.imports`; never scanned as their own standalone case.
 
 The runner itself (`run_tests.cpp`) is a small, dependency-free C++
 program -- POSIX `fork`/`exec` + `<filesystem>` only, no third-party
@@ -78,10 +92,11 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `09_integer_overflow` | checked-abort by default, wrapping in `unsafe`, div/mod special cases |
 | `10_bool_and_char` | no implicit scalar conversions, short-circuit evaluation |
 | `12_struct_vs_class` | `struct` vs `class` access-control divergence |
-| `13_unsupported_robustness` | not-yet-implemented syntax fails cleanly, never crashes |
+| `13_unsupported_robustness` | unsupported/not-yet-implemented syntax fails cleanly, never crashes |
 | `14_classes` | constructors/destructors, private access control, no-copy-semantics, method borrow checking, `this` |
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting; `using namespace` rejected |
+| `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
 
 ## Testing philosophy
 
@@ -114,32 +129,78 @@ Pass `--scpp-bin <path>` to point at a different build.
   own internals are otherwise checked exactly like any other function
   (e.g. a raw-pointer dereference inside it still needs its own
   `unsafe { }`).
+- **`17_modules`'s `--import name=path` mechanics are now verified**:
+  `path` does point directly at a module's raw `.scpp` interface source,
+  compiled on the fly -- no separate "compile a module to `.scppm` first"
+  step is needed. Confirmed empirically by 10 passing multi-file cases.
+  Module partitions genuinely combining multiple files into one
+  importable module still aren't expressible with this one-path-per-
+  module-name model -- only the "an external file can't import a
+  partition directly" restriction is covered; the
+  primary-interface-unit-aggregates-partitions mechanism itself isn't
+  exercised.
+- **A module file can't also be the runnable program**: a file containing
+  `export module name;` does not get its `main()` linked as the process
+  entry point (discovered empirically via an "undefined reference to
+  `main`" linker error). Every `17_modules` multi-file case therefore
+  uses two files: a plain (non-moduled) `main.scpp` that does the
+  `import`ing and calling, and a separate module file with no `main` of
+  its own. This is a constraint on the test convention, not a documented
+  language rule -- flagged here since it isn't called out anywhere in
+  `docs/book/`.
 - `docs/book/` can occasionally lag behind `src/` (the two are maintained
   independently) -- a chapter note saying a feature is "not yet
   implemented" is not always still accurate (confirmed again this round:
-  basic `namespace` declaration/qualified-lookup/nesting already work
-  despite ch06's backlog still calling all of ch11 "design only so far";
-  see `16_namespaces`). When in doubt, a quick probe with `scpp build`
-  settles it empirically.
+  basic `namespace` declaration/qualified-lookup/nesting already work).
+  When in doubt, a quick probe with `scpp build` settles it empirically.
 
 ## Status
 
-**123/123 passing**, verified against `scpp` after `src/` implemented the
-`safe`-keyword removal (ch01/ch08 Q13: every function checked
-unconditionally by default; `unsafe { }` is the only safety-context
-construct; file extension `.scpp`, not `.cpp`). Getting here from the
-docs-only rewrite took two more rounds of fixes once actually compiled:
+**137 cases total, all passing.** 123/123 in `01_basics`-`16_namespaces`
+plus 13/13 in `17_modules` (ch11's module system: `export module`/`import`,
+namespace-matches-module-name, cross-module import/export/re-export,
+bare `extern`, partitions) are verified against `scpp` after `src/`
+implemented module partitions (ch11 §11.4), the `.scppm` format, and a
+fix to transitive re-export symbol mangling (below), plus 1 more in
+`13_unsupported_robustness` (below).
+
+No known failures.
+
+`import ... as` (module aliasing) is **not** a scpp feature -- it was
+briefly documented in ch11 §11.8 but turned out to not be real C++20
+syntax (verified against cppreference: only `import name;` and
+`import name:part;` are standard) and was removed as a documentation bug
+(`0413530`). Even though this is no longer a documented rule, it's still
+worth confirming scpp rejects the syntax cleanly rather than crashing or
+misparsing it -- exactly the kind of thing a Python/Rust programmer might
+instinctively try -- so
+`13_unsupported_robustness/import_as_aliasing_is_rejected_not_crashed.scpp`
+was kept (re-targeted at "unsupported/nonexistent syntax must fail
+cleanly" rather than "documented but not yet implemented").
+
+Earlier fixes from the previous verification round, for reference:
 - Two `07_extern_c` cases wrongly assumed a with-body `extern "C"`
   function could be called without `unsafe { }` -- ch02's boundary table
   draws no such exception, so both the call sites and (for
   `sum_point_by_pointer`) an internal raw-pointer dereference needed
   `unsafe { }` added.
 - `namespace` support turned out to already be implemented (nesting,
-  qualified calls) despite ch06 still listing it as backlog -- moved the
-  wrong `13_unsupported_robustness` case into a new `16_namespaces`
-  category of real passing cases, and added a `13_unsupported_robustness`
-  case for the one piece confirmed still missing (`using foo::bar;`
-  single-name import).
+  qualified calls) despite ch06 still listing it as backlog at the time --
+  moved the wrong `13_unsupported_robustness` case into a new
+  `16_namespaces` category of real passing cases, and added a
+  `13_unsupported_robustness` case for the one piece confirmed still
+  missing (`using foo::bar;` single-name import).
+- 4 `17_modules` cases were originally written as single files combining
+  `export module X;` with a top-level runnable `main()` -- this silently
+  can't link (see the "module file can't also be the runnable program"
+  note above). Split each into a 2-file module + plain-consumer pair.
+- `17_modules/export_import_re_exports_transitively` initially failed to
+  link with "undefined reference to `_scppM1_bF5_valueP0_`" -- a
+  transitively re-exported symbol's mangled name incorrectly used the
+  re-exporting module (`b`) instead of the defining module (`a`) as its
+  prefix. Isolated empirically (calling the same function *indirectly*
+  through a `b`-defined wrapper worked fine, isolating the bug to call
+  sites reaching a symbol purely through a transitive re-export chain).
+  Reported to `src/`; confirmed fixed on re-verification.
 
-Re-run `./build/run_tests` after any further `src/`/`docs/book/` change to
-catch regressions.
+

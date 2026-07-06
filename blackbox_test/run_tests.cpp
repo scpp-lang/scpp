@@ -30,9 +30,37 @@
 //    terminate normally (return/exit) rather than being killed by a
 //    signal.
 //
-// Adding a new case is just dropping in a matching `.scpp`/`.expected`
-// pair under `cases/` (subdirectories are just organization and are
-// walked recursively) -- no changes to this file are needed.
+// Adding a new single-file case is just dropping in a matching
+// `.scpp`/`.expected` pair under `cases/` (subdirectories are just
+// organization and are walked recursively) -- no changes to this file are
+// needed.
+//
+// Multi-file (ch11 module) cases: some language rules (import/export
+// across files, partitions, ...) genuinely need more than one source
+// file. A directory containing a `main.scpp` file is instead treated as
+// one *module test case*, named after the directory:
+//   - `main.scpp` -- the entry point, compiled and run exactly like an
+//     ordinary single-file case (`main.expected` is its outcome, same
+//     three forms as above).
+//   - `main.imports` (optional) -- one `module_name=relative_path` mapping
+//     per non-blank, non-`#`-comment line, resolved relative to the test
+//     case directory and passed to `scpp build` as
+//     `--import module_name=path` (ch11 §11.14) -- list every module
+//     `main.scpp` needs, direct or transitive (re-exported), since only
+//     `main.scpp` itself is ever the compiled entry point.
+//   - any other `.scpp` files in the directory -- the modules referenced
+//     by `main.imports`; never scanned as their own standalone case.
+// **Verified**: `--import name=path`'s `path` does point directly at that
+// module's raw `.scpp` interface source, compiled on the fly -- there is
+// no separate "compile a module to `.scppm` first" step. Confirmed
+// empirically by several passing multi-file cases (see README.md's
+// Status section for details).
+// **Discovered constraint**: a file containing `export module name;` does
+// not get its `main()` linked as the process entry point (an "undefined
+// reference to `main`" linker error results if you try). Every
+// module test case therefore needs its `main.scpp` to be a plain,
+// non-moduled file that imports and calls into separate module file(s) --
+// never a single file wearing both hats.
 //
 // Build: cmake -S . -B build && cmake --build build (see CMakeLists.txt).
 // Usage: ./build/run_tests [filter] [--scpp-bin <path>]
@@ -208,15 +236,55 @@ struct Outcome {
     std::string detail;
 };
 
+// Parses a module test case directory's `main.imports`, if present: each
+// non-blank, non-`#`-comment line is `module_name=relative_path`,
+// resolved relative to `dir`, and turned into a `--import
+// module_name=absolute_path` pair of arguments for `scpp build` (ch11
+// §11.14).
+std::vector<std::string> parse_imports_file(const fs::path& dir) {
+    std::vector<std::string> args;
+    fs::path imports_path = dir / "main.imports";
+    if (!fs::exists(imports_path)) {
+        return args;
+    }
+    std::istringstream stream(read_file(imports_path));
+    std::string line;
+    while (std::getline(stream, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) {
+            continue; // blank line
+        }
+        line = line.substr(start);
+        if (line.empty() || line[0] == '#') {
+            continue; // comment
+        }
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue; // malformed; skip rather than hard-fail the whole suite
+        }
+        std::string module_name = line.substr(0, eq);
+        std::string rel_path = line.substr(eq + 1);
+        fs::path abs_path = fs::absolute(dir / rel_path);
+        args.push_back("--import");
+        args.push_back(module_name + "=" + abs_path.string());
+    }
+    return args;
+}
+
 Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const fs::path& expected_path,
-                      const fs::path& temp_dir) {
+                      const fs::path& temp_dir, const std::vector<std::string>& extra_build_args) {
     Expected expected = parse_expected(read_file(expected_path));
     fs::path out_binary = temp_dir / "case.bin";
     std::error_code ec;
     fs::remove(out_binary, ec);
 
-    RunResult compile_result = run_process({scpp_bin.string(), "build", scpp_path.string(), "-o", out_binary.string()},
-                                            temp_dir, std::chrono::seconds(kTimeoutSeconds));
+    std::vector<std::string> build_argv = {scpp_bin.string(), "build", scpp_path.string(), "-o",
+                                            out_binary.string()};
+    build_argv.insert(build_argv.end(), extra_build_args.begin(), extra_build_args.end());
+    RunResult compile_result = run_process(build_argv, temp_dir, std::chrono::seconds(kTimeoutSeconds));
 
     if (compile_result.timed_out) {
         return {false, "scpp build timed out"};
@@ -298,6 +366,16 @@ std::optional<fs::path> find_default_scpp_binary() {
     return std::nullopt;
 }
 
+// One discovered test case, either a single loose `.scpp` file or a
+// `main.scpp`-containing module-test directory (see this file's header
+// comment).
+struct TestUnit {
+    fs::path entry_file;
+    fs::path expected_file;
+    std::string rel_name;
+    std::vector<std::string> extra_build_args;
+};
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -326,16 +404,52 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    std::vector<fs::path> scpp_files;
+    // Pass 1: any directory containing a `main.scpp` is one module test
+    // case (possibly multi-file); record its directory so pass 2 can skip
+    // treating its files as standalone single-file cases.
+    std::vector<fs::path> module_test_dirs;
     for (const auto& entry : fs::recursive_directory_iterator(cases_dir)) {
-        if (entry.path().extension() == ".scpp" && entry.path().string().find(filter) != std::string::npos) {
-            scpp_files.push_back(entry.path());
+        if (entry.path().filename() == "main.scpp") {
+            module_test_dirs.push_back(entry.path().parent_path());
         }
     }
-    std::sort(scpp_files.begin(), scpp_files.end());
 
-    if (scpp_files.empty()) {
-        std::cerr << "error: no *.scpp case files found under " << cases_dir << " matching '" << filter << "'\n";
+    std::vector<TestUnit> units;
+    for (const fs::path& dir : module_test_dirs) {
+        fs::path entry = dir / "main.scpp";
+        fs::path expected = dir / "main.expected";
+        std::string rel_name = fs::relative(dir, cases_dir).string();
+        if (rel_name.find(filter) == std::string::npos) {
+            continue;
+        }
+        units.push_back(TestUnit{entry, expected, rel_name, parse_imports_file(dir)});
+    }
+
+    // Pass 2: every other `.scpp` file is a standalone single-file case,
+    // unless it lives inside a module-test directory already handled above
+    // (its own main.scpp, or a helper module file main.scpp imports).
+    for (const auto& entry : fs::recursive_directory_iterator(cases_dir)) {
+        if (entry.path().extension() != ".scpp" || entry.path().filename() == "main.scpp") {
+            continue;
+        }
+        fs::path parent = entry.path().parent_path();
+        bool inside_module_test_dir =
+            std::find(module_test_dirs.begin(), module_test_dirs.end(), parent) != module_test_dirs.end();
+        if (inside_module_test_dir) {
+            continue;
+        }
+        if (entry.path().string().find(filter) == std::string::npos) {
+            continue;
+        }
+        fs::path expected_path = entry.path();
+        expected_path.replace_extension(".expected");
+        units.push_back(TestUnit{entry.path(), expected_path, fs::relative(entry.path(), cases_dir).string(), {}});
+    }
+    std::sort(units.begin(), units.end(),
+              [](const TestUnit& a, const TestUnit& b) { return a.rel_name < b.rel_name; });
+
+    if (units.empty()) {
+        std::cerr << "error: no case files found under " << cases_dir << " matching '" << filter << "'\n";
         return 2;
     }
 
@@ -346,24 +460,21 @@ int main(int argc, char** argv) {
     int passed = 0;
     std::vector<std::pair<std::string, std::string>> failed;
 
-    for (const fs::path& scpp_path : scpp_files) {
-        fs::path expected_path = scpp_path;
-        expected_path.replace_extension(".expected");
-        std::string rel_name = fs::relative(scpp_path, cases_dir).string();
-
-        if (!fs::exists(expected_path)) {
-            failed.emplace_back(rel_name, "missing " + expected_path.filename().string());
-            std::cout << "FAIL " << rel_name << ": missing " << expected_path.filename().string() << "\n";
+    for (const TestUnit& unit : units) {
+        if (!fs::exists(unit.expected_file)) {
+            failed.emplace_back(unit.rel_name, "missing " + unit.expected_file.filename().string());
+            std::cout << "FAIL " << unit.rel_name << ": missing " << unit.expected_file.filename().string() << "\n";
             continue;
         }
 
-        Outcome outcome = run_one_case(*scpp_bin, scpp_path, expected_path, temp_dir);
+        Outcome outcome =
+            run_one_case(*scpp_bin, unit.entry_file, unit.expected_file, temp_dir, unit.extra_build_args);
         if (outcome.passed) {
             passed++;
-            std::cout << "ok   " << rel_name << "\n";
+            std::cout << "ok   " << unit.rel_name << "\n";
         } else {
-            failed.emplace_back(rel_name, outcome.detail);
-            std::cout << "FAIL " << rel_name << ": " << outcome.detail << "\n";
+            failed.emplace_back(unit.rel_name, outcome.detail);
+            std::cout << "FAIL " << unit.rel_name << ": " << outcome.detail << "\n";
         }
     }
 

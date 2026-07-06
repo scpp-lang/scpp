@@ -1,0 +1,7 @@
+export module foo;
+
+namespace foo {
+    export int helper() {
+        return 5;
+    }
+}

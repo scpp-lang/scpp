@@ -1,0 +1,5 @@
+export module mylib;
+
+namespace mylib {
+    export extern int square(int x);
+}

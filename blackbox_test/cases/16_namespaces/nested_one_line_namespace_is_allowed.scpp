@@ -1,4 +1,4 @@
-// ch11 §11.4: "including C++17's one-line nested-namespace definition
+// ch11 §11.5: "including C++17's one-line nested-namespace definition
 // (namespace a::b::c { ... })."
 namespace a::b {
     int helper() {

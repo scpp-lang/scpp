@@ -1,0 +1,13 @@
+// ch11 §11.6: "an export-marked declaration only actually exports if
+// it's lexically inside namespace <M1>::<M2>::...::<Mn> { ... }, where
+// M1.M2. ... .Mn is exactly the current module's own dotted name." A
+// single-segment module name (`foo`) maps to a single-segment namespace
+// (`namespace foo { ... }`) -- the simplest case. A module's own file has
+// no `main()` of its own (it's a library, not an executable), so this is
+// tested from a separate, plain (non-module) consumer file that imports
+// it -- exactly the shape ch11 §11.3's own examples use.
+import foo;
+
+int main() {
+    return foo::helper();
+}

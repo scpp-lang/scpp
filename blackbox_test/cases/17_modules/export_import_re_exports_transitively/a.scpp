@@ -1,0 +1,7 @@
+export module a;
+
+namespace a {
+    export int value() {
+        return 1;
+    }
+}

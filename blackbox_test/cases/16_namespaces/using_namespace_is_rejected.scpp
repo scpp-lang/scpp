@@ -1,4 +1,4 @@
-// ch11 §11.4: "No using namespace, anywhere -- not even function-local.
+// ch11 §11.5: "No using namespace, anywhere -- not even function-local.
 // The only import form is a single-name using-declaration, using
 // foo::bar;" -- a permanent restriction, not a temporary gap.
 namespace foo {

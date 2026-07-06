@@ -1,0 +1,11 @@
+export module mylib;
+
+int internal_helper() {
+    return 1;
+}
+
+namespace mylib {
+    export int public_fn() {
+        return internal_helper();
+    }
+}
