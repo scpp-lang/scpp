@@ -1,0 +1,22 @@
+// ch05 §5.14: an out-of-range index -- no base class (direct or
+// indirect) of the argument's own type matches the requested level --
+// is rejected with a precise diagnostic, not a crash or a silently
+// wrong result.
+template<int Idx, typename... Ts> class TupleImpl;
+
+template<int Idx> class TupleImpl<Idx> {};
+
+template<int Idx, typename Head, typename... Tail>
+class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {
+public:
+    Head value;
+};
+
+template<int I, typename Head, typename... Tail>
+Head& get(TupleImpl<I, Head, Tail...>& t) { return t.value; }
+
+int main() {
+    TupleImpl<0, int, bool, char> t;
+    int a = get<5>(t);
+    return 0;
+}

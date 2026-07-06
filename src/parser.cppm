@@ -123,6 +123,25 @@ private:
     // to recognize `Name<Arg>` (a generic-type instantiation) instead of
     // a plain `Name` type reference.
     std::unordered_set<std::string> generic_type_names_;
+    // ch05 §5.14: every variadic primary template's own declared
+    // parameter list (`template<typename... Ts> class Tuple;`), keyed
+    // by its qualified name -- consulted by parse_variadic_specialization
+    // to validate a later specialization's own `<...>` argument list
+    // actually matches one of the two fixed patterns (an empty pack, or
+    // exactly the primary template's own parameter names in order), and
+    // to recognize the pack parameter's own name (needed for a
+    // specialization's `: private Tuple<Tail...>` base-clause, see
+    // ClassDef::base_pack_arg_name).
+    std::unordered_map<std::string, std::vector<GenericTypeParam>> variadic_primary_template_params_;
+    // ch05 §5.11: every full-header-form generic function's own declared
+    // template parameter list (`template<size_t I, typename Head,
+    // typename... Tail> Head& get(...)`), keyed by its qualified name --
+    // consulted at a *call* site (parse_postfix's Identifier-then-`(`
+    // handling) to recognize `name<Args>(...)` as an explicit-template-
+    // argument call (rather than misparsing `<`/`>` as comparison
+    // operators, the classic ambiguity) and to know, for each argument
+    // position, whether to parse a type or a non-type expression.
+    std::unordered_map<std::string, std::vector<GenericTypeParam>> generic_function_template_params_;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -184,6 +203,26 @@ private:
     [[nodiscard]] const Token& peek_at(size_t offset) const {
         size_t idx = pos_ + offset;
         return idx < tokens_.size() ? tokens_[idx] : tokens_.back();
+    }
+
+    // ch05 §5.14: given the offset of a `<` (e.g. a `template<...>`
+    // header, or a `Name<...>` specialization/instantiation), returns
+    // the offset of the token immediately *after* its own matching `>`
+    // -- without consuming anything. Tracks nesting depth (never
+    // actually reached in this version -- neither a template header nor
+    // a specialization's own argument list ever contains a nested
+    // `<...>` -- but doing so is free and more robust than assuming
+    // flatness). Used purely for lookahead/dispatch; the real parse
+    // that follows re-walks the same tokens structurally.
+    [[nodiscard]] size_t offset_after_matching_angle(size_t less_than_offset) const {
+        size_t offset = less_than_offset + 1;
+        int depth = 1;
+        while (depth > 0 && peek_at(offset).kind != TokenKind::EndOfFile) {
+            if (peek_at(offset).kind == TokenKind::Less) depth++;
+            else if (peek_at(offset).kind == TokenKind::Greater) depth--;
+            offset++;
+        }
+        return offset;
     }
 
     // Checks (without consuming) for the 3-token sequence `std :: <member>`,
@@ -370,19 +409,75 @@ private:
             type.name = "void";
             advance();
         } else if (tok.kind == TokenKind::Identifier && generic_type_names_.contains(peek_qualified_name())) {
-            // ch05 §5.14: `Name<Arg>` -- a generic class/struct
-            // instantiation. `name` still names the *template* here,
-            // not a real, concrete type -- left for the Monomorphizer to
-            // resolve (synthesizing the concrete instantiation and
-            // rewriting `name` to its own mangled name) exactly like a
-            // Lambda literal's own synthesized class or an `auto`
-            // VarDecl's inferred type. v0.1 supports exactly one type
-            // argument (matching GenericTypeParam's own single-parameter
-            // scope).
+            // ch05 §5.14: `Name<Arg, Arg2, ...>` -- a generic class/
+            // struct instantiation. `name` still names the *template*
+            // here, not a real, concrete type -- left for the
+            // Monomorphizer to resolve (synthesizing the concrete
+            // instantiation and rewriting `name` to its own mangled
+            // name) exactly like a Lambda literal's own synthesized
+            // class or an `auto` VarDecl's inferred type. An ordinary
+            // (non-variadic) generic type takes exactly one type
+            // argument (GenericTypeParam's own single-parameter scope,
+            // enforced right here since resolve_generic_type's own
+            // "template_args empty means not a generic instantiation at
+            // all" fast path depends on an ordinary generic never
+            // parsing with zero); a variadic one (Tuple/TupleImpl-style,
+            // tracked in variadic_primary_template_params_) takes its
+            // own primary template's own leading non-type arguments (if
+            // any, e.g. TupleImpl's own "Idx" position -- parsed as an
+            // expression, non_type_args, ch05 §5.14's bit-pattern-
+            // equality-matched non-type parameters) followed by zero or
+            // more comma-separated type arguments (one per pack
+            // element, e.g. `Tuple<int, bool, char>`). Inside a generic
+            // *function*'s own base-class-deduction parameter type
+            // (`TupleImpl<I, Head, Tail...>& t`, ch05 §5.14's `get<I>`
+            // pattern), each argument may instead *symbolically*
+            // reference the enclosing function template's own parameter
+            // names directly (a non-type parameter's name as a bare
+            // expression, e.g. "I"; a type parameter's own name, e.g.
+            // "Head", parsing as an ordinary Named type since it's
+            // already been temporarily registered exactly like a class/
+            // struct template's own type parameter is -- see
+            // parse_generic_function_def); the *one* new syntax this
+            // parser needs to recognize structurally is a trailing pack
+            // spread, `Name...` (must be the final argument), handled
+            // right here regardless of context since `...` is never a
+            // valid continuation of an ordinary type otherwise.
+            const Token& name_tok = peek();
             type.name = parse_qualified_name();
+            bool is_variadic = variadic_primary_template_params_.contains(type.name);
+            size_t leading_non_type_count = 0;
+            if (is_variadic) {
+                for (const GenericTypeParam& p : variadic_primary_template_params_[type.name]) {
+                    if (!p.is_non_type) break;
+                    leading_non_type_count++;
+                }
+            }
             expect(TokenKind::Less, "'<'");
-            type.template_args.push_back(parse_type());
+            size_t arg_index = 0;
+            if (!check(TokenKind::Greater)) {
+                do {
+                    if (is_variadic && arg_index < leading_non_type_count) {
+                        type.non_type_args.push_back(std::shared_ptr<Expr>(parse_additive().release()));
+                    } else if (check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
+                        Type spread;
+                        spread.kind = TypeKind::Named;
+                        spread.name = std::string(advance().text);
+                        advance(); // '...'
+                        spread.is_pack_expansion = true;
+                        type.template_args.push_back(std::move(spread));
+                    } else {
+                        type.template_args.push_back(parse_type());
+                    }
+                    arg_index++;
+                } while (match(TokenKind::Comma));
+            }
             expect(TokenKind::Greater, "'>'");
+            if (!is_variadic && type.template_args.size() != 1) {
+                throw ParseError(name_tok.line, name_tok.column,
+                                  "'" + type.name + "' is an ordinary generic type and takes exactly one type "
+                                  "argument (ch05 §5.14)");
+            }
         } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(peek_qualified_name())) {
             type.name = parse_qualified_name();
         } else {
@@ -855,25 +950,65 @@ private:
             parse_class_def(program, is_exported);
         } else if (check(TokenKind::KwTemplate)) {
             // ch05 §5.11/§5.14: `template<...>` introduces either a
-            // `concept` declaration or a generic `class`/`struct` type --
-            // both share the identical fixed 5-token header shape this
-            // version supports (`template < [typename|ConceptName] Name
-            // >`, exactly one type parameter), so a constant-offset
-            // lookahead past it is enough to tell which of the three
-            // keywords follows next, without consuming anything yet.
-            TokenKind after_header = peek_at(5).kind;
-            if (after_header == TokenKind::KwClass) {
-                std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-                parse_class_def(program, is_exported, std::move(template_params));
-            } else if (after_header == TokenKind::KwStruct) {
+            // `concept` declaration or a generic `class`/`struct` type
+            // -- peek past the whole header (of whatever length --
+            // zero, one, or several parameters, possibly ending in a
+            // pack) to see which of the three keywords follows, without
+            // consuming anything yet.
+            size_t after_header = offset_after_matching_angle(1); // peek_at(1) is the header's own '<'
+            TokenKind after_header_kind = peek_at(after_header).kind;
+            if (after_header_kind == TokenKind::KwClass) {
+                // A class name is immediately followed by `;` (a
+                // variadic primary template's own bodyless forward
+                // declaration, e.g. `template<typename... Ts> class
+                // Tuple;`), `<` (one of the two fixed specializations of
+                // an already-declared primary template, e.g.
+                // `template<> class Tuple<> { ... };`), or `{`/`:` (an
+                // ordinary, single-template-parameter generic class,
+                // ch05 §5.14's phase-1 shape).
+                TokenKind after_name = peek_at(after_header + 2).kind;
+                if (after_name == TokenKind::Semicolon) {
+                    parse_variadic_primary_template_decl(program, is_exported);
+                } else if (after_name == TokenKind::Less) {
+                    parse_variadic_specialization(program, is_exported);
+                } else {
+                    std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+                    parse_class_def(program, is_exported, std::move(template_params));
+                }
+            } else if (after_header_kind == TokenKind::KwStruct) {
+                // ch05 §5.14: a variadic generic type is class-only --
+                // the only way to vary a type's own layout by arity is
+                // recursive inheritance (real C++ has no syntax to
+                // expand a pack directly into a member list), and a
+                // struct has no inheritance at all (ch04 §4.1). A
+                // struct name immediately followed by `;` or `<` would
+                // only ever be one of those two variadic shapes, so
+                // reject with a precise diagnostic rather than a
+                // confusing downstream parse error.
+                if (peek_at(after_header + 2).kind == TokenKind::Semicolon ||
+                    peek_at(after_header + 2).kind == TokenKind::Less) {
+                    const Token& tok = peek_at(after_header);
+                    throw ParseError(tok.line, tok.column,
+                                      "a variadic generic type (parameter packs, ch05 §5.14) is only "
+                                      "supported for 'class', never 'struct' -- building one needs recursive "
+                                      "inheritance, which a struct doesn't have");
+                }
                 SourceLocation loc = current_loc();
                 std::vector<GenericTypeParam> template_params = parse_generic_type_header();
                 StructDef def = parse_struct_def(std::move(template_params));
                 def.is_exported = is_exported;
                 check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
                 program.structs.push_back(std::move(def));
-            } else {
+            } else if (after_header_kind == TokenKind::KwConcept) {
                 parse_concept_def(program, is_exported);
+            } else {
+                // ch05 §5.11: neither `class`/`struct` (a generic type,
+                // handled above) nor `concept` -- the only remaining
+                // legal shape is a full-header-form generic *function*
+                // (`template<...> ReturnType name(params) { body }`,
+                // ch05 §5.11's "generic functions may be spelled with
+                // either the abbreviated or full header form").
+                parse_generic_function_def(program, is_exported);
             }
         } else {
             parse_top_level_function_or_extern_group(program, is_exported);
@@ -1312,35 +1447,65 @@ private:
     // existing class/method-call machinery with zero new logic.
     //
     // ch05 §5.14: parses a generic `class`/`struct` type's own
-    // `template<...>` header -- exactly one type parameter for this
-    // version (multiple type parameters and parameter packs are out of
-    // scope, see ch05 §5.14's own "explicitly out of scope" list):
-    // either `typename Name` (bare) or `ConceptName Name` (constrained,
-    // real C++20 syntax -- a concept may appear directly in a template
-    // parameter list as shorthand for `typename Name` plus a matching
-    // `requires` clause). The caller (parse_top_level_item) has already
-    // confirmed, via a fixed-offset lookahead, that this is a `class`/
-    // `struct` header rather than a `concept` one, but hasn't consumed
-    // anything yet.
+    // `template<...>` header: zero or more comma-separated parameters,
+    // each either a *type* parameter (`typename Name`, bare; `Concept
+    // Name`, constrained -- real C++20 syntax, a concept may appear
+    // directly in a template parameter list as shorthand for `typename
+    // Name` plus a matching `requires` clause), a *pack* of one
+    // (`typename... Name`, legal only as the last parameter -- a
+    // variadic primary template's own header, e.g. `template<typename...
+    // Ts> class Tuple;`), or a *non-type* parameter (a scalar type
+    // followed by a name, e.g. `int Idx` -- restricted to whatever
+    // scalar types this version already supports; `size_t`/`ptrdiff_t`/
+    // fixed-width integers don't exist as scpp types yet, so `int` is
+    // used in their place for now). The caller (parse_top_level_item)
+    // has already confirmed, via lookahead past the whole header, that
+    // this is a `class`/`struct` header rather than a `concept` one,
+    // but hasn't consumed anything yet.
     std::vector<GenericTypeParam> parse_generic_type_header() {
         expect(TokenKind::KwTemplate, "'template'");
         expect(TokenKind::Less, "'<'");
-        GenericTypeParam param;
-        if (!match(TokenKind::KwTypename)) {
-            const Token& concept_tok = peek();
-            std::string concept_name(expect(TokenKind::Identifier, "'typename' or a concept name").text);
-            if (!concept_names_.contains(concept_name)) {
-                throw ParseError(concept_tok.line, concept_tok.column,
-                                  "'" + concept_name +
-                                      "' is not a declared concept -- a generic type's template parameter "
-                                      "must be introduced by 'typename' or an already-declared concept name "
-                                      "(ch05 §5.14)");
-            }
-            param.concept_name = concept_name;
+        std::vector<GenericTypeParam> params;
+        if (!check(TokenKind::Greater)) {
+            do {
+                GenericTypeParam param;
+                if (match(TokenKind::KwTypename)) {
+                    param.is_pack = match(TokenKind::Ellipsis);
+                    param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                } else if (check(TokenKind::KwInt) || check(TokenKind::KwBool) || check(TokenKind::KwChar)) {
+                    // ch05 §5.14: a non-type parameter -- restricted to
+                    // scalar types (only int/bool/char exist as scpp
+                    // types so far; ptrdiff_t/fixed-width integers/
+                    // float32_t/float64_t/size_t are all deferred until
+                    // those types themselves exist).
+                    param.is_non_type = true;
+                    param.non_type_type = parse_unqualified_type();
+                    param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                } else {
+                    const Token& concept_tok = peek();
+                    std::string concept_name(
+                        expect(TokenKind::Identifier, "'typename', a scalar type, or a concept name").text);
+                    if (!concept_names_.contains(concept_name)) {
+                        throw ParseError(concept_tok.line, concept_tok.column,
+                                          "'" + concept_name +
+                                              "' is not a declared concept -- a generic type's template "
+                                              "parameter must be introduced by 'typename', a scalar type, or "
+                                              "an already-declared concept name (ch05 §5.14)");
+                    }
+                    param.concept_name = concept_name;
+                    param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                }
+                if (param.is_pack && !check(TokenKind::Greater)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "a parameter pack ('typename... " + param.name +
+                                          "') must be the last template parameter (ch05 §5.14)");
+                }
+                params.push_back(std::move(param));
+            } while (match(TokenKind::Comma));
         }
-        param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
         expect(TokenKind::Greater, "'>'");
-        return {std::move(param)};
+        return params;
     }
 
     // ch05 §5.14: parses a generic method (or constructor)'s own,
@@ -1373,6 +1538,57 @@ private:
         }
         expect(TokenKind::Greater, "'>'");
         return concept_name;
+    }
+
+    // ch05 §5.11: `template<...> ReturnType name(params) { body }` -- a
+    // generic function spelled with the full header form (as opposed to
+    // the abbreviated `Concept auto` form, parse_top_level_function_or_
+    // extern_group's own ordinary path). Reuses parse_function verbatim
+    // for the return type/name/params/body (identical grammar to an
+    // ordinary function from that point on) -- the only difference is
+    // temporarily registering each *type*-kind template parameter's own
+    // name (bare or concept-constrained, and a pack's own name too) as a
+    // type name for the duration of parsing this one function's own
+    // signature and body, exactly mirroring parse_class_def/
+    // parse_variadic_specialization's identical established pattern (a
+    // *non-type* parameter's own name, e.g. "I", needs no such
+    // registration: it's referenced as a bare value expression, not a
+    // type, and the parser never validates a non-type-argument
+    // expression's own identifier references at parse time at all --
+    // see this function's own non_type_args comment on Type). A pack
+    // parameter's own name (e.g. "Tail") is registered exactly like an
+    // ordinary type parameter's, even though it's only ever legally
+    // *used* spread (`Tail...`) inside a base-class-deduction pattern
+    // parameter type -- nothing at this point needs to specially
+    // reject a bare, non-spread reference to it (there is no legal
+    // function-parameter position for one anyway, so a bare `Tail x`
+    // parameter would simply never resolve to anything real at
+    // monomorphization time, surfacing there instead).
+    void parse_generic_function_def(Program& program, bool is_exported) {
+        SourceLocation loc = current_loc();
+        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+        for (const GenericTypeParam& p : template_params) {
+            if (p.is_non_type) continue;
+            struct_names_.insert(p.name);
+            class_names_.insert(p.name);
+        }
+
+        Function fn = parse_function(/*is_extern_c=*/false);
+        fn.loc = loc;
+        fn.name = qualify_name(fn.name);
+        fn.namespace_path = namespace_stack_;
+        fn.is_exported = is_exported;
+        fn.template_params = template_params;
+        fn.is_generic_template = true;
+        check_export_namespace(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+        generic_function_template_params_[fn.name] = template_params;
+
+        for (const GenericTypeParam& p : template_params) {
+            if (p.is_non_type) continue;
+            struct_names_.erase(p.name);
+            class_names_.erase(p.name);
+        }
+        program.functions.push_back(std::move(fn));
     }
 
     void parse_concept_def(Program& program, bool is_exported) {
@@ -1510,6 +1726,211 @@ private:
     // §11.3) marks the whole class -- and every method synthesized from
     // it -- exported as one unit, not per-member.
     //
+    // ch05 §5.14: `template<typename... Ts> class Tuple;` -- a bodyless
+    // forward declaration introducing a variadic generic type's own
+    // primary template name. Registers the name (so `Tuple<...>` parses
+    // as a type and a later specialization can reference/validate
+    // against it) but pushes no real ClassDef body at all -- there is
+    // nothing to instantiate directly (only a specialization, ever, is
+    // -- see parse_variadic_specialization/the Monomorphizer's own
+    // variadic-instantiation logic).
+    void parse_variadic_primary_template_decl(Program& program, bool is_exported) {
+        SourceLocation loc = current_loc();
+        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+        expect(TokenKind::KwClass, "'class'");
+        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        std::string qualified_class_name = qualify_name(class_name);
+        expect(TokenKind::Semicolon, "';'");
+
+        struct_names_.insert(qualified_class_name);
+        class_names_.insert(qualified_class_name);
+        generic_type_names_.insert(qualified_class_name);
+        variadic_primary_template_params_[qualified_class_name] = template_params;
+
+        ClassDef def;
+        def.name = qualified_class_name;
+        def.namespace_path = namespace_stack_;
+        def.is_exported = is_exported;
+        def.template_params = template_params;
+        def.is_variadic_primary_template = true;
+        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        program.classes.push_back(std::move(def));
+    }
+
+    // ch05 §5.14: parses one of the exactly two fixed variadic
+    // specialization patterns of an already-declared primary template
+    // -- `template<> class Name<> { ... };` (the empty-pack base case)
+    // or `template<typename Head, typename... Tail> class Name<Head,
+    // Tail...> [: base] { ... };` (the recursive case). The
+    // specialization's own `<...>` argument list (right after the class
+    // name) must exactly restate this declaration's own template
+    // header's parameter names, in order -- not a general/arbitrary
+    // specialization pattern (ch05 §5.14's own scoping: "exactly two
+    // fixed patterns... not arbitrary/general specialization").
+    void parse_variadic_specialization(Program& program, bool is_exported) {
+        SourceLocation loc = current_loc();
+        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+        expect(TokenKind::KwClass, "'class'");
+        const Token& class_name_tok = peek();
+        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        std::string qualified_class_name = qualify_name(class_name);
+        auto primary_it = variadic_primary_template_params_.find(qualified_class_name);
+        if (primary_it == variadic_primary_template_params_.end()) {
+            throw ParseError(class_name_tok.line, class_name_tok.column,
+                              "'" + qualified_class_name +
+                                  "' is not a declared variadic primary template -- a specialization requires "
+                                  "a preceding 'template<typename... Ts> class " +
+                                  class_name + ";' forward declaration (ch05 §5.14)");
+        }
+
+        // The specialization's own `<...>` argument list must exactly
+        // restate template_params' own names, in order (empty for the
+        // base case).
+        expect(TokenKind::Less, "'<'");
+        size_t index = 0;
+        if (!check(TokenKind::Greater)) {
+            do {
+                if (index >= template_params.size()) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "this specialization's own '<...>' argument list has more entries than "
+                                      "its own template header (ch05 §5.14 only supports restating the "
+                                      "header's own parameter names, in order)");
+                }
+                const Token& name_tok = peek();
+                std::string arg_name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                if (arg_name != template_params[index].name) {
+                    throw ParseError(name_tok.line, name_tok.column,
+                                      "expected this specialization's own template parameter '" +
+                                          template_params[index].name + "', not '" + arg_name +
+                                          "' (ch05 §5.14 only supports restating the header's own parameter "
+                                          "names, in order)");
+                }
+                if (template_params[index].is_pack) expect(TokenKind::Ellipsis, "'...'");
+                index++;
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::Greater, "'>'");
+        if (index != template_params.size()) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "this specialization's own '<...>' argument list must restate every one of its "
+                              "own template header's parameters (ch05 §5.14)");
+        }
+
+        // Exactly two fixed shapes are legal (ch05 §5.14), after
+        // peeling off any leading non-type parameters (e.g. TupleImpl's
+        // own "Idx", always first -- ch05 §5.14's own established
+        // ordering, matched here rather than supporting an arbitrary
+        // interleaving parse_generic_type_header itself never
+        // produces): zero remaining parameters (the empty-pack base
+        // case, e.g. `TupleImpl<Idx>`) or exactly one type parameter
+        // followed by a pack (the recursive case, e.g. `TupleImpl<Idx,
+        // Head, Tail...>`).
+        size_t leading_non_type_count = 0;
+        while (leading_non_type_count < template_params.size() &&
+               template_params[leading_non_type_count].is_non_type) {
+            leading_non_type_count++;
+        }
+        for (size_t i = leading_non_type_count; i < template_params.size(); i++) {
+            if (template_params[i].is_non_type) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "a variadic specialization's non-type parameter(s) must all come first, "
+                                  "before any type parameter (ch05 §5.14)");
+            }
+        }
+        size_t remaining = template_params.size() - leading_non_type_count;
+        bool has_pack = remaining == 2 && template_params[leading_non_type_count + 1].is_pack &&
+                         !template_params[leading_non_type_count].is_pack;
+        if (remaining != 0 && !has_pack) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "a variadic specialization's own template header must, after any leading "
+                              "non-type parameter(s), be either empty (the empty-pack base case) or end in "
+                              "exactly one type parameter followed by a parameter pack ('typename Head, "
+                              "typename... Tail', the recursive case) (ch05 §5.14)");
+        }
+
+        // Register every one of this specialization's own template
+        // parameter names as a temporary type name for the duration of
+        // its own body -- mirrors parse_class_def's identical ordinary-
+        // generic handling (see its own comment). A non-type
+        // parameter's own name (e.g. "Idx") needs no such registration
+        // (see parse_generic_function_def's identical reasoning).
+        for (const GenericTypeParam& p : template_params) {
+            if (p.is_non_type) continue;
+            struct_names_.insert(p.name);
+            class_names_.insert(p.name);
+        }
+
+        ClassDef def;
+        def.name = qualified_class_name;
+        def.namespace_path = namespace_stack_;
+        def.is_exported = is_exported;
+        def.template_params = template_params;
+        def.is_variadic_specialization = true;
+        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+
+        // ch05 §5.14: the recursive case's own base clause, `: private
+        // Tuple<Tail...>` or (with a leading non-type parameter, e.g.
+        // TupleImpl) `: public TupleImpl<Idx + 1, Tail...>` -- any
+        // leading non-type argument(s) are parsed as an expression
+        // (evaluated later, at monomorphization time, against this
+        // specialization's own concrete non-type argument -- see
+        // movecheck's evaluate_non_type_arg), and the base's own final
+        // argument must be exactly this specialization's own pack
+        // parameter, spread whole (the only shape either of the doc's
+        // own variadic examples ever needs -- see
+        // ClassDef::base_pack_arg_name's own comment).
+        if (match(TokenKind::Colon)) {
+            if (match(TokenKind::KwPublic)) {
+                def.base_access = AccessSpecifier::Public;
+            } else {
+                match(TokenKind::KwPrivate);
+                def.base_access = AccessSpecifier::Private;
+            }
+            const Token& base_tok = peek();
+            std::string base_name = parse_qualified_name();
+            auto base_primary_it = variadic_primary_template_params_.find(base_name);
+            if (base_primary_it == variadic_primary_template_params_.end()) {
+                throw ParseError(base_tok.line, base_tok.column,
+                                  "'" + base_name + "' is not a declared variadic primary template (ch05 §5.14)");
+            }
+            def.base_class_name = base_name;
+            size_t base_leading_non_type_count = 0;
+            for (const GenericTypeParam& p : base_primary_it->second) {
+                if (!p.is_non_type) break;
+                base_leading_non_type_count++;
+            }
+            expect(TokenKind::Less, "'<'");
+            for (size_t i = 0; i < base_leading_non_type_count; i++) {
+                def.base_non_type_arg = std::shared_ptr<Expr>(parse_additive().release());
+                expect(TokenKind::Comma, "','");
+            }
+            const Token& pack_tok = peek();
+            std::string pack_name = std::string(expect(TokenKind::Identifier, "the pack parameter's own name").text);
+            if (!has_pack || pack_name != template_params.back().name) {
+                throw ParseError(pack_tok.line, pack_tok.column,
+                                  "a variadic specialization's own base class can only be instantiated by "
+                                  "spreading this specialization's own pack parameter whole (e.g. '" +
+                                      base_name + "<" + (has_pack ? template_params.back().name : "Tail") +
+                                      "...>') (ch05 §5.14)");
+            }
+            expect(TokenKind::Ellipsis, "'...'");
+            expect(TokenKind::Greater, "'>'");
+            def.base_pack_arg_name = pack_name;
+        }
+
+        parse_class_body_into(program, def, class_name, template_params);
+
+        for (const GenericTypeParam& p : template_params) {
+            if (p.is_non_type) continue;
+            struct_names_.erase(p.name);
+            class_names_.erase(p.name);
+        }
+    }
+
     // `template_params` (ch05 §5.14), non-empty exactly when the caller
     // (parse_top_level_item) already consumed a `template<...>` header
     // in front of `class`, additionally: registers the type parameter's
@@ -1561,6 +1982,61 @@ private:
         def.template_params = template_params;
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
+        // ch05 §5.14: `class Derived : public/private Base { ... };` --
+        // real C++ single-inheritance syntax verbatim. `Base` must
+        // already be a declared class (this parser is single-pass, same
+        // requirement as every other type reference) -- a generic
+        // type's own base (e.g. `Tuple<Head, Tail...> : private
+        // Tuple<Tail...>`) is handled separately by the specialization
+        // parser, which never reaches this ordinary path.
+        if (match(TokenKind::Colon)) {
+            // Real C++'s own default when neither keyword is written is
+            // `private` for a `class` (only `struct` defaults to
+            // `public`, but structs have no inheritance here at all) --
+            // matching that exactly rather than requiring the keyword.
+            if (match(TokenKind::KwPublic)) {
+                def.base_access = AccessSpecifier::Public;
+            } else {
+                match(TokenKind::KwPrivate); // optional -- private either way
+                def.base_access = AccessSpecifier::Private;
+            }
+            const Token& base_tok = peek();
+            std::string base_name = parse_qualified_name();
+            if (!class_names_.contains(base_name)) {
+                throw ParseError(base_tok.line, base_tok.column,
+                                  "'" + base_name +
+                                      "' is not a declared class -- a base class must be declared before use "
+                                      "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
+            }
+            def.base_class_name = base_name;
+        }
+
+        parse_class_body_into(program, def, class_name, template_params);
+
+        if (is_generic) {
+            // Un-register the temporary type-parameter name -- scoped
+            // only to this one class's own declaration (see this
+            // function's own comment).
+            struct_names_.erase(template_params[0].name);
+            class_names_.erase(template_params[0].name);
+        }
+    }
+
+    // ch05 §5.14: parses a class's own `{ ... };` body (fields, access-
+    // specifier sections, constructor/destructor/method definitions)
+    // into `def`, then pushes it into `program.classes` -- factored out
+    // of parse_class_def so parse_variadic_specialization can reuse it
+    // verbatim after handling its own, differently-shaped header
+    // (template header + specialization `<...>` argument list + base
+    // clause) that parse_class_def's own bodyless-forward-declaration
+    // sibling, parse_variadic_primary_template_decl, never reaches at
+    // all. `def`'s own name/namespace_path/is_exported/template_params/
+    // base_class_name/base_access/is_variadic_specialization must
+    // already be set by the caller; only `fields` is populated here.
+    void parse_class_body_into(Program& program, ClassDef& def, const std::string& class_name,
+                                const std::vector<GenericTypeParam>& template_params) {
+        std::string qualified_class_name = def.name;
+        bool is_exported = def.is_exported;
         // Every method/constructor/destructor synthesized below shares
         // this same namespace_path/is_exported (ch11 §11.3: exporting a
         // class exports its whole member surface as one unit) --
@@ -1664,13 +2140,14 @@ private:
                 continue;
             }
 
-            // A field: ch04 §4.2 permanently forbids a public one.
-            if (current_access == AccessSpecifier::Public) {
-                const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                  "member variable '" + member_name + "' cannot be 'public' (ch04 §4.2) -- "
-                                  "only member functions can be; expose read access through a method instead");
-            }
+            // ch04 §4.2: a field may now be public or private in any
+            // combination, exactly like real C++ (the class-only
+            // "member variables can never be public" restriction was
+            // reversed -- see the doc's own commit history). Direct
+            // external access to a public field is checked exactly like
+            // a struct field access (movecheck's apply_expr Member
+            // case: the whole-root-conservative treatment, not a new
+            // per-field mechanism).
             ClassField field;
             field.type = parse_array_suffix(member_type);
             field.name = member_name;
@@ -1681,14 +2158,6 @@ private:
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
         program.classes.push_back(std::move(def));
-
-        if (is_generic) {
-            // Un-register the temporary type-parameter name -- scoped
-            // only to this one class's own declaration (see this
-            // function's own comment).
-            struct_names_.erase(template_params[0].name);
-            class_names_.erase(template_params[0].name);
-        }
     }
 
     // Parses one function declaration or definition's `<return-type>
@@ -2386,11 +2855,45 @@ private:
             // the overwhelmingly common case, is just a chain of length
             // one).
             std::string name = parse_qualified_name();
+            // ch05 §5.11: `name<Args>(...)` -- an explicit-template-
+            // argument call to a known full-header-form generic
+            // function (e.g. `make<Circle>()`, `get<2>(t)`) --
+            // recognized structurally only when `name` is already a
+            // declared generic-function-template name (mirrors how a
+            // generic *type* instantiation, `Name<Arg>`, is
+            // disambiguated in parse_unqualified_type), avoiding any
+            // ambiguity with an ordinary `a < b` comparison for every
+            // other identifier.
+            auto generic_fn_it = generic_function_template_params_.find(name);
+            std::vector<ExplicitTemplateArg> explicit_template_args;
+            if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
+                advance(); // '<'
+                const std::vector<GenericTypeParam>& fn_template_params = generic_fn_it->second;
+                size_t arg_index = 0;
+                if (!check(TokenKind::Greater)) {
+                    do {
+                        ExplicitTemplateArg arg;
+                        bool is_non_type =
+                            arg_index < fn_template_params.size() && fn_template_params[arg_index].is_non_type;
+                        if (is_non_type) {
+                            arg.is_type = false;
+                            arg.value = std::shared_ptr<Expr>(parse_additive().release());
+                        } else {
+                            arg.is_type = true;
+                            arg.type = parse_type();
+                        }
+                        explicit_template_args.push_back(std::move(arg));
+                        arg_index++;
+                    } while (match(TokenKind::Comma));
+                }
+                expect(TokenKind::Greater, "'>'");
+            }
             if (match(TokenKind::LParen)) {
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Call;
                 node->loc = loc;
                 node->name = name;
+                node->explicit_template_args = std::move(explicit_template_args);
                 if (!check(TokenKind::RParen)) {
                     do {
                         node->args.push_back(parse_expr());

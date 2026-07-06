@@ -1,0 +1,34 @@
+// ch05 §5.14: a variadic generic type's own Head parameter may be
+// concept-constrained (`template<Describable Head, typename... Tail>
+// class Tuple<Head, Tail...> ...`), exactly like an ordinary generic
+// type's own single type parameter -- checked via
+// instantiate_variadic_generic_type's own check_type_param_constraint
+// call, reusing the identical mechanism instantiate_generic_type
+// already established. Circle satisfies Describable, so this
+// instantiation is allowed.
+template<typename T>
+concept Describable = requires(const T& t) {
+    { t.magnitude() } -> std::same_as<int>;
+};
+
+class Circle {
+public:
+    Circle(int r) { this.radius = r; return; }
+    int magnitude() const { return this.radius; }
+private:
+    int radius;
+};
+
+template<typename... Ts> class Tuple;
+
+template<> class Tuple<> {};
+
+template<Describable Head, typename... Tail>
+class Tuple<Head, Tail...> : private Tuple<Tail...> {
+    Head head;
+};
+
+int main() {
+    Tuple<Circle> t;
+    return 0;
+}

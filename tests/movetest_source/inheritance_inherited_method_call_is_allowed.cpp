@@ -1,0 +1,23 @@
+// ch05 §5.14: a derived class inherits its base's own methods -- calling
+// one not overridden on the derived class itself resolves through a
+// synthesized forwarding stub (movecheck's synthesize_inherited_method_
+// forwards), reusing the exact same method-call machinery as an
+// ordinary, non-inherited call.
+class Animal {
+public:
+    Animal(int legs) { this.legs = legs; return; }
+    int leg_count() const { return this.legs; }
+private:
+    int legs;
+};
+
+class Dog : public Animal {
+public:
+    Dog(int legs) { this.legs = legs; return; }
+    int bark_count() const { return 3; }
+};
+
+int main() {
+    Dog d(4);
+    return d.leg_count() + d.bark_count();
+}

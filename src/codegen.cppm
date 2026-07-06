@@ -149,10 +149,19 @@ public:
             declare_function(fn);
         }
         for (const Function& fn : program.functions) {
-            // A bodyless `extern "C"` declaration (ch02 §2.1) already got
-            // its LLVM `declare` from declare_function above; there's no
-            // body to lower.
-            if (fn.body != nullptr && !is_never_compiled(fn)) define_function(fn);
+            if (is_never_compiled(fn)) continue;
+            if (fn.body != nullptr) {
+                define_function(fn);
+            } else if (!fn.forwards_to.empty()) {
+                // ch05 §5.14: an inherited method's own forwarding stub
+                // (synthesize_inherited_method_forwards) -- has no
+                // scpp-level AST body at all, just a thin codegen-only
+                // wrapper.
+                define_forwarding_function(fn);
+            }
+            // Otherwise: a bodyless `extern "C"` declaration (ch02
+            // §2.1) already got its LLVM `declare` from declare_function
+            // above; there's no body to lower.
         }
         std::string error;
         llvm::raw_string_ostream error_stream(error);
@@ -180,6 +189,27 @@ private:
         llvm::StructType* llvm_type = nullptr;
         std::vector<std::string> field_names;
         std::vector<Type> field_types;
+
+        // ch05 §5.14: finds `name`'s own index in `field_names`, searching
+        // from the *end* backwards -- needed since a derived class's
+        // flattened (base-fields-first) layout may have a base's own
+        // field name *shadowed* by a same-named field the derived level
+        // itself declares (e.g. a variadic Tuple-style type's own
+        // recursive-inheritance chain, where every level names its field
+        // identically, "value"/"head" -- ch05 §5.14's own TupleImpl
+        // example). Searching from the end always finds *this* level's
+        // own field first (the last one appended, see declare_class),
+        // matching real C++'s own "the most-derived declaration shadows
+        // a base's same-named member" rule for unqualified `.field`
+        // access. Harmless/no-op for the overwhelmingly common
+        // non-shadowed case (a name appearing only once has the same
+        // first-match and last-match index).
+        [[nodiscard]] std::optional<size_t> find_field_index(const std::string& name) const {
+            for (size_t i = field_names.size(); i > 0; i--) {
+                if (field_names[i - 1] == name) return i - 1;
+            }
+            return std::nullopt;
+        }
     };
 
     // A storage location: an LLVM pointer plus the scpp-level Type stored
@@ -339,9 +369,9 @@ private:
                 auto struct_it = structs_.find(base_named.name);
                 if (struct_it == structs_.end()) return std::nullopt;
                 const StructInfo& info = struct_it->second;
-                auto field_it = std::find(info.field_names.begin(), info.field_names.end(), expr.name);
-                if (field_it == info.field_names.end()) return std::nullopt;
-                const Type& field_type = info.field_types[static_cast<size_t>(field_it - info.field_names.begin())];
+                std::optional<size_t> field_index = info.find_field_index(expr.name);
+                if (!field_index.has_value()) return std::nullopt;
+                const Type& field_type = info.field_types[*field_index];
                 // ch05 §5.12: a Reference-typed field (e.g. a closure's
                 // own by-reference capture) auto-dereferences to its
                 // pointee too, exactly like codegen_lvalue's own
@@ -688,10 +718,32 @@ private:
     // unique_ptr/span/other class members, or any other type carrying
     // ownership/lifetime semantics), so this skips validate_trivial
     // entirely.
+    //
+    // ch05 §5.14: a class with a base (ClassDef::base_class_name) gets a
+    // *flattened* layout -- the base's own StructInfo (already
+    // registered: the parser requires a base to be declared, and
+    // `generate()`'s own declare_class loop processes program.classes in
+    // that same declaration order) is copied in first, then this class's
+    // own fields appended -- rather than nesting the base as a single
+    // sub-struct element. This is the same memory layout real single
+    // inheritance already produces (the base subobject's fields occupy
+    // the leading bytes either way), but flattening means every existing
+    // field-access/GEP path (codegen_lvalue's Member case, a simple
+    // linear search through field_names) needs no inheritance-specific
+    // logic at all, and a most-derived instance's own leading bytes are
+    // trivially reinterpretable as its base type (needed later for
+    // base-class-deduction, ch05 §5.14's indexed-access pattern) via a
+    // plain bitcast, with no pointer adjustment.
     void declare_class(const ClassDef& def) {
         StructInfo info;
+        if (!def.base_class_name.empty()) {
+            const StructInfo& base_info = structs_.at(def.base_class_name);
+            info.field_names = base_info.field_names;
+            info.field_types = base_info.field_types;
+        }
         std::vector<llvm::Type*> llvm_field_types;
-        llvm_field_types.reserve(def.fields.size());
+        llvm_field_types.reserve(info.field_names.size() + def.fields.size());
+        for (const Type& t : info.field_types) llvm_field_types.push_back(to_llvm_type(t));
         for (const ClassField& field : def.fields) {
             info.field_names.push_back(field.name);
             info.field_types.push_back(field.type);
@@ -1118,7 +1170,12 @@ private:
         // via overload_names_'s mangled name already) is unaffected --
         // external linkage, exactly as before this chapter.
         llvm::Function::LinkageTypes linkage = llvm::Function::ExternalLinkage;
-        if (fn.body != nullptr && fn.owning_module.empty() && !program_->module_name.empty() && !fn.is_exported) {
+        // ch05 §5.14: a forwarding stub (Function::forwards_to) gets a
+        // real, defined body too (define_forwarding_function), just
+        // never an scpp-level AST one -- eligible for the same internal
+        // linkage as an ordinary defined function.
+        bool has_definition = fn.body != nullptr || !fn.forwards_to.empty();
+        if (has_definition && fn.owning_module.empty() && !program_->module_name.empty() && !fn.is_exported) {
             linkage = llvm::Function::InternalLinkage;
         }
         llvm::Function::Create(fn_type, linkage, overload_names_.at(&fn), *module_);
@@ -1161,6 +1218,62 @@ private:
         if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
             throw CodegenError("function '" + fn.name + "' does not return on all paths",
                 current_loc_);
+        }
+    }
+
+    // ch05 §5.14: emits a thin, codegen-only wrapper body for a
+    // Function::forwards_to stub (an inherited method a derived class
+    // doesn't itself override, synthesized by movecheck's
+    // synthesize_inherited_method_forwards) -- calls the real target
+    // function directly, forwarding every LLVM argument (including
+    // `this`) completely unchanged: the derived class's own flattened,
+    // base-first layout (declare_class) already makes its leading bytes
+    // byte-identical to the base's own full layout, so no pointer
+    // adjustment/bitcast is needed at all (LLVM's opaque pointers carry
+    // no type information to begin with). `fn.body` is always null for
+    // one of these (see Function::forwards_to's own comment) -- this is
+    // the *only* place that ever runs for it, never codegen_stmt/
+    // codegen_expr.
+    void define_forwarding_function(const Function& fn) {
+        llvm::Function* llvm_fn = module_->getFunction(overload_names_.at(&fn));
+        if (llvm_fn == nullptr) {
+            throw CodegenError("function '" + fn.name + "' was not declared before definition",
+                current_loc_);
+        }
+        // Finds the exact base method this stub forwards to: `name`
+        // alone isn't necessarily unique (ch05 §5.10 method
+        // overloading), but this stub's own params[1:] were copied
+        // verbatim from that exact overload at synthesis time, so
+        // matching on both name and every non-`this` parameter's type
+        // is unambiguous.
+        const Function* target = nullptr;
+        for (const Function& candidate : program_->functions) {
+            if (candidate.name != fn.forwards_to || candidate.params.size() != fn.params.size()) continue;
+            bool params_match = true;
+            for (size_t i = 1; i < fn.params.size() && params_match; i++) {
+                params_match = types_equal(candidate.params[i].type, fn.params[i].type);
+            }
+            if (params_match) {
+                target = &candidate;
+                break;
+            }
+        }
+        if (target == nullptr) {
+            throw CodegenError("forwarding stub '" + fn.name + "' names an unknown target '" + fn.forwards_to + "'",
+                current_loc_);
+        }
+        llvm::Function* target_llvm = module_->getFunction(overload_names_.at(target));
+
+        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
+        builder_->SetInsertPoint(entry);
+        std::vector<llvm::Value*> args;
+        args.reserve(llvm_fn->arg_size());
+        for (auto& arg : llvm_fn->args()) args.push_back(&arg);
+        llvm::Value* call_result = builder_->CreateCall(target_llvm, args);
+        if (is_bare_void(fn.return_type)) {
+            builder_->CreateRetVoid();
+        } else {
+            builder_->CreateRet(call_result);
         }
     }
 
@@ -2193,12 +2306,12 @@ private:
                         current_loc_);
                 }
                 const StructInfo& info = structs_.at(base.type.name);
-                auto field_it = std::find(info.field_names.begin(), info.field_names.end(), expr.name);
-                if (field_it == info.field_names.end()) {
+                std::optional<size_t> field_index_opt = info.find_field_index(expr.name);
+                if (!field_index_opt.has_value()) {
                     throw CodegenError("struct '" + base.type.name + "' has no field '" + expr.name + "'",
                         current_loc_);
                 }
-                size_t field_index = static_cast<size_t>(field_it - info.field_names.begin());
+                size_t field_index = *field_index_opt;
                 llvm::Value* field_ptr =
                     builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
                 const Type& field_type = info.field_types[field_index];

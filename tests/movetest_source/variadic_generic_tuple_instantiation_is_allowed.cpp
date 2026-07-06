@@ -1,0 +1,21 @@
+// ch05 §5.14: `Tuple<int, bool, char>` -- a variadic generic type's own
+// recursive-inheritance instantiation. instantiate_variadic_generic_type
+// builds one concrete ClassDef per level (Tuple<char> -> Tuple<bool,char>
+// -> Tuple<int,bool,char>, each level's own base_class_name pointing at
+// the next), bottoming out at the empty-pack base case (Tuple<>). No
+// method call/field access is exercised here (neither of the doc's own
+// variadic examples ever needs one directly) -- this only checks the
+// instantiation chain itself resolves and passes movecheck cleanly.
+template<typename... Ts> class Tuple;
+
+template<> class Tuple<> {};
+
+template<typename Head, typename... Tail>
+class Tuple<Head, Tail...> : private Tuple<Tail...> {
+    Head head;
+};
+
+int main() {
+    Tuple<int, bool, char> t;
+    return 0;
+}

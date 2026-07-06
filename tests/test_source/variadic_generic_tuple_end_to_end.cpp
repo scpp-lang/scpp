@@ -1,0 +1,24 @@
+// ch05 §5.14: a variadic generic type's own recursive-inheritance chain,
+// built end-to-end via the real `scpp` compilation pipeline (parse ->
+// monomorphize_generics -> check_moves -> codegen -> link -> run).
+// `Tuple<int, bool, char>` resolves to a 3-level chain (Tuple<char> ->
+// Tuple<bool,char> -> Tuple<int,bool,char>), each level contributing one
+// field to the final flattened layout ({ i8, i8, i32 }, verified via IR
+// inspection during development). Neither field has an accessor (matching
+// the doc's own Tuple example, which never reads one back) -- this test
+// only verifies construction/destruction of the whole chain succeeds
+// without crashing.
+template<typename... Ts> class Tuple;
+
+template<> class Tuple<> {};
+
+template<typename Head, typename... Tail>
+class Tuple<Head, Tail...> : private Tuple<Tail...> {
+    Head head;
+};
+
+int main() {
+    Tuple<int, bool, char> t;
+    print_int(42);
+    return 0;
+}

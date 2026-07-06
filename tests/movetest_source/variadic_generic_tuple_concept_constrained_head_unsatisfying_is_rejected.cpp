@@ -1,0 +1,22 @@
+// ch05 §5.14: instantiating a variadic generic type whose Head parameter
+// is concept-constrained with a concrete type that does *not* satisfy
+// that concept is rejected immediately -- `int` has no `magnitude()`
+// method, so it doesn't satisfy Describable.
+template<typename T>
+concept Describable = requires(const T& t) {
+    { t.magnitude() } -> std::same_as<int>;
+};
+
+template<typename... Ts> class Tuple;
+
+template<> class Tuple<> {};
+
+template<Describable Head, typename... Tail>
+class Tuple<Head, Tail...> : private Tuple<Tail...> {
+    Head head;
+};
+
+int main() {
+    Tuple<int> t;
+    return 0;
+}

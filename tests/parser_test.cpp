@@ -1756,6 +1756,321 @@ void test_generic_type_instantiation_parses_with_template_args() {
            "generic_type_instantiation_parses_with_template_args: template arg should be Named('int')");
 }
 
+// ch05 §5.14: `class Derived : public Base { ... };` records
+// base_class_name/base_access on the ClassDef.
+void test_class_public_inheritance_parses() {
+    scpp::Program program = scpp::parse(
+        "class Animal {\n"
+        "public:\n"
+        "    Animal() { return; }\n"
+        "};\n"
+        "class Dog : public Animal {\n"
+        "public:\n"
+        "    Dog() { return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* dog = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Dog") dog = &c;
+    }
+    expect(dog != nullptr, "class_public_inheritance_parses: expected a ClassDef named 'Dog'");
+    expect(dog->base_class_name == "Animal", "class_public_inheritance_parses: base_class_name should be 'Animal'");
+    expect(dog->base_access == scpp::AccessSpecifier::Public,
+           "class_public_inheritance_parses: base_access should be Public");
+}
+
+// ch05 §5.14: `class Derived : Base { ... };` (no access keyword)
+// defaults to private inheritance, matching real C++'s own default for
+// `class` (unlike `struct`, which defaults to public -- but structs
+// have no inheritance here at all).
+void test_class_inheritance_defaults_to_private() {
+    scpp::Program program = scpp::parse(
+        "class Animal {\n"
+        "public:\n"
+        "    Animal() { return; }\n"
+        "};\n"
+        "class Dog : Animal {\n"
+        "public:\n"
+        "    Dog() { return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* dog = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Dog") dog = &c;
+    }
+    expect(dog != nullptr, "class_inheritance_defaults_to_private: expected a ClassDef named 'Dog'");
+    expect(dog->base_access == scpp::AccessSpecifier::Private,
+           "class_inheritance_defaults_to_private: base_access should default to Private");
+}
+
+// ch05 §5.14: a base class must already be a declared class (single-
+// pass parsing) -- referencing an undeclared name is a ParseError.
+void test_class_inheritance_from_undeclared_class_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "class Dog : public Animal {\n"
+            "public:\n"
+            "    Dog() { return; }\n"
+            "};\n"
+            "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "class_inheritance_from_undeclared_class_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.14: `template<typename... Ts> class Tuple;` -- a variadic
+// primary template's own bodyless forward declaration -- marks the
+// ClassDef is_variadic_primary_template, records its single pack
+// parameter, and pushes no fields/base at all.
+void test_variadic_primary_template_decl_parses() {
+    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+                                         "int main() { return 0; }\n");
+    const scpp::ClassDef* tuple = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Tuple") tuple = &c;
+    }
+    expect(tuple != nullptr, "variadic_primary_template_decl_parses: expected a ClassDef named 'Tuple'");
+    expect(tuple->is_variadic_primary_template,
+           "variadic_primary_template_decl_parses: is_variadic_primary_template should be true");
+    expect(tuple->template_params.size() == 1 && tuple->template_params[0].is_pack,
+           "variadic_primary_template_decl_parses: expected a single pack parameter 'Ts'");
+    expect(tuple->fields.empty(), "variadic_primary_template_decl_parses: expected no fields");
+}
+
+// ch05 §5.14: `template<> class Tuple<> {};` -- the empty-pack base-case
+// specialization of an already-declared variadic primary template.
+void test_variadic_empty_pack_specialization_parses() {
+    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+                                         "template<> class Tuple<> {};\n"
+                                         "int main() { return 0; }\n");
+    const scpp::ClassDef* base_case = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Tuple" && c.is_variadic_specialization) base_case = &c;
+    }
+    expect(base_case != nullptr, "variadic_empty_pack_specialization_parses: expected a specialization ClassDef");
+    expect(base_case->template_params.empty(),
+           "variadic_empty_pack_specialization_parses: expected zero template params");
+    expect(base_case->fields.empty(), "variadic_empty_pack_specialization_parses: expected no fields");
+}
+
+// ch05 §5.14: `template<typename Head, typename... Tail> class
+// Tuple<Head, Tail...> : private Tuple<Tail...> { Head head; };` -- the
+// recursive-case specialization: records template_params (Head +
+// Tail(is_pack)), base_class_name/base_pack_arg_name (the pack spread
+// as the base's sole argument), and the field typed by the head
+// parameter.
+void test_variadic_recursive_specialization_parses() {
+    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+                                         "template<> class Tuple<> {};\n"
+                                         "template<typename Head, typename... Tail>\n"
+                                         "class Tuple<Head, Tail...> : private Tuple<Tail...> {\n"
+                                         "    Head head;\n"
+                                         "};\n"
+                                         "int main() { return 0; }\n");
+    const scpp::ClassDef* recursive_case = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Tuple" && c.is_variadic_specialization && !c.template_params.empty()) recursive_case = &c;
+    }
+    expect(recursive_case != nullptr, "variadic_recursive_specialization_parses: expected a recursive-case ClassDef");
+    expect(recursive_case->template_params.size() == 2 && recursive_case->template_params[0].name == "Head" &&
+               recursive_case->template_params[1].name == "Tail" && recursive_case->template_params[1].is_pack,
+           "variadic_recursive_specialization_parses: expected params [Head, Tail(pack)]");
+    expect(recursive_case->base_class_name == "Tuple",
+           "variadic_recursive_specialization_parses: base_class_name should be 'Tuple'");
+    expect(recursive_case->base_pack_arg_name == "Tail",
+           "variadic_recursive_specialization_parses: base_pack_arg_name should be 'Tail'");
+    expect(recursive_case->fields.size() == 1 && recursive_case->fields[0].type.name == "Head",
+           "variadic_recursive_specialization_parses: expected a single field typed 'Head'");
+}
+
+// ch05 §5.14: a use-site instantiation of a variadic generic type,
+// `Tuple<int, bool, char>`, parses with all 3 concrete arguments
+// recorded (in order) on Type::template_args.
+void test_variadic_instantiation_with_multiple_args_parses() {
+    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+                                         "template<> class Tuple<> {};\n"
+                                         "template<typename Head, typename... Tail>\n"
+                                         "class Tuple<Head, Tail...> : private Tuple<Tail...> {\n"
+                                         "    Head head;\n"
+                                         "};\n"
+                                         "int main() {\n"
+                                         "    Tuple<int, bool, char> t;\n"
+                                         "    return 0;\n"
+                                         "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Stmt& var_decl = *main_fn->body->statements[0];
+    expect(var_decl.type.name == "Tuple", "variadic_instantiation_with_multiple_args_parses: type name should be 'Tuple'");
+    expect(var_decl.type.template_args.size() == 3,
+           "variadic_instantiation_with_multiple_args_parses: expected exactly 3 template args");
+    expect(is_named_type(var_decl.type.template_args[0], "int") &&
+               is_named_type(var_decl.type.template_args[1], "bool") &&
+               is_named_type(var_decl.type.template_args[2], "char"),
+           "variadic_instantiation_with_multiple_args_parses: expected args [int, bool, char] in order");
+}
+
+// ch05 §5.14: a variadic generic type is class-only -- `struct` has no
+// inheritance, so it cannot vary its own layout by arity.
+void test_variadic_struct_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("template<typename... Ts> struct Tuple;\n"
+                    "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "variadic_struct_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.14: a specialization referencing an undeclared primary
+// template is a ParseError.
+void test_variadic_specialization_without_primary_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("template<> class Tuple<> {};\n"
+                    "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "variadic_specialization_without_primary_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.11: `template<typename T> T name(params) { body }` -- the full
+// header form for a generic function (as opposed to the abbreviated
+// `Concept auto` form) -- records Function::template_params and marks
+// is_generic_template.
+void test_generic_function_full_header_form_parses() {
+    scpp::Program program = scpp::parse("template<typename T> T make() {\n"
+                                         "    T x;\n"
+                                         "    return x;\n"
+                                         "}\n"
+                                         "int main() { return 0; }\n");
+    const scpp::Function* make_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "make") make_fn = &fn;
+    }
+    expect(make_fn != nullptr, "generic_function_full_header_form_parses: expected a Function named 'make'");
+    expect(make_fn->is_generic_template,
+           "generic_function_full_header_form_parses: is_generic_template should be true");
+    expect(make_fn->template_params.size() == 1 && make_fn->template_params[0].name == "T",
+           "generic_function_full_header_form_parses: expected a single template param 'T'");
+}
+
+// ch05 §5.11: a full-header-form generic function may declare multiple
+// type parameters, each tied to its own function-parameter position.
+void test_generic_function_multiple_type_params_parses() {
+    scpp::Program program = scpp::parse("template<typename T, typename U> void f(T a, U b) { return; }\n"
+                                         "int main() { return 0; }\n");
+    const scpp::Function* f_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "f") f_fn = &fn;
+    }
+    expect(f_fn != nullptr, "generic_function_multiple_type_params_parses: expected a Function named 'f'");
+    expect(f_fn->template_params.size() == 2 && f_fn->template_params[0].name == "T" &&
+               f_fn->template_params[1].name == "U",
+           "generic_function_multiple_type_params_parses: expected template params [T, U]");
+}
+
+// ch05 §5.11: `name<Arg>(...)` -- an explicit call-site template
+// argument (e.g. a "return-type-only" generic, `make<Circle>()`) --
+// recorded on the Call expression's own explicit_template_args.
+void test_explicit_type_template_argument_call_parses() {
+    scpp::Program program = scpp::parse("class Circle {\n"
+                                         "public:\n"
+                                         "    Circle() { return; }\n"
+                                         "};\n"
+                                         "template<typename T> T make() {\n"
+                                         "    T x;\n"
+                                         "    return x;\n"
+                                         "}\n"
+                                         "int main() {\n"
+                                         "    Circle c = make<Circle>();\n"
+                                         "    return 0;\n"
+                                         "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Stmt& var_decl = *main_fn->body->statements[0];
+    expect(var_decl.init != nullptr && var_decl.init->kind == scpp::ExprKind::Call,
+           "explicit_type_template_argument_call_parses: expected a Call initializer");
+    expect(var_decl.init->explicit_template_args.size() == 1 && var_decl.init->explicit_template_args[0].is_type &&
+               is_named_type(var_decl.init->explicit_template_args[0].type, "Circle"),
+           "explicit_type_template_argument_call_parses: expected explicit_template_args == [Circle]");
+}
+
+// ch05 §5.14: `name<2>(t)` -- an explicit non-type call-site template
+// argument (ch05 §5.14's base-class-deduction accessor pattern,
+// `get<I>`) -- recorded as a non-type (value) ExplicitTemplateArg, not a
+// type one, disambiguating from the classic `a < b > c` parse.
+void test_explicit_non_type_template_argument_call_parses() {
+    scpp::Program program = scpp::parse("template<int Idx, typename... Ts> class TupleImpl;\n"
+                                         "template<int Idx> class TupleImpl<Idx> {};\n"
+                                         "template<int Idx, typename Head, typename... Tail>\n"
+                                         "class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {\n"
+                                         "public:\n"
+                                         "    Head value;\n"
+                                         "};\n"
+                                         "template<int I, typename Head, typename... Tail>\n"
+                                         "Head& get(TupleImpl<I, Head, Tail...>& t) { return t.value; }\n"
+                                         "int main() {\n"
+                                         "    TupleImpl<0, int, bool> t;\n"
+                                         "    int x = get<0>(t);\n"
+                                         "    return 0;\n"
+                                         "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Stmt& var_decl = *main_fn->body->statements[1];
+    expect(var_decl.init != nullptr && var_decl.init->kind == scpp::ExprKind::Call && var_decl.init->name == "get",
+           "explicit_non_type_template_argument_call_parses: expected a Call to 'get'");
+    expect(var_decl.init->explicit_template_args.size() == 1 && !var_decl.init->explicit_template_args[0].is_type &&
+               var_decl.init->explicit_template_args[0].value != nullptr,
+           "explicit_non_type_template_argument_call_parses: expected a single non-type explicit_template_arg");
+}
+
+// ch05 §5.14: TupleImpl's own leading non-type parameter ("Idx") is
+// legal both alone (the empty-pack base case, `TupleImpl<Idx>`) and
+// followed by exactly one type parameter plus a pack (the recursive
+// case, `TupleImpl<Idx, Head, Tail...>`) -- both specializations parse,
+// and the recursive case's own base clause records base_non_type_arg
+// (the "Idx + 1" expression) alongside base_pack_arg_name ("Tail").
+void test_variadic_specialization_with_leading_non_type_param_parses() {
+    scpp::Program program = scpp::parse("template<int Idx, typename... Ts> class TupleImpl;\n"
+                                         "template<int Idx> class TupleImpl<Idx> {};\n"
+                                         "template<int Idx, typename Head, typename... Tail>\n"
+                                         "class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {\n"
+                                         "public:\n"
+                                         "    Head value;\n"
+                                         "};\n"
+                                         "int main() { return 0; }\n");
+    const scpp::ClassDef* base_case = nullptr;
+    const scpp::ClassDef* recursive_case = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "TupleImpl" && c.is_variadic_specialization) {
+            if (c.template_params.size() == 1) base_case = &c;
+            if (c.template_params.size() == 3) recursive_case = &c;
+        }
+    }
+    expect(base_case != nullptr && base_case->template_params[0].is_non_type,
+           "variadic_specialization_with_leading_non_type_param_parses: expected a 1-param (Idx) base case");
+    expect(recursive_case != nullptr, "variadic_specialization_with_leading_non_type_param_parses: expected a "
+                                       "3-param (Idx, Head, Tail) recursive case");
+    expect(recursive_case->template_params[0].is_non_type && !recursive_case->template_params[1].is_non_type &&
+               recursive_case->template_params[2].is_pack,
+           "variadic_specialization_with_leading_non_type_param_parses: expected params [Idx(non-type), Head, "
+           "Tail(pack)]");
+    expect(recursive_case->base_class_name == "TupleImpl" && recursive_case->base_non_type_arg != nullptr &&
+               recursive_case->base_pack_arg_name == "Tail",
+           "variadic_specialization_with_leading_non_type_param_parses: expected base_class_name='TupleImpl', "
+           "base_non_type_arg set, base_pack_arg_name='Tail'");
+}
+
 } // namespace
 
 int main() {
@@ -1866,6 +2181,20 @@ int main() {
     test_generic_struct_concept_constrained_type_param_parses();
     test_generic_struct_bare_type_param_is_rejected();
     test_generic_type_instantiation_parses_with_template_args();
+    test_class_public_inheritance_parses();
+    test_class_inheritance_defaults_to_private();
+    test_class_inheritance_from_undeclared_class_is_rejected();
+    test_variadic_primary_template_decl_parses();
+    test_variadic_empty_pack_specialization_parses();
+    test_variadic_recursive_specialization_parses();
+    test_variadic_instantiation_with_multiple_args_parses();
+    test_variadic_struct_is_rejected();
+    test_variadic_specialization_without_primary_is_rejected();
+    test_generic_function_full_header_form_parses();
+    test_generic_function_multiple_type_params_parses();
+    test_explicit_type_template_argument_call_parses();
+    test_explicit_non_type_template_argument_call_parses();
+    test_variadic_specialization_with_leading_non_type_param_parses();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

@@ -102,12 +102,46 @@ struct Type {
     // rewrites `name` to the mangled concrete name while clearing this
     // back to empty -- mirroring the "auto" VarDecl-type sentinel and a
     // Lambda's own `name`-starts-empty-until-resolved pattern. Never
-    // reaches check_moves/codegen non-empty. v0.1 only ever populates
-    // this with a single argument (one type parameter per generic type,
-    // see ClassDef/StructDef::template_params) -- kept as a vector for
-    // forward compatibility, not because multiple arguments are
-    // supported yet.
+    // reaches check_moves/codegen non-empty. An ordinary (non-variadic)
+    // generic type always populates this with exactly one entry (its own
+    // single type parameter); a variadic one (Tuple/TupleImpl-style, ch05
+    // §5.14) populates it with the *type*-parameter-position arguments
+    // only (its own pack elements) -- see non_type_args below for the
+    // separate, non-type-parameter-position arguments (e.g. TupleImpl's
+    // own leading "Idx").
     std::vector<Type> template_args;
+    // ch05 §5.14: a variadic generic type's own NON-TYPE argument(s)
+    // (e.g. the "0" in `TupleImpl<0, int, bool, char>`, or the "Idx + 1"
+    // expression in a specialization's own base-clause spread
+    // `TupleImpl<Idx + 1, Tail...>`) -- always logically *before*
+    // template_args, matching the established shape every variadic
+    // generic type's own header uses (0+ leading non-type parameters,
+    // then a type parameter optionally followed by a pack; see
+    // GenericTypeParam's own comment). A shared_ptr (not unique_ptr) so
+    // Type itself stays copyable, matching pointee/element's own
+    // existing choice -- needed since Type values are copied freely
+    // throughout movecheck.cppm (see its own reference-invalidation-
+    // safety comments). Each entry is restricted to a small, purpose-
+    // scoped expression shape (an integer literal, a bare identifier
+    // naming an enclosing template's own non-type parameter, or a `+`
+    // of the two) -- not a general compile-time constant-expression
+    // evaluator; see movecheck's evaluate_non_type_arg.
+    std::vector<std::shared_ptr<Expr>> non_type_args;
+    // ch05 §5.14: true only for one, special `template_args` entry --
+    // `Name{Named, is_pack_expansion=true}` -- meaning "spread the
+    // enclosing generic *function* template's own pack parameter named
+    // `Name` here" (e.g. the trailing "Tail..." in a base-class-
+    // deduction accessor's own parameter type,
+    // `TupleImpl<I, Head, Tail...>& t`, ch05 §5.14's `get<I>` pattern).
+    // Always the *last* entry, mirroring GenericTypeParam::is_pack's own
+    // "pack is always last" rule. Meaningless anywhere `template_args`
+    // holds already-concrete arguments (an ordinary use-site
+    // instantiation like `Tuple<int, bool, char>` never sets this --
+    // there, every pack element is spelled out individually as an
+    // ordinary concrete type). Left entirely unresolved until
+    // movecheck's base-class-deduction algorithm substitutes the
+    // enclosing function template's own concrete Tail binding in place.
+    bool is_pack_expansion = false;
 };
 
 struct Param {
@@ -223,6 +257,23 @@ enum class UnaryOp {
                // lasting borrow (see movecheck's apply_address_of).
 };
 
+// ch05 §5.11/§5.14: one explicit argument in a generic function call's
+// own `<...>` list (e.g. `make<Circle>()`'s "Circle", or `get<2>(t)`'s
+// "2") -- needed for a full-header-form generic function (Function::
+// template_params) whose template parameter either has no corresponding
+// function-parameter position at all (a "return-type-only" generic) or
+// must be supplied explicitly to drive base-class deduction (ch05
+// §5.14's `get<I>` accessor pattern) rather than deduced from an
+// ordinary argument's own type. Exactly one of `type`/`value` is
+// meaningful, per `is_type`; `value` is restricted to the same small,
+// purpose-scoped expression shape as Type::non_type_args (an integer
+// literal, or a `+` of one) -- see movecheck's evaluate_non_type_arg.
+struct ExplicitTemplateArg {
+    bool is_type = true;
+    Type type;                 // meaningful when is_type
+    std::shared_ptr<Expr> value; // meaningful when !is_type
+};
+
 // A single expression node. Only the fields relevant to `kind` are populated;
 // this keeps the AST as a flat, easy-to-pattern-match tagged union without
 // needing a class hierarchy for the minimal M1 subset.
@@ -267,6 +318,15 @@ struct Expr {
 
     // Call arguments / MakeUnique constructor arguments
     std::vector<ExprPtr> args;
+
+    // ch05 §5.11/§5.14: Call only -- non-empty only for a call to a
+    // full-header-form generic function that explicitly supplies one or
+    // more of its own template arguments at the call site (e.g.
+    // `make<Circle>()`, `get<2>(t)`) -- see ExplicitTemplateArg's own
+    // comment. Empty for every other call (the overwhelmingly common
+    // case: an ordinary, non-generic call, or a generic call resolved
+    // entirely by argument-position deduction).
+    std::vector<ExplicitTemplateArg> explicit_template_args;
 
     // MakeUnique: the allocated element type `T` in `make_unique<T>(...)`.
     // Lambda: the explicit trailing return type (`-> Type`), only
@@ -358,6 +418,31 @@ struct Stmt {
     bool is_unsafe = false;
 };
 
+// ch05 §5.14: a generic type's (class or struct) own template
+// parameter -- either a *type* parameter (`typename T`, bare --
+// `concept_name` empty -- or `ConceptName T`, constrained), or a
+// *non-type* parameter (`size_t Idx`, restricted to scalar types --
+// `is_non_type`/`non_type_type`, only used by a variadic class-template
+// specialization's own header, e.g. `TupleImpl<Idx, Head, Tail...>`'s
+// `Idx`). `is_pack` marks the abbreviated-pack form (`typename... Ts`),
+// legal only as the *last* parameter in a variadic primary template's
+// own header (`template<typename... Ts> class Tuple;`) -- see
+// ClassDef::is_variadic_primary_template. A `struct`'s own parameter
+// can never be bare (triviality, ch04 §4.1, is a whole-type property no
+// per-member clause could decompose the way a class's methods can --
+// see Function::method_requires_concept) -- enforced by the parser,
+// not represented as a separate flag here. ch05 §5.11: also reused for
+// a full-header-form generic *function*'s own template parameter (see
+// Function::template_params) -- the exact same shape (bare/constrained
+// type parameter, or non-type parameter) applies identically there.
+struct GenericTypeParam {
+    std::string name;
+    std::string concept_name; // empty = bare (type parameter only)
+    bool is_pack = false;
+    bool is_non_type = false;
+    Type non_type_type; // meaningful only when is_non_type is true
+};
+
 struct Function {
     Type return_type;
     std::string name;
@@ -423,6 +508,44 @@ struct Function {
     // concept-monomorphization pass) with its own distinct mangled name.
     bool is_generic_template = false;
 
+    // ch05 §5.11/§5.14: non-empty only for a generic *function* spelled
+    // with the full `template<...>` header form (as opposed to the
+    // abbreviated `Concept auto` form, whose constrained parameters are
+    // tracked per-Param via Param::generic_concept instead) -- e.g.
+    // `template<size_t I, typename Head, typename... Tail> Head&
+    // get(TupleImpl<I, Head, Tail...>& t) { ... }`. Real C++ treats the
+    // two spellings as fully equivalent (ch05 §5.11); the full form
+    // additionally allows a type parameter with *no* corresponding
+    // function-parameter position at all (a "return-type-only" generic,
+    // e.g. `template<typename T> T make();`), which must be supplied
+    // explicitly at the call site (Expr::explicit_template_args) since
+    // there is nothing to deduce it from. Never a pack for a function
+    // (only a generic *type*'s own header supports one, ch05 §5.14) --
+    // parser-enforced. This function is a *template* exactly like an
+    // is_generic_template one (never emitted to codegen directly; each
+    // concrete call site gets a separate monomorphized clone) --
+    // is_generic_template is also set to true whenever this is non-empty,
+    // so every existing "is this a template" check keeps working
+    // unchanged.
+    std::vector<GenericTypeParam> template_params;
+
+    // ch05 §5.14: non-empty only for a synthesized *forwarding stub* --
+    // a derived class inheriting a base method it doesn't itself
+    // override (e.g. "Derived_foo" forwarding to "Base_foo") -- names
+    // the real function this one's own call should be redirected to at
+    // codegen (Codegen::define_forwarding_function). `body` is always
+    // null for one of these: there is no scpp-level AST to move/borrow-
+    // check at all (movecheck already skips every bodyless function,
+    // the same as an `extern` declaration), since forwarding a
+    // *pointer* unchanged (this class's own flattened layout, see
+    // ClassDef::base_class_name, makes a derived instance's leading
+    // bytes already byte-identical to its base) needs no scpp-level
+    // logic of its own -- purely a thin, codegen-only wrapper. Avoids a
+    // real scpp-level upcast/base-conversion expression, which doesn't
+    // exist yet (this is the only place a derived-to-base "conversion"
+    // is needed in v0.1).
+    std::string forwards_to;
+
     // ch11 §11.4/§11.5: the namespace path this declaration lexically
     // lives in, e.g. `namespace std { ... }` -> {"std"}, `namespace
     // a::b { ... }` -> {"a", "b"}. Empty for a declaration at file/global
@@ -456,22 +579,6 @@ struct Function {
 struct StructField {
     Type type;
     std::string name;
-};
-
-// ch05 §5.14: a generic type's (class or struct) own template type
-// parameter, e.g. `typename T` (bare -- `concept_name` empty) or
-// `ConceptName T` (constrained). A `struct`'s own parameter can never be
-// bare (triviality, ch04 §4.1, is a whole-type property no per-member
-// clause could decompose the way a class's methods can -- see
-// Function::method_requires_concept) -- enforced by the parser, not
-// represented as a separate flag here. v0.1 only ever has exactly one of
-// these per generic type (single type parameter; parameter packs and
-// multiple type parameters are out of scope for this round) -- kept as
-// a vector on ClassDef/StructDef for forward compatibility, not because
-// more than one is accepted yet.
-struct GenericTypeParam {
-    std::string name;
-    std::string concept_name; // empty = bare
 };
 
 struct StructDef {
@@ -575,6 +682,69 @@ struct ClassDef {
     // Monomorphizer's own comment). Excluded from codegen exactly like
     // is_concept_witness.
     bool is_synthetic_check_only = false;
+    // ch05 §5.14: the enclosing class's own single, direct base class
+    // name (empty = none) -- `class Derived : public/private Base {
+    // ... };`. Real C++ single inheritance verbatim: the base's own
+    // fields are laid out first (see codegen's declare_class), and a
+    // method/field not found on the derived class itself falls back to
+    // the base (recursively, up the whole chain) -- both movecheck and
+    // codegen's `ClassName_memberName` resolution already walk this
+    // chain wherever they resolve a receiver's class name (see
+    // resolve_inherited_member_owner). Only a `class` may have a base
+    // (never a `struct` -- ch04 §4.1 has no inheritance concept at
+    // all); multiple/virtual inheritance are out of scope, matching the
+    // doc's own single, most-derived-first "recursive inheritance"
+    // pattern (Tuple-style variadic generic types, ch05 §5.14).
+    std::string base_class_name;
+    // Public inheritance keeps an inherited public member's own
+    // accessibility; private inheritance makes every inherited member
+    // (however it was declared on the base) private in the derived
+    // class's own external interface. Meaningless when base_class_name
+    // is empty.
+    AccessSpecifier base_access = AccessSpecifier::Private;
+    // ch05 §5.14: true for a variadic generic type's own *primary
+    // template* declaration -- `template<typename... Ts> class Tuple;`
+    // (a bodyless forward declaration; `fields`/`base_class_name` are
+    // always empty/default for one of these). Exists purely to
+    // register the name (so `Tuple<...>` parses as a type, and so a
+    // later specialization of it can be recognized/validated) --
+    // itself never instantiated directly; see is_variadic_specialization.
+    bool is_variadic_primary_template = false;
+    // ch05 §5.14: true for one of the exactly two fixed patterns
+    // specializing an already-declared variadic primary template --
+    // `template<> class Tuple<> { ... };` (the empty-pack base case,
+    // template_params empty) or `template<typename Head, typename...
+    // Tail> class Tuple<Head, Tail...> { ... };` (the recursive case,
+    // template_params == [Head, Tail(is_pack)]) -- no other shape is
+    // legal (parser-enforced), matching the doc's own "exactly two
+    // fixed patterns, not general/arbitrary specialization" scoping.
+    // Multiple ClassDefs may share the same `name` this way (one per
+    // specialization) -- ordinary lookups that need "the" definition of
+    // a generic type (e.g. an ordinary, non-variadic instantiation)
+    // never see more than one, since is_variadic_primary_template/
+    // is_variadic_specialization are mutually exclusive with an
+    // ordinary generic type's own single ClassDef.
+    bool is_variadic_specialization = false;
+    // ch05 §5.14: meaningful only when is_variadic_specialization and
+    // base_class_name is non-empty -- names *this* specialization's own
+    // pack parameter (e.g. "Tail") when the base class is instantiated
+    // by spreading it (`: private Tuple<Tail...>`). Scoped to exactly
+    // this one shape (a single pack, spread whole, as the base's only
+    // argument) -- the only one either of the doc's own two variadic
+    // examples ever needs; empty for every other base-class shape
+    // (ordinary inheritance, or no base at all).
+    std::string base_pack_arg_name;
+    // ch05 §5.14: meaningful only when is_variadic_specialization and
+    // the base class's own primary template has a leading non-type
+    // parameter (e.g. TupleImpl's own "Idx") -- holds that argument's
+    // own expression in the base clause (e.g. the "Idx + 1" in `:
+    // public TupleImpl<Idx + 1, Tail...>`), always logically *before*
+    // base_pack_arg_name's own spread, matching every variadic generic
+    // type's own established "non-type args first, then the pack"
+    // shape. nullptr when the base's own primary template has no
+    // leading non-type parameter at all (e.g. plain Tuple's own `:
+    // private Tuple<Tail...>`).
+    std::shared_ptr<Expr> base_non_type_arg;
 };
 
 // ch05 §5.11: one requirement inside a `concept Name = requires(...) {

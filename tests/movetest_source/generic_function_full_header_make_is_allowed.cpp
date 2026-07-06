@@ -1,0 +1,13 @@
+// ch05 §5.11: a full-header-form generic function whose type parameter
+// has no corresponding function-parameter position at all (a
+// "return-type-only" generic) -- must be supplied explicitly at the
+// call site (`make<int>()`), since there is nothing to deduce it from.
+template<typename T> T make() {
+    T x;
+    return x;
+}
+
+int main() {
+    int n = make<int>();
+    return n;
+}

@@ -78,6 +78,13 @@ using RefTargetMap = std::unordered_map<std::string, std::string>;
 // to resolve a Member expression's type).
 using ClassFieldTypes = std::unordered_map<std::string, std::unordered_map<std::string, Type>>;
 
+// ch04 §4.2: every *class*'s own declared field name -> its own
+// AccessSpecifier, across the whole program -- see
+// DataflowState::class_field_access's own comment. Never populated for a
+// struct (struct fields have no access control at all, ch04 §4.1 -- see
+// check_moves, which only fills this in for program.classes).
+using ClassFieldAccess = std::unordered_map<std::string, std::unordered_map<std::string, AccessSpecifier>>;
+
 // The full per-program-point dataflow state: ownership/move state per
 // local (`locals`), active borrows per root place (`borrows`), which root
 // each currently-bound reference aliases (`ref_targets`), and the current
@@ -126,6 +133,18 @@ struct DataflowState {
     // field-access rewrite, a captured name is a Member, not a plain
     // Identifier, the only shape that lookup previously handled).
     const ClassFieldTypes* class_field_types = nullptr;
+    // ch04 §4.2: every *class*'s own declared field name -> its own
+    // AccessSpecifier, across the whole program -- built once by
+    // check_moves (mirrors class_field_types' identical lifetime/
+    // non-null-once-set contract). Needed since a member variable may
+    // now be `public` or `private` in any combination (real, unrestricted
+    // C++ access control) -- apply_expr's Member case looks up the
+    // accessed field's own access level here to decide whether external
+    // access (from outside the class's own methods) is allowed (public)
+    // or rejected (private), rather than unconditionally rejecting every
+    // external field access the way an earlier, stricter version of this
+    // rule did.
+    const ClassFieldAccess* class_field_access = nullptr;
     // Where the statement/expression currently being processed begins in
     // the source (see SourceLocation, ast.cppm) -- refreshed by
     // apply_statement/apply_expr as they recurse, so any DataflowError
@@ -142,7 +161,8 @@ struct DataflowState {
     [[nodiscard]] bool operator==(const DataflowState& other) const {
         return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
                unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
-               class_names == other.class_names && class_field_types == other.class_field_types;
+               class_names == other.class_names && class_field_types == other.class_field_types &&
+               class_field_access == other.class_field_access;
     }
 };
 
@@ -266,6 +286,7 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         a.current_class,
         a.class_names,
         a.class_field_types,
+        a.class_field_access,
         // `current_loc` carries no dataflow meaning at all (see its own
         // comment on DataflowState) and is excluded from operator==, so
         // which side's value ends up here doesn't affect correctness --
@@ -1994,26 +2015,40 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
 
         case ExprKind::Member: {
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-            // ch04 §4.2: a member variable is always private-by-
-            // construction (parse_class_def rejects `public` on one
-            // outright), so external code can only ever reach it through
-            // a method call -- never directly, the way it still can for
-            // a struct field (never access-controlled, ch04 §4.1).
-            // Scoped to a plain Identifier base (`this`, or an ordinary
-            // local/parameter) for now -- movecheck doesn't otherwise
-            // infer the type of an arbitrary nested expression, so a
-            // deeper chain (`a.b.field` where `a.b` is itself
-            // class-typed) isn't covered by this check yet, a known,
-            // narrow scope limitation.
+            // ch04 §4.2: real, unrestricted C++ access control -- a
+            // member variable may be `public` or `private` in any
+            // combination. External access (from outside the class's
+            // own methods) to a `private` field is rejected, exactly
+            // like before; a `public` one is now allowed (checked
+            // exactly like a struct field access -- the borrow itself
+            // is still recorded against the whole root object,
+            // conservatively, by the caller's own apply_place/
+            // resolve_borrow_source_root machinery, unaffected by this
+            // access-control gate). Scoped to a plain Identifier base
+            // (`this`, or an ordinary local/parameter) for now --
+            // movecheck doesn't otherwise infer the type of an arbitrary
+            // nested expression, so a deeper chain (`a.b.field` where
+            // `a.b` is itself class-typed) isn't covered by this check
+            // yet, a known, narrow scope limitation.
             if (report_errors && expr.lhs->kind == ExprKind::Identifier && state.class_names != nullptr) {
                 auto type_it = body.local_types.find(expr.lhs->name);
                 if (type_it != body.local_types.end()) {
                     std::string class_name = named_type_name(type_it->second);
                     if (!class_name.empty() && state.class_names->contains(class_name) &&
                         class_name != state.current_class) {
-                        throw DataflowError("cannot access private member '" + expr.name + "' of class '" +
-                                             class_name + "' from outside its own methods (ch04 §4.2)",
-                            state.current_loc);
+                        AccessSpecifier access = AccessSpecifier::Private;
+                        if (state.class_field_access != nullptr) {
+                            auto class_it = state.class_field_access->find(class_name);
+                            if (class_it != state.class_field_access->end()) {
+                                auto field_it = class_it->second.find(expr.name);
+                                if (field_it != class_it->second.end()) access = field_it->second;
+                            }
+                        }
+                        if (access == AccessSpecifier::Private) {
+                            throw DataflowError("cannot access private member '" + expr.name + "' of class '" +
+                                                 class_name + "' from outside its own methods (ch04 §4.2)",
+                                state.current_loc);
+                        }
                     }
                 }
             }
@@ -2404,7 +2439,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 // not-yet-stable intermediate states) and duplicate diagnostics (a block
 // can be visited many times during fixed-point iteration).
 void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names,
-                     const ClassFieldTypes& class_field_types) {
+                     const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access) {
     Body body = build_mir(fn);
 
     size_t n = body.blocks.size();
@@ -2441,6 +2476,7 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     }
     entry_state.class_names = &class_names;
     entry_state.class_field_types = &class_field_types;
+    entry_state.class_field_access = &class_field_access;
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;
         // ch04 §4.2: like a class-typed local (see the Assign case
@@ -2593,6 +2629,14 @@ ExprPtr clone_expr(const Expr& expr) {
     clone->unary_op = expr.unary_op;
     clone->args.reserve(expr.args.size());
     for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
+    clone->explicit_template_args.reserve(expr.explicit_template_args.size());
+    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
+        ExplicitTemplateArg cloned_arg;
+        cloned_arg.is_type = arg.is_type;
+        cloned_arg.type = arg.type;
+        if (arg.value) cloned_arg.value = std::shared_ptr<Expr>(clone_expr(*arg.value).release());
+        clone->explicit_template_args.push_back(std::move(cloned_arg));
+    }
     clone->type = expr.type;
     return clone;
 }
@@ -2637,6 +2681,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.has_varargs = fn.has_varargs;
     clone.method_requires_concept = fn.method_requires_concept;
     clone.is_generic_template = fn.is_generic_template;
+    clone.template_params = fn.template_params;
     clone.namespace_path = fn.namespace_path;
     clone.is_exported = fn.is_exported;
     clone.owning_module = fn.owning_module;
@@ -2958,10 +3003,35 @@ public:
         for (const StructDef& s : program.structs) {
             if (!s.template_params.empty()) generic_type_template_names_.insert(s.name);
         }
+        // ch05 §5.14: every variadic generic type's own *primary
+        // template* name (e.g. "Tuple") -- distinguishes a variadic
+        // instantiation (`Tuple<int,bool,char>`, resolved by
+        // instantiate_variadic_generic_type, one concrete ClassDef per
+        // recursive-inheritance level) from an ordinary, single-type-
+        // parameter one (`Vec<int>`, resolved by instantiate_generic_
+        // type). A variadic primary template's own name is always
+        // already a member of generic_type_template_names_ too (its
+        // own template_params is non-empty, a single pack parameter),
+        // but the two mechanisms are otherwise unrelated -- this set is
+        // what resolve_generic_type actually branches on.
+        for (const ClassDef& c : program.classes) {
+            if (c.is_variadic_primary_template) variadic_generic_type_names_.insert(c.name);
+        }
     }
 
     void run() {
         signatures_ = build_signatures(program_);
+        // ch05 §5.14: synthesizes a "forwarding stub" Function for every
+        // inherited method/field access a derived class doesn't itself
+        // override (see synthesize_inherited_method_forwards' own
+        // comment) -- runs first, since resolve_generic_types/
+        // check_generic_type_methods_once and the ordinary per-function
+        // walk below all resolve an inherited method call by simply
+        // finding "DerivedClass_methodName" already present in
+        // program_.functions, exactly like an ordinary, non-inherited
+        // method -- no inheritance-specific fallback logic needed
+        // anywhere else in this file (or in codegen) as a result.
+        synthesize_inherited_method_forwards();
         // ch05 §5.14: resolves every `GenericType<Concrete>` instantiation
         // anywhere in the program (struct/class fields, every function/
         // method's own signature, and every VarDecl inside a body) and
@@ -3010,6 +3080,18 @@ public:
         for (size_t i = 0; i < original_count; i++) {
             if (program_.functions[i].body == nullptr) continue;
             if (belongs_to_unresolved_generic_type_template(program_.functions[i])) continue;
+            // ch05 §5.11: a full-header-form generic function's own
+            // template (Function::template_params non-empty, e.g.
+            // `get`/`make`) is skipped here too, for the identical
+            // reason -- its own body may reference a not-yet-bound
+            // template parameter's own name as a type (or, for a
+            // base-class-deduction pattern, something with no concrete
+            // meaning at all outside a real call site); see
+            // check_moves's own identical guard/comment. Each concrete
+            // call site is instead resolved directly below (this same
+            // walk, over an *already-monomorphized* caller's own body)
+            // by monomorphize_generic_function_call.
+            if (!program_.functions[i].template_params.empty()) continue;
             // build_mir's own Body holds raw (const Expr*) pointers into
             // this Function's *own* Stmt/Expr tree (see mir.cppm's
             // Terminator) -- safe to keep using after program_.functions
@@ -3036,12 +3118,42 @@ private:
     // ch05 §5.14: every generic class/struct template's own name -- see
     // the constructor's own comment.
     std::unordered_set<std::string> generic_type_template_names_;
+    // ch05 §5.14: every variadic generic type's own primary-template
+    // name -- see the constructor's own comment.
+    std::unordered_set<std::string> variadic_generic_type_names_;
     // ch05 §5.14: caches an already-synthesized concrete generic-type
     // instantiation by "TemplateName.MangledArgType" (mirrors
     // clone_cache_'s identical purpose for generic functions), so
     // `Vec<int>` used twice in the same program shares one concrete
     // class/method set rather than duplicating it.
     std::unordered_map<std::string, std::string> generic_type_instance_cache_;
+    // ch05 §5.14: every concrete variadic-generic-type instantiation's
+    // own recorded (non-type argument values, type arguments) --
+    // populated by instantiate_variadic_generic_type, keyed by the
+    // concrete ClassDef's own (mangled) name. The *only* way base-class
+    // deduction (monomorphize_generic_function_call's own
+    // deduce_via_base_class_chain) can recover "what was this level's
+    // own Head/Tail/Idx" after the fact: a concrete ClassDef itself
+    // records only its own *fields* (already-substituted types), not
+    // which template arguments produced them.
+    struct VariadicInstanceInfo {
+        std::string template_name;
+        std::vector<int> non_type_values;
+        std::vector<Type> type_args;
+    };
+    std::unordered_map<std::string, VariadicInstanceInfo> variadic_instance_info_;
+    // ch05 §5.11: caches an already-synthesized concrete monomorphized
+    // clone of a full-header-form generic *function* template (e.g.
+    // `get`/`make`) by its own template-parameter-binding cache key --
+    // see monomorphize_generic_function_call's own comment. Kept
+    // separate from clone_cache_ (the abbreviated-Concept-auto-form's
+    // own identical-purpose cache) since the two forms' cache keys are
+    // computed differently (this one keys off the *template parameter
+    // bindings themselves*, not the concrete function-parameter types --
+    // the two diverge for a base-class-deduction parameter, whose
+    // concrete parameter type is the *deduced base*, not any input the
+    // cache key would otherwise naturally be built from).
+    std::unordered_map<std::string, std::string> generic_function_clone_cache_;
     // ch05 §5.14: the single, shared, globally-empty witness struct
     // representing a completely bare (unconstrained) generic-type
     // parameter -- see check_generic_type_methods_once's own comment.
@@ -3170,6 +3282,93 @@ private:
         return result;
     }
 
+    // ch05 §5.14: for every class with a base (ClassDef::base_class_name),
+    // synthesizes a "forwarding stub" Function (Function::forwards_to)
+    // for every method the base class defines (recursively -- including
+    // any forward the base class itself already synthesized from *its*
+    // own base, since classes are processed in the same declaration
+    // order the parser already requires: a base is always fully
+    // declared -- and thus already has its own forwards synthesized --
+    // before a class inheriting from it) that the derived class doesn't
+    // itself override. This means every other pass in this file (and
+    // every codegen call-resolution path) resolves an inherited method
+    // call by simply finding "DerivedClass_methodName" already present
+    // in program_.functions, exactly like an ordinary, non-inherited
+    // method -- no separate inheritance-aware fallback logic needed
+    // anywhere else. A constructor/destructor ("_new"/"_delete") is
+    // never forwarded: a derived class with no constructor of its own
+    // already zero-initializes its whole (flattened, base-first)
+    // layout by default, which already correctly zero-initializes the
+    // inherited base fields too (see declare_class); synthesizing a
+    // same-named forwarding constructor would just redundantly re-run
+    // the base's own initialization a second time over the exact same
+    // `this`, and would get in the way of a derived class later
+    // defining its own constructor with a different parameter list.
+    void synthesize_inherited_method_forwards() {
+        size_t original_class_count = program_.classes.size();
+        for (size_t i = 0; i < original_class_count; i++) {
+            if (program_.classes[i].base_class_name.empty()) continue;
+            // ch05 §5.14: a variadic specialization's own base_class_name
+            // (e.g. "Tuple", set by parse_variadic_specialization's base-
+            // clause handling) names the *template*, not a real,
+            // concrete base class -- there is nothing to forward yet
+            // (neither of the doc's own variadic examples defines a
+            // method on a specialization at all; see this class's own
+            // instantiate_variadic_generic_type comment). The real,
+            // concrete per-level base chain is instead built directly
+            // by instantiate_variadic_generic_type once resolve_generic_
+            // types actually instantiates a concrete `Tuple<...>` --
+            // skipped here explicitly rather than relying on
+            // method_templates_of happening to return empty.
+            if (program_.classes[i].is_variadic_primary_template || program_.classes[i].is_variadic_specialization) {
+                continue;
+            }
+            std::string derived_name = program_.classes[i].name;
+            std::string base_name = program_.classes[i].base_class_name;
+            std::vector<std::string> namespace_path_copy = program_.classes[i].namespace_path;
+            bool is_exported_copy = program_.classes[i].is_exported;
+
+            std::vector<Function> base_methods = method_templates_of(base_name);
+            for (const Function& base_method : base_methods) {
+                // e.g. "_foo" out of "Circle_foo" -- see
+                // method_templates_of's exact-name-match filter, which
+                // guarantees this is always a clean prefix.
+                std::string suffix = base_method.name.substr(base_name.size());
+                if (suffix == "_new" || suffix == "_delete") continue;
+                std::string derived_method_name = derived_name + suffix;
+                bool already_defined = false;
+                for (const Function& fn : program_.functions) {
+                    if (fn.name == derived_method_name) {
+                        already_defined = true;
+                        break;
+                    }
+                }
+                if (already_defined) continue; // the derived class overrides this one itself
+
+                Function forward;
+                forward.name = derived_method_name;
+                forward.loc = base_method.loc;
+                forward.return_type = base_method.return_type;
+                forward.namespace_path = namespace_path_copy;
+                forward.is_exported = is_exported_copy;
+                forward.forwards_to = base_method.name;
+                forward.body = nullptr; // purely a codegen-level wrapper -- see Function::forwards_to's own comment
+                Param this_param;
+                this_param.name = "this";
+                Type this_type;
+                this_type.kind = TypeKind::Reference;
+                this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = derived_name});
+                this_type.is_mutable_ref = base_method.params[0].type.is_mutable_ref;
+                this_param.type = std::move(this_type);
+                forward.params.push_back(std::move(this_param));
+                for (size_t p = 1; p < base_method.params.size(); p++) {
+                    forward.params.push_back(base_method.params[p]);
+                }
+                program_.functions.push_back(std::move(forward));
+            }
+        }
+    }
+
     // ch05 §5.14: checks every generic class's own method bodies once,
     // abstractly, at their own definition (ch05 §5.11/§5.14's "checked
     // once at that method's own definition" principle, decomposed per
@@ -3217,6 +3416,19 @@ private:
         size_t original_class_count = program_.classes.size();
         for (size_t i = 0; i < original_class_count; i++) {
             if (program_.classes[i].template_params.empty()) continue;
+            // ch05 §5.14: a variadic primary template's own bodyless
+            // forward declaration, or one of its two fixed
+            // specializations, is never itself witness-checked this
+            // way -- its "template_params" don't name a single ordinary
+            // type parameter the way an the-generic-class-phase-1
+            // shape's own does (a pack like "Ts"/"Tail" is never a real
+            // type substitutable by a witness at all, and neither
+            // variadic shape has ever needed per-method abstract
+            // checking so far -- see this class's own constructor
+            // comment on variadic_generic_type_names_).
+            if (program_.classes[i].is_variadic_primary_template || program_.classes[i].is_variadic_specialization) {
+                continue;
+            }
             std::string type_param_name = program_.classes[i].template_params[0].name;
             std::vector<ClassField> fields_copy = program_.classes[i].fields;
             std::string class_name_copy = program_.classes[i].name;
@@ -3326,6 +3538,15 @@ private:
         size_t original_class_count = program_.classes.size();
         for (size_t i = 0; i < original_class_count; i++) {
             if (!program_.classes[i].template_params.empty()) continue;
+            // ch05 §5.14: the empty-pack base-case specialization
+            // (`Tuple<>`) is the only variadic ClassDef shape whose own
+            // template_params is empty -- it's still a template itself
+            // (of the enclosing variadic primary template), never a
+            // real, directly-instantiated class, so it's excluded here
+            // exactly like every other template's own definition is
+            // (see instantiate_variadic_generic_type, which is what
+            // actually synthesizes a *concrete* base case).
+            if (program_.classes[i].is_variadic_specialization) continue;
             size_t field_count = program_.classes[i].fields.size();
             for (size_t j = 0; j < field_count; j++) {
                 Type old_type = program_.classes[i].fields[j].type;
@@ -3336,6 +3557,20 @@ private:
         size_t original_count = program_.functions.size();
         for (size_t i = 0; i < original_count; i++) {
             if (belongs_to_unresolved_generic_type_template(program_.functions[i])) continue;
+            // ch05 §5.11/§5.14: a full-header-form generic *function*'s
+            // own template (e.g. `get`/`make`, Function::template_params
+            // non-empty) is never resolved here at all -- its own
+            // signature may contain a base-class-deduction pattern
+            // (`TupleImpl<I, Head, Tail...>& t`) whose "arguments" are
+            // only meaningful *symbolically*, referencing this
+            // function's own not-yet-bound template parameters, not
+            // real concrete types/values resolve_generic_type could
+            // make sense of at all. Each concrete call site is instead
+            // resolved directly by monomorphize_generic_function_call
+            // (mirroring exactly how an abbreviated-Concept-auto-form
+            // generic function's own body is similarly left untouched
+            // here and only monomorphized per call site).
+            if (!program_.functions[i].template_params.empty()) continue;
             SourceLocation loc = program_.functions[i].loc;
             size_t param_count = program_.functions[i].params.size();
             for (size_t j = 0; j < param_count; j++) {
@@ -3411,6 +3646,42 @@ private:
     // via a fresh index-based access afterward, never holding a
     // reference across the call.
     [[nodiscard]] Type resolve_generic_type(Type type, SourceLocation loc) {
+        // ch05 §5.14: a variadic generic type (`Tuple<int,bool,char>`,
+        // or even the zero-argument `Tuple<>` base case) is checked
+        // *before* the ordinary "template_args empty means not a
+        // generic instantiation at all" fast path below -- a variadic
+        // instantiation's own template_args being empty is itself
+        // meaningful (the empty-pack case), unlike an ordinary,
+        // non-generic Type (e.g. "int"), which never populates
+        // template_args at all. The parser guarantees an *ordinary*
+        // (non-variadic) generic type's own template_args is always
+        // exactly 1 (see parse_unqualified_type), so this branch can
+        // never misfire against one.
+        if (variadic_generic_type_names_.contains(type.name)) {
+            std::vector<Type> resolved_args;
+            resolved_args.reserve(type.template_args.size());
+            for (const Type& arg : type.template_args) resolved_args.push_back(resolve_generic_type(arg, loc));
+            // ch05 §5.14: this Type's own non_type_args (e.g. the "0" in
+            // `TupleImpl<0, int, bool, char>`) are ordinary, self-
+            // contained expressions at a top-level use site like this
+            // one (never referencing any enclosing template's own
+            // parameter -- that symbolic-reference shape only ever
+            // appears inside a *generic function's own* deduction-
+            // pattern parameter type, which this pass never reaches at
+            // all, see run()'s own guard) -- evaluated with an empty
+            // parameter-value scope.
+            std::vector<int> resolved_non_type_args;
+            resolved_non_type_args.reserve(type.non_type_args.size());
+            for (const std::shared_ptr<Expr>& arg : type.non_type_args) {
+                resolved_non_type_args.push_back(evaluate_non_type_arg(*arg, {}));
+            }
+            std::string concrete_name =
+                instantiate_variadic_generic_type(type.name, resolved_non_type_args, resolved_args, loc);
+            type.name = concrete_name;
+            type.template_args.clear();
+            type.non_type_args.clear();
+            return type;
+        }
         if (type.template_args.empty()) {
             if (type.pointee) type.pointee = std::make_shared<Type>(resolve_generic_type(*type.pointee, loc));
             if (type.element) type.element = std::make_shared<Type>(resolve_generic_type(*type.element, loc));
@@ -3427,6 +3698,7 @@ private:
         type.template_args.clear();
         return type;
     }
+
 
     // ch05 §5.14: synthesizes (or reuses an already-cached) concrete
     // instantiation of the generic class/struct template named
@@ -3536,6 +3808,394 @@ private:
 
         throw DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc);
     }
+
+    // ch05 §5.14: synthesizes (or reuses an already-cached) concrete
+    // instantiation of a variadic generic type's own recursive-
+    // inheritance chain -- one concrete ClassDef per level, from
+    // `type_args[0]` down to the terminal empty-pack base case, each
+    // level's own base_class_name pointing at the next level's own
+    // synthesized name (mirroring exactly how the doc's own
+    // `Tuple<Head, Tail...> : private Tuple<Tail...>` recursive
+    // specialization is meant to expand). `non_type_args` holds every
+    // *leading* non-type argument's own already-evaluated concrete
+    // value (e.g. TupleImpl's own "Idx" -- empty for a primary template
+    // with no non-type parameter at all, like plain Tuple). Returns the
+    // *outermost* (fullest) level's own mangled name -- what
+    // `TupleImpl<0,int,bool,char>` itself resolves to. Neither of the
+    // doc's own two variadic examples (Tuple, TupleImpl) ever defines a
+    // method on a variadic specialization, so unlike
+    // instantiate_generic_type's class branch, no method-cloning
+    // happens here at all -- see method_templates_of's own comment:
+    // every specialization sharing the same `name` would be
+    // indistinguishable by a `this`-type-pointee-name scan alone, so
+    // naively reusing it here would be unsound (a known, deliberately
+    // out-of-scope gap for now).
+    [[nodiscard]] std::string instantiate_variadic_generic_type(const std::string& template_name,
+                                                                 const std::vector<int>& non_type_args,
+                                                                 const std::vector<Type>& type_args,
+                                                                 SourceLocation loc) {
+        std::string cache_key = template_name;
+        for (int v : non_type_args) cache_key += "." + std::to_string(v);
+        cache_key += type_args.empty() ? ".empty" : "";
+        for (const Type& arg : type_args) cache_key += "." + mangle_type_for_clone_name(arg);
+        auto cached = generic_type_instance_cache_.find(cache_key);
+        if (cached != generic_type_instance_cache_.end()) return cached->second;
+        generic_type_instance_cache_[cache_key] = cache_key;
+
+        if (type_args.empty()) {
+            // The empty-pack base case: `template<> class Tuple<>
+            // { ... };`, or (with a leading non-type parameter, e.g.
+            // TupleImpl) `template<int Idx> class TupleImpl<Idx>
+            // { ... };` -- must already be declared (parser-enforced
+            // for every variadic primary template that's ever
+            // specialized at all, but not necessarily reached by any
+            // *use* of the recursive case -- a `TupleImpl<0,int>`
+            // instantiation still needs to bottom out at TupleImpl<1>'s
+            // own concrete instance one level down).
+            const ClassDef* base_case_tmpl = nullptr;
+            for (const ClassDef& c : program_.classes) {
+                if (c.name == template_name && c.is_variadic_specialization &&
+                    c.template_params.size() == non_type_args.size()) {
+                    base_case_tmpl = &c;
+                    break;
+                }
+            }
+            if (!base_case_tmpl) {
+                throw DataflowError("'" + template_name + "' has no declared empty-pack base-case specialization "
+                                                            "matching " +
+                                         std::to_string(non_type_args.size()) + " non-type argument(s) (ch05 §5.14)",
+                    loc);
+            }
+            ClassDef concrete;
+            concrete.name = cache_key;
+            concrete.namespace_path = base_case_tmpl->namespace_path;
+            program_.classes.push_back(std::move(concrete));
+            variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
+            return cache_key;
+        }
+
+        const ClassDef* recursive_tmpl = nullptr;
+        for (const ClassDef& c : program_.classes) {
+            if (c.name == template_name && c.is_variadic_specialization &&
+                c.template_params.size() == non_type_args.size() + 2 &&
+                c.template_params[non_type_args.size()].is_pack == false &&
+                c.template_params[non_type_args.size() + 1].is_pack) {
+                recursive_tmpl = &c;
+                break;
+            }
+        }
+        if (!recursive_tmpl) {
+            throw DataflowError("'" + template_name + "' has no declared recursive-case specialization to match " +
+                                     std::to_string(non_type_args.size()) + " non-type and " +
+                                     std::to_string(type_args.size()) + " type argument(s) (ch05 §5.14)",
+                loc);
+        }
+
+        // Copy everything needed out of `recursive_tmpl` *before* the
+        // recursive instantiate_variadic_generic_type call below,
+        // which pushes a new ClassDef into program_.classes and can
+        // reallocate its backing storage -- `recursive_tmpl` itself
+        // (a bare pointer into that vector) would otherwise dangle
+        // (see this class's other generic-type methods' identical
+        // concern).
+        size_t leading_non_type_count = non_type_args.size();
+        std::vector<GenericTypeParam> leading_non_type_params(
+            recursive_tmpl->template_params.begin(), recursive_tmpl->template_params.begin() + leading_non_type_count);
+        GenericTypeParam head_param = recursive_tmpl->template_params[leading_non_type_count];
+        std::string base_template_name = recursive_tmpl->base_class_name;
+        AccessSpecifier base_access = recursive_tmpl->base_access;
+        std::vector<ClassField> fields_copy = recursive_tmpl->fields;
+        std::vector<std::string> namespace_path_copy = recursive_tmpl->namespace_path;
+        std::shared_ptr<Expr> base_non_type_arg_expr = recursive_tmpl->base_non_type_arg;
+
+        Type head_concrete = type_args[0];
+        std::vector<Type> tail_concrete(type_args.begin() + 1, type_args.end());
+        check_type_param_constraint(head_param, head_concrete, template_name, loc);
+
+        // ch05 §5.14: the base's own non-type argument (e.g. "Idx + 1"
+        // in TupleImpl's own `: public TupleImpl<Idx + 1, Tail...>`) is
+        // evaluated using *this* level's own non-type parameter values
+        // (e.g. this level's own concrete "Idx") -- empty when the base
+        // template has no non-type parameter at all (plain Tuple's own
+        // `: private Tuple<Tail...>`).
+        std::vector<int> base_non_type_args;
+        if (base_non_type_arg_expr) {
+            std::unordered_map<std::string, int> param_values;
+            for (size_t i = 0; i < leading_non_type_params.size(); i++) {
+                param_values[leading_non_type_params[i].name] = non_type_args[i];
+            }
+            base_non_type_args.push_back(evaluate_non_type_arg(*base_non_type_arg_expr, param_values));
+        }
+
+        std::string base_concrete_name =
+            instantiate_variadic_generic_type(base_template_name, base_non_type_args, tail_concrete, loc);
+
+        ClassDef concrete;
+        concrete.name = cache_key;
+        concrete.namespace_path = namespace_path_copy;
+        concrete.base_class_name = base_concrete_name;
+        concrete.base_access = base_access;
+        for (const ClassField& f : fields_copy) {
+            ClassField nf;
+            nf.name = f.name;
+            nf.access = f.access;
+            nf.type = substitute_type_param(f.type, head_param.name, head_concrete);
+            concrete.fields.push_back(std::move(nf));
+        }
+        program_.classes.push_back(std::move(concrete));
+        variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
+        return cache_key;
+    }
+
+    // ch05 §5.14: evaluates a variadic generic type's own non-type
+    // argument expression down to a concrete int -- restricted to a
+    // small, purpose-scoped shape (an integer literal; a bare
+    // identifier, looked up in `param_values`, e.g. an enclosing
+    // specialization's own non-type parameter name; or a `+` of the
+    // two, e.g. "Idx + 1"), not a general compile-time constant-
+    // expression evaluator (ch05 §5.14's own scoping: non-type
+    // parameters are a narrow, purpose-built feature for a variadic
+    // type's own recursive indexing, not a general `consteval`
+    // mechanism). Throws a precise DataflowError for any other shape,
+    // or an identifier not found in `param_values`.
+    [[nodiscard]] int evaluate_non_type_arg(const Expr& expr, const std::unordered_map<std::string, int>& param_values) {
+        switch (expr.kind) {
+            case ExprKind::IntegerLiteral: return static_cast<int>(expr.int_value);
+            case ExprKind::Identifier: {
+                auto it = param_values.find(expr.name);
+                if (it == param_values.end()) {
+                    throw DataflowError("'" + expr.name +
+                                         "' does not name a known non-type template parameter here (ch05 §5.14)",
+                        expr.loc);
+                }
+                return it->second;
+            }
+            case ExprKind::Binary:
+                if (expr.binary_op == BinaryOp::Add) {
+                    return evaluate_non_type_arg(*expr.lhs, param_values) +
+                           evaluate_non_type_arg(*expr.rhs, param_values);
+                }
+                [[fallthrough]];
+            default:
+                throw DataflowError("unsupported non-type template argument expression (ch05 §5.14 only supports "
+                                     "an integer literal, a bare parameter name, or a '+' of the two)",
+                    expr.loc);
+        }
+    }
+
+    // ch05 §5.14: given `pattern` (a generic function's own base-class-
+    // deduction parameter type, e.g. `TupleImpl<I, Head, Tail...>`,
+    // still bearing its own *symbolic* template_args/non_type_args
+    // referencing the enclosing function template's own parameter
+    // names) and the actual call argument at `arg_index`, walks that
+    // argument's own concrete type's base-class chain (via
+    // variadic_instance_info_, populated by instantiate_variadic_
+    // generic_type) looking for the unique level whose own recorded
+    // non-type value(s) match `pattern`'s own (by-now-substituted-with-
+    // already-bound-values) non-type arguments -- real, standard C++
+    // template-argument deduction from a base class ([temp.deduct.call]),
+    // not a scpp-specific mechanism (see ch05 §5.14's own doc comment).
+    // Binds every one of `pattern`'s own type-parameter-position
+    // symbolic references (e.g. "Head") to that matched level's own
+    // concrete type argument, and records an upcast for `arg_index`
+    // (its actual argument needs to be treated as the matched level's
+    // own, less-derived concrete type when calling the monomorphized
+    // clone -- codegen needs no actual conversion instruction for this,
+    // since every level's own flattened layout is already byte-
+    // compatible with its base, see ClassDef::base_class_name's own
+    // comment; this is purely a scpp-level type-compatibility fact).
+    void deduce_via_base_class_chain(const Expr& expr, size_t arg_index, const Type& pattern, Body& body,
+                                      std::unordered_map<std::string, Type>& type_bindings,
+                                      std::unordered_map<std::string, int>& value_bindings,
+                                      std::vector<std::pair<size_t, Type>>& upcasts) {
+        std::vector<int> search_non_type_values;
+        search_non_type_values.reserve(pattern.non_type_args.size());
+        for (const std::shared_ptr<Expr>& e : pattern.non_type_args) {
+            search_non_type_values.push_back(evaluate_non_type_arg(*e, value_bindings));
+        }
+
+        std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_index], body, signatures_);
+        if (!arg_type.has_value()) {
+            throw DataflowError("cannot resolve the type of this argument for base-class deduction (ch05 §5.14)",
+                expr.loc);
+        }
+        Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+
+        std::string current_name = named.name;
+        const VariadicInstanceInfo* matched = nullptr;
+        std::string matched_name;
+        while (true) {
+            auto it = variadic_instance_info_.find(current_name);
+            if (it == variadic_instance_info_.end()) break;
+            if (it->second.template_name == pattern.name && it->second.non_type_values == search_non_type_values) {
+                matched = &it->second;
+                matched_name = current_name;
+                break;
+            }
+            const ClassDef* cd = nullptr;
+            for (const ClassDef& c : program_.classes) {
+                if (c.name == current_name) {
+                    cd = &c;
+                    break;
+                }
+            }
+            if (!cd || cd->base_class_name.empty()) break;
+            current_name = cd->base_class_name;
+        }
+        if (!matched) {
+            throw DataflowError("no base class (direct or indirect) of the argument's own type matches the "
+                                 "pattern '" +
+                                     pattern.name + "<...>' (ch05 §5.14 base-class deduction)",
+                expr.loc);
+        }
+
+        size_t ti = 0;
+        for (const Type& sym : pattern.template_args) {
+            if (sym.is_pack_expansion) break; // the doc's own examples never use the pack itself directly
+            if (ti < matched->type_args.size()) {
+                type_bindings[sym.name] = matched->type_args[ti];
+                ti++;
+            }
+        }
+
+        Type target;
+        target.kind = TypeKind::Named;
+        target.name = matched_name;
+        upcasts.emplace_back(arg_index, std::move(target));
+    }
+
+    // ch05 §5.11: monomorphizes a call to a full-header-form generic
+    // function template (Function::template_params non-empty, e.g.
+    // `get`/`make`) -- binds each of the template's own parameters to a
+    // concrete Type (type parameter) or int value (non-type parameter),
+    // either from an explicit call-site argument (Expr::
+    // explicit_template_args) or by deduction from the corresponding
+    // function-parameter's own argument (an ordinary bare-`T`-shaped
+    // parameter, or ch05 §5.14's own base-class-deduction accessor
+    // pattern, see deduce_via_base_class_chain), then synthesizes (or
+    // reuses an already-cached) concrete clone and rewrites `expr.name`
+    // to it.
+    void monomorphize_generic_function_call(Expr& expr, const Function& tmpl, Body& body) {
+        std::unordered_map<std::string, Type> type_bindings;
+        std::unordered_map<std::string, int> value_bindings;
+        std::vector<std::pair<size_t, Type>> upcasts;
+
+        for (size_t p = 0; p < expr.explicit_template_args.size() && p < tmpl.template_params.size(); p++) {
+            const GenericTypeParam& tp = tmpl.template_params[p];
+            const ExplicitTemplateArg& arg = expr.explicit_template_args[p];
+            if (tp.is_non_type) {
+                if (arg.is_type || !arg.value) {
+                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
+                                             "' is a non-type parameter, but a type argument was given (ch05 §5.11)",
+                        expr.loc);
+                }
+                value_bindings[tp.name] = evaluate_non_type_arg(*arg.value, value_bindings);
+            } else {
+                if (!arg.is_type) {
+                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
+                                             "' is a type parameter, but a non-type argument was given (ch05 §5.11)",
+                        expr.loc);
+                }
+                type_bindings[tp.name] = arg.type;
+            }
+        }
+
+        for (size_t i = 0; i < tmpl.params.size() && i < expr.args.size(); i++) {
+            const Type& param_type = tmpl.params[i].type;
+            const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
+            if (underlying.kind != TypeKind::Named) continue;
+
+            if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
+                // Case A: a bare parameter directly named after one of
+                // this template's own type parameters (e.g. "T x").
+                for (const GenericTypeParam& tp : tmpl.template_params) {
+                    if (tp.is_non_type || tp.name != underlying.name || type_bindings.contains(tp.name)) continue;
+                    std::optional<Type> arg_type = infer_expr_type(*expr.args[i], body, signatures_);
+                    if (!arg_type.has_value()) continue;
+                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    type_bindings[tp.name] = named;
+                }
+                continue;
+            }
+            // Case B: a base-class-deduction pattern (e.g.
+            // "TupleImpl<I, Head, Tail...>& t").
+            if (variadic_generic_type_names_.contains(underlying.name)) {
+                deduce_via_base_class_chain(expr, i, underlying, body, type_bindings, value_bindings, upcasts);
+            }
+        }
+
+        for (const GenericTypeParam& tp : tmpl.template_params) {
+            // ch05 §5.14: a *pack* template parameter (e.g. "Tail") can
+            // only ever appear spread inside a base-class-deduction
+            // pattern in this language's current scope -- never bound
+            // individually (the whole pattern it's part of is replaced
+            // wholesale by the deduced upcast target type instead, see
+            // deduce_via_base_class_chain), so it needs no binding of
+            // its own at all.
+            if (tp.is_pack) continue;
+            bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
+            if (!bound) {
+                throw DataflowError("cannot deduce template parameter '" + tp.name + "' of generic function '" +
+                                         tmpl.name + "', and no explicit argument was given for it (ch05 §5.11)",
+                    expr.loc);
+            }
+        }
+
+        std::string cache_key = tmpl.name;
+        for (const GenericTypeParam& tp : tmpl.template_params) {
+            if (tp.is_pack) continue; // never individually bound -- see the validation loop's own comment above
+            cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings[tp.name]))
+                                        : ("." + mangle_type_for_clone_name(type_bindings[tp.name]));
+        }
+        auto cached = generic_function_clone_cache_.find(cache_key);
+        if (cached == generic_function_clone_cache_.end()) {
+            generic_function_clone_cache_[cache_key] = cache_key;
+
+            Function clone;
+            clone.name = cache_key;
+            clone.loc = tmpl.loc;
+            clone.namespace_path = tmpl.namespace_path;
+            clone.is_exported = false;
+            clone.return_type = tmpl.return_type;
+            for (const auto& [name, replacement] : type_bindings) {
+                clone.return_type = substitute_type_param(clone.return_type, name, replacement);
+            }
+            clone.params.reserve(tmpl.params.size());
+            for (size_t i = 0; i < tmpl.params.size(); i++) {
+                Param p;
+                p.name = tmpl.params[i].name;
+                p.type = tmpl.params[i].type;
+                bool upcasted = false;
+                for (const auto& [idx, target] : upcasts) {
+                    if (idx != i) continue;
+                    if (p.type.kind == TypeKind::Reference) {
+                        p.type.pointee = std::make_shared<Type>(target);
+                    } else {
+                        p.type = target;
+                    }
+                    upcasted = true;
+                    break;
+                }
+                if (!upcasted) {
+                    for (const auto& [name, replacement] : type_bindings) {
+                        p.type = substitute_type_param(p.type, name, replacement);
+                    }
+                }
+                clone.params.push_back(std::move(p));
+            }
+            clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
+            if (clone.body) {
+                for (const auto& [name, replacement] : type_bindings) {
+                    substitute_type_param_in_stmt(*clone.body, name, replacement);
+                }
+            }
+            program_.functions.push_back(std::move(clone));
+        }
+
+        expr.name = cache_key;
+        expr.explicit_template_args.clear();
+    }
+
 
     // Shared by instantiate_generic_type's struct/class branches: throws
     // a precise error if `type_param` is concept-constrained and
@@ -3672,6 +4332,19 @@ private:
         auto template_it = generic_template_indices_.find(expr.name);
         if (template_it == generic_template_indices_.end()) return;
         const Function& tmpl = program_.functions[template_it->second];
+
+        // ch05 §5.11: a full-header-form generic function template
+        // (Function::template_params non-empty) is monomorphized by an
+        // entirely separate mechanism (explicit-argument/base-class-
+        // deduction, not this abbreviated-Concept-auto-form's own
+        // per-constrained-parameter-position matching below) --
+        // dispatched first and returned from immediately, since the
+        // rest of this function assumes the abbreviated form's own
+        // shape (Param::generic_concept) throughout.
+        if (!tmpl.template_params.empty()) {
+            monomorphize_generic_function_call(expr, tmpl, body);
+            return;
+        }
 
         std::vector<Type> concrete_param_types;
         concrete_param_types.reserve(tmpl.params.size());
@@ -4090,13 +4763,39 @@ void check_moves(const Program& program) {
             class_field_types[def.name][field.name] = field.type;
         }
     }
+    // See DataflowState::class_field_access's own comment -- struct
+    // fields have no access control at all (ch04 §4.1), so only
+    // program.classes populates this.
+    ClassFieldAccess class_field_access;
+    for (const ClassDef& def : program.classes) {
+        for (const ClassField& field : def.fields) {
+            class_field_access[def.name][field.name] = field.access;
+        }
+    }
     for (const Function& fn : program.functions) {
         // A bodyless `extern "C"` declaration (ch02 §2.1) has no
         // statements to run the dataflow analysis over -- it's already
         // registered in `signatures` above (so call sites into it are
         // still checked normally), but there's nothing here to check.
         if (!fn.body) continue;
-        check_function(fn, signatures, class_names, class_field_types);
+        // ch05 §5.11: a full-header-form generic function's own
+        // template (e.g. `get`/`make`, Function::template_params
+        // non-empty) is never checked directly here -- its own body may
+        // reference a not-yet-bound template parameter's own name as if
+        // it were a real type (e.g. `T x;`, or a base-class-deduction
+        // pattern's own "Head"/"Tail"), which movecheck's Body-based
+        // machinery has no way to make sense of abstractly (unlike the
+        // abbreviated `Concept auto` form, whose constrained parameter's
+        // declared type already names a real, though synthetic, witness
+        // class). Only each concrete call site's own monomorphized
+        // clone (an ordinary, fully-concrete Function by the time this
+        // runs, synthesized by monomorphize_generic_function_call) is
+        // ever checked -- a narrower, pragmatic scope than the
+        // abbreviated form's "checked once abstractly, independent of
+        // any call site" guarantee, accepted given this form's added
+        // deduction-pattern complexity.
+        if (!fn.template_params.empty()) continue;
+        check_function(fn, signatures, class_names, class_field_types, class_field_access);
     }
 }
 

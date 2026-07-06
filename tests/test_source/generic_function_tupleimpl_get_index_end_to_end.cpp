@@ -1,0 +1,32 @@
+// ch05 §5.14: full end-to-end verification of TupleImpl/get<I> --
+// writes a distinct value to each level via get<0>/get<1>/get<2>, then
+// reads each back to confirm they are independently stored (not
+// aliasing the same memory -- a real risk given every level of the
+// recursive-inheritance chain names its own field identically, "value";
+// codegen's field lookup must find the *own* level's field, not a
+// same-named one belonging to a different level, see
+// StructInfo::find_field_index).
+template<int Idx, typename... Ts> class TupleImpl;
+
+template<int Idx> class TupleImpl<Idx> {};
+
+template<int Idx, typename Head, typename... Tail>
+class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {
+public:
+    Head value;
+};
+
+template<int I, typename Head, typename... Tail>
+Head& get(TupleImpl<I, Head, Tail...>& t) { return t.value; }
+
+int main() {
+    TupleImpl<0, int, bool, char> t;
+    get<0>(t) = 42;
+    get<1>(t) = true;
+    get<2>(t) = 'A';
+
+    print_int(get<0>(t));
+    print_bool(get<1>(t));
+    print_int(get<2>(t));
+    return 0;
+}

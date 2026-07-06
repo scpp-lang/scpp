@@ -1,0 +1,13 @@
+// ch05 §5.11: a "return-type-only" full-header-form generic function --
+// the type parameter has no corresponding function-parameter position
+// at all, so the caller must supply it explicitly (`make<int>()`).
+template<typename T> T make() {
+    T x;
+    return x;
+}
+
+int main() {
+    int n = make<int>();
+    print_int(n);
+    return 0;
+}
