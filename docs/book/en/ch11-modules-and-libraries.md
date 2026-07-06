@@ -205,12 +205,9 @@ elsewhere in this spec:
   `using`-declaration. `using X = Y;` is a *type* alias in real C++, and a
   namespace is not a type; spelling a namespace alias that way would not
   survive stripping `unsafe` and handing the result to a real C++
-  compiler ([ch00](ch00-design-philosophy.md) §6). This is a third,
+  compiler ([ch00](ch00-design-philosophy.md) §6). This is a second,
   orthogonal mechanism alongside `using foo::bar;` (imports one *name*,
-  not a whole namespace) and `import name as local;`
-  ([§11.8](#118-import-visibility-re-exports-and-renaming), renames a
-  *module* at the import statement, doesn't shorten any in-code path) --
-  all three can be used together freely.
+  not a whole namespace) -- both can be used together freely.
 - **Namespace and module are otherwise orthogonal**, exactly as in real
   C++: a namespace is a purely logical grouping of names; a module is a
   physical compilation/import boundary. The one deliberate exception is
@@ -326,19 +323,12 @@ verified in plain C++) -- scpp's version is actually checked, at least
 once, by a real scpp compiler, which is strictly *more* than plain C++
 guarantees, not less.
 
-## 11.8 Import visibility, re-exports, and renaming
+## 11.8 Import visibility and re-exports
 
 - `import name;` is **private, non-transitive**: it makes `name`'s
   exports visible in the importing file, but does not forward them to
   whoever imports *that* file in turn.
 - `export import name;` **re-exports**, transitively.
-- `import name as local_name;` -- **new syntax, not present in real
-  C++20** -- lets the importing file refer to `name` under a local alias.
-  This solves a purely source-level problem (two imported modules
-  happening to share a human-readable name) and is analogous to Python's
-  `import x as y` or Rust's dependency renaming; it does **not** by
-  itself resolve link-level symbol collisions (see
-  [§11.11](#1111-collision-handling)) -- that's a separate mechanism.
 
 ## 11.9 Soundness: cross-module signatures are all the checker needs
 
@@ -444,8 +434,8 @@ actually needs to be visible outside its own compiled unit:
 
 - Two `import`s of differently-named-but-colliding modules **directly**
   in the same file: caught at **compile time**, cleanly, before codegen
-  even runs (the existing rule: pick different names, or use
-  `import ... as ...`).
+  even runs (the existing rule: pick different names -- exactly like
+  real C++, scpp has no import-site renaming mechanism to fall back on).
 - Two modules **indirectly** pulled into the same final link (neither
   imported directly by the same file, e.g. both are dependencies of a
   third module that doesn't re-export either): if their compiled exported
