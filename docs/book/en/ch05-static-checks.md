@@ -745,6 +745,87 @@ short-lived local simply does not satisfy such a signature, so passing it
 to that function is rejected at the call site, without the caller's own
 checker ever inspecting the callee's body.
 
+## 5.13 Lifetime-Generic Parameters
+
+Lets library code accept a closure, verify -- through an ordinary
+`concept` -- that the closure's own parameter is safe to call with a
+reference of *any* lifetime, and then actually call it with a value the
+library's own function body creates internally, whose lifetime the
+closure's author could never have named in advance. This is a minimal,
+targeted extension of [§5.3](#53-lifetime)'s existing named-group
+mechanism and [§5.11](#511-generic-functions-and-concepts)'s
+concept-constrained generics -- one reserved group name, plus one new
+piece of concept-checking semantics, no new grammar. It is what makes a
+Rust-`thread::scope`-shaped API (a callback whose parameter's lifetime is
+chosen by the callee, not the caller) expressible as ordinary library
+code, rather than needing to be a compiler-hardcoded special case like
+`std::thread`/`std::span` -- designing that library API itself is
+separate follow-up work, not part of this language-level definition.
+
+- **`[[scpp::lifetime(generic)]]` is a reserved group name.** Tagging a
+  reference parameter this way assigns it a fresh, compiler-synthesized
+  group that no other group anywhere in the program can ever be unified
+  with, because `generic` does not name a group any user-written code can
+  otherwise spell or reuse. This needs no new body-checking machinery --
+  it is exactly [§5.3](#53-lifetime)'s existing "groups are mutually
+  independent unless explicitly unified" rule, applied to a group nobody
+  else can ever name. A consequence already implied by that existing
+  rule, not a separately-stated one: within the function or closure's own
+  body, a `generic`-tagged parameter (or anything derived from it) may be
+  used for ordinary, synchronous operations -- read it, call a method on
+  it, pass it on to another function accepting a compatible bound -- but
+  it can never be written into any of the function's own by-reference
+  captures, any other named group, the function's return value, or
+  global/static storage: there is no group it could legally be unified
+  with to permit any of that.
+- **A `requires`-expression's own probe parameter may carry the same
+  tag.** Tagging a compound requirement's probe parameter
+  `[[scpp::lifetime(generic)]]` changes what that requirement checks:
+  ```cpp
+  template<typename T>
+  concept AcceptsToken = requires(T a, Token& tok [[scpp::lifetime(generic)]]) {
+      { a(tok) } -> std::same_as<void>;
+  };
+  ```
+  is satisfied only if `T`'s own matching call-operator/function
+  parameter is *also* declared `[[scpp::lifetime(generic)]]` at its own
+  definition -- not merely "callable with some `Token&`". This is new
+  concept-checking semantics attached to an already-legal C++20 grammar
+  position (a `requires`-expression's parameters may already carry
+  attributes, and a real compiler already accepts and ignores ones it
+  doesn't recognize, see [ch00](ch00-design-philosophy.md) §2) -- real
+  C++20 concepts have no notion of inspecting a parameter's lifetime-group
+  at all, so this is scpp-specific semantics, not new syntax.
+- **Call-site exemption.** Once a value's type is known -- through such a
+  concept, or because the concrete callable's own declaration is directly
+  visible -- to have a `generic`-tagged parameter, calling it with *any*
+  concrete argument is unconditionally permitted, regardless of what
+  group that argument belongs to, including a reference whose lifetime is
+  invented fresh inside the *caller's own* body (a local variable the
+  callee could never have named in advance):
+  ```cpp
+  void with_fresh_token(AcceptsToken auto&& f) {
+      Token tok;   // invented here, inside this function's own body
+      f(tok);      // permitted: f's own parameter is declared lifetime-generic
+  }
+  ```
+  Ordinarily, passing a reference argument requires it to satisfy
+  whatever group the parameter belongs to (see [§5.3](#53-lifetime));
+  this is the one exemption to that rule, justified precisely because the
+  previous two rules already guarantee the callee's own body cannot do
+  anything requiring the argument to outlive the single call.
+
+This reaches the same soundness pattern real Rust's `std::thread::scope`
+relies on via a higher-ranked trait bound
+(`for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T`), without adding
+generics over lifetimes as their own first-class category:
+[§5.3](#53-lifetime) already declined `'a`-style lifetime syntax in
+favor of the simpler, non-generic named-group mechanism, and these three
+rules extend that same mechanism rather than reversing that choice --
+covering the one pattern (a callback whose parameter's lifetime is chosen
+by the callee, not the caller) the plain grouping mechanism could not
+otherwise reach.
+
 ---
 
 [← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The v0.1 Supported Subset →](ch06-safe-subset.md)

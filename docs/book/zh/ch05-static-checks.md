@@ -594,6 +594,73 @@ void for_each_doubled(std::span<int> s, IntConsumer auto&& f) {
 签名，所以把它传给那个函数，在调用点就会被拒绝，调用方自己的检查器
 完全不需要去看被调用函数的函数体。
 
+## 5.13 生命周期泛型参数（Lifetime-Generic Parameters）
+
+让库代码能接受一个闭包，通过一条普通的 `concept` 验证"这个闭包自己的
+参数对**任意**生命期都能安全调用"，然后真的拿一个这个库函数自己内部
+现造出来的值去调用它——这个值的生命期，闭包的作者写这个闭包的时候根本
+不可能提前知道。这是对 [§5.3](#53-生命周期lifetime) 已有的具名 group
+机制、以及 [§5.11](#511-泛型函数与-concept) 的 concept 约束泛型，做的
+一个小范围、有针对性的扩展——一个保留的 group 名字，加一条新的
+concept 检查语义，没有新语法。它让 Rust `thread::scope`那种形状的 API
+（回调函数自己参数的生命期，是被调用方而不是调用方决定的）能写成普通
+库代码，不需要像 `std::thread`/`std::span`那样被硬编码进编译器——
+基于这个机制去设计那套线程库 API 本身，是另外的后续工作，不属于这份
+语言层面的定义。
+
+- **`[[scpp::lifetime(generic)]]` 是一个保留的 group 名字。** 这样标记
+  一个引用型参数，等于给它分配一个全新的、编译器合成的 group——程序里
+  任何别的地方都不可能跟它 unify，因为 `generic`根本不是任何用户代码能
+  拼写出来或者复用的 group 名字。这不需要任何新的函数体检查逻辑——就是
+  [§5.3](#53-生命周期lifetime) 已有的"不同 group 之间互相独立，除非
+  显式 unify"规则，套用在一个别人永远拼不出名字的 group 上而已。有个
+  推论是这条已有规则本身就带出来的，不需要另外声明：在函数/闭包自己的
+  函数体内部，一个标了 `generic`的参数（或者从它派生出来的东西）可以
+  做普通的、同步的操作——读它、在它上面调用方法、把它传给另一个接受
+  兼容约束的函数——但永远没法写进这个函数自己的按引用 capture、任何
+  其它具名 group、这个函数的返回值、或者全局/static 存储里：没有任何
+  合法的 group 能让它 unify 进那些地方。
+- **`requires`表达式自己的探测参数也可以带同样的 tag。** 给一条
+  compound requirement 的探测参数标上 `[[scpp::lifetime(generic)]]`，
+  会改变这条 requirement 检查的内容：
+  ```cpp
+  template<typename T>
+  concept AcceptsToken = requires(T a, Token& tok [[scpp::lifetime(generic)]]) {
+      { a(tok) } -> std::same_as<void>;
+  };
+  ```
+  只有当 `T`自己那个对应的 call-operator/函数参数，在它**自己定义的
+  地方**也标了 `[[scpp::lifetime(generic)]]`，这条 requirement 才算
+  满足——不再只是"能不能拿某个 `Token&`去调用"这么简单。这是给一个
+  本来就合法的 C++20 语法位置（`requires`表达式的参数本来就可以带
+  attribute，真实编译器本来就会接受并且忽略它不认识的 attribute，见
+  [ch00](ch00-design-philosophy.md) §2）加上的新语义——真实 C++20 的
+  concept 完全没有"检查一个参数的 lifetime group"这种能力，所以这是
+  scpp 专属的语义，不是新语法。
+- **调用点的豁免规则。** 一旦通过这样一条 concept（或者因为这个具体
+  可调用对象自己的声明就摆在眼前直接可见）确认了某个值的类型带有一个
+  标了 `generic`的参数，拿**任意**具体实参去调用它就无条件放行，不管
+  这个实参属于哪个 group——哪怕这个引用的生命期是在**调用方自己**的
+  函数体内部现造出来的（被调用方根本不可能提前给它起名字）：
+  ```cpp
+  void with_fresh_token(AcceptsToken auto&& f) {
+      Token tok;   // 就在这个函数自己的函数体里现造出来的
+      f(tok);      // 允许：f 自己的参数被声明成了 lifetime-generic
+  }
+  ```
+  正常情况下，传一个引用型实参，要求它满足对应参数所在的 group（见
+  [§5.3](#53-生命周期lifetime)）；这是对这条规则**唯一**的豁免，之所以
+  站得住，正是因为前两条规则已经保证了被调用方自己的函数体不可能做
+  任何要求这个实参活得比这一次调用还久的事。
+
+这样就达成了真实 Rust `std::thread::scope`靠一个 higher-ranked trait
+bound（`for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T`）才能拿到
+的那种健全性，而且没有把"对生命期做泛型"变成一个独立的一等公民范畴：
+[§5.3](#53-生命周期lifetime) 当初就已经放弃了 `'a`那种生命周期语法，
+选了更简单、非泛型的具名 group 机制，这三条规则是在扩展同一套机制，
+不是推翻当初那个选择——只是补上了"回调函数参数的生命期由被调用方
+而不是调用方决定"这一种、纯粹的分组机制原本够不着的场景。
+
 ---
 
 [← 上一章：struct 与 class 的语义区分](ch04-struct-vs-class.md) · [目录](README.md) · [下一章：v0.1 支持的子集 →](ch06-safe-subset.md)
