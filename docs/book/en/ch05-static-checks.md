@@ -663,19 +663,23 @@ void print_area(const Shape auto& s) {
   former, and the latter is a much more open-ended feature (arbitrary
   compile-time predicates over types) than this round is scoped to
   design.
-- **Generic functions are spelled with the abbreviated C++20 form only**
-  (`void f(Concept auto& x)`) -- the full `template<Concept T> void
-  f(T& x)` header is **not** supported for functions in v0.1 (generic
-  *types* do use the full header form, of necessity -- see
-  [§5.14](#514-generic-types)). This is a deliberate scoping cut, not a
-  claim that the two forms differ semantically in real C++ (they
-  don't): it sidesteps needing multi-parameter template headers,
-  explicit/partial specialization, and template-template parameters for
-  *functions* specifically, none of which this feature's actual goal
-  (compile-time polymorphism without inheritance) needs. A consequence:
-  every constrained type parameter is tied to at least one function
-  parameter's declared position -- there is no way to write a
-  "return-type-only" generic function in this subset.
+- **Generic functions may be spelled with either the abbreviated C++20
+  form** (`void f(Concept auto& x)`) **or the full header form**
+  (`template<Concept T> void f(T& x)`) -- real C++ treats the two as
+  fully equivalent, and so does scpp; neither is preferred or
+  restricted. The full header form also allows multiple type parameters
+  (`template<typename T, typename U> void f(T& a, U& b)`, matching
+  generic types, [§5.14](#514-generic-types)) and a "return-type-only"
+  generic function -- a type parameter with no corresponding
+  function-parameter position at all, requiring the caller to supply it
+  explicitly at the call site (e.g. `template<typename T> T make();
+  make<Circle>();`) -- something the abbreviated form cannot express,
+  since it always ties a constrained parameter to a function parameter's
+  own declared position. This is exactly what
+  [§5.14](#514-generic-types)'s base-class-deduction accessor pattern
+  (`get<I>`) needs: an explicit, non-deduced non-type argument at the
+  call site, and a parameter type -- naming a class-template
+  specialization -- that no `Concept auto` placeholder could spell.
 - **No default method bodies in a concept** -- unlike a Rust trait,
   which can supply a default implementation a type may inherit or
   override, a real C++ `concept` is purely a structural predicate; it
@@ -691,11 +695,12 @@ void print_area(const Shape auto& s) {
   overloads.
 - **Explicitly out of scope for this round**: recursive pack-splitting
   inside a function body (as opposed to fold expressions, above),
-  template-template parameters, default template arguments, associated
-  types, and dynamic dispatch/type erasure (scpp's
-  virtual-function/`dyn`-equivalent, deferred alongside inheritance).
-  Generic `struct`/`class` types, once out of scope entirely, are now
-  designed -- see [§5.14](#514-generic-types).
+  explicit specialization of a function template, template-template
+  parameters, default template arguments, associated types, and dynamic
+  dispatch/type erasure (scpp's virtual-function/`dyn`-equivalent,
+  deferred alongside inheritance). Generic `struct`/`class` types, once
+  out of scope entirely, are now designed -- see
+  [§5.14](#514-generic-types).
 
 ## 5.12 Closures (Lambda Expressions)
 
@@ -992,6 +997,10 @@ monolithically:
       Head value;
   };
 
+  // Full header form (see §5.11) -- needed here since Head/Tail are
+  // deduced from a base class, and I is supplied explicitly by the
+  // caller (get<2>(t)), neither of which the abbreviated auto form
+  // could express.
   template<size_t I, typename Head, typename... Tail>
   Head& get(TupleImpl<I, Head, Tail...>& t) { return t.value; }
   ```
