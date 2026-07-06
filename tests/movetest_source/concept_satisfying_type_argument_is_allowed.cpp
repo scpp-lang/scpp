@@ -1,0 +1,19 @@
+class Circle {
+public:
+    Circle() { return; }
+    int area() const { return 314; }
+};
+
+template<typename T>
+concept Shape = requires(const T& t) {
+    { t.area() } -> std::same_as<int>;
+};
+
+int print_area(const Shape auto& s) {
+    return s.area();
+}
+
+int main() {
+    Circle c;
+    return print_area(c);
+}

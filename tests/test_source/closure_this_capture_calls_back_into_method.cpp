@@ -1,0 +1,26 @@
+// ch05 §5.12: `[this]` captures a reference to the enclosing method's
+// own receiver, letting a closure defined inside a method call back
+// into it (via an explicit `this->method()`, ch05 §5.9).
+template<typename T>
+concept IntTransform = requires(T f, int x) { f(x); };
+
+int apply(IntTransform auto&& f, int z) {
+    return f(z);
+}
+
+class Multiplier {
+public:
+    Multiplier(int factor) { this->factor = factor; return; }
+    int scale(int x) const { return x * this->factor; }
+    int use_closure(int z) {
+        return apply([this](int z) -> int { return this->scale(z); }, z);
+    }
+private:
+    int factor;
+};
+
+int main() {
+    Multiplier m(7);
+    print_int(m.use_closure(3));
+    return 0;
+}

@@ -1,0 +1,25 @@
+// ch05 §5.11: a simple requirement directly invoking the placeholder
+// itself (`f(x);`, no braces/arrow) models "callable with an int
+// argument" -- satisfied here by an ordinary class with a method named
+// "call" (the same fixed internal name a closure's own synthesized
+// operator() uses, ch05 §5.12), invoked explicitly via `.call(...)`
+// (the "bare Call sugar" for a closure literal itself is separate,
+// still-pending work).
+class Doubler {
+public:
+    Doubler() { return; }
+    int call(int x) { return x * 2; }
+};
+
+template<typename T>
+concept IntConsumer = requires(T f, int x) { f(x); };
+
+int apply_it(IntConsumer auto& f, int x) {
+    return f.call(x);
+}
+
+int main() {
+    Doubler d;
+    print_int(apply_it(d, 21));
+    return 0;
+}

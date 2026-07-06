@@ -108,6 +108,14 @@ private:
     // Class names specifically (ch04 §4.2) -- see struct_names_ above for
     // why this is a second, narrower set rather than the only one.
     std::unordered_set<std::string> class_names_;
+    // ch05 §5.11: concept names, keyed the same fully-qualified way as
+    // struct_names_/class_names_. Consulted by generic-parameter parsing
+    // (`ConceptName auto& name`) to recognize the abbreviated generic-
+    // function form: an identifier immediately followed by `auto` is
+    // only treated as a concept-constrained parameter when it names an
+    // already-declared concept (concepts, like every other declaration
+    // this parser handles, must be declared before use).
+    std::unordered_set<std::string> concept_names_;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -145,6 +153,13 @@ private:
             tok.kind == TokenKind::KwVoid || tok.kind == TokenKind::KwChar) {
             return true;
         }
+        // ch05 §5.12: a bare `auto` at statement start unambiguously
+        // means an auto-typed var-decl (`auto f = expr;`) -- the only
+        // way to name a closure's own compiler-synthesized, otherwise
+        // unspellable type. `auto`'s *other* legal appearance (`Concept
+        // auto` in parameter position, parse_param_type) is never the
+        // very first token of a statement, so there's no ambiguity here.
+        if (tok.kind == TokenKind::KwAuto) return true;
         if (check_std_qualified("unique_ptr") || check_std_qualified("span")) return true;
         if (tok.kind != TokenKind::Identifier) return false;
         // ch11: a bare identifier might be the *first segment* of a
@@ -368,15 +383,25 @@ private:
     // Parses a full type, including the borrow-checking sugar from ch03:
     // an optional leading `const` plus a trailing `&` turns the
     // unqualified type into a Reference -- `T&` is a mutable/exclusive
-    // borrow, `const T&` a shared borrow (ch05.2). `const` immediately
+    // borrow, `const T&` a shared borrow (ch05.2). A trailing `&&`
+    // instead makes an rvalue reference (`T&&`, ch03's "passed by move"
+    // parameter form) -- ownership transfer, not a borrow; `const T&&`
+    // is rejected (a moved-from value must be mutable to move *from*).
+    // `allow_rvalue_ref` gates `&&` to exactly the contexts ch03's own
+    // table restricts it to -- a function/method/constructor parameter's
+    // declared type -- rejected everywhere else (a var-decl, struct/
+    // class field, return type, or a nested position like std::
+    // unique_ptr<T>/std::make_unique<T>'s own `T`) with a clear parse
+    // error, rather than silently constructing an AST some later pass
+    // would have to reject (or worse, wouldn't). `const` immediately
     // before a *pointer* type (`const T*`, e.g. `const char* fmt` in a
-    // realistic `extern "C"` signature -- ch02 §2.1) is also accepted and,
-    // like a reference's `is_mutable_ref`, properly tracked: `const T*`
-    // and `T*` are genuinely distinct types (ch05 §5.7, ch08 Q9), not
-    // unified the way an earlier draft of that section assumed. `const`
-    // is rejected everywhere else (a bare `const T`, no `&`/`*`) since
-    // scpp has no other const-qualification yet.
-    Type parse_type() {
+    // realistic `extern "C"` signature -- ch02 §2.1) is also accepted
+    // and, like a reference's `is_mutable_ref`, properly tracked: `const
+    // T*` and `T*` are genuinely distinct types (ch05 §5.7, ch08 Q9),
+    // not unified the way an earlier draft of that section assumed.
+    // `const` is rejected everywhere else (a bare `const T`, no
+    // `&`/`&&`/`*`) since scpp has no other const-qualification yet.
+    Type parse_type(bool allow_rvalue_ref = false) {
         bool has_const_prefix = match(TokenKind::KwConst);
         Type type = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
 
@@ -389,6 +414,30 @@ private:
             return type;
         }
 
+        if (match(TokenKind::AmpAmp)) {
+            if (!allow_rvalue_ref) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "'&&' (rvalue reference) is only supported for a function/method/"
+                                  "constructor parameter's declared type in this version (ch03) -- not "
+                                  "a variable, field, return type, or nested type argument");
+            }
+            if (has_const_prefix) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "'const' cannot qualify an rvalue reference ('const T&&') -- an "
+                                  "rvalue-reference parameter always takes ownership via move (ch03), "
+                                  "which needs mutable access to the value being moved from");
+            }
+            auto pointee = std::make_shared<Type>(std::move(type));
+            type = Type{};
+            type.kind = TypeKind::Reference;
+            type.pointee = std::move(pointee);
+            type.is_mutable_ref = true;
+            type.is_rvalue_ref = true;
+            return type;
+        }
+
         if (has_const_prefix && type.kind != TypeKind::Pointer) {
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
@@ -396,6 +445,83 @@ private:
                               "or a pointer type ('const T*') in this version");
         }
         return type;
+    }
+
+    // ch05 §5.11: parses a single *parameter's* declared type, additionally
+    // recognizing the abbreviated generic-function form -- `[const]
+    // ConceptName auto[&|&&]` (e.g. `const Shape auto&`, `Invocable
+    // auto&&`, bare `Shape auto`) -- on top of every ordinary shape
+    // parse_type() already handles (including `T&&`, always legal in
+    // parameter position). Sets `out_generic_concept` to the concept's
+    // own name when this parameter is generic-constrained (left empty
+    // otherwise, the overwhelmingly common case) -- see
+    // Param::generic_concept's own comment for how this is used later
+    // (concept-satisfaction checking + monomorphization).
+    //
+    // The resulting Type's innermost Named type names the concept's own
+    // witness class (ClassDef::is_concept_witness) -- registered in
+    // struct_names_/class_names_ exactly like a real class, by
+    // parse_concept_def -- so the generic function's own body-check
+    // resolves every call through its constrained parameter via the
+    // exact same class/method-call machinery used for a real class,
+    // with zero new logic; only monomorphization (consulting
+    // out_generic_concept, recorded on Param) needs to know this
+    // parameter was ever generic at all.
+    Type parse_param_type(std::string& out_generic_concept) {
+        out_generic_concept.clear();
+        size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
+        bool next_is_identifier_then_auto =
+            peek_at(const_offset).kind == TokenKind::Identifier && peek_at(const_offset + 1).kind == TokenKind::KwAuto;
+        if (!next_is_identifier_then_auto) return parse_type(/*allow_rvalue_ref=*/true);
+
+        std::string concept_name(peek_at(const_offset).text);
+        if (!concept_names_.contains(concept_name)) {
+            const Token& tok = peek_at(const_offset);
+            throw ParseError(tok.line, tok.column,
+                              "'" + concept_name +
+                                  "' is not a declared concept -- 'Name auto' is only legal when 'Name' names a "
+                                  "concept, declared before use (ch05 §5.11)");
+        }
+        bool has_const = match(TokenKind::KwConst);
+        advance(); // the concept name itself
+        expect(TokenKind::KwAuto, "'auto'");
+        out_generic_concept = concept_name;
+
+        Type type;
+        type.kind = TypeKind::Named;
+        type.name = concept_name; // the witness class shares the concept's own name
+
+        if (match(TokenKind::AmpAmp)) {
+            if (has_const) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "'const' cannot qualify an rvalue reference ('const " + concept_name +
+                                      " auto&&') -- an rvalue-reference parameter always takes ownership via "
+                                      "move (ch03), which needs mutable access to the value being moved from");
+            }
+            auto pointee = std::make_shared<Type>(std::move(type));
+            type = Type{};
+            type.kind = TypeKind::Reference;
+            type.pointee = std::move(pointee);
+            type.is_mutable_ref = true;
+            type.is_rvalue_ref = true;
+            return type;
+        }
+        if (match(TokenKind::Amp)) {
+            auto pointee = std::make_shared<Type>(std::move(type));
+            type = Type{};
+            type.kind = TypeKind::Reference;
+            type.pointee = std::move(pointee);
+            type.is_mutable_ref = !has_const;
+            return type;
+        }
+        if (has_const) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "'const' is only supported directly before a reference type ('const " +
+                                  concept_name + " auto&') in this version");
+        }
+        return type; // bare "ConceptName auto" -- by value
     }
 
     // Wraps `base` in Array types for each trailing `[N]` found after a
@@ -694,7 +820,7 @@ private:
         }
     }
 
-    // Parses exactly one struct/class/function(-or-extern-group)
+    // Parses exactly one struct/class/concept/function(-or-extern-group)
     // top-level item, given whether an `export` marker (individual, or
     // inherited from an enclosing `export { }` group) applies to it.
     void parse_top_level_item(Program& program, bool is_exported) {
@@ -706,6 +832,12 @@ private:
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwClass)) {
             parse_class_def(program, is_exported);
+        } else if (check(TokenKind::KwTemplate)) {
+            // ch05 §5.11: only a `concept` declaration ever starts with
+            // `template<...>` in v0.1 (a generic *function* stays
+            // abbreviated-form-only) -- so seeing this keyword at all is
+            // enough to dispatch here unambiguously.
+            parse_concept_def(program, is_exported);
         } else {
             parse_top_level_function_or_extern_group(program, is_exported);
         }
@@ -938,7 +1070,7 @@ private:
         if (!check(TokenKind::RParen)) {
             do {
                 Param param;
-                Type base_type = parse_type();
+                Type base_type = parse_param_type(param.generic_concept);
                 param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
                 // Same C-style declarator order (array suffix after the
                 // name, decaying to pointer) as parse_function's own
@@ -980,6 +1112,256 @@ private:
         this_type.is_mutable_ref = !is_const;
         this_param.type = std::move(this_type);
         return this_param;
+    }
+
+    // ch05 §5.11: generic (concept-constrained) *methods* aren't
+    // supported in v0.1 -- only free functions are (matching every
+    // example the spec itself demonstrates). Rather than silently
+    // mismarking such a method (parse_param_list's "ConceptName auto"
+    // syntax is shared with parse_function, so it would otherwise parse
+    // without error, just with is_generic_template never set -- an
+    // ordinary-looking Function that's actually unsound to compile as
+    // one), reject it outright with a clear, scoped error message.
+    void reject_generic_params(const std::vector<Param>& params, const std::string& what) {
+        for (const Param& param : params) {
+            if (!param.generic_concept.empty()) {
+                throw ParseError(current_loc().line, current_loc().column,
+                                  "a generic (concept-constrained) parameter is not supported on " + what +
+                                      " in this version (ch05 §5.11 -- only a free function may be generic)");
+            }
+        }
+    }
+
+    // ch05 §5.11: parses a single requirement inside a concept's
+    // requires-expression body -- restricted (a pragmatic v0.1 scoping
+    // cut matching the spec's own examples) to a call on the concept's
+    // own placeholder parameter, never an arbitrary expression. Mirrors
+    // real C++20 requires-expression grammar exactly: a *simple*
+    // requirement is a bare expression-statement with **no** braces at
+    // all (`f(x);`) and can never carry a `->` constraint; only a
+    // *compound* requirement is brace-wrapped (`{ t.area() } ->
+    // std::same_as<T>;`), and a compound requirement's braces always
+    // require exactly the `-> constraint` that follows them (v0.1 has no
+    // use for a brace-wrapped requirement with no `->`, e.g. a bare
+    // `noexcept` check -- not part of this feature's scope):
+    //   <placeholder>.<method>(<args>);                          --
+    //     simple, a method call.
+    //   { <placeholder>.<method>(<args>) } -> std::same_as<T>;   --
+    //     compound, constraining the call's result to exact type T.
+    //   <placeholder>(<args>);                                   --
+    //     simple, *directly invoking* the placeholder itself (e.g.
+    //     IntConsumer's `f(x)`) -- modeled internally as a call to a
+    //     fixed synthesized method name ("call"), exactly like a
+    //     closure's own compiler-synthesized operator() (ch05 §5.12):
+    //     both are resolved through the same "a bare Call redirects to
+    //     receiver.call(args) when the callee name is a class-typed
+    //     value with a 'call' method" sugar, so a concept requiring
+    //     direct invocation and a real closure satisfying it line up
+    //     with zero extra machinery.
+    // Every argument must be a bare reference to one of the requires-
+    // expression's own *other* (non-placeholder) parameters -- resolved
+    // to a concrete Type via `helper_param_types` right here, so nothing
+    // about the parameter list itself needs to survive into
+    // ConceptRequirement.
+    ConceptRequirement parse_concept_requirement(const std::string& placeholder_name,
+                                                   const std::unordered_map<std::string, Type>& helper_param_types) {
+        ConceptRequirement req;
+        bool is_compound = match(TokenKind::LBrace);
+
+        const Token& receiver_tok = expect(TokenKind::Identifier, "the concept's own requires-parameter name");
+        if (receiver_tok.text != placeholder_name) {
+            throw ParseError(receiver_tok.line, receiver_tok.column,
+                              "expected a requirement shaped as a call on '" + placeholder_name +
+                                  "' (this concept's own constrained requires-parameter) -- v0.1 does not "
+                                  "support an arbitrary requirement expression");
+        }
+        if (match(TokenKind::Dot)) {
+            req.method_name = std::string(expect(TokenKind::Identifier, "method name").text);
+        } else {
+            req.method_name = "call";
+        }
+        expect(TokenKind::LParen, "'('");
+        if (!check(TokenKind::RParen)) {
+            do {
+                const Token& arg_tok =
+                    expect(TokenKind::Identifier, "a requirement argument (a requires-expression parameter name)");
+                auto it = helper_param_types.find(std::string(arg_tok.text));
+                if (it == helper_param_types.end()) {
+                    throw ParseError(arg_tok.line, arg_tok.column,
+                                      "'" + std::string(arg_tok.text) +
+                                          "' is not one of this concept's own requires-expression parameters -- "
+                                          "v0.1 only supports a requirement argument that is a bare reference to "
+                                          "one of them");
+                }
+                req.arg_types.push_back(it->second);
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::RParen, "')'");
+
+        if (is_compound) {
+            expect(TokenKind::RBrace, "'}'");
+            // ch05 §5.11: the result must be constrained to an *exact*
+            // type -- 'std::same_as<T>' only, never
+            // 'std::convertible_to<T>' (scpp has no implicit scalar
+            // conversions at all, so the two would mean the same thing
+            // anyway).
+            expect(TokenKind::Arrow,
+                   "'->' (a brace-wrapped requirement must be followed by a 'std::same_as<T>' constraint in "
+                   "this version)");
+            if (!check_std_qualified("same_as")) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "a compound requirement's constraint must be 'std::same_as<T>' in this "
+                                  "version (never 'std::convertible_to<T>')");
+            }
+            consume_std_qualified();
+            expect(TokenKind::Less, "'<'");
+            req.return_type = parse_type();
+            expect(TokenKind::Greater, "'>'");
+            req.has_return_constraint = true;
+        }
+        expect(TokenKind::Semicolon, "';'");
+        return req;
+    }
+
+    // ch05 §5.11: parses `template<typename T> concept Name =
+    // requires(...) { ... };` -- the *only* place v0.1 ever uses a full
+    // `template<...>` header (a generic *function* stays abbreviated-
+    // form-only, `Concept auto`); real C++ grammar has no other way to
+    // declare a concept at all, so this is unavoidable even though the
+    // rest of this feature deliberately avoids the general template-
+    // parameter machinery.
+    //
+    // Immediately synthesizes the concept's hidden witness class (one
+    // bodyless method per requirement, named via the same
+    // `ClassName_memberName` scheme every other method uses) directly
+    // into `program` -- see ClassDef::is_concept_witness and
+    // Function::is_generic_template's own comments for why this lets a
+    // constrained generic function's body-check reuse 100% of the
+    // existing class/method-call machinery with zero new logic.
+    void parse_concept_def(Program& program, bool is_exported) {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwTemplate, "'template'");
+        expect(TokenKind::Less, "'<'");
+        expect(TokenKind::KwTypename, "'typename'");
+        std::string template_param_name =
+            std::string(expect(TokenKind::Identifier, "template parameter name").text);
+        expect(TokenKind::Greater, "'>'");
+
+        expect(TokenKind::KwConcept, "'concept'");
+        ConceptDef def;
+        std::string bare_name = std::string(expect(TokenKind::Identifier, "concept name").text);
+        def.name = qualify_name(bare_name);
+        def.template_param_name = template_param_name;
+        def.namespace_path = namespace_stack_;
+        def.is_exported = is_exported;
+        check_export_namespace(program, is_exported, def.namespace_path, loc, "concept '" + def.name + "'");
+        concept_names_.insert(def.name);
+        // The witness class shares the concept's own fully-qualified
+        // name -- a concept and a class/struct can never collide in
+        // real C++ (different entity kinds sharing one namespace,
+        // exactly like a class and a function can't share a name
+        // either), so this is always unambiguous. Registering it the
+        // same way parse_class_def does makes every existing type-name
+        // lookup (looks_like_type_start, generic-parameter parsing,
+        // ...) just work with no special-casing.
+        struct_names_.insert(def.name);
+        class_names_.insert(def.name);
+
+        expect(TokenKind::Assign, "'='");
+        expect(TokenKind::KwRequires, "'requires'");
+        expect(TokenKind::LParen, "'('");
+
+        // The requires-expression's own (fake, unevaluated) parameter
+        // list: exactly one parameter's declared type must be
+        // (optionally const-qualified) the template parameter itself --
+        // e.g. `const T& t` -- identifying it as the constrained
+        // placeholder (def.requires_param_name), with its const-ness
+        // driving the witness methods' own `this` mutability (mirroring
+        // make_this_param). Every other parameter is an ordinary,
+        // already-declared concrete type (e.g. `int x`), tracked only
+        // transiently to resolve a requirement's own argument types.
+        std::unordered_map<std::string, Type> helper_param_types;
+        bool found_placeholder = false;
+        bool placeholder_is_const = false;
+        if (!check(TokenKind::RParen)) {
+            do {
+                size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
+                bool is_placeholder = peek_at(const_offset).kind == TokenKind::Identifier &&
+                                       peek_at(const_offset).text == template_param_name;
+                if (is_placeholder) {
+                    if (found_placeholder) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column,
+                                          "a concept's requires-expression may only have one parameter of "
+                                          "the constrained type '" +
+                                              template_param_name + "'");
+                    }
+                    placeholder_is_const = match(TokenKind::KwConst);
+                    advance(); // the template parameter name itself (e.g. "T")
+                    match(TokenKind::Amp); // optional trailing '&' -- ref-ness itself
+                                            // doesn't affect witness synthesis, only
+                                            // const-ness does
+                    def.requires_param_name =
+                        std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
+                    found_placeholder = true;
+                } else {
+                    Type helper_type = parse_type();
+                    std::string helper_name =
+                        std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
+                    helper_param_types[helper_name] = std::move(helper_type);
+                }
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::RParen, "')'");
+        if (!found_placeholder) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "concept '" + def.name +
+                                  "'s requires-expression must have exactly one parameter of the "
+                                  "constrained type '" +
+                                  template_param_name + "'");
+        }
+
+        expect(TokenKind::LBrace, "'{'");
+        while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+            def.requirements.push_back(parse_concept_requirement(def.requires_param_name, helper_param_types));
+        }
+        expect(TokenKind::RBrace, "'}'");
+        expect(TokenKind::Semicolon, "';'");
+
+        ClassDef witness;
+        witness.name = def.name;
+        witness.namespace_path = namespace_stack_;
+        witness.is_exported = is_exported;
+        witness.is_concept_witness = true;
+        program.classes.push_back(std::move(witness));
+
+        for (const ConceptRequirement& req : def.requirements) {
+            Function fn;
+            fn.loc = loc;
+            fn.name = def.name + "_" + req.method_name;
+            fn.namespace_path = namespace_stack_;
+            fn.is_exported = is_exported;
+            fn.return_type =
+                req.has_return_constraint ? req.return_type : Type{.kind = TypeKind::Named, .name = "void"};
+            fn.params.push_back(make_this_param(def.name, placeholder_is_const));
+            for (size_t i = 0; i < req.arg_types.size(); i++) {
+                Param p;
+                p.type = req.arg_types[i];
+                p.name = "arg" + std::to_string(i);
+                fn.params.push_back(std::move(p));
+            }
+            // Bodyless: a witness method is never actually called or
+            // compiled (is_concept_witness excludes it from codegen
+            // entirely) -- it exists purely as a signature for the
+            // generic function's own abstract body-check to resolve
+            // calls against.
+            fn.body = nullptr;
+            program.functions.push_back(std::move(fn));
+        }
+
+        program.concepts.push_back(std::move(def));
     }
 
     // Parses `class Name { ... };` (ch04 §4.2/ch05 §5.9): fields (with
@@ -1087,6 +1469,7 @@ private:
                 fn.return_type.name = "void";
                 fn.name = qualified_class_name + "_new";
                 fn.params = parse_param_list();
+                reject_generic_params(fn.params, "a constructor");
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.body = parse_block();
                 finish_member_fn(fn);
@@ -1104,6 +1487,7 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.params = parse_param_list();
+                reject_generic_params(fn.params, "a method");
                 // `const` trails the parameter list, exactly like real
                 // C++ (`int length() const { ... }`), so it's only
                 // knowable -- and `this`'s mutability with it -- after
@@ -1165,7 +1549,7 @@ private:
                     break;
                 }
                 Param param;
-                Type base_type = parse_type();
+                Type base_type = parse_param_type(param.generic_concept);
                 param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
                 // The array suffix (if any) follows the *declared name*,
                 // not the type -- same C-style declarator order as
@@ -1190,6 +1574,21 @@ private:
             } while (match(TokenKind::Comma));
         }
         expect(TokenKind::RParen, "')'");
+
+        // ch05 §5.11: a function with at least one concept-constrained
+        // parameter is a *generic template* -- checked once, abstractly,
+        // against each constrained parameter's own witness class; never
+        // emitted to codegen directly (see Function::is_generic_template's
+        // own comment). Computed here (rather than by scanning
+        // program.functions later) since this is the one place every
+        // function's parameter list is fully parsed, regardless of which
+        // top-level path reached it.
+        for (const Param& param : fn.params) {
+            if (!param.generic_concept.empty()) {
+                fn.is_generic_template = true;
+                break;
+            }
+        }
 
         if (fn.has_varargs && !fn.is_extern_c) {
             const Token& tok = peek();
@@ -1267,6 +1666,30 @@ private:
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
         stmt->loc = loc;
+        if (match(TokenKind::KwAuto)) {
+            // ch05 §5.12: `auto name = expr;` infers the local's type
+            // from its initializer -- the only way to name a closure's
+            // own compiler-synthesized, otherwise unspellable class
+            // type. `Type{Named, "auto"}` is a safe, collision-free
+            // sentinel ("auto" is a reserved keyword -- the lexer never
+            // produces it as an ordinary Identifier, so no real type can
+            // ever be named this): resolved in place by movecheck's
+            // Monomorphizer pass (monomorphize_generics), in the same
+            // pre-check_moves phase that resolves a Lambda literal's own
+            // synthesized class -- see its VarDecl case. Never reaches
+            // check_moves/codegen unresolved.
+            stmt->type = Type{.kind = TypeKind::Named, .name = "auto"};
+            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            const Token& tok = peek();
+            if (!match(TokenKind::Assign)) {
+                throw ParseError(tok.line, tok.column,
+                                  "'auto' requires an initializer ('auto name = expr;') -- there is no other "
+                                  "way to know what concrete type to infer");
+            }
+            stmt->init = parse_expr();
+            expect(TokenKind::Semicolon, "';'");
+            return stmt;
+        }
         Type base = parse_type();
         stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
         stmt->type = parse_array_suffix(base);
@@ -1534,6 +1957,33 @@ private:
                 node->lhs = std::move(expr);
                 node->rhs = std::move(index);
                 expr = std::move(node);
+            } else if (expr->kind == ExprKind::Lambda && check(TokenKind::LParen)) {
+                // ch05 §5.12: an IIFE (immediately-invoked lambda
+                // expression), e.g. `[](int x) { return x; }(5)` -- sugar
+                // for calling the literal's own synthesized "call"
+                // method directly, exactly like `obj.method(args)`
+                // above just with the receiver being the lambda literal
+                // itself rather than a named variable (movecheck's
+                // closure-resolution pass resolves `expr`'s synthesized
+                // class the same way either way -- see
+                // resolve_callee_signature/codegen_lvalue's own Lambda
+                // cases). Scoped to exactly a Lambda literal (not any
+                // other expression kind): scpp has no other "callable
+                // value" concept (no function pointers/std::function)
+                // that could sensibly appear directly before `(` here.
+                advance(); // '('
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Call;
+                node->loc = expr->loc;
+                node->name = "call";
+                node->lhs = std::move(expr);
+                if (!check(TokenKind::RParen)) {
+                    do {
+                        node->args.push_back(parse_expr());
+                    } while (match(TokenKind::Comma));
+                }
+                expect(TokenKind::RParen, "')'");
+                expr = std::move(node);
             } else {
                 break;
             }
@@ -1572,9 +2022,110 @@ private:
         return node;
     }
 
+    // ch05 §5.12: parses `[capture-list](params) [mutable] [-> Type] {
+    // body }` -- reuses real C++ lambda syntax verbatim. Produces a
+    // *raw* (unresolved) Lambda Expr: a capture's concrete type isn't
+    // known yet (the parser has no type inference for arbitrary
+    // enclosing-scope locals -- that's movecheck's job), and a blanket
+    // `[=]`/`[&]` capture mode's own implicit captures aren't resolved
+    // yet either (needs free-variable analysis over the body, likewise
+    // deferred). See movecheck's closure-resolution pass (which runs in
+    // the same pre-check_moves phase as concept monomorphization, for
+    // the same reason: it needs per-function type information the
+    // parser doesn't have) for where both are resolved and the concrete
+    // synthesized class this literal constructs is determined.
+    ExprPtr parse_lambda_expression() {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::LBracket, "'['");
+
+        auto node = std::make_unique<Expr>();
+        node->kind = ExprKind::Lambda;
+        node->loc = loc;
+
+        bool first = true;
+        if (!check(TokenKind::RBracket)) {
+            do {
+                // A capture-default (`=`/`&`) is only meaningful as the
+                // very first item -- real C++ rejects it elsewhere too,
+                // but this parser simply never looks for one past the
+                // first position, so a stray later `=`/`&` instead falls
+                // through to an ordinary (by-value/by-reference) capture
+                // parse, which naturally rejects nonsense like a second
+                // bare `&` via expect(Identifier) failing.
+                if (first && match(TokenKind::Assign)) {
+                    node->lambda_blanket_mode = LambdaCaptureMode::ByValue;
+                    first = false;
+                    continue;
+                }
+                if (first && check(TokenKind::Amp) &&
+                    (peek_at(1).kind == TokenKind::Comma || peek_at(1).kind == TokenKind::RBracket)) {
+                    advance();
+                    node->lambda_blanket_mode = LambdaCaptureMode::ByReference;
+                    first = false;
+                    continue;
+                }
+                first = false;
+
+                if (match(TokenKind::Star)) {
+                    // `[*this]` -- captures the enclosing object *by
+                    // value*, which needs a class-copy mechanism this
+                    // codebase doesn't have yet (classes have no copy
+                    // constructor at all, ch04 §4.2) -- an honest "not
+                    // yet supported" error rather than silently
+                    // constructing something unsound.
+                    expect(TokenKind::KwThis, "'this' (after '*' in a capture)");
+                    const Token& this_tok = peek();
+                    throw ParseError(this_tok.line, this_tok.column,
+                                      "'[*this]' is not supported in this version (capturing the enclosing "
+                                      "object by value would need class copy semantics, which don't exist "
+                                      "yet) -- use '[this]' to capture a reference to it instead");
+                }
+                LambdaCapture capture;
+                if (match(TokenKind::KwThis)) {
+                    // `[this]` -- a reference to the enclosing method's
+                    // own receiver (this is scpp's *only* `this`
+                    // representation, ch05 §5.9 -- there is no separate
+                    // raw-pointer form to distinguish from).
+                    capture.name = "this";
+                    capture.by_reference = true;
+                    node->lambda_captures.push_back(std::move(capture));
+                    continue;
+                }
+                capture.by_reference = match(TokenKind::Amp);
+                capture.name = std::string(expect(TokenKind::Identifier, "captured variable name").text);
+                if (match(TokenKind::Assign)) {
+                    // Init-capture: `[name = expr]`/`[&name = expr]` --
+                    // `expr` is evaluated in the *enclosing* scope; how
+                    // a move-only type crosses into a closure (ch05
+                    // §5.12), e.g. `[p = std::move(p)]`.
+                    capture.init = parse_expr();
+                }
+                node->lambda_captures.push_back(std::move(capture));
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::RBracket, "']'");
+
+        node->lambda_params = parse_param_list();
+        reject_generic_params(node->lambda_params, "a lambda parameter list");
+
+        node->lambda_is_mutable = match(TokenKind::KwMutable);
+
+        if (match(TokenKind::Arrow)) {
+            node->type = parse_type();
+            node->has_lambda_explicit_return_type = true;
+        }
+
+        node->lambda_body = parse_block();
+        return node;
+    }
+
     ExprPtr parse_primary() {
         const Token& tok = peek();
         SourceLocation loc{tok.line, tok.column};
+
+        if (check(TokenKind::LBracket)) {
+            return parse_lambda_expression();
+        }
 
         if (check_std_qualified("move")) {
             consume_std_qualified();

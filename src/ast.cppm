@@ -63,8 +63,22 @@ struct Type {
     // view), false for `std::span<const T>` (read-only view) -- reuses
     // this same flag rather than adding a new one, since the two types
     // share the same "is this view/borrow read-only" meaning. Meaningless
-    // for every other kind.
+    // for every other kind. Not consulted when is_rvalue_ref (below) is
+    // true.
     bool is_mutable_ref = true;
+
+    // Reference only: true for `T&&` (ch03's "passed by move" parameter
+    // form -- ownership transfer, exactly like a std::unique_ptr move,
+    // just for any type). This is genuinely just a named rvalue
+    // reference: unlike real C++'s `auto&&`/forwarding-reference
+    // template parameters, scpp's `auto` never triggers reference
+    // collapsing, so `T&&` always means "take ownership via move," never
+    // "bind to either an lvalue or rvalue depending on the argument" --
+    // confirmed against the language-definition doc, ch05 §5.11's
+    // `Concept auto&&` generic form reuses this exact same flag (see
+    // Param::generic_concept). false for `T&`/`const T&`, where
+    // is_mutable_ref (above) then distinguishes those two as before.
+    bool is_rvalue_ref = false;
 
     // Pointer only: true for `T*`, false for `const T*` -- mirrors
     // is_mutable_ref above, but kept as its own separate flag (rather than
@@ -76,6 +90,61 @@ struct Type {
     // pointee == false) is rejected unconditionally, even inside
     // `unsafe { }` -- see movecheck's assignment_target_is_read_only.
     bool is_mutable_pointee = true;
+};
+
+struct Param {
+    Type type;
+    std::string name;
+    // ch05 §5.11: empty for an ordinary parameter (the overwhelmingly
+    // common case). Non-empty names the concept this parameter is
+    // constrained by, for the abbreviated generic-function form --
+    // `ConceptName auto name` (by value), `ConceptName auto& name`/
+    // `const ConceptName auto& name` (mutable/shared borrow), or
+    // `ConceptName auto&& name` (move-in) -- mirroring the ordinary
+    // `T`/`T&`/`const T&`/`T&&` forms exactly, just with `auto`
+    // interposed and a concept name standing in for a concrete type
+    // (see parse_generic_param_type). `type` itself is still fully
+    // populated the same shape an ordinary parameter's would be, except
+    // its innermost Named type names a synthesized *witness class*
+    // (see ClassDef::is_concept_witness) rather than a real type -- the
+    // generic function's own body is checked once, abstractly, against
+    // that witness (ch05 §5.11); this field alone records *which*
+    // concept produced it, consulted at each call site to monomorphize
+    // (see the parser's/movecheck's concept-monomorphization pass).
+    std::string generic_concept;
+};
+
+// ch05 §5.12: one entry in a lambda expression's own capture-list --
+// `[x]` (by-value), `[&x]` (by-reference), `[x = expr]`/`[&x = expr]`
+// (init-capture: the field's initial value/binding is `expr`, evaluated
+// in the *enclosing* scope, rather than a copy/reference of an existing
+// same-named local -- how a move-only type crosses into a closure, e.g.
+// `[p = std::move(p)]`), or `[this]` (name == "this", captures a
+// reference to the enclosing method's own receiver). Populated for
+// every *explicit* capture at parse time (parser.cppm's
+// parse_lambda_expression); a blanket `[=]`/`[&]` capture mode (see
+// Expr::lambda_blanket_mode) adds further *implicit* entries to this
+// same list, but only once movecheck's closure-resolution pass (which
+// alone has the per-function type information needed to know what a
+// blanket capture's free variables even refer to) has run -- by the
+// time movecheck's own per-function checking or codegen ever sees a
+// Lambda Expr node, this list is always the complete, final capture set.
+struct LambdaCapture {
+    std::string name;
+    bool by_reference = false;
+    // Non-null only for an init-capture; null for a plain `[name]`/
+    // `[&name]` capture (whose value/binding comes directly from the
+    // enclosing scope's own same-named local).
+    ExprPtr init;
+};
+
+enum class LambdaCaptureMode {
+    None,       // only the explicitly-listed captures -- e.g. `[]`, `[x]`.
+    ByValue,    // `[=]` or a mixed `[=, &y]` -- every other free variable
+                // referenced in the body is implicitly captured by value.
+    ByReference, // `[&]` or a mixed `[&, x]` -- every other free variable
+                 // referenced in the body is implicitly captured by
+                 // reference.
 };
 
 enum class ExprKind {
@@ -98,6 +167,9 @@ enum class ExprKind {
     Subscript,
     Move,       // std::move(x) -- compiler builtin move hint, not an ordinary call
     MakeUnique, // std::make_unique<T>(args...) -- compiler builtin heap allocation
+    Lambda,     // `[captures](params) { body }` (ch05 §5.12) -- desugars to
+                // constructing an anonymous, compiler-synthesized class; see
+                // Expr's own lambda_* fields below.
 };
 
 enum class BinaryOp {
@@ -155,7 +227,11 @@ struct Expr {
 
     // Identifier / Call (callee name) / Member (field name) / StringLiteral
     // (decoded byte content, e.g. "a\n" -> the 2 bytes 'a','\n' -- same
-    // escape set as CharLiteral, see parser's decode_string_literal)
+    // escape set as CharLiteral, see parser's decode_string_literal) /
+    // Lambda (the synthesized concrete class this literal constructs --
+    // empty until movecheck's closure-resolution pass runs, see
+    // lambda_captures's own comment; non-empty by the time codegen ever
+    // sees this node).
     std::string name;
 
     // Binary; also Call's method-call receiver (ch05 §5.9), nullptr for
@@ -175,6 +251,8 @@ struct Expr {
     std::vector<ExprPtr> args;
 
     // MakeUnique: the allocated element type `T` in `make_unique<T>(...)`.
+    // Lambda: the explicit trailing return type (`-> Type`), only
+    // meaningful when has_lambda_explicit_return_type is true.
     Type type;
 
     // Member: object stored in `lhs`, field name in `name`.
@@ -182,6 +260,26 @@ struct Expr {
     // Move: moved expression stored in `lhs` (must resolve to a plain
     // local variable of unique_ptr type; enforced by the move checker,
     // not the parser).
+
+    // Lambda (ch05 §5.12) -- see LambdaCapture/LambdaCaptureMode's own
+    // comments. `lambda_captures` holds every *explicit* capture at
+    // parse time; movecheck's closure-resolution pass appends any
+    // further *implicit* ones resolved from `lambda_blanket_mode`
+    // in place, and sets `name` (above) to the synthesized concrete
+    // class before movecheck's own per-function checking or codegen
+    // ever runs.
+    std::vector<LambdaCapture> lambda_captures;
+    LambdaCaptureMode lambda_blanket_mode = LambdaCaptureMode::None;
+    // The lambda's own parameter list -- ordinary Params; a concept-
+    // constrained lambda parameter is not supported in this version
+    // (mirrors parser.cppm's reject_generic_params for methods).
+    std::vector<Param> lambda_params;
+    bool has_lambda_explicit_return_type = false;
+    // `[x](int y) mutable { ... }` -- licenses the synthesized "call"
+    // method to modify by-value-captured fields (a non-`const` method,
+    // mirroring an ordinary method's own trailing `const`, ch05 §5.9).
+    bool lambda_is_mutable = false;
+    StmtPtr lambda_body;
 };
 
 enum class StmtKind {
@@ -242,11 +340,6 @@ struct Stmt {
     bool is_unsafe = false;
 };
 
-struct Param {
-    Type type;
-    std::string name;
-};
-
 struct Function {
     Type return_type;
     std::string name;
@@ -286,6 +379,17 @@ struct Function {
     // only parsing/declaring the correct variadic signature shape is
     // implemented in this first slice, per the spec's own scoping.
     bool has_varargs = false;
+
+    // ch05 §5.11: true when at least one parameter has a non-empty
+    // Param::generic_concept -- this is the generic function's own
+    // *template* definition, checked once abstractly against each
+    // constrained parameter's witness class, never emitted to codegen
+    // directly (see Codegen::generate, which skips every
+    // is_generic_template Function entirely). Each concrete call site
+    // instead gets a separate monomorphized clone (an ordinary,
+    // non-template Function, injected into Program::functions by the
+    // concept-monomorphization pass) with its own distinct mangled name.
+    bool is_generic_template = false;
 
     // ch11 §11.4/§11.5: the namespace path this declaration lexically
     // lives in, e.g. `namespace std { ... }` -> {"std"}, `namespace
@@ -377,6 +481,75 @@ struct ClassDef {
     std::vector<std::string> namespace_path;
     bool is_exported = false;
     std::string owning_module;
+    // ch05 §5.11: true for a hidden class synthesized from a `concept`
+    // declaration's own requirement list (one bodyless method per
+    // requirement) -- never a real, user-written class. Exists purely so
+    // a generic function's own body-check can resolve method calls on
+    // its concept-constrained parameter through the exact same class/
+    // method-call machinery used everywhere else (Param::type's innermost
+    // Named type names this synthesized class while checking the
+    // template's own definition), with zero new movecheck logic. Excluded
+    // entirely from codegen (see Codegen::generate) -- it (and its
+    // bodyless methods) never needs to exist as real emitted code, since
+    // every call site is monomorphized against a real concrete type
+    // instead (see Function::is_generic_template).
+    bool is_concept_witness = false;
+};
+
+// ch05 §5.11: one requirement inside a `concept Name = requires(...) {
+// ... };` body -- restricted (a pragmatic v0.1 scoping cut, matching the
+// spec's own examples) to a method call on the requires-expression's own
+// placeholder parameter: `{ placeholder.method(args) };` (simple -- see
+// has_return_constraint below) or `{ placeholder.method(args) } ->
+// std::same_as<T>;` (compound, exact-type only, never
+// std::convertible_to -- ch05 §5.11's own reasoning: scpp has no
+// implicit scalar conversions at all, so the two would mean the same
+// thing anyway). Arbitrary expressions, type-requirements
+// (`typename T::Foo;`), and nested requirements (arbitrary boolean
+// constant-expressions) are explicitly out of scope for v0.1.
+struct ConceptRequirement {
+    std::string method_name;
+    // The call's own argument types (e.g. `f(x)` where `x: int` ->
+    // {int}) -- excludes the implicit receiver (the placeholder itself),
+    // exactly like Function::params excludes nothing but `this` is
+    // always params[0] elsewhere; here there is no receiver slot at all
+    // since the placeholder is never itself part of this list.
+    std::vector<Type> arg_types;
+    // True for a compound requirement (`{ expr } -> std::same_as<T>;`).
+    // False (the common case) for a simple requirement (`{ expr };`),
+    // which constrains nothing about the result's type -- ch05 §5.11:
+    // the generic body may then only use the call as a discarded
+    // expression-statement, never bind its result to anything.
+    bool has_return_constraint = false;
+    Type return_type; // only meaningful when has_return_constraint
+};
+
+// ch05 §5.11: `template<typename T> concept Name = requires(<param>) {
+// <requirements> };` -- concepts are always declared with the full
+// `template<typename T>` header (unlike a *function*, which only ever
+// uses the abbreviated `Concept auto` form in v0.1: real C++ grammar has
+// no other way to spell a concept declaration itself, so this header is
+// unavoidable here even though ch05 §5.11 otherwise avoids introducing
+// the general `template<...>` machinery).
+struct ConceptDef {
+    std::string name;
+    // The template header's own type-parameter name, e.g. "T" in
+    // `template<typename T>` -- recorded so the parser can recognize
+    // later uses of this exact identifier inside the requires-expression
+    // as referring to the constrained type (e.g. `const T& t`), rather
+    // than an ordinary (already-declared) type name.
+    std::string template_param_name;
+    // The requires-expression's own placeholder parameter name, e.g.
+    // "t" in `requires(const T& t) { ... }` -- every requirement's
+    // method calls are written against this name.
+    std::string requires_param_name;
+    std::vector<ConceptRequirement> requirements;
+    // See Function::namespace_path/is_exported/owning_module above --
+    // same meaning, applied to a concept declaration (ch11 §11.3's
+    // exportable surface).
+    std::vector<std::string> namespace_path;
+    bool is_exported = false;
+    std::string owning_module;
 };
 
 // ch11 §11.8: one `import name;` / `export import name;` declaration,
@@ -419,6 +592,10 @@ struct Program {
     std::vector<StructDef> structs;
     std::vector<ClassDef> classes;
     std::vector<Function> functions;
+    // ch05 §5.11: every `concept` declaration parsed from this file (or
+    // merged in from an imported module -- concepts participate in
+    // export/import exactly like a struct/class declaration).
+    std::vector<ConceptDef> concepts;
 
     // ch11 §11.3: this file's own module name, e.g. "std" or
     // "org.lotx.cmath" -- empty for an ordinary, non-module file (every

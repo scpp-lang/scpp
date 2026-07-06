@@ -72,6 +72,12 @@ using BorrowMap = std::unordered_map<std::string, BorrowState>;
 // *root* place it (transitively) borrows -- see `resolve_root_place`.
 using RefTargetMap = std::unordered_map<std::string, std::string>;
 
+// Every struct/class's own declared field name -> Type, across the whole
+// program -- see DataflowState::class_field_types' own comment for why
+// this exists (movecheck's Body-only architecture otherwise has no way
+// to resolve a Member expression's type).
+using ClassFieldTypes = std::unordered_map<std::string, std::unordered_map<std::string, Type>>;
+
 // The full per-program-point dataflow state: ownership/move state per
 // local (`locals`), active borrows per root place (`borrows`), which root
 // each currently-bound reference aliases (`ref_targets`), and the current
@@ -109,6 +115,17 @@ struct DataflowState {
     // that references it; never null once check_function sets it (may be
     // empty, for a program with no classes at all).
     const std::unordered_set<std::string>* class_names = nullptr;
+    // Every struct/class's own field name -> declared Type, across the
+    // whole program -- built once by check_moves (mirrors class_names'
+    // identical lifetime/non-null-once-set contract). The *only* way
+    // movecheck's otherwise Body-only (no Program access) machinery can
+    // resolve a `this.field`/`obj.field` Member expression's own type --
+    // needed by validate_deref_operand/apply_deref to validate `*p`
+    // through a captured std::unique_ptr *field* (ch05 §5.12's own
+    // `[p = std::move(p)]` init-capture example: after the closure's
+    // field-access rewrite, a captured name is a Member, not a plain
+    // Identifier, the only shape that lookup previously handled).
+    const ClassFieldTypes* class_field_types = nullptr;
     // Where the statement/expression currently being processed begins in
     // the source (see SourceLocation, ast.cppm) -- refreshed by
     // apply_statement/apply_expr as they recurse, so any DataflowError
@@ -125,7 +142,7 @@ struct DataflowState {
     [[nodiscard]] bool operator==(const DataflowState& other) const {
         return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
                unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
-               class_names == other.class_names;
+               class_names == other.class_names && class_field_types == other.class_field_types;
     }
 };
 
@@ -239,14 +256,16 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // fixed-point iteration computes along the way, mirroring
         // join_ref_targets' own comment above.
         std::min(a.unsafe_depth, b.unsafe_depth),
-        // `current_class`/`class_names` are set once per function and
-        // never change afterward (see DataflowState's own comments) --
-        // identical on both sides in a well-formed program, so simply
-        // keeping `a`'s is enough (no real join needed, same reasoning
-        // as `unsafe_depth` just above, minus the "fail safe" tie-break
-        // since there's no meaningful direction to fail toward here).
+        // `current_class`/`class_names`/`class_field_types` are set once
+        // per function and never change afterward (see DataflowState's
+        // own comments) -- identical on both sides in a well-formed
+        // program, so simply keeping `a`'s is enough (no real join
+        // needed, same reasoning as `unsafe_depth` just above, minus the
+        // "fail safe" tie-break since there's no meaningful direction to
+        // fail toward here).
         a.current_class,
         a.class_names,
+        a.class_field_types,
         // `current_loc` carries no dataflow meaning at all (see its own
         // comment on DataflowState) and is excluded from operator==, so
         // which side's value ends up here doesn't affect correctness --
@@ -301,7 +320,10 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 // this is that "exact match" test. Deliberately requires is_mutable_ref/
 // is_mutable_pointee to also match: `T&` and `const T&` (or `T*`/
 // `const T*`) are distinct parameter types for overloading purposes, not
-// interchangeable.
+// interchangeable. Reference additionally requires is_rvalue_ref to
+// match: `T&`/`const T&` (a borrow) and `T&&` (ch03's move-parameter
+// form) are likewise distinct parameter types, never interchangeable --
+// meaningless for Span (which has no rvalue-reference concept at all).
 [[nodiscard]] bool types_equal(const Type& a, const Type& b) {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
@@ -312,6 +334,8 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
         case TypeKind::UniquePtr:
             return types_equal(*a.pointee, *b.pointee);
         case TypeKind::Reference:
+            return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref &&
+                   types_equal(*a.pointee, *b.pointee);
         case TypeKind::Span:
             return a.is_mutable_ref == b.is_mutable_ref && types_equal(*a.pointee, *b.pointee);
         case TypeKind::Array:
@@ -337,19 +361,25 @@ struct CalleeSignature {
 // `ClassName_methodName` form (see parse_class_def) -- exactly like
 // codegen_call independently resolves the same fact from the receiver's
 // type. Scoped to a plain Identifier receiver (covers `this->method()`
-// and `obj.method()` for a local/parameter `obj`, the only shape
+// and `obj.method()` for a local/parameter `obj`) or a Lambda literal
+// receiver (ch05 §5.12's IIFE, e.g. `[](int x){...}(5)` -- already
+// resolved to its own synthesized closure class name by the time
+// check_moves runs, see monomorphize_generics) -- the only two shapes
 // movecheck can resolve a type for without a real type-checker) -- a
 // more complex receiver expression falls back to the unqualified name
 // and a zero offset, same as an ordinary free-function call. Shared by
 // check_call_arguments and produces_unique_ptr_rvalue so both resolve a
 // method call's callee identically.
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body) {
-    if (call_expr.lhs && call_expr.lhs->kind == ExprKind::Identifier) {
-        auto type_it = body.local_types.find(call_expr.lhs->name);
-        if (type_it != body.local_types.end()) {
-            std::string class_name = named_type_name(type_it->second);
-            if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1};
+    if (call_expr.lhs) {
+        std::string class_name;
+        if (call_expr.lhs->kind == ExprKind::Identifier) {
+            auto type_it = body.local_types.find(call_expr.lhs->name);
+            if (type_it != body.local_types.end()) class_name = named_type_name(type_it->second);
+        } else if (call_expr.lhs->kind == ExprKind::Lambda && !call_expr.lhs->name.empty()) {
+            class_name = call_expr.lhs->name;
         }
+        if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1};
     }
     return CalleeSignature{call_expr.name, 0};
 }
@@ -371,6 +401,8 @@ struct CalleeSignature {
                                                           const Body& body, const Signatures& signatures);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
+                                            const Signatures& signatures);
 
 // Whether `arg` is a legitimate argument for a candidate overload's
 // parameter declared as `param_type`, for exact-type-match overload
@@ -389,6 +421,12 @@ struct CalleeSignature {
         std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
         return arg_type.has_value() && arg_type->kind == TypeKind::UniquePtr &&
                types_equal(*arg_type->pointee, *param_type.pointee);
+    }
+    if (is_reference(param_type) && param_type.is_rvalue_ref) {
+        // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the mirror image of
+        // the ordinary-reference case just below: needs a genuine
+        // rvalue-producing argument, never a bare place.
+        return produces_rvalue_of_type(arg, *param_type.pointee, body, signatures);
     }
     if (is_reference(param_type)) {
         // A bare lvalue-like place (Identifier/Member/Subscript/a
@@ -531,7 +569,16 @@ struct CalleeSignature {
 
     std::optional<size_t> found;
     for (size_t i = 0; i < fn.params.size(); i++) {
-        if (!is_reference(fn.params[i].type)) continue;
+        // ch03/ch05 §5.11: an rvalue-reference (`T&&`) parameter is
+        // never an eligible elision source -- its argument may be a
+        // fresh temporary (a literal, a std::make_unique<T>(...)/call
+        // result) whose storage the caller never promises to keep alive
+        // past the call, unlike an ordinary T&/const T& argument (always
+        // a real place the caller keeps borrowed for the call's
+        // duration). Returning a reference derived from it would be a
+        // dangling reference in exactly the cases elision is supposed to
+        // rule out.
+        if (!is_reference(fn.params[i].type) || fn.params[i].type.is_rvalue_ref) continue;
         if (found.has_value()) {
             throw DataflowError(
                 "function '" + fn.name +
@@ -692,6 +739,64 @@ struct CalleeSignature {
     return false;
 }
 
+// ch03/ch05 §5.11: the expressions allowed to bind to a `T&&` (rvalue-
+// reference/move) parameter -- generalizes produces_unique_ptr_rvalue
+// above to any type (not just std::unique_ptr), checked against a
+// specific `expected_type` since, unlike a unique_ptr parameter (always
+// disambiguated by its own pointee type elsewhere), an arbitrary T&&
+// parameter's type is exactly what tells a legitimate argument from an
+// ill-typed one here. Reused, via the same Type::is_rvalue_ref flag, for
+// a `Concept auto&&` generic parameter's own witness-typed slot (ch05
+// §5.11) and for passing a lambda expression literal to one (ch05
+// §5.12, once ExprKind::Lambda exists -- add it to the switch below at
+// that point; a lambda literal is a fresh prvalue exactly like the
+// cases already handled here). `std::move(x)` is allowed regardless of
+// x's own type (not just std::unique_ptr, generalizing the existing
+// Move-processing restriction would be a much larger, cross-cutting
+// change deferred past this round -- see apply_expr's Move case, which
+// still rejects a non-unique_ptr std::move with a clear diagnostic, so
+// this relaxation here is purely "which expression *shapes* are
+// considered", not a silent widening of what std::move itself accepts).
+// A bare place (Identifier/Member/Subscript/a pointer Deref) is never
+// legitimate here: passing an existing lvalue directly into a by-move
+// parameter without an explicit std::move would be exactly the
+// unmarked implicit move ch05 §5.1 forbids -- the mirror image of
+// argument_matches_parameter's ordinary-reference case, which rejects
+// these same expression shapes for the opposite reason (there's no
+// borrowable place to speak of).
+[[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
+                                            const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::Move:
+        case ExprKind::MakeUnique:
+        case ExprKind::IntegerLiteral:
+        case ExprKind::BoolLiteral:
+        case ExprKind::CharLiteral:
+        case ExprKind::StringLiteral:
+        case ExprKind::Lambda:
+            // ch05 §5.12: a (by now resolved) lambda literal is a fresh
+            // prvalue exactly like a literal or std::make_unique<T>(...)
+            // -- the primary motivating case for a `Concept auto&&`
+            // parameter (ch05 §5.11), e.g. passing a closure directly to
+            // a generic function.
+            break;
+        case ExprKind::Call: {
+            CalleeSignature callee = resolve_callee_signature(expr, body);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            // A reference-returning call yields a place/alias, not a
+            // fresh value (see resolve_borrow_source_root's own Call
+            // case) -- legitimate as a T&/const T& source elsewhere, but
+            // not here.
+            if (sig == nullptr || is_reference(sig->return_type)) return false;
+            break;
+        }
+        default:
+            return false;
+    }
+    std::optional<Type> actual_type = infer_expr_type(expr, body, signatures);
+    return actual_type.has_value() && types_equal(*actual_type, expected_type);
+}
+
 // Infers `expr`'s scpp type, for function-overload resolution purposes
 // only (ch05 §5.10) -- a best-effort, non-exhaustive type inference
 // (movecheck has no general type-checking pass at all, by design: see
@@ -739,6 +844,17 @@ struct CalleeSignature {
             result.kind = TypeKind::UniquePtr;
             result.pointee = std::make_shared<Type>(expr.type);
             return result;
+        }
+
+        case ExprKind::Lambda: {
+            // ch05 §5.12: once resolved (movecheck's closure-resolution
+            // pass, which runs before check_moves -- see
+            // monomorphize_generics), `expr.name` holds the synthesized
+            // closure class's own name; its type is exactly that class,
+            // by value (matching MakeUnique's identical shape just
+            // above: a fresh, concretely-typed value, not a reference).
+            if (expr.name.empty()) return std::nullopt;
+            return Type{.kind = TypeKind::Named, .name = expr.name};
         }
 
         case ExprKind::Unary:
@@ -809,30 +925,66 @@ struct CalleeSignature {
     return it == state.end() ? LocalState::Bottom : it->second;
 }
 
-// Validates that `name` currently names a readable pointer-like value
-// that `*p`/`p->x` (UnaryOp::Deref) is licensed to dereference: always for
-// a std::unique_ptr (this is proven-safe by the move/borrow checker
-// itself, no unsafe {} needed), or, only while `state.unsafe_depth > 0`
-// (ch01 §1.3/ch02/ch05.5), for a raw pointer `T*`. Shared by apply_deref
-// (reading through `*p`) and resolve_borrow_source_root's Deref case
-// (borrowing through `*p`) so both apply the exact same checks.
-void validate_deref_operand(const std::string& name, const DataflowState& state, const Body& body) {
-    auto type_it = body.local_types.find(name);
-    bool is_uptr = type_it != body.local_types.end() && is_unique_ptr(type_it->second);
-    bool is_raw_ptr = type_it != body.local_types.end() && type_it->second.kind == TypeKind::Pointer;
+// Resolves a `base.field` Member expression's own declared field type --
+// `base` must be a plain Identifier naming a struct/class-typed local or
+// parameter (covers `this.field`, ch05 §5.12's rewritten captured-name
+// access, as well as an ordinary `obj.field`); anything else (a nested
+// `a.b.c`, `arr[i].field`, ...) returns nullopt, left unsupported for now
+// -- see DataflowState::class_field_types' own comment for why this
+// lookup is possible at all despite movecheck's otherwise Body-only
+// (no Program access) architecture.
+[[nodiscard]] std::optional<Type> resolve_member_field_type(const Expr& member_expr, const Body& body,
+                                                              const DataflowState& state) {
+    if (member_expr.kind != ExprKind::Member || member_expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
+    if (state.class_field_types == nullptr) return std::nullopt;
+    auto base_it = body.local_types.find(member_expr.lhs->name);
+    if (base_it == body.local_types.end()) return std::nullopt;
+    const Type& base_type = base_it->second;
+    const std::string& type_name = (base_type.kind == TypeKind::Reference ? *base_type.pointee : base_type).name;
+    auto class_it = state.class_field_types->find(type_name);
+    if (class_it == state.class_field_types->end()) return std::nullopt;
+    auto field_it = class_it->second.find(member_expr.name);
+    if (field_it == class_it->second.end()) return std::nullopt;
+    return field_it->second;
+}
+
+// Validates that `operand` (a plain Identifier, e.g. `p`, or a `base.field`
+// Member, e.g. `this.p` -- ch05 §5.12's rewritten captured-name access)
+// currently names/resolves to a readable pointer-like value that
+// `*p`/`p->x` (UnaryOp::Deref) is licensed to dereference: always for a
+// std::unique_ptr (this is proven-safe by the move/borrow checker itself,
+// no unsafe {} needed), or, only while `state.unsafe_depth > 0` (ch01
+// §1.3/ch02/ch05.5), for a raw pointer `T*`. Shared by apply_deref
+// (reading through `*p`) so it applies the exact same checks. A `base.field`
+// Member operand has no independent move/borrow-state of its own to check
+// (movecheck tracks move/borrow state per plain local, not per struct/
+// class field -- there is no way to move *out of* a field in this version
+// at all, matching the documented pre-existing gap), so it is implicitly
+// always considered "Initialized, unborrowed" -- only its *type* (and, for
+// a raw pointer, the enclosing unsafe context) is checked.
+void validate_deref_operand(const Expr& operand, const DataflowState& state, const Body& body) {
+    std::string describe = operand.kind == ExprKind::Member ? operand.lhs->name + "." + operand.name : operand.name;
+    std::optional<Type> resolved =
+        operand.kind == ExprKind::Member ? resolve_member_field_type(operand, body, state) : [&]() -> std::optional<Type> {
+            auto it = body.local_types.find(operand.name);
+            return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
+        }();
+    bool is_uptr = resolved.has_value() && is_unique_ptr(*resolved);
+    bool is_raw_ptr = resolved.has_value() && resolved->kind == TypeKind::Pointer;
     if (!is_uptr && !is_raw_ptr) {
-        throw DataflowError("cannot dereference ('*') '" + name +
+        throw DataflowError("cannot dereference ('*') '" + describe +
                              "': only std::unique_ptr or a raw pointer (inside unsafe {}) is supported",
             state.current_loc);
     }
     if (is_raw_ptr && state.unsafe_depth == 0) {
-        throw DataflowError("cannot dereference raw pointer '" + name +
+        throw DataflowError("cannot dereference raw pointer '" + describe +
                              "': requires 'unsafe { }' (spec ch01 §1.3/ch02)",
             state.current_loc);
     }
-    LocalState current = lookup(state.locals, name);
+    if (operand.kind == ExprKind::Member) return; // no per-field move/borrow state -- see this function's own comment
+    LocalState current = lookup(state.locals, operand.name);
     if (current != LocalState::Initialized) {
-        throw DataflowError(describe_bad_state(name, current),
+        throw DataflowError(describe_bad_state(operand.name, current),
             state.current_loc);
     }
 }
@@ -846,17 +998,28 @@ void validate_deref_operand(const std::string& name, const DataflowState& state,
 // reading a struct field doesn't move the struct that owns it. A raw
 // pointer has no ownership/move state to disturb in the first place.
 void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, bool report_errors) {
-    if (expr.lhs->kind != ExprKind::Identifier) {
+    bool is_plain_identifier = expr.lhs->kind == ExprKind::Identifier;
+    // ch05 §5.12: `*this.p`/`*p` where `p` is an init-captured
+    // std::unique_ptr, rewritten to a `this.p` Member access by the
+    // closure's own field-access rewrite (rewrite_captured_identifiers_
+    // as_field_access) -- see validate_deref_operand's own comment for
+    // why a Member operand has no separate move/borrow state to check
+    // beyond its type.
+    bool is_member_of_identifier =
+        expr.lhs->kind == ExprKind::Member && expr.lhs->lhs->kind == ExprKind::Identifier;
+    if (!is_plain_identifier && !is_member_of_identifier) {
         if (report_errors) {
             throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr or "
-                                 "raw pointer variable (not a member, subscript, or other expression)",
+                                 "raw pointer variable, or a captured field of one ('this.field') (not a "
+                                 "subscript or other expression)",
                 state.current_loc);
         }
         return;
     }
     if (!report_errors) return; // purely diagnostic: doesn't move p or change any tracked state
+    validate_deref_operand(*expr.lhs, state, body);
+    if (!is_plain_identifier) return; // no separate borrow-tracking key for a field -- see the comment above
     const std::string& name = expr.lhs->name;
-    validate_deref_operand(name, state, body);
     auto borrow_it = state.borrows.find(name);
     if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
         // `expr.lhs->loc` (the identifier `name` itself), not
@@ -978,6 +1141,26 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::Subscript:
             collect_reference_uses(expr->lhs.get(), body, out);
             collect_reference_uses(expr->rhs.get(), body, out);
+            return;
+        case ExprKind::Lambda:
+            // ch05 §5.12: a plain (non-init) capture reads whatever
+            // local already exists under that name in the enclosing
+            // scope -- if that local is itself reference/span-typed,
+            // this is a genuine "use" of it, exactly like an ordinary
+            // Identifier reference (mirrors the Identifier case above).
+            // An init-capture's own expression is walked normally
+            // instead (it may itself reference an existing reference-
+            // typed local, e.g. `[r = some_ref]`).
+            for (const LambdaCapture& capture : expr->lambda_captures) {
+                if (capture.init) {
+                    collect_reference_uses(capture.init.get(), body, out);
+                    continue;
+                }
+                auto it = body.local_types.find(capture.name);
+                if (it != body.local_types.end() && (is_reference(it->second) || is_span(it->second))) {
+                    out.insert(capture.name);
+                }
+            }
             return;
     }
 }
@@ -1238,7 +1421,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 return "";
             }
             const std::string& name = expr.lhs->name;
-            if (report_errors) validate_deref_operand(name, state, body);
+            if (report_errors) validate_deref_operand(*expr.lhs, state, body);
             return name;
         }
 
@@ -1521,7 +1704,25 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         size_t param_index = i + callee.param_offset;
         bool param_is_reference =
             sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
-        if (param_is_reference) {
+        bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
+        if (param_is_rvalue_reference) {
+            // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- an ownership-
+            // transfer argument, not a borrow: needs a genuine rvalue
+            // (see produces_rvalue_of_type), never apply_reference_
+            // argument's place-borrow bookkeeping. Still walked via
+            // apply_expr (exactly like a by-value/unique_ptr argument
+            // below) for its own side effects -- e.g. std::move(x)
+            // marking x moved-out in `state`.
+            if (report_errors &&
+                !produces_rvalue_of_type(arg, *sig->param_types[param_index].pointee, body, signatures)) {
+                throw DataflowError(
+                    "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
+                    "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
+                    "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
+                    state.current_loc);
+            }
+            apply_expr(arg, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
+        } else if (param_is_reference) {
             apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
                                       report_errors);
         } else {
@@ -1557,6 +1758,70 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                     state.current_loc);
             }
         }
+    }
+}
+
+// ch05 §5.12: checks every capture of a resolved Lambda literal --
+// shared by apply_expr's own Lambda case (a *transient* use: an IIFE, a
+// call argument, ... -- the closure literal itself can never outlive
+// this statement, so `reference_capture_borrows` is a fresh, local,
+// discarded-afterward map there) and apply_statement's class-typed
+// Assign case (a closure literal being bound to a *named* `auto`
+// variable, ch05 §5.12's only spelling for this -- which genuinely can
+// outlive this statement, so that caller passes `state.borrows` itself,
+// making any by-reference capture's borrow last for the rest of this
+// function, exactly like an ordinary `T& r = x;` binding's own borrow
+// would -- a deliberately conservative simplification: released only at
+// function end rather than at the closure variable's own precise last
+// use, since v0.1 has no liveness analysis for a class-typed local the
+// way it already has for a plain reference/span, see
+// compute_reference_liveness). Checked the same way passing each
+// capture as an argument already would be (reusing existing machinery,
+// zero new move/borrow logic beyond this per-capture dispatch):
+//  - an init-capture's own expression is evaluated normally (e.g.
+//    permitting std::move(p) for a move-only type).
+//  - a plain by-value capture is an ordinary read: rejects an un-moved
+//    std::unique_ptr, exactly like reading any other Identifier (there
+//    is no implicit-copy escape hatch for a move-only type -- use an
+//    init-capture with std::move instead, ch05 §5.12's own example).
+//  - a by-reference capture is checked exactly like a reference-typed
+//    call argument (apply_reference_argument): the closure's own field
+//    genuinely borrows it, for as long as `reference_capture_borrows`
+//    (see above) says it lasts.
+void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
+                            const Body& body, const Signatures& signatures, bool report_errors) {
+    for (const LambdaCapture& capture : expr.lambda_captures) {
+        if (capture.init) {
+            apply_expr(*capture.init, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
+            continue;
+        }
+        if (!capture.by_reference) {
+            if (report_errors) {
+                auto type_it = body.local_types.find(capture.name);
+                if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
+                    throw DataflowError(
+                        "use of std::unique_ptr variable '" + capture.name +
+                            "' requires std::move (copying is not allowed) -- capture it as an "
+                            "init-capture instead, e.g. '[" +
+                            capture.name + " = std::move(" + capture.name + ")]' (ch05 §5.12)",
+                        state.current_loc);
+                }
+            }
+            LocalState current = lookup(state.locals, capture.name);
+            if (report_errors && current != LocalState::Initialized) {
+                throw DataflowError(describe_bad_state(capture.name, current), state.current_loc);
+            }
+            continue;
+        }
+        Expr capture_ident;
+        capture_ident.kind = ExprKind::Identifier;
+        capture_ident.loc = expr.loc;
+        capture_ident.name = capture.name;
+        Type ref_type;
+        ref_type.kind = TypeKind::Reference;
+        ref_type.is_mutable_ref = true; // matches resolve_lambda's own field choice
+        apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
+                                  report_errors);
     }
 }
 
@@ -1768,6 +2033,24 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                 apply_expr(*arg, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
             }
             return;
+
+        case ExprKind::Lambda: {
+            // ch05 §5.12: a resolved lambda literal constructs a fresh
+            // instance of its synthesized closure class, binding each
+            // capture. When the literal is used *transiently* (an
+            // IIFE, a call argument, ...) it can never outlive this
+            // statement (scpp has no way to name/store a closure value
+            // beyond this one -- unless it's the direct initializer of
+            // an `auto` variable, see apply_statement's own Assign
+            // case, which calls apply_lambda_captures directly with
+            // `state.borrows` itself instead of a throwaway map), so a
+            // fresh, local, discarded-afterward BorrowMap here is sound
+            // -- see apply_lambda_captures' own comment for the shared
+            // per-capture logic.
+            BorrowMap capture_borrows;
+            apply_lambda_captures(expr, state, capture_borrows, body, signatures, report_errors);
+            return;
+        }
     }
 }
 
@@ -1930,12 +2213,46 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // their respective scope exits -- a double-free/use-
                 // after-free. Lifting this needs real copy semantics
                 // designed first, not just permission to reassign.
-                if (report_errors) {
+                //
+                // This MIR-level Assign statement, though, is *also* how
+                // a `VarDecl`'s own `= expr` initializer lowers (see
+                // mir.cppm's VarDecl case -- there is no separate
+                // "construct with an initial value" MIR node) -- the
+                // *only* spelling `auto name = expr;` (ch05 §5.12, the
+                // sole way to name a closure's own otherwise-unspellable
+                // type) can ever take. A genuine first initialization
+                // must therefore still be allowed here: distinguished
+                // from a later reassignment by whether `stmt.local` has
+                // *any* prior entry in `state.locals` at all (a bare
+                // `ClassName c;` -- the only other way to declare a
+                // class-typed local -- always marks it Initialized
+                // immediately, see the Declare case above; a plain
+                // `auto f = expr;` has no such preceding Declare, so its
+                // own Assign is always this variable's first-ever
+                // appearance).
+                if (report_errors && state.locals.contains(stmt.local)) {
                     throw DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                          "' cannot be reassigned after construction in this version (no copy "
                                          "semantics are defined yet -- see ch04 §4.2)",
                         state.current_loc);
                 }
+                if (stmt.expr->kind == ExprKind::Lambda) {
+                    // ch05 §5.12: unlike a *transient* lambda literal
+                    // (apply_expr's own Lambda case -- an IIFE, a call
+                    // argument, ...), one bound to a named `auto`
+                    // variable genuinely can outlive this statement, so
+                    // any by-reference capture's borrow must land
+                    // directly in `state.borrows` (persisting for the
+                    // rest of this function -- see
+                    // apply_lambda_captures' own comment) rather than a
+                    // throwaway map that apply_expr's generic Lambda
+                    // handling would otherwise use.
+                    apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors);
+                } else {
+                    apply_expr(*stmt.expr, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures,
+                               report_errors);
+                }
+                state.locals[stmt.local] = LocalState::Initialized;
                 return;
             }
 
@@ -2086,7 +2403,8 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 // Splitting into these two phases avoids both false positives (from
 // not-yet-stable intermediate states) and duplicate diagnostics (a block
 // can be visited many times during fixed-point iteration).
-void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names) {
+void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names,
+                     const ClassFieldTypes& class_field_types) {
     Body body = build_mir(fn);
 
     size_t n = body.blocks.size();
@@ -2122,6 +2440,7 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
         entry_state.current_class = fn.params[0].type.pointee->name;
     }
     entry_state.class_names = &class_names;
+    entry_state.class_field_types = &class_field_types;
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;
         // ch04 §4.2: like a class-typed local (see the Assign case
@@ -2216,12 +2535,16 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     }
 }
 
-} // namespace
-} // namespace scpp
-
-export namespace scpp {
-
-void check_moves(const Program& program) {
+// Builds the ch05 §5.10 overload-resolution signature map from every
+// Function in `program` -- factored out of check_moves so
+// monomorphize_generics (ch05 §5.11, below) can build the same map for
+// its own call-site type inference (infer_expr_type/resolve_overload)
+// without duplicating this loop. Throws the same "redefinition" /
+// "invalid elision" diagnostics check_moves itself always has, just
+// possibly surfaced slightly earlier in the pipeline now that
+// monomorphization runs before check_moves (see driver.cppm) -- the
+// error is exactly as correct either way.
+[[nodiscard]] Signatures build_signatures(const Program& program) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
         FunctionSignature sig;
@@ -2233,13 +2556,6 @@ void check_moves(const Program& program) {
         sig.elided_param_index = resolve_elided_param_index(fn);
         sig.is_extern_c = fn.is_extern_c;
         sig.loc = fn.loc;
-        // ch05 §5.10: two functions sharing a name are legitimate
-        // overloads only if their parameter lists actually differ --
-        // scpp cannot overload on return type alone (real C++'s own
-        // rule). A duplicate is a hard redefinition error, not silently
-        // overwritten -- unlike this map's previous one-entry-per-name
-        // behavior, which would have let the second definition silently
-        // replace the first.
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             bool same_params = existing.param_types.size() == sig.param_types.size();
@@ -2256,6 +2572,939 @@ void check_moves(const Program& program) {
         }
         overloads.push_back(std::move(sig));
     }
+    return signatures;
+}
+
+// ch05 §5.11: a deep (recursive) copy of an Expr/Stmt tree -- needed
+// only for monomorphization (below), which must inject an independent
+// clone of a generic template's body per concrete instantiation (Stmt/
+// Expr trees use unique_ptr children with no copy constructor of their
+// own, by design -- see Expr/Stmt's own comments in ast.cppm).
+ExprPtr clone_expr(const Expr& expr) {
+    auto clone = std::make_unique<Expr>();
+    clone->kind = expr.kind;
+    clone->loc = expr.loc;
+    clone->int_value = expr.int_value;
+    clone->bool_value = expr.bool_value;
+    clone->name = expr.name;
+    clone->binary_op = expr.binary_op;
+    if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
+    if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
+    clone->unary_op = expr.unary_op;
+    clone->args.reserve(expr.args.size());
+    for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
+    clone->type = expr.type;
+    return clone;
+}
+
+StmtPtr clone_stmt(const Stmt& stmt) {
+    auto clone = std::make_unique<Stmt>();
+    clone->kind = stmt.kind;
+    clone->loc = stmt.loc;
+    clone->type = stmt.type;
+    clone->var_name = stmt.var_name;
+    if (stmt.init) clone->init = clone_expr(*stmt.init);
+    clone->has_ctor_args = stmt.has_ctor_args;
+    clone->ctor_args.reserve(stmt.ctor_args.size());
+    for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_expr(*arg));
+    if (stmt.expr) clone->expr = clone_expr(*stmt.expr);
+    if (stmt.condition) clone->condition = clone_expr(*stmt.condition);
+    if (stmt.then_branch) clone->then_branch = clone_stmt(*stmt.then_branch);
+    if (stmt.else_branch) clone->else_branch = clone_stmt(*stmt.else_branch);
+    clone->statements.reserve(stmt.statements.size());
+    for (const StmtPtr& s : stmt.statements) clone->statements.push_back(clone_stmt(*s));
+    clone->is_unsafe = stmt.is_unsafe;
+    return clone;
+}
+
+// ch05 §5.11: whether `type` (a concrete, ordinary type -- never a
+// witness class) structurally satisfies `concept_def`: for every
+// requirement, the class named by `type` must have a real method
+// matching the requirement's own shape exactly -- same synthesized name
+// (`ClassName_methodName`, see ClassDef's own comment), same argument
+// types (exact match, ch05 §5.10 -- no implicit conversions), and (only
+// when the requirement itself constrains it) an identical return type.
+// A simple requirement (no return-type constraint) only requires the
+// method to exist with matching arguments -- its own return type is
+// unconstrained, so any return type qualifies.
+[[nodiscard]] bool type_satisfies_concept(const Type& type, const ConceptDef& concept_def, const Program& program) {
+    if (type.kind != TypeKind::Named) return false;
+    for (const ConceptRequirement& req : concept_def.requirements) {
+        std::string method_name = type.name + "_" + req.method_name;
+        bool found = false;
+        for (const Function& fn : program.functions) {
+            if (fn.name != method_name || fn.params.empty()) continue;
+            if (fn.params.size() != req.arg_types.size() + 1) continue;
+            bool args_match = true;
+            for (size_t i = 0; args_match && i < req.arg_types.size(); i++) {
+                args_match = types_equal(fn.params[i + 1].type, req.arg_types[i]);
+            }
+            if (!args_match) continue;
+            if (req.has_return_constraint && !types_equal(fn.return_type, req.return_type)) continue;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+// A short, deterministic, LLVM-identifier-safe encoding of `type` for a
+// monomorphized clone's own name -- deliberately duplicated from
+// codegen's own (private, inaccessible from here) mangle_type rather
+// than shared across modules, same existing precedent as this file's
+// own independently-duplicated types_equal.
+[[nodiscard]] std::string mangle_type_for_clone_name(const Type& type) {
+    switch (type.kind) {
+        case TypeKind::Named: return type.name;
+        case TypeKind::Pointer:
+            return mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
+        case TypeKind::UniquePtr: return mangle_type_for_clone_name(*type.pointee) + "_uptr";
+        case TypeKind::Reference:
+            return mangle_type_for_clone_name(*type.pointee) +
+                   (type.is_rvalue_ref ? "_rref" : (type.is_mutable_ref ? "_ref" : "_cref"));
+        case TypeKind::Span: return mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_ref ? "_span" : "_cspan");
+        case TypeKind::Array:
+            return mangle_type_for_clone_name(*type.element) + "_arr" + std::to_string(type.array_size);
+    }
+    return "?";
+}
+
+// ch05 §5.12: collects every VarDecl's own name inside `stmt`
+// (recursively, ignoring lexical scope -- same "whole-body, flat"
+// pragmatism as mir.cppm's own Body::local_types) into `out` -- used to
+// exclude a lambda's own locally-declared variables from blanket-
+// capture free-variable resolution (they're the lambda's own locals,
+// never a capture).
+void collect_locally_declared_names(const Stmt& stmt, std::unordered_set<std::string>& out) {
+    switch (stmt.kind) {
+        case StmtKind::VarDecl:
+            out.insert(stmt.var_name);
+            return;
+        case StmtKind::If:
+            collect_locally_declared_names(*stmt.then_branch, out);
+            if (stmt.else_branch) collect_locally_declared_names(*stmt.else_branch, out);
+            return;
+        case StmtKind::While:
+            collect_locally_declared_names(*stmt.then_branch, out);
+            return;
+        case StmtKind::Block:
+            for (const StmtPtr& s : stmt.statements) collect_locally_declared_names(*s, out);
+            return;
+        default:
+            return;
+    }
+}
+
+// Forward declarations: collect_free_identifiers's Expr/Stmt overloads
+// are mutually recursive (an If/While/Block statement recurses into its
+// own sub-expressions/sub-statements; a Lambda expression recurses into
+// its own body statement).
+void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::string>& excluded,
+                                std::unordered_set<std::string>& out);
+void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::string>& excluded,
+                                std::unordered_set<std::string>& out);
+
+// ch05 §5.12: collects every free Identifier reference inside `expr`
+// (skipping any name in `excluded` -- a lambda's own params/locals,
+// already-explicit captures, known function names, known type names)
+// into `out`, for a blanket `[=]`/`[&]` capture's own free-variable
+// resolution. A Call's own callee name and a Member's own field name
+// are never variable references (skipped entirely); their receiver/
+// base sub-expressions are still walked normally. A nested lambda's own
+// body is conservatively walked too (v1 simplification: over-
+// approximates rather than precisely tracking what a nested lambda
+// already captures itself -- harmless, since capturing an unused name
+// is safe, just not maximally minimal; see this codebase's general
+// "pragmatic over exhaustive" style elsewhere).
+void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::string>& excluded,
+                                std::unordered_set<std::string>& out) {
+    if (expr.kind == ExprKind::Identifier) {
+        if (!excluded.contains(expr.name)) out.insert(expr.name);
+        return;
+    }
+    if (expr.lhs) collect_free_identifiers(*expr.lhs, excluded, out);
+    if (expr.rhs) collect_free_identifiers(*expr.rhs, excluded, out);
+    for (const ExprPtr& arg : expr.args) collect_free_identifiers(*arg, excluded, out);
+    if (expr.kind == ExprKind::Lambda && expr.lambda_body) {
+        collect_free_identifiers(*expr.lambda_body, excluded, out);
+    }
+}
+
+void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::string>& excluded,
+                                std::unordered_set<std::string>& out) {
+    switch (stmt.kind) {
+        case StmtKind::VarDecl:
+            if (stmt.init) collect_free_identifiers(*stmt.init, excluded, out);
+            for (const ExprPtr& arg : stmt.ctor_args) collect_free_identifiers(*arg, excluded, out);
+            return;
+        case StmtKind::Return:
+        case StmtKind::ExprStmt:
+            if (stmt.expr) collect_free_identifiers(*stmt.expr, excluded, out);
+            return;
+        case StmtKind::If:
+            collect_free_identifiers(*stmt.condition, excluded, out);
+            collect_free_identifiers(*stmt.then_branch, excluded, out);
+            if (stmt.else_branch) collect_free_identifiers(*stmt.else_branch, excluded, out);
+            return;
+        case StmtKind::While:
+            collect_free_identifiers(*stmt.condition, excluded, out);
+            collect_free_identifiers(*stmt.then_branch, excluded, out);
+            return;
+        case StmtKind::Block:
+            for (const StmtPtr& s : stmt.statements) collect_free_identifiers(*s, excluded, out);
+            return;
+    }
+}
+
+// ch05 §5.12: rewrites every bare Identifier reference to a captured
+// name inside `expr` into an explicit `this.name` Member access.
+// Necessary because a lambda's body, as originally written, refers to
+// what were then ordinary enclosing-scope locals by their bare names --
+// but scpp requires *explicit* `this.field` for a class's own fields
+// (there is no implicit-field-lookup fallback the way real C++ allows
+// a bare `field` inside a method body, verified empirically: this
+// codebase's own movecheck rejects a bare field reference with "use of
+// undeclared variable"). Once the lambda's body becomes the synthesized
+// closure class's own "call" method, each captured name is a *field*,
+// not a local, so every such reference must be rewritten this way. The
+// lambda's own parameters and any of its own locally-declared variables
+// are left as ordinary bare identifiers -- only names in
+// `captured_names` are ever rewritten. A nested lambda's own body is
+// conservatively rewritten too (matching collect_free_identifiers'
+// identical reasoning above); this codebase does not attempt to prove a
+// nested lambda's own parameter/local never shadows a captured name
+// from this outer scope -- an accepted v1 limitation (not demonstrated
+// by any documented example, and real C++ closure-capture-chain nesting
+// is itself a well-known deep-end topic).
+void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unordered_set<std::string>& captured_names);
+
+void rewrite_captured_identifiers_as_field_access(Expr& expr, const std::unordered_set<std::string>& captured_names) {
+    if (expr.kind == ExprKind::Identifier && captured_names.contains(expr.name)) {
+        auto this_ref = std::make_unique<Expr>();
+        this_ref->kind = ExprKind::Identifier;
+        this_ref->loc = expr.loc;
+        this_ref->name = "this";
+        expr.kind = ExprKind::Member;
+        expr.lhs = std::move(this_ref);
+        // expr.name already holds the captured name -- Member's own
+        // field-name slot, unchanged.
+        return;
+    }
+    if (expr.lhs) rewrite_captured_identifiers_as_field_access(*expr.lhs, captured_names);
+    if (expr.rhs) rewrite_captured_identifiers_as_field_access(*expr.rhs, captured_names);
+    for (ExprPtr& arg : expr.args) rewrite_captured_identifiers_as_field_access(*arg, captured_names);
+    if (expr.kind == ExprKind::Lambda && expr.lambda_body) {
+        rewrite_captured_identifiers_as_field_access(*expr.lambda_body, captured_names);
+    }
+}
+
+void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unordered_set<std::string>& captured_names) {
+    switch (stmt.kind) {
+        case StmtKind::VarDecl:
+            if (stmt.init) rewrite_captured_identifiers_as_field_access(*stmt.init, captured_names);
+            for (ExprPtr& arg : stmt.ctor_args) rewrite_captured_identifiers_as_field_access(*arg, captured_names);
+            return;
+        case StmtKind::Return:
+        case StmtKind::ExprStmt:
+            if (stmt.expr) rewrite_captured_identifiers_as_field_access(*stmt.expr, captured_names);
+            return;
+        case StmtKind::If:
+            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
+            rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names);
+            if (stmt.else_branch) rewrite_captured_identifiers_as_field_access(*stmt.else_branch, captured_names);
+            return;
+        case StmtKind::While:
+            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
+            rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names);
+            return;
+        case StmtKind::Block:
+            for (StmtPtr& s : stmt.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names);
+            return;
+    }
+}
+
+// ch05 §5.12: "By default a closure's `operator()` is const (a by-value
+// capture can't be reassigned inside the body)"; `mutable` opts out.
+// Checked directly here -- on the *original*, pre field-access-rewrite
+// body, where a captured name is still an ordinary bare Identifier, so
+// no field-type information is needed -- rather than via the general
+// const-`this`-propagation mechanism (assignment_target_is_read_only),
+// which cannot by itself distinguish "writing to a by-value field"
+// (should require `mutable`) from "writing *through* a by-reference
+// field's own referent" (always allowed, regardless of `mutable` --
+// matching real C++, where a reference member's constness is
+// independent of its enclosing object's own) -- see resolve_lambda's
+// own `this_type.is_mutable_ref` comment for why the "call" method's
+// receiver is unconditionally mutable. Only ever called when the
+// lambda is *not* `mutable` (see resolve_lambda). A nested lambda's own
+// body is deliberately not recursed into: it has its own independent
+// capture list, checked when *it* is itself resolved.
+void reject_write_to_nonmutable_by_value_capture(const Expr& expr, const std::unordered_set<std::string>& by_value_names) {
+    if (expr.kind == ExprKind::Binary && expr.binary_op == BinaryOp::Assign && expr.lhs->kind == ExprKind::Identifier &&
+        by_value_names.contains(expr.lhs->name)) {
+        throw DataflowError("cannot assign to by-value-captured '" + expr.lhs->name +
+                                 "' inside a non-'mutable' lambda (ch05 §5.12 -- a closure's own call operator "
+                                 "is 'const' by default; add 'mutable' to opt out)",
+            expr.loc);
+    }
+    if (expr.lhs) reject_write_to_nonmutable_by_value_capture(*expr.lhs, by_value_names);
+    if (expr.rhs) reject_write_to_nonmutable_by_value_capture(*expr.rhs, by_value_names);
+    for (const ExprPtr& arg : expr.args) reject_write_to_nonmutable_by_value_capture(*arg, by_value_names);
+}
+
+void reject_write_to_nonmutable_by_value_capture(const Stmt& stmt, const std::unordered_set<std::string>& by_value_names) {
+    switch (stmt.kind) {
+        case StmtKind::VarDecl:
+            if (stmt.init) reject_write_to_nonmutable_by_value_capture(*stmt.init, by_value_names);
+            for (const ExprPtr& arg : stmt.ctor_args) reject_write_to_nonmutable_by_value_capture(*arg, by_value_names);
+            return;
+        case StmtKind::Return:
+        case StmtKind::ExprStmt:
+            if (stmt.expr) reject_write_to_nonmutable_by_value_capture(*stmt.expr, by_value_names);
+            return;
+        case StmtKind::If:
+            reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
+            reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names);
+            if (stmt.else_branch) reject_write_to_nonmutable_by_value_capture(*stmt.else_branch, by_value_names);
+            return;
+        case StmtKind::While:
+            reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
+            reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names);
+            return;
+        case StmtKind::Block:
+            for (const StmtPtr& s : stmt.statements) reject_write_to_nonmutable_by_value_capture(*s, by_value_names);
+            return;
+    }
+}
+
+
+// ch05 §5.12: implements call-site monomorphization for every generic
+// (concept-constrained) function in a Program -- run once, before
+// check_moves (see driver.cppm/monomorphize_generics below), so that by
+// the time movecheck's ordinary exact-type-match call-argument checking
+// runs, every call site targets an already-concrete, already-
+// monomorphized Function (an ordinary function by then, needing zero
+// special-casing) rather than the original generic template (whose own
+// witness-typed signature would otherwise never structurally match a
+// concrete argument). The original generic template itself is left
+// completely untouched in `program.functions` -- it's still separately,
+// abstractly checked by movecheck's ordinary per-function pass (its
+// witness-typed `this`/parameters make that check exactly as
+// intraprocedural as any other function's), just never itself reachable
+// from a real call site anymore, and excluded from codegen entirely
+// (Codegen::generate, keyed off Function::is_generic_template).
+//
+// Also resolves every closure literal (ch05 §5.12) in the same pass --
+// both features need the same thing (concrete per-function type
+// information the parser itself never has), so they share this single
+// pre-check_moves walk rather than needing two separate passes over
+// every function body.
+class Monomorphizer {
+public:
+    explicit Monomorphizer(Program& program) : program_(program) {
+        for (const ConceptDef& c : program.concepts) concepts_by_name_[c.name] = &c;
+        for (size_t i = 0; i < program.functions.size(); i++) {
+            if (program.functions[i].is_generic_template) generic_template_indices_[program.functions[i].name] = i;
+        }
+        // ch05 §5.12: names a blanket lambda capture must never
+        // implicitly bind to -- a known type name (struct/class/
+        // concept) or a known free-function name is never itself a
+        // capturable *variable*, even though it may appear as a bare
+        // Identifier-shaped token inside a requires-expression-like
+        // context; excluded up front so collect_free_identifiers'
+        // exclusion set (built per-lambda in resolve_lambda) doesn't
+        // need to reconstruct these each time.
+        for (const StructDef& s : program.structs) known_type_names_.insert(s.name);
+        for (const ClassDef& c : program.classes) known_type_names_.insert(c.name);
+        for (const ConceptDef& c : program.concepts) known_type_names_.insert(c.name);
+        for (const Function& fn : program.functions) known_function_names_.insert(fn.name);
+    }
+
+    void run() {
+        signatures_ = build_signatures(program_);
+        // A snapshot of the function count *before* any clone is
+        // injected: new clones/synthesized closure classes are appended
+        // to program_.functions/program_.classes as we go (see
+        // get_or_create_clone/resolve_lambda) and must never themselves
+        // be re-walked by *this* outer loop (they're already fully
+        // concrete -- nothing left to monomorphize/resolve at the top
+        // level; a synthesized closure's own body is instead walked
+        // directly from within resolve_lambda itself, once, right after
+        // being synthesized).
+        //
+        // A generic template's own body *is* walked here too (unlike an
+        // earlier version of this pass) -- bare-call-redirect (ch05
+        // §5.9/§5.11/§5.12, e.g. `f(x)` for a witness-typed parameter
+        // `f`) and lambda-resolution both need to run there just as much
+        // as anywhere else, and neither depends on knowing the eventual
+        // concrete instantiation. Only the *generic-call-monomorphization*
+        // half of walk_expr is suppressed while inside a generic
+        // template's own body (see allow_generic_monomorphization
+        // below) -- a nested generic-template-calling-another-generic-
+        // template call site is left targeting the original,
+        // codegen-excluded template, surfacing as a clear "unknown
+        // function" error downstream rather than incorrectly attempting
+        // to monomorphize against an abstract witness type as if it
+        // were concrete.
+        size_t original_count = program_.functions.size();
+        for (size_t i = 0; i < original_count; i++) {
+            if (program_.functions[i].body == nullptr) continue;
+            // build_mir's own Body holds raw (const Expr*) pointers into
+            // this Function's *own* Stmt/Expr tree (see mir.cppm's
+            // Terminator) -- safe to keep using after program_.functions
+            // mutates below, since only the *vector's* backing storage
+            // (and, incidentally, the Function objects it directly
+            // holds) can move; a Function's own body is heap-allocated
+            // independently (via StmtPtr/ExprPtr) and never relocates
+            // just because the enclosing vector reallocates elsewhere.
+            Body body = build_mir(program_.functions[i]);
+            bool allow_generic_monomorphization = !program_.functions[i].is_generic_template;
+            walk_stmt(*program_.functions[i].body, body, this_type_of(program_.functions[i]),
+                      allow_generic_monomorphization);
+        }
+    }
+
+private:
+    Program& program_;
+    std::unordered_map<std::string, const ConceptDef*> concepts_by_name_;
+    std::unordered_map<std::string, size_t> generic_template_indices_;
+    std::unordered_map<std::string, std::string> clone_cache_;
+    std::unordered_set<std::string> known_type_names_;
+    std::unordered_set<std::string> known_function_names_;
+    Signatures signatures_;
+    // ch05 §5.12: a monotonically-increasing counter for synthesizing
+    // each closure's own unique class name ("__lambda0", "__lambda1",
+    // ...) -- a lambda literal has no user-spelled name to reuse (unlike
+    // a concept's witness class, which shares the concept's own name),
+    // and this codebase has no other source of process-wide uniqueness
+    // to draw on.
+    int lambda_counter_ = 0;
+
+    // ch04 §4.2/ch05 §5.9: the enclosing function's own `this` parameter
+    // type (Named(ClassName)), or nullopt if `fn` isn't a method at all
+    // -- used to type a `[this]` lambda capture. `this` is always
+    // params[0] when present (parser's make_this_param).
+    [[nodiscard]] static std::optional<Type> this_type_of(const Function& fn) {
+        if (fn.params.empty() || fn.params[0].name != "this") return std::nullopt;
+        return *fn.params[0].type.pointee;
+    }
+
+    void walk_stmt(Stmt& stmt, Body& body, const std::optional<Type>& enclosing_this_type,
+                   bool allow_generic_monomorphization) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                if (stmt.init) walk_expr(*stmt.init, body, enclosing_this_type, allow_generic_monomorphization);
+                for (ExprPtr& arg : stmt.ctor_args) {
+                    walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
+                }
+                // ch05 §5.12: `auto name = expr;` -- infer the concrete
+                // type from the (by-now-fully-resolved, e.g. a Lambda's
+                // own synthesized class) initializer. Must overwrite
+                // *both* the AST's own `stmt.type` (so check_moves/
+                // codegen's later, fresh `build_mir` call sees a
+                // concrete type) and this pass's own `body.local_types`
+                // entry in place (so a *later* statement in this same
+                // function -- e.g. `f(x)`'s bare-call-redirect just
+                // below, or another lambda capturing `f` by reference --
+                // resolves this variable's real type too, not the stale
+                // "auto" placeholder `build_mir` originally saw before
+                // any resolution ran).
+                if (stmt.type.kind == TypeKind::Named && stmt.type.name == "auto") {
+                    if (!stmt.init) {
+                        throw DataflowError("'auto' requires an initializer", stmt.loc);
+                    }
+                    std::optional<Type> inferred = infer_expr_type(*stmt.init, body, signatures_);
+                    if (!inferred.has_value()) {
+                        throw DataflowError(
+                            "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer",
+                            stmt.loc);
+                    }
+                    stmt.type = *inferred;
+                    body.local_types[stmt.var_name] = *inferred;
+                }
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) walk_expr(*stmt.expr, body, enclosing_this_type, allow_generic_monomorphization);
+                return;
+            case StmtKind::If:
+                walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
+                walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization);
+                if (stmt.else_branch) {
+                    walk_stmt(*stmt.else_branch, body, enclosing_this_type, allow_generic_monomorphization);
+                }
+                return;
+            case StmtKind::While:
+                walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
+                walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization);
+                return;
+            case StmtKind::Block:
+                for (StmtPtr& s : stmt.statements) {
+                    walk_stmt(*s, body, enclosing_this_type, allow_generic_monomorphization);
+                }
+                return;
+        }
+    }
+
+    void walk_expr(Expr& expr, Body& body, const std::optional<Type>& enclosing_this_type,
+                   bool allow_generic_monomorphization) {
+        // ch05 §5.12: a Lambda's own sub-tree (captures' init-exprs,
+        // params, body) is handled entirely inside resolve_lambda --
+        // never via the generic lhs/rhs/args recursion below (which
+        // would find them all empty/unused for a Lambda node anyway,
+        // since captures/params/body are Lambda's own dedicated fields,
+        // not lhs/rhs/args -- see ast.cppm's Expr).
+        if (expr.kind == ExprKind::Lambda) {
+            resolve_lambda(expr, body, enclosing_this_type);
+            return;
+        }
+
+        // ch05 §5.9/§5.11/§5.12: a bare (no-receiver) Call whose own
+        // name resolves to a *local variable* (not a function) of class
+        // type is sugar for calling that class's own "call" method --
+        // `f(args)` desugars in place to `f.call(args)`, reusing 100% of
+        // the existing method-call machinery with zero further new
+        // logic. Shared by an ordinary user-defined callable class (any
+        // class with a method literally named "call"), a concept's own
+        // witness class (ch05 §5.11's IntConsumer-style direct-
+        // invocation requirement, e.g. `f(x)` inside a generic
+        // function's own body), and a real closure (ch05 §5.12's
+        // `c(args)`). A local variable always shadows an outer function
+        // of the same name here, matching ordinary C++ scoping -- and
+        // there is no genuine ambiguity in practice, since a generic
+        // template's own name (checked further below) is never itself
+        // registered as a local.
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
+            auto local_it = body.local_types.find(expr.name);
+            if (local_it != body.local_types.end()) {
+                const Type& local_type = local_it->second;
+                const Type& underlying = local_type.kind == TypeKind::Reference ? *local_type.pointee : local_type;
+                if (underlying.kind == TypeKind::Named) {
+                    auto receiver = std::make_unique<Expr>();
+                    receiver->kind = ExprKind::Identifier;
+                    receiver->loc = expr.loc;
+                    receiver->name = expr.name;
+                    expr.lhs = std::move(receiver);
+                    expr.name = "call";
+                }
+            }
+        }
+
+        if (expr.lhs) walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization);
+        if (expr.rhs) walk_expr(*expr.rhs, body, enclosing_this_type, allow_generic_monomorphization);
+        for (ExprPtr& arg : expr.args) walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
+
+        // Only a bare (no-receiver) Call can ever target a generic
+        // template -- generic *methods* are rejected at parse time (see
+        // parser.cppm's reject_generic_params), so `expr.lhs != nullptr`
+        // (a method-call shape) can never be one. Suppressed entirely
+        // while walking a generic template's own body (see run()'s own
+        // comment): a nested generic-to-generic call is left targeting
+        // the original, codegen-excluded template instead.
+        if (!allow_generic_monomorphization) return;
+        if (expr.kind != ExprKind::Call || expr.lhs != nullptr) return;
+        auto template_it = generic_template_indices_.find(expr.name);
+        if (template_it == generic_template_indices_.end()) return;
+        const Function& tmpl = program_.functions[template_it->second];
+
+        std::vector<Type> concrete_param_types;
+        concrete_param_types.reserve(tmpl.params.size());
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            const Param& param = tmpl.params[i];
+            if (param.generic_concept.empty()) {
+                concrete_param_types.push_back(param.type);
+                continue;
+            }
+            if (i >= expr.args.size()) return; // arg-count mismatch -- leave for codegen's own error
+            std::optional<Type> arg_type = infer_expr_type(*expr.args[i], body, signatures_);
+            if (!arg_type.has_value()) return;
+            // The concept is checked against the argument's *underlying*
+            // named type -- e.g. a `const Shape auto&` parameter's
+            // argument might itself be a plain `Circle` local (arg_type
+            // == Named("Circle")) or an already-bound `const Circle&`
+            // reference variable (arg_type == Reference(Circle)) -- both
+            // resolve to the same concrete type for concept-satisfaction
+            // and substitution purposes.
+            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+            auto concept_it = concepts_by_name_.find(param.generic_concept);
+            if (concept_it == concepts_by_name_.end()) return;
+            if (!type_satisfies_concept(named, *concept_it->second, program_)) {
+                throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
+                                     param.generic_concept + "' required by generic function '" + tmpl.name +
+                                     "' (ch05 §5.11 -- every requirement's method must exist with a matching "
+                                     "signature)",
+                    expr.loc);
+            }
+            Type substituted = param.type;
+            if (substituted.kind == TypeKind::Reference) {
+                substituted.pointee = std::make_shared<Type>(named);
+            } else {
+                substituted = named;
+            }
+            concrete_param_types.push_back(std::move(substituted));
+        }
+
+        expr.name = get_or_create_clone(tmpl, concrete_param_types);
+    }
+
+    // ch05 §5.12: resolves a single Lambda expression node in place --
+    // performs blanket-capture free-variable analysis if needed,
+    // resolves every capture's concrete field type, synthesizes the
+    // concrete closure ClassDef + "call" method (injecting both into
+    // program_), rewrites the (deep-cloned) body's captured-name
+    // references into explicit `this.name` field access, and finally
+    // sets `expr.name` to the synthesized class -- the only thing
+    // codegen/movecheck need from here on to treat this literal exactly
+    // like an ordinary class construction (see codegen's own Lambda
+    // case).
+    void resolve_lambda(Expr& expr, Body& enclosing_body, const std::optional<Type>& enclosing_this_type) {
+        if (expr.lambda_blanket_mode != LambdaCaptureMode::None) {
+            std::unordered_set<std::string> excluded;
+            for (const Param& p : expr.lambda_params) excluded.insert(p.name);
+            for (const LambdaCapture& c : expr.lambda_captures) excluded.insert(c.name);
+            if (expr.lambda_body) collect_locally_declared_names(*expr.lambda_body, excluded);
+            excluded.insert(known_function_names_.begin(), known_function_names_.end());
+            excluded.insert(known_type_names_.begin(), known_type_names_.end());
+
+            std::unordered_set<std::string> free_names;
+            if (expr.lambda_body) collect_free_identifiers(*expr.lambda_body, excluded, free_names);
+            bool by_reference = expr.lambda_blanket_mode == LambdaCaptureMode::ByReference;
+            for (const std::string& name : free_names) {
+                // ch05 §5.12's own hard rule: `this` is never implicitly
+                // captured by a bare `[=]`/`[&]`, even though it would
+                // otherwise look like just another free identifier here
+                // -- must be named explicitly (`[this]`/`[=, this]`/
+                // `[&, this]`).
+                if (name == "this") continue;
+                // Not a real local in the enclosing scope -- leave for
+                // the usual "use of undeclared variable" error rather
+                // than guessing.
+                if (!enclosing_body.local_types.contains(name)) continue;
+                LambdaCapture capture;
+                capture.name = name;
+                capture.by_reference = by_reference;
+                expr.lambda_captures.push_back(std::move(capture));
+            }
+        }
+
+        std::vector<Type> field_types;
+        field_types.reserve(expr.lambda_captures.size());
+        std::unordered_set<std::string> captured_names;
+        // ch05 §5.12: every by-*value*-captured name other than `this`
+        // (`[*this]`'s own copy semantics are a separate concern --
+        // see below) -- used after the loop to reject a direct
+        // assignment to one of these inside a non-`mutable` lambda body
+        // (reject_write_to_nonmutable_by_value_capture). A by-*reference*
+        // capture is deliberately excluded: writing *through* a
+        // reference field is always allowed regardless of the closure's
+        // own mutability, exactly like real C++ (a reference member's
+        // constness is independent of its enclosing object's) -- see
+        // `this_type.is_mutable_ref`'s own comment below for why the
+        // "call" method's receiver itself is unconditionally mutable.
+        std::unordered_set<std::string> by_value_names;
+        for (LambdaCapture& capture : expr.lambda_captures) {
+            captured_names.insert(capture.name);
+            Type captured_type;
+            if (capture.name == "this") {
+                if (!enclosing_this_type.has_value()) {
+                    throw DataflowError(
+                        "a lambda captures 'this', but is not itself inside a method body (ch05 §5.12)",
+                        expr.loc);
+                }
+                captured_type = *enclosing_this_type;
+            } else if (capture.init) {
+                std::optional<Type> t = infer_expr_type(*capture.init, enclosing_body, signatures_);
+                if (!t.has_value()) {
+                    throw DataflowError("cannot determine the type of init-capture '" + capture.name +
+                                             "' (ch05 §5.12)",
+                        expr.loc);
+                }
+                captured_type = std::move(*t);
+            } else {
+                auto it = enclosing_body.local_types.find(capture.name);
+                if (it == enclosing_body.local_types.end()) {
+                    throw DataflowError("lambda captures '" + capture.name +
+                                             "', which is not a local variable or parameter in this scope (ch05 "
+                                             "§5.12)",
+                        expr.loc);
+                }
+                captured_type = it->second;
+            }
+            if (capture.by_reference) {
+                Type ref;
+                ref.kind = TypeKind::Reference;
+                ref.pointee = std::make_shared<Type>(std::move(captured_type));
+                // v1 simplification: every by-reference capture is a
+                // mutable reference field, regardless of how the body
+                // itself uses it -- ch05 §5.12 doesn't ask for a
+                // separate const-vs-mutable capture distinction, and
+                // real C++ itself doesn't track per-capture constness
+                // this way either (a lambda's own constness -- the
+                // `mutable` keyword -- is about by-*value* captures, see
+                // `this_param.type.is_mutable_ref` below).
+                ref.is_mutable_ref = true;
+                field_types.push_back(std::move(ref));
+            } else {
+                if (capture.name != "this") by_value_names.insert(capture.name);
+                field_types.push_back(std::move(captured_type));
+            }
+        }
+
+        std::string class_name = "__lambda" + std::to_string(lambda_counter_++);
+        ClassDef closure_class;
+        closure_class.name = class_name;
+        closure_class.fields.reserve(expr.lambda_captures.size());
+        for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
+            ClassField field;
+            field.name = expr.lambda_captures[i].name;
+            field.type = field_types[i];
+            field.access = AccessSpecifier::Private;
+            closure_class.fields.push_back(std::move(field));
+        }
+        program_.classes.push_back(std::move(closure_class));
+
+        Function call_method;
+        call_method.name = class_name + "_call";
+        call_method.loc = expr.loc;
+        Param this_param;
+        this_param.name = "this";
+        Type this_type;
+        this_type.kind = TypeKind::Reference;
+        this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = class_name});
+        // The "call" method's own receiver is unconditionally mutable --
+        // *not* gated by `mutable` (unlike a real C++ closure's
+        // internally-const `operator()`): the general const-`this`-
+        // propagation mechanism this would otherwise rely on
+        // (assignment_target_is_read_only) cannot, without full
+        // Program-wide field-type information movecheck's Body-based
+        // architecture doesn't carry, distinguish "writing to a
+        // by-value field" (should require `mutable`) from "writing
+        // *through* a by-reference field's own referent" (must always
+        // be allowed, matching real C++, where a reference member's
+        // constness is independent of its enclosing object's). Instead,
+        // "requires `mutable` to modify a by-value capture" is enforced
+        // directly and precisely below
+        // (reject_write_to_nonmutable_by_value_capture), using the
+        // capture-list information only resolve_lambda itself has.
+        this_type.is_mutable_ref = true;
+        this_param.type = std::move(this_type);
+        call_method.params.push_back(std::move(this_param));
+        for (const Param& p : expr.lambda_params) call_method.params.push_back(p);
+
+        call_method.body = expr.lambda_body ? clone_stmt(*expr.lambda_body) : nullptr;
+        // ch05 §5.12: "a by-value capture can't be reassigned inside the
+        // body" absent `mutable` -- checked on the *original* (pre field-
+        // access-rewrite) body, where a captured name is still an
+        // ordinary bare Identifier, so no field-type information is
+        // needed (see the function's own comment).
+        if (call_method.body && !expr.lambda_is_mutable) {
+            reject_write_to_nonmutable_by_value_capture(*call_method.body, by_value_names);
+        }
+        // Return-type inference must likewise run on the *original*
+        // (pre-rewrite) body: infer_expr_type has no Program access to
+        // resolve a field's type from a `this.name` Member node (see
+        // infer_lambda_return_type's own comment), but a captured name
+        // is still a plain, resolvable Identifier at this point --
+        // exactly like reject_write_to_nonmutable_by_value_capture's
+        // identical reasoning just above.
+        if (expr.has_lambda_explicit_return_type) {
+            call_method.return_type = expr.type;
+        } else if (call_method.body) {
+            std::unordered_map<std::string, Type> capture_types;
+            for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
+                capture_types[expr.lambda_captures[i].name] = field_types[i];
+            }
+            call_method.return_type = infer_lambda_return_type(*call_method.body, call_method.params, capture_types);
+        } else {
+            call_method.return_type = Type{.kind = TypeKind::Named, .name = "void"};
+        }
+        if (call_method.body) rewrite_captured_identifiers_as_field_access(*call_method.body, captured_names);
+
+        // scpp requires an explicit `return;` covering every path, even
+        // for a `void` function with an otherwise-empty body (verified
+        // against this codebase's own existing behavior -- e.g. a bare
+        // `Circle() {}` constructor is rejected the same way) -- real
+        // C++ lambdas need no such thing (`[](int x) { print_int(x); }`
+        // is perfectly valid with no `return` at all), so this
+        // synthesis step must compensate by appending one when the
+        // resolved return type is `void` and the body doesn't already
+        // end with a Return statement (the common case for a body with
+        // no explicit `-> Type` and no `return expr;` of its own -- a
+        // more complex void body already ending in its own `return;` on
+        // every path is left untouched, matching this same "don't guess,
+        // defer to the real check" spirit codegen's own is_bare_void
+        // helper follows elsewhere (not reusable here directly -- a
+        // separate module, see this file's other independently-
+        // duplicated helpers, e.g. types_equal).
+        bool return_type_is_void =
+            call_method.return_type.kind == TypeKind::Named && call_method.return_type.name == "void";
+        if (return_type_is_void && call_method.body && call_method.body->kind == StmtKind::Block &&
+            (call_method.body->statements.empty() ||
+             call_method.body->statements.back()->kind != StmtKind::Return)) {
+            auto return_stmt = std::make_unique<Stmt>();
+            return_stmt->kind = StmtKind::Return;
+            return_stmt->loc = expr.loc;
+            call_method.body->statements.push_back(std::move(return_stmt));
+        }
+
+        program_.functions.push_back(std::move(call_method));
+        Function& synthesized = program_.functions.back();
+
+        expr.name = class_name;
+
+        // Recurse into the synthesized method's own body (nested generic
+        // calls / nested lambdas) using its own freshly-built Body --
+        // capture fields are reached via `this.field` (a Member
+        // expression, resolved structurally like any other class field,
+        // never through body.local_types), so nothing about this
+        // recursive walk needs to know about them specially. A
+        // synthesized closure's own "call" method is never itself a
+        // generic template, so generic-call-monomorphization stays
+        // enabled here.
+        if (synthesized.body) {
+            Body synthesized_body = build_mir(synthesized);
+            walk_stmt(*synthesized.body, synthesized_body, this_type_of(synthesized),
+                      /*allow_generic_monomorphization=*/true);
+        }
+    }
+
+    // ch05 §5.12: infers a lambda's return type from a single top-level
+    // `return expr;` statement when no explicit trailing `-> Type` is
+    // given (scpp has no general type inference, so this is a
+    // deliberately narrow special case, matching the parser's own
+    // comment) -- looks only at the body's own top-level Block
+    // statements (not nested inside an If/While), mirroring how
+    // narrowly this inference is meant to apply. No qualifying return
+    // statement (none at all, or only a bare `return;`) infers `void`.
+    // Ambiguous (more than one differently-shaped top-level return, or
+    // a top-level return whose own expression type can't be determined
+    // structurally) is left as `void` too, rather than guessing -- a
+    // genuinely ambiguous case should use an explicit `-> Type` instead;
+    // this is intentionally not a general control-flow analysis.
+    // `call_params` is the synthesized "call" method's own params
+    // (including `this`); `capture_types` maps each captured name to
+    // its own resolved field type. Run on the *original* (pre field-
+    // access-rewrite) body -- a captured name is still a plain bare
+    // Identifier at this point (never yet a `this.field` Member access,
+    // which infer_expr_type could not resolve anyway -- it has no
+    // Program access to look up a field's type) -- so both a lambda's
+    // own params and its captures are plain Identifiers infer_expr_type
+    // can resolve directly from a fresh, flat Body (no enclosing
+    // Function exists yet to build_mir from).
+    [[nodiscard]] Type infer_lambda_return_type(const Stmt& body, const std::vector<Param>& call_params,
+                                                 const std::unordered_map<std::string, Type>& capture_types) {
+        if (body.kind != StmtKind::Block) return Type{.kind = TypeKind::Named, .name = "void"};
+        Body param_only_body;
+        for (const Param& p : call_params) {
+            param_only_body.local_types[p.name] = p.type;
+        }
+        for (const auto& [name, type] : capture_types) {
+            param_only_body.local_types[name] = type;
+        }
+        for (const StmtPtr& stmt : body.statements) {
+            if (stmt->kind != StmtKind::Return || !stmt->expr) continue;
+            // `[this]() { return this->value; }` (ch05 §5.12): a
+            // `this`-capture's own field access -- infer_expr_type's
+            // Member case can never resolve this (no Program access),
+            // but this function, being a Monomorphizer method, has
+            // `program_` directly -- special-cased here rather than
+            // widening infer_expr_type's own general contract.
+            if (stmt->expr->kind == ExprKind::Member && stmt->expr->lhs->kind == ExprKind::Identifier) {
+                auto base_it = param_only_body.local_types.find(stmt->expr->lhs->name);
+                if (base_it != param_only_body.local_types.end()) {
+                    const Type& base_type = base_it->second;
+                    const std::string& class_name =
+                        (base_type.kind == TypeKind::Reference ? *base_type.pointee : base_type).name;
+                    if (std::optional<Type> field_type = resolve_field_type(class_name, stmt->expr->name)) {
+                        return *field_type;
+                    }
+                }
+            }
+            std::optional<Type> t = infer_expr_type(*stmt->expr, param_only_body, signatures_);
+            if (t.has_value()) return *t;
+            return Type{.kind = TypeKind::Named, .name = "void"};
+        }
+        return Type{.kind = TypeKind::Named, .name = "void"};
+    }
+
+    // Looks up `class_or_struct_name`'s own declared field `field_name`'s
+    // type -- a Monomorphizer method, so it has direct `program_` access
+    // (unlike movecheck's own, otherwise Program-less, Body-based
+    // machinery -- see DataflowState::class_field_types for the parallel
+    // mechanism check_moves needs for the exact same underlying reason).
+    [[nodiscard]] std::optional<Type> resolve_field_type(const std::string& class_or_struct_name,
+                                                          const std::string& field_name) const {
+        for (const ClassDef& def : program_.classes) {
+            if (def.name != class_or_struct_name) continue;
+            for (const ClassField& field : def.fields) {
+                if (field.name == field_name) return field.type;
+            }
+        }
+        for (const StructDef& def : program_.structs) {
+            if (def.name != class_or_struct_name) continue;
+            for (const StructField& field : def.fields) {
+                if (field.name == field_name) return field.type;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::string get_or_create_clone(const Function& tmpl, const std::vector<Type>& concrete_param_types) {
+        std::string cache_key = tmpl.name;
+        for (const Type& t : concrete_param_types) cache_key += "." + mangle_type_for_clone_name(t);
+        auto cached = clone_cache_.find(cache_key);
+        if (cached != clone_cache_.end()) return cached->second;
+        // Reserve the name *before* recursing (cloning tmpl's own body
+        // below never re-enters get_or_create_clone for this exact same
+        // key, but keeping this assignment first is simpler to reason
+        // about than proving that independently).
+        clone_cache_[cache_key] = cache_key;
+
+        Function clone;
+        clone.return_type = tmpl.return_type;
+        clone.name = cache_key;
+        clone.loc = tmpl.loc;
+        clone.namespace_path = tmpl.namespace_path;
+        // A monomorphized instantiation is always an internal
+        // implementation detail of whatever called it -- never itself
+        // directly exported (ch11 §11.3 doesn't apply to a compiler-
+        // synthesized clone with a compiler-synthesized name).
+        clone.is_exported = false;
+        clone.params.reserve(tmpl.params.size());
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            Param p;
+            p.name = tmpl.params[i].name;
+            p.type = concrete_param_types[i];
+            clone.params.push_back(std::move(p));
+        }
+        clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
+        // is_generic_template stays false (default): the clone is an
+        // ordinary, fully concrete function from here on, checked
+        // normally by movecheck (see monomorphize_generics's own
+        // comment) and compiled normally by codegen.
+
+        program_.functions.push_back(std::move(clone));
+        return cache_key;
+    }
+};
+
+} // namespace
+} // namespace scpp
+
+export namespace scpp {
+
+// ch05 §5.11: monomorphizes every call to a generic (concept-
+// constrained) function in `program`, mutating it in place -- see
+// Monomorphizer's own comment for the full algorithm and why this must
+// run *before* check_moves (driver.cppm calls this first).
+void monomorphize_generics(Program& program) {
+    Monomorphizer monomorphizer(program);
+    monomorphizer.run();
+}
+
+void check_moves(const Program& program) {
+    Signatures signatures = build_signatures(program);
     // ch04 §4.2: every class name in the program, so Member-access
     // checking (apply_expr's own Member case) can tell a class-typed
     // base (access-controlled) apart from a struct-typed one (never
@@ -2264,13 +3513,25 @@ void check_moves(const Program& program) {
     for (const ClassDef& def : program.classes) {
         class_names.insert(def.name);
     }
+    // See DataflowState::class_field_types' own comment.
+    ClassFieldTypes class_field_types;
+    for (const ClassDef& def : program.classes) {
+        for (const ClassField& field : def.fields) {
+            class_field_types[def.name][field.name] = field.type;
+        }
+    }
+    for (const StructDef& def : program.structs) {
+        for (const StructField& field : def.fields) {
+            class_field_types[def.name][field.name] = field.type;
+        }
+    }
     for (const Function& fn : program.functions) {
         // A bodyless `extern "C"` declaration (ch02 §2.1) has no
         // statements to run the dataflow analysis over -- it's already
         // registered in `signatures` above (so call sites into it are
         // still checked normally), but there's nothing here to check.
         if (!fn.body) continue;
-        check_function(fn, signatures, class_names);
+        check_function(fn, signatures, class_names, class_field_types);
     }
 }
 

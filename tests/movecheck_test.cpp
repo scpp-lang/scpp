@@ -48,6 +48,14 @@ std::string trim(std::string s) {
 bool throws_move_error(std::string_view source) {
     try {
         scpp::Program program = scpp::parse(source);
+        // ch05 §5.11: monomorphize_generics must run before check_moves,
+        // exactly like the real pipeline (driver.cppm's
+        // emit_object_file_for_program) -- a generic function's call
+        // site is only ever type-correct against a witness-typed
+        // signature *before* this rewrite; concept-satisfaction
+        // rejection also only happens here, so a movetest_source case
+        // exercising either would otherwise never see it.
+        scpp::monomorphize_generics(program);
         scpp::check_moves(program);
     } catch (const scpp::DataflowError&) {
         return true;

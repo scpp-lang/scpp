@@ -286,16 +286,19 @@ void test_char_literal_escape_sequence() {
     expect(tokens[0].text == "'\\n'", "char_literal_escape_sequence: text should include the escape");
 }
 
-// ch11 §11.3/§11.4/§11.7: module/export/import/namespace/as keywords.
+// ch11 §11.3/§11.4/§11.7: module/export/import/namespace keywords. `as`
+// is not a reserved word (the `import name as local_name;` aliasing
+// syntax it once supported was removed, ch11 -- see "Remove import ...
+// as ... aliasing from ch11" commit); a bare `as` lexes as an ordinary
+// Identifier, covered by test_identifier, not here.
 void test_module_keywords() {
     expect_kinds(
-        "module export import namespace as",
+        "module export import namespace",
         {
             scpp::TokenKind::KwModule,
             scpp::TokenKind::KwExport,
             scpp::TokenKind::KwImport,
             scpp::TokenKind::KwNamespace,
-            scpp::TokenKind::KwAs,
             scpp::TokenKind::EndOfFile,
         },
         "module_keywords");
@@ -316,6 +319,32 @@ void test_dotted_module_name() {
             scpp::TokenKind::EndOfFile,
         },
         "dotted_module_name");
+}
+
+// ch05 §5.11: generic functions/concepts keywords.
+void test_concept_keywords() {
+    expect_kinds(
+        "template typename concept requires auto",
+        {
+            scpp::TokenKind::KwTemplate,
+            scpp::TokenKind::KwTypename,
+            scpp::TokenKind::KwConcept,
+            scpp::TokenKind::KwRequires,
+            scpp::TokenKind::KwAuto,
+            scpp::TokenKind::EndOfFile,
+        },
+        "concept_keywords");
+}
+
+// ch05 §5.12: `mutable` for a lambda's own operator().
+void test_mutable_keyword() {
+    expect_kinds(
+        "mutable",
+        {
+            scpp::TokenKind::KwMutable,
+            scpp::TokenKind::EndOfFile,
+        },
+        "mutable_keyword");
 }
 
 } // namespace
@@ -344,6 +373,8 @@ int main() {
     test_char_literal_escape_sequence();
     test_module_keywords();
     test_dotted_module_name();
+    test_concept_keywords();
+    test_mutable_keyword();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

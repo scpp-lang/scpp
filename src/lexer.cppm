@@ -75,8 +75,31 @@ enum class TokenKind {
                  // name;` (re-exporting).
     KwNamespace, // ch11 §11.4: `namespace a::b::c { ... }` (real C++
                  // syntax, including the C++17 one-line nested form).
-    KwAs,        // ch11 §11.7: `import name as local_name;` (renaming an
-                 // import -- new syntax, not present in real C++20).
+    KwTemplate,  // ch05 §5.11: `template<typename T>` -- required
+                 // (real C++ grammar has no other way to declare a
+                 // `concept`) directly above a `concept` declaration
+                 // only; a *function* is never spelled with this header
+                 // in v0.1 (abbreviated `Concept auto` form only).
+    KwTypename,  // ch05 §5.11: names the single template parameter in a
+                 // concept's own `template<typename T>` header.
+    KwConcept,   // ch05 §5.11: `concept Name = requires(...) { ... };` --
+                 // a compile-time structural predicate over one type.
+    KwRequires,  // ch05 §5.11: introduces a requires-expression's
+                 // parenthesized placeholder parameter list + brace-
+                 // enclosed requirement sequence.
+    KwAuto,      // ch05 §5.11: only meaningful directly after a concept
+                 // name in a generic function parameter (`Shape auto&
+                 // s`, `Shape auto&&`, `const Shape auto&`) -- the
+                 // abbreviated C++20 generic-function form; v0.1 has no
+                 // other use for `auto` (no type inference for ordinary
+                 // variables).
+    KwMutable,   // ch05 §5.12: trailing qualifier on a lambda's parameter
+                 // list (`[x](int y) mutable { ... }`), allowing the
+                 // synthesized closure's own operator() to modify
+                 // by-value-captured fields -- the mirror image of an
+                 // ordinary method's own trailing `const` (ch05 §5.9):
+                 // absent means a `const` operator(), present means a
+                 // non-`const` one.
 
     // punctuation
     LParen,
@@ -211,7 +234,12 @@ private:
         if (text == "export") return TokenKind::KwExport;
         if (text == "import") return TokenKind::KwImport;
         if (text == "namespace") return TokenKind::KwNamespace;
-        if (text == "as") return TokenKind::KwAs;
+        if (text == "template") return TokenKind::KwTemplate;
+        if (text == "typename") return TokenKind::KwTypename;
+        if (text == "concept") return TokenKind::KwConcept;
+        if (text == "requires") return TokenKind::KwRequires;
+        if (text == "auto") return TokenKind::KwAuto;
+        if (text == "mutable") return TokenKind::KwMutable;
         return TokenKind::Identifier;
     }
 

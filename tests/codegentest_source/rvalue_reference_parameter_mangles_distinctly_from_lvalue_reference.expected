@@ -1,0 +1,2 @@
+contains: define i32 @f.int_ref(ptr %x)
+contains: define i32 @f.int_rref(ptr %x)

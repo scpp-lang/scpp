@@ -48,7 +48,12 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwExport: return "KwExport";
         case scpp::TokenKind::KwImport: return "KwImport";
         case scpp::TokenKind::KwNamespace: return "KwNamespace";
-        case scpp::TokenKind::KwAs: return "KwAs";
+        case scpp::TokenKind::KwTemplate: return "KwTemplate";
+        case scpp::TokenKind::KwTypename: return "KwTypename";
+        case scpp::TokenKind::KwConcept: return "KwConcept";
+        case scpp::TokenKind::KwRequires: return "KwRequires";
+        case scpp::TokenKind::KwAuto: return "KwAuto";
+        case scpp::TokenKind::KwMutable: return "KwMutable";
         case scpp::TokenKind::LParen: return "LParen";
         case scpp::TokenKind::RParen: return "RParen";
         case scpp::TokenKind::LBrace: return "LBrace";
@@ -96,6 +101,7 @@ std::string type_to_string(const scpp::Type& type) {
         case scpp::TypeKind::UniquePtr:
             return "std::unique_ptr<" + type_to_string(*type.pointee) + ">";
         case scpp::TypeKind::Reference:
+            if (type.is_rvalue_ref) return type_to_string(*type.pointee) + "&&";
             return (type.is_mutable_ref ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
                    "&";
         case scpp::TypeKind::Span:
@@ -216,6 +222,12 @@ void print_indent(int depth) {
     for (int i = 0; i < depth; i++) std::cout << "  ";
 }
 
+// Forward-declared: print_expr's own Lambda case (ch05 §5.12) needs to
+// print the closure's body, which is a Stmt -- print_stmt itself is
+// defined below (after print_expr), and also calls print_expr for
+// ordinary sub-expressions, so the two are mutually recursive.
+void print_stmt(const scpp::Stmt& stmt, int depth);
+
 void print_expr(const scpp::Expr& expr, int depth) {
     print_indent(depth);
     switch (expr.kind) {
@@ -271,6 +283,41 @@ void print_expr(const scpp::Expr& expr, int depth) {
             std::cout << "MakeUnique " << type_to_string(expr.type) << "\n";
             for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
             break;
+        case scpp::ExprKind::Lambda: {
+            std::cout << "Lambda";
+            if (!expr.name.empty()) std::cout << " -> " << expr.name;
+            std::cout << "\n";
+            print_indent(depth + 1);
+            std::cout << "Captures";
+            switch (expr.lambda_blanket_mode) {
+                case scpp::LambdaCaptureMode::ByValue: std::cout << " (blanket =)"; break;
+                case scpp::LambdaCaptureMode::ByReference: std::cout << " (blanket &)"; break;
+                case scpp::LambdaCaptureMode::None: break;
+            }
+            std::cout << "\n";
+            for (const auto& capture : expr.lambda_captures) {
+                print_indent(depth + 2);
+                std::cout << (capture.by_reference ? "&" : "") << capture.name;
+                if (capture.init) std::cout << " = <init-expr>";
+                std::cout << "\n";
+            }
+            print_indent(depth + 1);
+            std::cout << "Params\n";
+            for (const auto& param : expr.lambda_params) {
+                print_indent(depth + 2);
+                std::cout << type_to_string(param.type) << " " << param.name << "\n";
+            }
+            if (expr.lambda_is_mutable) {
+                print_indent(depth + 1);
+                std::cout << "mutable\n";
+            }
+            if (expr.has_lambda_explicit_return_type) {
+                print_indent(depth + 1);
+                std::cout << "-> " << type_to_string(expr.type) << "\n";
+            }
+            if (expr.lambda_body) print_stmt(*expr.lambda_body, depth + 1);
+            break;
+        }
     }
 }
 

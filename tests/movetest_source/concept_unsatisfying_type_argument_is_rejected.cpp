@@ -1,0 +1,23 @@
+// ch05 §5.11: a type whose own class has no method matching the
+// concept's own requirement (name + argument types + return-type
+// constraint) fails structural satisfaction -- rejected at the call
+// site, before ever reaching a monomorphized clone.
+class NotAShape {
+public:
+    NotAShape() { return; }
+    int perimeter() const { return 0; }
+};
+
+template<typename T>
+concept Shape = requires(const T& t) {
+    { t.area() } -> std::same_as<int>;
+};
+
+int print_area(const Shape auto& s) {
+    return s.area();
+}
+
+int main() {
+    NotAShape n;
+    return print_area(n);
+}

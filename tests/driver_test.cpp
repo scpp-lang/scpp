@@ -588,12 +588,75 @@ void run_module_system_tests() {
     }
 }
 
+// ch05 §5.11: generic functions/concepts -- monomorphization end-to-end
+// and the "checked once, abstractly, zero new movecheck logic" claim.
+// Lives here (not movetest_source/codegentest_source) because it
+// genuinely needs the *full* pipeline (parse -> monomorphize_generics ->
+// check_moves -> codegen) in a single test: movetest_source's own
+// throws_move_error helper never runs codegen at all (see
+// movecheck_test.cpp), and codegentest_source's generate_ir never runs
+// monomorphize_generics (deliberately testing codegen in isolation --
+// see codegen_test.cpp), so neither alone can reach this specific
+// rejection (an "unknown method" inside a *monomorphized clone's* body,
+// which only exists once a real call site triggers instantiation).
+void run_concept_tests() {
+    // A generic function's own body is checked once, abstractly, against
+    // its constrained parameter's witness class -- calling an operation
+    // the concept never promised (here `.perimeter()`, which `Shape`
+    // never requires) is rejected via the exact same "unknown method"
+    // mechanism an ordinary class-typed call would hit, with zero new
+    // movecheck logic. Like module_private_function_not_visible above,
+    // this surfaces at codegen's own "unknown function" check (an
+    // unresolved callee name has never been movecheck's own job -- see
+    // check_call_arguments's comment), reached only once a real call
+    // site (print_area(c) below) triggers monomorphize_generics to
+    // produce a concrete clone whose body still calls the ungranted
+    // operation, now against the concrete type's own naming scheme.
+    {
+        std::string case_name = "concept_generic_body_calling_ungranted_operation_is_rejected";
+        cases_run++;
+        std::string source =
+            "class Circle {\n"
+            "public:\n"
+            "    Circle() { return; }\n"
+            "    int area() const { return 314; }\n"
+            "};\n"
+            "template<typename T>\n"
+            "concept Shape = requires(const T& t) {\n"
+            "    { t.area() } -> std::same_as<int>;\n"
+            "};\n"
+            "int print_area(const Shape auto& s) {\n"
+            "    return s.perimeter();\n"
+            "}\n"
+            "int main() {\n"
+            "    Circle c;\n"
+            "    return print_area(c);\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected calling an operation not promised by the concept to fail");
+    }
+}
+
 } // namespace
 
 int main() {
     run_test_case_files();
     run_error_location_tests();
     run_module_system_tests();
+    run_concept_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

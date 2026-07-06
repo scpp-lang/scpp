@@ -1,0 +1,1 @@
+sequence: %rvaluetmp = alloca i32 | store i32 42, ptr %rvaluetmp | call i32 @take(ptr %rvaluetmp)

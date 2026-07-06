@@ -159,7 +159,12 @@ public:
     // a partition folds into whichever module imports it and never gets
     // an object file of its own.
     [[nodiscard]] const std::vector<std::string>& resolution_order() const { return resolution_order_; }
-    [[nodiscard]] const Program& program_for(const std::string& module_name) const { return cache_.at(module_name); }
+    // Non-const: emit_object_file_for_program (ch05 §5.11) needs to
+    // mutate this module's own Program in place (monomorphize_generics
+    // injects concrete clones before check_moves runs) -- safe since
+    // each cached module's Program is only ever handed to that one
+    // separate-compilation call, never read again afterward.
+    [[nodiscard]] Program& program_for(const std::string& module_name) { return cache_.at(module_name); }
 
 private:
     std::unordered_map<std::string, std::string> import_paths_;
@@ -176,7 +181,13 @@ private:
 // by compile_to_executable below -- exactly the same backend either way,
 // since by this point a Program is just a Program regardless of which
 // file it came from.
-void emit_object_file_for_program(const Program& program, const std::string& object_path) {
+void emit_object_file_for_program(Program& program, const std::string& object_path) {
+    // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
+    // comment in movecheck.cppm for why call-site monomorphization has
+    // to happen first (movecheck's ordinary exact-type-match call-
+    // argument checking can only work once every call site targets an
+    // already-concrete function).
+    monomorphize_generics(program);
     check_moves(program);
 
     llvm::InitializeNativeTarget();

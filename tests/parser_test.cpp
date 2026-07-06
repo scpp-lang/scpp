@@ -1067,6 +1067,565 @@ void test_export_import_on_implementation_partition_is_rejected() {
     expect(threw, "export_import_on_implementation_partition_is_rejected: expected a ParseError");
 }
 
+// ch03: `T&&` (rvalue reference) is parsed only in a function parameter's
+// declared type -- `is_rvalue_ref` set, `is_mutable_ref` also true (an
+// rvalue-reference parameter is always fully mutable/ownable inside the
+// callee).
+void test_rvalue_reference_parameter_parses() {
+    scpp::Program program = scpp::parse("int take(int&& x) { return x; }");
+    expect(program.functions.size() == 1, "rvalue_reference_parameter_parses: expected 1 function");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.params.size() == 1, "rvalue_reference_parameter_parses: expected 1 param");
+    const scpp::Type& type = fn.params[0].type;
+    expect(type.kind == scpp::TypeKind::Reference, "rvalue_reference_parameter_parses: kind should be Reference");
+    expect(type.is_rvalue_ref, "rvalue_reference_parameter_parses: is_rvalue_ref should be true");
+    expect(type.is_mutable_ref, "rvalue_reference_parameter_parses: is_mutable_ref should also be true");
+    expect(is_named_type(*type.pointee, "int"), "rvalue_reference_parameter_parses: pointee should be 'int'");
+}
+
+// ch03: a plain `T&`/`const T&` parameter must still parse with
+// is_rvalue_ref left false -- this flag must not accidentally default to
+// true or leak across unrelated parameters.
+void test_ordinary_reference_parameter_is_not_rvalue_ref() {
+    scpp::Program program = scpp::parse("int take(int& x, const int& y) { return x + y; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(!fn.params[0].type.is_rvalue_ref, "ordinary_reference_parameter_is_not_rvalue_ref: 'int&' param");
+    expect(!fn.params[1].type.is_rvalue_ref, "ordinary_reference_parameter_is_not_rvalue_ref: 'const int&' param");
+}
+
+// ch03: `const T&&` is rejected -- a moved-from value must be mutable to
+// move *from*, so `const` can never qualify an rvalue reference.
+void test_const_rvalue_reference_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int take(const int&& x) { return x; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "const_rvalue_reference_is_rejected: expected a ParseError");
+}
+
+// ch03: `T&&` is scoped to a function/method/constructor parameter's
+// declared type only (ch03's own table says "T&& (parameter)") --
+// rejected for a local variable declaration, a class field, a function's
+// return type, and a nested type argument (std::unique_ptr<T>'s own T).
+void test_rvalue_reference_rejected_outside_parameter_position() {
+    auto expect_rejected = [](const std::string& source, const char* label) {
+        bool threw = false;
+        try {
+            scpp::parse(source);
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, std::string("rvalue_reference_rejected_outside_parameter_position: ") + label);
+    };
+    expect_rejected("int f() { int&& x = 5; return 0; }", "var decl");
+    expect_rejected("int&& f() { return 5; }", "return type");
+    expect_rejected(
+        "class Widget {\n"
+        "public:\n"
+        "    Widget() {}\n"
+        "    int&& field;\n"
+        "};\n",
+        "class field");
+    expect_rejected("int f() { std::unique_ptr<int&&> p; return 0; }", "unique_ptr element type");
+}
+
+// ch05 §5.11: `template<typename T> concept Name = requires(...) { ...
+// };` with a *compound* requirement (`{ expr } -> std::same_as<T>;`)
+// synthesizes a hidden witness class (ClassDef::is_concept_witness) with
+// one bodyless method per requirement, named via the same
+// `ClassName_memberName` scheme every other method uses -- so the
+// return type and parameter (receiver) shape are exactly what an
+// ordinary method's would be.
+void test_concept_compound_requirement_synthesizes_witness_class() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "concept Shape = requires(const T& t) {\n"
+        "    { t.area() } -> std::same_as<int>;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(program.concepts.size() == 1, "concept_compound_requirement_synthesizes_witness_class: expected 1 concept");
+    const scpp::ConceptDef& def = program.concepts[0];
+    expect(def.name == "Shape", "concept_compound_requirement_synthesizes_witness_class: name should be 'Shape'");
+    expect(def.template_param_name == "T",
+           "concept_compound_requirement_synthesizes_witness_class: template_param_name should be 'T'");
+    expect(def.requires_param_name == "t",
+           "concept_compound_requirement_synthesizes_witness_class: requires_param_name should be 't'");
+    expect(def.requirements.size() == 1, "concept_compound_requirement_synthesizes_witness_class: expected 1 requirement");
+    expect(def.requirements[0].method_name == "area",
+           "concept_compound_requirement_synthesizes_witness_class: method_name should be 'area'");
+    expect(def.requirements[0].has_return_constraint,
+           "concept_compound_requirement_synthesizes_witness_class: has_return_constraint should be true");
+    expect(is_named_type(def.requirements[0].return_type, "int"),
+           "concept_compound_requirement_synthesizes_witness_class: return_type should be 'int'");
+
+    bool found_witness_class = false;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Shape") {
+            found_witness_class = true;
+            expect(c.is_concept_witness,
+                   "concept_compound_requirement_synthesizes_witness_class: ClassDef should be is_concept_witness");
+        }
+    }
+    expect(found_witness_class, "concept_compound_requirement_synthesizes_witness_class: expected a witness ClassDef");
+
+    bool found_witness_method = false;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Shape_area") {
+            found_witness_method = true;
+            expect(fn.body == nullptr,
+                   "concept_compound_requirement_synthesizes_witness_class: witness method should be bodyless");
+            expect(fn.params.size() == 1,
+                   "concept_compound_requirement_synthesizes_witness_class: witness method should have 1 param (this)");
+            expect(fn.params[0].name == "this",
+                   "concept_compound_requirement_synthesizes_witness_class: witness method's param 0 should be 'this'");
+            expect(!fn.params[0].type.is_mutable_ref,
+                   "concept_compound_requirement_synthesizes_witness_class: 'this' should be const ('const T& t')");
+            expect(is_named_type(fn.return_type, "int"),
+                   "concept_compound_requirement_synthesizes_witness_class: witness method return type should be 'int'");
+        }
+    }
+    expect(found_witness_method, "concept_compound_requirement_synthesizes_witness_class: expected a witness method "
+                                  "'Shape_area'");
+}
+
+// ch05 §5.11: a *simple* requirement (no braces, no `->`) directly
+// invoking the placeholder itself (`f(x);`, e.g. IntConsumer) is modeled
+// as a call to a fixed synthesized method name ("call") -- shared with a
+// closure's own compiler-synthesized operator() (ch05 §5.12), so both
+// resolve through the same "bare Call redirects to a method call" sugar.
+void test_concept_simple_direct_invocation_requirement_synthesizes_call_method() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "concept IntConsumer = requires(T f, int x) { f(x); };\n"
+        "int main() { return 0; }\n");
+    expect(program.concepts.size() == 1,
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: expected 1 concept");
+    const scpp::ConceptDef& def = program.concepts[0];
+    expect(def.requires_param_name == "f",
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: requires_param_name should be 'f'");
+    expect(def.requirements.size() == 1,
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: expected 1 requirement");
+    expect(def.requirements[0].method_name == "call",
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: method_name should be 'call'");
+    expect(!def.requirements[0].has_return_constraint,
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: simple requirement has no return "
+           "constraint");
+    expect(def.requirements[0].arg_types.size() == 1,
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: expected 1 arg type");
+    expect(is_named_type(def.requirements[0].arg_types[0], "int"),
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: arg type should be 'int'");
+
+    bool found_witness_method = false;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "IntConsumer_call") {
+            found_witness_method = true;
+            expect(fn.params.size() == 2,
+                   "concept_simple_direct_invocation_requirement_synthesizes_call_method: expected 2 params "
+                   "(this + x)");
+            expect(fn.params[0].type.is_mutable_ref,
+                   "concept_simple_direct_invocation_requirement_synthesizes_call_method: 'this' should be mutable "
+                   "('T f' has no const)");
+            expect(is_named_type(fn.params[1].type, "int"),
+                   "concept_simple_direct_invocation_requirement_synthesizes_call_method: param 1 should be 'int'");
+        }
+    }
+    expect(found_witness_method,
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: expected a witness method "
+           "'IntConsumer_call'");
+}
+
+// ch05 §5.11: a requirement's expression must be shaped as a call on the
+// concept's own requires-parameter -- an unrelated identifier is
+// rejected (v0.1 does not support an arbitrary requirement expression).
+void test_concept_requirement_on_wrong_receiver_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "template<typename T>\n"
+            "concept Shape = requires(const T& t) {\n"
+            "    { other.area() } -> std::same_as<int>;\n"
+            "};\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "concept_requirement_on_wrong_receiver_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.11: a compound requirement's constraint must be
+// `std::same_as<T>` -- `std::convertible_to<T>` is rejected outright
+// (scpp has no implicit scalar conversions at all, so the two concepts
+// would mean the same thing anyway).
+void test_concept_convertible_to_constraint_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "template<typename T>\n"
+            "concept Shape = requires(const T& t) {\n"
+            "    { t.area() } -> std::convertible_to<int>;\n"
+            "};\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "concept_convertible_to_constraint_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.11: a requirement's call argument must be a bare reference to
+// one of the requires-expression's *other* (non-placeholder) parameters
+// -- an unknown identifier is rejected.
+void test_concept_requirement_unknown_argument_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("template<typename T>\nconcept IntConsumer = requires(T f, int x) { f(y); };\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "concept_requirement_unknown_argument_is_rejected: expected a ParseError");
+}
+
+// ch11 §11.5: `export` on a concept declaration, like every other
+// top-level declaration, has no effect (is rejected) outside a module
+// file.
+void test_export_concept_outside_module_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("export template<typename T>\nconcept Shape = requires(const T& t) { t.area(); };\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "export_concept_outside_module_is_rejected: expected a ParseError");
+}
+
+// ch11 §11.4/§11.5: a concept declared inside `namespace a { ... }`
+// namespace-qualifies its own name and its witness class/method exactly
+// like a struct/class/function would.
+void test_concept_inside_namespace_is_qualified() {
+    scpp::Program program = scpp::parse(
+        "export module shapes;\n"
+        "namespace shapes {\n"
+        "export template<typename T>\n"
+        "concept Shape = requires(const T& t) { t.area(); };\n"
+        "}\n");
+    expect(program.concepts.size() == 1, "concept_inside_namespace_is_qualified: expected 1 concept");
+    expect(program.concepts[0].name == "shapes::Shape",
+           "concept_inside_namespace_is_qualified: name should be namespace-qualified");
+    expect(program.concepts[0].is_exported, "concept_inside_namespace_is_qualified: should be exported");
+    bool found = false;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "shapes::Shape_area") found = true;
+    }
+    expect(found, "concept_inside_namespace_is_qualified: expected witness method 'shapes::Shape_area'");
+}
+
+// ch05 §5.11: the abbreviated generic-function parameter form `const
+// ConceptName auto& name` parses to an ordinary Reference parameter
+// whose innermost Named type is the concept's own witness-class name --
+// Param::generic_concept records which concept produced it, and the
+// enclosing Function is marked is_generic_template.
+void test_generic_parameter_const_auto_ref_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "concept Shape = requires(const T& t) { t.area(); };\n"
+        "int print_area(const Shape auto& s) { return 0; }\n");
+    const scpp::Function* print_area = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "print_area") print_area = &fn;
+    }
+    expect(print_area != nullptr, "generic_parameter_const_auto_ref_parses: expected function 'print_area'");
+    expect(print_area->is_generic_template,
+           "generic_parameter_const_auto_ref_parses: 'print_area' should be is_generic_template");
+    expect(print_area->params.size() == 1, "generic_parameter_const_auto_ref_parses: expected 1 param");
+    const scpp::Param& param = print_area->params[0];
+    expect(param.generic_concept == "Shape", "generic_parameter_const_auto_ref_parses: generic_concept should be "
+                                              "'Shape'");
+    expect(param.type.kind == scpp::TypeKind::Reference,
+           "generic_parameter_const_auto_ref_parses: kind should be Reference");
+    expect(!param.type.is_mutable_ref, "generic_parameter_const_auto_ref_parses: should be a shared reference "
+                                        "('const ... &')");
+    expect(!param.type.is_rvalue_ref, "generic_parameter_const_auto_ref_parses: should not be an rvalue reference");
+    expect(is_named_type(*param.type.pointee, "Shape"),
+           "generic_parameter_const_auto_ref_parses: pointee should name the witness class 'Shape'");
+}
+
+// ch05 §5.11: `ConceptName auto&&` (a move-in generic parameter,
+// e.g. for passing a closure) parses with is_rvalue_ref set, mirroring
+// an ordinary `T&&` parameter exactly, just with a concept's witness
+// class standing in for a concrete type.
+void test_generic_parameter_auto_rvalue_ref_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "concept InvocableRvalue = requires(T f, int x) { f(x); };\n"
+        "int for_each_doubled(InvocableRvalue auto&& f) { return 0; }\n");
+    const scpp::Function* fn_ptr = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "for_each_doubled") fn_ptr = &fn;
+    }
+    expect(fn_ptr != nullptr, "generic_parameter_auto_rvalue_ref_parses: expected function 'for_each_doubled'");
+    expect(fn_ptr->is_generic_template,
+           "generic_parameter_auto_rvalue_ref_parses: should be is_generic_template");
+    const scpp::Param& param = fn_ptr->params[0];
+    expect(param.generic_concept == "InvocableRvalue",
+           "generic_parameter_auto_rvalue_ref_parses: generic_concept should be 'InvocableRvalue'");
+    expect(param.type.kind == scpp::TypeKind::Reference,
+           "generic_parameter_auto_rvalue_ref_parses: kind should be Reference");
+    expect(param.type.is_rvalue_ref, "generic_parameter_auto_rvalue_ref_parses: is_rvalue_ref should be true");
+    expect(is_named_type(*param.type.pointee, "InvocableRvalue"),
+           "generic_parameter_auto_rvalue_ref_parses: pointee should name the witness class");
+}
+
+// ch05 §5.11: `ConceptName auto&` (mutable, no leading const) parses as
+// a mutable-reference generic parameter.
+void test_generic_parameter_mutable_auto_ref_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "concept Shape = requires(const T& t) { t.area(); };\n"
+        "int touch(Shape auto& s) { return 0; }\n");
+    const scpp::Function& fn = program.functions[program.functions.size() - 1];
+    expect(fn.name == "touch", "generic_parameter_mutable_auto_ref_parses: expected function 'touch'");
+    expect(fn.params[0].type.is_mutable_ref,
+           "generic_parameter_mutable_auto_ref_parses: should be a mutable reference");
+    expect(!fn.params[0].type.is_rvalue_ref,
+           "generic_parameter_mutable_auto_ref_parses: should not be an rvalue reference");
+}
+
+// ch05 §5.11: an identifier immediately followed by `auto` that does
+// *not* name a declared concept is rejected with a clear error (rather
+// than silently mis-parsing or crashing).
+void test_generic_parameter_unknown_concept_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int f(NotAConcept auto& x) { return 0; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "generic_parameter_unknown_concept_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.11: a generic (concept-constrained) parameter is only
+// supported on a free function in this version -- rejected on a method
+// or constructor.
+void test_generic_parameter_on_method_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "template<typename T>\n"
+            "concept Shape = requires(const T& t) { t.area(); };\n"
+            "class Widget {\n"
+            "public:\n"
+            "    Widget() { return; }\n"
+            "    int touch(Shape auto& s) { return 0; }\n"
+            "};\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "generic_parameter_on_method_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.12: `[capture-list](params) { body }` parses to a raw,
+// unresolved Lambda Expr -- explicit captures (by-value, by-reference)
+// recorded verbatim, params reusing the same shared parameter-list
+// parser methods/constructors use, and no synthesized class name yet
+// (that's movecheck's closure-resolution pass's job, see
+// Expr::name's own comment).
+void test_lambda_with_explicit_captures_parses() {
+    scpp::Program program = scpp::parse(
+        "int apply(int x, int y) { return x; }\n"
+        "int main() {\n"
+        "    int x = 5;\n"
+        "    int y = 10;\n"
+        "    apply([x, &y](int z) -> int { return x + y + z; }, 3);\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    expect(main_fn != nullptr, "lambda_with_explicit_captures_parses: expected function 'main'");
+    // main's body: VarDecl x, VarDecl y, ExprStmt(Call apply(...)), Return.
+    const scpp::Stmt& call_stmt = *main_fn->body->statements[2];
+    expect(call_stmt.kind == scpp::StmtKind::ExprStmt, "lambda_with_explicit_captures_parses: expected ExprStmt");
+    const scpp::Expr& call_expr = *call_stmt.expr;
+    expect(call_expr.kind == scpp::ExprKind::Call, "lambda_with_explicit_captures_parses: expected Call");
+    expect(call_expr.args.size() == 2, "lambda_with_explicit_captures_parses: expected 2 args");
+    const scpp::Expr& lambda = *call_expr.args[0];
+    expect(lambda.kind == scpp::ExprKind::Lambda, "lambda_with_explicit_captures_parses: expected Lambda");
+    expect(lambda.name.empty(), "lambda_with_explicit_captures_parses: name (synthesized class) should be empty "
+                                 "before resolution");
+    expect(lambda.lambda_blanket_mode == scpp::LambdaCaptureMode::None,
+           "lambda_with_explicit_captures_parses: expected no blanket mode");
+    expect(lambda.lambda_captures.size() == 2, "lambda_with_explicit_captures_parses: expected 2 captures");
+    expect(lambda.lambda_captures[0].name == "x" && !lambda.lambda_captures[0].by_reference,
+           "lambda_with_explicit_captures_parses: capture 0 should be by-value 'x'");
+    expect(lambda.lambda_captures[1].name == "y" && lambda.lambda_captures[1].by_reference,
+           "lambda_with_explicit_captures_parses: capture 1 should be by-reference 'y'");
+    expect(lambda.lambda_params.size() == 1 && lambda.lambda_params[0].name == "z",
+           "lambda_with_explicit_captures_parses: expected 1 param 'z'");
+    expect(lambda.has_lambda_explicit_return_type && is_named_type(lambda.type, "int"),
+           "lambda_with_explicit_captures_parses: expected explicit return type 'int'");
+    expect(!lambda.lambda_is_mutable, "lambda_with_explicit_captures_parses: should not be mutable");
+    expect(lambda.lambda_body != nullptr, "lambda_with_explicit_captures_parses: expected a body");
+}
+
+// ch05 §5.12: `[=]`/`[&]` (blanket captures) parse with no explicit
+// capture entries and lambda_blanket_mode set -- free-variable
+// resolution happens later (movecheck's closure-resolution pass), not
+// here.
+void test_lambda_blanket_capture_modes_parse() {
+    scpp::Program value_program = scpp::parse(
+        "int apply(int x, int y) { return x; }\n"
+        "int main() {\n"
+        "    int x = 5;\n"
+        "    apply([=](int z) { return x + z; }, 3);\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : value_program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Expr& lambda1 = *main_fn->body->statements[1]->expr->args[0];
+    expect(lambda1.lambda_blanket_mode == scpp::LambdaCaptureMode::ByValue,
+           "lambda_blanket_capture_modes_parse: '[=]' should be ByValue");
+    expect(lambda1.lambda_captures.empty(),
+           "lambda_blanket_capture_modes_parse: '[=]' should have no explicit captures");
+
+    scpp::Program ref_program = scpp::parse(
+        "int apply(int x, int y) { return x; }\n"
+        "int main() {\n"
+        "    int x = 5;\n"
+        "    apply([&](int z) { return x + z; }, 3);\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn2 = nullptr;
+    for (const scpp::Function& fn : ref_program.functions) {
+        if (fn.name == "main") main_fn2 = &fn;
+    }
+    const scpp::Expr& lambda2 = *main_fn2->body->statements[1]->expr->args[0];
+    expect(lambda2.lambda_blanket_mode == scpp::LambdaCaptureMode::ByReference,
+           "lambda_blanket_capture_modes_parse: '[&]' should be ByReference");
+
+    // Mixed: `[&, x]` -- blanket by-reference, 'x' explicitly by-value.
+    scpp::Program mixed_program = scpp::parse(
+        "int apply(int x, int y) { return x; }\n"
+        "int main() {\n"
+        "    int x = 5;\n"
+        "    int y = 10;\n"
+        "    apply([&, x](int z) { return x + y + z; }, 3);\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn3 = nullptr;
+    for (const scpp::Function& fn : mixed_program.functions) {
+        if (fn.name == "main") main_fn3 = &fn;
+    }
+    const scpp::Expr& lambda3 = *main_fn3->body->statements[2]->expr->args[0];
+    expect(lambda3.lambda_blanket_mode == scpp::LambdaCaptureMode::ByReference,
+           "lambda_blanket_capture_modes_parse: '[&, x]' should be ByReference blanket");
+    expect(lambda3.lambda_captures.size() == 1 && lambda3.lambda_captures[0].name == "x" &&
+               !lambda3.lambda_captures[0].by_reference,
+           "lambda_blanket_capture_modes_parse: '[&, x]' should explicitly list 'x' by-value");
+}
+
+// ch05 §5.12: an init-capture (`[name = expr]`) records the init
+// expression -- how a move-only type crosses into a closure, e.g.
+// `[p = std::move(p)]`.
+void test_lambda_init_capture_parses() {
+    scpp::Program program = scpp::parse(
+        "int apply(int x, int y) { return x; }\n"
+        "int main() {\n"
+        "    std::unique_ptr<int> p = std::make_unique<int>(5);\n"
+        "    apply([q = std::move(p)](int z) { return z; }, 3);\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Expr& lambda = *main_fn->body->statements[1]->expr->args[0];
+    expect(lambda.lambda_captures.size() == 1, "lambda_init_capture_parses: expected 1 capture");
+    expect(lambda.lambda_captures[0].name == "q", "lambda_init_capture_parses: capture name should be 'q'");
+    expect(lambda.lambda_captures[0].init != nullptr, "lambda_init_capture_parses: expected a non-null init expr");
+    expect(lambda.lambda_captures[0].init->kind == scpp::ExprKind::Move,
+           "lambda_init_capture_parses: init expr should be a Move");
+}
+
+// ch05 §5.12: `[this]` captures a reference to the enclosing method's
+// own receiver; `[*this]` (capturing the object by value) is rejected
+// -- scpp classes have no copy constructor yet (ch04 §4.2).
+void test_lambda_this_capture_parses_and_star_this_is_rejected() {
+    scpp::Program program = scpp::parse(
+        "int apply(int x, int y) { return x; }\n"
+        "class Widget {\n"
+        "public:\n"
+        "    Widget() { return; }\n"
+        "    int use_lambda() {\n"
+        "        return apply([this](int z) { return z; }, 3);\n"
+        "    }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* method = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Widget_use_lambda") method = &fn;
+    }
+    expect(method != nullptr, "lambda_this_capture_parses_and_star_this_is_rejected: expected 'Widget_use_lambda'");
+    const scpp::Expr& lambda = *method->body->statements[0]->expr->args[0];
+    expect(lambda.lambda_captures.size() == 1 && lambda.lambda_captures[0].name == "this" &&
+               lambda.lambda_captures[0].by_reference,
+           "lambda_this_capture_parses_and_star_this_is_rejected: expected 1 capture '&this'");
+
+    bool threw = false;
+    try {
+        scpp::parse(
+            "int apply(int x, int y) { return x; }\n"
+            "class Widget {\n"
+            "public:\n"
+            "    Widget() { return; }\n"
+            "    int use_lambda() {\n"
+            "        return apply([*this](int z) { return z; }, 3);\n"
+            "    }\n"
+            "};\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "lambda_this_capture_parses_and_star_this_is_rejected: expected '[*this]' to be a ParseError");
+}
+
+// ch05 §5.12: a lambda's own parameter list does not support a
+// concept-constrained ("ConceptName auto") parameter in this version --
+// mirrors the same restriction on methods/constructors.
+void test_lambda_generic_parameter_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "template<typename T>\n"
+            "concept Shape = requires(const T& t) { t.area(); };\n"
+            "int apply(int x) { return x; }\n"
+            "int main() {\n"
+            "    apply([](Shape auto& s) { return 0; });\n"
+            "    return 0;\n"
+            "}\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "lambda_generic_parameter_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.12: `mutable` parses and sets lambda_is_mutable.
+void test_lambda_mutable_keyword_parses() {
+    scpp::Program program = scpp::parse(
+        "int apply(int x) { return x; }\n"
+        "int main() {\n"
+        "    int x = 5;\n"
+        "    apply([x](int z) mutable { return x + z; });\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Expr& lambda = *main_fn->body->statements[1]->expr->args[0];
+    expect(lambda.lambda_is_mutable, "lambda_mutable_keyword_parses: expected lambda_is_mutable true");
+}
+
 } // namespace
 
 int main() {
@@ -1150,6 +1709,28 @@ int main() {
     test_partition_import_merges_with_body();
     test_plain_partition_import_does_not_reexport();
     test_export_import_on_implementation_partition_is_rejected();
+    test_rvalue_reference_parameter_parses();
+    test_ordinary_reference_parameter_is_not_rvalue_ref();
+    test_const_rvalue_reference_is_rejected();
+    test_rvalue_reference_rejected_outside_parameter_position();
+    test_concept_compound_requirement_synthesizes_witness_class();
+    test_concept_simple_direct_invocation_requirement_synthesizes_call_method();
+    test_concept_requirement_on_wrong_receiver_is_rejected();
+    test_concept_convertible_to_constraint_is_rejected();
+    test_concept_requirement_unknown_argument_is_rejected();
+    test_export_concept_outside_module_is_rejected();
+    test_concept_inside_namespace_is_qualified();
+    test_generic_parameter_const_auto_ref_parses();
+    test_generic_parameter_auto_rvalue_ref_parses();
+    test_generic_parameter_mutable_auto_ref_parses();
+    test_generic_parameter_unknown_concept_is_rejected();
+    test_generic_parameter_on_method_is_rejected();
+    test_lambda_with_explicit_captures_parses();
+    test_lambda_blanket_capture_modes_parse();
+    test_lambda_init_capture_parses();
+    test_lambda_this_capture_parses_and_star_this_is_rejected();
+    test_lambda_generic_parameter_is_rejected();
+    test_lambda_mutable_keyword_parses();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

@@ -8,6 +8,7 @@ module;
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <llvm/IR/BasicBlock.h>
@@ -71,21 +72,52 @@ public:
         // the single-pass parser already guarantees one class only ever
         // references an *earlier* class by value.
         program_ = &program;
+        // ch05 §5.11: a concept's hidden witness class (ClassDef::
+        // is_concept_witness) is never a real, instantiable type -- it
+        // exists purely so a generic function's own body-check has
+        // something to resolve method calls against (see
+        // ClassDef::is_concept_witness's own comment); skipped from
+        // declare_class entirely. Its name is recorded here so the
+        // Function loops below can likewise skip its (also bodyless,
+        // never-compiled) methods, found via their own `this` parameter.
+        std::unordered_set<std::string> witness_class_names;
         for (const StructDef& def : program.structs) {
             declare_struct(def);
         }
         for (const ClassDef& def : program.classes) {
+            if (def.is_concept_witness) {
+                witness_class_names.insert(def.name);
+                continue;
+            }
             declare_class(def);
         }
         build_overload_names();
+        auto is_never_compiled = [&](const Function& fn) {
+            // A generic template is checked once, abstractly, by
+            // movecheck (ch05 §5.11) -- only its concrete monomorphized
+            // clones (ordinary Functions by the time codegen sees them,
+            // injected by movecheck's own monomorphize_generics) ever
+            // actually compile.
+            if (fn.is_generic_template) return true;
+            // A witness class's own method is bodyless and never
+            // called (every real call site resolves to a concrete
+            // type's own real method instead, see
+            // type_satisfies_concept/monomorphization) -- purely a
+            // signature for the generic template's own body-check to
+            // resolve against.
+            return !fn.params.empty() && fn.params[0].name == "this" &&
+                   fn.params[0].type.kind == TypeKind::Reference &&
+                   witness_class_names.contains(fn.params[0].type.pointee->name);
+        };
         for (const Function& fn : program.functions) {
+            if (is_never_compiled(fn)) continue;
             declare_function(fn);
         }
         for (const Function& fn : program.functions) {
             // A bodyless `extern "C"` declaration (ch02 §2.1) already got
             // its LLVM `declare` from declare_function above; there's no
             // body to lower.
-            if (fn.body != nullptr) define_function(fn);
+            if (fn.body != nullptr && !is_never_compiled(fn)) define_function(fn);
         }
         std::string error;
         llvm::raw_string_ostream error_stream(error);
@@ -252,6 +284,16 @@ private:
                 return result;
             }
 
+            case ExprKind::Lambda: {
+                // ch05 §5.12: once resolved (movecheck's closure-
+                // resolution pass), `expr.name` holds the synthesized
+                // closure class's own name -- its type is exactly that
+                // class, by value (matching MakeUnique's identical shape
+                // just above: a fresh, concretely-typed value).
+                if (expr.name.empty()) return std::nullopt;
+                return Type{.kind = TypeKind::Named, .name = expr.name};
+            }
+
             case ExprKind::Member: {
                 std::optional<Type> base = infer_type(*expr.lhs);
                 if (!base) return std::nullopt;
@@ -264,7 +306,13 @@ private:
                 const StructInfo& info = struct_it->second;
                 auto field_it = std::find(info.field_names.begin(), info.field_names.end(), expr.name);
                 if (field_it == info.field_names.end()) return std::nullopt;
-                return info.field_types[static_cast<size_t>(field_it - info.field_names.begin())];
+                const Type& field_type = info.field_types[static_cast<size_t>(field_it - info.field_names.begin())];
+                // ch05 §5.12: a Reference-typed field (e.g. a closure's
+                // own by-reference capture) auto-dereferences to its
+                // pointee too, exactly like codegen_lvalue's own
+                // (matching) Member-case fix -- `this.b`'s *type* is the
+                // referent's type, not "a reference to it".
+                return field_type.kind == TypeKind::Reference ? *field_type.pointee : field_type;
             }
 
             case ExprKind::Subscript: {
@@ -340,6 +388,36 @@ private:
         return std::nullopt;
     }
 
+    // Whether `arg` produces a genuine rvalue of exactly `expected_type`
+    // -- mirrors movecheck's own produces_rvalue_of_type (ch03/ch05
+    // §5.11), used only for the `T&&`/`Concept auto&&` branch of
+    // argument_matches_parameter just below (a monomorphized `Concept
+    // auto&&` call site is, by the time codegen sees it, an ordinary
+    // `T&&` parameter of a concrete type -- see the concept-
+    // monomorphization pass -- so this needs no concept-specific logic
+    // of its own).
+    bool produces_rvalue_of_type(const Expr& arg, const Type& expected_type) {
+        switch (arg.kind) {
+            case ExprKind::Move:
+            case ExprKind::MakeUnique:
+            case ExprKind::IntegerLiteral:
+            case ExprKind::BoolLiteral:
+            case ExprKind::CharLiteral:
+            case ExprKind::StringLiteral:
+            case ExprKind::Lambda:
+                break;
+            case ExprKind::Call: {
+                std::optional<Type> t = infer_type(arg);
+                if (!t.has_value() || t->kind == TypeKind::Reference) return false;
+                break;
+            }
+            default:
+                return false;
+        }
+        std::optional<Type> arg_type = infer_type(arg);
+        return arg_type.has_value() && types_equal(*arg_type, expected_type);
+    }
+
     // Whether `arg` is a legitimate argument for a candidate overload's
     // parameter declared as `param_type` -- mirrors movecheck's own
     // argument_matches_parameter (ch05 §5.10) exactly (same by-value/
@@ -352,6 +430,11 @@ private:
             std::optional<Type> arg_type = infer_type(arg);
             return arg_type.has_value() && arg_type->kind == TypeKind::UniquePtr &&
                    types_equal(*arg_type->pointee, *param_type.pointee);
+        }
+        if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
+            // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- mirror image of
+            // the ordinary-reference case just below.
+            return produces_rvalue_of_type(arg, *param_type.pointee);
         }
         if (param_type.kind == TypeKind::Reference) {
             if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique ||
@@ -687,7 +770,11 @@ private:
     void validate_reference_return_elision(const Function& fn) {
         const Param* found = nullptr;
         for (const Param& param : fn.params) {
-            if (param.type.kind != TypeKind::Reference) continue;
+            // ch03/ch05 §5.11: exclude a `T&&` parameter -- see
+            // movecheck's resolve_elided_param_index (this function's
+            // structural counterpart) for why it's never a sound elision
+            // source.
+            if (param.type.kind != TypeKind::Reference || param.type.is_rvalue_ref) continue;
             if (found != nullptr) {
                 throw CodegenError("function '" + fn.name +
                                     "' returns a reference but has more than one reference parameter; scpp "
@@ -763,6 +850,9 @@ private:
     // separate data model) for why a naive `=default` comparison of
     // Type's shared_ptr pointee/element wouldn't work. Used only for
     // function-overload resolution (ch05 §5.10)'s exact-type-match rule.
+    // Reference additionally requires is_rvalue_ref to match: `T&`/
+    // `const T&` and `T&&` (ch03) are distinct parameter types, never
+    // interchangeable -- meaningless for Span.
     [[nodiscard]] static bool types_equal(const Type& a, const Type& b) {
         if (a.kind != b.kind) return false;
         switch (a.kind) {
@@ -770,6 +860,8 @@ private:
             case TypeKind::Pointer: return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
             case TypeKind::UniquePtr: return types_equal(*a.pointee, *b.pointee);
             case TypeKind::Reference:
+                return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref &&
+                       types_equal(*a.pointee, *b.pointee);
             case TypeKind::Span:
                 return a.is_mutable_ref == b.is_mutable_ref && types_equal(*a.pointee, *b.pointee);
             case TypeKind::Array: return a.array_size == b.array_size && types_equal(*a.element, *b.element);
@@ -790,7 +882,9 @@ private:
             case TypeKind::Named: return type.name;
             case TypeKind::Pointer: return mangle_type(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
             case TypeKind::UniquePtr: return mangle_type(*type.pointee) + "_uptr";
-            case TypeKind::Reference: return mangle_type(*type.pointee) + (type.is_mutable_ref ? "_ref" : "_cref");
+            case TypeKind::Reference:
+                return mangle_type(*type.pointee) +
+                       (type.is_rvalue_ref ? "_rref" : (type.is_mutable_ref ? "_ref" : "_cref"));
             case TypeKind::Span: return mangle_type(*type.pointee) + (type.is_mutable_ref ? "_span" : "_cspan");
             case TypeKind::Array: return mangle_type(*type.element) + "_arr" + std::to_string(type.array_size);
         }
@@ -810,6 +904,7 @@ private:
                        verbatim_type_spelling(*type.pointee) + "*";
             case TypeKind::UniquePtr: return "std::unique_ptr<" + verbatim_type_spelling(*type.pointee) + ">";
             case TypeKind::Reference:
+                if (type.is_rvalue_ref) return verbatim_type_spelling(*type.pointee) + "&&";
                 return (type.is_mutable_ref ? std::string() : std::string("const ")) +
                        verbatim_type_spelling(*type.pointee) + "&";
             case TypeKind::Span:
@@ -1130,6 +1225,32 @@ private:
                                         "pointee -- 'void*' -- may be 'void')",
                         current_loc_);
                 }
+
+                // ch05 §5.12: `auto f = [...];` -- the only spelling
+                // that gives a class-typed VarDecl a plain `= expr`
+                // initializer rather than `ClassName name(args);`'s own
+                // constructor-call syntax (movecheck's closure-
+                // resolution pass gives a synthesized closure class no
+                // constructor at all). A Lambda literal's own codegen
+                // (codegen_construct_lambda) already allocates and fully
+                // populates its own fresh instance -- exactly the
+                // storage `f` itself should use -- so `f` is aliased
+                // directly to that address rather than allocating a
+                // *second*, separate slot and trying to copy into it
+                // (which would be wrong regardless: a class-typed
+                // value's own codegen representation is always its
+                // address, never a loadable/storable flat value, unlike
+                // every scalar/struct/array/pointer type the general
+                // path below handles).
+                if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
+                    llvm::AllocaInst* closure_ptr = codegen_construct_lambda(*stmt.init);
+                    locals_[stmt.var_name] = LocalSlot{closure_ptr, stmt.type};
+                    if (!scope_stack_.empty()) {
+                        scope_stack_.back().push_back(stmt.var_name);
+                    }
+                    return;
+                }
+
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
                 llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
                 if (stmt.has_ctor_args) {
@@ -1392,7 +1513,41 @@ private:
         for (size_t i = 0; i < args.size(); i++) {
             bool param_is_reference = callee_def != nullptr && i + param_offset < callee_def->params.size() &&
                                        callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
-            if (param_is_reference) {
+            bool param_is_rvalue_reference =
+                param_is_reference && callee_def->params[i + param_offset].type.is_rvalue_ref;
+            if (param_is_rvalue_reference) {
+                // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the move
+                // checker has already verified this argument produces a
+                // genuine rvalue (produces_rvalue_of_type), which may not
+                // itself be an addressable place (a literal, a fresh
+                // std::make_unique<T>(...)/call result, ...).
+                if (args[i]->kind == ExprKind::Lambda) {
+                    // ch05 §5.12: a lambda literal's own codegen (see
+                    // codegen_expr's Lambda case) already allocates a
+                    // fresh temporary and returns *its* address directly
+                    // (a class value is always represented/passed by
+                    // address in this codebase, never as a bare
+                    // aggregate SSA value) -- using that address
+                    // directly as the argument avoids double-wrapping it
+                    // in yet another temporary, which would pass "a
+                    // pointer to a pointer to the closure" instead of "a
+                    // pointer to the closure".
+                    result.push_back(codegen_expr(*args[i]));
+                    continue;
+                }
+                // Otherwise: evaluate it as an ordinary *value*
+                // (codegen_expr, not codegen_lvalue -- this also reuses
+                // std::move's own codegen unchanged, including its
+                // "null out the source slot" side effect when the moved
+                // value is itself a std::unique_ptr), then materialize a
+                // fresh stack temporary to hold it and pass that
+                // temporary's address -- exactly what real C++ does when
+                // binding a reference to a prvalue.
+                llvm::Value* value = codegen_expr(*args[i]);
+                llvm::AllocaInst* temp = builder_->CreateAlloca(value->getType(), nullptr, "rvaluetmp");
+                builder_->CreateStore(value, temp);
+                result.push_back(temp);
+            } else if (param_is_reference) {
                 // Bind the reference parameter to the argument's address
                 // rather than passing its value, exactly like a local
                 // reference's own VarDecl.
@@ -1629,9 +1784,64 @@ private:
 
             case ExprKind::MakeUnique:
                 return codegen_make_unique(expr);
+
+            case ExprKind::Lambda:
+                return codegen_construct_lambda(expr);
         }
         throw CodegenError("unhandled expression kind",
             current_loc_);
+    }
+
+    // ch05 §5.12: constructs a resolved Lambda literal's own closure
+    // value -- allocates a fresh temporary, then directly stores each
+    // capture into its own field slot, bypassing the ordinary "call a
+    // synthesized constructor" convention entirely (movecheck's
+    // closure-resolution pass gives this class no constructor at all).
+    // A by-value capture stores the captured value; a by-reference
+    // capture stores the captured variable's own ADDRESS (via
+    // codegen_lvalue, exactly like a local `T& r = expr;` reference
+    // declaration's own binding -- correctly handling both an ordinary
+    // local, whose own alloca is the address, and an already-reference-
+    // typed local like `this`, whose own current pointer *value* is the
+    // address, since codegen_lvalue's Identifier case already
+    // distinguishes the two). This sidesteps a real, separate pre-
+    // existing gap where plain Member-access assignment on a
+    // Reference-typed field does not auto-dereference the way
+    // Identifier access already does -- storing the address directly
+    // here avoids ever going through that path. Returns the closure's
+    // own address (an `llvm::AllocaInst*`, like any other class-typed
+    // value in this codebase -- see codegen_expr's Lambda case, and
+    // codegen_lvalue's own Lambda case for an IIFE's receiver, ch05
+    // §5.12's `[](...){...}()`).
+    llvm::AllocaInst* codegen_construct_lambda(const Expr& expr) {
+        const StructInfo& info = structs_.at(expr.name);
+        llvm::AllocaInst* closure = builder_->CreateAlloca(info.llvm_type, nullptr, "lambdatmp");
+        for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
+            const LambdaCapture& capture = expr.lambda_captures[i];
+            llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, closure, i, capture.name);
+            if (capture.by_reference) {
+                Expr ident;
+                ident.kind = ExprKind::Identifier;
+                ident.loc = expr.loc;
+                ident.name = capture.name;
+                llvm::Value* address = codegen_lvalue(ident).ptr;
+                builder_->CreateStore(address, field_ptr);
+                continue;
+            }
+            llvm::Value* value;
+            if (capture.init) {
+                value = codegen_expr(*capture.init);
+            } else {
+                Expr ident;
+                ident.kind = ExprKind::Identifier;
+                ident.loc = expr.loc;
+                ident.name = capture.name;
+                value = codegen_expr(ident);
+            }
+            check_store_type(value, to_llvm_type(info.field_types[i]), "capture '" + capture.name + "'");
+            builder_->CreateStore(value, field_ptr);
+        }
+        return closure;
     }
 
     // `std::make_unique<T>(...)` is a compiler builtin (like std::move),
@@ -1956,7 +2166,22 @@ private:
                 size_t field_index = static_cast<size_t>(field_it - info.field_names.begin());
                 llvm::Value* field_ptr =
                     builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
-                return LValue{field_ptr, info.field_types[field_index]};
+                const Type& field_type = info.field_types[field_index];
+                if (field_type.kind == TypeKind::Reference) {
+                    // ch05 §5.12: a Reference-typed field (e.g. a
+                    // closure's own by-reference capture) stores just
+                    // the address it's bound to, exactly like a
+                    // Reference-typed local's own alloca (see the
+                    // Identifier case above) -- auto-dereference once so
+                    // every caller (reads, writes-through, and further
+                    // Member/Subscript base resolution) transparently
+                    // operates on the referent, not the field's own
+                    // storage slot.
+                    llvm::Value* referent_ptr =
+                        builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), field_ptr, "fieldderef");
+                    return LValue{referent_ptr, *field_type.pointee};
+                }
+                return LValue{field_ptr, field_type};
             }
 
             case ExprKind::Subscript: {
@@ -2012,6 +2237,18 @@ private:
                         current_loc_);
                 }
                 return LValue{result.value, *result.callee_def->return_type.pointee};
+            }
+
+            case ExprKind::Lambda: {
+                // ch05 §5.12: an IIFE's receiver (`[](...){...}(args)`,
+                // parser.cppm's own Lambda-followed-by-`(` case) needs
+                // the constructed closure's *address* to invoke its
+                // "call" method on -- exactly like an ordinary method
+                // call's receiver (codegen_call's own `expr.lhs != nullptr`
+                // branch calls codegen_lvalue on it uniformly, regardless
+                // of receiver shape).
+                llvm::Value* ptr = codegen_construct_lambda(expr);
+                return LValue{ptr, Type{.kind = TypeKind::Named, .name = expr.name}};
             }
 
             case ExprKind::Unary: {

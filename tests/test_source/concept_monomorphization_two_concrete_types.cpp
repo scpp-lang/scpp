@@ -1,0 +1,33 @@
+// ch05 §5.11: a generic (concept-constrained) function is monomorphized
+// separately per distinct concrete argument type -- zero-cost, no
+// vtable, no runtime dispatch. Two different concrete types (Circle,
+// Square) both satisfying the same concept correctly dispatch to their
+// own type's own method.
+class Circle {
+public:
+    Circle() { return; }
+    int area() const { return 314; }
+};
+
+class Square {
+public:
+    Square() { return; }
+    int area() const { return 100; }
+};
+
+template<typename T>
+concept Shape = requires(const T& t) {
+    { t.area() } -> std::same_as<int>;
+};
+
+int print_area(const Shape auto& s) {
+    return s.area();
+}
+
+int main() {
+    Circle c;
+    Square sq;
+    print_int(print_area(c));
+    print_int(print_area(sq));
+    return 0;
+}
