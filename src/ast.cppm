@@ -90,6 +90,24 @@ struct Type {
     // pointee == false) is rejected unconditionally, even inside
     // `unsafe { }` -- see movecheck's assignment_target_is_read_only.
     bool is_mutable_pointee = true;
+
+    // ch05 §5.14: non-empty only for a *not-yet-resolved* generic-type
+    // instantiation, e.g. `Vec<int>` parsed as `Type{Named, "Vec"}` with
+    // `template_args == [Type{Named,"int"}]` -- `name` still names the
+    // *template*, not a real, concrete type. Resolved in place by
+    // movecheck's Monomorphizer pass (the same pre-check_moves phase that
+    // resolves a Lambda literal's own synthesized class and a generic
+    // function's call-site clone): looks up the original template
+    // ClassDef/StructDef, synthesizes a concrete instantiation, and
+    // rewrites `name` to the mangled concrete name while clearing this
+    // back to empty -- mirroring the "auto" VarDecl-type sentinel and a
+    // Lambda's own `name`-starts-empty-until-resolved pattern. Never
+    // reaches check_moves/codegen non-empty. v0.1 only ever populates
+    // this with a single argument (one type parameter per generic type,
+    // see ClassDef/StructDef::template_params) -- kept as a vector for
+    // forward compatibility, not because multiple arguments are
+    // supported yet.
+    std::vector<Type> template_args;
 };
 
 struct Param {
@@ -380,6 +398,20 @@ struct Function {
     // implemented in this first slice, per the spec's own scoping.
     bool has_varargs = false;
 
+    // ch05 §5.14: non-empty only for a method (including a constructor)
+    // of a generic `class`/`struct` that carries its own `requires
+    // Concept<T>` clause (e.g. `bool less_than(const T& o) const requires
+    // std::totally_ordered<T> { ... }`) -- names the concept constraining
+    // the *enclosing generic type's own* type parameter, for *this one
+    // method's own body-check only* (ch05 §5.11's "concept is optional,
+    // decomposed per member" principle, applied to a class instead of a
+    // whole function). Empty for a method with no such clause (the
+    // parameter stays fully opaque within that method's own body: move/
+    // store/pass-through/return only, exactly like a bare generic-
+    // function parameter). Meaningless outside a generic type's own
+    // template definition (see ClassDef/StructDef::template_params).
+    std::string method_requires_concept;
+
     // ch05 §5.11: true when at least one parameter has a non-empty
     // Param::generic_concept -- this is the generic function's own
     // *template* definition, checked once abstractly against each
@@ -426,6 +458,22 @@ struct StructField {
     std::string name;
 };
 
+// ch05 §5.14: a generic type's (class or struct) own template type
+// parameter, e.g. `typename T` (bare -- `concept_name` empty) or
+// `ConceptName T` (constrained). A `struct`'s own parameter can never be
+// bare (triviality, ch04 §4.1, is a whole-type property no per-member
+// clause could decompose the way a class's methods can -- see
+// Function::method_requires_concept) -- enforced by the parser, not
+// represented as a separate flag here. v0.1 only ever has exactly one of
+// these per generic type (single type parameter; parameter packs and
+// multiple type parameters are out of scope for this round) -- kept as
+// a vector on ClassDef/StructDef for forward compatibility, not because
+// more than one is accepted yet.
+struct GenericTypeParam {
+    std::string name;
+    std::string concept_name; // empty = bare
+};
+
 struct StructDef {
     std::string name;
     std::vector<StructField> fields;
@@ -435,6 +483,16 @@ struct StructDef {
     std::vector<std::string> namespace_path;
     bool is_exported = false;
     std::string owning_module;
+    // ch05 §5.14: non-empty for a generic struct's own *template*
+    // definition (`template<Concept T> struct Name { ... };`) -- its
+    // single GenericTypeParam is always concept-constrained (never
+    // bare, see GenericTypeParam's own comment). Never emitted to
+    // codegen directly (see Codegen::generate, mirroring
+    // Function::is_generic_template's identical exclusion) -- each
+    // concrete instantiation (`Name<SomeType>`) instead gets a separate
+    // monomorphized struct injected into Program::structs by the
+    // Monomorphizer, with its own distinct mangled name.
+    std::vector<GenericTypeParam> template_params;
 };
 
 enum class AccessSpecifier {
@@ -494,6 +552,29 @@ struct ClassDef {
     // every call site is monomorphized against a real concrete type
     // instead (see Function::is_generic_template).
     bool is_concept_witness = false;
+    // ch05 §5.14: non-empty for a generic class's own *template*
+    // definition (`template<typename T> class Name { ... };`, or
+    // `template<Concept T> class Name { ... };`) -- its single
+    // GenericTypeParam may be bare (concept_name empty) or constrained;
+    // see GenericTypeParam's own comment. Every method may additionally
+    // layer its own `requires Concept<T>` clause (Function::
+    // method_requires_concept), decomposing the "what does T support"
+    // question per member rather than needing one shared, class-wide
+    // constraint. Never emitted to codegen directly (mirrors
+    // is_concept_witness/Function::is_generic_template's identical
+    // exclusion) -- each concrete instantiation (`Name<SomeType>`)
+    // instead gets a separate monomorphized class injected into
+    // Program::classes by the Monomorphizer.
+    std::vector<GenericTypeParam> template_params;
+    // ch05 §5.14: true only for a *temporary, internal* witness-
+    // substituted class synthesized purely to check one generic method's
+    // body once, abstractly, at its own definition (mirrors a concept's
+    // own witness class, is_concept_witness, but distinct from it: this
+    // exists per generic-*type*-method-check, never user-facing, and
+    // deliberately not reused/cached across methods -- see the
+    // Monomorphizer's own comment). Excluded from codegen exactly like
+    // is_concept_witness.
+    bool is_synthetic_check_only = false;
 };
 
 // ch05 §5.11: one requirement inside a `concept Name = requires(...) {

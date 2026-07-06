@@ -116,6 +116,13 @@ private:
     // already-declared concept (concepts, like every other declaration
     // this parser handles, must be declared before use).
     std::unordered_set<std::string> concept_names_;
+    // ch05 §5.14: names of every generic `class`/`struct` *template*
+    // declaration seen so far (a subset of struct_names_/class_names_,
+    // which already register a generic type's own name unconditionally
+    // like any other struct/class) -- consulted by parse_unqualified_type
+    // to recognize `Name<Arg>` (a generic-type instantiation) instead of
+    // a plain `Name` type reference.
+    std::unordered_set<std::string> generic_type_names_;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -362,6 +369,20 @@ private:
             // fine and needs no rejection anywhere.
             type.name = "void";
             advance();
+        } else if (tok.kind == TokenKind::Identifier && generic_type_names_.contains(peek_qualified_name())) {
+            // ch05 §5.14: `Name<Arg>` -- a generic class/struct
+            // instantiation. `name` still names the *template* here,
+            // not a real, concrete type -- left for the Monomorphizer to
+            // resolve (synthesizing the concrete instantiation and
+            // rewriting `name` to its own mangled name) exactly like a
+            // Lambda literal's own synthesized class or an `auto`
+            // VarDecl's inferred type. v0.1 supports exactly one type
+            // argument (matching GenericTypeParam's own single-parameter
+            // scope).
+            type.name = parse_qualified_name();
+            expect(TokenKind::Less, "'<'");
+            type.template_args.push_back(parse_type());
+            expect(TokenKind::Greater, "'>'");
         } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(peek_qualified_name())) {
             type.name = parse_qualified_name();
         } else {
@@ -833,11 +854,27 @@ private:
         } else if (check(TokenKind::KwClass)) {
             parse_class_def(program, is_exported);
         } else if (check(TokenKind::KwTemplate)) {
-            // ch05 §5.11: only a `concept` declaration ever starts with
-            // `template<...>` in v0.1 (a generic *function* stays
-            // abbreviated-form-only) -- so seeing this keyword at all is
-            // enough to dispatch here unambiguously.
-            parse_concept_def(program, is_exported);
+            // ch05 §5.11/§5.14: `template<...>` introduces either a
+            // `concept` declaration or a generic `class`/`struct` type --
+            // both share the identical fixed 5-token header shape this
+            // version supports (`template < [typename|ConceptName] Name
+            // >`, exactly one type parameter), so a constant-offset
+            // lookahead past it is enough to tell which of the three
+            // keywords follows next, without consuming anything yet.
+            TokenKind after_header = peek_at(5).kind;
+            if (after_header == TokenKind::KwClass) {
+                std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+                parse_class_def(program, is_exported, std::move(template_params));
+            } else if (after_header == TokenKind::KwStruct) {
+                SourceLocation loc = current_loc();
+                std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+                StructDef def = parse_struct_def(std::move(template_params));
+                def.is_exported = is_exported;
+                check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
+                program.structs.push_back(std::move(def));
+            } else {
+                parse_concept_def(program, is_exported);
+            }
         } else {
             parse_top_level_function_or_extern_group(program, is_exported);
         }
@@ -1030,7 +1067,19 @@ private:
                               "sequences (\\n \\t \\r \\\\ \\' \\\" \\0)");
     }
 
-    StructDef parse_struct_def() {
+    // ch05 §5.14: `template_params`, non-empty exactly when the caller
+    // (parse_top_level_item) already consumed a `template<...>` header
+    // in front of `struct`, must always be concept-constrained (never
+    // bare) -- unlike `class`, a struct's fields must *all* be trivial
+    // (ch04 §4.1), and triviality is a whole-type layout/ABI property no
+    // per-member clause could decompose (a struct has no methods to
+    // decompose it across in the first place, unlike Function::
+    // method_requires_concept). Otherwise behaves exactly like
+    // parse_class_def's own generic handling: registers the type
+    // parameter's own bare name as a temporary type name for the
+    // duration of this one struct's body, removed again immediately
+    // afterward.
+    StructDef parse_struct_def(std::vector<GenericTypeParam> template_params = {}) {
         expect(TokenKind::KwStruct, "'struct'");
         StructDef def;
         std::string bare_name = std::string(expect(TokenKind::Identifier, "struct name").text);
@@ -1040,6 +1089,23 @@ private:
         // a field can refer to the enclosing struct via a pointer (e.g.
         // `Node* next;`).
         struct_names_.insert(def.name);
+        bool is_generic = !template_params.empty();
+        if (is_generic) {
+            if (template_params[0].concept_name.empty()) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "a generic struct's own type parameter '" + template_params[0].name +
+                                      "' cannot be bare -- struct field triviality (ch04 §4.1) is a "
+                                      "whole-type property, so it must be constrained by a concept at the "
+                                      "struct itself (ch05 §5.14): write 'template<Concept " +
+                                      template_params[0].name + "> struct " + bare_name +
+                                      "' instead, or use 'class' if per-method constraints are enough");
+            }
+            generic_type_names_.insert(def.name);
+            struct_names_.insert(template_params[0].name);
+            class_names_.insert(template_params[0].name);
+        }
+        def.template_params = template_params;
 
         expect(TokenKind::LBrace, "'{'");
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
@@ -1052,6 +1118,11 @@ private:
         }
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
+
+        if (is_generic) {
+            struct_names_.erase(template_params[0].name);
+            class_names_.erase(template_params[0].name);
+        }
         return def;
     }
 
@@ -1239,6 +1310,71 @@ private:
     // Function::is_generic_template's own comments for why this lets a
     // constrained generic function's body-check reuse 100% of the
     // existing class/method-call machinery with zero new logic.
+    //
+    // ch05 §5.14: parses a generic `class`/`struct` type's own
+    // `template<...>` header -- exactly one type parameter for this
+    // version (multiple type parameters and parameter packs are out of
+    // scope, see ch05 §5.14's own "explicitly out of scope" list):
+    // either `typename Name` (bare) or `ConceptName Name` (constrained,
+    // real C++20 syntax -- a concept may appear directly in a template
+    // parameter list as shorthand for `typename Name` plus a matching
+    // `requires` clause). The caller (parse_top_level_item) has already
+    // confirmed, via a fixed-offset lookahead, that this is a `class`/
+    // `struct` header rather than a `concept` one, but hasn't consumed
+    // anything yet.
+    std::vector<GenericTypeParam> parse_generic_type_header() {
+        expect(TokenKind::KwTemplate, "'template'");
+        expect(TokenKind::Less, "'<'");
+        GenericTypeParam param;
+        if (!match(TokenKind::KwTypename)) {
+            const Token& concept_tok = peek();
+            std::string concept_name(expect(TokenKind::Identifier, "'typename' or a concept name").text);
+            if (!concept_names_.contains(concept_name)) {
+                throw ParseError(concept_tok.line, concept_tok.column,
+                                  "'" + concept_name +
+                                      "' is not a declared concept -- a generic type's template parameter "
+                                      "must be introduced by 'typename' or an already-declared concept name "
+                                      "(ch05 §5.14)");
+            }
+            param.concept_name = concept_name;
+        }
+        param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+        expect(TokenKind::Greater, "'>'");
+        return {std::move(param)};
+    }
+
+    // ch05 §5.14: parses a generic method (or constructor)'s own,
+    // optional `requires ConceptName<T>` clause -- real C++20 syntax
+    // verbatim, appearing after the parameter list (and, for a method,
+    // its trailing `const`) and before the body. `T` must name the
+    // enclosing generic type's own single template parameter exactly
+    // (this version has only one to match). Returns the concept's own
+    // name (Function::method_requires_concept), or empty if no such
+    // clause is present -- always empty when `template_params` itself
+    // is empty (an ordinary, non-generic class/struct's member can never
+    // have one, since there's no type parameter left to constrain).
+    std::string parse_optional_method_requires_clause(const std::vector<GenericTypeParam>& template_params) {
+        if (template_params.empty() || !check(TokenKind::KwRequires)) return "";
+        advance(); // 'requires'
+        std::string concept_name(expect(TokenKind::Identifier, "concept name").text);
+        if (!concept_names_.contains(concept_name)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "'" + concept_name + "' is not a declared concept (ch05 §5.14)");
+        }
+        expect(TokenKind::Less, "'<'");
+        const Token& param_tok = peek();
+        std::string arg_name(expect(TokenKind::Identifier, "the generic type's own template parameter name").text);
+        if (arg_name != template_params[0].name) {
+            throw ParseError(param_tok.line, param_tok.column,
+                              "'requires " + concept_name + "<" + arg_name +
+                                  ">' does not name this generic type's own template parameter '" +
+                                  template_params[0].name + "' (ch05 §5.14)");
+        }
+        expect(TokenKind::Greater, "'>'");
+        return concept_name;
+    }
+
     void parse_concept_def(Program& program, bool is_exported) {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwTemplate, "'template'");
@@ -1373,7 +1509,24 @@ private:
     // the `ClassName_memberName` naming scheme used. `is_exported` (ch11
     // §11.3) marks the whole class -- and every method synthesized from
     // it -- exported as one unit, not per-member.
-    void parse_class_def(Program& program, bool is_exported) {
+    //
+    // `template_params` (ch05 §5.14), non-empty exactly when the caller
+    // (parse_top_level_item) already consumed a `template<...>` header
+    // in front of `class`, additionally: registers the type parameter's
+    // own bare name as a temporary type name (both struct_names_ and
+    // class_names_, mirroring exactly how a concept's own witness class
+    // is registered -- "T" plays the identical role here, a placeholder
+    // standing in for "whatever satisfies this generic type's own
+    // constraint") for the duration of this one class's body -- removed
+    // again immediately afterward, since it's meaningful only within
+    // this one declaration; parses each method/constructor's own
+    // optional `requires ConceptName<T>` clause; and records
+    // `def.template_params`/marks the synthesized ClassDef as a
+    // template. The template's own methods are never themselves
+    // monomorphized/checked here -- see the Monomorphizer's generic-type
+    // handling (movecheck.cppm) for both the once-at-definition abstract
+    // check and each concrete instantiation's own clone.
+    void parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {}) {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
         // The bare, unqualified name as written -- used for the
@@ -1394,11 +1547,18 @@ private:
         // registration order as parse_struct_def.
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
+        bool is_generic = !template_params.empty();
+        if (is_generic) {
+            generic_type_names_.insert(qualified_class_name);
+            struct_names_.insert(template_params[0].name);
+            class_names_.insert(template_params[0].name);
+        }
 
         ClassDef def;
         def.name = qualified_class_name;
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
+        def.template_params = template_params;
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
         // Every method/constructor/destructor synthesized below shares
@@ -1471,6 +1631,7 @@ private:
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a constructor");
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
+                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_block();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
@@ -1496,6 +1657,7 @@ private:
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_" + member_name;
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_block();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
@@ -1519,6 +1681,14 @@ private:
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
         program.classes.push_back(std::move(def));
+
+        if (is_generic) {
+            // Un-register the temporary type-parameter name -- scoped
+            // only to this one class's own declaration (see this
+            // function's own comment).
+            struct_names_.erase(template_params[0].name);
+            class_names_.erase(template_params[0].name);
+        }
     }
 
     // Parses one function declaration or definition's `<return-type>

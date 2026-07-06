@@ -1,0 +1,33 @@
+// ch05 §5.14: a generic class method may layer its own `requires
+// Concept<T>` clause -- checked, and rejected with a precise
+// diagnostic, at the call site (not deferred instantiation gibberish):
+// calling it is legal exactly when the concrete type argument
+// structurally satisfies that concept.
+template<typename T>
+concept Describable = requires(const T& t) {
+    { t.magnitude() } -> std::same_as<int>;
+};
+
+class Circle {
+public:
+    Circle(int r) { this.radius = r; return; }
+    int magnitude() const { return this.radius; }
+private:
+    int radius;
+};
+
+template<typename T>
+class Vec {
+    T item;
+public:
+    Vec(const T& x) { this.item = x; return; }
+    int describe() const requires Describable<T> {
+        return this.item.magnitude();
+    }
+};
+
+int main() {
+    Circle c(3);
+    Vec<Circle> vc(c);
+    return vc.describe();
+}

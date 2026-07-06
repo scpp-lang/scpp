@@ -80,8 +80,25 @@ public:
         // declare_class entirely. Its name is recorded here so the
         // Function loops below can likewise skip its (also bodyless,
         // never-compiled) methods, found via their own `this` parameter.
+        //
+        // ch05 §5.14: a generic class/struct *template* (ClassDef/
+        // StructDef::template_params non-empty) is likewise never real
+        // -- its own fields/methods still literally reference "T", never
+        // a concrete type -- movecheck's Monomorphizer synthesizes a
+        // separate, fully concrete class/struct (and, for a class, one
+        // concrete method clone) per real instantiation instead (see
+        // resolve_generic_types); and a "checking class" (ClassDef::
+        // is_synthetic_check_only) is a purely internal, witness-
+        // substituted artifact synthesized only so movecheck can check
+        // one generic method's body once, abstractly, never meant to be
+        // emitted either (see check_generic_type_methods_once).
         std::unordered_set<std::string> witness_class_names;
+        std::unordered_set<std::string> generic_type_template_names;
         for (const StructDef& def : program.structs) {
+            if (!def.template_params.empty()) {
+                generic_type_template_names.insert(def.name);
+                continue;
+            }
             declare_struct(def);
         }
         for (const ClassDef& def : program.classes) {
@@ -89,6 +106,11 @@ public:
                 witness_class_names.insert(def.name);
                 continue;
             }
+            if (!def.template_params.empty()) {
+                generic_type_template_names.insert(def.name);
+                continue;
+            }
+            if (def.is_synthetic_check_only) continue;
             declare_class(def);
         }
         build_overload_names();
@@ -105,9 +127,22 @@ public:
             // type_satisfies_concept/monomorphization) -- purely a
             // signature for the generic template's own body-check to
             // resolve against.
-            return !fn.params.empty() && fn.params[0].name == "this" &&
-                   fn.params[0].type.kind == TypeKind::Reference &&
-                   witness_class_names.contains(fn.params[0].type.pointee->name);
+            if (!fn.params.empty() && fn.params[0].name == "this" &&
+                fn.params[0].type.kind == TypeKind::Reference &&
+                witness_class_names.contains(fn.params[0].type.pointee->name)) {
+                return true;
+            }
+            // ch05 §5.14: a generic class template's own, not-yet-
+            // resolved method (its `this` parameter names the template
+            // directly, e.g. "Vec", never a concrete instantiation like
+            // "Vec_int") -- "T" is never a real type anywhere in the
+            // program for these; only check_generic_type_methods_once's
+            // own witness-substituted clones (is_generic_template,
+            // already excluded above) and resolve_generic_types' own
+            // concrete-instantiation clones (ordinary functions by now)
+            // are ever compiled.
+            return !fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
+                   generic_type_template_names.contains(fn.params[0].type.pointee->name);
         };
         for (const Function& fn : program.functions) {
             if (is_never_compiled(fn)) continue;

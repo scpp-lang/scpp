@@ -1,0 +1,39 @@
+// ch05 §5.14: generic types end-to-end -- a bare type parameter (Vec's
+// own `push`/`get`, usable for any T) and a per-method `requires
+// Concept<T>` clause (`describe`, only usable when T satisfies
+// Describable) both monomorphized correctly for two different concrete
+// instantiations (Vec<int> and Vec<Circle>) in the same program.
+template<typename T>
+concept Describable = requires(const T& t) {
+    { t.magnitude() } -> std::same_as<int>;
+};
+
+class Circle {
+public:
+    Circle(int r) { this.radius = r; return; }
+    int magnitude() const { return this.radius; }
+private:
+    int radius;
+};
+
+template<typename T>
+class Vec {
+    T item;
+public:
+    Vec(const T& x) { this.item = x; return; }
+    const T& get() const { return this.item; }
+    int describe() const requires Describable<T> {
+        return this.item.magnitude();
+    }
+};
+
+int main() {
+    int n = 5;
+    Vec<int> v(n);
+    print_int(v.get());
+
+    Circle c(9);
+    Vec<Circle> vc(c);
+    print_int(vc.describe());
+    return 0;
+}

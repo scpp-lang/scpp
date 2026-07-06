@@ -1626,6 +1626,136 @@ void test_lambda_mutable_keyword_parses() {
     expect(lambda.lambda_is_mutable, "lambda_mutable_keyword_parses: expected lambda_is_mutable true");
 }
 
+// ch05 §5.14: `template<typename T> class Name { ... };` -- a bare
+// (unconstrained) type parameter, legal for a class (never a struct,
+// see the next test). Registers ClassDef::template_params and marks it
+// a template; the type parameter's own bare name ("T") is only a
+// temporary type name scoped to this one declaration's own body, so a
+// field/param typed "T" parses as an ordinary Named type.
+void test_generic_class_bare_type_param_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Vec {\n"
+        "    T item;\n"
+        "public:\n"
+        "    void push(T x) { this.item = x; return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* vec = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Vec") vec = &c;
+    }
+    expect(vec != nullptr, "generic_class_bare_type_param_parses: expected a ClassDef named 'Vec'");
+    expect(vec->template_params.size() == 1,
+           "generic_class_bare_type_param_parses: expected exactly 1 template param");
+    expect(vec->template_params[0].name == "T", "generic_class_bare_type_param_parses: param name should be 'T'");
+    expect(vec->template_params[0].concept_name.empty(),
+           "generic_class_bare_type_param_parses: bare param's concept_name should be empty");
+    expect(vec->fields.size() == 1 && vec->fields[0].type.kind == scpp::TypeKind::Named &&
+               vec->fields[0].type.name == "T",
+           "generic_class_bare_type_param_parses: field 'item' should be Named('T')");
+}
+
+// ch05 §5.14: a method may layer its own `requires Concept<T>` clause,
+// recorded on Function::method_requires_concept -- independent of
+// whether the class's own type parameter is itself bare or constrained.
+void test_generic_class_method_requires_clause_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "concept Describable = requires(const T& t) {\n"
+        "    { t.magnitude() } -> std::same_as<int>;\n"
+        "};\n"
+        "template<typename T>\n"
+        "class Vec {\n"
+        "    T item;\n"
+        "public:\n"
+        "    void push(T x) { this.item = x; return; }\n"
+        "    int describe() const requires Describable<T> { return 0; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* push_fn = nullptr;
+    const scpp::Function* describe_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Vec_push") push_fn = &fn;
+        if (fn.name == "Vec_describe") describe_fn = &fn;
+    }
+    expect(push_fn != nullptr, "generic_class_method_requires_clause_parses: expected 'Vec_push'");
+    expect(push_fn->method_requires_concept.empty(),
+           "generic_class_method_requires_clause_parses: 'push' should have no requires clause");
+    expect(describe_fn != nullptr, "generic_class_method_requires_clause_parses: expected 'Vec_describe'");
+    expect(describe_fn->method_requires_concept == "Describable",
+           "generic_class_method_requires_clause_parses: 'describe' should require 'Describable'");
+}
+
+// ch05 §5.14: a generic struct's own type parameter must be concept-
+// constrained (`template<Concept T> struct Name { ... };`) -- a bare
+// one is a parse error, since struct field triviality (ch04 §4.1) is a
+// whole-type property no per-member clause could decompose the way a
+// class's own methods can.
+void test_generic_struct_concept_constrained_type_param_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "concept Describable = requires(const T& t) {\n"
+        "    { t.magnitude() } -> std::same_as<int>;\n"
+        "};\n"
+        "template<Describable T>\n"
+        "struct Wrapper {\n"
+        "    T item;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::StructDef* wrapper = nullptr;
+    for (const scpp::StructDef& s : program.structs) {
+        if (s.name == "Wrapper") wrapper = &s;
+    }
+    expect(wrapper != nullptr, "generic_struct_concept_constrained_type_param_parses: expected a StructDef named 'Wrapper'");
+    expect(wrapper->template_params.size() == 1,
+           "generic_struct_concept_constrained_type_param_parses: expected exactly 1 template param");
+    expect(wrapper->template_params[0].concept_name == "Describable",
+           "generic_struct_concept_constrained_type_param_parses: concept_name should be 'Describable'");
+}
+
+void test_generic_struct_bare_type_param_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "template<typename T>\n"
+            "struct Pair {\n"
+            "    T x;\n"
+            "};\n"
+            "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "generic_struct_bare_type_param_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.14: `Name<Arg>` (a generic-type instantiation) parses to a
+// Type whose `name` still names the *template* and whose `template_args`
+// holds the (single, v0.1-only) concrete argument -- left unresolved
+// for movecheck's Monomorphizer (see Type::template_args' own comment).
+void test_generic_type_instantiation_parses_with_template_args() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Vec {\n"
+        "    T item;\n"
+        "};\n"
+        "int main() {\n"
+        "    Vec<int> v;\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Stmt& var_decl = *main_fn->body->statements[0];
+    expect(var_decl.type.kind == scpp::TypeKind::Named && var_decl.type.name == "Vec",
+           "generic_type_instantiation_parses_with_template_args: type name should still be 'Vec'");
+    expect(var_decl.type.template_args.size() == 1,
+           "generic_type_instantiation_parses_with_template_args: expected exactly 1 template arg");
+    expect(is_named_type(var_decl.type.template_args[0], "int"),
+           "generic_type_instantiation_parses_with_template_args: template arg should be Named('int')");
+}
+
 } // namespace
 
 int main() {
@@ -1731,6 +1861,11 @@ int main() {
     test_lambda_this_capture_parses_and_star_this_is_rejected();
     test_lambda_generic_parameter_is_rejected();
     test_lambda_mutable_keyword_parses();
+    test_generic_class_bare_type_param_parses();
+    test_generic_class_method_requires_clause_parses();
+    test_generic_struct_concept_constrained_type_param_parses();
+    test_generic_struct_bare_type_param_is_rejected();
+    test_generic_type_instantiation_parses_with_template_args();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

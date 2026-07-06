@@ -650,6 +650,61 @@ void run_concept_tests() {
     }
 }
 
+// ch05 §5.14: generic types (classes/structs) -- same "needs the full
+// pipeline in one test" reasoning as run_concept_tests just above: a
+// generic class method's own `requires Concept<T>` clause is only
+// checked once a real instantiation (`Vec<SomeType>`) exists at all
+// (movecheck's Monomorphizer, resolve_generic_types), and calling a
+// method whose constraint the concrete argument doesn't satisfy is
+// rejected via the same "unknown function" mechanism as an ordinary
+// unresolved callee -- codegen's own job, unreachable through
+// movetest_source's movecheck-only throws_move_error helper.
+void run_generic_type_tests() {
+    std::string source =
+        "template<typename T>\n"
+        "concept Describable = requires(const T& t) {\n"
+        "    { t.magnitude() } -> std::same_as<int>;\n"
+        "};\n"
+        "class NoMagnitude {\n"
+        "public:\n"
+        "    NoMagnitude(int v) { this.value = v; return; }\n"
+        "private:\n"
+        "    int value;\n"
+        "};\n"
+        "template<typename T>\n"
+        "class Vec {\n"
+        "    T item;\n"
+        "public:\n"
+        "    Vec(const T& x) { this.item = x; return; }\n"
+        "    int describe() const requires Describable<T> {\n"
+        "        return this.item.magnitude();\n"
+        "    }\n"
+        "};\n"
+        "int main() {\n"
+        "    NoMagnitude n(1);\n"
+        "    Vec<NoMagnitude> vn(n);\n"
+        "    return vn.describe();\n"
+        "}\n";
+    std::string case_name = "generic_class_constrained_method_unsatisfying_type_is_rejected";
+    cases_run++;
+    bool threw = false;
+    try {
+        scpp::Program program = scpp::parse(source);
+        scpp::monomorphize_generics(program);
+        scpp::check_moves(program);
+        scpp::Codegen codegen("test_module");
+        codegen.generate(program);
+    } catch (const scpp::DataflowError&) {
+        threw = true;
+    } catch (const scpp::CodegenError&) {
+        threw = true;
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, case_name + ": expected calling a method whose own requires-clause the concrete type "
+                              "argument doesn't satisfy to fail");
+}
+
 } // namespace
 
 int main() {
@@ -657,6 +712,7 @@ int main() {
     run_error_location_tests();
     run_module_system_tests();
     run_concept_tests();
+    run_generic_type_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
