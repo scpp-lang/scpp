@@ -604,6 +604,42 @@ void print_area(const Shape auto& s) {
   checking properly intraprocedural (see
   [§11.6](ch11-modules-and-libraries.md)) -- a generic function has no
   single concrete signature to check a body against otherwise.
+- **A concept is optional, not mandatory, on a constrained parameter.**
+  Writing bare `auto` (no concept name in front of it) is legal -- it
+  means the parameter's type is treated as fully opaque: the body may
+  move it, store it, pass it to another function accepting a compatible
+  (bare-or-narrower) parameter, and return it, but calling any method on
+  it or applying any operator to it is a compile error, exactly as if it
+  were constrained by a concept whose `requires`-expression guarantees
+  nothing. Naming a concept (`Concept auto`) unlocks whatever its
+  `requires`-expression additionally guarantees, checked the same
+  once-at-definition way. The same rule governs a generic type's own
+  type parameter ([§5.14](#514-generic-types)).
+- **A pack of the abbreviated form (`Concept auto&... args`) is
+  supported, but only usable through a fold expression** -- real C++17
+  syntax verbatim (`(pack op ...)`, `(... op pack)`, or with an initial
+  value on either side). A fold expression's meaning is defined for a
+  pack of any length, including zero, so checking one reduces to
+  checking the folded operator once against what the concept guarantees
+  per element -- no different in kind from checking any other
+  concept-guaranteed operation, and still entirely at the generic
+  function's own definition:
+  ```cpp
+  template<typename T>
+  concept Formattable = requires(const T& t, std::ostream& os) { os << t; };
+
+  void log(const Formattable auto&... args) {
+      (std::cout << ... << args) << "\n";
+  }
+  ```
+  **Splitting a pack recursively is not supported in a function body**
+  (peeling off a first element and recursing on the rest, the classic
+  C++ variadic-template idiom) -- each recursive step would need its own
+  separately-checked signature, breaking the once-at-definition
+  property. Recursive pack-splitting is, however, how a generic *type*'s
+  own storage is built ([§5.14](#514-generic-types)) -- there, it's the
+  type definition itself doing the recursion, with each step still
+  checked once, not a function body's control flow.
 - **Compound requirements (`{ expr } -> Constraint;`) must constrain the
   result to an exact type, spelled `std::same_as<T>`** -- never
   `std::convertible_to<T>`, and never a bare type name (`-> T` is not
@@ -629,15 +665,17 @@ void print_area(const Shape auto& s) {
   design.
 - **Generic functions are spelled with the abbreviated C++20 form only**
   (`void f(Concept auto& x)`) -- the full `template<Concept T> void
-  f(T& x)` header is **not** supported in v0.1. This is a deliberate
-  scoping cut, not a claim that the two forms differ semantically in
-  real C++ (they don't): it sidesteps needing to design variadic
-  templates, non-type template parameters, explicit specialization, and
-  multi-parameter template headers before any of them are needed for
-  this feature's actual goal (compile-time polymorphism without
-  inheritance). A consequence: every constrained type parameter is tied
-  to at least one function parameter's declared position -- there is no
-  way to write a "return-type-only" generic function in this subset.
+  f(T& x)` header is **not** supported for functions in v0.1 (generic
+  *types* do use the full header form, of necessity -- see
+  [§5.14](#514-generic-types)). This is a deliberate scoping cut, not a
+  claim that the two forms differ semantically in real C++ (they
+  don't): it sidesteps needing multi-parameter template headers,
+  explicit/partial specialization, and template-template parameters for
+  *functions* specifically, none of which this feature's actual goal
+  (compile-time polymorphism without inheritance) needs. A consequence:
+  every constrained type parameter is tied to at least one function
+  parameter's declared position -- there is no way to write a
+  "return-type-only" generic function in this subset.
 - **No default method bodies in a concept** -- unlike a Rust trait,
   which can supply a default implementation a type may inherit or
   override, a real C++ `concept` is purely a structural predicate; it
@@ -651,11 +689,13 @@ void print_area(const Shape auto& s) {
   encoding already gives every distinct instantiation a distinct mangled
   symbol, for the same reason it already disambiguates ordinary
   overloads.
-- **Explicitly out of scope for this round**: generic `struct`/`class`
-  types (e.g. a future `Vec<T>`-shaped container), variadic templates,
-  non-type template parameters, explicit/partial specialization,
-  associated types, and dynamic dispatch/type erasure (scpp's
+- **Explicitly out of scope for this round**: recursive pack-splitting
+  inside a function body (as opposed to fold expressions, above),
+  template-template parameters, default template arguments, associated
+  types, and dynamic dispatch/type erasure (scpp's
   virtual-function/`dyn`-equivalent, deferred alongside inheritance).
+  Generic `struct`/`class` types, once out of scope entirely, are now
+  designed -- see [§5.14](#514-generic-types).
 
 ## 5.12 Closures (Lambda Expressions)
 
@@ -825,6 +865,140 @@ rules extend that same mechanism rather than reversing that choice --
 covering the one pattern (a callback whose parameter's lifetime is chosen
 by the callee, not the caller) the plain grouping mechanism could not
 otherwise reach.
+
+## 5.14 Generic Types
+
+Extends [§5.11](#511-generic-functions-and-concepts)'s answer to
+compile-time polymorphism from functions to `struct`/`class`
+definitions themselves -- real C++ template syntax verbatim
+(`template<typename T> class X { ... };`), including multiple type
+parameters and parameter packs, with the same concept-optional
+principle §5.11 established, applied per-member instead of
+monolithically:
+
+- **A generic type's own type parameter(s) may be left bare** -- exactly
+  like a bare generic-function parameter (§5.11), this means "no
+  operations guaranteed beyond the universal baseline every scpp type
+  already has" (move, store as a field, pass to a compatible parameter,
+  return -- see [§5.1](#51-ownership--move)). This is enough to declare
+  fields of the bare type and write ordinary constructors/accessors
+  around them; it is not enough to call any method on the type or apply
+  any operator to it.
+- **Each method (including a constructor) may add its own `requires
+  Concept<T>` clause**, real C++20 syntax verbatim, unlocking whatever
+  that concept additionally guarantees *for that one method's own body,
+  checked once at that method's own definition* -- exactly the same
+  once-at-definition principle as a generic function, just decomposed
+  per member instead of applied to one shared, class-wide constraint:
+  ```cpp
+  template<typename T>
+  class Vec {
+      T item;
+  public:
+      Vec(T x) : item(std::move(x)) {}
+
+      void push(T x) { item = std::move(x); }         // needs nothing from T
+
+      bool less_than(const T& other) const requires std::totally_ordered<T> {
+          return item < other;                          // only this method needs comparison
+      }
+  };
+  ```
+  A caller using `Vec<SomeType>` may call `push` regardless of what
+  `SomeType` supports; calling `less_than` is only legal if `SomeType`
+  actually satisfies `std::totally_ordered` -- checked, and rejected
+  with a precise diagnostic, at the call site, not deferred instantiation
+  gibberish.
+- **A generic `struct`'s type parameter(s) cannot be left bare** --
+  unlike `class`, a `struct`'s fields must *all* be trivial
+  ([§4.1](ch04-struct-vs-class.md)), and triviality is a whole-type
+  layout/ABI property, not something individual methods could each
+  separately guarantee (a `struct` has no methods to decompose it
+  across in the first place). A generic `struct`'s type parameter(s)
+  must therefore be constrained, at the `struct` itself, by a concept
+  that guarantees triviality.
+- **Parameter packs (`typename... Ts`) are supported for building a
+  type whose own member layout varies by arity** (e.g. a `Tuple`-like
+  type), but only via **recursive inheritance** -- real C++ has no
+  syntax to expand a pack directly into a member list (`Ts... elems;`
+  is proposed, as [P1858](https://wg21.link/P1858), but not adopted
+  into any C++ standard as of C++23; verified it is rejected by a
+  current compiler, and scpp's erasure principle
+  ([ch00](ch00-design-philosophy.md) §2) requires every construct to be
+  accepted by a real, unmodified C++ compiler). Exactly two, fixed
+  patterns are supported for a variadic generic type -- not
+  arbitrary/general specialization:
+  ```cpp
+  template<typename... Ts> class Tuple;
+
+  template<> class Tuple<> {};   // base case: the empty pack
+
+  template<typename Head, typename... Tail>
+  class Tuple<Head, Tail...> : private Tuple<Tail...> {   // recursive case
+      Head head;
+  };
+  ```
+  The base case is the *empty* pack (`Tuple<>`), not one remaining
+  element -- a parameter pack matching zero arguments is itself
+  ordinary, standard C++ ([temp.variadic], since C++11), not a special
+  case scpp invented; real `std::tuple` implementations (libstdc++
+  verified directly) instead stop recursing at exactly one remaining
+  element, purely as their own implementation-specific micro-optimization
+  (saving one level of an otherwise-empty base class) -- the C++
+  standard mandates no particular internal layout for `std::tuple` at
+  all (only that `get` be constant-time, see below), so scpp is free to
+  pick the simpler, uniform empty-pack base case instead.
+- **Non-type template parameters are supported, restricted to scalar
+  types** ([§6](ch06-safe-subset.md)'s scalar family: `bool`, the fixed-width
+  integers, `char`, `float32_t`/`float64_t`, `size_t`, `ptrdiff_t`, and
+  their aliases) -- excluding `struct`/`class`, which sidesteps real
+  C++20's "structural type" machinery (memberwise-comparison-based
+  template-argument matching) entirely, since nothing so far needs a
+  class-typed non-type parameter. Two non-type arguments are the same
+  template argument if and only if their **bit patterns are identical**
+  -- this one rule is uniformly correct for every scalar: it collapses
+  to ordinary value equality for integers (no scalar integer
+  representation is redundant, doubly so since C++20 mandates
+  two's-complement), and it is, verified against a real compiler, *the*
+  actual rule real C++ already applies to floating-point non-type
+  arguments (`0.0` and `-0.0` compare equal but are **not** the same
+  template argument, since their bit patterns differ; two independently
+  computed `NaN`s with identical bit patterns **are** the same template
+  argument, even though `NaN == NaN` is false) -- so this is one uniform
+  rule, not two, and it is not a new one.
+- **Indexed access into a recursively-defined variadic type reuses
+  deduction from a base class** -- real, standard C++ behavior
+  ([temp.deduct.call]), not a scpp-specific mechanism: if a function
+  template's parameter type names a class-template specialization, and
+  the actual argument's type has a unique base class (direct or
+  indirect) matching that specialization pattern, the compiler deduces
+  the function's own template parameters from that base class's actual
+  arguments. Threading a scalar, non-type index through the recursive
+  definition above (mirroring how real `std::tuple` is actually
+  implemented internally -- verified directly against libstdc++'s
+  `<tuple>`) lets an accessor deduce, in one step, exactly which level
+  of the inheritance chain holds the requested element -- giving
+  constant-time indexed access (the one guarantee the C++ standard
+  actually places on `std::get`) without the accessor's own body ever
+  recursing:
+  ```cpp
+  template<size_t Idx, typename... Ts> class TupleImpl;
+
+  template<size_t Idx> class TupleImpl<Idx> {};   // empty pack: recursion's natural end
+
+  template<size_t Idx, typename Head, typename... Tail>
+  class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {
+  public:
+      Head value;
+  };
+
+  template<size_t I, typename Head, typename... Tail>
+  Head& get(TupleImpl<I, Head, Tail...>& t) { return t.value; }
+  ```
+- **Explicitly out of scope for this round**: general/arbitrary
+  specialization (beyond the one fixed empty-pack/head-and-tail pattern
+  above), template-template parameters, default template arguments,
+  class-typed non-type template parameters, and associated types.
 
 ---
 

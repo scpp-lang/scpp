@@ -53,6 +53,16 @@
   （v0.1 范围内只有定长数组 `T[N]`）。
 - `std::expected<T, E>`（见 [§5.6](ch05-static-checks.md)）：scpp 唯一的可恢复错误载体；是编译器内置类型，跟
   `unique_ptr`/`span` 待遇一样，不是真实 libstdc++/libc++ 模板的实例化。
+- **泛型 `struct`/`class` 类型**（`template<typename T> class X { ... }`，
+  原样复用真实 C++ 语法，支持多个类型参数和参数包——见
+  [§5.14](ch05-static-checks.md)）：scpp 的编译期多态机制
+  （[§5.11](ch05-static-checks.md)）从函数扩展到类型定义。类型参数可以
+  裸写（只保证 move/存/传给兼容参数/return），也可以按方法各自用
+  `requires`子句约束；泛型 `struct`自己的类型参数则必须绑 concept
+  保证 trivial，因为 `struct`的字段-trivial 规则
+  （[§4.1](ch04-struct-vs-class.md)）是整个类型的性质。变参泛型类型的
+  存储靠递归继承实现（真实 C++ 没有能把 pack 直接展开成成员列表的
+  语法）；非类型模板参数只支持标量类型。
 
 **表达式 / 语句**
 - 局部变量声明与初始化。
@@ -75,7 +85,10 @@
   真实 C++20 语法——见 [§5.11](ch05-static-checks.md)）：scpp 用来代替继承/虚函数（仍然不在 v0.1 范围内，见下面）的
   编译期多态机制。按每个具体类型单态化（零开销，没有 vtable）；受约束
   的函数体在它自己定义的地方就检查一遍，只认 concept 的 `requires`
-  表达式保证过的东西——不像真实 C++ 模板那样延迟到实例化才检查。
+  表达式保证过的东西——不像真实 C++ 模板那样延迟到实例化才检查。受约束
+  的参数也可以是参数包（`Concept auto&... args`），但只能通过 fold
+  expression 使用（原样复用真实 C++17 语法）——覆盖变参调用场景（比如
+  `std::format`那种），不需要检查递归拆包的 pack（函数体内不支持）。
 - **lambda 表达式**（`[capture-list](params) { body }`，原样复用真实
   C++ 语法——见 [§5.12](ch05-static-checks.md)）：跟真实 C++ 一样脱糖
   成一个匿名的、编译器合成的类，所以除了 `struct`/`class` 已有的规则
@@ -127,9 +140,12 @@
   [§8](ch08-open-questions.md)）。
 
 **不在 v0.1 范围内**
-- **类型**的模板/泛型（泛型 `struct`/`class`，比如以后的 `Vec<T>`）、
-  变参模板、非类型模板参数、显式/偏特化、关联类型——这些
-  [§5.11](ch05-static-checks.md) 里泛型**函数**的设计也明确排除在外。
+- 任意/通用的模板特化（超出变参泛型类型能用的那种固定空
+  pack/Head+Tail 模式，见 [§5.14](ch05-static-checks.md)）、模板模板
+  参数、默认模板实参、class 类型的非类型模板参数、关联类型，以及
+  函数体内的递归拆包——这些
+  [§5.11](ch05-static-checks.md)/[§5.14](ch05-static-checks.md) 里泛型
+  设计也明确排除在外。
 - `class` 类型的继承和虚函数（因此也包括 `protected`）——见
   [§4.2](ch04-struct-vs-class.md)。
 - `shared_ptr` 的完整别名模型。

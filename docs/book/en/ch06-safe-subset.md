@@ -62,6 +62,19 @@ distinct from an ordinary type/borrow-check error):
 - `std::expected<T, E>` (see [§5.6](ch05-static-checks.md)): scpp's only vehicle for recoverable
   errors; a compiler builtin type, same treatment as `unique_ptr`/`span`,
   not a real libstdc++/libc++ template instantiation.
+- **Generic `struct`/`class` types** (`template<typename T> class X { ... }`,
+  real C++ syntax verbatim, including multiple type parameters and
+  parameter packs -- see [§5.14](ch05-static-checks.md)): scpp's
+  compile-time-polymorphism mechanism ([§5.11](ch05-static-checks.md))
+  extended from functions to type definitions. A type parameter may be
+  left bare (only move/store/pass-through/return guaranteed) or
+  constrained, per method, by a `requires` clause; a generic `struct`'s
+  own parameter(s) must instead be concept-constrained to guarantee
+  triviality, since a `struct`'s field-triviality rule ([§4.1](ch04-struct-vs-class.md))
+  is a whole-type property. A variadic generic type's storage is built
+  via recursive inheritance (real C++ has no syntax to expand a pack
+  directly into a member list); non-type template parameters are
+  supported for scalar types only.
 
 **Expressions / Statements**
 - Local variable declaration and initialization.
@@ -90,7 +103,12 @@ distinct from an ordinary type/borrow-check error):
   Monomorphized per concrete type (zero-cost, no vtable); a constrained
   function's body is checked once, at its own definition, against only
   what the concept's `requires`-expression guarantees -- not deferred to
-  instantiation the way real C++ templates otherwise work.
+  instantiation the way real C++ templates otherwise work. A
+  concept-constrained parameter may also be a pack (`Concept auto&...
+  args`), usable only through a fold expression (real C++17 syntax
+  verbatim) -- covers variadic call patterns (e.g. a `std::format`-style
+  function) without needing to check a recursively-split pack, which is
+  not supported in a function body.
 - **Lambda expressions** (`[capture-list](params) { body }`, real C++
   syntax verbatim -- see [§5.12](ch05-static-checks.md)): desugars to an
   anonymous, compiler-synthesized class exactly as in real C++, so no
@@ -156,11 +174,14 @@ distinct from an ordinary type/borrow-check error):
   (see [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)).
 
 **Out of scope for v0.1**
-- Templates / generics for **types** (generic `struct`/`class`, e.g. a
-  future `Vec<T>`), variadic templates, non-type template parameters,
-  explicit/partial specialization, and associated types -- all
-  explicitly out of scope for [§5.11](ch05-static-checks.md)'s
-  generic-*function* design too.
+- General/arbitrary template specialization (beyond the one fixed
+  empty-pack/head-and-tail pattern a variadic generic type may use, see
+  [§5.14](ch05-static-checks.md)), template-template parameters, default
+  template arguments, class-typed non-type template parameters,
+  associated types, and recursive pack-splitting inside a function body
+  -- all explicitly out of scope for
+  [§5.11](ch05-static-checks.md)/[§5.14](ch05-static-checks.md)'s generic
+  design too.
 - Inheritance and virtual functions for `class` types (and therefore
   `protected`) -- see [§4.2](ch04-struct-vs-class.md).
 - The full aliasing model for `shared_ptr`.
