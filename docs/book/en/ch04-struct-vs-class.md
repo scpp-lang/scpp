@@ -68,20 +68,27 @@ itself the explicit declaration, and the compiler verifies triviality.
     `private`, so the factory function is the only way to obtain an
     instance -- the classic C++ "named constructor idiom" (Marshall
     Cline's C++ FAQ), requiring zero new scpp syntax.
-- **Access control**: a member **variable** -- including a class-level constant --
-  can never be `public`; only member **functions** can be. Writing
-  `public:` above a member variable is a compile error. External code
-  can therefore only ever reach a class's data through a method call,
-  never through direct field access -- this is also what keeps the
-  method-borrow-checking design in
-  [§5.9](ch05-static-checks.md) tractable: the borrow checker only has
-  to reason about *method calls* crossing a class's boundary, never
-  about arbitrary external field-level aliasing the way it already does
-  for `struct`.
-  - A class-level constant is exposed via a `static consteval` function
-    instead of a public data member (see [§6](ch06-safe-subset.md) for
-    scpp's `consteval`-only rule for compile-time functions) -- this has
-    the exact same (zero) runtime cost a public constant would have had.
+- **Access control**: real, unrestricted C++ access control -- a member
+  variable or member function may be `public` or `private` in any
+  combination, exactly like real C++ (`protected` remains deferred
+  alongside inheritance, see below). Direct external access to a public
+  member variable (`a.b`) is checked exactly like a `struct` field
+  access ([§5.2](ch05-static-checks.md)): the borrow is recorded against
+  the whole root object, conservatively -- the same simplification
+  `struct` already uses, not a new one invented for this. A method call
+  (`a.f()`) continues to be checked via [§5.9](ch05-static-checks.md)'s
+  existing this-as-reference-parameter model. The two compose with no
+  new mechanism: both ultimately record a borrow against the same root
+  object, so a live borrow of `a.b` correctly conflicts with a call to a
+  mutating method on `a`, exactly as two conflicting borrows of the same
+  root always do.
+  - A class-level constant may therefore be an ordinary `public` `static
+    constexpr` member, real C++ syntax verbatim -- `constexpr`
+    *variables*, unlike `constexpr` *functions*, are unambiguous and
+    already fully supported (see [§5.11](ch05-static-checks.md)) -- or,
+    if hiding its value from the public interface is wanted, a `private`
+    constant exposed via a `static consteval` function instead, at the
+    same zero runtime cost.
 - **No inheritance in v0.1** (deferred, not a permanent exclusion -- see
   [§8](ch08-open-questions.md)): `protected` is consequently not a
   recognized access specifier either, since it only has meaning

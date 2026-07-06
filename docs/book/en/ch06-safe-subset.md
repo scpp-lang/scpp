@@ -48,8 +48,9 @@ distinct from an ordinary type/borrow-check error):
   types only).
 - `class` (see
   [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)): member
-  variables (including class-level constants) must be `private`, only
-  member functions may be `public`; no inheritance/`protected` in v0.1.
+  variables and member functions may each be `public` or `private`, in
+  any combination, exactly like real C++; no inheritance/`protected` in
+  v0.1.
   A trivial-typed member may instead be declared `mutable` (see
   [§4.2](ch04-struct-vs-class.md)/
   [§5.9](ch05-static-checks.md)): readable/writable through a `const`

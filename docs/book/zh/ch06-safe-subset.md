@@ -40,8 +40,9 @@
 - `struct`（规则见 [§4.1](ch04-struct-vs-class.md)；仅含受支持类型的
   字段）。
 - `class`（见
-  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)）：成员变量（包括类级别常量）必须
-  `private`，只有成员函数可以 `public`；v0.1 没有继承/`protected`。
+  [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)）：成员
+  变量和成员函数，各自可以是 `public`或者 `private`，任意搭配，跟真实
+  C++ 完全一样；v0.1 没有继承/`protected`。
   平凡类型的成员可以改声明成 `mutable`（见
   [§4.2](ch04-struct-vs-class.md)/[§5.9](ch05-static-checks.md)）：
   通过 `const` 的 `this` 也能读写，但永远不能被引用，是 scpp 对内部

@@ -52,14 +52,15 @@
    otherwise -- subject to exactly the same alias-XOR-mutability,
    whole-root-conservative field access, and lifetime-elision rules as
    any other reference (see [§5.9](ch05-static-checks.md)). Related,
-   also settled in the same round: a `class`'s member *variables*
-   (including class-level constants) can never be `public`, only member
-   *functions* can -- external code always goes through a method call,
-   never direct field access (see [§4.2](ch04-struct-vs-class.md));
-   class-level constants are exposed via a `static consteval` function
-   instead of a public data member (see [§6](ch06-safe-subset.md) for
-   why scpp has no `constexpr`-qualified functions). Inheritance (and
-   therefore `protected`) remains deferred, not part of this round.
+   revisited later: whether a `class`'s member *variables* (including
+   class-level constants) must always be `private`, only member
+   *functions* ever `public` -- **reversed**: real C++ access control is
+   fully supported for both, in any combination (see
+   [§4.2](ch04-struct-vs-class.md)), since direct external access to a
+   public field composes, with no new mechanism, with this Q's own
+   this-as-reference-parameter model -- both already record a borrow
+   against the same root object. Inheritance (and therefore `protected`)
+   remains deferred, not part of this round.
 6. **ABI / interop with existing C++ libraries**: how to engineer ordinary
    (checked-by-default) code calling third-party headers (all inherently
    unchecked) — treat them all as requiring `unsafe { }`?
