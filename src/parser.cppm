@@ -26,7 +26,7 @@ struct ParseError : std::runtime_error {
     SourceLocation loc;
 };
 
-// ch11 §11.7/§11.8: given a module's dotted name (e.g. "std"), returns a
+// ch11 §11.8: given a module's dotted name (e.g. "std"), returns a
 // reference to that module's already-parsed (and, transitively, already
 // import-resolved) Program -- called while parsing an `import name;`
 // declaration, so the imported module's exported struct/class names are
@@ -41,10 +41,33 @@ struct ParseError : std::runtime_error {
 // import-free caller (the whole test suite, today) is unaffected.
 using ModuleResolver = std::function<const Program&(const std::string&)>;
 
+// ch11 §11.4: given a same-module partition's fully-qualified key
+// ("<module_name>:<partition_name>", e.g. "std:string"), returns a
+// *freshly parsed, owned* Program (by value, not a cached reference like
+// ModuleResolver above) -- called while parsing an `import :part;` /
+// `export import :part;` declaration. A fresh, independently-owned
+// Program is required (rather than a shared cached reference) because a
+// partition's declarations merge into the importing file *with their
+// bodies* (see merge_partition): the partition compiles together with
+// whatever imports it, not as a separately-compiled unit, so its
+// Function bodies (unique_ptr-owned Stmt trees) must actually be moved
+// into the importing Program, not merely referenced. Re-parsing on every
+// resolve (rather than caching) sidesteps any "already moved-from"
+// concern if more than one sibling file within the same module imports
+// the same partition -- a real, if unlikely, v1 limitation: two
+// importers of the same partition each get their own independently
+// parsed copy (no shared identity), which is fine for merge_partition's
+// purposes but would not be the right foundation for anything that ever
+// needed cross-partition identity (nothing in v1 does). Left default-
+// constructed for any caller with no partitions to resolve.
+using PartitionResolver = std::function<Program(const std::string&)>;
+
 class Parser {
 public:
-    explicit Parser(std::vector<Token> tokens, ModuleResolver resolver = {})
-        : tokens_(std::move(tokens)), resolver_(std::move(resolver)) {}
+    explicit Parser(std::vector<Token> tokens, ModuleResolver resolver = {},
+                     PartitionResolver partition_resolver = {})
+        : tokens_(std::move(tokens)), resolver_(std::move(resolver)),
+          partition_resolver_(std::move(partition_resolver)) {}
 
     Program parse_program() {
         Program program;
@@ -58,6 +81,7 @@ private:
     std::vector<Token> tokens_;
     size_t pos_ = 0;
     ModuleResolver resolver_;
+    PartitionResolver partition_resolver_;
     // ch11 §11.4: the namespace path currently being parsed into, e.g.
     // inside `namespace std { ... }` this is {"std"}; empty at file
     // scope (today's default -- every existing, non-namespaced file is
@@ -397,13 +421,15 @@ private:
         return base;
     }
 
-    // ch11 §11.3: parses an optional module declaration at the very
-    // start of the file -- `export module <dotted.name>;` (a primary
-    // interface unit, may contain `export`-marked declarations) or
-    // `module <dotted.name>;` (an implementation unit, contributes more
-    // code to the same module but exports nothing of its own). Entirely
-    // absent for an ordinary, non-module file (today's default, still
-    // the overwhelmingly common case): nothing is consumed,
+    // ch11 §11.3/§11.4: parses an optional module declaration at the very
+    // start of the file -- `export module <dotted.name>[:<partition>];`
+    // (a primary interface unit, or -- with the `:partition` suffix -- an
+    // interface partition, either way may contain `export`-marked
+    // declarations) or `module <dotted.name>[:<partition>];` (an
+    // implementation unit/partition, contributes more code to the same
+    // module but exports nothing of its own). Entirely absent for an
+    // ordinary, non-module file (today's default, still the
+    // overwhelmingly common case): nothing is consumed,
     // `program.module_name` stays empty and every existing behavior is
     // unaffected.
     void parse_module_declaration(Program& program) {
@@ -416,28 +442,71 @@ private:
             dotted += '.';
             dotted += std::string(expect(TokenKind::Identifier, "module name segment").text);
         }
+        // ch11 §11.4: an optional `:partition` suffix -- designates this
+        // file as one specific partition of `dotted`, rather than its
+        // primary interface/implementation unit. partition_name stays
+        // separate from module_name (which always holds just the base
+        // dotted name) so the export/namespace validation pass (§11.6)
+        // keeps comparing against the *module's* own name, unaffected by
+        // which partition happens to be declaring something.
+        if (match(TokenKind::Colon)) {
+            program.partition_name = std::string(expect(TokenKind::Identifier, "partition name").text);
+        }
         expect(TokenKind::Semicolon, "';'");
         program.module_name = dotted;
         program.is_module_interface = leading_export;
         program.is_module_impl = !leading_export;
     }
 
-    // ch11 §11.7: parses zero or more `import name;` / `export import
-    // name;` declarations (a dotted name, same grammar as the module
-    // declaration above), immediately resolving each via resolver_ (given
-    // by the driver, which knows about `--import name=path` mappings and
-    // file I/O -- the parser itself never touches the filesystem) so the
-    // imported module's exported names are visible (struct_names_/
-    // class_names_) to the rest of this file, which is parsed next --
-    // mirrors real C++20's own requirement that imports precede every
-    // other declaration.
+    // ch11 §11.4/§11.8: parses zero or more `import name;` / `export
+    // import name;` (cross-module, a dotted name) or `import :part;` /
+    // `export import :part;` (ch11 §11.4, a same-module partition --
+    // just a bare identifier, never dotted) declarations, immediately
+    // resolving each via resolver_/partition_resolver_ (given by the
+    // driver, which knows about `--import name=path` mappings and file
+    // I/O -- the parser itself never touches the filesystem) so the
+    // imported names are visible (struct_names_/class_names_) to the
+    // rest of this file, which is parsed next -- mirrors real C++20's
+    // own requirement that imports precede every other declaration.
     void parse_import_declarations(Program& program) {
         for (;;) {
             bool is_reexport = check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::KwImport;
-            if (!is_reexport && !check(TokenKind::KwImport)) return;
+            bool is_plain_import = check(TokenKind::KwImport);
+            if (!is_reexport && !is_plain_import) return;
             if (is_reexport) advance(); // 'export'
             const Token& import_tok = peek();
             advance(); // 'import'
+
+            if (match(TokenKind::Colon)) {
+                // ch11 §11.4: a same-module partition import -- only
+                // meaningful inside a file that is itself part of some
+                // module (primary unit or another partition).
+                std::string partition_name(expect(TokenKind::Identifier, "partition name").text);
+                expect(TokenKind::Semicolon, "';'");
+
+                if (program.module_name.empty()) {
+                    throw ParseError(import_tok.line, import_tok.column,
+                                      "cannot import partition ':" + partition_name +
+                                          "' -- this file has no 'module'/'export module' declaration of "
+                                          "its own (ch11 §11.4: partitions only exist within a module)");
+                }
+                ImportDecl import;
+                import.module_name = partition_name;
+                import.is_reexport = is_reexport;
+                import.is_partition = true;
+                program.imports.push_back(import);
+
+                std::string key = program.module_name + ":" + partition_name;
+                if (!partition_resolver_) {
+                    throw ParseError(import_tok.line, import_tok.column,
+                                      "cannot resolve partition '" + key +
+                                          "' -- no partition resolver was configured for this build (see "
+                                          "the driver's --import " + key + "=path flag)");
+                }
+                merge_partition(program, partition_resolver_(key), import.is_reexport, key, import_tok);
+                continue;
+            }
+
             std::string dotted(expect(TokenKind::Identifier, "imported module name").text);
             while (match(TokenKind::Dot)) {
                 dotted += '.';
@@ -513,6 +582,62 @@ private:
         for (const Function& fn : imported.functions) {
             if (!fn.is_exported) continue;
             program.functions.push_back(clone_function_declaration(fn, imported_name));
+        }
+    }
+
+    // Merges *every* declaration (exported or not -- ch11 §11.4: within a
+    // module, any unit that imports a partition sees everything in it) of
+    // `partition` into the Program currently being parsed. Unlike
+    // merge_imported_module (which clones a cross-module import's
+    // exported-only surface, always clearing Function bodies since that
+    // module compiles *separately*), this genuinely moves each
+    // StructDef/ClassDef/Function -- bodies included -- out of
+    // `partition`, since a partition compiles *together* with whatever
+    // imports it, as one combined unit (ch11 §11.4's own framing).
+    // `owning_module` is left empty on every merged declaration (they
+    // become this Program's own local declarations, not a foreign
+    // module's), which is also exactly why codegen's mangling (keyed off
+    // owning_module, falling back to Program::module_name) still produces
+    // the right module-qualified symbol for anything the whole merged
+    // Program eventually exports.
+    //
+    // `is_reexport` (true for `export import :part;`, false for a plain
+    // `import :part;`) controls whether the partition's own individual
+    // `export` markings survive into the merged copy (so they become
+    // part of the *whole module's* external export surface) or are
+    // forced false (so the partition's content stays usable inside the
+    // module -- this file and its sibling partitions -- but invisible to
+    // anyone importing the module from outside). Attempting `export
+    // import` on an implementation partition (`module name:part;`, no
+    // `export` on its own module declaration) is rejected: such a
+    // partition can never export anything to the outside, by
+    // construction, matching real C++20.
+    void merge_partition(Program& program, Program&& partition, bool is_reexport, const std::string& key,
+                          const Token& import_tok) {
+        if (is_reexport && partition.is_module_impl) {
+            throw ParseError(import_tok.line, import_tok.column,
+                              "cannot 'export import' partition '" + key +
+                                  "': it is an implementation partition ('module ...;' with no 'export' on "
+                                  "its own module declaration), so it can never export anything to the "
+                                  "outside (ch11 §11.4)");
+        }
+        for (StructDef& def : partition.structs) {
+            struct_names_.insert(def.name);
+            def.is_exported = is_reexport && def.is_exported;
+            def.owning_module.clear();
+            program.structs.push_back(std::move(def));
+        }
+        for (ClassDef& def : partition.classes) {
+            struct_names_.insert(def.name);
+            class_names_.insert(def.name);
+            def.is_exported = is_reexport && def.is_exported;
+            def.owning_module.clear();
+            program.classes.push_back(std::move(def));
+        }
+        for (Function& fn : partition.functions) {
+            fn.is_exported = is_reexport && fn.is_exported;
+            fn.owning_module.clear();
+            program.functions.push_back(std::move(fn));
         }
     }
 
@@ -1557,13 +1682,15 @@ private:
     }
 };
 
-Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {}) {
-    Parser parser(std::move(tokens), resolver);
+Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {},
+              const PartitionResolver& partition_resolver = {}) {
+    Parser parser(std::move(tokens), resolver, partition_resolver);
     return parser.parse_program();
 }
 
-Program parse(std::string_view source, const ModuleResolver& resolver = {}) {
-    return parse(tokenize(source), resolver);
+Program parse(std::string_view source, const ModuleResolver& resolver = {},
+              const PartitionResolver& partition_resolver = {}) {
+    return parse(tokenize(source), resolver, partition_resolver);
 }
 
 } // namespace scpp

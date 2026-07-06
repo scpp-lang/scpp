@@ -24,14 +24,16 @@ scratch would just reimplement `std::string` badly. Instead:
   opaque `void*` handle. No C++ type (`std::string` itself, or anything
   from namespace `std`) ever crosses the `extern "C"` boundary — scpp only
   ever sees `void*`/`const char*`/`int`, types it already understands.
-- `std.cpp` is the scpp side: `export module std;` with `namespace std {
-  export class string { ... }; }`, whose only job is calling those
-  `extern "C"` functions, each wrapped in `unsafe { }` exactly like any
-  other call to an `extern "C"` function (ch01/ch02). All of `string`'s
-  actual behavior (growth, copying bytes, etc.) is real `std::string`
-  code; scpp contributes only the checked, borrow-checked surface around
-  it (RAII construction/destruction, access control on the `handle`
-  field, `this`-borrow-checked methods).
+- `std.cpp` is the scpp side: the "std" module's primary interface unit
+  (`export module std;`), aggregating the actual `class string`
+  declaration from a separate partition (`std_string.cpp`, `export
+  module std:string;`, ch11 §11.4) via `export import :string;`. Every
+  method's body calls those `extern "C"` functions, each wrapped in
+  `unsafe { }` exactly like any other call to an `extern "C"` function
+  (ch01/ch02). All of `string`'s actual behavior (growth, copying bytes,
+  etc.) is real `std::string` code; scpp contributes only the checked,
+  borrow-checked surface around it (RAII construction/destruction,
+  access control on the `handle` field, `this`-borrow-checked methods).
 
 ## Files
 
@@ -39,20 +41,26 @@ scratch would just reimplement `std::string` badly. Instead:
 |---|---|---|
 | `scpp_string_wrapper.h` | C/C++ | `extern "C"` function declarations (the ABI contract) |
 | `scpp_string_wrapper.cpp` | C++ | Implementation, forwards onto real `std::string` |
-| `std.cpp` | scpp | The `std` module (`export module std;`), exporting `class string` |
+| `std.cpp` | scpp | The `std` module's primary interface unit (`export module std;`), aggregating `:string` via `export import :string;` |
+| `std_string.cpp` | scpp | The `:string` partition (`export module std:string;`), exporting `class string` |
 | `demo.cpp` | scpp | `import std;` then a `main()` exercising `std::string` (construct/append/length/c_str/equals) |
-| `CMakeLists.txt` | CMake | Builds the wrapper, builds+links the demo against `std.cpp` via `scpp build --import`, registers the ctest case (see below) |
+| `CMakeLists.txt` | CMake | Builds the wrapper, builds+links the demo against the `std` module via `scpp build --import`, registers the ctest case (see below) |
 | `expected_output.txt` | — | Recorded expected stdout of `demo.cpp`, checked by the `stdlib_string_demo` ctest case |
 
-`std.cpp` has no `main()` of its own — it's a module's primary interface
-unit (ch11 §11.3), meant to be `import`ed by a consumer, not run directly.
-Unlike scpp's earlier (pre-ch11) single-file limitation, `demo.cpp` and
-`std.cpp` are genuinely **separately compiled** — `scpp build demo.cpp
---import std=std.cpp` parses and move-checks each independently, seeding
-`demo.cpp`'s checker with `std.cpp`'s *exported* signatures only (ch11
-§11.8), then emits and links two separate object files (see
-`src/driver.cppm`'s `compile_to_executable`) — no textual concatenation
-is involved.
+Neither `std.cpp` nor `std_string.cpp` has a `main()` of its own — they're
+a module's primary interface unit and one of its partitions (ch11
+§11.3/§11.4), meant to be `import`ed by a consumer, not run directly.
+Partitions are purely a source-organization mechanism for the module's
+own author: from a consumer's point of view, nothing changes — `import
+std;` is exactly the same whether `std::string` lives directly in
+`std.cpp` or, as here, in a `:string` partition `std.cpp` aggregates.
+Building the module means compiling its primary interface unit
+*together* with every partition it aggregates (ch11 §11.4) -- `scpp build
+demo.cpp --import std=std.cpp --import std:string=std_string.cpp` gives
+the driver both files, which are move-checked and compiled together into
+one object file for the whole "std" module, genuinely **separately**
+from `demo.cpp` itself (see `src/driver.cppm`'s `compile_to_executable`)
+-- no textual concatenation is involved anywhere in this pipeline.
 
 ## Building and running
 
@@ -71,16 +79,20 @@ build/stdlib/string/string_demo   # run it directly, if you just want the output
    target (`scpp_string_wrapper`) — entirely independent of the scpp
    compiler itself, exactly as a real project's existing C/C++ library
    would be.
-2. Runs `scpp build demo.cpp -o string_demo --import std=std.cpp --link
-   <path/to/libscpp_string_wrapper.a>` as a custom command (depending on
-   the `scpp` target, the `scpp_string_wrapper` target, and both source
-   files, so it always rebuilds against a fresh compiler/library/source).
-   `--import std=std.cpp` (ch11 §11.7/§11.13) resolves `demo.cpp`'s
-   `import std;` against `std.cpp`'s source, which gets its own,
-   separately-compiled object file automatically linked in alongside
-   `demo.cpp`'s own and the wrapper library. Since the wrapper is real
-   C++ (needs libstdc++'s runtime), `scpp build` automatically adds
-   `-lstdc++` to the link line whenever `--link` is used at all.
+2. Runs `scpp build demo.cpp -o string_demo --import std=std.cpp --import
+   std:string=std_string.cpp --link <path/to/libscpp_string_wrapper.a>`
+   as a custom command (depending on the `scpp` target, the
+   `scpp_string_wrapper` target, and all three scpp source files, so it
+   always rebuilds against a fresh compiler/library/source). `--import
+   std=std.cpp` (ch11 §11.7/§11.14) resolves `demo.cpp`'s `import std;`
+   against `std.cpp`'s source; `--import std:string=std_string.cpp`
+   resolves `std.cpp`'s own `export import :string;` against the
+   partition's source (same flag, just keyed as
+   `<module>:<partition>`). The whole "std" module (both files combined)
+   gets its own, separately-compiled object file automatically linked in
+   alongside `demo.cpp`'s own and the wrapper library. Since the wrapper
+   is real C++ (needs libstdc++'s runtime), `scpp build` automatically
+   adds `-lstdc++` to the link line whenever `--link` is used at all.
 
 Registers `stdlib_string_demo` as a ctest case that runs the resulting
 `string_demo` executable and diffs its stdout against
@@ -104,8 +116,10 @@ not a separate manual step.
   full API. Extending `scpp_string_wrapper.h`/`.cpp` with more `extern "C"`
   functions and matching `std::string` methods is a straightforward,
   purely additive follow-up.
-- **No `.scppm` archive packaging** (ch11 §11.11): `std.cpp` is consumed
-  directly as a source file via `--import std=std.cpp`, not packaged into
-  a `.scppm` library archive with a compiled-payload/signature story —
-  deliberately out of scope for this module system's first pass (see
-  ch11's own document for the full design).
+- **No `.scppm`/`.scppa`/`.scppkg` packaging** (ch11 §11.12): `std.cpp`
+  and `std_string.cpp` are consumed directly as source files via
+  `--import name=path`, not as a compiled `.scppm` module interface
+  paired with a `.scppa` archive, nor bundled into a distributable
+  `.scppkg` package — deliberately out of scope for this module system's
+  first pass (see ch11's own document, and
+  `docs/standards/en/{scppm,scppkg}-format.md`, for the full design).

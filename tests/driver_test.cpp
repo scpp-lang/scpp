@@ -356,6 +356,123 @@ void run_module_system_tests() {
         std::filesystem::remove(a_path);
         std::filesystem::remove(b_path);
     }
+
+    // ch11 §11.4: module partitions, end-to-end through the real CLI-level
+    // API. A primary interface unit (mathlib) aggregates an interface
+    // partition (mathlib:trig) via `export import :trig;`, and the whole
+    // module compiles+links+runs together with a plain consumer.
+    {
+        std::string case_name = "partition_export_import_end_to_end";
+        cases_run++;
+        std::filesystem::path trig_path = write_temp_file(case_name, "trig",
+            "export module mathlib:trig;\n"
+            "namespace mathlib {\n"
+            "    export int sin_deg_approx(int degrees) { return degrees / 2; }\n"
+            "    int private_helper(int x) { return x + 1000; }\n"
+            "}\n");
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module mathlib;\n"
+            "export import :trig;\n"
+            "namespace mathlib {\n"
+            "    export int square(int x) { return x * x; }\n"
+            "}\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() {\n"
+            "    print_int(mathlib::square(6));\n"
+            "    print_int(mathlib::sin_deg_approx(90));\n"
+            "    return 0;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+            FILE* pipe = popen(exe_path.string().c_str(), "r");
+            std::string output;
+            if (pipe != nullptr) {
+                char buffer[256];
+                size_t n;
+                while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
+            }
+            int status = pipe != nullptr ? pclose(pipe) : -1;
+            std::filesystem::remove(exe_path);
+            expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
+            expect(output == "36\n45\n", case_name + ": expected stdout '36\\n45\\n', got '" + output + "'");
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(trig_path);
+        std::filesystem::remove(lib_path);
+    }
+
+    // A partition's own non-exported declaration stays invisible to an
+    // external importer of the whole module, even though the primary
+    // unit does `export import :trig;` -- only what the partition itself
+    // marked `export` gets re-exported.
+    {
+        std::string case_name = "partition_private_declaration_not_reexported";
+        cases_run++;
+        std::filesystem::path trig_path = write_temp_file(case_name, "trig",
+            "export module mathlib:trig;\n"
+            "namespace mathlib { int private_helper(int x) { return x; } }\n");
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module mathlib;\n"
+            "export import :trig;\n"
+            "namespace mathlib { export int square(int x) { return x * x; } }\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() { print_int(mathlib::private_helper(1)); return 0; }\n";
+        bool threw = false;
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+            std::filesystem::remove(exe_path);
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected private_helper to stay invisible outside the module");
+        std::filesystem::remove(trig_path);
+        std::filesystem::remove(lib_path);
+    }
+
+    // A plain `import :part;` (no `export`) uses a partition internally
+    // but never re-exports it -- even an exported-within-the-partition
+    // declaration stays invisible to an external importer of the module.
+    {
+        std::string case_name = "plain_partition_import_not_visible_externally";
+        cases_run++;
+        std::filesystem::path trig_path = write_temp_file(case_name, "trig",
+            "export module mathlib:trig;\n"
+            "namespace mathlib { export int sin_deg_approx(int degrees) { return degrees / 2; } }\n");
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module mathlib;\n"
+            "import :trig;\n"
+            "namespace mathlib { export int square(int x) { return x * x; } }\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() { print_int(mathlib::sin_deg_approx(90)); return 0; }\n";
+        bool threw = false;
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+            std::filesystem::remove(exe_path);
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected sin_deg_approx to stay invisible (plain import :part; never "
+                                   "re-exports)");
+        std::filesystem::remove(trig_path);
+        std::filesystem::remove(lib_path);
+    }
 }
 
 } // namespace

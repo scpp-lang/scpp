@@ -936,6 +936,137 @@ void test_bare_extern_declaration_is_namespace_qualified() {
            "bare_extern_declaration_is_namespace_qualified: expected qualified name");
 }
 
+// ch11 §11.4: `export module name:part;` declares an interface
+// partition -- module_name stays just the base dotted name, with the
+// part after ':' recorded separately in partition_name.
+void test_partition_declaration_sets_partition_name() {
+    scpp::Program program = scpp::parse("export module mylib.math:trig;\n");
+    expect(program.module_name == "mylib.math", "partition_declaration_sets_partition_name: expected 'mylib.math'");
+    expect(program.partition_name == "trig", "partition_declaration_sets_partition_name: expected 'trig'");
+    expect(program.is_module_interface, "partition_declaration_sets_partition_name: should be an interface partition");
+}
+
+// ch11 §11.4: `module name:part;` (no `export`) declares an
+// implementation partition.
+void test_implementation_partition_declaration() {
+    scpp::Program program = scpp::parse("module mylib.math:detail;\n");
+    expect(program.module_name == "mylib.math", "implementation_partition_declaration: expected 'mylib.math'");
+    expect(program.partition_name == "detail", "implementation_partition_declaration: expected 'detail'");
+    expect(!program.is_module_interface, "implementation_partition_declaration: should not be an interface partition");
+    expect(program.is_module_impl, "implementation_partition_declaration: should be an implementation partition");
+}
+
+// ch11 §11.4: `import :part;` inside a file with no module declaration
+// of its own makes no sense -- partitions only exist within a module.
+void test_partition_import_outside_module_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("import :trig;\nint main() { return 0; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "partition_import_outside_module_is_rejected: expected a ParseError");
+}
+
+// ch11 §11.4: `import :part;` without a partition resolver configured
+// (mirrors the existing cross-module "no module resolver" check) is
+// rejected with a clear error rather than crashing.
+void test_partition_import_without_resolver_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("export module mylib.math;\nimport :trig;\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "partition_import_without_resolver_is_rejected: expected a ParseError");
+}
+
+// ch11 §11.4: a partition import (`import :part;`) resolves via
+// PartitionResolver, keyed as "<module_name>:<partition>" -- merging
+// every declaration (exported or not) *with* their bodies, unlike a
+// cross-module import.
+void test_partition_import_merges_with_body() {
+    scpp::PartitionResolver partition_resolver = [](const std::string& key) -> scpp::Program {
+        expect(key == "mylib.math:trig", "partition_import_merges_with_body: expected key 'mylib.math:trig'");
+        return scpp::parse(
+            "export module mylib.math:trig;\n"
+            "namespace mylib::math {\n"
+            "    export int sin_deg_approx(int degrees) { return degrees / 2; }\n"
+            "    int private_helper(int x) { return x; }\n"
+            "}\n");
+    };
+    scpp::Program program = scpp::parse(
+        "export module mylib.math;\n"
+        "export import :trig;\n"
+        "namespace mylib::math { export int square(int x) { return x * x; } }\n",
+        /*resolver=*/{}, partition_resolver);
+    // 2 functions from the partition (sin_deg_approx + private_helper)
+    // plus this file's own square.
+    expect(program.functions.size() == 3, "partition_import_merges_with_body: expected 3 functions");
+    for (const scpp::Function& fn : program.functions) {
+        expect(fn.body != nullptr, "partition_import_merges_with_body: '" + fn.name + "' should keep its body");
+        expect(fn.owning_module.empty(),
+               "partition_import_merges_with_body: '" + fn.name + "' owning_module should stay empty");
+    }
+    bool found_exported_sin = false;
+    bool found_private_helper = false;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "mylib::math::sin_deg_approx") {
+            found_exported_sin = true;
+            expect(fn.is_exported, "partition_import_merges_with_body: sin_deg_approx should be exported "
+                                    "(export import re-exports the partition's own exports)");
+        }
+        if (fn.name == "mylib::math::private_helper") {
+            found_private_helper = true;
+            expect(!fn.is_exported,
+                   "partition_import_merges_with_body: private_helper was never exported by the partition "
+                   "itself, so it should stay unexported after merging");
+        }
+    }
+    expect(found_exported_sin, "partition_import_merges_with_body: expected to find sin_deg_approx");
+    expect(found_private_helper, "partition_import_merges_with_body: expected to find private_helper");
+}
+
+// ch11 §11.4: a plain `import :part;` (no `export`) merges the
+// partition's declarations for internal use, but forces is_exported
+// false on all of them regardless of the partition's own markings --
+// they must not leak to an external importer of the whole module.
+void test_plain_partition_import_does_not_reexport() {
+    scpp::PartitionResolver partition_resolver = [](const std::string&) -> scpp::Program {
+        return scpp::parse(
+            "export module mylib.math:trig;\n"
+            "namespace mylib::math { export int sin_deg_approx(int degrees) { return degrees / 2; } }\n");
+    };
+    scpp::Program program = scpp::parse(
+        "export module mylib.math;\n"
+        "import :trig;\n"
+        "namespace mylib::math { export int square(int x) { return x * x; } }\n",
+        /*resolver=*/{}, partition_resolver);
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "mylib::math::sin_deg_approx") {
+            expect(!fn.is_exported, "plain_partition_import_does_not_reexport: sin_deg_approx should not be "
+                                     "exported (plain import :part; never re-exports)");
+        }
+    }
+}
+
+// ch11 §11.4: `export import :part;` on an implementation partition
+// (declared via `module name:part;`, no `export`) is a compile error --
+// such a partition can never export anything to the outside, by
+// construction.
+void test_export_import_on_implementation_partition_is_rejected() {
+    scpp::PartitionResolver partition_resolver = [](const std::string&) -> scpp::Program {
+        return scpp::parse("module mylib.math:detail;\nnamespace mylib::math { export int f() { return 0; } }\n");
+    };
+    bool threw = false;
+    try {
+        scpp::parse("export module mylib.math;\nexport import :detail;\n", /*resolver=*/{}, partition_resolver);
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "export_import_on_implementation_partition_is_rejected: expected a ParseError");
+}
+
 } // namespace
 
 int main() {
@@ -1012,6 +1143,13 @@ int main() {
     test_export_without_any_module_declaration_is_rejected();
     test_bare_extern_declaration_is_module_extern();
     test_bare_extern_declaration_is_namespace_qualified();
+    test_partition_declaration_sets_partition_name();
+    test_implementation_partition_declaration();
+    test_partition_import_outside_module_is_rejected();
+    test_partition_import_without_resolver_is_rejected();
+    test_partition_import_merges_with_body();
+    test_plain_partition_import_does_not_reexport();
+    test_export_import_on_implementation_partition_is_rejected();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

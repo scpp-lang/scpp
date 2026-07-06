@@ -379,17 +379,40 @@ struct ClassDef {
     std::string owning_module;
 };
 
-// ch11 §11.7: one `import name;` / `export import name;` declaration.
+// ch11 §11.8: one `import name;` / `export import name;` declaration,
+// or (ch11 §11.4) a same-module partition import (`import :part;` /
+// `export import :part;`).
 struct ImportDecl {
     // The imported module's dotted name (e.g. "std", "org.lotx.cmath"),
     // exactly as written -- this is also the key the driver's
     // ModuleResolver/import-path mapping (`--import name=path`) is
-    // looked up by.
+    // looked up by. For a partition import (is_partition == true), this
+    // instead holds just the bare partition identifier (e.g. "string"),
+    // no dots -- the parser resolves it against the *current* file's own
+    // module_name (joined as "<module_name>:<this>") before consulting
+    // the resolver, so the resolver callback's key shape is identical
+    // either way.
     std::string module_name;
-    // ch11 §11.7: true for `export import name;` (transitively
+    // ch11 §11.8: true for `export import name;` (transitively
     // re-exports `name`'s own exports to whoever imports *this* file in
     // turn), false for a plain `import name;` (private, non-transitive).
+    // For a partition import (ch11 §11.4), this instead controls whether
+    // the partition's own exported declarations become part of the
+    // *whole module's* export surface (export import :part;) or stay
+    // purely internal to the module (plain import :part;) -- either way
+    // every declaration in the partition, exported or not, is visible to
+    // the current file and its sibling partitions (see
+    // parser.cppm's merge_partition).
     bool is_reexport = false;
+    // ch11 §11.4: true for `import :part;` / `export import :part;` (a
+    // same-module partition import) -- false for an ordinary cross-
+    // module `import name;` (ch11 §11.8). A partition import is resolved
+    // and merged completely differently from a cross-module one (see
+    // parser.cppm's merge_partition vs merge_imported_module): every
+    // declaration crosses in (not just exported ones), with bodies
+    // preserved (the partition compiles *together* with the importing
+    // file, not as a separately-compiled module).
+    bool is_partition = false;
 };
 
 struct Program {
@@ -401,20 +424,34 @@ struct Program {
     // "org.lotx.cmath" -- empty for an ordinary, non-module file (every
     // scpp file before this chapter, and still the overwhelmingly common
     // case: nothing about module_name being empty changes any existing
-    // behavior anywhere).
+    // behavior anywhere). For a partition file (ch11 §11.4, `export
+    // module std:string;`), this still holds just the base module name
+    // ("std", never "std:string") -- see partition_name below for the
+    // part after the colon.
     std::string module_name;
-    // True for a file starting `export module name;` (a primary
-    // interface unit -- may contain `export`-marked declarations).
+    // ch11 §11.4: the partition name after `:` in `export module
+    // name:part;` / `module name:part;` -- empty for the primary
+    // interface/implementation unit (every module file before this
+    // section, and still the common case). A non-empty partition_name
+    // designates exactly one file within module_name; see parser.cppm's
+    // merge_partition for how a partition's declarations reach the file
+    // that imports it.
+    std::string partition_name;
+    // True for a file starting `export module name;` or `export module
+    // name:part;` (an interface unit or interface partition -- may
+    // contain `export`-marked declarations).
     bool is_module_interface = false;
-    // True for a file starting `module name;` with no `export` (an
-    // implementation unit -- contributes more code to the same module,
-    // but may not itself export anything; see ch11 §11.3). Mutually
+    // True for a file starting `module name;` or `module name:part;`
+    // with no `export` (an implementation unit or implementation
+    // partition -- contributes more code to the same module, but may
+    // not itself export anything; see ch11 §11.3/§11.4). Mutually
     // exclusive with is_module_interface.
     bool is_module_impl = false;
-    // Every `import`/`export import` declaration this file has, in
-    // source order -- consulted by the driver to know which modules
-    // must be separately compiled and linked in, and by the export/
-    // namespace validation pass for re-export bookkeeping.
+    // Every `import`/`export import` declaration this file has
+    // (cross-module or same-module partition alike), in source order --
+    // consulted by the driver to know which modules must be separately
+    // compiled and linked in, and by the export/namespace validation
+    // pass for re-export bookkeeping.
     std::vector<ImportDecl> imports;
 };
 

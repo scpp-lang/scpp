@@ -70,6 +70,12 @@ std::string read_module_source(const std::string& path) {
 // supported (mirrors Clang's `-fmodule-file=` and Rust's `--extern`,
 // per ch11 §11.13) -- a `.scppm` archive/package search path
 // (§11.11/§11.13's `-I` convenience) is out of scope for this pass.
+//
+// Also resolves `import :part;`/`export import :part;` (ch11 §11.4,
+// same-module partitions) against the *same* `--import` mapping, keyed
+// as "<module>:<partition>" (e.g. "std:string") -- see resolve_partition
+// below for why that path re-parses fresh every time instead of caching
+// like resolve() does for ordinary cross-module imports.
 class ModuleCache {
 public:
     explicit ModuleCache(std::unordered_map<std::string, std::string> import_paths)
@@ -91,8 +97,9 @@ public:
 
         resolving_.insert(module_name);
         std::string source = read_module_source(path_it->second);
-        Program imported =
-            parse(source, [this](const std::string& name) -> const Program& { return resolve(name); });
+        Program imported = parse(
+            source, [this](const std::string& name) -> const Program& { return resolve(name); },
+            [this](const std::string& key) -> Program { return resolve_partition(key); });
         resolving_.erase(module_name);
 
         if (imported.module_name != module_name) {
@@ -107,12 +114,50 @@ public:
         return it->second;
     }
 
+    // ch11 §11.4: resolves a same-module partition key
+    // ("<module>:<partition>", e.g. "std:string") against the same
+    // `--import name=path` mapping resolve() uses. Returns a *freshly
+    // parsed* Program by value every call -- never cached -- since
+    // scpp.parser's merge_partition genuinely moves each declaration
+    // (bodies included) out of the returned Program; a cached, shared
+    // instance would end up silently empty for a second importer of the
+    // same partition (see PartitionResolver's own comment in
+    // parser.cppm for why this v1 limitation -- no shared identity
+    // across two importers of the same partition -- is acceptable).
+    Program resolve_partition(const std::string& key) {
+        if (partitions_resolving_.contains(key)) {
+            throw DriverError("circular partition import detected: '" + key +
+                               "' (directly or transitively) imports itself");
+        }
+        auto path_it = import_paths_.find(key);
+        if (path_it == import_paths_.end()) {
+            throw DriverError("cannot find partition '" + key + "' (use --import " + key + "=path/to/file)");
+        }
+
+        partitions_resolving_.insert(key);
+        std::string source = read_module_source(path_it->second);
+        Program partition = parse(
+            source, [this](const std::string& name) -> const Program& { return resolve(name); },
+            [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); });
+        partitions_resolving_.erase(key);
+
+        std::string expected_key = partition.module_name + ":" + partition.partition_name;
+        if (expected_key != key) {
+            throw DriverError("'" + path_it->second + "' does not declare partition '" + key +
+                               "' (its own module declaration names '" + expected_key + "')");
+        }
+        return partition;
+    }
+
     // Every module actually resolved so far, in first-resolved order (a
     // transitively-imported module is resolved -- and so appears here --
     // strictly before whatever imported it, since resolve() recurses
     // into a module's own imports before that module's entry is
     // recorded). Used by compile_to_executable to know which modules
-    // need their own separately-compiled object file.
+    // need their own separately-compiled object file. Partitions are
+    // deliberately never recorded here at all (see resolve_partition) --
+    // a partition folds into whichever module imports it and never gets
+    // an object file of its own.
     [[nodiscard]] const std::vector<std::string>& resolution_order() const { return resolution_order_; }
     [[nodiscard]] const Program& program_for(const std::string& module_name) const { return cache_.at(module_name); }
 
@@ -120,6 +165,7 @@ private:
     std::unordered_map<std::string, std::string> import_paths_;
     std::unordered_map<std::string, Program> cache_;
     std::unordered_set<std::string> resolving_;
+    std::unordered_set<std::string> partitions_resolving_;
     std::vector<std::string> resolution_order_;
 };
 
@@ -189,8 +235,9 @@ export namespace scpp {
 void emit_object_file(std::string_view source, const std::string& object_path,
                        const std::unordered_map<std::string, std::string>& import_paths = {}) {
     ModuleCache cache(import_paths);
-    Program program =
-        parse(source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); });
+    Program program = parse(
+        source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
+        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); });
     emit_object_file_for_program(program, object_path);
 }
 
@@ -236,8 +283,9 @@ void compile_to_executable(std::string_view source, const std::string& executabl
                             const std::vector<std::string>& extra_link_inputs = {},
                             const std::unordered_map<std::string, std::string>& import_paths = {}) {
     ModuleCache cache(import_paths);
-    Program program =
-        parse(source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); });
+    Program program = parse(
+        source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
+        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); });
 
     std::string object_path = executable_path + ".o";
     emit_object_file_for_program(program, object_path);
