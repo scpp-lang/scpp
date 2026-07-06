@@ -473,6 +473,119 @@ void run_module_system_tests() {
         std::filesystem::remove(trig_path);
         std::filesystem::remove(lib_path);
     }
+
+    // ch11 §11.8: `export import a;` inside module `b` re-exports `a`'s
+    // exports *transitively* -- a third file that only `import b;` (never
+    // importing `a` directly) can still call `a::value()` by relying on
+    // that transitive re-export. This is also a mangling-correctness
+    // regression test: the symbol codegen declares/defines for
+    // `a::value()` must be mangled using "a" (its *original* defining
+    // module) even when merged a second time via "b" -- a real bug found
+    // by black-box testing (colleague-reported): the merged clone's
+    // owning_module was being unconditionally overwritten with the
+    // *re-exporting* module's name ("b") instead of preserving the
+    // original ("a"), producing a mangled symbol nothing ever defined
+    // and failing to link.
+    {
+        std::string case_name = "export_import_reexports_transitively";
+        cases_run++;
+        std::filesystem::path a_path = write_temp_file(case_name, "a",
+            "export module a;\nnamespace a { export int value() { return 42; } }\n");
+        std::filesystem::path b_path = write_temp_file(case_name, "b",
+            "export module b;\n"
+            "export import a;\n"
+            "namespace b { export int helper() { return a::value() + 1; } }\n");
+        std::string main_source =
+            "import b;\n"
+            "int main() {\n"
+            "    print_int(a::value());\n"
+            "    print_int(b::helper());\n"
+            "    return 0;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"a", a_path.string()}, {"b", b_path.string()}});
+            FILE* pipe = popen(exe_path.string().c_str(), "r");
+            std::string output;
+            if (pipe != nullptr) {
+                char buffer[256];
+                size_t n;
+                while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
+            }
+            int status = pipe != nullptr ? pclose(pipe) : -1;
+            std::filesystem::remove(exe_path);
+            expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
+            expect(output == "42\n43\n", case_name + ": expected stdout '42\\n43\\n', got '" + output + "'");
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(a_path);
+        std::filesystem::remove(b_path);
+    }
+
+    // ch11 §11.8: a plain (non-reexporting) `import a;` inside module `b`
+    // is private -- `a`'s exports must NOT become visible to a third file
+    // that only `import b;`, even though `b`'s own code (e.g. `helper()`)
+    // can still call `a::value()` internally without issue.
+    {
+        std::string case_name = "plain_import_does_not_reexport_transitively";
+        cases_run++;
+        std::filesystem::path a_path = write_temp_file(case_name, "a",
+            "export module a;\nnamespace a { export int value() { return 42; } }\n");
+        std::filesystem::path b_path = write_temp_file(case_name, "b",
+            "export module b;\n"
+            "import a;\n"
+            "namespace b { export int helper() { return a::value() + 1; } }\n");
+
+        // The indirect call (through b::helper()) must still work fine.
+        {
+            std::string main_source = "import b;\nint main() { print_int(b::helper()); return 0; }\n";
+            try {
+                std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
+                                                  ("scpp_driver_test_" + case_name + "_indirect_exe");
+                scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                             {{"a", a_path.string()}, {"b", b_path.string()}});
+                FILE* pipe = popen(exe_path.string().c_str(), "r");
+                std::string output;
+                if (pipe != nullptr) {
+                    char buffer[256];
+                    size_t n;
+                    while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
+                }
+                int status = pipe != nullptr ? pclose(pipe) : -1;
+                std::filesystem::remove(exe_path);
+                expect(WEXITSTATUS(status) == 0, case_name + " (indirect): expected exit code 0");
+                expect(output == "43\n", case_name + " (indirect): expected stdout '43\\n', got '" + output + "'");
+            } catch (const std::exception& e) {
+                expect(false, case_name + " (indirect): threw an exception: " + std::string(e.what()));
+            }
+        }
+
+        // The direct call (relying on transitive visibility through a
+        // private import) must be rejected.
+        {
+            cases_run++;
+            std::string main_source = "import b;\nint main() { print_int(a::value()); return 0; }\n";
+            bool threw = false;
+            try {
+                std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
+                                                  ("scpp_driver_test_" + case_name + "_direct_exe");
+                scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                             {{"a", a_path.string()}, {"b", b_path.string()}});
+                std::filesystem::remove(exe_path);
+            } catch (const scpp::CodegenError&) {
+                threw = true;
+            } catch (const scpp::DataflowError&) {
+                threw = true;
+            }
+            expect(threw, case_name + " (direct): expected a::value() to stay invisible (private import is "
+                                       "non-transitive)");
+        }
+        std::filesystem::remove(a_path);
+        std::filesystem::remove(b_path);
+    }
 }
 
 } // namespace

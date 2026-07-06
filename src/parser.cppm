@@ -525,14 +525,22 @@ private:
                                       "' -- no module resolver was configured for this build (see the "
                                       "driver's --import name=path flag)");
             }
-            merge_imported_module(program, resolver_(dotted), dotted);
+            merge_imported_module(program, resolver_(dotted), dotted, is_reexport);
         }
     }
 
     // Manually clones a Function *declaration* (never its body -- see
     // merge_imported_module) since Function::body is a unique_ptr and so
-    // Function itself has no implicit copy constructor.
-    static Function clone_function_declaration(const Function& fn, const std::string& owning_module) {
+    // Function itself has no implicit copy constructor. `fallback_owning_module`
+    // is only used when `fn` doesn't already have an owning_module of its
+    // own (i.e. `fn` is `imported`'s own local declaration, not itself a
+    // pass-through re-export -- see merge_imported_module's own comment
+    // for why preserving an already-set owning_module matters).
+    // `is_reexport` gates whether the clone stays exported at all (ch11
+    // §11.8: a private, non-reexporting import must not forward what it
+    // sees to whoever imports the *current* file in turn).
+    static Function clone_function_declaration(const Function& fn, const std::string& fallback_owning_module,
+                                                 bool is_reexport) {
         Function clone;
         clone.return_type = fn.return_type;
         clone.name = fn.name;
@@ -543,32 +551,46 @@ private:
         clone.is_module_extern = fn.is_module_extern;
         clone.has_varargs = fn.has_varargs;
         clone.namespace_path = fn.namespace_path;
-        clone.is_exported = fn.is_exported;
-        clone.owning_module = owning_module;
+        clone.is_exported = is_reexport && fn.is_exported;
+        clone.owning_module = fn.owning_module.empty() ? fallback_owning_module : fn.owning_module;
         return clone;
     }
 
     // Merges `imported`'s exported surface into the Program currently
     // being parsed (ch11 §11.8): every exported StructDef/ClassDef/
-    // Function is cloned in, tagged `owning_module = imported_name` so
-    // codegen's mangling scheme (keyed off owning_module, not
-    // Program::module_name) produces exactly the symbol name the
-    // imported module's own separate compilation will define (see
-    // codegen.cppm). A cloned Function's body is always cleared (even
-    // though the source Program's own copy has a real one): check_moves/
-    // codegen's existing "body == nullptr -> already declared/defined
-    // elsewhere, don't re-check/re-define" handling (today used for
-    // `extern "C"`/bare `extern`) picks this up with zero new logic --
-    // exactly ch11 §11.8's "zero new checker logic" framing. Only
-    // `is_exported` declarations are visible to an importer at all -- a
-    // module-private helper is invisible outside its own file, matching
-    // real C++20 modules.
-    void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name) {
+    // Function is cloned in. Each clone's `owning_module` is set to
+    // `imported_name` *only if the original declaration didn't already
+    // have one* -- a declaration that reached `imported` itself via a
+    // transitive `export import` (e.g. `imported` is "b", which did
+    // `export import a;`, so this Function's owning_module is already
+    // "a") must keep pointing at its *original* defining module, not get
+    // overwritten with "b": codegen's mangling scheme (keyed off
+    // owning_module) has to match whatever "a"'s own separate
+    // compilation actually defines, regardless of how many modules
+    // re-exported it along the way. `is_reexport` (true for `export
+    // import name;`, false for a plain `import name;`) gates whether the
+    // clone stays exported at all: a private import must not forward
+    // what it sees to whoever imports the *current* file in turn (ch11
+    // §11.8's own "private, non-transitive" rule) -- `struct_names_`/
+    // `class_names_` registration is unaffected either way, since that's
+    // about the type being usable in *this* file's own subsequent
+    // parsing, not about further forwarding. A cloned Function's body is
+    // always cleared (even though the source Program's own copy has a
+    // real one): check_moves/codegen's existing "body == nullptr ->
+    // already declared/defined elsewhere, don't re-check/re-define"
+    // handling (today used for `extern "C"`/bare `extern`) picks this up
+    // with zero new logic -- exactly ch11 §11.8's "zero new checker
+    // logic" framing. Only `is_exported` declarations are visible to an
+    // importer at all -- a module-private helper is invisible outside
+    // its own file, matching real C++20 modules.
+    void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
+                                bool is_reexport) {
         for (const StructDef& def : imported.structs) {
             if (!def.is_exported) continue;
             struct_names_.insert(def.name);
             StructDef clone = def;
-            clone.owning_module = imported_name;
+            if (clone.owning_module.empty()) clone.owning_module = imported_name;
+            clone.is_exported = is_reexport && clone.is_exported;
             program.structs.push_back(std::move(clone));
         }
         for (const ClassDef& def : imported.classes) {
@@ -576,12 +598,13 @@ private:
             struct_names_.insert(def.name);
             class_names_.insert(def.name);
             ClassDef clone = def;
-            clone.owning_module = imported_name;
+            if (clone.owning_module.empty()) clone.owning_module = imported_name;
+            clone.is_exported = is_reexport && clone.is_exported;
             program.classes.push_back(std::move(clone));
         }
         for (const Function& fn : imported.functions) {
             if (!fn.is_exported) continue;
-            program.functions.push_back(clone_function_declaration(fn, imported_name));
+            program.functions.push_back(clone_function_declaration(fn, imported_name, is_reexport));
         }
     }
 
