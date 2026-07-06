@@ -518,6 +518,82 @@ void print_area(const Shape auto& s) {
   类型、以及动态分发/类型擦除（scpp 对应虚函数/`dyn` 的那部分，跟
   继承一起搁置）。
 
+## 5.12 闭包（Lambda 表达式）
+
+原样复用真实 C++ 的 lambda 语法——`[capture-list](params) { body }`，
+包括 `mutable`、尾置返回类型、以及泛型（C++14 起的 `auto` 参数）
+lambda。一个 lambda 表达式的类型，跟真实 C++ 完全一样，是一个匿名的、
+编译器合成的类：每个被capture的名字对应一个成员，外加一个实现函数体的
+`operator()`。这不是什么新概念——就是真实 C++ 本来就在做的那套脱糖——
+所以现有的 `struct`/`class` 规则（[§4](ch04-struct-vs-class.md)）能
+原样套用到闭包的成员上，不需要任何新机制：
+
+- **按值capture**（`[x]`，或者 init-capture `[x = expr]`）是一个普通的
+  拥有型成员，copy或者move进来，跟从一个参数初始化一个`class`成员
+  （[§4.2](ch04-struct-vs-class.md)）完全一样，遵循跟别处一样的move
+  规则（[§5.1](#51-所有权与移动move--ownership)）。move-only类型要进
+  闭包，靠的就是init-capture，跟传给构造函数是一回事：`std::unique_ptr<T> p`
+  就写`[p = std::move(p)]`。
+- **按引用capture**（`[&x]`）是一个引用类型的成员——`struct`不允许，
+  但`class`允许（[§4.1](ch04-struct-vs-class.md)/
+  [§4.2](ch04-struct-vs-class.md)）——所以这个闭包值本身就变成了一个
+  生命周期追踪的值，跟`class`持有一个`T&`/`const T&`字段、或者
+  `std::span`是一回事。它跟其它任何持有引用的值一样，参与同一套
+  alias-XOR-mutability和悬空检查（[§5.1](#51-所有权与移动move--ownership)-
+  [§5.3](#53-生命周期lifetime)）：闭包活着的时候，被借用的局部变量不能
+  被move、不能被重新赋值、也不能离开作用域。按引用capture不止一个名字
+  （`[&a, &b]`）时，闭包自己的生命周期跟这几个变量共同绑定——就是
+  [§5.3](#53-生命周期lifetime)已经给"好几个没分组的引用参数"用的那套
+  保守默认分组处理。
+- **`[=]`/`[&]`（整体隐式capture），以及`[&, x]`/`[=, &y]`这种混合
+  写法，原样接受**——scpp不要求每个capture都得单独点名。真实C++本身
+  并不把整体capture当成普遍要避免的坏味道，所以scpp不会加一条真实
+  C++自己都不要求的限制。
+- **例外：`this`/`*this`必须显式capture。** 裸的`[=]`或者`[&]`因为
+  lambda写在方法里、用到了成员变量而隐式capture了`this`，这是
+  **编译错误**——得写`[this]`、`[*this]`、`[=, this]`或者`[&, this]`。
+  真实C++20只是把这个**标记为deprecated**（P0806R2），因为`[=]`隐式
+  capture `this`这件事本身就很有误导性：看起来像是把整个receiver都
+  复制了一份，实际上capture的是一个指向它的裸指针——这是真实存在、有
+  据可查的use-after-free bug来源，一旦闭包活得比对象还长就会出问题。
+  scpp这里直接做成硬错误，不是deprecation warning，跟本书对待其它
+  已经被认定的C++坑的一贯做法一致（比如[§6](ch06-safe-subset.md)禁止
+  裸`unsigned`）。这条规则目前实际上是休眠的，因为class方法体本身的
+  完整检查还没设计出来（[§4.2](ch04-struct-vs-class.md)；
+  [§5.9](#59-方法与-this)只覆盖了目前已经检查的部分）——现在先定下来，
+  这样等方法体拿到完整检查能力那天，这条规则已经是现成的，而不是到
+  时候才发现的一个漏洞。
+
+**调用一个闭包**（`c(args)`）就是对它（编译器合成的）`operator()`的
+一次普通调用，跟任何别的方法调用（[§5.9](#59-方法与-this)）检查方式
+一样——没有任何闭包专属的东西。
+
+**把闭包传给别的函数**，用concept约束的泛型参数
+（[§5.11](#511-泛型函数与-concept)），不用`std::function`——按具体
+闭包类型单态化，零开销，跟scpp在别处一贯避免类型擦除/动态分发的做法
+一致：
+
+```cpp
+template<typename T>
+concept IntConsumer = requires(T f, int x) { f(x); };
+
+void for_each_doubled(std::span<int> s, IntConsumer auto&& f) {
+    for (int i = 0; i < s.size; ++i) f(s[i] * 2);
+}
+```
+
+**不需要任何新机制，就能阻止一个按引用capture的闭包"逃逸"**——比如
+被传给另一个函数、然后存进一个全局数组里。
+[§5.3](#53-生命周期lifetime)的intraprocedural模型，以及
+[ch11 §11.9](ch11-modules-and-libraries.md#119-健全性跨模块检查器只需要签名)
+对它的重申，已经确立了：调用方只需要被调用函数的**签名**，永远不需要
+看它的函数体——如果某个函数自己的函数体把闭包参数存进了`'static`
+时长的存储里，那这个函数自己的签名必须早就承诺了它的参数活得够久，
+这件事在这个函数自己定义的地方就检查过一次了——不然这个函数自己压根
+编译不过。一个绑定在短生命周期局部变量上的闭包，天然满足不了这样的
+签名，所以把它传给那个函数，在调用点就会被拒绝，调用方自己的检查器
+完全不需要去看被调用函数的函数体。
+
 ---
 
 [← 上一章：struct 与 class 的语义区分](ch04-struct-vs-class.md) · [目录](README.md) · [下一章：v0.1 支持的子集 →](ch06-safe-subset.md)

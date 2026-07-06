@@ -91,6 +91,16 @@ distinct from an ordinary type/borrow-check error):
   function's body is checked once, at its own definition, against only
   what the concept's `requires`-expression guarantees -- not deferred to
   instantiation the way real C++ templates otherwise work.
+- **Lambda expressions** (`[capture-list](params) { body }`, real C++
+  syntax verbatim -- see [§5.12](ch05-static-checks.md)): desugars to an
+  anonymous, compiler-synthesized class exactly as in real C++, so no
+  new checking machinery beyond the `struct`/`class` rules
+  ([§4](ch04-struct-vs-class.md)) is needed. By-value captures are
+  ordinary owned members; by-reference captures are reference-typed
+  members, making the closure value itself lifetime-tracked like
+  `std::span`. `this`/`*this` must always be captured explicitly -- a
+  bare `[=]`/`[&]` implicitly capturing `this` is a compile error (real
+  C++20 only deprecates this, P0806R2).
 - `consteval` functions (see [§4.2](ch04-struct-vs-class.md)): scpp's only compile-time-function
   mechanism, reused verbatim from real C++20 -- every call is
   mandatorily evaluated at compile time, a compile error if any argument
@@ -153,7 +163,6 @@ distinct from an ordinary type/borrow-check error):
   generic-*function* design too.
 - Inheritance and virtual functions for `class` types (and therefore
   `protected`) -- see [§4.2](ch04-struct-vs-class.md).
-- Lifetime checking of lambdas capturing references.
 - The full aliasing model for `shared_ptr`.
 - `for`/range-for, `std::vector`, `std::string`/`std::string_view`,
   `reinterpret_cast`, `union`, raw `new`/`delete`, and global variables.

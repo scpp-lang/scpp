@@ -21,6 +21,7 @@
 | 局部变量 `T x;` | 拥有其值；作用域结束时 drop（析构）。 |
 | `new` / `delete` | 默认**禁止**；需 `unsafe { }`。（裸指针的**解引用**同样需要 `unsafe { }` 才能用，但 `T*` 这个**类型**本身、以及上面用 `&expr` 取一个裸地址，都不需要——见 [§5.5](ch05-static-checks.md)。） |
 | `[[scpp::lifetime(name)]]` | Attribute（不是新关键字），把引用型形参/声明符分到具名的跨函数生命周期组——这是 scpp 相对 Rust `'a`/Circle `/a` 的可选退出式替代方案；见 [§5.3](ch05-static-checks.md)。 |
+| `[capture-list](params) { body }`（lambda 表达式） | 跟真实 C++ 一样脱糖成一个匿名的、编译器合成的类：每个capture对应一个成员，`operator()` 实现函数体。按值capture是普通的拥有型成员；按引用capture是引用类型的成员，使闭包本身变成一个生命周期追踪的值。`this`/`*this` 必须显式capture——裸的 `[=]`/`[&]` 隐式capture `this` 是编译错误（真实 C++20 只是把它标记为 deprecated，P0806R2）。见 [§5.12](ch05-static-checks.md)。 |
 | `extern "C" ...;` / `extern "C" ... { ... }` | 不是重新语义化，只是加限制：声明/定义一个 C 链接的函数，签名类型限定为 C-ABI 兼容类型。不带函数体的声明永远隐式不受检查（没东西可验证）——调用它需要 `unsafe { }`；带函数体的定义内部跟其它任何函数一样受检查。见 [§2.1](ch02-boundary-rules.md)。 |
 
 **关键原则**：这些语义变化对用户是"隐形"的——他们写的还是熟悉的 C++，

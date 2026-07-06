@@ -76,6 +76,14 @@
   编译期多态机制。按每个具体类型单态化（零开销，没有 vtable）；受约束
   的函数体在它自己定义的地方就检查一遍，只认 concept 的 `requires`
   表达式保证过的东西——不像真实 C++ 模板那样延迟到实例化才检查。
+- **lambda 表达式**（`[capture-list](params) { body }`，原样复用真实
+  C++ 语法——见 [§5.12](ch05-static-checks.md)）：跟真实 C++ 一样脱糖
+  成一个匿名的、编译器合成的类，所以除了 `struct`/`class` 已有的规则
+  （[§4](ch04-struct-vs-class.md)）之外不需要任何新检查机制。按值
+  capture是普通的拥有型成员；按引用capture是引用类型的成员，使闭包值
+  本身跟 `std::span` 一样是生命周期追踪的。`this`/`*this` 必须显式
+  capture——裸的 `[=]`/`[&]` 隐式capture `this` 是编译错误（真实
+  C++20 只是把它标记为 deprecated，P0806R2）。
 - `consteval` 函数（见 [§4.2](ch04-struct-vs-class.md)）：scpp 唯一的编译期函数机制，原样复用真实 C++20 语法——
   每次调用都强制在编译期求值，只要有一个实参本身不是常量表达式就编译
   错误。scpp**没有 `constexpr` 修饰的函数**：真实 C++ 的 `constexpr`
@@ -124,7 +132,6 @@
   [§5.11](ch05-static-checks.md) 里泛型**函数**的设计也明确排除在外。
 - `class` 类型的继承和虚函数（因此也包括 `protected`）——见
   [§4.2](ch04-struct-vs-class.md)。
-- lambda 捕获引用的生命周期检查。
 - `shared_ptr` 的完整别名模型。
 - `for`/range-for、`std::vector`、`std::string`/`std::string_view`、
   `reinterpret_cast`、`union`、裸 `new`/`delete`、全局变量。

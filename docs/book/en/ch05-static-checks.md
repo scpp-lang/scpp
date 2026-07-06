@@ -657,6 +657,94 @@ void print_area(const Shape auto& s) {
   associated types, and dynamic dispatch/type erasure (scpp's
   virtual-function/`dyn`-equivalent, deferred alongside inheritance).
 
+## 5.12 Closures (Lambda Expressions)
+
+Reuses real C++ lambda syntax verbatim -- `[capture-list](params) { body }`,
+including `mutable`, trailing return types, and generic (C++14, `auto`
+parameter) lambdas. A lambda expression's type is, exactly as in real
+C++, an anonymous, compiler-synthesized class: one member per captured
+name, plus an `operator()` implementing the body. This is not a new
+concept -- it is the same desugaring real C++ already performs -- so
+every existing `struct`/`class` rule ([§4](ch04-struct-vs-class.md))
+applies to a closure's members directly, with no new machinery:
+
+- **A by-value capture** (`[x]`, or an init-capture `[x = expr]`) is an
+  ordinary owned member, copied or moved in exactly like initializing a
+  `class` member from an argument ([§4.2](ch04-struct-vs-class.md)),
+  subject to the same move rules as anywhere else
+  ([§5.1](#51-ownership--move)). Init-capture is how a move-only type
+  crosses into a closure, exactly like passing one to a constructor:
+  `[p = std::move(p)]` for a `std::unique_ptr<T> p`.
+- **A by-reference capture** (`[&x]`) is a reference-typed member --
+  forbidden in a `struct` but allowed in a `class`
+  ([§4.1](ch04-struct-vs-class.md)/[§4.2](ch04-struct-vs-class.md)) -- so
+  the closure value itself becomes a lifetime-tracked value, exactly like
+  a `class` holding a `T&`/`const T&` field, or `std::span`. It
+  participates in the same alias-XOR-mutability and dangling checks as
+  any other reference-holding value
+  ([§5.1](#51-ownership--move)-[§5.3](#53-lifetime)): the borrowed local
+  cannot be moved, reassigned, or allowed to go out of scope while the
+  closure is still alive. Capturing more than one name by reference
+  (`[&a, &b]`) ties the closure's own lifetime to all of them jointly --
+  the same conservative default-grouping treatment
+  [§5.3](#53-lifetime) already gives a function with several ungrouped
+  reference parameters.
+- **`[=]`/`[&]` (whole-scope implicit captures), and mixed forms like
+  `[&, x]`/`[=, &y]`, are accepted as-is** -- scpp does not require every
+  capture to be individually named. Real C++ does not treat blanket
+  captures as something to avoid in general, so scpp adds no restriction
+  real C++ itself does not call for.
+- **Exception: `this`/`*this` must always be captured explicitly.** A
+  bare `[=]` or `[&]` implicitly capturing `this` (because the lambda is
+  written inside a method and reads a member) is a **compile error** --
+  write `[this]`, `[*this]`, `[=, this]`, or `[&, this]` instead. Real
+  C++20 only *deprecates* this (P0806R2), because `[=]`'s implicit `this`
+  capture is genuinely misleading: it looks like the whole receiver is
+  copied, but it actually captures a raw pointer to it -- a real,
+  documented source of use-after-free bugs if the closure outlives the
+  object. scpp makes this a hard error rather than a deprecation warning,
+  matching how this spec already treats every other recognized C++
+  footgun (e.g. [§6](ch06-safe-subset.md)'s bare `unsigned` ban). This
+  rule is dormant in practice until class-method-body checking is itself
+  designed ([§4.2](ch04-struct-vs-class.md); [§5.9](#59-methods-and-this)
+  covers only what is checked so far) -- specified now so it is already
+  the rule the day method bodies gain full checking, rather than a gap
+  discovered later.
+
+**Calling a closure** (`c(args)`) is an ordinary call to its
+(compiler-synthesized) `operator()`, checked exactly like any other
+method call ([§5.9](#59-methods-and-this)) -- nothing closure-specific
+about it.
+
+**Passing a closure to another function** uses a concept-constrained
+generic parameter ([§5.11](#511-generic-functions-and-concepts)), not
+`std::function` -- monomorphized per concrete closure type, zero-cost,
+consistent with how scpp already avoids type erasure/dynamic dispatch
+elsewhere:
+
+```cpp
+template<typename T>
+concept IntConsumer = requires(T f, int x) { f(x); };
+
+void for_each_doubled(std::span<int> s, IntConsumer auto&& f) {
+    for (int i = 0; i < s.size; ++i) f(s[i] * 2);
+}
+```
+
+**Nothing new is needed to stop a reference-capturing closure from
+escaping** -- e.g. into a global array, via some other function it's
+passed to. [§5.3](#53-lifetime)'s intraprocedural model, and
+[ch11 §11.9](ch11-modules-and-libraries.md#119-soundness-cross-module-signatures-are-all-the-checker-needs)'s
+restatement of it, already establish that a caller only ever needs a
+callee's *signature*, never its body: if some function's own body stores
+its closure parameter into `'static`-duration storage, that function's
+own signature must already promise its parameter lives that long,
+checked once at that function's own definition -- otherwise that
+function itself would never have compiled. A closure tied to a
+short-lived local simply does not satisfy such a signature, so passing it
+to that function is rejected at the call site, without the caller's own
+checker ever inspecting the callee's body.
+
 ---
 
 [← Previous: Struct vs Class Semantics](ch04-struct-vs-class.md) · [Table of Contents](README.md) · [Next: The v0.1 Supported Subset →](ch06-safe-subset.md)
