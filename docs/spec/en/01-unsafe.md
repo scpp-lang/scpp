@@ -94,4 +94,4 @@ clause. — end note]
 
 ---
 
-[← Previous: Front Matter](00-front-matter.md) · [Table of Contents](README.md)
+[← Previous: Front Matter](00-front-matter.md) · [Table of Contents](README.md) · [Next: Ownership, Initialization, and Move →](02-ownership-and-move.md)

@@ -16,3 +16,4 @@
 
 0. [Front Matter (Scope, Normative References, Terms and Definitions, Conformance)](00-front-matter.md)
 5. [The `unsafe` Compound Statement](01-unsafe.md)
+6. [Ownership, Initialization, and Move](02-ownership-and-move.md)

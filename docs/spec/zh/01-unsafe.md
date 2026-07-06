@@ -86,4 +86,4 @@ context 里不合法（ill-formed），在 unsafe context 里合法
 
 ---
 
-[← 上一节：前言部分](00-front-matter.md) · [目录](README.md)
+[← 上一节：前言部分](00-front-matter.md) · [目录](README.md) · [下一节：所有权、初始化与 Move →](02-ownership-and-move.md)
