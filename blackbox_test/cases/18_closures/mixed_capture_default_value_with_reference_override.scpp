@@ -1,0 +1,10 @@
+// ch05 §5.12: "mixed forms like `[&, x]`/`[=, &y]` are accepted as-is."
+// Here `x` is captured by value (default `=`, read-only snapshot) and
+// `y` is overridden to by-reference (`&y`), so mutating `y` inside the
+// closure is visible through the original `y` afterward.
+int main() {
+    int x = 1;
+    int y = 2;
+    [=, &y]() { y = x + y; }();
+    return y;
+}

@@ -1,0 +1,35 @@
+// ch05 §5.12: "Passing a closure to another function uses a
+// concept-constrained generic parameter ([§5.11]), not std::function --
+// monomorphized per concrete closure type, zero-cost." Adapted from the
+// spec's own example (ch05 §5.12), substituting a `while` loop for the
+// spec's `for` loop since range-for/`for` itself is out of scope for v0.1
+// (ch06) and not part of what this test is exercising.
+//
+// NOTE: as of this test's writing, generic functions/concepts are not
+// yet implemented (see 13_unsupported_robustness/
+// concept_and_generic_functions_are_rejected_not_crashed.scpp) -- this
+// case exercises BOTH closures (this section) and generic functions
+// (§5.11) at once, so it may only start passing once both land, not
+// purely as a closures-specific fix.
+template<typename T>
+concept IntConsumer = requires(T f, int x) { f(x); };
+
+void for_each_doubled(std::span<int> s, IntConsumer auto&& f) {
+    int i = 0;
+    while (i < s.size) {
+        f(s[i] * 2);
+        i = i + 1;
+    }
+    return;
+}
+
+int main() {
+    int arr[3];
+    arr[0] = 1;
+    arr[1] = 2;
+    arr[2] = 3;
+    std::span<int> s = arr;
+    int sum = 0;
+    for_each_doubled(s, [&sum](int x) { sum = sum + x; });
+    return sum;
+}

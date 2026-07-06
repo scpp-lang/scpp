@@ -86,6 +86,7 @@ cmake --build build
 | `15_function_overloading` | 按精确类型匹配解析重载、by-value/by-reference 独立轴、const/非-const 方法 |
 | `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套；`using namespace` 被拒绝 |
 | `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition |
+| `18_closures` | lambda 表达式（ch05 §5.12）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
 
 ## 测试理念
 
@@ -127,17 +128,54 @@ cmake --build build
   实现"，不代表现在依然如此（这一轮又证实了一次：基本的 `namespace` 声明/
   限定查找/嵌套其实已经能用了）。拿不准的时候，用 `scpp build` 快速探测一下
   就能确认。
+- **`18_closures` 曾假设 `auto` 局部变量/返回类型推导已经能像真实 C++
+  一样工作**，尽管 `docs/book/` 里从没有明确写过这一点已支持——**验证时
+  确认这个假设是对的**，没有用例因为这个失败。
+- **`18_closures` 里跟泛型函数/泛型 lambda 相关的用例，曾预期会依赖那个
+  单独记录过的 generics/concepts 缺口**——结果只说对了一半：概念约束的
+  泛型函数/lambda 现在已经实现了（`passing_closure_to_concept_constrained_generic_function.scpp`
+  通过证实了这一点），但裸的（不带概念约束的）`auto` 参数是另一个独立的、
+  依然存在的缺口（见下面的现状）——跟最初猜的"泛型完全没实现"不是一回事。
 
 ## 现状
 
-**总共 137 个用例，全部通过。** `01_basics`-`16_namespaces` 里的 123 个，
-加上 `17_modules` 里的 13/13 个（ch11 的模块系统：`export module`/
-`import`、命名空间与模块名匹配、跨模块 import/export/重新导出、裸
-`extern`、partition）都已经针对 `src/` 实现的 module partition
-（ch11 §11.4）、`.scppm` 格式，以及一个透传重导出符号 mangle 的修复
-（见下）验证通过，另外 `13_unsupported_robustness` 里还有 1 个（见下）。
+**总共 157 个用例，154 个通过。** `01_basics`-`17_modules` 里的 137 个
+（之前已验证，见下）加上 `18_closures` 里的 17/20 个（ch05 §5.12 lambda
+表达式）已经针对 `src/` 一起实现的泛型函数/概念（§5.11）和闭包（§5.12）
+验证通过。`auto` 局部变量/返回类型推导这个假设也确认没问题。
 
-目前没有已知失败。
+`18_closures` 里有 3 个已知失败，都是真正的实现发现（不是测试的问题——
+当初写这些用例时标注的那 2 个依赖，最终都不是导致失败的原因）：
+
+- `by_reference_capture_mutates_and_reads_after_last_use.scpp`：一个按
+  引用捕获的闭包，它的借用并**没有**像 §5.3 的 NLL 模型承诺的那样在最后
+  一次使用后释放——在闭包自己最后一次使用之后，直接写（甚至只是读）被
+  捕获的局部变量，会被拒绝，报错 "cannot use 'x' while it is mutably
+  borrowed"。已经对照 `std::span`（ch05 §5.12 原文里明确拿来跟闭包类比
+  的对象："exactly like a class holding a T&/const T& field, or
+  std::span"）做了实证隔离：完全相同的"创建一次/使用一次/之后直接碰一下
+  原变量"这个形状，对 `std::span` 来说编译通过，说明 span 自己的借用
+  确实在最后一次使用后正确释放了，而闭包捕获的引用没有。很可能是"把 NLL
+  的最后一次使用后释放"这个机制扩展到闭包内部引用类型捕获成员这一步
+  上有缺口。
+- `explicit_star_this_capture_is_allowed.scpp`：`[*this]` 被一个清晰、
+  明确的诊断信息拒绝了——"capturing the enclosing object by value would
+  need class copy semantics, which don't exist yet -- use `[this]` to
+  capture a reference to it instead"。这不是一个新缺口：这正是
+  `14_classes/class_by_value_parameter_is_rejected.scpp` 早就覆盖过的
+  "class 类型还没有拷贝语义"这同一个老限制，现在通过闭包又冒出来了。
+  `[this]`（按引用）以及笼统/显式成员形式不受影响——只有 `[*this]`
+  专门依赖这个。
+- `generic_lambda_with_auto_parameter.scpp`：lambda 的裸（也就是不带
+  概念约束的）`auto` 参数——报错 "expected a type name"。已经实证隔离：
+  这不是 lambda 专属的问题——一个普通（非 lambda）函数的裸 `auto` 参数
+  会以完全相同的方式失败，而 `Concept auto`（概念约束）参数则工作正常
+  （见通过的 `passing_closure_to_concept_constrained_generic_function.scpp`，
+  用的正是这种形式）。所以目前泛型函数支持只覆盖了概念约束的情形；ch05
+  §5.12 同样声称支持的、不带约束的 C++14 泛型 lambda/泛型函数形式
+  （"generic (C++14, `auto` parameter) lambdas"）还没覆盖到。
+
+之前已验证过的 `01_basics`-`17_modules` 分类目前没有已知失败。
 
 `import ... as`（模块别名）**不是** scpp 的特性——它曾短暂地出现在
 ch11 §11.8 里，但后来确认这根本不是真实的 C++20 语法（对照 cppreference

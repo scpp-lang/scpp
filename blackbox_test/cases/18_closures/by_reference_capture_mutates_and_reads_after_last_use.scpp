@@ -1,0 +1,13 @@
+// ch05 §5.12: "A by-reference capture (`[&x]`) is a reference-typed
+// member ... the closure value itself becomes a lifetime-tracked value."
+// Mutating through the closure is visible through the original variable
+// name afterward, exactly like writing through any other `T&` (ch03).
+// `f`'s last use is the call itself, so reading `x` directly afterward
+// is fine (mirrors `borrow_released_after_last_use_permits_direct_write`
+// in 04_references_borrow).
+int main() {
+    int x = 5;
+    auto f = [&x]() { x = 10; return x; };
+    int y = f();
+    return x + y;
+}

@@ -1,0 +1,23 @@
+// ch05 §5.12: "write [this], [*this], [=, this], or [&, this] instead."
+// `[*this]` captures a copy of the whole receiver object by value
+// (distinct from `[this]`'s by-reference/pointer capture) -- accepted
+// explicit syntax. Only reading (never mutating) the captured value, so
+// this doesn't depend on resolving whether `this` inside the lambda body
+// then refers to the copy or the original.
+class Box {
+private:
+    int value;
+public:
+    Box(int v) {
+        this->value = v;
+        return;
+    }
+    int get_via_star_this_capture() {
+        return [*this]() { return this->value; }();
+    }
+};
+
+int main() {
+    Box b(42);
+    return b.get_via_star_this_capture();
+}

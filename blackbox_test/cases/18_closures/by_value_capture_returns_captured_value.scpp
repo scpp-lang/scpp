@@ -1,0 +1,8 @@
+// ch05 §5.12: a lambda expression desugars to an anonymous,
+// compiler-synthesized class -- a by-value capture (`[x]`) is an
+// ordinary owned member. Calling the closure immediately (an IIFE) needs
+// no name for the closure's own unnameable type.
+int main() {
+    int x = 5;
+    return [x]() { return x; }();
+}

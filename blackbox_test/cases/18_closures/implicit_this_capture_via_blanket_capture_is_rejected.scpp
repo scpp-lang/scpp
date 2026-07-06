@@ -1,0 +1,26 @@
+// ch05 §5.12: "Exception: this/*this must always be captured explicitly.
+// A bare [=] or [&] implicitly capturing this ... is a compile error --
+// write [this], [*this], [=, this], or [&, this] instead." scpp makes
+// this a hard error (real C++20 only deprecates it, P0806R2). This rule
+// is noted in the spec as "dormant in practice until class-method-body
+// checking is itself designed" -- so an unexpected pass here may reflect
+// that dependency rather than a lambda-capture-checking bug specifically;
+// worth double-checking against ch05 §5.9's current scope if this fails
+// to be rejected.
+class Box {
+private:
+    int value;
+public:
+    Box(int v) {
+        this->value = v;
+        return;
+    }
+    int get_via_implicit_this_capture() {
+        return [=]() { return this->value; }();
+    }
+};
+
+int main() {
+    Box b(42);
+    return b.get_via_implicit_this_capture();
+}

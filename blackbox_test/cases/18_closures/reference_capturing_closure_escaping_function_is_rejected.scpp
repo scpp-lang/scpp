@@ -1,0 +1,21 @@
+// ch05 §5.12 + §5.3: a by-reference-capturing closure is a
+// lifetime-tracked value exactly like a class holding a `T&` field --
+// returning one out of the function whose local it captures must be
+// rejected, since `local` is destroyed at `make_bad`'s exit while the
+// returned closure would still hold a reference into it. Mirrors
+// `function_returning_reference_with_no_reference_parameter_is_rejected`
+// in 04_references_borrow, but the dangling reference is hidden inside a
+// closure's member instead of being the function's literal return type.
+//
+// `auto` as a function's return type (return-type deduction) is the only
+// way to spell a closure's own unnameable type as a return type, exactly
+// as in real C++ -- assumed to already work like real C++ for the same
+// reason noted in by_value_capture_snapshots_value_at_creation_not_call.
+auto make_bad() {
+    int local = 5;
+    return [&local]() { return local; };
+}
+
+int main() {
+    return 0;
+}

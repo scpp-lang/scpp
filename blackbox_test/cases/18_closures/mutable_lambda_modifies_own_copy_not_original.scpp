@@ -1,0 +1,12 @@
+// ch05 §5.12: "Reuses real C++ lambda syntax verbatim ... including
+// `mutable`." By default a closure's `operator()` is const (a by-value
+// capture can't be reassigned inside the body); `mutable` opts out,
+// matching real C++. Mutating the closure's own copy must not affect the
+// outer `x` (a separate, by-value-captured member) -- computed as
+// `mutated_copy * 10 + outer_x` in one expression so both are observable
+// from a single exit code: inner lambda returns 6 (5+1), outer `x` stays
+// 5, so 6*10+5 = 65.
+int main() {
+    int x = 5;
+    return [x]() mutable { x = x + 1; return x; }() * 10 + x;
+}

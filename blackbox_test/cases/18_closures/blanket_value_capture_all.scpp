@@ -1,0 +1,7 @@
+// ch05 §5.12: "`[=]` (whole-scope implicit capture)... accepted as-is --
+// scpp does not require every capture to be individually named."
+int main() {
+    int x = 3;
+    int y = 4;
+    return [=]() { return x + y; }();
+}

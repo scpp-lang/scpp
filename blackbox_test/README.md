@@ -97,6 +97,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
+| `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
 
 ## Testing philosophy
 
@@ -153,18 +154,67 @@ Pass `--scpp-bin <path>` to point at a different build.
   implemented" is not always still accurate (confirmed again this round:
   basic `namespace` declaration/qualified-lookup/nesting already work).
   When in doubt, a quick probe with `scpp build` settles it empirically.
+- **`18_closures` assumed `auto` local-variable and return-type deduction
+  already work like real C++**, even though it's never explicitly called
+  out as supported anywhere in `docs/book/` -- **confirmed correct** on
+  verification, no cases failed because of this.
+- **`18_closures`'s generic-function/generic-lambda cases were expected to
+  depend on the separately-tracked generics/concepts gap** -- turned out
+  to be half right: concept-constrained generic functions/lambdas are now
+  implemented (confirmed by
+  `passing_closure_to_concept_constrained_generic_function.scpp` passing),
+  but a bare/unconstrained `auto` parameter is a distinct, still-open gap
+  (see Status below) -- not the same thing as "generics aren't implemented
+  at all" as originally guessed.
 
 ## Status
 
-**137 cases total, all passing.** 123/123 in `01_basics`-`16_namespaces`
-plus 13/13 in `17_modules` (ch11's module system: `export module`/`import`,
-namespace-matches-module-name, cross-module import/export/re-export,
-bare `extern`, partitions) are verified against `scpp` after `src/`
-implemented module partitions (ch11 §11.4), the `.scppm` format, and a
-fix to transitive re-export symbol mangling (below), plus 1 more in
-`13_unsupported_robustness` (below).
+**157 cases total, 154 passing.** 137/137 in `01_basics`-`17_modules`
+(previously verified, see below) plus 17/20 in `18_closures` (ch05 §5.12
+lambda expressions) are verified against `scpp` after `src/` implemented
+generic functions/concepts (§5.11) and closures (§5.12) together.
+`auto` local-variable/return-type deduction turned out to already work
+fine, as assumed.
 
-No known failures.
+3 known failures in `18_closures`, all genuine implementation findings
+(not test issues -- the 2 dependencies flagged when these cases were
+written did *not* end up being the cause of any of them):
+
+- `by_reference_capture_mutates_and_reads_after_last_use.scpp`: a
+  by-reference-capturing closure's borrow does **not** get released at
+  its last use the way §5.3's NLL model promises -- writing (or even just
+  reading) the captured local directly, right after the closure's own
+  last use, is rejected with "cannot use 'x' while it is mutably
+  borrowed". Isolated empirically against `std::span` (explicitly compared
+  to closures in ch05 §5.12's own text: "exactly like a class holding a
+  `T&`/`const T&` field, or `std::span`"): the exact same
+  create-once/use-once/touch-the-original-directly-afterward shape
+  compiles fine for `std::span`, so span's own borrow correctly releases
+  at last use while a closure's captured reference does not. Likely a
+  gap in extending NLL release-at-last-use to a closure's internal
+  reference-typed capture members specifically.
+- `explicit_star_this_capture_is_allowed.scpp`: `[*this]` is rejected
+  with a clear, deliberate diagnostic -- "capturing the enclosing object
+  by value would need class copy semantics, which don't exist yet -- use
+  `[this]` to capture a reference to it instead." This isn't a new gap:
+  it's the same pre-existing "no copy semantics for class types"
+  limitation `14_classes/class_by_value_parameter_is_rejected.scpp`
+  already covers, now surfacing through closures too. `[this]` (by
+  reference) and blanket/explicit-member forms are unaffected -- only
+  `[*this]` specifically depends on this.
+- `generic_lambda_with_auto_parameter.scpp`: a lambda's bare (i.e.
+  unconstrained, no concept) `auto` parameter -- "expected a type name".
+  Isolated empirically: this isn't lambda-specific -- a bare `auto`
+  parameter on an *ordinary* (non-lambda) function fails identically,
+  while a `Concept auto` (concept-constrained) parameter works fine (see
+  the passing `passing_closure_to_concept_constrained_generic_function.scpp`,
+  which uses exactly that form). So generic-function support currently
+  only covers the concept-constrained case; the unconstrained C++14
+  generic-lambda/generic-function form ch05 §5.12 also claims ("generic
+  (C++14, `auto` parameter) lambdas") isn't covered yet.
+
+No known failures in the previously-verified `01_basics`-`17_modules`
+categories.
 
 `import ... as` (module aliasing) is **not** a scpp feature -- it was
 briefly documented in ch11 §11.8 but turned out to not be real C++20
@@ -177,6 +227,7 @@ instinctively try -- so
 `13_unsupported_robustness/import_as_aliasing_is_rejected_not_crashed.scpp`
 was kept (re-targeted at "unsupported/nonexistent syntax must fail
 cleanly" rather than "documented but not yet implemented").
+
 
 Earlier fixes from the previous verification round, for reference:
 - Two `07_extern_c` cases wrongly assumed a with-body `extern "C"`

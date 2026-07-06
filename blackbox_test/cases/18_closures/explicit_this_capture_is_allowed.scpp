@@ -1,0 +1,21 @@
+// ch05 §5.12: "this/*this must always be captured explicitly ... write
+// [this], [*this], [=, this], or [&, this] instead." A lambda inside a
+// method that explicitly captures `this` and reads a member through it
+// is ordinary, accepted syntax.
+class Box {
+private:
+    int value;
+public:
+    Box(int v) {
+        this->value = v;
+        return;
+    }
+    int get_via_this_capture() {
+        return [this]() { return this->value; }();
+    }
+};
+
+int main() {
+    Box b(42);
+    return b.get_via_this_capture();
+}

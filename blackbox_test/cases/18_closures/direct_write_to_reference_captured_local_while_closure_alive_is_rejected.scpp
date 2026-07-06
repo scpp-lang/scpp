@@ -1,0 +1,14 @@
+// ch05 §5.12: "the borrowed local cannot be ... reassigned ... while the
+// closure is still alive." `f`'s last use is `return f();` at the end,
+// so its borrow of `x` is still live when `x = 10;` executes -- a direct
+// write to the borrowed original, conflicting with the closure's own
+// live reference-typed member (mirrors how
+// `borrow_released_after_last_use_permits_direct_write` in
+// 04_references_borrow shows the *opposite*, permitted case once the
+// borrow's last use has already passed).
+int main() {
+    int x = 5;
+    auto f = [&x]() { return x; };
+    x = 10;
+    return f();
+}

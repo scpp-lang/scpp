@@ -1,0 +1,5 @@
+// ch05 §5.12: "Reuses real C++ lambda syntax verbatim ... including
+// ... trailing return types."
+int main() {
+    return [](int x) -> int { return x * 2; }(21);
+}

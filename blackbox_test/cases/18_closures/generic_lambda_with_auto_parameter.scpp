@@ -1,0 +1,15 @@
+// ch05 §5.12: "Reuses real C++ lambda syntax verbatim ... including
+// generic (C++14, `auto` parameter) lambdas." A generic lambda's
+// `operator()` is itself a function template, monomorphized per
+// call-site argument type -- the same underlying mechanism as §5.11's
+// concept-constrained generic functions.
+//
+// NOTE: as of this test's writing, generic functions/concepts are not
+// yet implemented (see 13_unsupported_robustness/
+// concept_and_generic_functions_are_rejected_not_crashed.scpp) -- a
+// generic lambda's `auto` parameter plausibly depends on the same
+// monomorphization mechanism, so this case may only start passing once
+// that lands too, not purely as a closures-specific fix.
+int main() {
+    return [](auto x) { return x + x; }(21);
+}

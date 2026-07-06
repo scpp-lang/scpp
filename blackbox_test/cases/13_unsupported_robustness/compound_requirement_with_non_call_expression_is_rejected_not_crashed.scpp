@@ -1,0 +1,21 @@
+// ch05 §5.11: `concept`/`requires` and the abbreviated `Concept auto`
+// parameter form are now implemented (confirmed via
+// 18_closures/passing_closure_to_concept_constrained_generic_function.scpp),
+// so this case no longer tests "generics aren't implemented" as it
+// originally did -- it now isolates a narrower, still-real gap: a
+// compound requirement's `{ expr }` only accepts a call-shaped
+// expression (`f(x)`, `t.foo()`), not an arbitrary expression like the
+// binary `t + t` here ("expected '(' but found '+'"). Not called out as
+// a restriction anywhere in §5.11's text.
+template<typename T>
+concept Numeric = requires(T t) {
+    { t + t } -> std::same_as<T>;
+};
+
+int double_it(Numeric auto x) {
+    return x + x;
+}
+
+int main() {
+    return double_it(5);
+}

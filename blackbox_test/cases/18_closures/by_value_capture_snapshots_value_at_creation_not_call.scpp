@@ -1,0 +1,18 @@
+// ch05 §5.12: "A by-value capture is an ordinary owned member, copied or
+// moved in exactly like initializing a class member from an argument."
+// The capture happens at closure-*creation* time, not at call time: `x`
+// is captured as 5 here, so mutating the outer `x` afterward must not
+// affect what the closure returns when called later.
+//
+// This test needs the closure to outlive the statement that mutates `x`,
+// which means it must be given a name -- `auto` (C++11 local-variable
+// type deduction) is the only way to spell a closure's own unnameable
+// type, exactly as in real C++. This is assumed to already work like
+// real C++ (ch00 §2/§6: nothing is restricted unless a chapter says so),
+// since it isn't called out as excluded anywhere in ch06.
+int main() {
+    int x = 5;
+    auto f = [x]() { return x; };
+    x = 10;
+    return f();
+}

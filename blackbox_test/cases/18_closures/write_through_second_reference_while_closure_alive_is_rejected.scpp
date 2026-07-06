@@ -1,0 +1,15 @@
+// ch05 §5.12: a by-reference-capturing closure is a lifetime-tracked
+// value subject to the same alias-XOR-mutability rule as any other
+// reference ([§5.2](ch05-static-checks.md)) -- a second mutable
+// reference to the same local, taken and used while the closure is still
+// alive (not yet called), conflicts with the closure's own live borrow.
+// Mirrors `two_mutable_borrows_conflict_is_rejected` in
+// 04_references_borrow, but one side is a closure instead of a plain
+// `T&` local.
+int main() {
+    int x = 5;
+    auto f = [&x]() { return x; };
+    int& r = x;
+    r = 10;
+    return f();
+}

@@ -1,0 +1,6 @@
+// ch05 §5.12: a closure's parameter list works exactly like an ordinary
+// function's -- "calling a closure is an ordinary call to its
+// (compiler-synthesized) operator()."
+int main() {
+    return [](int a, int b) { return a + b; }(3, 4);
+}

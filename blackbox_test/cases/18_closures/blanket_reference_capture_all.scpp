@@ -1,0 +1,9 @@
+// ch05 §5.12: "`[&]` (whole-scope implicit capture)... accepted as-is."
+// Every captured name becomes a reference-typed member, so mutating
+// through the closure mutates the original locals.
+int main() {
+    int x = 0;
+    int y = 0;
+    [&]() { x = 1; y = 2; }();
+    return x + y;
+}
