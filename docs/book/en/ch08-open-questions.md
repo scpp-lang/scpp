@@ -382,6 +382,29 @@
     itself returns a function pointer (the outer function's own
     leading/trailing attribute positions would need disambiguating from
     the returned pointer's).
+17. **Should scpp support user-defined dereference operators, and if so,
+    how much of real C++'s operator surface comes with them?** **Settled:
+    yes for `operator*`, no separate `operator->`, and no new borrow rule.**
+    Verified against the current compiler first: a `class` may declare
+    `operator*()` / `operator*() const`; `*x` then works on that class,
+    `x->y` works through the pre-existing `(*x).y` rewrite, while
+    `operator->` and arithmetic operator names such as `operator+` are
+    currently rejected. The key design choice is that `*x` is **not** a
+    new primitive with its own ownership/borrowing semantics: the
+    compiler simply desugars it to an ordinary method call
+    (`x.operator*()`), so [§5.9](ch05-static-checks.md)'s existing
+    `this`-as-reference-parameter machinery, and
+    [§5.3](ch05-static-checks.md)'s existing "returned reference borrows
+    from the receiver" rules, do all the work already. This was confirmed
+    empirically too: keeping `int& r = *b;` alive and then attempting
+    `std::move(b)` is rejected by the same old "cannot move while
+    borrowed" rule, with no `operator*`-specific exception. `operator->`
+    was deliberately left out because scpp already gets the useful `x->y`
+    spelling for free from the one rewrite it already had
+    (`x->y` → `(*x).y`); adding a second, separately overloadable operator
+    name would only create another path to the same borrow-checked effect,
+    with no new expressive power needed today. See
+    [§5.17](ch05-static-checks.md#517-dereference-operators-on-classes).
 
 ---
 

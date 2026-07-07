@@ -17,3 +17,4 @@
 0. [Front Matter (Scope, Normative References, Terms and Definitions, Conformance)](00-front-matter.md)
 5. [The `[[scpp::unsafe]]` Attribute](01-unsafe.md)
 6. [Ownership, Initialization, and Move](02-ownership-and-move.md)
+7. [Dereference and Member Access](03-dereference-and-member-access.md)

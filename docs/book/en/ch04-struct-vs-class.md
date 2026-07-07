@@ -51,9 +51,9 @@ itself the explicit declaration, and the compiler verifies triviality.
   constructors (real C++ overloading rules, [§5.10](ch05-static-checks.md),
   apply directly -- disambiguated by parameter list, exactly like any
   other overloaded name) and, optionally, a destructor, using real C++
-  syntax verbatim. This is no longer limited to the standard-library-provided
-  owning type `unique_ptr` (M2's original scope) -- any user-defined
-  `class` may now own a resource and define its own cleanup logic.
+  syntax verbatim. `std::unique_ptr` is just one ordinary library `class`
+  that happens to use these rules; any user-defined `class` may likewise
+  own a resource and define its own cleanup logic.
 - **Move construction and move assignment are never user-written --
   the compiler always provides them**: a program that declares its own
   `ClassName(ClassName&&)` or `operator=(ClassName&&)` is rejected, for

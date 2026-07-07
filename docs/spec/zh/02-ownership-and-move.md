@@ -193,4 +193,4 @@ public:
 
 ---
 
-[← 上一节：`[[scpp::unsafe]]` Attribute](01-unsafe.md) · [目录](README.md)
+[← 上一节：`[[scpp::unsafe]]` Attribute](01-unsafe.md) · [目录](README.md) · [下一节：解引用与成员访问 →](03-dereference-and-member-access.md)
