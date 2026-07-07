@@ -55,6 +55,14 @@ struct CodegenError : std::runtime_error {
     return nullptr;
 }
 
+[[nodiscard]] bool is_scalar_type_name(const std::string& name) {
+    static const std::unordered_set<std::string> scalar_names = {
+        "bool", "char", "int", "long", "unsigned int", "unsigned long", "int8_t", "int16_t", "int32_t",
+        "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "float", "double", "float32_t", "float64_t",
+        "size_t", "ptrdiff_t"};
+    return scalar_names.contains(name);
+}
+
 // Lowers the M1/M2 AST subset (scalars + locals + control flow + functions +
 // trivial structs, no borrow/move checks yet) directly to LLVM IR.
 class Codegen {
@@ -329,6 +337,13 @@ private:
         return nullptr;
     }
 
+    const ClassDef* find_class_def(const std::string& name) const {
+        for (const ClassDef& def : program_->classes) {
+            if (def.name == name) return &def;
+        }
+        return nullptr;
+    }
+
     const Function* find_function_def(const std::string& name) const {
         for (const Function& fn : program_->functions) {
             if (fn.name == name) return &fn;
@@ -570,22 +585,17 @@ private:
         return arg_type.has_value() && types_equal(*arg_type, expected_type);
     }
 
+    [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type) const {
+        if (expr.kind != ExprKind::Identifier) return false;
+        auto it = locals_.find(expr.name);
+        return it != locals_.end() && types_equal(it->second.type, target_type);
+    }
+
     // Whether `arg` is a legitimate argument for a candidate overload's
     // parameter declared as `param_type` -- mirrors movecheck's own
-    // argument_matches_parameter (ch05 §5.10) exactly (same by-value/
-    // by-reference/std::unique_ptr distinctions), just phrased over
+    // argument_matches_parameter (ch05 §5.10) exactly, just phrased over
     // codegen's own infer_type/types_equal instead of movecheck's.
     bool argument_matches_parameter(const Expr& arg, const Type& param_type) {
-        if (is_unique_ptr(param_type)) {
-            bool produces_rvalue = arg.kind == ExprKind::Move;
-            if (!produces_rvalue && arg.kind == ExprKind::Call) {
-                std::optional<Type> arg_type = infer_type(arg);
-                produces_rvalue = arg_type.has_value() && is_unique_ptr(*arg_type);
-            }
-            if (!produces_rvalue) return false;
-            std::optional<Type> arg_type = infer_type(arg);
-            return arg_type.has_value() && types_equal(*arg_type, param_type);
-        }
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
             // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- mirror image of
             // the ordinary-reference case just below.
@@ -609,7 +619,12 @@ private:
             return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
         }
         std::optional<Type> arg_type = infer_type(arg);
-        return arg_type.has_value() && types_equal(*arg_type, param_type);
+        if (!arg_type.has_value() || !types_equal(*arg_type, param_type)) return false;
+        if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr) {
+            return (is_bare_same_type_copy_source(arg, param_type) && is_copy_constructible(param_type.name)) ||
+                   produces_rvalue_of_type(arg, param_type);
+        }
+        return true;
     }
 
     // Whether `expr` (a method-call receiver or reference-parameter
@@ -751,15 +766,14 @@ private:
                 validate_trivial(*type.element, in_progress);
                 return;
             case TypeKind::Named: {
-                if (is_unique_ptr(type)) {
-                    throw CodegenError("std::unique_ptr carries ownership and cannot be a struct field; "
-                                        "use class instead",
-                        current_loc_);
-                }
-                if (type.name == "int" || type.name == "bool" || type.name == "char") return;
+                if (is_scalar_type_name(type.name)) return;
                 if (type.name == "void") {
                     throw CodegenError("'void' cannot be a struct field (only a return type or a "
                                         "pointer's pointee -- 'void*' -- may be 'void')",
+                        current_loc_);
+                }
+                if (find_class_def(type.name) != nullptr) {
+                    throw CodegenError("a class type '" + type.name + "' cannot be a struct field; use class instead",
                         current_loc_);
                 }
                 const StructDef* def = find_struct_def(type.name);
@@ -1074,13 +1088,16 @@ private:
     void validate_c_abi_compatible(const Type& type, const std::string& fn_name,
                                     const std::string& context_description) {
         switch (type.kind) {
-            case TypeKind::Named:
-                if (is_unique_ptr(type)) {
+            case TypeKind::Named: {
+                if (find_class_def(type.name) != nullptr) {
                     throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
-                                        " cannot be std::unique_ptr -- it has no defined C representation "
+                                        " cannot be class type '" + type.name +
+                                        "' -- class types have no defined C representation "
                                         "(spec ch02 §2.1)",
                         current_loc_);
                 }
+                if (is_scalar_type_name(type.name)) return;
+            }
             case TypeKind::Pointer:
             case TypeKind::FunctionPointer:
             case TypeKind::Array:
@@ -1500,6 +1517,9 @@ private:
             llvm::AllocaInst* slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
             builder_->CreateStore(&arg, slot);
             locals_[param.name] = LocalSlot{slot, param.type};
+            if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
+                locals_[param.name].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
+            }
         }
 
         codegen_stmt(*fn.body, llvm_fn);
@@ -1869,6 +1889,9 @@ private:
                 if (stmt.expr) {
                     value = current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
                                 ? codegen_lvalue(*stmt.expr).ptr
+                                : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
+                                      find_class_def(current_function_def_->return_type.name) != nullptr
+                                      ? codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type)
                                 : current_function_def_ != nullptr
                                       ? codegen_value_for_target(*stmt.expr, current_function_def_->return_type)
                                       : codegen_expr(*stmt.expr);
@@ -2158,6 +2181,30 @@ private:
         return temp;
     }
 
+    void codegen_copy_construct_class(llvm::Value* dest_ptr, llvm::Value* src_ptr, const std::string& class_name) {
+        if (const Function* user_ctor = find_user_declared_copy_ctor_ast(class_name)) {
+            llvm::Function* ctor = module_->getFunction(overload_names_.at(user_ctor));
+            builder_->CreateCall(ctor, {dest_ptr, src_ptr});
+        } else {
+            codegen_memberwise_copy_construct(dest_ptr, src_ptr, class_name);
+        }
+    }
+
+    llvm::Value* codegen_class_value_for_boundary(const Expr& expr, const Type& target_type) {
+        llvm::Type* llvm_type = to_llvm_type(target_type);
+        if (is_bare_same_type_copy_source(expr, target_type) && is_copy_constructible(target_type.name)) {
+            auto src_it = locals_.find(expr.name);
+            llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtransport");
+            codegen_copy_construct_class(temp, src_it->second.alloca, target_type.name);
+            return builder_->CreateLoad(llvm_type, temp, "classtransport.value");
+        }
+        if (expr.kind == ExprKind::Lambda) {
+            llvm::Value* temp = codegen_expr(expr);
+            return builder_->CreateLoad(llvm_type, temp, "classtransport.lambda");
+        }
+        return codegen_expr(expr);
+    }
+
     std::vector<llvm::Value*> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
                                                   size_t param_offset) {
         std::vector<llvm::Value*> result;
@@ -2198,7 +2245,12 @@ private:
                 // rather than defaulting to `int`/`double` and failing
                 // the callee's own parameter-type check.
                 if (callee_def != nullptr && i + param_offset < callee_def->params.size()) {
-                    result.push_back(codegen_value_for_target(*args[i], callee_def->params[i + param_offset].type));
+                    const Type& param_type = callee_def->params[i + param_offset].type;
+                    if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr) {
+                        result.push_back(codegen_class_value_for_boundary(*args[i], param_type));
+                    } else {
+                        result.push_back(codegen_value_for_target(*args[i], param_type));
+                    }
                 } else {
                     result.push_back(codegen_expr(*args[i]));
                 }
@@ -2223,7 +2275,11 @@ private:
             } else if (param_is_reference) {
                 result.push_back(codegen_lvalue(*args[i]).ptr);
             } else if (i < param_types.size()) {
-                result.push_back(codegen_value_for_target(*args[i], param_types[i]));
+                if (param_types[i].kind == TypeKind::Named && find_class_def(param_types[i].name) != nullptr) {
+                    result.push_back(codegen_class_value_for_boundary(*args[i], param_types[i]));
+                } else {
+                    result.push_back(codegen_value_for_target(*args[i], param_types[i]));
+                }
             } else {
                 result.push_back(codegen_expr(*args[i]));
             }
@@ -2644,44 +2700,6 @@ private:
             builder_->CreateStore(value, field_ptr);
         }
         return closure;
-    }
-
-    // `std::make_unique<T>(...)` is a compiler builtin (like std::move),
-    // not a real generic function call -- scpp has no `new` expression at
-    // all; make_unique is the only sanctioned way to heap-allocate. v0.1
-    // supports exactly two forms: zero arguments (zero-initializes T, like
-    // a bare `T x;`) or one argument when T is a scalar (int/bool/char),
-    // initializing it to that value. Everything else (multiple arguments,
-    // or one argument for a struct/array/pointer T) needs real constructor
-    // support that doesn't exist yet.
-    llvm::Value* codegen_make_unique(const Expr& expr) {
-        llvm::Type* element_type = to_llvm_type(expr.type);
-        bool element_is_scalar = expr.type.kind == TypeKind::Named &&
-                                  (expr.type.name == "int" || expr.type.name == "bool" || expr.type.name == "char");
-
-        llvm::Value* initial_value;
-        if (expr.args.empty()) {
-            initial_value = llvm::Constant::getNullValue(element_type);
-        } else if (expr.args.size() == 1 && element_is_scalar) {
-            initial_value = codegen_expr(*expr.args[0]);
-            // Refresh to `expr`'s own position -- see the VarDecl case's
-            // identical comment above.
-            current_loc_ = expr.loc;
-            check_store_type(initial_value, element_type,
-                              "std::make_unique<" + expr.type.name + ">(...)'s argument");
-        } else {
-            throw CodegenError(
-                "std::make_unique<T>(...) currently only supports zero arguments (zero-initializes "
-                "T) or exactly one argument when T is a scalar (int/bool/char)",
-                current_loc_);
-        }
-
-        llvm::Function* malloc_fn = get_or_declare_malloc();
-        uint64_t size_in_bytes = module_->getDataLayout().getTypeAllocSize(element_type);
-        llvm::Value* size_arg = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), size_in_bytes);
-        llvm::Value* heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
-        builder_->CreateStore(initial_value, heap_ptr);
-        return heap_ptr;
     }
 
     llvm::Value* codegen_new_expr(const Expr& expr) {
