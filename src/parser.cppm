@@ -2240,6 +2240,27 @@ private:
                 fn.name = qualified_class_name + "_new";
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a constructor");
+                // spec §6.4(1): a program shall not declare a move
+                // constructor for a class type -- exactly one parameter,
+                // of type rvalue reference to the class's own type (real
+                // C++'s own [class.copy.ctor] classification). Every
+                // class instead gets a compiler-synthesized one (spec
+                // §6.4(2)), dispatched directly at each `ClassName y
+                // (std::move(x));` call site (see movecheck's
+                // is_move_construction_shape) -- never through this
+                // user-declared-constructor machinery at all. (There is
+                // no `operator=` declaration syntax in this version at
+                // all, so spec §6.4(1)'s "move assignment operator" half
+                // is already vacuously satisfied -- nothing further to
+                // reject for that.)
+                if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
+                    fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
+                    fn.params[0].type.pointee->kind == TypeKind::Named &&
+                    fn.params[0].type.pointee->name == class_name) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a move constructor cannot be user-declared for class '" + class_name +
+                                          "' -- the compiler always provides one (spec §6.4(1)/(2), ch04 §4.2)");
+                }
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_block();

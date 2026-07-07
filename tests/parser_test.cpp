@@ -252,6 +252,48 @@ void test_thread_safety_attribute_on_parameter_parses() {
            "thread_safety_attribute_on_parameter_parses: require_thread_shareable should be false");
 }
 
+// spec §6.4(1): a program shall not declare a move constructor for a
+// class type -- exactly one parameter, of type rvalue reference to the
+// class's own type. The compiler always provides one instead (spec
+// §6.4(2)).
+void test_user_declared_move_constructor_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("class Foo {\n"
+                    "public:\n"
+                    "    Foo() { return; }\n"
+                    "    Foo(Foo&& other) { return; }\n"
+                    "};\n"
+                    "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "user_declared_move_constructor_is_rejected: expected a ParseError");
+}
+
+// An ordinary constructor taking a *different* type's rvalue reference
+// (not the enclosing class's own) is not a move constructor at all, and
+// must continue to parse normally.
+void test_constructor_taking_other_type_rvalue_reference_parses() {
+    scpp::Program program = scpp::parse(
+        "class Foo {\n"
+        "public:\n"
+        "    Foo() { return; }\n"
+        "};\n"
+        "class Bar {\n"
+        "public:\n"
+        "    Bar(Foo&& f) { return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* bar_ctor = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Bar_new") bar_ctor = &fn;
+    }
+    expect(bar_ctor != nullptr, "constructor_taking_other_type_rvalue_reference_parses: expected a 'Bar_new' Function");
+    expect(bar_ctor->params.size() == 2,
+           "constructor_taking_other_type_rvalue_reference_parses: expected 2 params (this + f)");
+}
+
 void test_operator_precedence() {
     // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3.
     scpp::Program program = scpp::parse("int f() { return 1 + 2 * 3; }");
@@ -2191,6 +2233,8 @@ int main() {
     test_thread_safety_attribute_on_struct_parses();
     test_thread_safety_attributes_on_class_parse();
     test_thread_safety_attribute_on_parameter_parses();
+    test_user_declared_move_constructor_is_rejected();
+    test_constructor_taking_other_type_rvalue_reference_parses();
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();

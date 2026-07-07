@@ -1,0 +1,18 @@
+// spec §6.4(3): a class with a non-static data member of reference type
+// has no move assignment operator at all -- exactly real C++'s own rule
+// ([class.copy.assign]), since a reference cannot be re-seated by
+// assignment.
+class RefHolder {
+public:
+    RefHolder(int& r) { return; }
+private:
+    int& r;
+};
+int main() {
+    int a = 1;
+    int b = 2;
+    RefHolder x(a);
+    RefHolder y(b);
+    y = std::move(x);
+    return 0;
+}

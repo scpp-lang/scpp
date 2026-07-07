@@ -90,6 +90,19 @@ struct MirStatement {
     // can point at the right source line, never consulted by any actual
     // dataflow check.
     SourceLocation loc;
+    // Declare only: non-null exactly when the originating VarDecl used
+    // constructor-call syntax (`ClassName name(args);`, ch04 §4.2,
+    // Stmt::has_ctor_args) -- a raw, non-owning pointer straight at the
+    // original AST's own Stmt::ctor_args vector (which outlives this MIR
+    // Body, exactly like `expr` above pointing into the same AST), so
+    // the dataflow checker can process each argument's own move/borrow
+    // effects (e.g. `Outer y(std::move(x));` marking `x` moved-out) --
+    // previously entirely invisible to movecheck, which only ever saw a
+    // bare Declare with no way to reach the arguments at all. Placed
+    // last (rather than next to `type` above, which might read more
+    // naturally) so every existing positional aggregate-init call site
+    // that predates this field stays valid unchanged.
+    const std::vector<ExprPtr>* ctor_args = nullptr;
 };
 
 enum class TerminatorKind {
@@ -241,6 +254,15 @@ private:
                 } else if (stmt.init) {
                     current().statements.push_back(
                         MirStatement{MirStatementKind::Assign, stmt.var_name, stmt.init.get(), stmt.type, stmt.loc});
+                } else if (stmt.has_ctor_args) {
+                    // ch04 §4.2: `ClassName name(args);` -- see
+                    // MirStatement::ctor_args' own comment for why this
+                    // needs to carry the argument list (rather than
+                    // falling into the plain, argument-blind Declare case
+                    // just below).
+                    MirStatement mir_stmt{MirStatementKind::Declare, stmt.var_name, nullptr, stmt.type, stmt.loc};
+                    mir_stmt.ctor_args = &stmt.ctor_args;
+                    current().statements.push_back(std::move(mir_stmt));
                 } else {
                     current().statements.push_back(
                         MirStatement{MirStatementKind::Declare, stmt.var_name, nullptr, stmt.type, stmt.loc});

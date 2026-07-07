@@ -236,6 +236,17 @@ private:
     struct LocalSlot {
         llvm::AllocaInst* alloca;
         Type type;
+        // spec §6.4: non-null only for a class-typed local whose own
+        // class has a destructor (see create_moved_flag_if_has_destructor)
+        // -- an extra `i1` slot, initialized false at declaration, set
+        // true by codegen_expr's Move case exactly when this local is
+        // the source of a `std::move(...)`. Consulted only at scope-exit
+        // (see codegen_call_destructor_unless_moved) so a moved-out
+        // instance's destructor is correctly never invoked for it (spec
+        // §6.3/§6.4) -- a class with no destructor at all needs no such
+        // tracking, since there's nothing to conditionally skip; null
+        // for every non-class-typed local for the same reason.
+        llvm::AllocaInst* moved_flag = nullptr;
     };
 
     const Program* program_ = nullptr;
@@ -1426,8 +1437,34 @@ private:
                     }
                     builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
+                    }
+                    // spec §6.4(2): `ClassName y(std::move(x));` -- the
+                    // compiler-synthesized move constructor -- dispatches
+                    // directly to the existing Move-expression codegen
+                    // (loads the source's whole aggregate value, nulls
+                    // the source slot -- see codegen_expr's Move case)
+                    // rather than resolving against any user-declared
+                    // constructor (spec §6.4(1) forbids declaring a move
+                    // constructor at all, enforced at parse time). This is
+                    // byte-for-byte equivalent to a recursive memberwise
+                    // move: every field kind bottoms out in either a
+                    // plain bitwise value (scalar/struct/pointer/
+                    // reference, unaffected either way) or a
+                    // std::unique_ptr, whose own move semantics --
+                    // capture the pointer, null the source -- the
+                    // whole-aggregate load+null already performs
+                    // correctly and transitively, however deeply nested.
+                    if (stmt.ctor_args.size() == 1 && stmt.ctor_args[0]->kind == ExprKind::Move &&
+                        stmt.ctor_args[0]->lhs->kind == ExprKind::Identifier) {
+                        auto src_it = locals_.find(stmt.ctor_args[0]->lhs->name);
+                        if (src_it != locals_.end() && types_equal(src_it->second.type, stmt.type)) {
+                            llvm::Value* moved = codegen_expr(*stmt.ctor_args[0]);
+                            builder_->CreateStore(moved, slot);
+                            return;
+                        }
                     }
                     std::string ctor_name = stmt.type.name + "_new";
                     // ch05 §5.10: a class may declare multiple
@@ -1469,6 +1506,9 @@ private:
                     builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
                 }
                 locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                if (stmt.type.kind == TypeKind::Named) {
+                    locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                }
                 if (!scope_stack_.empty()) {
                     scope_stack_.back().push_back(stmt.var_name);
                 }
@@ -1924,15 +1964,25 @@ private:
 
             case ExprKind::Move: {
                 // The move checker has already verified `expr.lhs` is a
-                // plain, currently-Initialized unique_ptr variable. At the
-                // IR level a move is: read the old value, then null out the
-                // source slot -- so even code that (incorrectly) bypassed
-                // the move checker would observe a null pointer rather than
-                // an aliased/duplicated one.
+                // plain, currently-Initialized unique_ptr or class-typed
+                // variable. At the IR level a move is: read the old
+                // value, then null out the source slot -- so even code
+                // that (incorrectly) bypassed the move checker would
+                // observe a null pointer rather than an aliased/
+                // duplicated one. For a class-typed source with a
+                // destructor, also set its own moved_flag (spec §6.3/
+                // §6.4: the destructor is never invoked for a moved-out
+                // object) -- see codegen_call_destructor_unless_moved.
                 LValue lv = codegen_lvalue(*expr.lhs);
                 llvm::Type* llvm_type = to_llvm_type(lv.type);
                 llvm::Value* old_value = builder_->CreateLoad(llvm_type, lv.ptr, "movetmp");
                 builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), lv.ptr);
+                if (expr.lhs->kind == ExprKind::Identifier) {
+                    auto local_it = locals_.find(expr.lhs->name);
+                    if (local_it != locals_.end() && local_it->second.moved_flag != nullptr) {
+                        builder_->CreateStore(llvm::ConstantInt::getTrue(*context_), local_it->second.moved_flag);
+                    }
+                }
                 return old_value;
             }
 
@@ -2048,6 +2098,85 @@ private:
         return module_->getFunction(class_name + "_delete");
     }
 
+    // spec §6.4: a fresh, zero-initialized (`false`) `i1` slot for
+    // tracking whether a class-typed local has been moved-out, so
+    // scope-exit cleanup (codegen_call_destructor_unless_moved) can
+    // correctly skip invoking its destructor if so (spec §6.3/§6.4:
+    // "its destructor, if declared, is not invoked for it"). Returns
+    // null when `class_name` has no destructor at all -- nothing to
+    // conditionally skip, so no tracking is needed (kept minimal: this
+    // local's scope-exit path stays the plain, unconditional call it
+    // always was).
+    llvm::AllocaInst* create_moved_flag_if_has_destructor(const std::string& class_name) {
+        if (find_destructor(class_name) == nullptr) return nullptr;
+        llvm::AllocaInst* flag = builder_->CreateAlloca(llvm::Type::getInt1Ty(*context_), nullptr, "movedflag");
+        builder_->CreateStore(llvm::ConstantInt::getFalse(*context_), flag);
+        return flag;
+    }
+
+    // spec §6.3/§6.4: emits `dtor(slot.alloca)` guarded by `!moved_flag`
+    // when `slot` has one (a moved-out object's destructor is never
+    // invoked for it), or an unconditional call when it doesn't (either
+    // this class has no destructor at all -- callers only reach here
+    // once find_destructor has already confirmed one exists -- or this
+    // particular local predates move-tracking, which doesn't arise in
+    // practice: every class-typed local with a destructor always gets a
+    // moved_flag at declaration).
+    void codegen_call_destructor_unless_moved(llvm::Function* dtor, const LocalSlot& slot) {
+        if (slot.moved_flag == nullptr) {
+            builder_->CreateCall(dtor, {slot.alloca});
+            return;
+        }
+        llvm::Value* was_moved = builder_->CreateLoad(llvm::Type::getInt1Ty(*context_), slot.moved_flag, "wasmoved");
+        llvm::Function* current_fn = builder_->GetInsertBlock()->getParent();
+        llvm::BasicBlock* then_bb = llvm::BasicBlock::Create(*context_, "dtorcall", current_fn);
+        llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(*context_, "dtorskip", current_fn);
+        builder_->CreateCondBr(was_moved, merge_bb, then_bb);
+        builder_->SetInsertPoint(then_bb);
+        builder_->CreateCall(dtor, {slot.alloca});
+        builder_->CreateBr(merge_bb);
+        builder_->SetInsertPoint(merge_bb);
+    }
+
+    // spec §6.4(5): move-assignment's own "replace the value of each
+    // member" step needs the *destination*'s own currently-owned
+    // resources released first, or reassigning a unique_ptr-owning field
+    // would leak whatever it already owned (unlike move-construction,
+    // codegen_stmt's VarDecl case, whose destination is always a fresh,
+    // just-zero-initialized slot with nothing yet to release). Walks
+    // `class_name`'s own flattened field layout (structs_, already
+    // base-class-first per declare_class), freeing any std::unique_ptr-
+    // typed field's current value (free(NULL) is a safe no-op, so this
+    // is correct whether or not that field actually owns a live
+    // allocation) and recursing into any nested class-typed field for
+    // its own further-nested unique_ptr fields -- exactly mirroring
+    // real C++'s own move-assignment operator, which recursively
+    // delegates to each member's own move-assignment operator rather
+    // than the whole object's destructor. Scalar/struct/raw-pointer/
+    // reference/array fields need no release at all (never resource-
+    // owning in this model, ch05 §5.5/§5.15). After this runs, the
+    // caller still needs to actually transfer the new value in (see
+    // codegen_binary's Assign case) -- this only ever frees the *old*
+    // one.
+    void codegen_release_nested_unique_ptrs(llvm::Value* ptr, const std::string& class_name) {
+        auto struct_it = structs_.find(class_name);
+        if (struct_it == structs_.end()) return;
+        const StructInfo& info = struct_it->second;
+        llvm::Function* free_fn = get_or_declare_free();
+        for (size_t i = 0; i < info.field_types.size(); i++) {
+            const Type& field_type = info.field_types[i];
+            if (field_type.kind == TypeKind::UniquePtr) {
+                llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, ptr, i, info.field_names[i]);
+                llvm::Value* old_value =
+                    builder_->CreateLoad(to_llvm_type(field_type), field_ptr, "oldnestedtmp");
+                builder_->CreateCall(free_fn, {old_value});
+            } else if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+                llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, ptr, i, info.field_names[i]);
+                codegen_release_nested_unique_ptrs(field_ptr, field_type.name);
+            }
+        }
+    }
+
     // Releases every *currently in-scope* unique_ptr local's owned
     // resource, and runs every currently-in-scope class-typed local's
     // destructor (ch04 §4.2), if it has one. Called right before each
@@ -2075,7 +2204,7 @@ private:
                 builder_->CreateCall(free_fn, {current});
             } else if (slot.type.kind == TypeKind::Named) {
                 if (llvm::Function* dtor = find_destructor(slot.type.name)) {
-                    builder_->CreateCall(dtor, {slot.alloca});
+                    codegen_call_destructor_unless_moved(dtor, slot);
                 }
             }
         }
@@ -2111,7 +2240,7 @@ private:
                     builder_->CreateCall(free_fn, {current});
                 } else if (slot_it->second.type.kind == TypeKind::Named) {
                     if (llvm::Function* dtor = find_destructor(slot_it->second.type.name)) {
-                        builder_->CreateCall(dtor, {slot_it->second.alloca});
+                        codegen_call_destructor_unless_moved(dtor, slot_it->second);
                     }
                 }
             }
@@ -2511,8 +2640,44 @@ private:
                 // out, etc).
                 llvm::Value* old_value = builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "oldtmp");
                 builder_->CreateCall(get_or_declare_free(), {old_value});
+            } else if (lv.type.kind == TypeKind::Named && structs_.contains(lv.type.name)) {
+                // spec §6.4(3)/(5): `y = std::move(x);` -- the compiler-
+                // synthesized move assignment operator (movecheck has
+                // already verified `expr.rhs` is exactly this shape --
+                // ordinary class reassignment is rejected before this
+                // point is ever reached, see check_moves). Release
+                // whatever `y` already owns (transitively, through any
+                // nested unique_ptr field) before the `CreateStore`
+                // below overwrites it wholesale with the source's own
+                // bytes -- `value` above already came from `codegen_expr`
+                // on the Move expression, which already nulled the
+                // source's slot, exactly like move-construction's own
+                // identical reasoning (codegen_stmt's VarDecl case).
+                codegen_release_nested_unique_ptrs(lv.ptr, lv.type.name);
             }
             builder_->CreateStore(value, lv.ptr);
+            if (lv.type.kind == TypeKind::Named && expr.lhs->kind == ExprKind::Identifier) {
+                // spec §6.2(4)/§6.4: an assignment always leaves its own
+                // target in the initialized state, holding the newly
+                // assigned value -- including the (real, discovered-and-
+                // fixed) self-move-assignment case `a = std::move(a);`,
+                // where evaluating the RHS above transiently sets `a`'s
+                // *own* moved_flag true as a side effect of `a` being the
+                // Move's own source (see codegen_expr's Move case) before
+                // this same statement's target (also `a`) is overwritten
+                // right back with its own (unaliased-copy-preserved)
+                // original value. Without this reset, `a`'s destructor
+                // would be wrongly skipped at its own later scope-exit,
+                // even though it again fully owns a valid value. Also
+                // covers reassigning a *previously* moved-out variable
+                // (its moved_flag would otherwise still read true from
+                // that earlier move, despite this assignment giving it a
+                // brand new value).
+                auto target_it = locals_.find(expr.lhs->name);
+                if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
+                    builder_->CreateStore(llvm::ConstantInt::getFalse(*context_), target_it->second.moved_flag);
+                }
+            }
             return value;
         }
 

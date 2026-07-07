@@ -1,0 +1,22 @@
+// spec §6.4/ch08 Q14: self-move-assignment (`a = std::move(a);`) needs
+// no defensive `this != &other` check the way real C++ does -- and,
+// critically, `a` must remain fully valid and destructible afterward
+// (a real, discovered-and-fixed bug during implementation: evaluating
+// `std::move(a)` transiently marks `a`'s own moved-out tracking flag as
+// a side effect of `a` being the move's source, before this same
+// statement's target -- also `a` -- must be restored to a normal,
+// destructible state).
+class Resource {
+public:
+    Resource(int v) { this.p = std::make_unique<int>(v); return; }
+    ~Resource() { print_int(999); return; }
+    int get() { return *this.p; }
+private:
+    std::unique_ptr<int> p;
+};
+int main() {
+    Resource a(7);
+    a = std::move(a);
+    print_int(a.get());
+    return 0;
+}

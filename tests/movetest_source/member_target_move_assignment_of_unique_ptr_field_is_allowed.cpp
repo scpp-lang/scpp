@@ -1,0 +1,15 @@
+// ch04 §4.2/spec §6.4: `this.field = std::move(x);` -- moving into a
+// std::unique_ptr *field* from a constructor parameter -- now also
+// generalizes to a class-typed field (previously this exact shape only
+// recognized a std::unique_ptr-typed field as a legitimate std::move
+// target).
+class Holder {
+public:
+    Holder(std::unique_ptr<int> p) { this.p = std::move(p); return; }
+private:
+    std::unique_ptr<int> p;
+};
+int main() {
+    Holder h(std::make_unique<int>(9));
+    return 0;
+}

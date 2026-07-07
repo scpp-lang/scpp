@@ -1,0 +1,16 @@
+// spec §6.4(2): every class gets a compiler-synthesized move
+// constructor *unconditionally*, even one with a reference-typed member
+// (only move *assignment* is conditionally suppressed for such a class,
+// spec §6.4(3) -- construction is unaffected).
+class RefHolder {
+public:
+    RefHolder(int& r) { return; }
+private:
+    int& r;
+};
+int main() {
+    int a = 1;
+    RefHolder x(a);
+    RefHolder y(std::move(x));
+    return 0;
+}

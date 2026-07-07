@@ -1359,7 +1359,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
     }
 }
 
-void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowState& state, const Body& body,
+void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors);
 
 // Checks every argument of a Call expression against its callee's
@@ -1425,7 +1425,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // could itself read/move/call), so it's checked exactly like
             // any other read; the array base contributes the (whole-)
             // root, same as Member above.
-            apply_expr(*expr.rhs, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
+            apply_expr(*expr.rhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
         case ExprKind::Unary: {
@@ -1758,7 +1758,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                     "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
                     state.current_loc);
             }
-            apply_expr(arg, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
+            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
         } else if (param_is_reference) {
             apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
                                       report_errors);
@@ -1768,7 +1768,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // must be `std::move(x)` regardless of position, so
             // std::move is simply allowed in every non-reference
             // argument slot.
-            apply_expr(arg, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
+            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
 
             // `&expr` (ch05 §5.7) passed directly as a call argument --
             // the primary motivating use case (an `extern "C"` out
@@ -1794,6 +1794,89 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                     "argument (would need 'const T*', which this parameter doesn't accept)",
                     state.current_loc);
             }
+        }
+    }
+}
+
+// ch04 §4.2: checks every argument of a `ClassName name(args);`
+// constructor-call VarDecl (Stmt::ctor_args) -- mirrors
+// check_call_arguments' own per-argument dataflow processing/validation
+// (reference-argument borrowing, rvalue-reference genuine-rvalue
+// requirement, unsafe-constructor gating) exactly, just resolved against
+// `class_name + "_new"`'s own signature(s) instead of an ordinary Call
+// expression's callee, since a constructor-call VarDecl has no wrapping
+// Call Expr of its own to hand to resolve_callee_signature/resolve_
+// overload (Stmt::ctor_args is a bare argument list). `param_offset` is
+// always 1 (the implicit `this`, exactly like any other method --
+// see make_this_param), and the receiver is unconditionally treated as
+// fully mutable (a freshly-constructed object always accepts a mutable
+// `this` -- there's no *existing* object yet for read-only-reachability
+// to apply to, mirroring codegen's own resolve_overload_by_type default).
+// Previously, constructor arguments were entirely invisible to the
+// dataflow checker (a has_ctor_args VarDecl lowered to a bare,
+// argument-blind Declare, see mir.cppm) -- e.g. `Holder h(std::move(p));`
+// never marked `p` moved-out at all. Multiple candidates matching by
+// argument count alone (ambiguous, or none at all) leave `sig` null,
+// exactly like resolve_overload's own "let a more specific, later check
+// report it" pattern -- codegen's own resolve_overload_by_type
+// independently re-derives the same answer and is the one that actually
+// rejects an unresolvable call.
+void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
+                                  DataflowState& state, const Body& body, const Signatures& signatures,
+                                  bool report_errors) {
+    std::string ctor_name = class_name + "_new";
+    const FunctionSignature* sig = nullptr;
+    auto name_it = signatures.find(ctor_name);
+    if (name_it != signatures.end()) {
+        const std::vector<FunctionSignature>& candidates = name_it->second;
+        if (candidates.size() == 1) {
+            sig = &candidates[0];
+        } else {
+            std::vector<const FunctionSignature*> matches;
+            for (const FunctionSignature& candidate : candidates) {
+                if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+                bool all_match = true;
+                for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
+                    all_match =
+                        argument_matches_parameter(*ctor_args[i], candidate.param_types[i + 1], body, signatures);
+                }
+                if (all_match) matches.push_back(&candidate);
+            }
+            if (matches.size() == 1) sig = matches[0];
+        }
+    }
+    if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
+        throw DataflowError("cannot call '" + class_name +
+                             "'s constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
+                             "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
+                             "caller can guarantee (ch01 §1.2/§1.3)",
+            state.current_loc);
+    }
+    BorrowMap in_call_borrows;
+    for (size_t i = 0; i < ctor_args.size(); i++) {
+        const Expr& arg = *ctor_args[i];
+        size_t param_index = i + 1;
+        bool param_is_reference =
+            sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
+        bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
+        if (param_is_rvalue_reference) {
+            if (report_errors &&
+                !produces_rvalue_of_type(arg, *sig->param_types[param_index].pointee, body, signatures)) {
+                throw DataflowError(
+                    "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
+                    "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
+                    "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
+                    state.current_loc);
+            }
+            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+        } else if (param_is_reference) {
+            apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
+                                      report_errors);
+        } else {
+            // A unique_ptr/class-typed by-value argument must be
+            // std::move(x) regardless of position, same reasoning as
+            // check_call_arguments' own identical fallback branch.
+            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
         }
     }
 }
@@ -1829,7 +1912,7 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
                             const Body& body, const Signatures& signatures, bool report_errors) {
     for (const LambdaCapture& capture : expr.lambda_captures) {
         if (capture.init) {
-            apply_expr(*capture.init, /*is_unique_ptr_rvalue_context=*/true, state, body, signatures, report_errors);
+            apply_expr(*capture.init, /*is_move_target_context=*/true, state, body, signatures, report_errors);
             continue;
         }
         if (!capture.by_reference) {
@@ -1864,16 +1947,23 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
 
 // Walks `expr`, updating `state` for any std::move / assignment / borrow
 // side effects and, when `report_errors` is true, throwing DataflowError
-// on an unsafe read. `is_unique_ptr_rvalue_context` is true exactly where
+// on an unsafe read. `is_move_target_context` is true exactly where
 // a bare `std::move(x)` is allowed to appear: a var-decl initializer, an
-// assignment RHS, a return value, or a call argument.
+// assignment RHS, a return value, a call argument, or a constructor-call
+// argument (ch04 §4.2 -- see check_constructor_arguments). ch04 §4.2/ch05
+// §5.15/spec §6.4: `std::move(x)` is legitimate here whether `x` is a
+// std::unique_ptr *or* a class-typed variable -- move construction/
+// assignment for `class` types is always the same compiler-provided,
+// memberwise operation (never user-written, spec §6.4(1)), so there is
+// no additional per-class validation to do here beyond the ordinary
+// move-state bookkeeping every movable type already gets.
 //
 // This function is run twice per program point: once during the
 // worklist's fixed-point iteration (report_errors=false, just to compute
 // stable per-block states) and once more in the final reporting pass
 // (report_errors=true). Both runs must apply the *same* state mutations so
 // the two phases stay consistent.
-void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowState& state, const Body& body,
+void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors) {
     // Refreshed on every call (including each recursive call for a child
     // sub-expression) so that, by the time *this* node's own checks run
@@ -1935,11 +2025,33 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             }
             const std::string& name = expr.lhs->name;
             auto type_it = body.local_types.find(name);
-            if (type_it == body.local_types.end() || !is_unique_ptr(type_it->second)) {
+            // ch04 §4.2/spec §6.4: std::unique_ptr, or any class type
+            // (move construction/assignment, always the compiler-
+            // provided memberwise operation -- never a struct/scalar,
+            // which isn't move-restricted at all (always freely
+            // copyable). Also recognizes an rvalue-reference-*to*-class
+            // local/parameter (`Inner&& i`, ch03/ch05 §5.11): `i` itself
+            // is a name, like any other, that can appear as `std::move`'s
+            // own operand (mirrors real C++: a *named* rvalue reference
+            // is itself an lvalue, so moving out of what it refers to
+            // still needs an explicit std::move) -- moving out of `i`
+            // here moves out of *its own current referent* (whatever
+            // temporary/argument that rvalue-reference parameter is
+            // itself bound to), not `i`'s own (nonexistent, references
+            // are never owning) storage.
+            auto is_named_class = [&](const Type& t) {
+                return t.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(t.name);
+            };
+            bool is_movable_class =
+                type_it != body.local_types.end() &&
+                (is_named_class(type_it->second) ||
+                 (type_it->second.kind == TypeKind::Reference && type_it->second.is_rvalue_ref &&
+                  type_it->second.pointee && is_named_class(*type_it->second.pointee)));
+            if (type_it == body.local_types.end() || !(is_unique_ptr(type_it->second) || is_movable_class)) {
                 if (report_errors) {
-                    throw DataflowError("std::move is only supported for std::unique_ptr variables in this "
-                                         "version; '" +
-                                         name + "' is not one",
+                    throw DataflowError("std::move is only supported for std::unique_ptr or class-typed "
+                                         "variables in this version; '" +
+                                         name + "' is neither",
                         state.current_loc);
                 }
                 return;
@@ -1958,9 +2070,9 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
                 }
             }
             state.locals[name] = LocalState::MovedOut;
-            if (report_errors && !is_unique_ptr_rvalue_context) {
+            if (report_errors && !is_move_target_context) {
                 throw DataflowError("std::move(" + name + ") must be used to initialize or assign into a "
-                                                            "std::unique_ptr",
+                                                            "std::unique_ptr or a same-typed class variable",
                     state.current_loc);
             }
             return;
@@ -1981,11 +2093,39 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
         case ExprKind::Binary:
             if (expr.binary_op == BinaryOp::Assign) {
                 bool target_is_unique_ptr = false;
+                bool target_is_movable_class = false;
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto it = body.local_types.find(expr.lhs->name);
                     target_is_unique_ptr = it != body.local_types.end() && is_unique_ptr(it->second);
+                    target_is_movable_class = it != body.local_types.end() && it->second.kind == TypeKind::Named &&
+                                               state.class_names != nullptr &&
+                                               state.class_names->contains(it->second.name);
+                } else if (expr.lhs->kind == ExprKind::Member) {
+                    // ch04 §4.2/spec §6.4: `this.field = std::move(x);`
+                    // (or any `obj.field = std::move(x);`) -- a field
+                    // write is always "reinitializing" regardless of
+                    // prior state (see this case's own Member branch
+                    // below: struct/class locals are Initialized as a
+                    // whole from declaration, so a field write never
+                    // needs its own separate reassignment gate the way a
+                    // *whole* class-typed local does) -- the only thing
+                    // worth resolving here is whether std::move is
+                    // *licensed* at all for this field's own declared
+                    // type, exactly like the Identifier case just above.
+                    // Previously scoped to unique_ptr fields only; now
+                    // also recognizes a class-typed field, so a
+                    // constructor moving a by-value/by-move parameter
+                    // directly into its own field (e.g. `Outer(Inner&& i)
+                    // { this.inner = std::move(i); }`) works the same way
+                    // it already did for a std::unique_ptr field.
+                    std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state);
+                    target_is_unique_ptr = field_type.has_value() && is_unique_ptr(*field_type);
+                    target_is_movable_class = field_type.has_value() && field_type->kind == TypeKind::Named &&
+                                               state.class_names != nullptr &&
+                                               state.class_names->contains(field_type->name);
                 }
-                apply_expr(*expr.rhs, target_is_unique_ptr, state, body, signatures, report_errors);
+                bool is_move_target = target_is_unique_ptr || target_is_movable_class;
+                apply_expr(*expr.rhs, is_move_target, state, body, signatures, report_errors);
                 if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*expr.rhs, body, signatures)) {
                     throw DataflowError("assigning to a std::unique_ptr variable requires std::move or "
                                         "std::make_unique (copying is not allowed)",
@@ -2081,7 +2221,7 @@ void apply_expr(const Expr& expr, bool is_unique_ptr_rvalue_context, DataflowSta
             // unique_ptr (it *produces* one); its constructor arguments
             // are ordinary values, checked as plain reads.
             for (const auto& arg : expr.args) {
-                apply_expr(*arg, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
+                apply_expr(*arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             }
             return;
 
@@ -2207,7 +2347,28 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
                 state.current_loc);
         }
     }
-    apply_expr(*stmt.expr, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
+    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+}
+
+// ch04 §4.2/spec §6.4: true exactly when `ctor_args` is the single-
+// argument shape `std::move(x)` where `x`'s own declared type is the
+// exact same class `constructed_type` names -- the shape that dispatches
+// to the compiler-synthesized move constructor (spec §6.4(2)) rather
+// than any of the class's own user-declared constructors (which can
+// never themselves be a move constructor -- spec §6.4(1) forbids
+// declaring one, enforced at parse time). A mismatched-type std::move
+// argument (or any other shape) falls through to ordinary constructor
+// resolution unchanged, exactly as it always has -- e.g. a real,
+// user-declared `Bar(Foo&& f)` constructor taking a *different* type's
+// rvalue reference is untouched by this and still resolved by
+// check_constructor_arguments below.
+[[nodiscard]] bool is_move_construction_shape(const std::vector<ExprPtr>& ctor_args, const Type& constructed_type,
+                                               const Body& body) {
+    if (ctor_args.size() != 1) return false;
+    const Expr& arg = *ctor_args[0];
+    if (arg.kind != ExprKind::Move || arg.lhs->kind != ExprKind::Identifier) return false;
+    auto type_it = body.local_types.find(arg.lhs->name);
+    return type_it != body.local_types.end() && types_equal(type_it->second, constructed_type);
 }
 
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
@@ -2217,6 +2378,23 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
     state.current_loc = stmt.loc;
     switch (stmt.kind) {
         case MirStatementKind::Declare:
+            // ch04 §4.2: a constructor-call VarDecl (`ClassName name
+            // (args);`) needs its own arguments' move/borrow effects
+            // applied -- see MirStatement::ctor_args' own comment for
+            // why this was previously entirely invisible here. A
+            // std::move(x)-of-the-same-class single argument dispatches
+            // to the compiler-synthesized move constructor directly
+            // (spec §6.4(2)); anything else goes through ordinary
+            // constructor-overload argument checking.
+            if (stmt.ctor_args != nullptr) {
+                if (is_move_construction_shape(*stmt.ctor_args, stmt.type, body)) {
+                    apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/true, state, body, signatures,
+                               report_errors);
+                } else {
+                    check_constructor_arguments(stmt.type.name, *stmt.ctor_args, state, body, signatures,
+                                                 report_errors);
+                }
+            }
             // scpp has no "uninitialized" state (see the LocalState
             // comment above): a bare declaration always zero-initializes,
             // so it's always Initialized from this point on.
@@ -2281,6 +2459,49 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // `auto f = expr;` has no such preceding Declare, so its
                 // own Assign is always this variable's first-ever
                 // appearance).
+                //
+                // spec §6.4(3): a genuine reassignment is nonetheless
+                // allowed exactly when it's `y = std::move(x);` with `x`
+                // the exact same class type -- dispatching to the
+                // compiler-synthesized move assignment operator --
+                // provided the class has no reference-typed member
+                // (spec §6.4(3)'s own exception: a reference member
+                // can't be re-seated by assignment, only ever bound once
+                // at construction, mirroring real C++'s
+                // [class.copy.assign]). Anything else (including a
+                // same-class std::move on a class *with* a reference
+                // member) falls through to the unconditional "no copy
+                // semantics" rejection just below, unchanged.
+                bool is_move_assignment = stmt.expr->kind == ExprKind::Move &&
+                                           stmt.expr->lhs->kind == ExprKind::Identifier &&
+                                           body.local_types.contains(stmt.expr->lhs->name) &&
+                                           types_equal(body.local_types.at(stmt.expr->lhs->name), type_it->second);
+                if (is_move_assignment && state.locals.contains(stmt.local)) {
+                    if (report_errors) {
+                        bool has_reference_member = false;
+                        if (state.class_field_types != nullptr) {
+                            auto fields_it = state.class_field_types->find(type_it->second.name);
+                            if (fields_it != state.class_field_types->end()) {
+                                for (const auto& [field_name, field_type] : fields_it->second) {
+                                    if (is_reference(field_type)) {
+                                        has_reference_member = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (has_reference_member) {
+                            throw DataflowError(
+                                "class '" + type_it->second.name +
+                                    "' has a reference-typed member, so it has no move assignment operator "
+                                    "(spec §6.4(3)) -- '" + stmt.local + "' cannot be reassigned",
+                                state.current_loc);
+                        }
+                    }
+                    apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                    state.locals[stmt.local] = LocalState::Initialized;
+                    return;
+                }
                 if (report_errors && state.locals.contains(stmt.local)) {
                     throw DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                          "' cannot be reassigned after construction in this version (no copy "
@@ -2300,7 +2521,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     // handling would otherwise use.
                     apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors);
                 } else {
-                    apply_expr(*stmt.expr, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures,
+                    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures,
                                report_errors);
                 }
                 state.locals[stmt.local] = LocalState::Initialized;
@@ -2347,7 +2568,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
         }
 
         case MirStatementKind::Eval:
-            apply_expr(*stmt.expr, /*is_unique_ptr_rvalue_context=*/false, state, body, signatures, report_errors);
+            apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             return;
 
         case MirStatementKind::Drop:

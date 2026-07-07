@@ -1,0 +1,21 @@
+// ch04 §4.2/spec §6.4: `this.field = std::move(i);` where `field` is
+// class-typed (not just std::unique_ptr-typed) -- the same field-target
+// move-assignment generalization, now for a nested class-typed field.
+// `i` itself is an rvalue-reference *parameter* (`Inner&&`) -- std::move
+// is still required to move out of it (a named rvalue reference is
+// itself an lvalue), moving out of its own current referent.
+class Inner {
+public:
+    Inner(int v) { return; }
+};
+class Outer {
+public:
+    Outer(Inner&& i) { this.inner = std::move(i); return; }
+private:
+    Inner inner;
+};
+int main() {
+    Inner i(1);
+    Outer o(std::move(i));
+    return 0;
+}

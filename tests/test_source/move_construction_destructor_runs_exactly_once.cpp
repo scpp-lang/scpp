@@ -1,0 +1,21 @@
+// spec §6.2/§6.3/§6.4: after `Resource b(std::move(a));` (move
+// construction), `a` is in the moved-out state, so its destructor is
+// never invoked for it -- only `b`'s runs, exactly once (not twice --
+// a real, discovered-and-fixed bug during implementation: without
+// tracking which instance was moved-out, both `a` and `b`'s destructors
+// would otherwise run, since a class-typed local's destructor
+// previously always ran unconditionally at scope-exit).
+class Resource {
+public:
+    Resource(int v) { this.p = std::make_unique<int>(v); return; }
+    ~Resource() { print_int(999); return; }
+    int get() { return *this.p; }
+private:
+    std::unique_ptr<int> p;
+};
+int main() {
+    Resource a(42);
+    Resource b(std::move(a));
+    print_int(b.get());
+    return 0;
+}

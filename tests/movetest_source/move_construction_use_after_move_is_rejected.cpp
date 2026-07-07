@@ -1,0 +1,13 @@
+// spec §6.2/§6.4: after move-constructing `y` from `std::move(x)`, `x`
+// is in the moved-out state -- any further use of it is ill-formed.
+class Widget {
+public:
+    Widget() { return; }
+    int val;
+};
+int main() {
+    Widget x;
+    x.val = 5;
+    Widget y(std::move(x));
+    return x.val;
+}
