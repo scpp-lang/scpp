@@ -1,0 +1,31 @@
+// ch05 §5.11/§5.14: a bare (unconstrained) generic type parameter
+// guarantees nothing -- calling a method on a bare-T-typed field is a
+// compile error at the generic type's own definition, regardless of
+// what any particular instantiation would allow.
+class Num {
+public:
+    int v;
+    int doubled() {
+        return this->v + this->v;
+    }
+};
+
+template<typename T>
+class Holder {
+    T item;
+public:
+    Holder(const T& x) {
+        this->item = x;
+        return;
+    }
+    int bad() {
+        return this->item.doubled();
+    }
+};
+
+int main() {
+    Num a;
+    a.v = 21;
+    Holder<Num> h(a);
+    return h.bad();
+}

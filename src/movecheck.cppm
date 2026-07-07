@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -344,6 +345,20 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
 
+// ch06 §6: the complete scalar/numeric family a `static_cast<T>(expr)`/
+// `(T)expr` may legally convert between (ExprKind::Cast's own apply_expr
+// case) -- `TypeKind::Named` alone isn't enough to tell a scalar apart
+// from a struct/class/witness name (all three share that TypeKind), so
+// this checks against the exact, closed set ch06 documents rather than
+// the type's own `kind`.
+[[nodiscard]] bool is_scalar_type_name(const std::string& name) {
+    static const std::unordered_set<std::string> scalar_names = {
+        "bool", "char", "int", "long", "unsigned int", "unsigned long", "int8_t", "int16_t", "int32_t",
+        "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "float", "double", "float32_t", "float64_t",
+        "size_t", "ptrdiff_t"};
+    return scalar_names.contains(name);
+}
+
 // spec §6.5: whether `class_name` has declared its own copy constructor
 // -- a function named "class_name_new" (see parse_class_def) whose sole
 // non-`this` parameter is `const class_name&` (an ordinary, non-rvalue,
@@ -543,16 +558,22 @@ struct CalleeSignature {
 // `ClassName_methodName` form (see parse_class_def) -- exactly like
 // codegen_call independently resolves the same fact from the receiver's
 // type. Scoped to a plain Identifier receiver (covers `this->method()`
-// and `obj.method()` for a local/parameter `obj`) or a Lambda literal
+// and `obj.method()` for a local/parameter `obj`), a Lambda literal
 // receiver (ch05 §5.12's IIFE, e.g. `[](int x){...}(5)` -- already
 // resolved to its own synthesized closure class name by the time
-// check_moves runs, see monomorphize_generics) -- the only two shapes
-// movecheck can resolve a type for without a real type-checker) -- a
-// more complex receiver expression falls back to the unqualified name
-// and a zero offset, same as an ordinary free-function call. Shared by
-// check_call_arguments and produces_unique_ptr_rvalue so both resolve a
-// method call's callee identically.
-[[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body) {
+// check_moves runs, see monomorphize_generics), or -- only when
+// `class_field_types` is supplied (optional: most callers have no
+// Program-level field-type info to give it, see DataflowState::
+// class_field_types' own comment) -- one more Member projection off a
+// plain-Identifier base (`this.field.method()`/`obj.field.method()`),
+// resolved through the field's own declared type. A more complex
+// receiver expression still falls back to the unqualified name and a
+// zero offset, same as an ordinary free-function call (this is *not* a
+// general type-checker). Shared by check_call_arguments and
+// produces_unique_ptr_rvalue so both resolve a method call's callee
+// identically.
+[[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
+                                                        const ClassFieldTypes* class_field_types = nullptr) {
     if (call_expr.lhs) {
         std::string class_name;
         if (call_expr.lhs->kind == ExprKind::Identifier) {
@@ -560,11 +581,39 @@ struct CalleeSignature {
             if (type_it != body.local_types.end()) class_name = named_type_name(type_it->second);
         } else if (call_expr.lhs->kind == ExprKind::Lambda && !call_expr.lhs->name.empty()) {
             class_name = call_expr.lhs->name;
+        } else if (class_field_types != nullptr && call_expr.lhs->kind == ExprKind::Member &&
+                   call_expr.lhs->lhs && call_expr.lhs->lhs->kind == ExprKind::Identifier) {
+            // ch05 §5.14: needed for check_generic_type_methods_once's
+            // own synthesized check functions -- a generic type's method
+            // calling another method *on one of its own fields*
+            // (`this.item.doubled()`) must still be resolved (and, when
+            // `item`'s substituted type turns out to guarantee no such
+            // method, correctly left unresolvable) even though the
+            // receiver is a Member, not a bare Identifier -- otherwise
+            // this falls back to an unqualified, unmangled lookup
+            // ("doubled") that (almost) never matches anything real,
+            // silently deferring an unresolvable call entirely to
+            // codegen -- which never runs at all for a synthetic,
+            // check-only function (ClassDef::is_synthetic_check_only),
+            // the exact gap this closes.
+            auto base_it = body.local_types.find(call_expr.lhs->lhs->name);
+            if (base_it != body.local_types.end()) {
+                const Type& base_type =
+                    base_it->second.kind == TypeKind::Reference ? *base_it->second.pointee : base_it->second;
+                if (base_type.kind == TypeKind::Named) {
+                    auto fields_it = class_field_types->find(base_type.name);
+                    if (fields_it != class_field_types->end()) {
+                        auto field_it = fields_it->second.find(call_expr.lhs->name);
+                        if (field_it != fields_it->second.end()) class_name = named_type_name(field_it->second);
+                    }
+                }
+            }
         }
         if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1};
     }
     return CalleeSignature{call_expr.name, 0};
 }
+
 
 // Forward declarations for a small mutually-recursive group implementing
 // ch05 §5.10's function-overload resolution:
@@ -616,14 +665,23 @@ struct CalleeSignature {
         return produces_rvalue_of_type(arg, *param_type.pointee, body, signatures);
     }
     if (is_reference(param_type)) {
+        // ch05 §5.x: a *const* reference may bind directly to a fresh
+        // rvalue argument -- exactly like the `T&&` case just above,
+        // just gated to only a non-mutable reference (real C++ forbids
+        // binding a *mutable* lvalue reference to a temporary).
+        if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
+            return true;
+        }
         // A bare lvalue-like place (Identifier/Member/Subscript/a
         // unique_ptr or raw pointer's Deref -- the same shapes
         // resolve_borrow_source_root accepts as a borrow source) is
         // viable against a T&/const T& parameter; std::move/MakeUnique/a
-        // literal never is (there's no place to borrow from).
+        // literal never is (there's no place to borrow from) unless the
+        // rvalue-binding case just above already accepted it.
         if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique ||
-            arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::BoolLiteral ||
-            arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
+            arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
+            arg.kind == ExprKind::BoolLiteral || arg.kind == ExprKind::CharLiteral ||
+            arg.kind == ExprKind::StringLiteral) {
             return false;
         }
         std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
@@ -986,6 +1044,7 @@ struct CalleeSignature {
         case ExprKind::Move:
         case ExprKind::MakeUnique:
         case ExprKind::IntegerLiteral:
+        case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
@@ -1032,6 +1091,7 @@ struct CalleeSignature {
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
         case ExprKind::IntegerLiteral: return Type{.kind = TypeKind::Named, .name = "int"};
+        case ExprKind::FloatLiteral: return Type{.kind = TypeKind::Named, .name = "double"};
         case ExprKind::BoolLiteral: return Type{.kind = TypeKind::Named, .name = "bool"};
         case ExprKind::CharLiteral: return Type{.kind = TypeKind::Named, .name = "char"};
         case ExprKind::StringLiteral: {
@@ -1061,6 +1121,11 @@ struct CalleeSignature {
             result.pointee = std::make_shared<Type>(expr.type);
             return result;
         }
+
+        // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): the cast's own
+        // declared target type, unconditionally -- see codegen's
+        // identical infer_type case.
+        case ExprKind::Cast: return expr.type;
 
         case ExprKind::Lambda: {
             // ch05 §5.12: once resolved (movecheck's closure-resolution
@@ -1327,6 +1392,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
     if (expr == nullptr) return;
     switch (expr->kind) {
         case ExprKind::IntegerLiteral:
+        case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
@@ -1344,6 +1410,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
             return;
         case ExprKind::Unary:
         case ExprKind::Move:
+        case ExprKind::Cast:
             collect_reference_uses(expr->lhs.get(), body, out);
             return;
         case ExprKind::Call:
@@ -1810,6 +1877,24 @@ void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, 
 void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                                BorrowMap& in_call_borrows, const Body& body, const Signatures& signatures,
                                bool report_errors) {
+    // ch05 §5.x: a *const* reference parameter bound directly to a fresh
+    // rvalue argument (a literal, std::move/std::make_unique, a lambda
+    // literal, or a call not itself returning by reference) binds to a
+    // freshly-materialized temporary -- exactly like real C++'s own
+    // temporary lifetime extension (mirrors argument_matches_parameter's
+    // identical acceptance of this shape during overload resolution).
+    // Never reached for a *mutable* `T&` (real C++ itself forbids binding
+    // a non-const lvalue reference to a temporary). A fresh temporary
+    // aliases nothing else in the entire program, so there is nothing
+    // further to check here at all: just evaluate `arg` for its own side
+    // effects (e.g. std::move's move-out bookkeeping) and return, skipping
+    // resolve_borrow_source_root/every borrow-conflict check below
+    // entirely (there is no "root" at all for a temporary).
+    if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
+        apply_expr(arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+        return;
+    }
+
     // resolve_borrow_source_root may have real (move-tracking) side
     // effects on `state` via nested apply_expr calls (e.g. a subscript
     // index) that must apply on *every* pass, not just the reporting
@@ -1934,7 +2019,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     if (expr.lhs) {
         apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
     }
-    CalleeSignature callee = resolve_callee_signature(expr, body);
+    CalleeSignature callee = resolve_callee_signature(expr, body, state.class_field_types);
     auto name_it = signatures.find(callee.key);
     const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
     // ch05 §5.10: a name that exists but has no overload whose parameters
@@ -2205,6 +2290,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
     state.current_loc = expr.loc;
     switch (expr.kind) {
         case ExprKind::IntegerLiteral:
+        case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
@@ -2304,6 +2390,30 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 throw DataflowError("std::move(" + name + ") must be used to initialize or assign into a "
                                                             "std::unique_ptr or a same-typed class variable",
                     state.current_loc);
+            }
+            return;
+        }
+
+        // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): visits the operand
+        // for its own move/borrow bookkeeping exactly like any other
+        // sub-expression (never itself a move-target-context -- a cast
+        // reads its operand's value, it doesn't take ownership of it),
+        // then validates the (source, target) pair is actually a legal
+        // scalar-to-scalar conversion -- codegen has no meaningful
+        // instruction to emit for anything else (a class, struct,
+        // unique_ptr, reference, span, or pointer type).
+        case ExprKind::Cast: {
+            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (report_errors) {
+                std::optional<Type> source_type = infer_expr_type(*expr.lhs, body, signatures);
+                bool source_ok = source_type.has_value() && source_type->kind == TypeKind::Named &&
+                                  is_scalar_type_name(source_type->name);
+                bool target_ok = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
+                if (!source_ok || !target_ok) {
+                    throw DataflowError(
+                        "a cast is only supported between two scalar types in this version (spec ch06)",
+                        state.current_loc);
+                }
             }
             return;
         }
@@ -2534,6 +2644,26 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         return;
     }
 
+    // ch05 §5.x: `const T& r = <rvalue>;` (a literal, std::move/
+    // std::make_unique, a lambda literal, or a call not itself returning
+    // by reference) binds to a freshly-materialized temporary -- exactly
+    // like real C++'s own temporary lifetime extension (mirrors
+    // apply_reference_argument's identical handling for a call
+    // argument). Scoped to `TypeKind::Reference` only (never `Span`: a
+    // std::span is only ever constructed from an existing fixed-size
+    // array, ch06, never a fresh rvalue) and to a *const* reference (real
+    // C++ forbids binding a *mutable* lvalue reference to a temporary). A
+    // fresh temporary aliases nothing else in the program, so there is
+    // no "root" to track in state.borrows/state.ref_targets at all --
+    // just evaluate the initializer for its own side effects and mark
+    // `stmt.local` initialized.
+    if (stmt.type.kind == TypeKind::Reference && !stmt.type.is_mutable_ref &&
+        produces_rvalue_of_type(*stmt.expr, *stmt.type.pointee, body, signatures)) {
+        apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+        state.locals[stmt.local] = LocalState::Initialized;
+        return;
+    }
+
     std::string root = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors);
     if (root.empty()) {
         // Only reachable when report_errors=false and the source
@@ -2680,6 +2810,22 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
 
         case MirStatementKind::Assign: {
             auto type_it = body.local_types.find(stmt.local);
+            // ch05/ch06: a `const`-qualified local (Stmt::is_const,
+            // Body::const_locals) is initialized exactly once, by the
+            // very same Assign statement its own VarDecl lowers to (see
+            // mir.cppm's VarDecl case) -- distinguished from a genuine
+            // later reassignment attempt by whether `stmt.local` already
+            // has a prior entry in `state.locals` at all, the identical
+            // "first write vs. reassignment" test the class-typed-local
+            // case below uses for its own, differently-motivated
+            // restriction. Checked *before* every type-specific case
+            // below (reference/span/class/unique_ptr/plain scalar) so it
+            // uniformly covers all of them with one rule, rather than
+            // needing to be threaded through each one separately.
+            if (report_errors && body.const_locals.contains(stmt.local) && state.locals.contains(stmt.local)) {
+                throw DataflowError("cannot reassign 'const' variable '" + stmt.local + "' after initialization",
+                    state.current_loc);
+            }
             if (type_it != body.local_types.end() && is_reference(type_it->second)) {
                 apply_reference_write_through(stmt, state, body, signatures, report_errors);
                 return;
@@ -3011,7 +3157,8 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names,
                      const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access,
                      const std::unordered_set<std::string>& classes_with_copy_ctor,
-                     const std::unordered_set<std::string>& classes_with_copy_assign) {
+                     const std::unordered_set<std::string>& classes_with_copy_assign,
+                     const std::unordered_set<std::string>& witness_class_names) {
     Body body = build_mir(fn);
 
     size_t n = body.blocks.size();
@@ -3072,8 +3219,17 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
         // independently of the caller's original -- a double-free. Take
         // a `const T&`/`T&` parameter instead (this doesn't apply to
         // `this` itself, which is always Reference-typed already, never
-        // bare Named -- see make_this_param).
-        if (param.type.kind == TypeKind::Named && class_names.contains(param.type.name)) {
+        // bare Named -- see make_this_param). Exempts a witness class
+        // (ClassDef::is_concept_witness -- a generic function's
+        // concept-constrained or bare-`auto` parameter, ch05 §5.11) --
+        // its declared type only *names* an abstract stand-in, not a
+        // real one, so this abstract, checked-once-at-definition pass
+        // cannot yet know whether the eventual concrete argument type
+        // will itself be copy-restricted; by-value passing of a bare
+        // scalar/struct (ch06's "move/store/pass-through/return"
+        // guarantee) must remain legal here.
+        if (param.type.kind == TypeKind::Named && class_names.contains(param.type.name) &&
+            !witness_class_names.contains(param.type.name)) {
             throw DataflowError("parameter '" + param.name + "' of function '" + fn.name + "' cannot take class '" +
                                  param.type.name +
                                  "' by value (no copy semantics are defined yet -- take 'const " +
@@ -3089,7 +3245,16 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     // (e.g. `this`, via the this-elision rule, ch05 §5.3/§5.9) or the
     // caller must construct its own directly -- there is no by-value
     // "return a freshly-built class instance" form in this version.
-    if (fn.return_type.kind == TypeKind::Named && class_names.contains(fn.return_type.name)) {
+    // Exempts a witness class for the identical reason the parameter
+    // check above does -- notably reached by a generic lambda whose
+    // return type is *inferred* from its own body (infer_lambda_return_
+    // type) rather than explicitly declared: when that body's own
+    // top-level `return` expression is itself witness-typed (e.g.
+    // `return x + x;` for a bare-`auto` parameter `x`), the inferred
+    // return type is the same witness, abstractly, until a real call
+    // site's monomorphized clone substitutes a concrete one.
+    if (fn.return_type.kind == TypeKind::Named && class_names.contains(fn.return_type.name) &&
+        !witness_class_names.contains(fn.return_type.name)) {
         throw DataflowError("function '" + fn.name + "' cannot return class '" + fn.return_type.name +
                              "' by value (no copy semantics are defined yet -- return '" + fn.return_type.name +
                              "&'/'const " + fn.return_type.name + "&' instead, see ch04 §4.2)",
@@ -4029,11 +4194,13 @@ private:
                 ClassDef check_class;
                 check_class.name = check_class_name;
                 check_class.is_synthetic_check_only = true;
+                std::unordered_map<std::string, Type> field_types;
                 for (const ClassField& f : fields_copy) {
                     ClassField nf;
                     nf.name = f.name;
                     nf.access = f.access;
                     nf.type = substitute_type_param(f.type, type_param_name, witness_type);
+                    field_types[nf.name] = nf.type;
                     check_class.fields.push_back(std::move(nf));
                 }
                 program_.classes.push_back(std::move(check_class));
@@ -4064,12 +4231,103 @@ private:
                 }
                 check_fn.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (check_fn.body) substitute_type_param_in_stmt(*check_fn.body, type_param_name, witness_type);
+                // ch05 §5.11/§5.14: "calling any method on it or applying
+                // any operator to it is a compile error" -- for the
+                // *bare* (unconstrained) case specifically (never the
+                // concept-constrained one: that witness genuinely has
+                // whatever methods its own requires-expression declares,
+                // already validated normally by check_moves's ordinary
+                // per-function walk over this very check_fn once it's
+                // pushed below). The bare witness struct
+                // (bare_witness_struct_name) has zero fields/methods by
+                // construction, so this can never itself be a false
+                // positive -- see reject_calls_on_bare_witness_type's
+                // own comment for why check_moves's ordinary call-
+                // argument-checking can't already catch this on its own.
+                if (check_fn.body && method_tmpl.method_requires_concept.empty()) {
+                    reject_calls_on_bare_witness_type(*check_fn.body, check_class_name, witness_name, field_types);
+                }
                 program_.functions.push_back(std::move(check_fn));
             }
         }
     }
 
-    // Lazily synthesizes (once) the single, shared, globally-empty
+    // ch05 §5.11/§5.14: recursively walks `stmt` (a synthesized check
+    // function's body, check_generic_type_methods_once's own comment)
+    // for any Call expression whose receiver -- resolved through a
+    // chain of plain Identifier/Member projections, using `field_types`
+    // for the one-level "this.field" case and `this_class_name` for
+    // `this` itself -- is exactly the bare witness struct
+    // (`bare_witness_name`), and throws immediately if one is found: a
+    // bare (unconstrained) type parameter guarantees nothing at all, so
+    // *any* method call on it is invalid, unconditionally, with no
+    // possible false positive (the witness has zero fields/methods by
+    // construction). This exists because check_moves's own ordinary
+    // call-argument-checking (check_call_arguments) can't reliably catch
+    // this on its own: a Member-based receiver's callee resolves to an
+    // unmangled, unqualified name it has no way to confirm doesn't exist
+    // anywhere else in the whole program (see resolve_callee_signature's
+    // own documented scope limitation), and even a precise resolution
+    // would find nothing to compare against here anyway, since this
+    // synthesized check function is deliberately excluded from codegen
+    // (ClassDef::is_synthetic_check_only) -- codegen's own "call to
+    // unknown function" check, which every real, compiled method call
+    // still gets, never runs for it at all.
+    void reject_calls_on_bare_witness_type(const Stmt& stmt, const std::string& this_class_name,
+                                            const std::string& bare_witness_name,
+                                            const std::unordered_map<std::string, Type>& field_types) {
+        // Resolves `expr`'s own type, restricted to exactly the two
+        // shapes needed here: a bare `this` (always `this_class_name`)
+        // and a single `this.field`/`self.field` projection off it
+        // (via `field_types`) -- anything else (a plain local, a
+        // deeper chain, a call result, ...) returns nullopt, since a
+        // bare type parameter's *only* legal use here is as a field of
+        // the generic type's own instance.
+        std::function<std::optional<std::string>(const Expr&)> resolve_type_name =
+            [&](const Expr& e) -> std::optional<std::string> {
+            if (e.kind == ExprKind::Identifier && e.name == "this") return this_class_name;
+            if (e.kind == ExprKind::Member) {
+                std::optional<std::string> base = resolve_type_name(*e.lhs);
+                if (base.has_value() && *base == this_class_name) {
+                    auto it = field_types.find(e.name);
+                    if (it != field_types.end() && it->second.kind == TypeKind::Named) return it->second.name;
+                }
+            }
+            return std::nullopt;
+        };
+        std::function<void(const Expr&)> walk_expr = [&](const Expr& e) {
+            if (e.kind == ExprKind::Call) {
+                if (e.lhs) {
+                    std::optional<std::string> receiver_type = resolve_type_name(*e.lhs);
+                    if (receiver_type.has_value() && *receiver_type == bare_witness_name) {
+                        throw DataflowError(
+                            "cannot call method '" + e.name +
+                                "' on a value of a bare (unconstrained) generic type parameter -- it guarantees no "
+                                "methods at all (spec ch05 §5.11/§5.14); constrain it with a concept to allow this",
+                            e.loc);
+                    }
+                    walk_expr(*e.lhs);
+                }
+                for (const auto& arg : e.args) walk_expr(*arg);
+                return;
+            }
+            if (e.lhs) walk_expr(*e.lhs);
+            if (e.rhs) walk_expr(*e.rhs);
+            for (const auto& arg : e.args) walk_expr(*arg);
+        };
+        std::function<void(const Stmt&)> walk_stmt = [&](const Stmt& s) {
+            if (s.init) walk_expr(*s.init);
+            for (const auto& arg : s.ctor_args) walk_expr(*arg);
+            if (s.expr) walk_expr(*s.expr);
+            if (s.condition) walk_expr(*s.condition);
+            if (s.then_branch) walk_stmt(*s.then_branch);
+            if (s.else_branch) walk_stmt(*s.else_branch);
+            for (const auto& inner : s.statements) walk_stmt(*inner);
+        };
+        walk_stmt(stmt);
+    }
+
+
     // witness struct standing in for a bare (unconstrained) generic
     // type parameter -- see check_generic_type_methods_once's own
     // comment for why this is a struct (never registered as a "known
@@ -5593,6 +5851,14 @@ void check_moves(const Program& program) {
         if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
         if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
     }
+    // ch05 §5.11: every concept/bare-`auto` witness class (never a real,
+    // user-written one) -- see ClassDef::is_concept_witness and
+    // check_function's own by-value-parameter/return-type exemption for
+    // why this is needed.
+    std::unordered_set<std::string> witness_class_names;
+    for (const ClassDef& def : program.classes) {
+        if (def.is_concept_witness) witness_class_names.insert(def.name);
+    }
     for (const Function& fn : program.functions) {
         // A bodyless `extern "C"` declaration (ch02 §2.1) has no
         // statements to run the dataflow analysis over -- it's already
@@ -5617,7 +5883,7 @@ void check_moves(const Program& program) {
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
         check_function(fn, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
-                       classes_with_copy_assign);
+                       classes_with_copy_assign, witness_class_names);
     }
 }
 

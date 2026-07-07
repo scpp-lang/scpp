@@ -67,13 +67,62 @@ public:
     explicit Parser(std::vector<Token> tokens, ModuleResolver resolver = {},
                      PartitionResolver partition_resolver = {})
         : tokens_(std::move(tokens)), resolver_(std::move(resolver)),
-          partition_resolver_(std::move(partition_resolver)) {}
+          partition_resolver_(std::move(partition_resolver)) {
+        // ch06 §6: the numeric family's own non-keyword members -- real
+        // C++ <cstdint>/<cstddef>/<stdfloat> typedef names, not keywords
+        // at all (unlike int/bool/char/long/float/double/unsigned,
+        // recognized directly by parse_unqualified_type's own keyword
+        // chain instead) -- pre-registered here exactly like an
+        // already-declared struct/class name (struct_names_ is what
+        // looks_like_type_start/parse_unqualified_type's own Identifier
+        // fallback both already consult), so every one of these is
+        // recognized as a type name from the very first line of every
+        // program, unconditionally guaranteed on every target (ch06's
+        // own "no platform on which scpp would need to omit any of
+        // these" rationale) -- never registered in class_names_ (they're
+        // scalars, not classes: no access control, no method-call
+        // machinery, no by-value-parameter restriction).
+        for (const char* name : {"int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
+                                  "uint64_t", "size_t", "ptrdiff_t", "float32_t", "float64_t"}) {
+            struct_names_.insert(name);
+        }
+    }
 
     Program parse_program() {
         Program program;
         parse_module_declaration(program);
         parse_import_declarations(program);
         parse_top_level_items(program);
+        // ch05 §5.11: a reserved, globally-shared witness class for a
+        // bare (unconstrained) `auto` parameter -- "the parameter's type
+        // is treated as fully opaque... exactly as if it were
+        // constrained by a concept whose requires-expression guarantees
+        // nothing" (see parse_param_type's own bare-auto handling). `$`
+        // can never start (or appear in) a real identifier (see
+        // lexer.cppm's is_ident_start/is_ident_continue), so this name
+        // can never collide with a real declaration. Registered lazily,
+        // only when `bare_auto_used_` was actually set (parse_param_type
+        // has no `program` access to push into as it's encountered) --
+        // unlike every other class/concept, added *after* parsing
+        // everything else so a program never using bare `auto` sees no
+        // difference at all in `program.classes`/`program.concepts`'
+        // size or contents. No requirement methods at all (unlike a real
+        // concept's own witness, parse_concept_def) -- there is nothing
+        // to add to Program::functions for it.
+        if (bare_auto_used_) {
+            program.classes.push_back(ClassDef{.name = "$auto", .is_concept_witness = true});
+            // Paired with the witness class above: an empty-requirements
+            // ConceptDef under the same reserved name, so monomorphize_
+            // generics' own concept-satisfaction lookup (concepts_by_name_,
+            // keyed from Program::concepts) resolves a bare-auto parameter
+            // exactly like a real (trivially-satisfied-by-everything)
+            // concept -- reusing its existing per-call-site substitution
+            // path unchanged, rather than special-casing "$auto"
+            // throughout that logic. type_satisfies_concept vacuously
+            // returns true for any Named-kind argument type when
+            // `requirements` is empty.
+            program.concepts.push_back(ConceptDef{.name = "$auto"});
+        }
         return program;
     }
 
@@ -116,6 +165,12 @@ private:
     // already-declared concept (concepts, like every other declaration
     // this parser handles, must be declared before use).
     std::unordered_set<std::string> concept_names_;
+    // ch05 §5.11: true once parse_param_type has seen at least one bare
+    // (unconstrained) `auto` parameter anywhere in the program --
+    // consulted by parse_program at the very end to decide whether to
+    // register the shared "$auto" witness class/concept at all (see its
+    // own comment for why this is lazy rather than unconditional).
+    bool bare_auto_used_ = false;
     // ch05 §5.14: names of every generic `class`/`struct` *template*
     // declaration seen so far (a subset of struct_names_/class_names_,
     // which already register a generic type's own name unconditionally
@@ -133,6 +188,18 @@ private:
     // specialization's `: private Tuple<Tail...>` base-clause, see
     // ClassDef::base_pack_arg_name).
     std::unordered_map<std::string, std::vector<GenericTypeParam>> variadic_primary_template_params_;
+    // ch05 §5.14: an ordinary (non-variadic, "phase-1") generic class/
+    // struct's own single template parameter, keyed by its qualified
+    // name -- consulted at an instantiation site (parse_unqualified_
+    // type's identical generic-type-argument loop below) to know
+    // whether that one argument is a type (the overwhelmingly common
+    // case, parsed via parse_type as always) or a non-type one (`Name<42>`,
+    // parsed as an expression into Type::non_type_args instead) --
+    // variadic_primary_template_params_ above already tracks this same
+    // fact for a variadic primary template's own (possibly multiple,
+    // always-leading) non-type parameters; this is the phase-1
+    // counterpart; for a phase-1 generic, at most one entry.
+    std::unordered_map<std::string, GenericTypeParam> phase1_generic_type_single_param_;
     // ch05 §5.11: every full-header-form generic function's own declared
     // template parameter list (`template<size_t I, typename Head,
     // typename... Tail> Head& get(...)`), keyed by its qualified name --
@@ -176,7 +243,9 @@ private:
     [[nodiscard]] bool looks_like_type_start() const {
         const Token& tok = peek();
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst ||
-            tok.kind == TokenKind::KwVoid || tok.kind == TokenKind::KwChar) {
+            tok.kind == TokenKind::KwVoid || tok.kind == TokenKind::KwChar || tok.kind == TokenKind::KwLong ||
+            tok.kind == TokenKind::KwFloat || tok.kind == TokenKind::KwDouble ||
+            tok.kind == TokenKind::KwUnsigned) {
             return true;
         }
         // ch05 §5.12: a bare `auto` at statement start unambiguously
@@ -195,6 +264,24 @@ private:
         // struct_names_ (which registers declarations under exactly that
         // form -- see parse_class_def/parse_struct_def).
         return struct_names_.contains(peek_qualified_name());
+    }
+
+    // ch06 §6: a simplified, offset-based variant of looks_like_type_
+    // start above -- no std::-qualified-name lookahead (a cast's own
+    // target type is never realistically std::unique_ptr<T>/
+    // std::span<T> in this version) -- used only by parse_unary's own
+    // C-style-cast lookahead, `(T)expr`, which needs to peek past the
+    // `(` at `offset` positions ahead without disturbing `pos_` at all
+    // (unlike looks_like_type_start, always checked at the current
+    // position).
+    [[nodiscard]] bool looks_like_type_start_at(size_t offset) const {
+        const Token& tok = peek_at(offset);
+        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwChar ||
+            tok.kind == TokenKind::KwLong || tok.kind == TokenKind::KwFloat || tok.kind == TokenKind::KwDouble ||
+            tok.kind == TokenKind::KwUnsigned) {
+            return true;
+        }
+        return tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text));
     }
 
     // Bounds-safe lookahead: returns the token `offset` positions ahead of
@@ -461,6 +548,35 @@ private:
         } else if (tok.kind == TokenKind::KwChar) {
             type.name = "char";
             advance();
+        } else if (tok.kind == TokenKind::KwLong) {
+            // ch06 §6: `long` -- deliberately fixed as an alias for
+            // int64_t regardless of target platform (unlike real C++'s
+            // own platform-defined width), to design away the classic
+            // LP64-vs-LLP64 cross-platform pitfall.
+            type.name = "long";
+            advance();
+        } else if (tok.kind == TokenKind::KwFloat) {
+            type.name = "float";
+            advance();
+        } else if (tok.kind == TokenKind::KwDouble) {
+            type.name = "double";
+            advance();
+        } else if (tok.kind == TokenKind::KwUnsigned) {
+            // ch06 §6: `unsigned` is only ever legal directly before
+            // `int`/`long` -- the bare one-word shorthand (meaning
+            // `unsigned int` in real C++) is *not* valid scpp, to keep
+            // `unsigned`-anything unambiguous and grep-able.
+            advance();
+            if (match(TokenKind::KwInt)) {
+                type.name = "unsigned int";
+            } else if (match(TokenKind::KwLong)) {
+                type.name = "unsigned long";
+            } else {
+                const Token& next = peek();
+                throw ParseError(next.line, next.column,
+                                  "'unsigned' must be immediately followed by 'int' or 'long' (ch06 §6) -- the "
+                                  "bare 'unsigned' shorthand is not valid scpp");
+            }
         } else if (tok.kind == TokenKind::KwVoid) {
             // Valid here structurally (like int/bool) so `void*` falls
             // out of the trailing `*` loop below for free; a *bare*
@@ -515,11 +631,25 @@ private:
                     leading_non_type_count++;
                 }
             }
+            // ch05 §5.14: a phase-1 (non-variadic) generic type whose
+            // sole parameter is itself a non-type one (`template<int N>
+            // class FixedValue { ... };`, real C++ syntax verbatim) --
+            // `leading_non_type_count` (checked identically to the
+            // variadic case just above) becomes 1 instead of the
+            // ordinary 0, so the single-argument loop below parses `42`
+            // in `FixedValue<42>` as a non-type expression instead of
+            // unconditionally attempting parse_type() on it (which would
+            // otherwise fail outright -- a non-type argument is never a
+            // type name).
+            auto phase1_it = phase1_generic_type_single_param_.find(type.name);
+            if (phase1_it != phase1_generic_type_single_param_.end() && phase1_it->second.is_non_type) {
+                leading_non_type_count = 1;
+            }
             expect(TokenKind::Less, "'<'");
             size_t arg_index = 0;
             if (!check(TokenKind::Greater)) {
                 do {
-                    if (is_variadic && arg_index < leading_non_type_count) {
+                    if (arg_index < leading_non_type_count) {
                         type.non_type_args.push_back(std::shared_ptr<Expr>(parse_additive().release()));
                     } else if (check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
                         Type spread;
@@ -535,10 +665,20 @@ private:
                 } while (match(TokenKind::Comma));
             }
             expect(TokenKind::Greater, "'>'");
-            if (!is_variadic && type.template_args.size() != 1) {
+            // A phase-1 generic type's sole argument lands in exactly
+            // one of template_args/non_type_args, never split across
+            // both -- check whichever one this instantiation actually
+            // used.
+            bool phase1_non_type = phase1_it != phase1_generic_type_single_param_.end() && phase1_it->second.is_non_type;
+            if (!is_variadic && !phase1_non_type && type.template_args.size() != 1) {
                 throw ParseError(name_tok.line, name_tok.column,
                                   "'" + type.name + "' is an ordinary generic type and takes exactly one type "
                                   "argument (ch05 §5.14)");
+            }
+            if (phase1_non_type && type.non_type_args.size() != 1) {
+                throw ParseError(name_tok.line, name_tok.column,
+                                  "'" + type.name + "' is an ordinary generic type and takes exactly one "
+                                  "non-type argument (ch05 §5.14)");
             }
         } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(peek_qualified_name())) {
             type.name = parse_qualified_name();
@@ -577,9 +717,15 @@ private:
     // and, like a reference's `is_mutable_ref`, properly tracked: `const
     // T*` and `T*` are genuinely distinct types (ch05 §5.7, ch08 Q9),
     // not unified the way an earlier draft of that section assumed.
-    // `const` is rejected everywhere else (a bare `const T`, no
-    // `&`/`&&`/`*`) since scpp has no other const-qualification yet.
-    Type parse_type(bool allow_rvalue_ref = false) {
+    // A bare `const T` (no `&`/`&&`/`*` at all) is rejected *unless* the
+    // caller opts in via `out_bare_const` (non-null): only
+    // parse_var_decl does, for a `const`-qualified local variable (spec
+    // ch05/ch06 -- an immutable local, distinct from a borrow/pointer's
+    // own, already-tracked read-only-ness) -- every other caller
+    // (a parameter, struct/class field, return type, or nested type
+    // argument) leaves this null and keeps the original rejection,
+    // since scpp has no other const-qualification for those yet.
+    Type parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr) {
         bool has_const_prefix = match(TokenKind::KwConst);
         Type type = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
 
@@ -617,6 +763,10 @@ private:
         }
 
         if (has_const_prefix && type.kind != TypeKind::Pointer) {
+            if (out_bare_const != nullptr) {
+                *out_bare_const = true;
+                return type;
+            }
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
                               "'const' is only supported directly before a reference type ('const T&') "
@@ -628,13 +778,19 @@ private:
     // ch05 §5.11: parses a single *parameter's* declared type, additionally
     // recognizing the abbreviated generic-function form -- `[const]
     // ConceptName auto[&|&&]` (e.g. `const Shape auto&`, `Invocable
-    // auto&&`, bare `Shape auto`) -- on top of every ordinary shape
-    // parse_type() already handles (including `T&&`, always legal in
-    // parameter position). Sets `out_generic_concept` to the concept's
-    // own name when this parameter is generic-constrained (left empty
-    // otherwise, the overwhelmingly common case) -- see
-    // Param::generic_concept's own comment for how this is used later
-    // (concept-satisfaction checking + monomorphization).
+    // auto&&`, bare `Shape auto`), *and* the unconstrained `[const]
+    // auto[&|&&]` form (no concept name at all, e.g. plain `auto x`) --
+    // on top of every ordinary shape parse_type() already handles
+    // (including `T&&`, always legal in parameter position). Sets
+    // `out_generic_concept` to the concept's own name when this
+    // parameter is generic-constrained (left empty otherwise, the
+    // overwhelmingly common case) -- see Param::generic_concept's own
+    // comment for how this is used later (concept-satisfaction checking
+    // + monomorphization). A bare `auto` (no concept) sets it to the
+    // reserved "$auto" witness (parse_program's own comment) -- ch05
+    // §5.11: "the parameter's type is treated as fully opaque... exactly
+    // as if it were constrained by a concept whose requires-expression
+    // guarantees nothing".
     //
     // The resulting Type's innermost Named type names the concept's own
     // witness class (ClassDef::is_concept_witness) -- registered in
@@ -650,18 +806,29 @@ private:
         size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
         bool next_is_identifier_then_auto =
             peek_at(const_offset).kind == TokenKind::Identifier && peek_at(const_offset + 1).kind == TokenKind::KwAuto;
-        if (!next_is_identifier_then_auto) return parse_type(/*allow_rvalue_ref=*/true);
+        bool next_is_bare_auto = peek_at(const_offset).kind == TokenKind::KwAuto;
+        if (!next_is_identifier_then_auto && !next_is_bare_auto) return parse_type(/*allow_rvalue_ref=*/true);
 
-        std::string concept_name(peek_at(const_offset).text);
-        if (!concept_names_.contains(concept_name)) {
-            const Token& tok = peek_at(const_offset);
-            throw ParseError(tok.line, tok.column,
-                              "'" + concept_name +
-                                  "' is not a declared concept -- 'Name auto' is only legal when 'Name' names a "
-                                  "concept, declared before use (ch05 §5.11)");
+        std::string concept_name;
+        if (next_is_identifier_then_auto) {
+            concept_name = std::string(peek_at(const_offset).text);
+            if (!concept_names_.contains(concept_name)) {
+                const Token& tok = peek_at(const_offset);
+                throw ParseError(tok.line, tok.column,
+                                  "'" + concept_name +
+                                      "' is not a declared concept -- 'Name auto' is only legal when 'Name' names a "
+                                      "concept, declared before use (ch05 §5.11)");
+            }
+        } else {
+            concept_name = "$auto";
+            bare_auto_used_ = true;
         }
+        // Only for error messages below -- shows the source spelling
+        // ("auto") rather than the internal "$auto" witness-class name a
+        // bare parameter is recorded under.
+        std::string display_name = next_is_identifier_then_auto ? concept_name : std::string("auto");
         bool has_const = match(TokenKind::KwConst);
-        advance(); // the concept name itself
+        if (next_is_identifier_then_auto) advance(); // the concept name itself
         expect(TokenKind::KwAuto, "'auto'");
         out_generic_concept = concept_name;
 
@@ -673,7 +840,7 @@ private:
             if (has_const) {
                 const Token& tok = peek();
                 throw ParseError(tok.line, tok.column,
-                                  "'const' cannot qualify an rvalue reference ('const " + concept_name +
+                                  "'const' cannot qualify an rvalue reference ('const " + display_name +
                                       " auto&&') -- an rvalue-reference parameter always takes ownership via "
                                       "move (ch03), which needs mutable access to the value being moved from");
             }
@@ -697,9 +864,9 @@ private:
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
                               "'const' is only supported directly before a reference type ('const " +
-                                  concept_name + " auto&') in this version");
+                                  display_name + " auto&') in this version");
         }
-        return type; // bare "ConceptName auto" -- by value
+        return type; // bare "ConceptName auto"/"auto" -- by value
     }
 
     // Wraps `base` in Array types for each trailing `[N]` found after a
@@ -2090,8 +2257,18 @@ private:
         bool is_generic = !template_params.empty();
         if (is_generic) {
             generic_type_names_.insert(qualified_class_name);
-            struct_names_.insert(template_params[0].name);
-            class_names_.insert(template_params[0].name);
+            phase1_generic_type_single_param_[qualified_class_name] = template_params[0];
+            // ch05 §5.14: a non-type parameter's own name (e.g. "N") is
+            // never itself a type -- registering it here (as every
+            // earlier version of this code unconditionally did) would
+            // wrongly let `N` parse as a bogus type name inside this
+            // class's own body, matching parse_variadic_specialization's
+            // identical exclusion for its own (possibly-leading)
+            // non-type parameters.
+            if (!template_params[0].is_non_type) {
+                struct_names_.insert(template_params[0].name);
+                class_names_.insert(template_params[0].name);
+            }
         }
 
         ClassDef def;
@@ -2556,7 +2733,7 @@ private:
             expect(TokenKind::Semicolon, "';'");
             return stmt;
         }
-        Type base = parse_type();
+        Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
         stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
         stmt->type = parse_array_suffix(base);
         if (match(TokenKind::Assign)) {
@@ -2577,6 +2754,17 @@ private:
                 } while (match(TokenKind::Comma));
             }
             expect(TokenKind::RParen, "')'");
+        }
+        // A `const`-qualified local (Stmt::is_const, set above by
+        // parse_type via its out_bare_const out-parameter) must be
+        // initialized right here -- there is no other opportunity to
+        // ever give it a value, unlike an ordinary mutable local, which
+        // may be declared bare and assigned later. Matches real C++'s
+        // own "default initialization of const variable" rejection.
+        if (stmt->is_const && !stmt->init && !stmt->has_ctor_args) {
+            throw ParseError(loc.line, loc.column,
+                              "a 'const' variable must be initialized ('const " + stmt->type.name + " " +
+                                  stmt->var_name + " = ...;') -- it can never be given a value afterward");
         }
         expect(TokenKind::Semicolon, "';'");
         return stmt;
@@ -2735,6 +2923,44 @@ private:
 
     ExprPtr parse_unary() {
         SourceLocation loc = current_loc();
+        // ch06 §6: `(T)expr` -- the C-style cast spelling (real C++
+        // accepts both this and `static_cast<T>(expr)`; scpp's own
+        // scalar-conversion table doesn't prefer one over the other, so
+        // both are supported). Ambiguous in general with a parenthesized
+        // expression (`(x)`), exactly like real C++'s own classic
+        // ambiguity -- resolved here by speculative parsing: only when
+        // the token right after `(` already looks like the start of a
+        // type (scpp's type-name set is closed and known ahead of time,
+        // ch05/ch11's struct_names_) is a type even attempted; if
+        // parsing one then fails, or `)` doesn't immediately follow it,
+        // this backtracks to `pos_`'s saved value and falls through to
+        // parse_postfix(parse_primary())'s ordinary parenthesized-
+        // expression handling below, unaffected.
+        if (check(TokenKind::LParen) && looks_like_type_start_at(1)) {
+            size_t saved_pos = pos_;
+            bool parsed_as_cast = false;
+            std::unique_ptr<Expr> node;
+            try {
+                advance(); // '('
+                Type target_type = parse_type();
+                if (check(TokenKind::RParen)) {
+                    advance(); // ')'
+                    node = std::make_unique<Expr>();
+                    node->kind = ExprKind::Cast;
+                    node->loc = loc;
+                    node->type = std::move(target_type);
+                    node->lhs = parse_unary();
+                    parsed_as_cast = true;
+                }
+            } catch (const ParseError&) {
+                // Not a type after all (e.g. `(x + y)` where `x` happens
+                // to look like a type-start token but isn't followed by
+                // a well-formed type) -- fall through to backtracking
+                // below, same as the "no ')' immediately after" case.
+            }
+            if (parsed_as_cast) return node;
+            pos_ = saved_pos;
+        }
         if (match(TokenKind::Minus)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Unary;
@@ -2972,7 +3198,28 @@ private:
         expect(TokenKind::RBracket, "']'");
 
         node->lambda_params = parse_param_list();
-        reject_generic_params(node->lambda_params, "a lambda parameter list");
+        // ch05 §5.12: real C++14 generic lambdas (a bare `auto`
+        // parameter, e.g. `[](auto x) { ... }`) are supported -- only a
+        // *named*-concept-constrained lambda parameter (`Shape auto`)
+        // remains rejected: ch05 §5.11's "only a free function may be
+        // generic" scoping is about that form specifically (it would
+        // need the same per-call-site monomorphized-clone machinery a
+        // full-header-form generic *function* gets, never built for a
+        // lambda's own synthesized closure class), whereas a bare `auto`
+        // parameter needs nothing beyond what a lambda's own call
+        // already resolves through the shared "$auto" witness (see
+        // parse_param_type/parse_program) -- exactly like the
+        // abbreviated-form *function* case, checked once, abstractly,
+        // against a synthesized witness type, with zero per-call-site
+        // cloning.
+        for (const Param& param : node->lambda_params) {
+            if (!param.generic_concept.empty() && param.generic_concept != "$auto") {
+                throw ParseError(current_loc().line, current_loc().column,
+                                  "a generic (concept-constrained) parameter is not supported on a lambda "
+                                  "parameter list in this version (ch05 §5.11 -- only a free function may be "
+                                  "generic); a bare 'auto' parameter is fine");
+            }
+        }
 
         node->lambda_is_mutable = match(TokenKind::KwMutable);
 
@@ -3024,11 +3271,41 @@ private:
             return node;
         }
 
+        // ch06 §6: `static_cast<T>(expr)` -- real C++ keyword syntax
+        // verbatim (a core-language cast, unlike make_unique/move above,
+        // so never `std::`-qualified). The only other spelling for an
+        // explicit scalar-to-scalar conversion is the C-style cast
+        // `(T)expr` -- see parse_unary's own handling of that (ambiguous
+        // with a parenthesized expression, so resolved there instead,
+        // by speculative parsing).
+        if (check(TokenKind::Identifier) && peek().text == "static_cast" && peek_at(1).kind == TokenKind::Less) {
+            advance(); // 'static_cast'
+            advance(); // '<'
+            Type target_type = parse_type();
+            expect(TokenKind::Greater, "'>'");
+            expect(TokenKind::LParen, "'('");
+            ExprPtr operand = parse_expr();
+            expect(TokenKind::RParen, "')'");
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Cast;
+            node->loc = loc;
+            node->type = std::move(target_type);
+            node->lhs = std::move(operand);
+            return node;
+        }
+
         if (match(TokenKind::IntegerLiteral)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::IntegerLiteral;
             node->loc = loc;
             node->int_value = std::stoll(std::string(tok.text));
+            return node;
+        }
+        if (match(TokenKind::FloatLiteral)) {
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::FloatLiteral;
+            node->loc = loc;
+            node->float_value = std::stod(std::string(tok.text));
             return node;
         }
         if (match(TokenKind::CharLiteral)) {

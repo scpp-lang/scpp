@@ -212,6 +212,12 @@ enum class LambdaCaptureMode {
 
 enum class ExprKind {
     IntegerLiteral,
+    // A floating-point literal (`1.5`) -- value stored in `float_value`
+    // (ch06 §6: defaults to a bare `double`-typed prvalue, same as real
+    // C++ with no suffix, adapted to a narrower/other float type by
+    // context wherever one is known, e.g. a VarDecl's own declared type
+    // -- see codegen's codegen_value_for_target).
+    FloatLiteral,
     BoolLiteral,
     CharLiteral, // 'a', '\n', ... -- ordinal value stored in `int_value`
                  // (same field as IntegerLiteral; see Expr below)
@@ -233,6 +239,11 @@ enum class ExprKind {
     Lambda,     // `[captures](params) { body }` (ch05 §5.12) -- desugars to
                 // constructing an anonymous, compiler-synthesized class; see
                 // Expr's own lambda_* fields below.
+    Cast,       // `static_cast<T>(expr)` / `(T)expr` (ch06 §6) -- an explicit
+                // scalar-to-scalar conversion; the *only* way to convert
+                // between two distinct scpp scalar types (no implicit
+                // conversion exists anywhere else). Target type `T` stored in
+                // `type`, operand in `lhs` -- see Expr's own comment.
 };
 
 enum class BinaryOp {
@@ -302,6 +313,9 @@ struct Expr {
     // which literal kind `expr.kind` is tells the two apart.
     long long int_value = 0;
 
+    // FloatLiteral
+    double float_value = 0.0;
+
     // BoolLiteral
     bool bool_value = false;
 
@@ -342,6 +356,8 @@ struct Expr {
     // MakeUnique: the allocated element type `T` in `make_unique<T>(...)`.
     // Lambda: the explicit trailing return type (`-> Type`), only
     // meaningful when has_lambda_explicit_return_type is true.
+    // Cast: the target type `T` in `static_cast<T>(expr)`/`(T)expr`
+    // (operand stored in `lhs`, like Unary).
     Type type;
 
     // Member: object stored in `lhs`, field name in `name`.
@@ -391,6 +407,17 @@ struct Stmt {
     Type type;
     std::string var_name;
     ExprPtr init; // optional
+
+    // VarDecl, scalar/struct/class (any non-reference, non-pointer)
+    // only: true for `const T name = expr;`/`const ClassName name(args);`
+    // -- an immutable local, initialized exactly once at declaration and
+    // rejected by movecheck (its own MirStatementKind::Assign case) on
+    // any subsequent reassignment attempt. Distinct from `const T&`/
+    // `const T*` (a shared borrow/read-only pointer, ch05.2/§5.7): those
+    // already track their own read-only-ness via Type::is_mutable_ref/
+    // is_mutable_pointee and never set this flag (see parse_var_decl).
+    // Always false for a Reference/Pointer-typed `type` above.
+    bool is_const = false;
 
     // VarDecl, class-typed only (ch04 §4.2): `ClassName name(args);`,
     // direct-initialization via an explicit constructor call --

@@ -23,11 +23,16 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
     switch (kind) {
         case scpp::TokenKind::Identifier: return "Identifier";
         case scpp::TokenKind::IntegerLiteral: return "IntegerLiteral";
+        case scpp::TokenKind::FloatLiteral: return "FloatLiteral";
         case scpp::TokenKind::CharLiteral: return "CharLiteral";
         case scpp::TokenKind::StringLiteral: return "StringLiteral";
         case scpp::TokenKind::KwInt: return "KwInt";
         case scpp::TokenKind::KwBool: return "KwBool";
         case scpp::TokenKind::KwChar: return "KwChar";
+        case scpp::TokenKind::KwLong: return "KwLong";
+        case scpp::TokenKind::KwFloat: return "KwFloat";
+        case scpp::TokenKind::KwDouble: return "KwDouble";
+        case scpp::TokenKind::KwUnsigned: return "KwUnsigned";
         case scpp::TokenKind::KwVoid: return "KwVoid";
         case scpp::TokenKind::KwReturn: return "KwReturn";
         case scpp::TokenKind::KwIf: return "KwIf";
@@ -233,6 +238,9 @@ void print_expr(const scpp::Expr& expr, int depth) {
         case scpp::ExprKind::IntegerLiteral:
             std::cout << "IntegerLiteral " << expr.int_value << "\n";
             break;
+        case scpp::ExprKind::FloatLiteral:
+            std::cout << "FloatLiteral " << expr.float_value << "\n";
+            break;
         case scpp::ExprKind::BoolLiteral:
             std::cout << "BoolLiteral " << (expr.bool_value ? "true" : "false") << "\n";
             break;
@@ -276,6 +284,10 @@ void print_expr(const scpp::Expr& expr, int depth) {
             break;
         case scpp::ExprKind::Move:
             std::cout << "Move\n";
+            print_expr(*expr.lhs, depth + 1);
+            break;
+        case scpp::ExprKind::Cast:
+            std::cout << "Cast " << type_to_string(expr.type) << "\n";
             print_expr(*expr.lhs, depth + 1);
             break;
         case scpp::ExprKind::MakeUnique:

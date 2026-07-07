@@ -332,6 +332,7 @@ private:
     std::optional<Type> infer_type(const Expr& expr) {
         switch (expr.kind) {
             case ExprKind::IntegerLiteral: return Type{.kind = TypeKind::Named, .name = "int"};
+            case ExprKind::FloatLiteral: return Type{.kind = TypeKind::Named, .name = "double"};
             case ExprKind::BoolLiteral: return Type{.kind = TypeKind::Named, .name = "bool"};
             case ExprKind::CharLiteral: return Type{.kind = TypeKind::Named, .name = "char"};
             case ExprKind::StringLiteral: {
@@ -423,6 +424,13 @@ private:
                 }
                 return std::nullopt;
 
+            // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): the cast's own
+            // declared target type, unconditionally -- that *is* the
+            // whole point of an explicit cast (movecheck's own Cast
+            // handling is what actually validates the source/target
+            // pairing is legal in the first place).
+            case ExprKind::Cast: return expr.type;
+
             case ExprKind::Binary:
                 switch (expr.binary_op) {
                     case BinaryOp::Add:
@@ -513,6 +521,14 @@ private:
             return produces_rvalue_of_type(arg, *param_type.pointee);
         }
         if (param_type.kind == TypeKind::Reference) {
+            // ch05 §5.x: a *const* reference may bind directly to a
+            // fresh rvalue argument -- exactly like the `T&&` case just
+            // above, just gated to only a non-mutable reference (real
+            // C++ forbids binding a *mutable* lvalue reference to a
+            // temporary).
+            if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee)) {
+                return true;
+            }
             if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique ||
                 arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::BoolLiteral ||
                 arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
@@ -812,6 +828,31 @@ private:
                 // the same pre-existing lack of promotion between `bool`
                 // and `int`), so this is the type's only representation.
                 if (type.name == "char") return llvm::Type::getInt8Ty(*context_);
+                // ch06 §6: the rest of the numeric family -- LLVM natively
+                // supports arbitrary-width integers, so every fixed-width
+                // signed/unsigned pair just maps to the same-width
+                // integer type (LLVM itself draws no signed/unsigned
+                // distinction at the type level, only at the
+                // instruction level -- see is_unsigned_scalar_type/
+                // codegen_checked_arith's own signedness dispatch).
+                // `long`/`unsigned long` are always 64-bit regardless of
+                // target (ch06's own deliberate anti-LP64/LLP64-pitfall
+                // fix), unlike `size_t`/`ptrdiff_t` below, which are
+                // meant to track the pointer width.
+                if (type.name == "int8_t" || type.name == "uint8_t") return llvm::Type::getInt8Ty(*context_);
+                if (type.name == "int16_t" || type.name == "uint16_t") return llvm::Type::getInt16Ty(*context_);
+                if (type.name == "int32_t" || type.name == "uint32_t" || type.name == "unsigned int") {
+                    return llvm::Type::getInt32Ty(*context_);
+                }
+                if (type.name == "int64_t" || type.name == "uint64_t" || type.name == "long" ||
+                    type.name == "unsigned long") {
+                    return llvm::Type::getInt64Ty(*context_);
+                }
+                if (type.name == "float" || type.name == "float32_t") return llvm::Type::getFloatTy(*context_);
+                if (type.name == "double" || type.name == "float64_t") return llvm::Type::getDoubleTy(*context_);
+                if (type.name == "size_t" || type.name == "ptrdiff_t") {
+                    return llvm::Type::getIntNTy(*context_, module_->getDataLayout().getPointerSizeInBits());
+                }
                 // `void` (ch02 §2.1): only meaningful as a function return
                 // type or a pointer's pointee (`void*`, whose own
                 // to_llvm_type case above never even inspects the
@@ -1347,12 +1388,24 @@ private:
                             current_loc_);
                     }
                     validate_reference_pointee(*stmt.type.pointee);
-                    // Store the *address* of the referent (not its value)
-                    // -- codegen_lvalue on the initializer gives exactly
-                    // that, and also enforces it resolves to a real,
-                    // addressable place (a plain variable, or a further
-                    // member/subscript chain off one).
-                    llvm::Value* referent_addr = codegen_lvalue(*stmt.init).ptr;
+                    // ch05 §5.x: a *const* reference may bind directly to
+                    // a fresh rvalue initializer (a literal, std::move/
+                    // std::make_unique, a lambda literal, or a call not
+                    // itself returning by reference) -- movecheck has
+                    // already validated this (produces_rvalue_of_type,
+                    // only ever for a non-mutable reference), so it only
+                    // remains to materialize a temporary and use *its*
+                    // address, exactly like codegen_call_args' identical
+                    // handling of the same shapes for a reference call
+                    // argument. Otherwise (the overwhelmingly common
+                    // case): codegen_lvalue on the initializer gives the
+                    // address directly, and also enforces it resolves to
+                    // a real, addressable place (a plain variable, or a
+                    // further member/subscript chain off one).
+                    llvm::Value* referent_addr =
+                        !stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)
+                            ? codegen_materialize_rvalue_reference_source(*stmt.init)
+                            : codegen_lvalue(*stmt.init).ptr;
                     llvm::AllocaInst* slot =
                         builder_->CreateAlloca(llvm::PointerType::getUnqual(*context_), nullptr, stmt.var_name);
                     builder_->CreateStore(referent_addr, slot);
@@ -1549,7 +1602,7 @@ private:
                         }
                         return;
                     }
-                    llvm::Value* init_value = codegen_expr(*stmt.init);
+                    llvm::Value* init_value = codegen_value_for_target(*stmt.init, stmt.type);
                     // Refresh to `stmt`'s own position: codegen_expr just
                     // recursed through `stmt.init` (possibly a compound
                     // expression like `a + b`), leaving current_loc_ at
@@ -1597,7 +1650,9 @@ private:
                 if (stmt.expr) {
                     value = current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
                                 ? codegen_lvalue(*stmt.expr).ptr
-                                : codegen_expr(*stmt.expr);
+                                : current_function_def_ != nullptr
+                                      ? codegen_value_for_target(*stmt.expr, current_function_def_->return_type)
+                                      : codegen_expr(*stmt.expr);
                 }
                 free_unique_ptr_locals();
                 if (value != nullptr) {
@@ -1762,6 +1817,35 @@ private:
     // otherwise. Shared by codegen_call and the VarDecl constructor-call
     // case below so both resolve "is this argument's target parameter a
     // reference" identically.
+    // Materializes a temporary holding `expr`'s own *value* and returns
+    // its address -- what a reference binds to when its source is a
+    // genuine rvalue (a literal, std::move/std::make_unique, a lambda
+    // literal, or a call that doesn't itself return by reference) rather
+    // than an existing addressable place, exactly like real C++'s own
+    // temporary materialization. Shared by codegen_call_args (a `T&&`
+    // parameter, unconditionally, or a *const* `T&`/`Concept auto&`
+    // parameter bound directly to an rvalue argument, ch05 §5.x) and the
+    // VarDecl BindReference case below (`const T& r = <rvalue>;`) -- both
+    // already move-checked (produces_rvalue_of_type) to guarantee `expr`
+    // is one of the shapes handled here. A Lambda literal is special-
+    // cased: its own codegen (codegen_construct_lambda, via codegen_expr's
+    // Lambda case) already allocates a fresh temporary and returns *its*
+    // address directly (a class value is always represented/passed by
+    // address in this codebase, never as a bare aggregate SSA value) --
+    // using that address as-is avoids double-wrapping it in yet another
+    // temporary, which would produce "a pointer to a pointer to the
+    // closure" instead of "a pointer to the closure".
+    llvm::Value* codegen_materialize_rvalue_reference_source(const Expr& expr) {
+        if (expr.kind == ExprKind::Lambda) return codegen_expr(expr);
+        // Also reuses std::move's own codegen unchanged, including its
+        // "null out the source slot" side effect when the moved value is
+        // itself a std::unique_ptr/class.
+        llvm::Value* value = codegen_expr(expr);
+        llvm::AllocaInst* temp = builder_->CreateAlloca(value->getType(), nullptr, "rvaluetmp");
+        builder_->CreateStore(value, temp);
+        return temp;
+    }
+
     std::vector<llvm::Value*> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
                                                   size_t param_offset) {
         std::vector<llvm::Value*> result;
@@ -1769,47 +1853,43 @@ private:
         for (size_t i = 0; i < args.size(); i++) {
             bool param_is_reference = callee_def != nullptr && i + param_offset < callee_def->params.size() &&
                                        callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
-            bool param_is_rvalue_reference =
-                param_is_reference && callee_def->params[i + param_offset].type.is_rvalue_ref;
-            if (param_is_rvalue_reference) {
+            const Type* ref_param_type =
+                param_is_reference ? &callee_def->params[i + param_offset].type : nullptr;
+            bool param_is_rvalue_reference = param_is_reference && ref_param_type->is_rvalue_ref;
+            // ch05 §5.x: a *const* (non-rvalue, non-mutable) reference
+            // parameter may also bind directly to a fresh rvalue argument
+            // -- movecheck's own argument_matches_parameter/
+            // apply_reference_argument already gate this identically
+            // (produces_rvalue_of_type), only ever for a const reference
+            // (real C++ itself forbids binding a *mutable* lvalue
+            // reference to a temporary).
+            bool param_is_const_reference_bound_to_rvalue =
+                param_is_reference && !param_is_rvalue_reference && !ref_param_type->is_mutable_ref &&
+                produces_rvalue_of_type(*args[i], *ref_param_type->pointee);
+            if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
                 // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the move
                 // checker has already verified this argument produces a
                 // genuine rvalue (produces_rvalue_of_type), which may not
                 // itself be an addressable place (a literal, a fresh
                 // std::make_unique<T>(...)/call result, ...).
-                if (args[i]->kind == ExprKind::Lambda) {
-                    // ch05 §5.12: a lambda literal's own codegen (see
-                    // codegen_expr's Lambda case) already allocates a
-                    // fresh temporary and returns *its* address directly
-                    // (a class value is always represented/passed by
-                    // address in this codebase, never as a bare
-                    // aggregate SSA value) -- using that address
-                    // directly as the argument avoids double-wrapping it
-                    // in yet another temporary, which would pass "a
-                    // pointer to a pointer to the closure" instead of "a
-                    // pointer to the closure".
-                    result.push_back(codegen_expr(*args[i]));
-                    continue;
-                }
-                // Otherwise: evaluate it as an ordinary *value*
-                // (codegen_expr, not codegen_lvalue -- this also reuses
-                // std::move's own codegen unchanged, including its
-                // "null out the source slot" side effect when the moved
-                // value is itself a std::unique_ptr), then materialize a
-                // fresh stack temporary to hold it and pass that
-                // temporary's address -- exactly what real C++ does when
-                // binding a reference to a prvalue.
-                llvm::Value* value = codegen_expr(*args[i]);
-                llvm::AllocaInst* temp = builder_->CreateAlloca(value->getType(), nullptr, "rvaluetmp");
-                builder_->CreateStore(value, temp);
-                result.push_back(temp);
+                result.push_back(codegen_materialize_rvalue_reference_source(*args[i]));
             } else if (param_is_reference) {
                 // Bind the reference parameter to the argument's address
                 // rather than passing its value, exactly like a local
                 // reference's own VarDecl.
                 result.push_back(codegen_lvalue(*args[i]).ptr);
             } else {
-                result.push_back(codegen_expr(*args[i]));
+                // ch06 §6: a bare literal argument adapts directly to
+                // its target parameter's own declared scalar type (see
+                // codegen_value_for_target) -- exactly like a VarDecl
+                // initializer/plain assignment's identical treatment,
+                // rather than defaulting to `int`/`double` and failing
+                // the callee's own parameter-type check.
+                if (callee_def != nullptr && i + param_offset < callee_def->params.size()) {
+                    result.push_back(codegen_value_for_target(*args[i], callee_def->params[i + param_offset].type));
+                } else {
+                    result.push_back(codegen_expr(*args[i]));
+                }
             }
         }
         return result;
@@ -1872,6 +1952,65 @@ private:
         return builder_->CreateZExt(v, llvm::Type::getInt8Ty(*context_), "boolext");
     }
 
+    // ch06 §6: a bare numeric literal (Integer/Float) has no fixed type
+    // of its own the way a named variable does -- exactly like real
+    // C++'s own literal-suffix rules (and, more directly, how Rust
+    // treats an unsuffixed integer/float literal as unconstrained until
+    // context picks a concrete type): generates the constant directly in
+    // `target_type`'s own LLVM representation when the source shape is a
+    // literal and the target is a scalar Named type, so `int64_t x = 5;`
+    // needs no separate cast at all -- this is *type inference for an
+    // otherwise-untyped constant*, not an implicit conversion of an
+    // already-typed value (ch06's "no implicit conversions" rule is
+    // about the latter; see check_store_type's own scope). Falls back to
+    // plain codegen_expr for every other expression shape (an existing
+    // variable, a call, an arithmetic expression, ...), which already
+    // has a real, fixed type of its own to check via check_store_type
+    // exactly as before. Shared by every site that already knows its own
+    // target type up front: a VarDecl initializer, a plain assignment's
+    // RHS, and std::make_unique<T>(...)'s scalar argument.
+    llvm::Value* codegen_value_for_target(const Expr& expr, const Type& target_type) {
+        // `-100`/`-1.5` (a negated literal, ExprKind::Unary/Neg over a
+        // bare literal) is just as untyped as the bare literal itself --
+        // real C++ itself treats a unary-minus-literal as a single
+        // token for exactly this reason (a negative literal, not "minus
+        // applied to a positive one"). Recurses once, with the negation
+        // folded into the literal's own value, rather than falling
+        // through to plain codegen_expr (which would infer a fixed
+        // int/double type for the un-negated literal, then apply `-` in
+        // that type, defeating the point).
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg) {
+            if (expr.lhs->kind == ExprKind::IntegerLiteral) {
+                Expr negated;
+                negated.kind = ExprKind::IntegerLiteral;
+                negated.loc = expr.loc;
+                negated.int_value = -expr.lhs->int_value;
+                return codegen_value_for_target(negated, target_type);
+            }
+            if (expr.lhs->kind == ExprKind::FloatLiteral) {
+                Expr negated;
+                negated.kind = ExprKind::FloatLiteral;
+                negated.loc = expr.loc;
+                negated.float_value = -expr.lhs->float_value;
+                return codegen_value_for_target(negated, target_type);
+            }
+        }
+        if (target_type.kind == TypeKind::Named) {
+            if (expr.kind == ExprKind::IntegerLiteral) {
+                if (is_float_scalar_type_name(target_type.name)) {
+                    return llvm::ConstantFP::get(to_llvm_type(target_type), static_cast<double>(expr.int_value));
+                }
+                if (target_type.name != "bool" && target_type.name != "char") {
+                    return llvm::ConstantInt::get(to_llvm_type(target_type), expr.int_value,
+                                                   /*isSigned=*/!is_unsigned_scalar_type_name(target_type.name));
+                }
+            } else if (expr.kind == ExprKind::FloatLiteral && is_float_scalar_type_name(target_type.name)) {
+                return llvm::ConstantFP::get(to_llvm_type(target_type), expr.float_value);
+            }
+        }
+        return codegen_expr(expr);
+    }
+
     // Verifies `value`'s LLVM type exactly matches `expected` before it's
     // stored into a place declared as `expected` (a VarDecl initializer,
     // a plain assignment's RHS, or std::make_unique<T>(...)'s scalar
@@ -1912,6 +2051,15 @@ private:
             case ExprKind::IntegerLiteral:
                 return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), expr.int_value, /*isSigned=*/true);
 
+            case ExprKind::FloatLiteral:
+                // Defaults to `double` (ch06 §6, real C++'s own
+                // no-suffix default) -- adapted to a narrower/other float
+                // type by context wherever the target type is known
+                // instead (VarDecl/Assign/call argument/return -- see
+                // codegen_value_for_target), exactly like an
+                // IntegerLiteral's own default-to-`int` treatment.
+                return llvm::ConstantFP::get(llvm::Type::getDoubleTy(*context_), expr.float_value);
+
             case ExprKind::BoolLiteral:
                 // `bool` is stored as a full byte (i8; see to_llvm_type
                 // and its false=0/true=1 invariant, ch06) -- a literal's
@@ -1940,6 +2088,26 @@ private:
                 // returns the pointer. Reuses the exact mechanism already
                 // used for print_bool's "true"/"false" constants.
                 return builder_->CreateGlobalString(expr.name, "str");
+
+            case ExprKind::Cast: {
+                // ch06 §6: `static_cast<T>(expr)`/`(T)expr` -- the only
+                // way to convert between two distinct scpp scalar types.
+                // Adapts a literal operand to whatever type it actually
+                // has to be read as first (e.g. `(int64_t)5` needs `5`
+                // materialized directly as an i64 constant, not the
+                // default i32 then converted -- though both give the
+                // same bit pattern here, this stays consistent with
+                // every other literal-context site), then dispatches on
+                // the (source, target) type pair.
+                std::optional<Type> source_type = infer_type(*expr.lhs);
+                if (!source_type.has_value() || source_type->kind != TypeKind::Named ||
+                    expr.type.kind != TypeKind::Named) {
+                    throw CodegenError("cast is only supported between scalar types in this version",
+                        current_loc_);
+                }
+                llvm::Value* operand = codegen_value_for_target(*expr.lhs, *source_type);
+                return codegen_scalar_cast(operand, *source_type, expr.type);
+            }
 
             case ExprKind::Identifier:
             case ExprKind::Subscript: {
@@ -1990,7 +2158,11 @@ private:
                     return codegen_lvalue(*expr.lhs).ptr;
                 }
                 llvm::Value* operand = codegen_expr(*expr.lhs);
-                if (expr.unary_op == UnaryOp::Neg) return builder_->CreateNeg(operand, "negtmp");
+                if (expr.unary_op == UnaryOp::Neg) {
+                    std::optional<Type> operand_type = infer_type(*expr.lhs);
+                    bool is_float = operand_type.has_value() && is_float_scalar_type_name(operand_type->name);
+                    return is_float ? builder_->CreateFNeg(operand, "fnegtmp") : builder_->CreateNeg(operand, "negtmp");
+                }
                 // Not (`!`) -- `operand` is a `bool` value (i8; see
                 // to_llvm_type), so this goes through the i1 domain
                 // rather than a raw bitwise-not directly on the i8: NOT
@@ -2526,22 +2698,113 @@ private:
         builder_->SetInsertPoint(ok_block);
     }
 
+    // ch06 §6: the numeric family's own signed/unsigned/floating
+    // classification, by scpp type name -- LLVM draws no signed/
+    // unsigned distinction at the *type* level (only i8/i16/i32/i64),
+    // so every integer arithmetic/comparison/division instruction that
+    // cares about signedness (sdiv vs udiv, icmp slt vs icmp ult, ...)
+    // needs this to pick the right one. `bool`/`char` are deliberately
+    // excluded from both is_unsigned/is_float (neither is ever true for
+    // them) *and* is_checked_arithmetic_scalar below (ch06: no
+    // arithmetic is defined for them yet, pre-existing, unchanged
+    // scope) -- every other named scalar (the numeric family proper) is
+    // checked.
+    [[nodiscard]] static bool is_float_scalar_type_name(const std::string& name) {
+        return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
+    }
+    [[nodiscard]] static bool is_unsigned_scalar_type_name(const std::string& name) {
+        return name == "unsigned int" || name == "unsigned long" || name == "uint8_t" || name == "uint16_t" ||
+               name == "uint32_t" || name == "uint64_t" || name == "size_t";
+    }
+    [[nodiscard]] static bool is_checked_arithmetic_scalar_type_name(const std::string& name) {
+        return name != "bool" && name != "char";
+    }
+
+    // ch06 §6: whether `name`'s own values should be treated as unsigned
+    // when *converting* to/from it (a cast, never an arithmetic
+    // operation -- see is_unsigned_scalar_type_name above for that
+    // narrower, arithmetic-only question) -- widens is_unsigned_scalar_
+    // type_name to also cover `bool`/`char`: both are always
+    // zero-extended when widened (a bool is always the bit pattern 0/1;
+    // char's ordinal value 0-255 already matches how every other part of
+    // this codebase treats it, e.g. CharLiteral's own codegen), even
+    // though neither counts as "unsigned" for arithmetic/overflow-
+    // checking purposes (ch06: no arithmetic is defined for either yet).
+    [[nodiscard]] static bool is_unsigned_for_cast(const std::string& name) {
+        return name == "bool" || name == "char" || is_unsigned_scalar_type_name(name);
+    }
+
+    // ch06 §6: the actual conversion instruction for `static_cast<T>(expr)`/
+    // `(T)expr`, given `value` already evaluated as `source_type`'s own
+    // LLVM representation -- dispatches on the (source, target) type
+    // pair exactly like a real compiler's own cast-kind selection:
+    // int<->int (sext/zext for widening -- signedness from the *source*
+    // type, matching real C++'s own conversion rules; trunc for
+    // narrowing; a bare bitcast-free no-op when both are the exact same
+    // width, e.g. int8_t<->uint8_t<->char<->bool, all i8), float<->float
+    // (fpext widening / fptrunc narrowing), and float<->int (sitofp/
+    // uitofp, fptosi/fptoui, signedness from whichever side is the
+    // integer one).
+    llvm::Value* codegen_scalar_cast(llvm::Value* value, const Type& source_type, const Type& target_type) {
+        llvm::Type* target_llvm = to_llvm_type(target_type);
+        if (value->getType() == target_llvm) return value;
+        bool source_is_float = is_float_scalar_type_name(source_type.name);
+        bool target_is_float = is_float_scalar_type_name(target_type.name);
+        if (source_is_float && target_is_float) {
+            return value->getType()->getScalarSizeInBits() < target_llvm->getScalarSizeInBits()
+                       ? builder_->CreateFPExt(value, target_llvm, "fpexttmp")
+                       : builder_->CreateFPTrunc(value, target_llvm, "fptrunctmp");
+        }
+        if (source_is_float) {
+            return is_unsigned_for_cast(target_type.name) ? builder_->CreateFPToUI(value, target_llvm, "fptouitmp")
+                                                            : builder_->CreateFPToSI(value, target_llvm, "fptositmp");
+        }
+        if (target_is_float) {
+            return is_unsigned_for_cast(source_type.name) ? builder_->CreateUIToFP(value, target_llvm, "uitofptmp")
+                                                            : builder_->CreateSIToFP(value, target_llvm, "sitofptmp");
+        }
+        // int -> int: same width already returned `value` unchanged
+        // above (e.g. int8_t <-> uint8_t <-> char <-> bool).
+        if (value->getType()->getScalarSizeInBits() < target_llvm->getScalarSizeInBits()) {
+            return is_unsigned_for_cast(source_type.name) ? builder_->CreateZExt(value, target_llvm, "zexttmp")
+                                                            : builder_->CreateSExt(value, target_llvm, "sexttmp");
+        }
+        return builder_->CreateTrunc(value, target_llvm, "trunctmp");
+    }
+
+    // `+`/`-`/`*` on a floating-point type (ch06 §6): IEEE-754 arithmetic
+    // has no UB-on-overflow concept to guard against at all (overflow
+    // produces +/-infinity, underflow a signed zero or subnormal, both
+    // well-defined by the standard itself) -- so, unlike the integer
+    // path below, there is nothing to check regardless of unsafe
+    // context; always the plain fadd/fsub/fmul instruction.
+    llvm::Value* codegen_float_arith(BinaryOp op, llvm::Value* lhs, llvm::Value* rhs) {
+        switch (op) {
+            case BinaryOp::Add: return builder_->CreateFAdd(lhs, rhs, "faddtmp");
+            case BinaryOp::Sub: return builder_->CreateFSub(lhs, rhs, "fsubtmp");
+            case BinaryOp::Mul: return builder_->CreateFMul(lhs, rhs, "fmultmp");
+            default: throw CodegenError("unhandled floating-point arithmetic operator",
+                current_loc_);
+        }
+    }
+
     // `+`/`-`/`*` (ch05 §5.8): overflow-checked by default (aborting,
-    // via the same panic mechanism as emit_span_bounds_check, on overflow
-    // -- both signed and unsigned per the spec, though only scpp's signed
-    // `int` exists as an arithmetic type so far), or a plain, guaranteed-
-    // wrapping (never UB) operation inside `unsafe { }`
+    // via the same panic mechanism as emit_span_bounds_check, on
+    // overflow -- both signed and unsigned per the spec), or a plain,
+    // guaranteed-wrapping (never UB) operation inside `unsafe { }`
     // (unsafe_depth_ > 0) -- achieved simply by using the plain
     // CreateAdd/CreateSub/CreateMul instructions, which (unlike real
     // Clang's) never get an `nsw`/`nuw` flag anywhere in this codebase, so
-    // they're already well-defined, wrapping LLVM IR on their own. Only
-    // i32 (scpp's `int`) is checked: `char`/`bool` (i8) arithmetic isn't a
-    // defined part of the numeric-family spec yet (ch06), so any other
-    // width falls back to the same plain instruction regardless of
-    // context, unchanged from before this check existed.
-    llvm::Value* codegen_checked_arith(BinaryOp op, llvm::Value* lhs, llvm::Value* rhs) {
+    // they're already well-defined, wrapping LLVM IR on their own.
+    // `is_checked` is false for `bool`/`char` (ch06: no arithmetic is
+    // defined for either yet, pre-existing, unchanged scope) -- every
+    // other integer width, signed or unsigned, is checked regardless of
+    // width (generalized from this codebase's original int-only, i32-only
+    // scope now that the rest of the numeric family exists).
+    llvm::Value* codegen_checked_arith(BinaryOp op, llvm::Value* lhs, llvm::Value* rhs, bool is_unsigned,
+                                        bool is_checked) {
         const char* name = op == BinaryOp::Add ? "addtmp" : op == BinaryOp::Sub ? "subtmp" : "multmp";
-        if (unsafe_depth_ > 0 || !lhs->getType()->isIntegerTy(32)) {
+        if (unsafe_depth_ > 0 || !is_checked) {
             switch (op) {
                 case BinaryOp::Add: return builder_->CreateAdd(lhs, rhs, name);
                 case BinaryOp::Sub: return builder_->CreateSub(lhs, rhs, name);
@@ -2551,9 +2814,12 @@ private:
             }
         }
 
-        llvm::Intrinsic::ID intrinsic_id = op == BinaryOp::Add   ? llvm::Intrinsic::sadd_with_overflow
-                                            : op == BinaryOp::Sub ? llvm::Intrinsic::ssub_with_overflow
-                                                                   : llvm::Intrinsic::smul_with_overflow;
+        llvm::Intrinsic::ID intrinsic_id =
+            op == BinaryOp::Add
+                ? (is_unsigned ? llvm::Intrinsic::uadd_with_overflow : llvm::Intrinsic::sadd_with_overflow)
+            : op == BinaryOp::Sub
+                ? (is_unsigned ? llvm::Intrinsic::usub_with_overflow : llvm::Intrinsic::ssub_with_overflow)
+                : (is_unsigned ? llvm::Intrinsic::umul_with_overflow : llvm::Intrinsic::smul_with_overflow);
         llvm::Function* intrinsic =
             llvm::Intrinsic::getOrInsertDeclaration(module_.get(), intrinsic_id, {lhs->getType()});
         llvm::Value* pair = builder_->CreateCall(intrinsic, {lhs, rhs}, name);
@@ -2573,29 +2839,36 @@ private:
         return result;
     }
 
-    // `/` (ch05 §5.8): `b == 0` or (the one case signed division itself
-    // overflows) `a == INT_MIN && b == -1` always abort() -- unconditionally,
-    // in *every* context, whether inside `unsafe { }` or not, unlike
-    // +/-/* above: both trap at the hardware level (x86 #DE) with no
+    // `/` (ch05 §5.8): `b == 0` always abort() -- unconditionally, in
+    // *every* context, whether inside `unsafe { }` or not, unlike +/-/*
+    // above: division traps at the hardware level (x86 #DE) with no
     // wrapped result for the hardware to fall back on, so there is no
-    // "unsafe and still defined" variant to fall back to here. Only i32
-    // is checked, for the same reason codegen_checked_arith only checks
-    // i32.
-    llvm::Value* codegen_checked_div(llvm::Value* lhs, llvm::Value* rhs) {
-        if (!lhs->getType()->isIntegerTy(32)) {
-            return builder_->CreateSDiv(lhs, rhs, "divtmp");
+    // "unsafe and still defined" variant to fall back to here. The one
+    // *signed*-only extra trap, `a == MIN && b == -1` (signed division's
+    // own overflow case -- unsigned division has no analogous overflow
+    // at all, MIN there is just 0 and 0/-1 isn't even representable as
+    // -1), generalized from this codebase's original int32-only scope to
+    // any integer width via getBitWidth()/getSignedMinValue() rather
+    // than a hardcoded int32_t::min(). `is_checked` is false for
+    // `bool`/`char` -- see codegen_checked_arith's identical reasoning.
+    llvm::Value* codegen_checked_div(llvm::Value* lhs, llvm::Value* rhs, bool is_unsigned, bool is_checked) {
+        if (!is_checked) {
+            return is_unsigned ? builder_->CreateUDiv(lhs, rhs, "divtmp") : builder_->CreateSDiv(lhs, rhs, "divtmp");
         }
 
-        llvm::Type* i32 = llvm::Type::getInt32Ty(*context_);
-        llvm::Value* zero = llvm::ConstantInt::get(i32, 0, /*isSigned=*/true);
-        llvm::Value* int_min =
-            llvm::ConstantInt::get(i32, static_cast<uint64_t>(std::numeric_limits<int32_t>::min()), /*isSigned=*/true);
-        llvm::Value* neg_one = llvm::ConstantInt::get(i32, static_cast<uint64_t>(-1), /*isSigned=*/true);
-
+        llvm::IntegerType* int_ty = llvm::cast<llvm::IntegerType>(lhs->getType());
+        llvm::Value* zero = llvm::ConstantInt::get(int_ty, 0);
         llvm::Value* divides_by_zero = builder_->CreateICmpEQ(rhs, zero, "divzero");
-        llvm::Value* overflows = builder_->CreateAnd(builder_->CreateICmpEQ(lhs, int_min, "isintmin"),
-                                                       builder_->CreateICmpEQ(rhs, neg_one, "isnegone"), "divoverflow");
-        llvm::Value* traps = builder_->CreateOr(divides_by_zero, overflows, "divtraps");
+        llvm::Value* traps = divides_by_zero;
+        if (!is_unsigned) {
+            llvm::APInt min_value = llvm::APInt::getSignedMinValue(int_ty->getBitWidth());
+            llvm::Value* int_min = llvm::ConstantInt::get(*context_, min_value);
+            llvm::Value* neg_one = llvm::ConstantInt::getSigned(int_ty, -1);
+            llvm::Value* overflows = builder_->CreateAnd(builder_->CreateICmpEQ(lhs, int_min, "isintmin"),
+                                                           builder_->CreateICmpEQ(rhs, neg_one, "isnegone"),
+                                                           "divoverflow");
+            traps = builder_->CreateOr(divides_by_zero, overflows, "divtraps");
+        }
 
         llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
         llvm::BasicBlock* fail_block = llvm::BasicBlock::Create(*context_, "div.fail", current_function);
@@ -2607,7 +2880,7 @@ private:
         builder_->CreateUnreachable();
 
         builder_->SetInsertPoint(ok_block);
-        return builder_->CreateSDiv(lhs, rhs, "divtmp");
+        return is_unsigned ? builder_->CreateUDiv(lhs, rhs, "divtmp") : builder_->CreateSDiv(lhs, rhs, "divtmp");
     }
 
     // Computes the storage location (pointer + scpp Type) of an lvalue
@@ -2868,7 +3141,7 @@ private:
                     return lv.ptr;
                 }
             }
-            llvm::Value* value = codegen_expr(*expr.rhs);
+            llvm::Value* value = codegen_value_for_target(*expr.rhs, lv.type);
             // Refresh to `expr`'s own position -- see the VarDecl case's
             // identical comment in codegen_stmt.
             current_loc_ = expr.loc;
@@ -2930,25 +3203,80 @@ private:
             return codegen_short_circuit(expr);
         }
 
-        llvm::Value* lhs = codegen_expr(*expr.lhs);
-        llvm::Value* rhs = codegen_expr(*expr.rhs);
+        // ch06 §6: an operand that's a bare literal has no fixed type of
+        // its own (see codegen_value_for_target) -- infer a "context
+        // type" from whichever side is *not* a literal (if either is)
+        // before evaluating either operand, so e.g. `int64_t x = c + 1;`
+        // generates `1` directly as an i64 constant rather than the
+        // default i32 (which would otherwise mismatch `c` and fail
+        // LLVM's own module verifier at the arithmetic instruction
+        // itself, a much less clear diagnostic than check_store_type's
+        // own). Movecheck has already rejected any two-distinct-real-
+        // scalar-type mismatch, so this can never itself paper over a
+        // genuine type error -- only ever resolves an otherwise-untyped
+        // literal.
+        bool lhs_is_literal = expr.lhs->kind == ExprKind::IntegerLiteral || expr.lhs->kind == ExprKind::FloatLiteral;
+        bool rhs_is_literal = expr.rhs->kind == ExprKind::IntegerLiteral || expr.rhs->kind == ExprKind::FloatLiteral;
+        std::optional<Type> context_type;
+        if (lhs_is_literal && !rhs_is_literal) {
+            context_type = infer_type(*expr.rhs);
+        } else if (rhs_is_literal && !lhs_is_literal) {
+            context_type = infer_type(*expr.lhs);
+        }
+        llvm::Value* lhs = context_type.has_value() ? codegen_value_for_target(*expr.lhs, *context_type)
+                                                      : codegen_expr(*expr.lhs);
+        llvm::Value* rhs = context_type.has_value() ? codegen_value_for_target(*expr.rhs, *context_type)
+                                                      : codegen_expr(*expr.rhs);
+
+        // ch06 §6: the operand type (preferring the resolved context
+        // type above, when there was a literal to resolve; otherwise the
+        // LHS -- movecheck has already rejected any two-distinct-real-
+        // scalar-type mismatch, so both operands always share one type
+        // by the time this runs) decides signed-vs-unsigned-vs-floating-
+        // point codegen for every arithmetic/ordering operator below;
+        // `Eq`/`Ne` alone are signedness-independent (an icmp/fcmp
+        // equality predicate is the same regardless) but still need
+        // fcmp for a float operand.
+        std::optional<Type> operand_type = context_type.has_value() ? context_type : infer_type(*expr.lhs);
+        bool is_float = operand_type.has_value() && is_float_scalar_type_name(operand_type->name);
+        bool is_unsigned = operand_type.has_value() && is_unsigned_scalar_type_name(operand_type->name);
+        bool is_checked = operand_type.has_value() && is_checked_arithmetic_scalar_type_name(operand_type->name);
 
         switch (expr.binary_op) {
             case BinaryOp::Add:
             case BinaryOp::Sub:
             case BinaryOp::Mul:
-                return codegen_checked_arith(expr.binary_op, lhs, rhs);
-            case BinaryOp::Div: return codegen_checked_div(lhs, rhs);
-            // Comparisons always produce a genuine i1 from icmp, but a
-            // scpp `bool` result needs to be widened to the i8 every
+                if (is_float) return codegen_float_arith(expr.binary_op, lhs, rhs);
+                return codegen_checked_arith(expr.binary_op, lhs, rhs, is_unsigned, is_checked);
+            case BinaryOp::Div:
+                if (is_float) return builder_->CreateFDiv(lhs, rhs, "fdivtmp");
+                return codegen_checked_div(lhs, rhs, is_unsigned, is_checked);
+            // Comparisons always produce a genuine i1 from icmp/fcmp, but
+            // a scpp `bool` result needs to be widened to the i8 every
             // other bool value uses (see i1_to_bool/to_llvm_type) before
             // it can be stored, passed, or returned like any other value.
-            case BinaryOp::Eq: return i1_to_bool(builder_->CreateICmpEQ(lhs, rhs, "eqtmp"));
-            case BinaryOp::Ne: return i1_to_bool(builder_->CreateICmpNE(lhs, rhs, "netmp"));
-            case BinaryOp::Lt: return i1_to_bool(builder_->CreateICmpSLT(lhs, rhs, "lttmp"));
-            case BinaryOp::Gt: return i1_to_bool(builder_->CreateICmpSGT(lhs, rhs, "gttmp"));
-            case BinaryOp::Le: return i1_to_bool(builder_->CreateICmpSLE(lhs, rhs, "letmp"));
-            case BinaryOp::Ge: return i1_to_bool(builder_->CreateICmpSGE(lhs, rhs, "getmp"));
+            case BinaryOp::Eq:
+                return i1_to_bool(is_float ? builder_->CreateFCmpOEQ(lhs, rhs, "eqtmp")
+                                            : builder_->CreateICmpEQ(lhs, rhs, "eqtmp"));
+            case BinaryOp::Ne:
+                return i1_to_bool(is_float ? builder_->CreateFCmpONE(lhs, rhs, "netmp")
+                                            : builder_->CreateICmpNE(lhs, rhs, "netmp"));
+            case BinaryOp::Lt:
+                return i1_to_bool(is_float ? builder_->CreateFCmpOLT(lhs, rhs, "lttmp")
+                                   : is_unsigned ? builder_->CreateICmpULT(lhs, rhs, "lttmp")
+                                                  : builder_->CreateICmpSLT(lhs, rhs, "lttmp"));
+            case BinaryOp::Gt:
+                return i1_to_bool(is_float ? builder_->CreateFCmpOGT(lhs, rhs, "gttmp")
+                                   : is_unsigned ? builder_->CreateICmpUGT(lhs, rhs, "gttmp")
+                                                  : builder_->CreateICmpSGT(lhs, rhs, "gttmp"));
+            case BinaryOp::Le:
+                return i1_to_bool(is_float ? builder_->CreateFCmpOLE(lhs, rhs, "letmp")
+                                   : is_unsigned ? builder_->CreateICmpULE(lhs, rhs, "letmp")
+                                                  : builder_->CreateICmpSLE(lhs, rhs, "letmp"));
+            case BinaryOp::Ge:
+                return i1_to_bool(is_float ? builder_->CreateFCmpOGE(lhs, rhs, "getmp")
+                                   : is_unsigned ? builder_->CreateICmpUGE(lhs, rhs, "getmp")
+                                                  : builder_->CreateICmpSGE(lhs, rhs, "getmp"));
             default: throw CodegenError("unhandled binary operator",
                 current_loc_);
         }

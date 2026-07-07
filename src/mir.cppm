@@ -2,6 +2,7 @@ module;
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 export module scpp.mir;
@@ -142,6 +143,13 @@ struct Body {
     std::vector<BasicBlock> blocks;
     std::unordered_map<std::string, Type> local_types;
     std::vector<std::string> locals_in_order;
+    // Every local declared `const` (Stmt::is_const, ch05/ch06 -- an
+    // immutable local, not a parameter: those don't support `const` yet,
+    // see parse_param_type) -- consulted by movecheck's own
+    // MirStatementKind::Assign case to reject any reassignment after the
+    // single, initializing Assign/Declare a const local's own VarDecl
+    // itself lowers to.
+    std::unordered_set<std::string> const_locals;
 };
 
 Body build_mir(const Function& fn);
@@ -242,6 +250,7 @@ private:
 
             case StmtKind::VarDecl: {
                 declare_local(stmt.var_name, stmt.type);
+                if (stmt.is_const) body_.const_locals.insert(stmt.var_name);
                 if (stmt.type.kind == TypeKind::Reference || stmt.type.kind == TypeKind::Span) {
                     // `expr` is null when the source omitted an
                     // initializer (`int& r;` / `std::span<int> s;`,

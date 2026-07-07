@@ -1,0 +1,11 @@
+// ch05 §5.x: unlike a *const* reference (see
+// const_reference_parameter_binding_to_a_literal_is_allowed.cpp), a
+// *mutable* `T&` still cannot bind to a temporary -- real C++ itself
+// forbids binding a non-const lvalue reference to an rvalue (there is no
+// place a write through it could ever land).
+int identity(int& r) {
+    return r;
+}
+int main() {
+    return identity(5);
+}

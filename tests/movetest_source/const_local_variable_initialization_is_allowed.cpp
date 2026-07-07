@@ -1,0 +1,8 @@
+// ch05/ch06: `const T name = expr;` declares an immutable local,
+// initialized exactly once at declaration -- reading it afterward is
+// always fine (only *reassigning* it is rejected, see
+// const_local_variable_reassignment_is_rejected.cpp).
+int main() {
+    const int x = 5;
+    return x;
+}

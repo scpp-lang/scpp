@@ -13,6 +13,12 @@ enum class TokenKind {
     // literals / identifiers
     Identifier,
     IntegerLiteral,
+    // A floating-point literal (`1.5`, `0.25`, ...) -- digits, a decimal
+    // point, then more digits (no exponent notation in this version).
+    // `text` is the exact source substring, like every other literal
+    // token; decoding it into a double happens in the parser (see
+    // decode_float_literal), not here.
+    FloatLiteral,
     // A char literal (`'a'`, `'\n'`, ...). `text` includes the
     // surrounding single quotes (same exact-source-substring convention
     // as StringLiteral below); decoding the escape sequence into an
@@ -40,6 +46,19 @@ enum class TokenKind {
             // literal/expression in one arithmetic/comparison op isn't
             // supported -- use a char literal (`'a'`) or another `char`
             // value on both sides instead.
+    // ch06 §6: the rest of the numeric family's own *keyword* members --
+    // real C++ keywords in their own right (unlike int8_t/uint8_t/.../
+    // size_t/ptrdiff_t/float32_t/float64_t below, ordinary <cstdint>/
+    // <cstddef>/<stdfloat> typedef names, not keywords at all in real
+    // C++ -- those are instead recognized as pre-registered identifiers,
+    // see Parser's own constructor). `unsigned` is only ever legal
+    // directly before `int`/`long` (ch06: the bare one-word shorthand
+    // isn't valid scpp) -- parse_unqualified_type enforces this, not the
+    // lexer.
+    KwLong,
+    KwFloat,
+    KwDouble,
+    KwUnsigned,
     KwVoid, // ch02 §2.1: valid only as a function return type or as a
             // pointer's pointee (`void*`) -- never as a bare
             // variable/parameter/field type. Needed for `extern "C"`
@@ -213,6 +232,10 @@ private:
         if (text == "int") return TokenKind::KwInt;
         if (text == "bool") return TokenKind::KwBool;
         if (text == "char") return TokenKind::KwChar;
+        if (text == "long") return TokenKind::KwLong;
+        if (text == "float") return TokenKind::KwFloat;
+        if (text == "double") return TokenKind::KwDouble;
+        if (text == "unsigned") return TokenKind::KwUnsigned;
         if (text == "void") return TokenKind::KwVoid;
         if (text == "return") return TokenKind::KwReturn;
         if (text == "if") return TokenKind::KwIf;
@@ -275,6 +298,18 @@ private:
 
         if (std::isdigit(static_cast<unsigned char>(c))) {
             while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) advance();
+            // A `.` followed by at least one digit makes this a
+            // FloatLiteral instead (`1.5`) -- a bare trailing `.` with no
+            // following digit (`1.`) is *not* consumed here, left as an
+            // IntegerLiteral followed by a separate `.` token (member
+            // access on an integer literal is nonsensical but not this
+            // lexer's problem to reject).
+            if (!at_end() && peek() == '.' && pos_ + 1 < source_.size() &&
+                std::isdigit(static_cast<unsigned char>(source_[pos_ + 1]))) {
+                advance(); // '.'
+                while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) advance();
+                return make_token(TokenKind::FloatLiteral, start, start_line, start_col);
+            }
             return make_token(TokenKind::IntegerLiteral, start, start_line, start_col);
         }
 

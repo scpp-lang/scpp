@@ -341,6 +341,42 @@ void test_user_declared_move_assignment_operator_is_rejected() {
     expect(threw, "user_declared_move_assignment_operator_is_rejected: expected a ParseError");
 }
 
+// ch06 §6: `static_cast<T>(expr)` parses to a Cast expression with `type`
+// set to the target type and the operand in `lhs`.
+void test_static_cast_parses() {
+    scpp::Program program = scpp::parse("int f(bool b) { return static_cast<int>(b); }");
+    const scpp::Stmt& ret = *program.functions[0].body->statements[0];
+    expect(ret.kind == scpp::StmtKind::Return, "static_cast_parses: expected Return");
+    const scpp::Expr& cast = *ret.expr;
+    expect(cast.kind == scpp::ExprKind::Cast, "static_cast_parses: expected Cast");
+    expect(is_named_type(cast.type, "int"), "static_cast_parses: target type should be 'int'");
+    expect(cast.lhs != nullptr && cast.lhs->kind == scpp::ExprKind::Identifier && cast.lhs->name == "b",
+           "static_cast_parses: operand should be Identifier 'b'");
+}
+
+// ch06 §6: `(T)expr` (the C-style cast) parses identically to
+// `static_cast<T>(expr)` -- same Cast node shape.
+void test_c_style_cast_parses() {
+    scpp::Program program = scpp::parse("int f(bool b) { return (int)b; }");
+    const scpp::Stmt& ret = *program.functions[0].body->statements[0];
+    const scpp::Expr& cast = *ret.expr;
+    expect(cast.kind == scpp::ExprKind::Cast, "c_style_cast_parses: expected Cast");
+    expect(is_named_type(cast.type, "int"), "c_style_cast_parses: target type should be 'int'");
+    expect(cast.lhs != nullptr && cast.lhs->kind == scpp::ExprKind::Identifier && cast.lhs->name == "b",
+           "c_style_cast_parses: operand should be Identifier 'b'");
+}
+
+// A parenthesized expression that merely *starts* with an identifier
+// (never a registered type name) must still parse as ordinary grouping,
+// not be misdetected as a C-style cast -- e.g. `(x)` where `x` is a
+// plain local variable, or `(x + y)`.
+void test_parenthesized_expression_is_not_misdetected_as_cast() {
+    scpp::Program program = scpp::parse("int f(int x, int y) { return (x) + (x + y) * 2; }");
+    const scpp::Stmt& ret = *program.functions[0].body->statements[0];
+    expect(ret.expr->kind == scpp::ExprKind::Binary,
+           "parenthesized_expression_is_not_misdetected_as_cast: expected Binary");
+}
+
 void test_operator_precedence() {
     // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3.
     scpp::Program program = scpp::parse("int f() { return 1 + 2 * 3; }");
@@ -947,6 +983,39 @@ void test_plain_pointer_defaults_to_mutable_pointee() {
     const scpp::Type& param_type = program.functions[0].params[0].type;
     expect(param_type.kind == scpp::TypeKind::Pointer, "plain_pointer_defaults_to_mutable_pointee: should be Pointer");
     expect(param_type.is_mutable_pointee, "plain_pointer_defaults_to_mutable_pointee: is_mutable_pointee should be true");
+}
+
+// ch05/ch06: `const T name = expr;` -- a bare (non-reference,
+// non-pointer) `const`-qualified local -- parses and sets Stmt::is_const,
+// distinct from `const T&`/`const T*`'s own, separately-tracked
+// read-only-ness (Type::is_mutable_ref/is_mutable_pointee).
+void test_const_local_variable_parses() {
+    scpp::Program program = scpp::parse("int f() { const int x = 5; return x; }");
+    const scpp::Stmt& decl = *program.functions[0].body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "const_local_variable_parses: statement 0 should be VarDecl");
+    expect(decl.is_const, "const_local_variable_parses: is_const should be true");
+    expect(is_named_type(decl.type, "int"), "const_local_variable_parses: type should be plain 'int'");
+}
+
+// A plain (non-const) local must default to is_const == false -- the
+// overwhelmingly common case, unaffected by the new tracking above.
+void test_ordinary_local_variable_is_not_const() {
+    scpp::Program program = scpp::parse("int f() { int x = 5; return x; }");
+    const scpp::Stmt& decl = *program.functions[0].body->statements[0];
+    expect(!decl.is_const, "ordinary_local_variable_is_not_const: is_const should be false");
+}
+
+// ch05/ch06: a `const` local can never be given a value afterward, so
+// omitting its initializer entirely (unlike an ordinary local, which may
+// be declared bare) is rejected right at parse time.
+void test_const_local_variable_without_initializer_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int f() { const int x; return x; }");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "const_local_variable_without_initializer_is_rejected: expected a ParseError");
 }
 
 // ch11 §11.3: `export module name;` marks a primary interface unit.
@@ -1579,6 +1648,47 @@ void test_generic_parameter_mutable_auto_ref_parses() {
            "generic_parameter_mutable_auto_ref_parses: should be a mutable reference");
     expect(!fn.params[0].type.is_rvalue_ref,
            "generic_parameter_mutable_auto_ref_parses: should not be an rvalue reference");
+}
+
+// ch05 §5.11: bare `auto` (no concept name at all) parses as its own
+// generic parameter form -- "the parameter's type is treated as fully
+// opaque... exactly as if it were constrained by a concept whose
+// requires-expression guarantees nothing". Recorded under the reserved
+// "$auto" witness (parse_program's own comment), never a real,
+// user-spellable concept name.
+void test_bare_auto_parameter_parses() {
+    scpp::Program program = scpp::parse("int identity(auto x) { return 0; }\n");
+    const scpp::Function* identity_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "identity") identity_fn = &fn;
+    }
+    expect(identity_fn != nullptr, "bare_auto_parameter_parses: expected function 'identity'");
+    expect(identity_fn->is_generic_template, "bare_auto_parameter_parses: should be is_generic_template");
+    expect(identity_fn->params.size() == 1, "bare_auto_parameter_parses: expected 1 param");
+    const scpp::Param& param = identity_fn->params[0];
+    expect(param.generic_concept == "$auto", "bare_auto_parameter_parses: generic_concept should be '$auto'");
+    expect(is_named_type(param.type, "$auto"), "bare_auto_parameter_parses: type should name the '$auto' witness");
+}
+
+// ch05 §5.12: real C++14 generic lambdas -- a bare `auto` lambda
+// parameter (unlike a *named*-concept-constrained one, still rejected)
+// -- now parses instead of failing with "expected a type name". Lambda
+// resolution (to a real class + "call" method) only happens later, in
+// movecheck's Monomorphizer pass, not at parse time (see
+// test_lambda_with_explicit_captures_parses' own "name should be empty
+// before resolution" check) -- so this inspects the raw Lambda
+// expression's own lambda_params directly, exactly like that test does.
+void test_bare_auto_lambda_parameter_parses() {
+    scpp::Program program = scpp::parse("int main() { return [](auto x) { return 0; }(1); }\n");
+    const scpp::Function& main_fn = program.functions[0];
+    const scpp::Expr& call_expr = *main_fn.body->statements[0]->expr;
+    expect(call_expr.kind == scpp::ExprKind::Call, "bare_auto_lambda_parameter_parses: expected Call");
+    expect(call_expr.lhs != nullptr && call_expr.lhs->kind == scpp::ExprKind::Lambda,
+           "bare_auto_lambda_parameter_parses: expected a Lambda IIFE receiver");
+    const scpp::Expr& lambda = *call_expr.lhs;
+    expect(lambda.lambda_params.size() == 1, "bare_auto_lambda_parameter_parses: expected 1 param");
+    expect(lambda.lambda_params[0].generic_concept == "$auto",
+           "bare_auto_lambda_parameter_parses: generic_concept should be '$auto'");
 }
 
 // ch05 §5.11: an identifier immediately followed by `auto` that does
@@ -2284,6 +2394,9 @@ int main() {
     test_constructor_taking_other_type_rvalue_reference_parses();
     test_operator_assign_parses();
     test_user_declared_move_assignment_operator_is_rejected();
+    test_static_cast_parses();
+    test_c_style_cast_parses();
+    test_parenthesized_expression_is_not_misdetected_as_cast();
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();
@@ -2332,6 +2445,9 @@ int main() {
     test_unsupported_string_escape_is_rejected();
     test_const_char_pointer_type();
     test_plain_pointer_defaults_to_mutable_pointee();
+    test_const_local_variable_parses();
+    test_ordinary_local_variable_is_not_const();
+    test_const_local_variable_without_initializer_is_rejected();
     test_export_module_declaration();
     test_dotted_module_name_declaration();
     test_plain_module_declaration_is_implementation_unit();
@@ -2370,6 +2486,8 @@ int main() {
     test_generic_parameter_const_auto_ref_parses();
     test_generic_parameter_auto_rvalue_ref_parses();
     test_generic_parameter_mutable_auto_ref_parses();
+    test_bare_auto_parameter_parses();
+    test_bare_auto_lambda_parameter_parses();
     test_generic_parameter_unknown_concept_is_rejected();
     test_generic_parameter_on_method_is_rejected();
     test_lambda_with_explicit_captures_parses();
