@@ -43,11 +43,64 @@ itself the explicit declaration, and the compiler verifies triviality.
 - `class` participates in the ownership/move/borrow/lifetime checks
   described in [§5](ch05-static-checks.md); it is **not** guaranteed to
   be zero-initialized (requires explicit construction).
-- Full checking rules for user-defined `class` types (constructors/
-  destructors, borrows across method bodies, etc.) are out of scope for
-  v0.1 — see the backlog in [§8](ch08-open-questions.md). v0.1 first
-  checks only the standard-library-provided owning type `unique_ptr`
-  (milestone M2).
+- **Construction and destruction**: a `class` may declare one or more
+  constructors (real C++ overloading rules, [§5.10](ch05-static-checks.md),
+  apply directly -- disambiguated by parameter list, exactly like any
+  other overloaded name) and, optionally, a destructor, using real C++
+  syntax verbatim. This is no longer limited to the standard-library-provided
+  owning type `unique_ptr` (M2's original scope) -- any user-defined
+  `class` may now own a resource and define its own cleanup logic.
+- **Move construction and move assignment are never user-written --
+  the compiler always provides them**: a program that declares its own
+  `ClassName(ClassName&&)` or `operator=(ClassName&&)` is rejected, for
+  *every* `class` type, unconditionally. Instead, every `class` gets a
+  compiler-synthesized move constructor and move assignment operator
+  that recursively move each member in declaration order (scalars/raw
+  pointers/`struct` members bitwise, `class`-typed members via their own
+  compiler-provided move) -- real C++'s own *implicitly-defined* move
+  constructor/assignment, verbatim, just never user-overridable. This is
+  a deliberate, permanent restriction, not a temporary one, for the same
+  reason real C++ move constructors are a well-known footgun category:
+  a hand-written one that forgets to reset the source (e.g. null out a
+  raw pointer field after taking it) leaves two live objects owning the
+  same resource, both of which will eventually try to free it. Verified
+  against real Rust (`rustc`) first: Rust has no "move constructor"
+  concept at all -- a move is unconditionally a bitwise copy plus
+  compile-time invalidation of the old binding, full stop, with no trait
+  or hook to customize it. Custom logic that needs to run when a value
+  changes hands lives in `Clone` instead (arbitrary logic, but always an
+  explicit `.clone()` call, never implicitly triggered by an ordinary
+  move/assignment) -- and a type implementing `Copy` cannot also
+  implement `Drop` (verified: `rustc` rejects it, error E0184), closing
+  off the exact "silently bitwise-duplicate a resource-owning type"
+  hazard real C++'s own implicit special member function rules still
+  allow today (declaring only a destructor still merely *deprecates*,
+  rather than deletes, the implicitly-declared copy constructor --
+  [depr.impldec]). scpp's rule reaches the same place scpp's own
+  `struct`/`class` split already reaches for copying ([§4.1](#41-struct-a-purely-trivial-aggregate)'s
+  `struct` is always bitwise-copyable, `class` is not copyable at all by
+  default in v0.1): move is likewise always exactly one thing,
+  structural and compiler-owned, never a place for author-supplied logic
+  to go wrong. See [§8](ch08-open-questions.md) Q14 for this decision's
+  full record.
+  - The moved-from object is placed in the *moved-out* state
+    ([§5.1](ch05-static-checks.md)), exactly like moving any other value
+    -- its destructor, if it has one, is then never invoked for it
+    ([§5.1](ch05-static-checks.md)), a compile-time-decided omission, not
+    a runtime null-check the way hand-written C++ typically achieves the
+    same safety.
+  - Because moving is always this same compiler-provided, purely
+    structural operation, self-move-assignment (`x = std::move(x)`)
+    needs no defensive `this != &other` check the way real C++ does:
+    evaluating `std::move(x)` places `x` in the moved-out state before
+    the assignment's own "destroy the old value" step runs, so that step
+    is always a no-op for this case, by the same rule as any other
+    moved-out object.
+  - A `class` with a non-static data member of reference type (`T&`/
+    `const T&`) has no move assignment operator at all -- exactly real
+    C++'s own rule ([class.copy.assign]) for the same reason (a
+    reference cannot be re-seated by assignment) -- only a move
+    constructor (references can still be bound once, at construction).
 - **Fallible construction and destruction**: a constructor or destructor has no
   channel to hand back a `std::expected<T, E>` -- scpp has no exceptions
   to throw through instead (see [§5.6](ch05-static-checks.md)/

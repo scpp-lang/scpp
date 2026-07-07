@@ -10,6 +10,10 @@ the following properties, unconditionally, everywhere:
 - Reassignment returns a variable to the *initialized* state.
 - At end of scope, values still *initialized* are dropped; moved-out values
   are not dropped.
+- For a `class`-typed value specifically, "moved" always means the same
+  compiler-provided, memberwise-recursive operation, never user-written
+  logic -- see [§4.2](ch04-struct-vs-class.md) for the full rule and
+  [§8](ch08-open-questions.md) Q14 for why.
 
 ## 5.2 Borrow & Aliasing
 - **Alias XOR mutability**: at any instant an object may have either any

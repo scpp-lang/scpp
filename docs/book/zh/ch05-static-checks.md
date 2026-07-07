@@ -8,6 +8,10 @@
 - `std::move(x)` 后，`x` 进入 *moved-out* 状态；读取 moved-out 值 → 错误。
 - 重新赋值可使变量回到 *initialized* 状态。
 - 作用域结束时对仍 *initialized* 的值执行 drop；对 moved-out 值不 drop。
+- 具体到一个 `class` 类型的值，"move"永远是同一种编译器提供的、逐字段
+  递归的操作，从来不是用户写的逻辑——完整规则见
+  [§4.2](ch04-struct-vs-class.md)，为什么这么定见
+  [§8](ch08-open-questions.md) Q14。
 
 ## 5.2 借用与别名（Borrow / Aliasing）
 - **别名 XOR 可变**：同一对象在同一时刻，要么存在任意数量 `const T&`

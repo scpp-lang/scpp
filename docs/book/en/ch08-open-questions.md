@@ -256,6 +256,40 @@
     (`.scpp`, not `.cpp`) exists specifically so a plain, unmodified
     `.cpp` file is never accidentally fed to the scpp compiler and
     silently subjected to checking its author never asked for.
+14. **Move construction/assignment: user-written, or compiler-only?**
+    Real C++ lets a class define its own `T(T&&)`/`operator=(T&&)` with
+    arbitrary logic. **Settled: compiler-only, no exceptions.** A program
+    that declares either for any `class` type is rejected outright; every
+    `class` instead gets a compiler-synthesized move constructor and move
+    assignment operator that recursively move each member -- real C++'s
+    own *implicitly-defined* versions, verbatim, just never
+    user-overridable (see [§4.2](ch04-struct-vs-class.md)). Verified
+    against real Rust (rustc) first: Rust has no "move constructor"
+    concept at all -- a move is unconditionally a bitwise copy plus
+    compile-time invalidation of the old binding, full stop, with no
+    trait or hook to customize it. Custom logic that needs to run when a
+    value changes hands lives in `Clone` instead (arbitrary logic,
+    but always an explicit `.clone()` call, never implicitly triggered by
+    an ordinary move/assignment) -- and a type implementing `Copy` cannot
+    also implement `Drop` (verified: `rustc` rejects it, error E0184),
+    closing off the exact "silently bitwise-duplicate a
+    resource-owning type" hazard real C++'s implicit special member
+    function rules still allow today (declaring only a destructor still
+    merely *deprecates*, rather than deletes, the implicitly-declared
+    copy constructor -- [depr.impldec]). scpp's rule reaches the same
+    place scpp's own `struct`/`class` split already reaches for copying
+    (§4.1's `struct` is always bitwise-copyable, `class` is not copyable
+    at all by default in v0.1): move is likewise always exactly one
+    thing, structural and compiler-owned, never a place for
+    author-supplied logic to go wrong. A concrete consequence: self-move-
+    assignment (`x = std::move(x)`) needs no `this != &other` guard --
+    real C++'s classic footgun -- because there is no user-written body
+    for aliasing to break; evaluating `std::move(x)` already places `x`
+    in the moved-out state before the assignment's own "destroy the old
+    value" step runs, making that step a no-op for exactly this case, by
+    the same rule as any other moved-out object. Copy construction/
+    assignment for `class` types is a separate, not-yet-settled question
+    (`struct` copying is already settled by §4.1).
 
 ---
 

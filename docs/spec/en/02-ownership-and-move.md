@@ -76,6 +76,67 @@ ends, or any other requirement the C++ standard imposes on destruction;
 it modifies only whether the destructor is invoked, based on the
 object's ownership/move state (6.2). — end note]
 
+## 6.4 Move construction and move assignment [class.copy.ctor], [class.copy.assign]
+
+(1) A program shall not declare a move constructor ([class.copy.ctor])
+or a move assignment operator ([class.copy.assign]) for a class type; a
+declaration the C++ standard would otherwise classify as either is
+ill-formed.
+
+(2) Every class type has an implicitly-defined move constructor with
+exactly one parameter, of type rvalue reference to the class type,
+irrespective of whether the C++ standard's own conditions for
+implicitly declaring one ([class.copy.ctor]) are met.
+
+(3) A class type has an implicitly-defined move assignment operator
+with exactly one parameter, of type rvalue reference to the class type,
+irrespective of whether the C++ standard's own conditions for
+implicitly declaring one ([class.copy.assign]) are met, unless the
+class has a non-static data member of reference type, in which case it
+has no move assignment operator, exactly as the C++ standard's own
+conditions ([class.copy.assign]) already provide.
+
+(4) The implicitly-defined move constructor for a class X initializes
+each non-static data member of the object being constructed with the
+corresponding non-static data member of the constructor's parameter,
+moved in the manner appropriate to that member's type, in declaration
+order.
+
+(5) The implicitly-defined move assignment operator for a class X
+replaces the value of each non-static data member of the object denoted
+by `*this` with the corresponding non-static data member of the
+operator's parameter, moved in the manner appropriate to that member's
+type, in declaration order, and returns `*this`.
+
+[Note: (4) and (5) apply recursively where a non-static data member is
+itself of class type: (2)/(3) give that member's own type an
+implicitly-defined move constructor/move assignment operator, which (1)
+guarantees is not a user declaration this document must instead
+reconcile with. — end note]
+
+[Note: [§6.2](02-ownership-and-move.md#62-ownership-and-move-state-basiclife) already places the
+object denoted by an expression of the form `std::move(E)` in the
+moved-out state upon that expression's evaluation, and
+[§6.3](02-ownership-and-move.md#63-destruction-classdtor) already excuses an object in the
+moved-out state from destruction; this subclause introduces no separate
+rule for either effect for an object supplied as the argument
+initializing (4)'s or (5)'s parameter. — end note]
+
+```cpp
+struct Inner { int* p; };
+class Outer {
+    Inner a;
+    int b;
+public:
+    Outer(int* p, int b_) : a{p}, b(b_) {}
+};
+
+Outer x(new int(1), 2);
+Outer y(std::move(x));   // (4): memberwise move-constructs y.a, y.b from x.a, x.b;
+                          // x is thereafter in the moved-out state (§6.2) and its
+                          // destructor, if declared, is not invoked for it (§6.3)
+```
+
 ---
 
 [← Previous: The `[[scpp::unsafe]]` Attribute](01-unsafe.md) · [Table of Contents](README.md)
