@@ -4390,51 +4390,6 @@ private:
         return result;
     }
 
-    void substitute_non_type_param_in_expr(Expr& expr, const std::string& param_name, int replacement) {
-        if (expr.kind == ExprKind::Identifier && expr.name == param_name) {
-            expr.kind = ExprKind::IntegerLiteral;
-            expr.int_value = replacement;
-            expr.name.clear();
-            expr.lhs.reset();
-            expr.rhs.reset();
-            expr.args.clear();
-            expr.explicit_template_args.clear();
-            return;
-        }
-        if (expr.lhs) substitute_non_type_param_in_expr(*expr.lhs, param_name, replacement);
-        if (expr.rhs) substitute_non_type_param_in_expr(*expr.rhs, param_name, replacement);
-        for (ExprPtr& arg : expr.args) substitute_non_type_param_in_expr(*arg, param_name, replacement);
-        for (LambdaCapture& capture : expr.lambda_captures) {
-            if (capture.init) substitute_non_type_param_in_expr(*capture.init, param_name, replacement);
-        }
-        if (expr.lambda_body) substitute_non_type_param_in_stmt(*expr.lambda_body, param_name, replacement);
-    }
-
-    void substitute_non_type_param_in_stmt(Stmt& stmt, const std::string& param_name, int replacement) {
-        switch (stmt.kind) {
-            case StmtKind::VarDecl:
-                if (stmt.init) substitute_non_type_param_in_expr(*stmt.init, param_name, replacement);
-                for (ExprPtr& arg : stmt.ctor_args) substitute_non_type_param_in_expr(*arg, param_name, replacement);
-                return;
-            case StmtKind::Return:
-            case StmtKind::ExprStmt:
-                if (stmt.expr) substitute_non_type_param_in_expr(*stmt.expr, param_name, replacement);
-                return;
-            case StmtKind::If:
-                substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
-                substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
-                if (stmt.else_branch) substitute_non_type_param_in_stmt(*stmt.else_branch, param_name, replacement);
-                return;
-            case StmtKind::While:
-                substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
-                substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
-                return;
-            case StmtKind::Block:
-                for (StmtPtr& nested : stmt.statements) substitute_non_type_param_in_stmt(*nested, param_name, replacement);
-                return;
-        }
-    }
-
     // ch05 §5.14: for every class with a base (ClassDef::base_class_name),
     // synthesizes a "forwarding stub" Function (Function::forwards_to)
     // for every method the base class defines (recursively -- including
