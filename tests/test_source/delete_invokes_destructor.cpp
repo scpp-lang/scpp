@@ -1,0 +1,15 @@
+class Box {
+public:
+    Box(int v) { this.v = v; return; }
+    ~Box() { print_int(this.v); return; }
+private:
+    int v;
+};
+
+int main() {
+    [[scpp::unsafe]] {
+        Box* p = new Box(9);
+        delete p;
+    }
+    return 0;
+}

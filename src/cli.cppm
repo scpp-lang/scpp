@@ -44,6 +44,8 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwFalse: return "KwFalse";
         case scpp::TokenKind::KwStruct: return "KwStruct";
         case scpp::TokenKind::KwConst: return "KwConst";
+        case scpp::TokenKind::KwNew: return "KwNew";
+        case scpp::TokenKind::KwDelete: return "KwDelete";
         case scpp::TokenKind::KwClass: return "KwClass";
         case scpp::TokenKind::KwPublic: return "KwPublic";
         case scpp::TokenKind::KwPrivate: return "KwPrivate";
@@ -310,6 +312,18 @@ void print_expr(const scpp::Expr& expr, int depth) {
         case scpp::ExprKind::MakeUnique:
             std::cout << "MakeUnique " << type_to_string(expr.type) << "\n";
             for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
+            break;
+        case scpp::ExprKind::New:
+            std::cout << "New " << type_to_string(expr.type) << "\n";
+            for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
+            break;
+        case scpp::ExprKind::Delete:
+            std::cout << "Delete\n";
+            print_expr(*expr.lhs, depth + 1);
+            break;
+        case scpp::ExprKind::PackExpansion:
+            std::cout << "PackExpansion\n";
+            print_expr(*expr.lhs, depth + 1);
             break;
         case scpp::ExprKind::Lambda: {
             std::cout << "Lambda";

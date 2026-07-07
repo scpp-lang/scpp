@@ -362,6 +362,17 @@ private:
                 return result;
             }
 
+            case ExprKind::New: {
+                Type result;
+                result.kind = TypeKind::Pointer;
+                result.pointee = std::make_shared<Type>(expr.type);
+                result.is_mutable_pointee = true;
+                return result;
+            }
+
+            case ExprKind::Delete:
+                return Type{.kind = TypeKind::Named, .name = "void"};
+
             case ExprKind::Lambda: {
                 // ch05 §5.12: once resolved (movecheck's closure-
                 // resolution pass), `expr.name` holds the synthesized
@@ -460,9 +471,10 @@ private:
                 return std::nullopt;
 
             case ExprKind::Fold:
+            case ExprKind::PackExpansion:
                 // Fold expressions are expanded away during generic-call
                 // monomorphization; no concrete codegen path should ever
-                // see one.
+                // see one. Same for a raw `args...` pack expansion.
                 return std::nullopt;
 
             case ExprKind::Call: {
@@ -514,6 +526,7 @@ private:
         switch (arg.kind) {
             case ExprKind::Move:
             case ExprKind::MakeUnique:
+            case ExprKind::New:
             case ExprKind::IntegerLiteral:
             case ExprKind::BoolLiteral:
             case ExprKind::CharLiteral:
@@ -559,7 +572,7 @@ private:
             if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee)) {
                 return true;
             }
-            if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique ||
+            if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique || arg.kind == ExprKind::New ||
                 arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::BoolLiteral ||
                 arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
                 return false;
@@ -1802,6 +1815,10 @@ private:
             }
 
             case StmtKind::ExprStmt:
+                if (stmt.expr && stmt.expr->kind == ExprKind::Delete) {
+                    codegen_delete_expr(*stmt.expr);
+                    return;
+                }
                 codegen_expr(*stmt.expr);
                 return;
 
@@ -2490,10 +2507,18 @@ private:
                 return old_value;
             }
 
+            case ExprKind::New:
+                return codegen_new_expr(expr);
+
+            case ExprKind::Delete:
+                throw CodegenError("'delete' is only supported as a standalone statement in this version",
+                    current_loc_);
+
             case ExprKind::MakeUnique:
                 return codegen_make_unique(expr);
 
             case ExprKind::Fold:
+            case ExprKind::PackExpansion:
                 throw CodegenError("fold expression should have been expanded before codegen",
                     current_loc_);
 
@@ -2592,6 +2617,63 @@ private:
         llvm::Value* heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
         builder_->CreateStore(initial_value, heap_ptr);
         return heap_ptr;
+    }
+
+    llvm::Value* codegen_new_expr(const Expr& expr) {
+        llvm::Type* element_type = to_llvm_type(expr.type);
+        llvm::Function* malloc_fn = get_or_declare_malloc();
+        uint64_t size_in_bytes = module_->getDataLayout().getTypeAllocSize(element_type);
+        llvm::Value* size_arg = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), size_in_bytes);
+        llvm::Value* heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
+
+        if (expr.type.kind == TypeKind::Named && structs_.contains(expr.type.name)) {
+            builder_->CreateStore(llvm::Constant::getNullValue(element_type), heap_ptr);
+            if (!expr.args.empty() || expr.has_paren_init) {
+                std::string ctor_name = expr.type.name + "_new";
+                const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
+                if (ctor_def == nullptr) {
+                    throw CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
+                        current_loc_);
+                }
+                llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
+                if (ctor == nullptr) {
+                    throw CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
+                        current_loc_);
+                }
+                std::vector<llvm::Value*> args = codegen_call_args(expr.args, ctor_def, /*param_offset=*/1);
+                args.insert(args.begin(), heap_ptr);
+                builder_->CreateCall(ctor, args);
+            }
+            return heap_ptr;
+        }
+
+        llvm::Value* initial_value = llvm::Constant::getNullValue(element_type);
+        if (!expr.args.empty()) {
+            if (expr.args.size() != 1) {
+                throw CodegenError("'new T(args...)' for a non-class type currently requires exactly one argument",
+                    current_loc_);
+            }
+            initial_value = codegen_expr(*expr.args[0]);
+            current_loc_ = expr.loc;
+            check_store_type(initial_value, element_type, "'new " + expr.type.name + "(...)' argument");
+        }
+        builder_->CreateStore(initial_value, heap_ptr);
+        return heap_ptr;
+    }
+
+    void codegen_delete_expr(const Expr& expr) {
+        llvm::Value* ptr = codegen_expr(*expr.lhs);
+        std::optional<Type> operand_type = infer_type(*expr.lhs);
+        if (!operand_type.has_value() || operand_type->kind != TypeKind::Pointer || operand_type->pointee == nullptr) {
+            throw CodegenError("'delete' requires a raw pointer operand in this version", current_loc_);
+        }
+        const Type& pointee = *operand_type->pointee;
+        if (pointee.kind == TypeKind::Named) {
+            if (llvm::Function* dtor = find_destructor(pointee.name)) {
+                codegen_call_destructor_unless_moved(dtor, ptr, nullptr);
+            }
+        }
+        builder_->CreateCall(get_or_declare_free(), {ptr});
     }
 
     // Returns `class_name`'s destructor function, if it has one (see

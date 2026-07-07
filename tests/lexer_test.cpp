@@ -51,7 +51,7 @@ void test_int_main_return() {
 
 void test_keywords() {
     expect_kinds(
-        "bool if else while for true false struct const",
+        "bool if else while for true false struct const new delete",
         {
             scpp::TokenKind::KwBool,
             scpp::TokenKind::KwIf,
@@ -62,6 +62,8 @@ void test_keywords() {
             scpp::TokenKind::KwFalse,
             scpp::TokenKind::KwStruct,
             scpp::TokenKind::KwConst,
+            scpp::TokenKind::KwNew,
+            scpp::TokenKind::KwDelete,
             scpp::TokenKind::EndOfFile,
         },
         "keywords");
