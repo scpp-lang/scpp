@@ -229,6 +229,57 @@ public:
 };
 ```
 
+## 6.6 By-value parameters of class type [expr.call]
+
+(1) If a function parameter has class type `T` and is not of reference
+type, the parameter object is initialized at each call according to this
+subclause.
+
+(2) If the corresponding argument is an *id-expression* designating a
+local object, including a parameter, whose type is exactly `T`, and `T`
+has a copy constructor (6.5), the parameter object is copy-constructed
+from that local object.
+
+(3) Otherwise, the corresponding argument shall be a **fresh value** of
+type `T`. For the purposes of this document, a fresh value of type `T`
+is:
+
+  (3.1) an expression of the form `std::move(E)` where `E` designates an
+  object of type `T`; or
+
+  (3.2) a call expression whose type is `T`.
+
+(4) If neither (2) nor (3) is satisfied, the program is ill-formed.
+
+(5) After its initialization under (2) or (3), the parameter object is
+an ordinary automatic object of type `T` within the callee, governed by
+[§6.2](02-ownership-and-move.md#62-ownership-and-move-state-basiclife)-[§6.5](02-ownership-and-move.md#65-copy-construction-and-copy-assignment-classcopyctor-classcopyassign)
+exactly as any other local object of class type is governed.
+
+(6) A candidate function whose by-value class parameter cannot be
+initialized as required by this subclause is not viable for overload
+resolution.
+
+## 6.7 By-value return of class type [stmt.return]
+
+(1) If a function's return type is class type `T`, a `return` statement's
+operand initializes the returned object according to this subclause.
+
+(2) If the operand is an *id-expression* designating a local object,
+including a parameter, whose type is exactly `T`, and `T` has a copy
+constructor (6.5), the returned object is copy-constructed from that
+local object.
+
+(3) Otherwise, the operand shall be a fresh value of type `T` as defined
+by [§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)
+(3). The returned object is move-constructed from that fresh value.
+
+(4) If neither (2) nor (3) is satisfied, the program is ill-formed.
+
+(5) A call expression whose type is class type `T` is itself a fresh
+value of type `T` for the purposes of both this subclause and
+[§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall).
+
 ---
 
 [← Previous: The `[[scpp::unsafe]]` Attribute](01-unsafe.md) · [Table of Contents](README.md) · [Next: Dereference and Member Access →](03-dereference-and-member-access.md)

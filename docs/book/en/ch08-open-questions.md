@@ -405,6 +405,58 @@
     name would only create another path to the same borrow-checked effect,
     with no new expressive power needed today. See
     [§5.17](ch05-static-checks.md#517-dereference-operators-on-classes).
+18. **Should `class` values be allowed to cross call/return boundaries by
+    value, or should scpp keep the old "references only except special
+    cases" rule?** **Settled: ordinary by-value class parameters and
+    returns are allowed, and they reuse the same copy/move semantics every
+    other class construction site already uses.** Verified against the
+    current compiler first: a copyable lvalue passed to a by-value
+    parameter invokes the copy constructor; a move-only class crosses a
+    by-value parameter or return boundary only as a **fresh value** (e.g.
+    `std::move(x)` or a call already returning that class by value); and
+    once inside the callee the parameter is just an ordinary local object,
+    so moving out of it marks that parameter moved-out and suppresses its
+    destructor exactly like any other moved-out local. One more detail was
+    worth settling explicitly because real C++ gets it badly: overload
+    viability is **copyability-aware**. With a noncopyable bare local,
+    `choose(Token)` is simply not a viable candidate, so a `choose(Token&)`
+    overload can still win. Real C++ itself was checked here too: the same
+    shape can be left ambiguous even though the by-value path cannot
+    actually be taken, because viability and deleted-copy diagnosis happen
+    later than the overload-ranking step. scpp rejects that footgun by
+    making "this boundary cannot actually be constructed" stop the
+    candidate from participating at all. See
+    [§4.2](ch04-struct-vs-class.md) and
+    [§6.6](../spec/en/02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)/
+    [§6.7](../spec/en/02-ownership-and-move.md#67-by-value-return-of-class-type-stmtreturn).
+19. **Should scpp have owning, type-erased callable wrappers like
+    `std::function`, and if so should they keep real C++'s nullable/empty
+    state?** **Settled: yes to both `std::function<Sig>` and
+    `std::move_only_function<Sig>`, no to an internal empty state, and no
+    deep compiler builtin.** Real C++ was rechecked here directly:
+    constructing `std::function<int(int)>` from a move-only callable
+    triggers the standard library's own "target must be copy-constructible"
+    failure, while `std::move_only_function` accepts move-only callables
+    and supports ref/cv-qualified signatures such as `void() const`,
+    `void() &`, and `void() &&`; both real wrappers are also
+    default-constructible, `operator bool`-testable, and `std::function`
+    throws `std::bad_function_call` when an empty value is invoked. Rust
+    was checked too: `Box<dyn Fn(i32) -> i32>` has no analogous default
+    empty state at all -- optionality is spelled as `Option<Box<dyn Fn...>>`.
+    scpp follows that shape instead: if a program may or may not have a
+    callable, it should say so in the type with
+    `std::optional<std::function<Sig>>` /
+    `std::optional<std::move_only_function<Sig>>`, not hide absence inside
+    the wrapper. The wrappers themselves are library types, not magic
+    compiler-known names: once generic class templates can express
+    multi-parameter specializations and decompose a function-type template
+    argument `R(Args...)`, the rest is ordinary library code. The only
+    compiler-level help accepted is that one decomposition step, analogous
+    to real C++ partial-specialization matching on a function type. A
+    `release()`-style extraction operation is acceptable too, but only in
+    a consuming form that leaves the wrapper itself moved-out, not
+    "alive but empty". See
+    [§5.18](ch05-static-checks.md#518-type-erased-call-wrappers-stdfunction-and-stdmove_only_function).
 
 ---
 
