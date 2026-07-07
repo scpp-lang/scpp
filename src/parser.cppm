@@ -225,6 +225,68 @@ private:
         return offset;
     }
 
+    // ch00 §2/ch01 §1.3: a parsed `[[ ... ]]` attribute-specifier-seq's
+    // own recognized `scpp::`-namespaced attribute-tokens -- e.g.
+    // parsing `[[scpp::unsafe]]` yields `{"unsafe"}`. Every attribute
+    // *not* in the `scpp` namespace (a real C++ standard one like
+    // `[[nodiscard]]`, or one this parser doesn't yet recognize even
+    // within `scpp::`, e.g. `scpp::lifetime` -- designed, ch05 §5.3, but
+    // not yet implemented, tracked for a later milestone) is silently
+    // parsed and discarded here, exactly like a real C++ compiler
+    // silently accepts and ignores an attribute it doesn't itself
+    // define (ch00 §2's own erasure principle, applied to scpp's own
+    // parser too, not just to a real downstream C++ compiler).
+    struct ParsedAttributes {
+        std::unordered_set<std::string> scpp_tokens;
+        [[nodiscard]] bool has(const std::string& token) const { return scpp_tokens.contains(token); }
+    };
+
+    // ch00 §2: parses zero or more leading `[[ attr-list ]]` attribute-
+    // specifier-seqs -- real C++ grammar already gives a compound-
+    // statement, a function declaration, a class-head, and a parameter-
+    // declaration each an optional leading (or, for a parameter, a
+    // trailing) attribute-specifier-seq (the same slot `[[likely]]`/
+    // `[[noreturn]]`/`[[deprecated]]` already use); this parser
+    // recognizes `[[`/`]]` as two consecutive `[`/`]` tokens rather than
+    // a dedicated combined lexer token, since nothing in lexer.cppm ever
+    // needed one before this (no existing scpp construct starts with a
+    // literal `[[`). Each bracketed group holds a comma-separated list
+    // of attributes, each spelled `token` or `namespace::token`, with an
+    // optional single-identifier argument (e.g. `scpp::lifetime(name)`)
+    // parsed and discarded -- this parser doesn't act on any argument
+    // yet. Returns every recognized `scpp`-namespaced token found across
+    // every group; a bare (non-namespaced) attribute, or one in any
+    // other namespace, is always silently ignored (scpp defines nothing
+    // outside its own `scpp` namespace).
+    [[nodiscard]] ParsedAttributes parse_attribute_specifier_seq() {
+        ParsedAttributes result;
+        while (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
+            advance(); // '['
+            advance(); // '['
+            if (!check(TokenKind::RBracket)) {
+                do {
+                    std::string ns;
+                    std::string token = std::string(expect(TokenKind::Identifier, "attribute token").text);
+                    if (match(TokenKind::ColonColon)) {
+                        ns = token;
+                        token = std::string(expect(TokenKind::Identifier, "attribute token").text);
+                    }
+                    if (match(TokenKind::LParen)) {
+                        // A single-identifier argument (e.g.
+                        // `lifetime(name)`) -- parsed and discarded, see
+                        // this function's own comment.
+                        if (!check(TokenKind::RParen)) advance();
+                        expect(TokenKind::RParen, "')'");
+                    }
+                    if (ns == "scpp") result.scpp_tokens.insert(token);
+                } while (match(TokenKind::Comma));
+            }
+            expect(TokenKind::RBracket, "']'");
+            expect(TokenKind::RBracket, "']'");
+        }
+        return result;
+    }
+
     // Checks (without consuming) for the 3-token sequence `std :: <member>`,
     // e.g. `std::unique_ptr` or `std::move`. These are recognized as fixed,
     // special-cased spellings rather than via a general `::`-qualified-name
@@ -646,7 +708,14 @@ private:
     // reference), so reject up front rather than let it silently codegen
     // as an array of addresses.
     Type parse_array_suffix(Type base) {
-        while (check(TokenKind::LBracket)) {
+        // ch00 §2/ch01 §1.3: `[[` (a doubled bracket) starts an
+        // attribute-specifier-seq, never an array declarator -- stop
+        // here rather than misparsing e.g. `T&& f [[scpp::thread_movable]]`
+        // as if `[[scpp::thread_movable]]` were an (invalid, since `f`'s
+        // own type is a Reference) array-of-references suffix. A real
+        // array declarator's own size is always a single `[` (never
+        // doubled), so this check never rejects a legitimate one.
+        while (check(TokenKind::LBracket) && peek_at(1).kind != TokenKind::LBracket) {
             const Token& bracket_tok = peek();
             if (base.kind == TypeKind::Reference) {
                 throw ParseError(bracket_tok.line, bracket_tok.column, "arrays of references are not supported");
@@ -940,13 +1009,36 @@ private:
     // top-level item, given whether an `export` marker (individual, or
     // inherited from an enclosing `export { }` group) applies to it.
     void parse_top_level_item(Program& program, bool is_exported) {
+        // ch01 §1.2/§1.3: a leading `[[scpp::unsafe]]` attribute-
+        // specifier-seq, if any, applies to a function's own
+        // declaration (the function-level unsafe marker) -- parsed once
+        // here, before dispatching on what actually follows, since it's
+        // only meaningful on a function (ordinary, `extern`, or a
+        // full-header-form generic template), never on a struct/class/
+        // concept declaration (ch01 §1.3 (1): "if an attribute-
+        // specifier-seq containing the attribute-token unsafe
+        // appertains to anything other than [a compound-statement or a
+        // function], the program is ill-formed").
+        const Token& attr_start_tok = peek();
+        ParsedAttributes leading_attrs = parse_attribute_specifier_seq();
+        bool requested_unsafe = leading_attrs.has("unsafe");
+        auto reject_unsafe_if_requested = [&](const char* what) {
+            if (requested_unsafe) {
+                throw ParseError(attr_start_tok.line, attr_start_tok.column,
+                                  "'[[scpp::unsafe]]' cannot appertain to " + std::string(what) +
+                                      " -- only to a compound-statement or a function's own declaration "
+                                      "(ch01 §1.3)");
+            }
+        };
         if (check(TokenKind::KwStruct)) {
+            reject_unsafe_if_requested("a 'struct' declaration");
             SourceLocation loc = current_loc();
             StructDef def = parse_struct_def();
             def.is_exported = is_exported;
             check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwClass)) {
+            reject_unsafe_if_requested("a 'class' declaration");
             parse_class_def(program, is_exported);
         } else if (check(TokenKind::KwTemplate)) {
             // ch05 §5.11/§5.14: `template<...>` introduces either a
@@ -958,6 +1050,7 @@ private:
             size_t after_header = offset_after_matching_angle(1); // peek_at(1) is the header's own '<'
             TokenKind after_header_kind = peek_at(after_header).kind;
             if (after_header_kind == TokenKind::KwClass) {
+                reject_unsafe_if_requested("a 'class' declaration");
                 // A class name is immediately followed by `;` (a
                 // variadic primary template's own bodyless forward
                 // declaration, e.g. `template<typename... Ts> class
@@ -976,6 +1069,7 @@ private:
                     parse_class_def(program, is_exported, std::move(template_params));
                 }
             } else if (after_header_kind == TokenKind::KwStruct) {
+                reject_unsafe_if_requested("a 'struct' declaration");
                 // ch05 §5.14: a variadic generic type is class-only --
                 // the only way to vary a type's own layout by arity is
                 // recursive inheritance (real C++ has no syntax to
@@ -1000,6 +1094,7 @@ private:
                 check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
                 program.structs.push_back(std::move(def));
             } else if (after_header_kind == TokenKind::KwConcept) {
+                reject_unsafe_if_requested("a 'concept' declaration");
                 parse_concept_def(program, is_exported);
             } else {
                 // ch05 §5.11: neither `class`/`struct` (a generic type,
@@ -1008,10 +1103,10 @@ private:
                 // (`template<...> ReturnType name(params) { body }`,
                 // ch05 §5.11's "generic functions may be spelled with
                 // either the abbreviated or full header form").
-                parse_generic_function_def(program, is_exported);
+                parse_generic_function_def(program, is_exported, requested_unsafe);
             }
         } else {
-            parse_top_level_function_or_extern_group(program, is_exported);
+            parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe);
         }
     }
 
@@ -1062,13 +1157,13 @@ private:
     // qualified or mangled (its name must stay the real, plain C symbol
     // regardless of enclosing namespace -- see qualify_name), so an
     // `export` marker on one is simply not applicable and is ignored.
-    void parse_top_level_function_or_extern_group(Program& program, bool is_exported) {
+    void parse_top_level_function_or_extern_group(Program& program, bool is_exported, bool is_unsafe = false) {
         SourceLocation loc = current_loc();
         if (match(TokenKind::KwExtern)) {
             if (!check(TokenKind::StringLiteral)) {
                 // Bare extern (ch11 §11.6): always a single bodyless
                 // declaration, ordinary scpp linkage.
-                Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/true);
+                Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/true, is_unsafe);
                 fn.loc = loc;
                 fn.name = qualify_name(fn.name);
                 fn.namespace_path = namespace_stack_;
@@ -1095,12 +1190,12 @@ private:
                 expect(TokenKind::RBrace, "'}'");
                 return;
             }
-            Function fn = parse_function(/*is_extern_c=*/true);
+            Function fn = parse_function(/*is_extern_c=*/true, /*is_module_extern=*/false, is_unsafe);
             fn.loc = loc;
             program.functions.push_back(std::move(fn));
             return;
         }
-        Function fn = parse_function(/*is_extern_c=*/false);
+        Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe);
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
@@ -1217,6 +1312,13 @@ private:
     StructDef parse_struct_def(std::vector<GenericTypeParam> template_params = {}) {
         expect(TokenKind::KwStruct, "'struct'");
         StructDef def;
+        // ch05 §5.15: `struct [[scpp::thread_movable]] Name { ... };` --
+        // real C++ grammar already gives a class-head an optional
+        // attribute-specifier-seq right after its class-key, the same
+        // slot `struct [[deprecated]] Name { ... };` would use.
+        ParsedAttributes attrs = parse_attribute_specifier_seq();
+        def.thread_movable_override = attrs.has("thread_movable");
+        def.thread_shareable_override = attrs.has("thread_shareable");
         std::string bare_name = std::string(expect(TokenKind::Identifier, "struct name").text);
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
@@ -1289,6 +1391,20 @@ private:
                     param_type = std::move(decayed);
                 }
                 param.type = std::move(param_type);
+                // ch05 §5.15: `T&& f [[scpp::thread_movable]]` -- a
+                // trailing attribute-specifier-seq right after a
+                // parameter's own declarator (real C++ grammar already
+                // gives a parameter-declaration one, the same slot
+                // `int x [[maybe_unused]]` would use), constraining this
+                // parameter's (possibly template-deduced) type to
+                // satisfy the corresponding thread-safety property --
+                // checked at each call site (see the Monomorphizer's own
+                // check_thread_safety_constraint), only meaningful when
+                // this parameter's own type actually depends on one of
+                // the enclosing function's own template parameters.
+                ParsedAttributes param_attrs = parse_attribute_specifier_seq();
+                param.require_thread_movable = param_attrs.has("thread_movable");
+                param.require_thread_shareable = param_attrs.has("thread_shareable");
                 params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
@@ -1564,7 +1680,7 @@ private:
     // function-parameter position for one anyway, so a bare `Tail x`
     // parameter would simply never resolve to anything real at
     // monomorphization time, surfacing there instead).
-    void parse_generic_function_def(Program& program, bool is_exported) {
+    void parse_generic_function_def(Program& program, bool is_exported, bool is_unsafe = false) {
         SourceLocation loc = current_loc();
         std::vector<GenericTypeParam> template_params = parse_generic_type_header();
         for (const GenericTypeParam& p : template_params) {
@@ -1573,7 +1689,7 @@ private:
             class_names_.insert(p.name);
         }
 
-        Function fn = parse_function(/*is_extern_c=*/false);
+        Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe);
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
@@ -1950,6 +2066,9 @@ private:
     void parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {}) {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
+        // ch05 §5.15: `class [[scpp::thread_movable]] Name { ... };` --
+        // see parse_struct_def's identical handling.
+        ParsedAttributes class_attrs = parse_attribute_specifier_seq();
         // The bare, unqualified name as written -- used for the
         // constructor/destructor spelling checks below (`~string()`,
         // `string(...)`  inside the class body itself always use the
@@ -1977,6 +2096,8 @@ private:
 
         ClassDef def;
         def.name = qualified_class_name;
+        def.thread_movable_override = class_attrs.has("thread_movable");
+        def.thread_shareable_override = class_attrs.has("thread_shareable");
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
         def.template_params = template_params;
@@ -2065,6 +2186,17 @@ private:
             }
 
             SourceLocation member_loc = current_loc();
+            // ch01 §1.2/§1.3: `[[scpp::unsafe]]` on a method/constructor/
+            // destructor's own declaration -- identical function-level
+            // marker semantics as a free function (see parse_function's
+            // own handling), just reached from inside a class body
+            // instead. Parsed once here, before dispatching on which
+            // member shape follows; rejected if it turns out to be a
+            // field (unsafe is only ever meaningful on a function, ch01
+            // §1.3 (1)).
+            const Token& member_attr_start_tok = peek();
+            ParsedAttributes member_attrs = parse_attribute_specifier_seq();
+            bool member_requested_unsafe = member_attrs.has("unsafe");
             if (match(TokenKind::Tilde)) {
                 // Destructor: `~ClassName() { ... }` -- no parameters, no
                 // return type, and always a mutable (non-`const`) `this`
@@ -2079,6 +2211,7 @@ private:
                 expect(TokenKind::RParen, "')'");
                 Function fn;
                 fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = qualified_class_name + "_delete";
@@ -2101,6 +2234,7 @@ private:
                 advance(); // class name
                 Function fn;
                 fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = qualified_class_name + "_new";
@@ -2123,6 +2257,7 @@ private:
             if (check(TokenKind::LParen)) {
                 Function fn;
                 fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a method");
                 // `const` trails the parameter list, exactly like real
@@ -2148,6 +2283,11 @@ private:
             // a struct field access (movecheck's apply_expr Member
             // case: the whole-root-conservative treatment, not a new
             // per-field mechanism).
+            if (member_requested_unsafe) {
+                throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
+                                  "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
+                                  "compound-statement or a function's own declaration (ch01 §1.3)");
+            }
             ClassField field;
             field.type = parse_array_suffix(member_type);
             field.name = member_name;
@@ -2169,10 +2309,11 @@ private:
     // runs, since their combination affects *which* prefixes were
     // already consumed (an item inside an `extern "C" { }` block isn't
     // preceded by its own `extern "C"` -- see that function).
-    Function parse_function(bool is_extern_c, bool is_module_extern = false) {
+    Function parse_function(bool is_extern_c, bool is_module_extern = false, bool is_unsafe = false) {
         Function fn;
         fn.is_extern_c = is_extern_c;
         fn.is_module_extern = is_module_extern;
+        fn.is_unsafe = is_unsafe;
         fn.return_type = parse_type();
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
 
@@ -2209,6 +2350,14 @@ private:
                     param_type = std::move(decayed);
                 }
                 param.type = std::move(param_type);
+                // ch05 §5.15: see parse_param_list's identical trailing-
+                // attribute handling -- this is the separate parameter-
+                // parsing loop parse_function itself uses (top-level
+                // ordinary/generic/extern functions), not shared with
+                // parse_param_list (class methods/lambdas).
+                ParsedAttributes param_attrs = parse_attribute_specifier_seq();
+                param.require_thread_movable = param_attrs.has("thread_movable");
+                param.require_thread_shareable = param_attrs.has("thread_shareable");
                 fn.params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
@@ -2273,31 +2422,30 @@ private:
     }
 
     StmtPtr parse_statement() {
+        // ch00 §2/ch01 §1.3: `[[scpp::unsafe]] { ... }` -- attribute-
+        // driven now, not a keyword. Parses (and discards) any leading
+        // attribute-specifier-seq first (real C++ grammar already
+        // allows one on any statement), then parses whatever statement
+        // follows normally; only when that statement turns out to be a
+        // Block *and* `scpp::unsafe` was among the recognized attributes
+        // does it get marked `is_unsafe` -- an attribute on any other
+        // statement shape (e.g. a real C++ one like `[[likely]] if
+        // (...) {}`) is accepted (mirrors a real compiler silently
+        // accepting an attribute it doesn't act on) but has no scpp
+        // effect at all, since only a compound-statement is a
+        // recognized placement for `scpp::unsafe` (ch01 §1.3).
+        if (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
+            ParsedAttributes attrs = parse_attribute_specifier_seq();
+            StmtPtr stmt = parse_statement();
+            if (attrs.has("unsafe") && stmt->kind == StmtKind::Block) stmt->is_unsafe = true;
+            return stmt;
+        }
         if (check(TokenKind::LBrace)) return parse_block();
-        if (check(TokenKind::KwUnsafe)) return parse_unsafe_block();
         if (looks_like_type_start()) return parse_var_decl();
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
         if (check(TokenKind::KwWhile)) return parse_while();
         return parse_expr_stmt();
-    }
-
-    // `unsafe { stmt; stmt; ... }` (ch01 §1.3, design finalized) -- an
-    // ordinary brace-delimited block (see parse_block) that additionally
-    // marks itself `is_unsafe` so the move checker relaxes exactly the
-    // ch05.5 checks it's licensed to for its statements. v0.1 only
-    // supports this block-statement form: `unsafe` must always be
-    // followed by `{` (parse_block itself rejects anything else), never a
-    // single bare statement, a condition expression, or a match-arm body.
-    // Grammar accepts this anywhere a statement is expected -- every
-    // function is checked by default now (ch01), so there's no enclosing-
-    // function context to consult here at all, unlike the pre-reversal
-    // design this comment used to describe.
-    StmtPtr parse_unsafe_block() {
-        expect(TokenKind::KwUnsafe, "'unsafe'");
-        StmtPtr block = parse_block();
-        block->is_unsafe = true;
-        return block;
     }
 
     StmtPtr parse_var_decl() {

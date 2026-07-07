@@ -192,6 +192,14 @@ struct FunctionSignature {
     // call site's DataflowState::unsafe_depth is greater than zero
     // (ch01 §1.3/ch02) -- see check_call_arguments.
     bool is_extern_c = false;
+    // Mirrors Function::is_unsafe (ch01 §1.2/§1.3) -- the function-
+    // level `[[scpp::unsafe]]` marker on this specific overload's own
+    // declaration: calling it is one more of ch05 §5.5's gated
+    // operations, rejected unless the call site's own
+    // DataflowState::unsafe_depth is greater than zero, exactly like
+    // is_extern_c above (see check_call_arguments) -- scpp's equivalent
+    // of Rust's `unsafe fn`.
+    bool is_unsafe = false;
     // Where this specific overload's declaration begins -- see
     // Function::loc; needed for diagnostics that are about one
     // particular overload (e.g. a redefinition error naming the
@@ -994,12 +1002,13 @@ void validate_deref_operand(const Expr& operand, const DataflowState& state, con
     bool is_raw_ptr = resolved.has_value() && resolved->kind == TypeKind::Pointer;
     if (!is_uptr && !is_raw_ptr) {
         throw DataflowError("cannot dereference ('*') '" + describe +
-                             "': only std::unique_ptr or a raw pointer (inside unsafe {}) is supported",
+                             "': only std::unique_ptr or a raw pointer (inside '[[scpp::unsafe]] { }') is "
+                             "supported",
             state.current_loc);
     }
     if (is_raw_ptr && state.unsafe_depth == 0) {
         throw DataflowError("cannot dereference raw pointer '" + describe +
-                             "': requires 'unsafe { }' (spec ch01 §1.3/ch02)",
+                             "': requires '[[scpp::unsafe]] { }' (spec ch01 §1.3/ch02)",
             state.current_loc);
     }
     if (operand.kind == ExprKind::Member) return; // no per-field move/borrow state -- see this function's own comment
@@ -1712,8 +1721,15 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     }
     if (report_errors && sig != nullptr && sig->is_extern_c && state.unsafe_depth == 0) {
         throw DataflowError("cannot call 'extern \"C\"' function '" + expr.name +
-                             "' outside 'unsafe { }': no scpp compiler ever sees its real implementation to "
-                             "check it (spec ch01 §1.3/ch02)",
+                             "' outside '[[scpp::unsafe]] { }': no scpp compiler ever sees its real "
+                             "implementation to check it (spec ch01 §1.3/ch02)",
+            state.current_loc);
+    }
+    if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
+        throw DataflowError("cannot call '" + expr.name +
+                             "' outside '[[scpp::unsafe]] { }': its own declaration is marked "
+                             "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
+                             "caller can guarantee (ch01 §1.2/§1.3)",
             state.current_loc);
     }
     // Scratch borrow-map shared by every reference argument of *this*
@@ -2460,13 +2476,23 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     std::vector<std::vector<LiveSet>> live_after = compute_reference_liveness(body, preds);
 
     DataflowState entry_state;
-    // ch01 §1.3: every function is checked by default, unconditionally --
-    // there is no per-function way to start already inside an implicit
-    // unsafe context (the old "native function" concept is fully
-    // retired). Every function's entry_state therefore starts at 0;
-    // unsafe_depth only ever increases via an explicit, lexically nested
-    // `unsafe { }` block within this same function's own body.
-    entry_state.unsafe_depth = 0;
+    // ch01 §1.2/§1.3: every function is checked by default,
+    // unconditionally -- there is no per-function way to start already
+    // inside an implicit unsafe context via mere absence of any marker
+    // (the old "native function" concept is fully retired). A function
+    // whose own declaration carries the function-level `[[scpp::unsafe]]`
+    // marker (`fn.is_unsafe`) is the one explicit exception: its entire
+    // body is an unsafe context throughout, exactly as if that whole
+    // body were itself wrapped in one `[[scpp::unsafe]] { }` block --
+    // implemented identically, by starting unsafe_depth at 1 instead of
+    // 0 (an ordinary nested block further increments/decrements this
+    // same counter from whatever it started at, so nesting one inside
+    // an already-unsafe function's body is harmless, matching ch01
+    // §1.2's "neither form changes §5.1-§5.4's checking" guarantee).
+    // Every other function's entry_state starts at 0; unsafe_depth then
+    // only increases via an explicit, lexically nested
+    // `[[scpp::unsafe]] { }` block within that function's own body.
+    entry_state.unsafe_depth = fn.is_unsafe ? 1 : 0;
     // ch04 §4.2/ch05 §5.9: `this` is always params[0] when present (see
     // parser's make_this_param) -- a user can never spell a same-named
     // parameter themselves, since `this` is a keyword, not an ordinary
@@ -2591,6 +2617,7 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
         sig.return_type = fn.return_type;
         sig.elided_param_index = resolve_elided_param_index(fn);
         sig.is_extern_c = fn.is_extern_c;
+        sig.is_unsafe = fn.is_unsafe;
         sig.loc = fn.loc;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
@@ -2678,6 +2705,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.body = fn.body ? clone_stmt(*fn.body) : nullptr;
     clone.is_extern_c = fn.is_extern_c;
     clone.is_module_extern = fn.is_module_extern;
+    clone.is_unsafe = fn.is_unsafe;
     clone.has_varargs = fn.has_varargs;
     clone.method_requires_concept = fn.method_requires_concept;
     clone.is_generic_template = fn.is_generic_template;
@@ -3783,6 +3811,7 @@ private:
                 clone.loc = method_tmpl.loc;
                 clone.namespace_path = method_tmpl.namespace_path;
                 clone.is_exported = false;
+                clone.is_unsafe = method_tmpl.is_unsafe;
                 clone.return_type = substitute_type_param(method_tmpl.return_type, type_param_name, named_concrete);
                 clone.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
@@ -4064,6 +4093,195 @@ private:
         upcasts.emplace_back(arg_index, std::move(target));
     }
 
+    // ch05 §5.15: is `name` one of the scalar type names this version
+    // actually implements? (Only `int`/`bool`/`char` exist as real scpp
+    // types so far -- see this file's own earlier notes on `size_t`/
+    // fixed-width integers/`float32_t`/`float64_t` not existing yet;
+    // every scalar is both thread-movable and thread-shareable.)
+    [[nodiscard]] static bool is_scalar_type_name(const std::string& name) {
+        return name == "int" || name == "bool" || name == "char";
+    }
+
+    // ch05 §5.15: recursively computes whether `type` is thread-movable
+    // (mirrors Rust's `Send`) -- see this document's own §5.15 for the
+    // full structural-derivation rules. `visiting` guards against
+    // infinite recursion through a self-referential type (e.g. `class
+    // Node { std::unique_ptr<Node> next; };`, a realistic linked-list
+    // shape) -- coinductively assumed thread-movable the moment a cycle
+    // is detected (the recursive occurrence contributes no *new*
+    // violation beyond whatever the rest of the type's own fields
+    // already determine), mirroring how a real compiler's own auto-trait
+    // computation (e.g. Rust's `Send`/`Sync` auto-derivation) handles a
+    // recursive type without looping forever.
+    [[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {}) {
+        switch (type.kind) {
+            case TypeKind::Named: {
+                if (is_scalar_type_name(type.name)) return true;
+                if (visiting.contains(type.name)) return true; // cycle -- see this function's own comment
+                visiting.insert(type.name);
+                for (const ClassDef& c : program_.classes) {
+                    if (c.name != type.name) continue;
+                    if (c.thread_movable_override) return true;
+                    // ch05 §5.15: a `mutable` member variable (ch04
+                    // §4.2's own interior-mutability construct) would
+                    // never itself defeat thread-movable (it's always a
+                    // trivial scalar, already true structurally) -- no
+                    // special-casing needed here at all, only for
+                    // thread-shareable below. `mutable` fields aren't
+                    // actually implemented in this version yet regardless
+                    // (see ClassField's own comment), so this is currently
+                    // moot either way.
+                    for (const ClassField& f : c.fields) {
+                        if (!is_thread_movable(f.type, visiting)) return false;
+                    }
+                    return true;
+                }
+                for (const StructDef& s : program_.structs) {
+                    if (s.name != type.name) continue;
+                    if (s.thread_movable_override) return true;
+                    for (const StructField& f : s.fields) {
+                        if (!is_thread_movable(f.type, visiting)) return false;
+                    }
+                    return true;
+                }
+                return false; // unrecognized (e.g. a bare, unconstrained generic witness) -- conservative default
+            }
+            case TypeKind::Pointer:
+                // ch05 §5.15: neither, by default -- a raw pointer
+                // already requires vouching for anything the checker
+                // can't verify on its own; vouch by wrapping it in a
+                // struct/class marked `[[scpp::thread_movable]]`, whose
+                // Named case above already handles the override
+                // directly (this Pointer case itself never recurses
+                // into the pointee, since a raw pointer's own structural
+                // shape carries no ownership/borrow information at all).
+                return false;
+            case TypeKind::Array: return type.element && is_thread_movable(*type.element, visiting);
+            case TypeKind::UniquePtr:
+                // ch05 §5.15: follows T's own property independently --
+                // moving the whole unique_ptr transfers exclusive
+                // ownership of the pointee along with it (mirrors
+                // `Box<T>`).
+                return type.pointee && is_thread_movable(*type.pointee, visiting);
+            case TypeKind::Reference:
+                // ch05 §5.15: "a type containing a reference member...
+                // is never thread-movable" -- applied here to a bare
+                // *borrowed* reference value (`T&`/`const T&`), for the
+                // identical reason (moving a reference never transfers
+                // the referent's own ownership, so the original thread
+                // keeps access to it regardless). An *rvalue* reference
+                // (`T&&`) is a fundamentally different case not
+                // addressed by that rule at all -- it represents a
+                // move (ownership transfer, ch03), not a borrow, so its
+                // own thread-movable-ness instead follows its
+                // underlying type's, exactly like std::unique_ptr's own
+                // pointee does above (the doc's own examples never spell
+                // this case out explicitly, but `spawn`'s own
+                // `T&& f [[scpp::thread_movable]]` parameter, ch05
+                // §5.15's own worked example, only makes sense at all if
+                // an rvalue reference to a movable type is itself
+                // considered thread-movable).
+                return type.is_rvalue_ref ? (type.pointee && is_thread_movable(*type.pointee, visiting)) : false;
+            case TypeKind::Span:
+                // A span is a non-owning, lifetime-checked borrowed view
+                // -- the same "never transfers ownership" reasoning as
+                // an ordinary (non-rvalue) Reference above applies
+                // identically; a span is never an rvalue-reference-like
+                // move construct at all.
+                return false;
+        }
+        return false;
+    }
+
+    // ch05 §5.15: recursively computes whether `type` is thread-
+    // shareable (mirrors Rust's `Sync`) -- see is_thread_movable's own
+    // comment for the identical cycle-guarding approach.
+    [[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {}) {
+        switch (type.kind) {
+            case TypeKind::Named: {
+                if (is_scalar_type_name(type.name)) return true;
+                if (visiting.contains(type.name)) return true;
+                visiting.insert(type.name);
+                for (const ClassDef& c : program_.classes) {
+                    if (c.name != type.name) continue;
+                    if (c.thread_shareable_override) return true;
+                    for (const ClassField& f : c.fields) {
+                        if (!is_thread_shareable(f.type, visiting)) return false;
+                    }
+                    return true;
+                }
+                for (const StructDef& s : program_.structs) {
+                    if (s.name != type.name) continue;
+                    if (s.thread_shareable_override) return true;
+                    for (const StructField& f : s.fields) {
+                        if (!is_thread_shareable(f.type, visiting)) return false;
+                    }
+                    return true;
+                }
+                return false;
+            }
+            case TypeKind::Pointer: return false;
+            case TypeKind::Array: return type.element && is_thread_shareable(*type.element, visiting);
+            case TypeKind::UniquePtr: return type.pointee && is_thread_shareable(*type.pointee, visiting);
+            case TypeKind::Reference:
+                // ch05 §5.15: an *rvalue* reference (`T&&`) represents a
+                // move, not a borrow (see is_thread_movable's own,
+                // identical reasoning) -- follows the underlying type's
+                // own thread-shareable-ness directly, bypassing the
+                // mutable/const-borrow distinction below entirely (an
+                // rvalue reference is neither).
+                if (type.is_rvalue_ref) return type.pointee && is_thread_shareable(*type.pointee, visiting);
+                // A *mutable* (borrowed) reference is never thread-
+                // shareable -- two threads simultaneously holding
+                // `const ThisType&` to a container of one, both able to
+                // reach through and write the same referent
+                // concurrently, is exactly the race thread-shareable
+                // exists to rule out (this is the same reasoning
+                // §5.15's own closure-capture bullet states explicitly,
+                // applied uniformly to any mutable-reference-typed
+                // value, not just a closure's own capture). A *shared*
+                // (`const`) reference is thread-shareable exactly when
+                // its own referent type is (matches §5.15's own
+                // closure-capture bullet too: "every by-const-reference-
+                // captured member's referent type is thread-shareable").
+                return type.pointee && !type.is_mutable_ref && is_thread_shareable(*type.pointee, visiting);
+            case TypeKind::Span:
+                return type.pointee && !type.is_mutable_ref && is_thread_shareable(*type.pointee, visiting);
+        }
+        return false;
+    }
+
+    // ch05 §5.15: checks a call to a generic function whose own
+    // parameter is tagged `[[scpp::thread_movable]]`/
+    // `[[scpp::thread_shareable]]` (Param::require_thread_movable/
+    // require_thread_shareable) -- once that parameter's own
+    // (possibly template-deduced) concrete type is known, rejects the
+    // call with a precise diagnostic if the concrete type doesn't
+    // actually satisfy the required property.
+    void check_thread_safety_constraints(const Expr& expr, const Function& tmpl,
+                                          const std::unordered_map<std::string, Type>& type_bindings) {
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            const Param& param = tmpl.params[i];
+            if (!param.require_thread_movable && !param.require_thread_shareable) continue;
+            Type concrete = param.type;
+            for (const auto& [name, replacement] : type_bindings) {
+                concrete = substitute_type_param(concrete, name, replacement);
+            }
+            if (param.require_thread_movable && !is_thread_movable(concrete)) {
+                throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                         tmpl.name +
+                                         "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
+                    expr.loc);
+            }
+            if (param.require_thread_shareable && !is_thread_shareable(concrete)) {
+                throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                         tmpl.name +
+                                         "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
+                    expr.loc);
+            }
+        }
+    }
+
     // ch05 §5.11: monomorphizes a call to a full-header-form generic
     // function template (Function::template_params non-empty, e.g.
     // `get`/`make`) -- binds each of the template's own parameters to a
@@ -4141,6 +4359,14 @@ private:
             }
         }
 
+        // ch05 §5.15: once every template parameter is bound to a
+        // concrete type, check any `[[scpp::thread_movable]]`/
+        // `[[scpp::thread_shareable]]`-tagged parameter's own concrete
+        // (post-substitution) type actually satisfies what it requires
+        // -- before synthesizing/caching a clone, so a violation is
+        // reported at the call site that triggered it.
+        check_thread_safety_constraints(expr, tmpl, type_bindings);
+
         std::string cache_key = tmpl.name;
         for (const GenericTypeParam& tp : tmpl.template_params) {
             if (tp.is_pack) continue; // never individually bound -- see the validation loop's own comment above
@@ -4156,6 +4382,7 @@ private:
             clone.loc = tmpl.loc;
             clone.namespace_path = tmpl.namespace_path;
             clone.is_exported = false;
+            clone.is_unsafe = tmpl.is_unsafe;
             clone.return_type = tmpl.return_type;
             for (const auto& [name, replacement] : type_bindings) {
                 clone.return_type = substitute_type_param(clone.return_type, name, replacement);
@@ -4381,6 +4608,28 @@ private:
                 substituted = named;
             }
             concrete_param_types.push_back(std::move(substituted));
+        }
+
+        // ch05 §5.15: the abbreviated (`Concept auto&`) form's own
+        // identical check -- see check_thread_safety_constraints' own
+        // comment; this form's own concrete param types are already
+        // fully resolved in concrete_param_types by this point, so no
+        // extra type_bindings substitution is needed here.
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            const Param& param = tmpl.params[i];
+            if (!param.require_thread_movable && !param.require_thread_shareable) continue;
+            if (param.require_thread_movable && !is_thread_movable(concrete_param_types[i])) {
+                throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                         tmpl.name +
+                                         "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
+                    expr.loc);
+            }
+            if (param.require_thread_shareable && !is_thread_shareable(concrete_param_types[i])) {
+                throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                         tmpl.name +
+                                         "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
+                    expr.loc);
+            }
         }
 
         expr.name = get_or_create_clone(tmpl, concrete_param_types);
@@ -4709,6 +4958,7 @@ private:
         // directly exported (ch11 §11.3 doesn't apply to a compiler-
         // synthesized clone with a compiler-synthesized name).
         clone.is_exported = false;
+        clone.is_unsafe = tmpl.is_unsafe;
         clone.params.reserve(tmpl.params.size());
         for (size_t i = 0; i < tmpl.params.size(); i++) {
             Param p;

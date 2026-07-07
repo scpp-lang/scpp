@@ -15,7 +15,7 @@ extern "C" {
 }
 
 void print_string(const std::string& s) {
-    unsafe {
+    [[scpp::unsafe]] {
         puts(s.c_str());
     }
     return;

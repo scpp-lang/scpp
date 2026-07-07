@@ -1,0 +1,20 @@
+// ch05 §5.15: without a manual override, a class containing a raw
+// pointer field is never thread-shareable by the structural rule.
+class PlainHandle {
+public:
+    PlainHandle(int* d) { this.data = d; return; }
+private:
+    int* data;
+};
+
+template<typename T>
+void broadcast(const T& x [[scpp::thread_shareable]]) {
+    return;
+}
+
+int main() {
+    int v = 1;
+    PlainHandle h(&v);
+    broadcast(h);
+    return 0;
+}

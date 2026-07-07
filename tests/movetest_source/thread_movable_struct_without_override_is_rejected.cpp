@@ -1,0 +1,28 @@
+// ch05 §5.15: without a manual override, a struct containing a raw
+// pointer field is never thread-movable by the structural rule -- a raw
+// pointer always requires vouching for, either at the type declaration
+// (see the sibling *_with_manual_override_is_allowed.cpp case) or not
+// at all.
+struct RawBufferHandle {
+    int* data;
+    int len;
+};
+
+template<typename T>
+void spawn(T&& f [[scpp::thread_movable]]) {
+    return;
+}
+
+RawBufferHandle make_handle(int* d, int n) {
+    RawBufferHandle h;
+    h.data = d;
+    h.len = n;
+    return h;
+}
+
+int main() {
+    int arr[3];
+    arr[0] = 1;
+    spawn(make_handle(arr, 3));
+    return 0;
+}

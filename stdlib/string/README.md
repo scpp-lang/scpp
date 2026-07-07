@@ -6,7 +6,7 @@ demonstration of both calling into a real C/C++ library from scpp (see
 feature this relies on, and
 [ch01 §1.3](../../docs/book/en/ch01-safety-context.md)/
 [ch02](../../docs/book/en/ch02-boundary-rules.md) for the
-`extern "C"`/`unsafe {}` boundary rules) *and* scpp's own
+`extern "C"`/`[[scpp::unsafe]] {}` boundary rules) *and* scpp's own
 multi-file module system
 ([ch11](../../docs/book/en/ch11-modules-and-libraries.md)): a consumer
 writes `import std;` then uses `std::string` directly, exactly like real
@@ -29,7 +29,7 @@ scratch would just reimplement `std::string` badly. Instead:
   declaration from a separate partition (`std_string.cpp`, `export
   module std:string;`, ch11 §11.4) via `export import :string;`. Every
   method's body calls those `extern "C"` functions, each wrapped in
-  `unsafe { }` exactly like any other call to an `extern "C"` function
+  `[[scpp::unsafe]] { }` exactly like any other call to an `extern "C"` function
   (ch01/ch02). All of `string`'s actual behavior (growth, copying bytes,
   etc.) is real `std::string` code; scpp contributes only the checked,
   borrow-checked surface around it (RAII construction/destruction,

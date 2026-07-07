@@ -1,5 +1,5 @@
 int f(int a, int b) {
-    unsafe {
+    [[scpp::unsafe]] {
         return a / b;
     }
 }

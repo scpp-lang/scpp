@@ -4,7 +4,7 @@ extern "C" {
 }
 
 void store_and_read() {
-    unsafe {
+    [[scpp::unsafe]] {
         void* raw = malloc(4);
         int* typed = raw;
         *typed = 99;

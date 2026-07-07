@@ -1189,13 +1189,19 @@ private:
         }
 
         current_function_def_ = &fn;
-        // Mirrors movecheck's entry_state.unsafe_depth (ch01 §1.3): every
-        // function is checked by default and starts outside any unsafe
-        // context -- unsafe_depth_ only ever increases via an explicit
-        // `unsafe { }` block within this same function's own body (the
-        // old "native function = implicitly unsafe everywhere" concept
-        // is fully retired).
-        unsafe_depth_ = 0;
+        // Mirrors movecheck's entry_state.unsafe_depth (ch01 §1.2/§1.3):
+        // every function is checked by default and starts outside any
+        // unsafe context, *except* one whose own declaration carries the
+        // function-level `[[scpp::unsafe]]` marker (fn.is_unsafe) --
+        // its entire body is an unsafe context throughout, exactly as if
+        // wrapped in one `[[scpp::unsafe]] { }` block, so overflow/
+        // bounds-check codegen is skipped throughout it too (see
+        // codegen_binary_op/codegen_span_subscript below). Otherwise,
+        // unsafe_depth_ only increases via an explicit, lexically nested
+        // `[[scpp::unsafe]] { }` block within that function's own body
+        // (the old "native function = implicitly unsafe everywhere"
+        // concept is fully retired).
+        unsafe_depth_ = fn.is_unsafe ? 1 : 0;
         llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
         builder_->SetInsertPoint(entry);
 

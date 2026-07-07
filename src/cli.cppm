@@ -34,7 +34,6 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwElse: return "KwElse";
         case scpp::TokenKind::KwWhile: return "KwWhile";
         case scpp::TokenKind::KwFor: return "KwFor";
-        case scpp::TokenKind::KwUnsafe: return "KwUnsafe";
         case scpp::TokenKind::KwExtern: return "KwExtern";
         case scpp::TokenKind::KwTrue: return "KwTrue";
         case scpp::TokenKind::KwFalse: return "KwFalse";

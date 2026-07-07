@@ -1,5 +1,5 @@
 int divide_unsafely(int a, int b) {
-    unsafe {
+    [[scpp::unsafe]] {
         return a / b;
     }
 }

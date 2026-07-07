@@ -1,7 +1,7 @@
 void write_via_raw_pointer() {
     int x = 0;
     int* p = &x;
-    unsafe {
+    [[scpp::unsafe]] {
         *p = 42;
     }
     print_int(x);

@@ -98,9 +98,9 @@ void test_while_loop() {
 }
 
 void test_unsafe_block_sets_is_unsafe_flag() {
-    // `unsafe { }` (ch01 §1.3) is an ordinary Block statement with
-    // is_unsafe set -- see parse_unsafe_block.
-    scpp::Program program = scpp::parse("int f() { unsafe { int x = 1; } return 0; }");
+    // `[[scpp::unsafe]] { }` (ch01 §1.3) is an ordinary Block statement
+    // with is_unsafe set -- see parse_statement's attribute handling.
+    scpp::Program program = scpp::parse("int f() { [[scpp::unsafe]] { int x = 1; } return 0; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.body->statements.size() == 2, "unsafe_block_sets_is_unsafe_flag: expected 2 statements");
 
@@ -115,8 +115,9 @@ void test_unsafe_block_sets_is_unsafe_flag() {
 }
 
 void test_ordinary_block_is_not_unsafe() {
-    // Sanity check for the flag's default: a plain `{ }` (no `unsafe`
-    // keyword) must never be mistaken for an unsafe block.
+    // Sanity check for the flag's default: a plain `{ }` (no
+    // `[[scpp::unsafe]]` attribute) must never be mistaken for an
+    // unsafe block.
     scpp::Program program = scpp::parse("int f() { { int x = 1; } return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& plain_block = *fn.body->statements[0];
@@ -125,9 +126,10 @@ void test_ordinary_block_is_not_unsafe() {
 }
 
 void test_nested_unsafe_blocks_parse() {
-    // `unsafe { unsafe { ... } }` (ch01 §1.3's nesting rule) -- both
-    // levels independently set is_unsafe.
-    scpp::Program program = scpp::parse("int f() { unsafe { unsafe { int x = 1; } } return 0; }");
+    // `[[scpp::unsafe]] { [[scpp::unsafe]] { ... } }` (ch01 §1.3's
+    // nesting rule) -- both levels independently set is_unsafe.
+    scpp::Program program =
+        scpp::parse("int f() { [[scpp::unsafe]] { [[scpp::unsafe]] { int x = 1; } } return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& outer = *fn.body->statements[0];
     expect(outer.is_unsafe, "nested_unsafe_blocks_parse: outer block should be unsafe");
@@ -137,16 +139,117 @@ void test_nested_unsafe_blocks_parse() {
     expect(inner.is_unsafe, "nested_unsafe_blocks_parse: inner block should also be unsafe");
 }
 
-void test_unsafe_without_brace_is_parse_error() {
-    // v0.1 only supports the block-statement form: `unsafe` must always
-    // be followed by `{`, never a single bare statement.
+// ch00 §2/ch01 §1.3: `unsafe` is no longer a keyword at all -- a bare
+// `unsafe` (no `[[ ]]` brackets) is just an ordinary Identifier now, so
+// `unsafe return 1;` fails to parse for a completely different reason
+// than before (an Identifier expression-statement can't be followed
+// directly by another statement-starting keyword like `return` with no
+// operator/`;` in between) -- not because "unsafe" demands a `{` next.
+void test_bare_unsafe_identifier_followed_by_return_is_parse_error() {
     bool threw = false;
     try {
         scpp::parse("int f() { unsafe return 1; }");
     } catch (const scpp::ParseError&) {
         threw = true;
     }
-    expect(threw, "unsafe_without_brace_is_parse_error: expected a ParseError to be thrown");
+    expect(threw, "bare_unsafe_identifier_followed_by_return_is_parse_error: expected a ParseError to be thrown");
+}
+
+// ch01 §1.3: `[[scpp::unsafe]]` only has an effect when the statement it
+// appertains to is a compound-statement (Block) -- on any other
+// statement shape, it's parsed and silently ignored, exactly like a
+// real C++ compiler accepts-and-ignores an attribute it doesn't act on
+// in that position (mirrors `[[likely]] return 1;`, real, legal C++).
+void test_unsafe_attribute_on_non_block_statement_has_no_effect() {
+    scpp::Program program = scpp::parse("int f() { [[scpp::unsafe]] return 1; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.body->statements.size() == 1,
+           "unsafe_attribute_on_non_block_statement_has_no_effect: expected 1 statement");
+    expect(fn.body->statements[0]->kind == scpp::StmtKind::Return,
+           "unsafe_attribute_on_non_block_statement_has_no_effect: should still parse as an ordinary Return");
+}
+
+// ch01 §1.2/§1.3: the function-level marker -- a leading
+// `[[scpp::unsafe]]` before a function's own return type makes
+// Function::is_unsafe true.
+void test_function_level_unsafe_marker_parses() {
+    scpp::Program program = scpp::parse("[[scpp::unsafe]] int f(int x) { return x; }\n"
+                                         "int main() { return 0; }\n");
+    const scpp::Function* f_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "f") f_fn = &fn;
+    }
+    expect(f_fn != nullptr, "function_level_unsafe_marker_parses: expected a Function named 'f'");
+    expect(f_fn->is_unsafe, "function_level_unsafe_marker_parses: is_unsafe should be true");
+}
+
+// ch01 §1.3 (1): `[[scpp::unsafe]]` may only appertain to a compound-
+// statement or a function's own declaration -- appertaining to a
+// struct/class declaration is ill-formed.
+void test_unsafe_attribute_on_struct_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("[[scpp::unsafe]] struct Foo { int x; };\n"
+                    "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "unsafe_attribute_on_struct_is_rejected: expected a ParseError");
+}
+
+// ch05 §5.15: `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` on a
+// struct's own declaration set the manual-override flags.
+void test_thread_safety_attribute_on_struct_parses() {
+    scpp::Program program = scpp::parse(
+        "struct [[scpp::thread_movable]] RawBufferHandle { int* data; int len; };\n"
+        "int main() { return 0; }\n");
+    const scpp::StructDef* s = nullptr;
+    for (const scpp::StructDef& def : program.structs) {
+        if (def.name == "RawBufferHandle") s = &def;
+    }
+    expect(s != nullptr, "thread_safety_attribute_on_struct_parses: expected a StructDef named 'RawBufferHandle'");
+    expect(s->thread_movable_override, "thread_safety_attribute_on_struct_parses: thread_movable_override should be true");
+    expect(!s->thread_shareable_override, "thread_safety_attribute_on_struct_parses: thread_shareable_override should be false");
+}
+
+// Same attribute grammar slot on a class's own declaration; both
+// attributes may be given together, comma-separated inside one `[[...]]`.
+void test_thread_safety_attributes_on_class_parse() {
+    scpp::Program program = scpp::parse(
+        "class [[scpp::thread_movable, scpp::thread_shareable]] Handle {\n"
+        "public:\n"
+        "    Handle(int* d) { this.data = d; return; }\n"
+        "private:\n"
+        "    int* data;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* c = nullptr;
+    for (const scpp::ClassDef& def : program.classes) {
+        if (def.name == "Handle") c = &def;
+    }
+    expect(c != nullptr, "thread_safety_attributes_on_class_parse: expected a ClassDef named 'Handle'");
+    expect(c->thread_movable_override, "thread_safety_attributes_on_class_parse: thread_movable_override should be true");
+    expect(c->thread_shareable_override, "thread_safety_attributes_on_class_parse: thread_shareable_override should be true");
+}
+
+// ch05 §5.15: attaching either attribute to a generic function's parameter
+// (trailing, same slot as an ordinary declarator attribute) sets the
+// constraint flag on that Param.
+void test_thread_safety_attribute_on_parameter_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "void spawn(T&& f [[scpp::thread_movable]]) { return; }\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* spawn_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "spawn") spawn_fn = &fn;
+    }
+    expect(spawn_fn != nullptr, "thread_safety_attribute_on_parameter_parses: expected a Function named 'spawn'");
+    expect(spawn_fn->params.size() == 1, "thread_safety_attribute_on_parameter_parses: expected 1 param");
+    expect(spawn_fn->params[0].require_thread_movable,
+           "thread_safety_attribute_on_parameter_parses: require_thread_movable should be true");
+    expect(!spawn_fn->params[0].require_thread_shareable,
+           "thread_safety_attribute_on_parameter_parses: require_thread_shareable should be false");
 }
 
 void test_operator_precedence() {
@@ -2081,7 +2184,13 @@ int main() {
     test_unsafe_block_sets_is_unsafe_flag();
     test_ordinary_block_is_not_unsafe();
     test_nested_unsafe_blocks_parse();
-    test_unsafe_without_brace_is_parse_error();
+    test_bare_unsafe_identifier_followed_by_return_is_parse_error();
+    test_unsafe_attribute_on_non_block_statement_has_no_effect();
+    test_function_level_unsafe_marker_parses();
+    test_unsafe_attribute_on_struct_is_rejected();
+    test_thread_safety_attribute_on_struct_parses();
+    test_thread_safety_attributes_on_class_parse();
+    test_thread_safety_attribute_on_parameter_parses();
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();

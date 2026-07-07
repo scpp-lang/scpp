@@ -1,5 +1,5 @@
 bool add_one_overflows(int x) {
-    unsafe {
+    [[scpp::unsafe]] {
         return (x + 1) < x;
     }
 }

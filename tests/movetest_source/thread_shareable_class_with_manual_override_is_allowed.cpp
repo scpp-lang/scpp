@@ -1,0 +1,21 @@
+// ch05 §5.15: a manual `[[scpp::thread_shareable]]` override on a class's
+// own declaration overrides the structural derivation entirely, even
+// though the class contains a raw pointer field.
+class [[scpp::thread_shareable]] RawHandle {
+public:
+    RawHandle(int* d) { this.data = d; return; }
+private:
+    int* data;
+};
+
+template<typename T>
+void broadcast(const T& x [[scpp::thread_shareable]]) {
+    return;
+}
+
+int main() {
+    int v = 1;
+    RawHandle h(&v);
+    broadcast(h);
+    return 0;
+}

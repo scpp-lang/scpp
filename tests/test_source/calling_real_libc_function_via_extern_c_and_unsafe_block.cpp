@@ -3,7 +3,7 @@ extern "C" {
 }
 
 int compute(int x) {
-    unsafe {
+    [[scpp::unsafe]] {
         return abs(x);
     }
 }

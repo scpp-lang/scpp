@@ -1,6 +1,6 @@
 extern "C" int puts(const char* s);
 void f() {
-    unsafe {
+    [[scpp::unsafe]] {
         puts("hi");
     }
     return;

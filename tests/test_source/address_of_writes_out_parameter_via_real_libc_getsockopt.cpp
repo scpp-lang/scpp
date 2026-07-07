@@ -12,20 +12,20 @@ extern "C" {
 int query_socket_type(int fd) {
     int value = 0;
     int len = 4;
-    unsafe {
+    [[scpp::unsafe]] {
         getsockopt(fd, 1, 3, &value, &len);
     }
     return value;
 }
 
 int open_socket() {
-    unsafe {
+    [[scpp::unsafe]] {
         return socket(2, 1, 0);
     }
 }
 
 void close_socket(int fd) {
-    unsafe {
+    [[scpp::unsafe]] {
         close(fd);
     }
     return;

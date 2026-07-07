@@ -1,7 +1,7 @@
 int f() {
     int x = 5;
     const int* p = &x;
-    unsafe {
+    [[scpp::unsafe]] {
         const int& r = *p;
         return r;
     }

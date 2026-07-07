@@ -1,7 +1,7 @@
 extern "C" int puts(const char* s);
 
 void print_buffer(char* msg) {
-    unsafe {
+    [[scpp::unsafe]] {
         puts(msg);
     }
     return;

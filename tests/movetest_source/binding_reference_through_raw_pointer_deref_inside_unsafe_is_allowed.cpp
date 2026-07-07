@@ -1,5 +1,5 @@
 int f(int* p) {
-    unsafe {
+    [[scpp::unsafe]] {
         const int& r = *p;
         return r;
     }

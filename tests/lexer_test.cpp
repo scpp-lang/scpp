@@ -51,9 +51,8 @@ void test_int_main_return() {
 
 void test_keywords() {
     expect_kinds(
-        "unsafe bool if else while for true false struct const",
+        "bool if else while for true false struct const",
         {
-            scpp::TokenKind::KwUnsafe,
             scpp::TokenKind::KwBool,
             scpp::TokenKind::KwIf,
             scpp::TokenKind::KwElse,
@@ -66,6 +65,16 @@ void test_keywords() {
             scpp::TokenKind::EndOfFile,
         },
         "keywords");
+}
+
+// ch00 §2/ch01 §1.3: `unsafe` is no longer a keyword at all -- it's the
+// attribute-token `unsafe` in the `scpp` namespace, spelled
+// `[[scpp::unsafe]]`. A bare `unsafe` identifier must therefore lex as
+// an ordinary Identifier, exactly like any other undeclared name (e.g.
+// it could be used as a variable name without conflict, unlike a real
+// keyword).
+void test_unsafe_is_not_a_keyword() {
+    expect_kinds("unsafe", {scpp::TokenKind::Identifier, scpp::TokenKind::EndOfFile}, "unsafe_is_not_a_keyword");
 }
 
 // ch01 (safety-context reversal): `safe` is no longer a keyword at all --
@@ -354,6 +363,7 @@ int main() {
     test_int_main_return();
     test_keywords();
     test_safe_is_no_longer_a_keyword();
+    test_unsafe_is_not_a_keyword();
     test_identifier_text();
     test_integer_literal_text();
     test_operators();

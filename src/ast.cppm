@@ -164,6 +164,17 @@ struct Param {
     // concept produced it, consulted at each call site to monomorphize
     // (see the parser's/movecheck's concept-monomorphization pass).
     std::string generic_concept;
+    // ch05 §5.15: `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`
+    // attached to a (generic) parameter's own declaration -- constrains
+    // its (possibly template-deduced) type to satisfy the corresponding
+    // structural property, checked at each call site against the
+    // deduced/concrete argument type (mirrors Rust's `Send`/`Sync`
+    // trait bounds on a generic function's own type parameter). Only
+    // meaningful on a parameter whose type actually depends on one of
+    // the enclosing function's own template parameters -- see
+    // Monomorphizer's own check_thread_safety_constraint.
+    bool require_thread_movable = false;
+    bool require_thread_shareable = false;
 };
 
 // ch05 §5.12: one entry in a lambda expression's own capture-list --
@@ -461,20 +472,44 @@ struct Function {
     StmtPtr body;
     // ch02 §2.1: requests C linkage. A bodyless `extern "C"` declaration
     // is always implicitly unchecked (no scpp compiler ever sees its
-    // real implementation), so calling it always requires `unsafe { }`
-    // (ch01/ch05 §5.5) -- the *only* remaining always-unchecked callee
-    // category, now that every ordinary function is checked by default
-    // (ch01 §1.3). An `extern "C"` *definition* (body non-null) is an
-    // ordinary, fully-checked function that additionally requests C
-    // linkage -- calling it needs no `unsafe { }` at all.
+    // real implementation), so calling it always requires
+    // `[[scpp::unsafe]] { }` (ch01/ch05 §5.5) -- the *only* remaining
+    // always-unchecked callee category, now that every ordinary
+    // function is checked by default (ch01 §1.3). An `extern "C"`
+    // *definition* (body non-null) is an ordinary, fully-checked
+    // function that additionally requests C linkage -- calling it needs
+    // no `[[scpp::unsafe]] { }` at all (unless it's also itself marked
+    // `is_unsafe` below).
     bool is_extern_c = false;
     // ch11 §11.6: a bare `extern` (no `"C"` string) bodyless declaration
-    // -- ordinary scpp linkage; calling it needs no `unsafe { }` either
-    // (the module's own author is trusted to check the real
-    // implementation elsewhere, see §11.6's own reasoning). Mutually
-    // exclusive with is_extern_c (either this function requests C ABI,
-    // or ordinary scpp linkage, never both).
+    // -- ordinary scpp linkage; calling it needs no
+    // `[[scpp::unsafe]] { }` either (the module's own author is trusted
+    // to check the real implementation elsewhere, see §11.6's own
+    // reasoning). Mutually exclusive with is_extern_c (either this
+    // function requests C ABI, or ordinary scpp linkage, never both).
     bool is_module_extern = false;
+    // ch01 §1.2/§1.3: the function-level `[[scpp::unsafe]]` marker --
+    // an attribute-specifier-seq containing the attribute-token
+    // `unsafe` appertaining to this function's own declaration (leading
+    // position, before the return type), as opposed to a *nested*
+    // `[[scpp::unsafe]] { }` block somewhere inside an otherwise-
+    // ordinary body (that form needs no AST field of its own: it's just
+    // an ordinary Stmt::is_unsafe=true Block, indistinguishable from any
+    // other unsafe block once parsed). Two effects follow, both handled
+    // by movecheck (see check_function's own entry_state setup and
+    // apply_expr's Call case): the function's *entire* body becomes an
+    // unsafe context throughout (as if its whole body were itself
+    // wrapped in one `[[scpp::unsafe]] { }`), and calling this function
+    // from anywhere becomes one more of ch05 §5.5's gated operations --
+    // scpp's equivalent of Rust's `unsafe fn`, for a function whose
+    // soundness depends on a precondition only its caller can guarantee.
+    // If this function is declared more than once (e.g. a bare `extern`
+    // forward declaration later defined elsewhere), every declaration
+    // must repeat this attribute consistently (ch01 §1.3 (2) in the
+    // formal spec) -- enforced by movecheck, not the parser (which
+    // parses one declaration at a time and has no cross-declaration
+    // view).
+    bool is_unsafe = false;
     // ch02 §2.1: the declaration ends in a trailing `...` (e.g.
     // `printf(const char* fmt, ...)`). Parsed and stored, but v0.1
     // doesn't yet support a *call site* passing extra arguments beyond
@@ -600,6 +635,21 @@ struct StructDef {
     // monomorphized struct injected into Program::structs by the
     // Monomorphizer, with its own distinct mangled name.
     std::vector<GenericTypeParam> template_params;
+    // ch05 §5.15: `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`
+    // attached directly to this struct's own declaration (after the
+    // `struct` keyword, before its name) -- manually asserts the
+    // corresponding property holds for this type, unconditionally
+    // overriding what the structural derivation (Monomorphizer's own
+    // thread_movable_of/thread_shareable_of) would otherwise conclude
+    // on its own (mirrors Rust's `unsafe impl Send`/`unsafe impl Sync`).
+    // The attribute's mere presence always asserts the property *true*
+    // -- there is no way to assert one *false* (real C++ has no stable
+    // "negative impl" syntax to reuse either, matching this document's
+    // own erasure-driven scoping). false (the default) means "no
+    // override; use the structural derivation instead", not "asserted
+    // false".
+    bool thread_movable_override = false;
+    bool thread_shareable_override = false;
 };
 
 enum class AccessSpecifier {
@@ -745,6 +795,11 @@ struct ClassDef {
     // leading non-type parameter at all (e.g. plain Tuple's own `:
     // private Tuple<Tail...>`).
     std::shared_ptr<Expr> base_non_type_arg;
+    // ch05 §5.15: see StructDef::thread_movable_override's own comment
+    // -- identical meaning, applied to a class declaration instead
+    // (after the `class` keyword, before its name).
+    bool thread_movable_override = false;
+    bool thread_shareable_override = false;
 };
 
 // ch05 §5.11: one requirement inside a `concept Name = requires(...) {

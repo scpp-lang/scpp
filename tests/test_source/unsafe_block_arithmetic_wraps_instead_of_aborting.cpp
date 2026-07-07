@@ -1,5 +1,5 @@
 int add_one_unsafely(int x) {
-    unsafe {
+    [[scpp::unsafe]] {
         return x + 1;
     }
 }

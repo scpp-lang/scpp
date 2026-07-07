@@ -3,7 +3,7 @@ int helper() {
     return 0;
 }
 int f() {
-    unsafe {
+    [[scpp::unsafe]] {
         return helper();
     }
 }

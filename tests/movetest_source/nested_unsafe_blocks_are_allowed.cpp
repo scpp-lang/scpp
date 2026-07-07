@@ -2,8 +2,8 @@ int helper() {
     return 1;
 }
 int f() {
-    unsafe {
-        unsafe {
+    [[scpp::unsafe]] {
+        [[scpp::unsafe]] {
             return helper();
         }
     }

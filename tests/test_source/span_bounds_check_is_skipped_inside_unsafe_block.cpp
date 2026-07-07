@@ -1,5 +1,5 @@
 int access_unsafely(std::span<int> s, int i) {
-    unsafe {
+    [[scpp::unsafe]] {
         return s[i];
     }
 }
