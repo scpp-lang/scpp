@@ -36,25 +36,6 @@ struct CodegenError : std::runtime_error {
     SourceLocation loc;
 };
 
-[[nodiscard]] bool is_unique_ptr_name(const std::string& name) {
-    return name == "std::unique_ptr" || name.rfind("std::unique_ptr.", 0) == 0;
-}
-
-[[nodiscard]] bool is_unique_ptr(const Type& type) {
-    return type.kind == TypeKind::Named && is_unique_ptr_name(type.name);
-}
-
-[[nodiscard]] const Type* unique_ptr_element_type(const Type& type) {
-    if (!is_unique_ptr(type)) return nullptr;
-    if (type.template_args.size() == 1) return &type.template_args[0];
-    static Type fallback;
-    if (type.name.rfind("std::unique_ptr.", 0) == 0) {
-        fallback = Type{.kind = TypeKind::Named, .name = type.name.substr(std::string("std::unique_ptr.").size())};
-        return &fallback;
-    }
-    return nullptr;
-}
-
 [[nodiscard]] bool is_scalar_type_name(const std::string& name) {
     static const std::unordered_set<std::string> scalar_names = {
         "bool", "char", "int", "long", "unsigned int", "unsigned long", "int8_t", "int16_t", "int32_t",
@@ -369,6 +350,7 @@ private:
             case ExprKind::IntegerLiteral: return Type{.kind = TypeKind::Named, .name = "int"};
             case ExprKind::FloatLiteral: return Type{.kind = TypeKind::Named, .name = "double"};
             case ExprKind::BoolLiteral: return Type{.kind = TypeKind::Named, .name = "bool"};
+            case ExprKind::TypeTrait: return Type{.kind = TypeKind::Named, .name = "bool"};
             case ExprKind::CharLiteral: return Type{.kind = TypeKind::Named, .name = "char"};
             case ExprKind::StringLiteral: {
                 Type result;
@@ -990,13 +972,9 @@ private:
             current_loc_);
     }
 
-    // A reference's referent may not itself be a std::unique_ptr in this
-    // version: that would require the borrow checker to also reason about
-    // moving/dropping the owner out from under a live borrow, which is
-    // deferred (see spec ch05.2/M4 scope notes near BorrowState below).
-    // Nor may it be another reference: reference-to-reference aliasing
-    // analysis is likewise out of scope for v0.1's intraprocedural,
-    // first-order borrow checking.
+    // A reference's referent may not itself be another reference:
+    // reference-to-reference aliasing analysis is still out of scope for
+    // v0.1's intraprocedural, first-order borrow checking.
     void validate_reference_pointee(const Type& pointee) {
         if (pointee.kind == TypeKind::Reference) {
             throw CodegenError("a reference to a reference is not supported",
@@ -1164,10 +1142,6 @@ private:
     [[nodiscard]] static std::string mangle_type(const Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
-                if (is_unique_ptr(type)) {
-                    const Type* element = unique_ptr_element_type(type);
-                    return element ? mangle_type(*element) + "_uptr" : "std_unique_ptr";
-                }
                 if (type.template_args.empty()) return type.name;
                 {
                     std::string result = type.name;
@@ -2456,6 +2430,7 @@ private:
                 return llvm::ConstantFP::get(llvm::Type::getDoubleTy(*context_), expr.float_value);
 
             case ExprKind::BoolLiteral:
+            case ExprKind::TypeTrait:
                 // `bool` is stored as a full byte (i8; see to_llvm_type
                 // and its false=0/true=1 invariant, ch06) -- a literal's
                 // value is already exactly 0 or 1, so no i1_to_bool
@@ -2676,6 +2651,7 @@ private:
         llvm::AllocaInst* closure = builder_->CreateAlloca(info.llvm_type, nullptr, "lambdatmp");
         for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
             const LambdaCapture& capture = expr.lambda_captures[i];
+            const Type& field_type = info.field_types[i];
             llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, closure, i, capture.name);
             if (capture.by_reference) {
                 Expr ident;
@@ -2686,17 +2662,22 @@ private:
                 builder_->CreateStore(address, field_ptr);
                 continue;
             }
-            llvm::Value* value;
-            if (capture.init) {
-                value = codegen_expr(*capture.init);
-            } else {
-                Expr ident;
-                ident.kind = ExprKind::Identifier;
-                ident.loc = expr.loc;
-                ident.name = capture.name;
-                value = codegen_expr(ident);
+            Expr ident;
+            ident.kind = ExprKind::Identifier;
+            ident.loc = expr.loc;
+            ident.name = capture.name;
+            const Expr& source = capture.init ? *capture.init : ident;
+            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name) &&
+                source.kind == ExprKind::Identifier) {
+                auto src_it = locals_.find(source.name);
+                if (src_it != locals_.end() && types_equal(src_it->second.type, field_type) &&
+                    is_copy_constructible(field_type.name)) {
+                    codegen_copy_construct_class(field_ptr, src_it->second.alloca, field_type.name);
+                    continue;
+                }
             }
-            check_store_type(value, to_llvm_type(info.field_types[i]), "capture '" + capture.name + "'");
+            llvm::Value* value = codegen_value_for_target(source, field_type);
+            check_store_type(value, to_llvm_type(field_type), "capture '" + capture.name + "'");
             builder_->CreateStore(value, field_ptr);
         }
         return closure;
@@ -2777,7 +2758,7 @@ private:
     // named helpers (has_user_declared_copy_ctor/copy_assign/dtor and
     // is_copy_constructible/is_copy_assignable) -- kept as a small,
     // separately-duplicated copy per module (the established pattern
-    // already used for is_unique_ptr/types_equal, rather than a shared
+    // already used for types_equal, rather than a shared
     // cross-module utility), since codegen has direct Program access
     // (`program_`) rather than movecheck's Body-only architecture.
     [[nodiscard]] const Function* find_user_declared_copy_ctor_ast(const std::string& class_name) {

@@ -9,7 +9,8 @@ export module std:memory;
 namespace std {
 
 export template<typename T>
-class unique_ptr {
+class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shareable(T))]]
+unique_ptr {
 private:
     T* ptr_;
     bool owns_;

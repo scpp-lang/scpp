@@ -345,8 +345,76 @@ private:
     // parser too, not just to a real downstream C++ compiler).
     struct ParsedAttributes {
         std::unordered_set<std::string> scpp_tokens;
+        ExprPtr thread_movable_if_movable_expr;
+        ExprPtr thread_movable_if_shareable_expr;
         [[nodiscard]] bool has(const std::string& token) const { return scpp_tokens.contains(token); }
     };
+
+    ExprPtr clone_expr_tree(const Expr& expr) {
+        auto clone = std::make_unique<Expr>();
+        clone->kind = expr.kind;
+        clone->loc = expr.loc;
+        clone->int_value = expr.int_value;
+        clone->float_value = expr.float_value;
+        clone->bool_value = expr.bool_value;
+        clone->name = expr.name;
+        clone->binary_op = expr.binary_op;
+        clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
+        clone->unary_op = expr.unary_op;
+        clone->type = expr.type;
+        clone->has_paren_init = expr.has_paren_init;
+        clone->lambda_blanket_mode = expr.lambda_blanket_mode;
+        clone->lambda_params = expr.lambda_params;
+        clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
+        clone->lambda_is_mutable = expr.lambda_is_mutable;
+        if (expr.lhs) clone->lhs = clone_expr_tree(*expr.lhs);
+        if (expr.rhs) clone->rhs = clone_expr_tree(*expr.rhs);
+        clone->args.clear();
+        for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr_tree(*arg));
+        clone->explicit_template_args.clear();
+        for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            ExplicitTemplateArg cloned = arg;
+            if (arg.value) cloned.value = std::shared_ptr<Expr>(clone_expr_tree(*arg.value).release());
+            clone->explicit_template_args.push_back(std::move(cloned));
+        }
+        clone->lambda_captures.clear();
+        for (const LambdaCapture& capture : expr.lambda_captures) {
+            LambdaCapture cloned;
+            cloned.name = capture.name;
+            cloned.by_reference = capture.by_reference;
+            if (capture.init) cloned.init = clone_expr_tree(*capture.init);
+            clone->lambda_captures.push_back(std::move(cloned));
+        }
+        clone->lambda_body.reset();
+        return clone;
+    }
+
+    ClassDef clone_class_def(const ClassDef& def) {
+        ClassDef clone;
+        clone.name = def.name;
+        clone.fields = def.fields;
+        clone.namespace_path = def.namespace_path;
+        clone.is_exported = def.is_exported;
+        clone.owning_module = def.owning_module;
+        clone.is_concept_witness = def.is_concept_witness;
+        clone.template_params = def.template_params;
+        clone.is_synthetic_check_only = def.is_synthetic_check_only;
+        clone.base_class_name = def.base_class_name;
+        clone.base_access = def.base_access;
+        clone.is_variadic_primary_template = def.is_variadic_primary_template;
+        clone.is_variadic_specialization = def.is_variadic_specialization;
+        clone.base_pack_arg_name = def.base_pack_arg_name;
+        if (def.base_non_type_arg) clone.base_non_type_arg = std::shared_ptr<Expr>(clone_expr_tree(*def.base_non_type_arg).release());
+        clone.thread_movable_override = def.thread_movable_override;
+        clone.thread_shareable_override = def.thread_shareable_override;
+        if (def.thread_movable_if_movable_expr) {
+            clone.thread_movable_if_movable_expr = clone_expr_tree(*def.thread_movable_if_movable_expr);
+        }
+        if (def.thread_movable_if_shareable_expr) {
+            clone.thread_movable_if_shareable_expr = clone_expr_tree(*def.thread_movable_if_shareable_expr);
+        }
+        return clone;
+    }
 
     // ch00 §2: parses zero or more leading `[[ attr-list ]]` attribute-
     // specifier-seqs -- real C++ grammar already gives a compound-
@@ -365,6 +433,23 @@ private:
     // every group; a bare (non-namespaced) attribute, or one in any
     // other namespace, is always silently ignored (scpp defines nothing
     // outside its own `scpp` namespace).
+    void skip_attribute_arguments() {
+        int depth = 1;
+        while (depth > 0) {
+            if (check(TokenKind::EndOfFile)) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column, "unterminated attribute argument list");
+            }
+            if (match(TokenKind::LParen)) {
+                depth++;
+            } else if (match(TokenKind::RParen)) {
+                depth--;
+            } else {
+                advance();
+            }
+        }
+    }
+
     [[nodiscard]] ParsedAttributes parse_attribute_specifier_seq() {
         ParsedAttributes result;
         while (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
@@ -379,11 +464,14 @@ private:
                         token = std::string(expect(TokenKind::Identifier, "attribute token").text);
                     }
                     if (match(TokenKind::LParen)) {
-                        // A single-identifier argument (e.g.
-                        // `lifetime(name)`) -- parsed and discarded, see
-                        // this function's own comment.
-                        if (!check(TokenKind::RParen)) advance();
-                        expect(TokenKind::RParen, "')'");
+                        if (ns == "scpp" && token == "thread_movable_if") {
+                            result.thread_movable_if_movable_expr = parse_expr();
+                            expect(TokenKind::Comma, "','");
+                            result.thread_movable_if_shareable_expr = parse_expr();
+                            expect(TokenKind::RParen, "')'");
+                        } else {
+                            skip_attribute_arguments();
+                        }
                     }
                     if (ns == "scpp") result.scpp_tokens.insert(token);
                 } while (match(TokenKind::Comma));
@@ -400,6 +488,12 @@ private:
     // flow through the general qualified-name path.
     [[nodiscard]] bool check_std_qualified(std::string_view member) const {
         return peek().kind == TokenKind::Identifier && peek().text == "std" &&
+               peek_at(1).kind == TokenKind::ColonColon && peek_at(2).kind == TokenKind::Identifier &&
+               peek_at(2).text == member;
+    }
+
+    [[nodiscard]] bool check_scpp_qualified(std::string_view member) const {
+        return peek().kind == TokenKind::Identifier && peek().text == "scpp" &&
                peek_at(1).kind == TokenKind::ColonColon && peek_at(2).kind == TokenKind::Identifier &&
                peek_at(2).text == member;
     }
@@ -1222,7 +1316,7 @@ private:
                     phase1_generic_type_single_param_[def.name] = def.template_params[0];
                 }
             }
-            ClassDef clone = def;
+            ClassDef clone = clone_class_def(def);
             if (clone.owning_module.empty()) clone.owning_module = imported_name;
             clone.is_exported = is_reexport && clone.is_exported;
             program.classes.push_back(std::move(clone));
@@ -1638,6 +1732,11 @@ private:
         ParsedAttributes attrs = parse_attribute_specifier_seq();
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
+        if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations");
+        }
         std::string bare_name = std::string(expect(TokenKind::Identifier, "struct name").text);
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
@@ -2405,6 +2504,11 @@ private:
     void parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {}) {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
+        bool is_generic = !template_params.empty();
+        if (is_generic && !template_params[0].is_non_type) {
+            struct_names_.insert(template_params[0].name);
+            class_names_.insert(template_params[0].name);
+        }
         // ch05 §5.15: `class [[scpp::thread_movable]] Name { ... };` --
         // see parse_struct_def's identical handling.
         ParsedAttributes class_attrs = parse_attribute_specifier_seq();
@@ -2426,7 +2530,6 @@ private:
         // registration order as parse_struct_def.
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
-        bool is_generic = !template_params.empty();
         if (is_generic) {
             generic_type_names_.insert(qualified_class_name);
             phase1_generic_type_single_param_[qualified_class_name] = template_params[0];
@@ -2447,6 +2550,19 @@ private:
         def.name = qualified_class_name;
         def.thread_movable_override = class_attrs.has("thread_movable");
         def.thread_shareable_override = class_attrs.has("thread_shareable");
+        if (class_attrs.thread_movable_if_movable_expr || class_attrs.thread_movable_if_shareable_expr) {
+            if (!(class_attrs.thread_movable_if_movable_expr && class_attrs.thread_movable_if_shareable_expr)) {
+                throw ParseError(loc.line, loc.column,
+                                 "'[[scpp::thread_movable_if(a, b)]]' requires exactly two boolean arguments");
+            }
+            if (def.thread_movable_override || def.thread_shareable_override) {
+                throw ParseError(loc.line, loc.column,
+                                 "'[[scpp::thread_movable_if(a, b)]]' cannot be combined with bare "
+                                 "'[[scpp::thread_movable]]' or '[[scpp::thread_shareable]]' on the same class");
+            }
+            def.thread_movable_if_movable_expr = std::move(class_attrs.thread_movable_if_movable_expr);
+            def.thread_movable_if_shareable_expr = std::move(class_attrs.thread_movable_if_shareable_expr);
+        }
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
         def.template_params = template_params;
@@ -3469,6 +3585,22 @@ private:
             node->kind = ExprKind::Move;
             node->loc = loc;
             node->lhs = std::move(inner);
+            return node;
+        }
+
+        if (check_scpp_qualified("is_thread_movable") || check_scpp_qualified("is_thread_shareable")) {
+            bool movable = check_scpp_qualified("is_thread_movable");
+            advance(); // scpp
+            expect(TokenKind::ColonColon, "'::'");
+            advance(); // is_thread_*
+            expect(TokenKind::LParen, "'('");
+            Type queried = parse_type();
+            expect(TokenKind::RParen, "')'");
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::TypeTrait;
+            node->loc = loc;
+            node->name = movable ? "is_thread_movable" : "is_thread_shareable";
+            node->type = std::move(queried);
             return node;
         }
 
