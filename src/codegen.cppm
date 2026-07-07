@@ -2776,43 +2776,45 @@ private:
     // particular local predates move-tracking, which doesn't arise in
     // practice: every class-typed local with a destructor always gets a
     // moved_flag at declaration).
-    void codegen_call_destructor_unless_moved(llvm::Function* dtor, const LocalSlot& slot) {
-        if (slot.moved_flag == nullptr) {
-            builder_->CreateCall(dtor, {slot.alloca});
+    void codegen_call_destructor_unless_moved(llvm::Function* dtor, llvm::Value* object_ptr,
+                                              llvm::AllocaInst* moved_flag) {
+        if (moved_flag == nullptr) {
+            builder_->CreateCall(dtor, {object_ptr});
             return;
         }
-        llvm::Value* was_moved = builder_->CreateLoad(llvm::Type::getInt1Ty(*context_), slot.moved_flag, "wasmoved");
+        llvm::Value* was_moved = builder_->CreateLoad(llvm::Type::getInt1Ty(*context_), moved_flag, "wasmoved");
         llvm::Function* current_fn = builder_->GetInsertBlock()->getParent();
         llvm::BasicBlock* then_bb = llvm::BasicBlock::Create(*context_, "dtorcall", current_fn);
         llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(*context_, "dtorskip", current_fn);
         builder_->CreateCondBr(was_moved, merge_bb, then_bb);
         builder_->SetInsertPoint(then_bb);
-        builder_->CreateCall(dtor, {slot.alloca});
+        builder_->CreateCall(dtor, {object_ptr});
         builder_->CreateBr(merge_bb);
         builder_->SetInsertPoint(merge_bb);
     }
 
     // spec §6.4(5): move-assignment's own "replace the value of each
-    // member" step needs the *destination*'s own currently-owned
-    // resources released first, or reassigning a unique_ptr-owning field
-    // would leak whatever it already owned (unlike move-construction,
-    // codegen_stmt's VarDecl case, whose destination is always a fresh,
-    // just-zero-initialized slot with nothing yet to release). Walks
-    // `class_name`'s own flattened field layout (structs_, already
-    // base-class-first per declare_class), freeing any std::unique_ptr-
-    // typed field's current value (free(NULL) is a safe no-op, so this
-    // is correct whether or not that field actually owns a live
-    // allocation) and recursing into any nested class-typed field for
-    // its own further-nested unique_ptr fields -- exactly mirroring
-    // real C++'s own move-assignment operator, which recursively
-    // delegates to each member's own move-assignment operator rather
-    // than the whole object's destructor. Scalar/struct/raw-pointer/
-    // reference/array fields need no release at all (never resource-
-    // owning in this model, ch05 §5.5/§5.15). After this runs, the
-    // caller still needs to actually transfer the new value in (see
-    // codegen_binary's Assign case) -- this only ever frees the *old*
-    // one.
-    void codegen_release_nested_unique_ptrs(llvm::Value* ptr, const std::string& class_name) {
+    // member" step needs the *destination*'s old state torn down first
+    // (the book's "destroy the old value" step) before the moved-in bytes
+    // overwrite it. Move-construction has no analogous step because its
+    // destination is always freshly zero-initialized storage (see
+    // codegen_stmt's VarDecl path), so there is nothing old there to
+    // release. For a class with a user-declared destructor, that
+    // destructor *is* the old-state teardown logic and must run here too;
+    // otherwise, recurse through its flattened field layout and tear down
+    // only the owning subobjects the compiler itself knows how to manage
+    // (builtin std::unique_ptr fields, or nested class fields that in turn
+    // need teardown by the same rules). `moved_flag`, when non-null, is
+    // the local-slot flag for the *whole* object being overwritten: a
+    // self-move-assignment (`x = std::move(x)`) sets it true while
+    // evaluating the RHS Move expression, so the old-value teardown
+    // correctly becomes a no-op exactly as the spec/book require.
+    void codegen_destroy_old_class_state_for_move_assign(llvm::Value* ptr, const std::string& class_name,
+                                                         llvm::AllocaInst* moved_flag = nullptr) {
+        if (llvm::Function* dtor = find_destructor(class_name)) {
+            codegen_call_destructor_unless_moved(dtor, ptr, moved_flag);
+            return;
+        }
         auto struct_it = structs_.find(class_name);
         if (struct_it == structs_.end()) return;
         const StructInfo& info = struct_it->second;
@@ -2826,7 +2828,7 @@ private:
                 builder_->CreateCall(free_fn, {old_value});
             } else if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, ptr, i, info.field_names[i]);
-                codegen_release_nested_unique_ptrs(field_ptr, field_type.name);
+                codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
             }
         }
     }
@@ -2858,7 +2860,7 @@ private:
                 builder_->CreateCall(free_fn, {current});
             } else if (slot.type.kind == TypeKind::Named) {
                 if (llvm::Function* dtor = find_destructor(slot.type.name)) {
-                    codegen_call_destructor_unless_moved(dtor, slot);
+                    codegen_call_destructor_unless_moved(dtor, slot.alloca, slot.moved_flag);
                 }
             }
         }
@@ -2894,7 +2896,7 @@ private:
                     builder_->CreateCall(free_fn, {current});
                 } else if (slot_it->second.type.kind == TypeKind::Named) {
                     if (llvm::Function* dtor = find_destructor(slot_it->second.type.name)) {
-                        codegen_call_destructor_unless_moved(dtor, slot_it->second);
+                        codegen_call_destructor_unless_moved(dtor, slot_it->second.alloca, slot_it->second.moved_flag);
                     }
                 }
             }
@@ -3451,15 +3453,20 @@ private:
                 // synthesized move assignment operator (movecheck has
                 // already verified `expr.rhs` is exactly this shape --
                 // ordinary class reassignment is rejected before this
-                // point is ever reached, see check_moves). Release
-                // whatever `y` already owns (transitively, through any
-                // nested unique_ptr field) before the `CreateStore`
+                // point is ever reached, see check_moves). Tear down
+                // whatever `y` already owns before the `CreateStore`
                 // below overwrites it wholesale with the source's own
                 // bytes -- `value` above already came from `codegen_expr`
-                // on the Move expression, which already nulled the
+                // on the Move expression, which already nulled (and, for
+                // a local class with a destructor, marked moved-out) the
                 // source's slot, exactly like move-construction's own
                 // identical reasoning (codegen_stmt's VarDecl case).
-                codegen_release_nested_unique_ptrs(lv.ptr, lv.type.name);
+                llvm::AllocaInst* target_moved_flag = nullptr;
+                if (expr.lhs->kind == ExprKind::Identifier) {
+                    auto target_it = locals_.find(expr.lhs->name);
+                    if (target_it != locals_.end()) target_moved_flag = target_it->second.moved_flag;
+                }
+                codegen_destroy_old_class_state_for_move_assign(lv.ptr, lv.type.name, target_moved_flag);
             }
             builder_->CreateStore(value, lv.ptr);
             if (lv.type.kind == TypeKind::Named && expr.lhs->kind == ExprKind::Identifier) {

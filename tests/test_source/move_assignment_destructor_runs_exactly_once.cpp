@@ -1,7 +1,8 @@
-// spec §6.4(3)/(5): `b = std::move(a);` (move assignment) releases
-// whatever `b` already owned *before* taking `a`'s value (no leak), and
-// `a` is left in the moved-out state so only `b`'s destructor runs at
-// scope-exit -- exactly once.
+// spec §6.4(3)/(5): `b = std::move(a);` (move assignment) first destroys
+// `b`'s old state, then overwrites it with `a`'s moved value; `a` is left
+// moved-out so only the newly-assigned `b` runs again at scope-exit. That
+// means the destructor body runs exactly twice overall: once during the
+// assignment for old `b`, once at scope-exit for new `b`, never for `a`.
 class Resource {
 public:
     Resource(int v) { this.p = std::make_unique<int>(v); return; }
