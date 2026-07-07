@@ -1,0 +1,42 @@
+// ch05 §5.15/spec §8.4: the conditional override must *not* silently
+// become unconditional. Here `NotThreadMovable` has a reference member,
+// so `scpp::is_thread_movable(NotThreadMovable)` is false; the
+// `[[scpp::thread_movable_if(...)]]` instantiation must therefore still
+// fail a `[[scpp::thread_movable]]` parameter constraint.
+class NotThreadMovable {
+private:
+    int& ref;
+public:
+    NotThreadMovable(int& x) : ref(x) {
+        return;
+    }
+};
+
+template<typename T>
+class [[scpp::thread_movable_if(
+    scpp::is_thread_movable(T),
+    scpp::is_thread_shareable(T)
+)]] Box {
+private:
+    int* p;
+public:
+    Box() {
+        [[scpp::unsafe]] {
+            this->p = new int(0);
+        }
+        return;
+    }
+};
+
+template<typename T>
+void spawn(T&& value [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    int x = 0;
+    NotThreadMovable value(x);
+    Box<NotThreadMovable> box;
+    spawn(std::move(box));
+    return 0;
+}

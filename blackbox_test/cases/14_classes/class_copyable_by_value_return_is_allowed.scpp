@@ -1,0 +1,32 @@
+// A copyable class may be returned by value from a bare local: the
+// local result object may be copied into the caller's destination.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    Counter(const Counter& other) {
+        this->value = other.value;
+        return;
+    }
+    Counter& operator=(const Counter& other) {
+        this->value = other.value;
+        return *this;
+    }
+    int get() {
+        return this->value;
+    }
+};
+
+Counter make_counter() {
+    Counter c(7);
+    return c;
+}
+
+int main() {
+    Counter c = make_counter();
+    return c.get();
+}

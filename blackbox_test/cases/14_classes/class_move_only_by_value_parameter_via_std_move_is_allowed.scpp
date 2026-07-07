@@ -1,0 +1,27 @@
+// A move-only class (here: user-declared destructor, so no implicit
+// copy) may still be passed by value when the caller supplies a fresh
+// rvalue with `std::move(...)`.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+    int get() {
+        return this->value;
+    }
+};
+
+int take_by_value(Counter c) {
+    return c.get();
+}
+
+int main() {
+    Counter c(9);
+    return take_by_value(std::move(c));
+}

@@ -1,0 +1,32 @@
+// A copyable class may be passed by value: the caller's bare local may
+// be copied into the parameter object, after which the callee may use it
+// normally.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    Counter(const Counter& other) {
+        this->value = other.value;
+        return;
+    }
+    Counter& operator=(const Counter& other) {
+        this->value = other.value;
+        return *this;
+    }
+    int get() {
+        return this->value;
+    }
+};
+
+int take_by_value(Counter c) {
+    return c.get();
+}
+
+int main() {
+    Counter c(7);
+    return take_by_value(c);
+}

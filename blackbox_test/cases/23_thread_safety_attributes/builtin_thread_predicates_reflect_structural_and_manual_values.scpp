@@ -1,0 +1,35 @@
+// ch05 §5.15/spec §8.3: `scpp::is_thread_movable(T)` and
+// `scpp::is_thread_shareable(T)` are builtin predicates over a *type
+// name* in parentheses, reflecting either a manual override or the
+// structural rules. Scalars are both true; a raw-pointer field is false
+// by default; a manual override can make such a wrapper true.
+struct RawPtrBox {
+    int* p;
+};
+
+struct [[scpp::thread_movable]]
+ManualMovableRawPtrBox {
+    int* p;
+};
+
+int main() {
+    if (!scpp::is_thread_movable(int)) {
+        return 1;
+    }
+    if (!scpp::is_thread_shareable(int)) {
+        return 2;
+    }
+    if (scpp::is_thread_movable(RawPtrBox)) {
+        return 3;
+    }
+    if (scpp::is_thread_shareable(RawPtrBox)) {
+        return 4;
+    }
+    if (!scpp::is_thread_movable(ManualMovableRawPtrBox)) {
+        return 5;
+    }
+    if (scpp::is_thread_shareable(ManualMovableRawPtrBox)) {
+        return 6;
+    }
+    return 0;
+}

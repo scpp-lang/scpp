@@ -1,0 +1,28 @@
+// Current by-value return is *not* rejected unconditionally: a copyable
+// bare local may be returned by value, and a move-only bare local may be
+// returned when explicitly wrapped in `std::move(...)`. This specific
+// case stays rejected because `Counter` has a user-declared destructor,
+// so ch04 §4.2/ch08 Q15 suppress its copy constructor/assignment;
+// returning the bare local `c` by value would therefore need a copy the
+// type does not have.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+};
+
+Counter make_counter() {
+    Counter c(5);
+    return c;
+}
+
+int main() {
+    return 0;
+}

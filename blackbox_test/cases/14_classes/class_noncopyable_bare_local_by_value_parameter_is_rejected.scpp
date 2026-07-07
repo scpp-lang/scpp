@@ -1,0 +1,29 @@
+// Current by-value materialization is *not* "rejected unconditionally":
+// copyable classes may still be passed by value, and move-only classes
+// may be passed when the caller supplies a fresh value such as
+// `std::move(x)`. This specific case stays rejected because `Counter`
+// has a user-declared destructor, so ch04 §4.2/ch08 Q15 suppress its
+// copy constructor/assignment; passing the bare local `c` by value would
+// therefore need a copy operation the type does not have.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+};
+
+void take_by_value(Counter c) {
+    return;
+}
+
+int main() {
+    Counter c(5);
+    take_by_value(c);
+    return 0;
+}

@@ -1,0 +1,30 @@
+// ch05 §5.15/spec §8.4: a generic class's
+// `[[scpp::thread_movable_if(a, b)]]` override is evaluated per
+// instantiation. Here `Box<int>` becomes thread-movable because the
+// condition forwards `int`'s own thread-movable value.
+template<typename T>
+class [[scpp::thread_movable_if(
+    scpp::is_thread_movable(T),
+    scpp::is_thread_shareable(T)
+)]] Box {
+private:
+    int* p;
+public:
+    Box() {
+        [[scpp::unsafe]] {
+            this->p = new int(0);
+        }
+        return;
+    }
+};
+
+template<typename T>
+void spawn(T&& value [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    Box<int> box;
+    spawn(std::move(box));
+    return 0;
+}

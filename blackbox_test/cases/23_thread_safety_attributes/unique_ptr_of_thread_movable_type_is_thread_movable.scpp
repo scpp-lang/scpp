@@ -1,0 +1,14 @@
+import std;
+// ch05 §5.15's worked example: `std::unique_ptr<T>` forwards its thread
+// properties through `[[scpp::thread_movable_if(...)]]`, so
+// `std::unique_ptr<int>` is thread-movable.
+template<typename T>
+void spawn(T&& value [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    std::unique_ptr<int> p = std::make_unique<int>(3);
+    spawn(std::move(p));
+    return 0;
+}

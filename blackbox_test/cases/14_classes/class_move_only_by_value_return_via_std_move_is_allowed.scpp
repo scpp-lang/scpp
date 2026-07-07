@@ -1,0 +1,27 @@
+// A move-only class may still be returned by value when the function
+// returns a fresh rvalue via `std::move(local)`.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+    int get() {
+        return this->value;
+    }
+};
+
+Counter make_counter() {
+    Counter c(9);
+    return std::move(c);
+}
+
+int main() {
+    Counter c = make_counter();
+    return c.get();
+}
