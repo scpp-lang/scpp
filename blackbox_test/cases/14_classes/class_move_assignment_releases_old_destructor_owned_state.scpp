@@ -1,0 +1,39 @@
+// ch04 §4.2/spec §6.4(5): move assignment destroys the target's old
+// initialized state before replacing it with the moved-in one. For a
+// user-defined destructor-owning class (not `std::unique_ptr` itself),
+// that old-state destructor logic must still run.
+extern "C" int puts(const char* s);
+extern "C" char* strdup(const char* s);
+extern "C" void free(char* p);
+extern "C" int strcmp(const char* lhs, const char* rhs);
+
+class Resource {
+public:
+    Resource(const char* s) {
+        [[scpp::unsafe]] {
+            this->p = strdup(s);
+        }
+        return;
+    }
+    ~Resource() {
+        [[scpp::unsafe]] {
+            puts(this->p);
+            free(this->p);
+        }
+        return;
+    }
+    int compare(const char* s) {
+        [[scpp::unsafe]] {
+            return strcmp(this->p, s);
+        }
+    }
+private:
+    char* p;
+};
+
+int main() {
+    Resource a("new");
+    Resource b("old");
+    b = std::move(a);
+    return b.compare("new");
+}
