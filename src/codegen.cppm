@@ -455,6 +455,12 @@ private:
                 }
                 return std::nullopt;
 
+            case ExprKind::Fold:
+                // Fold expressions are expanded away during generic-call
+                // monomorphization; no concrete codegen path should ever
+                // see one.
+                return std::nullopt;
+
             case ExprKind::Call: {
                 std::string callee_name = expr.name;
                 size_t param_offset = 0;
@@ -2226,6 +2232,10 @@ private:
 
             case ExprKind::MakeUnique:
                 return codegen_make_unique(expr);
+
+            case ExprKind::Fold:
+                throw CodegenError("fold expression should have been expanded before codegen",
+                    current_loc_);
 
             case ExprKind::Lambda:
                 return codegen_construct_lambda(expr);

@@ -2,6 +2,7 @@ module;
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1546,7 +1547,19 @@ private:
             do {
                 Param param;
                 Type base_type = parse_param_type(param.generic_concept);
+                param.is_parameter_pack = match(TokenKind::Ellipsis);
+                if (param.is_parameter_pack && param.generic_concept.empty()) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "parameter packs are only supported for the abbreviated generic form "
+                                      "('Concept auto&... args') in this version (ch05 §5.11)");
+                }
                 param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
+                if (param.is_parameter_pack && !check(TokenKind::RParen)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "a parameter pack must be the last parameter in the list (ch05 §5.11)");
+                }
                 // Same C-style declarator order (array suffix after the
                 // name, decaying to pointer) as parse_function's own
                 // parameter loop.
@@ -2586,7 +2599,19 @@ private:
                 }
                 Param param;
                 Type base_type = parse_param_type(param.generic_concept);
+                param.is_parameter_pack = match(TokenKind::Ellipsis);
+                if (param.is_parameter_pack && param.generic_concept.empty()) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "parameter packs are only supported for the abbreviated generic form "
+                                      "('Concept auto&... args') in this version (ch05 §5.11)");
+                }
                 param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
+                if (param.is_parameter_pack && !check(TokenKind::RParen)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "a parameter pack must be the last parameter in the list (ch05 §5.11)");
+                }
                 // The array suffix (if any) follows the *declared name*,
                 // not the type -- same C-style declarator order as
                 // parse_var_decl/parse_struct_def (e.g. `int arr[4]`).
@@ -3407,6 +3432,46 @@ private:
             return node;
         }
         if (match(TokenKind::LParen)) {
+            size_t saved_pos = pos_;
+            if (match(TokenKind::Ellipsis)) {
+                std::optional<BinaryOp> op = parse_fold_operator();
+                if (!op.has_value()) {
+                    const Token& bad = peek();
+                    throw ParseError(bad.line, bad.column,
+                                      "expected a fold operator after '...' (ch05 §5.11)");
+                }
+                ExprPtr pack = parse_unary();
+                expect(TokenKind::RParen, "')'");
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Fold;
+                node->loc = loc;
+                node->binary_op = *op;
+                node->fold_ellipsis_on_left = true;
+                node->lhs = std::move(pack);
+                return node;
+            }
+            pos_ = saved_pos;
+            ExprPtr first = parse_unary();
+            if (std::optional<BinaryOp> op = parse_fold_operator(); op.has_value() && check(TokenKind::Ellipsis)) {
+                advance(); // '...'
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Fold;
+                node->loc = loc;
+                node->binary_op = *op;
+                node->lhs = std::move(first);
+                if (std::optional<BinaryOp> trailing = parse_fold_operator()) {
+                    if (*trailing != *op) {
+                        const Token& bad = peek();
+                        throw ParseError(bad.line, bad.column,
+                                          "a binary fold expression must use the same operator on both sides of "
+                                          "'...' (ch05 §5.11)");
+                    }
+                    node->rhs = parse_unary();
+                }
+                expect(TokenKind::RParen, "')'");
+                return node;
+            }
+            pos_ = saved_pos;
             ExprPtr inner = parse_expr();
             expect(TokenKind::RParen, "')'");
             return inner;
@@ -3424,6 +3489,22 @@ private:
         node->lhs = std::move(lhs);
         node->rhs = std::move(rhs);
         return node;
+    }
+
+    std::optional<BinaryOp> parse_fold_operator() {
+        if (match(TokenKind::Plus)) return BinaryOp::Add;
+        if (match(TokenKind::Minus)) return BinaryOp::Sub;
+        if (match(TokenKind::Star)) return BinaryOp::Mul;
+        if (match(TokenKind::Slash)) return BinaryOp::Div;
+        if (match(TokenKind::EqualEqual)) return BinaryOp::Eq;
+        if (match(TokenKind::NotEqual)) return BinaryOp::Ne;
+        if (match(TokenKind::Less)) return BinaryOp::Lt;
+        if (match(TokenKind::Greater)) return BinaryOp::Gt;
+        if (match(TokenKind::LessEqual)) return BinaryOp::Le;
+        if (match(TokenKind::GreaterEqual)) return BinaryOp::Ge;
+        if (match(TokenKind::AmpAmp)) return BinaryOp::And;
+        if (match(TokenKind::PipePipe)) return BinaryOp::Or;
+        return std::nullopt;
     }
 };
 

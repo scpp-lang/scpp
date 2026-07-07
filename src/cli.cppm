@@ -258,6 +258,12 @@ void print_expr(const scpp::Expr& expr, int depth) {
             print_expr(*expr.lhs, depth + 1);
             print_expr(*expr.rhs, depth + 1);
             break;
+        case scpp::ExprKind::Fold:
+            std::cout << "Fold " << binary_op_name(expr.binary_op)
+                      << (expr.fold_ellipsis_on_left ? " (left)" : " (right)") << "\n";
+            print_expr(*expr.lhs, depth + 1);
+            if (expr.rhs) print_expr(*expr.rhs, depth + 1);
+            break;
         case scpp::ExprKind::Unary:
             std::cout << "Unary " << unary_op_name(expr.unary_op) << "\n";
             print_expr(*expr.lhs, depth + 1);

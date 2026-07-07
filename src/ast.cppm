@@ -175,6 +175,10 @@ struct Param {
     // Monomorphizer's own check_thread_safety_constraint.
     bool require_thread_movable = false;
     bool require_thread_shareable = false;
+    // ch05 §5.11: true only for the trailing abbreviated generic pack form
+    // (`Concept auto&... args`). Supported only on a free function's own
+    // parameter list, never on a method/lambda in this version.
+    bool is_parameter_pack = false;
 };
 
 // ch05 §5.12: one entry in a lambda expression's own capture-list --
@@ -239,6 +243,8 @@ enum class ExprKind {
     Lambda,     // `[captures](params) { body }` (ch05 §5.12) -- desugars to
                 // constructing an anonymous, compiler-synthesized class; see
                 // Expr's own lambda_* fields below.
+    Fold,       // C++17 fold expression over a parameter pack (ch05 §5.11),
+                // e.g. `(args + ...)`, `(... + args)`, or `(args + ... + 0)`.
     Cast,       // `static_cast<T>(expr)` / `(T)expr` (ch06 §6) -- an explicit
                 // scalar-to-scalar conversion; the *only* way to convert
                 // between two distinct scpp scalar types (no implicit
@@ -333,10 +339,15 @@ struct Expr {
     // Call with `lhs = obj`, `name = "method"`, resolved to a concrete
     // synthesized function symbol only once `obj`'s static type is known
     // (movecheck/codegen, not the parser -- see codegen_call's
-    // Member-base handling)
+    // Member-base handling). Fold uses `binary_op` as the folded operator;
+    // `lhs` is the sole operand for unary folds and the left-side operand
+    // for binary folds, `rhs` the optional right-side operand for a binary
+    // fold, and `fold_ellipsis_on_left` distinguishes `(... op pack)` from
+    // `(pack op ...)`.
     BinaryOp binary_op{};
     ExprPtr lhs;
     ExprPtr rhs;
+    bool fold_ellipsis_on_left = false;
 
     // Unary (operand stored in `lhs`)
     UnaryOp unary_op{};
