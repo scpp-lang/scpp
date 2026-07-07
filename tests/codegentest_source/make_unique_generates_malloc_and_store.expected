@@ -1,4 +1,4 @@
 contains: call ptr @malloc(i64 4)
 contains: store i32 %loadtmp, ptr %newptr
-contains: call void @"std::unique_ptr.int_new.int_uptr_ref.int_ptr"
+contains: call void @"std::unique_ptr.int_new.std::unique_ptr.int_ref.int_ptr"
 contains: declare ptr @malloc(i64)

@@ -265,6 +265,11 @@ void print_expr(const scpp::Expr& expr, int depth) {
         case scpp::ExprKind::BoolLiteral:
             std::cout << "BoolLiteral " << (expr.bool_value ? "true" : "false") << "\n";
             break;
+        case scpp::ExprKind::TypeTrait:
+            std::cout << "TypeTrait " << expr.name << "\n";
+            print_indent(depth + 1);
+            std::cout << "Type " << expr.type.name << "\n";
+            break;
         case scpp::ExprKind::CharLiteral:
             std::cout << "CharLiteral " << expr.int_value << "\n";
             break;

@@ -248,6 +248,10 @@ enum class ExprKind {
     Delete,     // `delete expr` -- destroys the pointed-to object (if any) and
                 // frees its storage; also gated by `[[scpp::unsafe]]`.
     Move,       // std::move(x) -- compiler builtin move hint, not an ordinary call
+    TypeTrait,  // scpp::is_thread_movable(T) / scpp::is_thread_shareable(T) --
+                // compiler builtin type-trait predicates whose queried type
+                // lives in `type` and whose specific trait name lives in
+                // `name`; evaluates to a bool constant.
     PackExpansion, // `expr...` in a generic function body, currently only
                    // meaningful inside a call/new/constructor argument list
                    // before monomorphization expands it to concrete args.
@@ -856,6 +860,14 @@ struct ClassDef {
     // (after the `class` keyword, before its name).
     bool thread_movable_override = false;
     bool thread_shareable_override = false;
+    // ch05 §5.15: `[[scpp::thread_movable_if(a, b)]]` on a class
+    // declaration -- a parameterized override of the class's own
+    // thread_movable/thread_shareable values, evaluated per concrete
+    // instantiation. Null means "no conditional override; fall back to the
+    // unconditional booleans above or, if those are both false, the
+    // structural derivation".
+    ExprPtr thread_movable_if_movable_expr;
+    ExprPtr thread_movable_if_shareable_expr;
 };
 
 // ch05 §5.11: one requirement inside a `concept Name = requires(...) {

@@ -358,22 +358,6 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     }
 }
 
-[[nodiscard]] bool is_unique_ptr_name(const std::string& name) {
-    return name == "std::unique_ptr" || name.rfind("std::unique_ptr.", 0) == 0;
-}
-[[nodiscard]] bool is_unique_ptr(const Type& type) {
-    return type.kind == TypeKind::Named && is_unique_ptr_name(type.name);
-}
-[[nodiscard]] const Type* unique_ptr_element_type(const Type& type) {
-    if (!is_unique_ptr(type)) return nullptr;
-    if (type.template_args.size() == 1) return &type.template_args[0];
-    static Type fallback;
-    if (type.name.rfind("std::unique_ptr.", 0) == 0) {
-        fallback = Type{.kind = TypeKind::Named, .name = type.name.substr(std::string("std::unique_ptr.").size())};
-        return &fallback;
-    }
-    return nullptr;
-}
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
 [[nodiscard]] bool is_function_pointer(const Type& type) { return type.kind == TypeKind::FunctionPointer; }
@@ -625,7 +609,7 @@ struct CalleeSignature {
 // receiver expression still falls back to the unqualified name and a
 // zero offset, same as an ordinary free-function call (this is *not* a
 // general type-checker). Shared by check_call_arguments and
-// produces_unique_ptr_rvalue so both resolve a method call's callee
+// produces_rvalue_of_type so both resolve a method call's callee
 // identically.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
@@ -732,8 +716,7 @@ struct CalleeSignature {
 //    own return type.
 //  - resolve_overload needs argument_matches_parameter to test each
 //    candidate, which in turn needs infer_expr_type (to compare argument/
-//    parameter types), produces_unique_ptr_rvalue (defined below, to
-//    validate a std::unique_ptr-typed parameter's argument), and
+//    parameter types), produces_rvalue_of_type (defined below), and
 //    is_read_only_reachable (defined much further below, for the
 //    T&-beats-const-T&-for-a-mutable-lvalue tie-break).
 // All of this always terminates: every recursive step is into a strictly
@@ -742,7 +725,6 @@ struct CalleeSignature {
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
-[[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                             const Signatures& signatures);
 // spec §6.5: forward-declared since apply_expr's own Binary/Assign case
@@ -1169,50 +1151,30 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
                 return std::nullopt;
             }
             return expr.lhs->name;
+        case ExprKind::Call:
+            if (expr.name == "operator_deref" && expr.lhs != nullptr) {
+                if (expr.lhs->kind == ExprKind::Identifier) return expr.lhs->name;
+                if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
+                    return direct_write_root(*expr.lhs->lhs, body);
+                }
+            }
+            return std::nullopt;
         default:
             return std::nullopt;
     }
 }
 
-// The expressions allowed to produce a std::unique_ptr rvalue: moving an
-// existing one out, freshly heap-allocating one via std::make_unique
-// (scpp has no `new` expression at all -- make_unique is the sole
-// sanctioned allocation syntax, and is itself a compiler builtin rather
-// than a real generic call, same treatment as std::move), or calling a
-// function/method whose own return type is std::unique_ptr<T> -- exactly
-// like real C++, a function's return value is already an rvalue at the
-// call site and needs no std::move (only a *named* variable needs an
-// explicit std::move to be treated as movable-from). Consistent with
-// check_call_arguments, which already allows this same Call expression
-// shape unconditionally when passed directly as another call's argument.
-[[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures) {
-    if (expr.kind == ExprKind::Move) return true;
-    if (expr.kind == ExprKind::Call) {
-        CalleeSignature callee = resolve_callee_signature(expr, body);
-        const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-        return sig != nullptr && is_unique_ptr(sig->return_type);
-    }
-    return false;
-}
-
 // ch03/ch05 §5.11: the expressions allowed to bind to a `T&&` (rvalue-
-// reference/move) parameter -- generalizes produces_unique_ptr_rvalue
-// above to any type (not just std::unique_ptr), checked against a
-// specific `expected_type` since, unlike a unique_ptr parameter (always
-// disambiguated by its own pointee type elsewhere), an arbitrary T&&
-// parameter's type is exactly what tells a legitimate argument from an
-// ill-typed one here. Reused, via the same Type::is_rvalue_ref flag, for
-// a `Concept auto&&` generic parameter's own witness-typed slot (ch05
-// §5.11) and for passing a lambda expression literal to one (ch05
-// §5.12, once ExprKind::Lambda exists -- add it to the switch below at
-// that point; a lambda literal is a fresh prvalue exactly like the
-// cases already handled here). `std::move(x)` is allowed regardless of
-// x's own type (not just std::unique_ptr, generalizing the existing
-// Move-processing restriction would be a much larger, cross-cutting
-// change deferred past this round -- see apply_expr's Move case, which
-// still rejects a non-unique_ptr std::move with a clear diagnostic, so
-// this relaxation here is purely "which expression *shapes* are
-// considered", not a silent widening of what std::move itself accepts).
+// reference/move) parameter, checked against a specific `expected_type`.
+// Reused, via the same Type::is_rvalue_ref flag, for a `Concept auto&&`
+// generic parameter's own witness-typed slot (ch05 §5.11) and for
+// passing a lambda expression literal to one (ch05 §5.12, once
+// ExprKind::Lambda exists -- add it to the switch below at that point; a
+// lambda literal is a fresh prvalue exactly like the cases already
+// handled here). `std::move(x)` is allowed here when apply_expr's own
+// Move-processing rules already license it for `x`; this helper only
+// decides which *expression shapes* count as rvalues once that semantic
+// check is separately satisfied.
 // A bare place (Identifier/Member/Subscript/a pointer Deref) is never
 // legitimate here: passing an existing lvalue directly into a by-move
 // parameter without an explicit std::move would be exactly the
@@ -1230,6 +1192,7 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
+        case ExprKind::TypeTrait:
         case ExprKind::Lambda:
             // ch05 §5.12: a (by now resolved) lambda literal is a fresh
             // prvalue exactly like a literal or std::make_unique<T>(...)
@@ -1257,7 +1220,7 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
 // Infers `expr`'s scpp type, for function-overload resolution purposes
 // only (ch05 §5.10) -- a best-effort, non-exhaustive type inference
 // (movecheck has no general type-checking pass at all, by design: see
-// e.g. produces_unique_ptr_rvalue's similarly-scoped Call handling just
+// e.g. produces_rvalue_of_type's similarly-scoped Call handling just
 // above). Covers every expression shape that can legally appear as a
 // call argument in this version: literals, a plain local (via
 // body.local_types), std::move/std::make_unique, a nested call's own
@@ -1319,6 +1282,9 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
         case ExprKind::Delete:
             return Type{.kind = TypeKind::Named, .name = "void"};
 
+        case ExprKind::TypeTrait:
+            return Type{.kind = TypeKind::Named, .name = "bool"};
+
         // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): the cast's own
         // declared target type, unconditionally -- see codegen's
         // identical infer_type case.
@@ -1371,12 +1337,21 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
                         return *operand->pointee;
                     }
                     if (is_function_pointer(*operand)) return *operand;
-                    if (!is_unique_ptr(*operand) && operand->kind != TypeKind::Pointer) {
-                        return std::nullopt;
+                    const Type& underlying =
+                        operand->kind == TypeKind::Reference && operand->pointee ? *operand->pointee : *operand;
+                    if (underlying.kind == TypeKind::Named) {
+                        auto sig_it = signatures.find(underlying.name + "_operator_deref");
+                        if (sig_it != signatures.end()) {
+                            for (const FunctionSignature& sig : sig_it->second) {
+                                if (sig.param_types.empty()) continue;
+                                return sig.return_type.kind == TypeKind::Reference
+                                           ? std::optional<Type>(*sig.return_type.pointee)
+                                           : std::optional<Type>(sig.return_type);
+                            }
+                        }
                     }
-                    if (operand->kind == TypeKind::Pointer) return *operand->pointee;
-                    const Type* element = unique_ptr_element_type(*operand);
-                    return element ? std::optional<Type>(*element) : std::nullopt;
+                    if (operand->kind != TypeKind::Pointer) return std::nullopt;
+                    return *operand->pointee;
                 }
             }
             return std::nullopt;
@@ -1414,12 +1389,42 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
         case ExprKind::PackExpansion:
             return std::nullopt;
 
-        case ExprKind::Member:
-        case ExprKind::Subscript:
-            // See this function's own doc comment: no Program access
-            // here to resolve a struct/class field's or an array/span's
-            // element type.
+        case ExprKind::Member: {
+            std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
+            if (!base) return std::nullopt;
+            const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
+            if (base_named.kind != TypeKind::Named || body.program == nullptr) return std::nullopt;
+            for (const ClassDef& def : body.program->classes) {
+                if (def.name != base_named.name) continue;
+                for (const ClassField& field : def.fields) {
+                    if (field.name == expr.name) {
+                        return field.type.kind == TypeKind::Reference ? std::optional<Type>(*field.type.pointee)
+                                                                      : std::optional<Type>(field.type);
+                    }
+                }
+                return std::nullopt;
+            }
+            for (const StructDef& def : body.program->structs) {
+                if (def.name != base_named.name) continue;
+                for (const StructField& field : def.fields) {
+                    if (field.name == expr.name) {
+                        return field.type.kind == TypeKind::Reference ? std::optional<Type>(*field.type.pointee)
+                                                                      : std::optional<Type>(field.type);
+                    }
+                }
+                return std::nullopt;
+            }
             return std::nullopt;
+        }
+
+        case ExprKind::Subscript: {
+            std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
+            if (!base) return std::nullopt;
+            if (base->kind == TypeKind::Array) return *base->element;
+            if (base->kind == TypeKind::Span) return *base->pointee;
+            if (base->kind == TypeKind::Pointer) return *base->pointee;
+            return std::nullopt;
+        }
     }
     return std::nullopt;
 }
@@ -1461,36 +1466,44 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
     return field_it->second;
 }
 
-// Validates that `operand` (a plain Identifier, e.g. `p`, or a `base.field`
-// Member, e.g. `this.p` -- ch05 §5.12's rewritten captured-name access)
-// currently names/resolves to a readable pointer-like value that
-// `*p`/`p->x` (UnaryOp::Deref) is licensed to dereference: always for a
-// std::unique_ptr (this is proven-safe by the move/borrow checker itself,
-// no unsafe {} needed), or, only while `state.unsafe_depth > 0` (ch01
-// §1.3/ch02/ch05.5), for a raw pointer `T*`. Shared by apply_deref
-// (reading through `*p`) so it applies the exact same checks. A `base.field`
-// Member operand has no independent move/borrow-state of its own to check
-// (movecheck tracks move/borrow state per plain local, not per struct/
-// class field -- there is no way to move *out of* a field in this version
-// at all, matching the documented pre-existing gap), so it is implicitly
-// always considered "Initialized, unborrowed" -- only its *type* (and, for
-// a raw pointer, the enclosing unsafe context) is checked.
-void validate_deref_operand(const Expr& operand, const DataflowState& state, const Body& body) {
+// Validates that `operand` (a plain Identifier, e.g. `p`, or a
+// `base.field` Member, e.g. `this.p` -- ch05 §5.12's rewritten
+// captured-name access) currently names/resolves to a readable
+// pointer-like value that `*p`/`p->x` (UnaryOp::Deref) is licensed to
+// dereference at this stage: a raw pointer `T*` (only while
+// `state.unsafe_depth > 0`, ch01 §1.3/ch02/ch05.5), a function pointer
+// being parenthesized for a call (`(*fp)(...)`), or `*this`. Class
+// overloads of `operator*` are rewritten to ordinary calls earlier in the
+// pipeline, so they no longer reach this raw Deref validator. A
+// `base.field` Member operand has no independent move/borrow-state of its
+// own to check (movecheck tracks move/borrow state per plain local, not
+// per struct/class field -- there is no way to move *out of* a field in
+// this version at all, matching the documented pre-existing gap), so it
+// is implicitly always considered "Initialized, unborrowed" -- only its
+// *type* (and, for a raw pointer, the enclosing unsafe context) is
+// checked.
+void validate_deref_operand(const Expr& operand, const DataflowState& state, const Body& body,
+                            const Signatures& signatures) {
     std::string describe = operand.kind == ExprKind::Member ? operand.lhs->name + "." + operand.name : operand.name;
     std::optional<Type> resolved =
         operand.kind == ExprKind::Member ? resolve_member_field_type(operand, body, state) : [&]() -> std::optional<Type> {
             auto it = body.local_types.find(operand.name);
             return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
         }();
-    bool is_uptr = resolved.has_value() && is_unique_ptr(*resolved);
+    const Type* underlying =
+        resolved.has_value() && resolved->kind == TypeKind::Reference && resolved->pointee ? &*resolved->pointee
+                                                                                            : (resolved ? &*resolved : nullptr);
     bool is_raw_ptr = resolved.has_value() && resolved->kind == TypeKind::Pointer;
     bool is_fn_ptr = resolved.has_value() && is_function_pointer(*resolved);
+    bool is_class_deref =
+        underlying != nullptr && underlying->kind == TypeKind::Named &&
+        signatures.contains(underlying->name + "_operator_deref");
     bool is_this_ref = resolved.has_value() && operand.kind == ExprKind::Identifier && operand.name == "this" &&
                        resolved->kind == TypeKind::Reference;
-    if (!is_uptr && !is_raw_ptr && !is_fn_ptr && !is_this_ref) {
+    if (!is_raw_ptr && !is_fn_ptr && !is_class_deref && !is_this_ref) {
         throw DataflowError("cannot dereference ('*') '" + describe +
-                             "': only std::unique_ptr or a raw pointer (inside '[[scpp::unsafe]] { }') is "
-                             "supported",
+                             "': only a raw pointer (inside '[[scpp::unsafe]] { }'), a function pointer "
+                             "being called, a class with operator*, or '*this' is supported here",
             state.current_loc);
     }
     if (is_raw_ptr && state.unsafe_depth == 0) {
@@ -1506,43 +1519,40 @@ void validate_deref_operand(const Expr& operand, const DataflowState& state, con
     }
 }
 
-// Handles a `*p` (UnaryOp::Deref) expression used as a plain read (not
-// as a borrow source -- see resolve_borrow_source_root's own Deref case
-// for that). Reading *through* a unique_ptr this way does *not* require
-// std::move -- unlike reading the unique_ptr identifier `p` directly,
-// which always does (spec ch05.1) -- since dereferencing reads the
-// pointee's value without disturbing p's own ownership, exactly like
-// reading a struct field doesn't move the struct that owns it. A raw
-// pointer has no ownership/move state to disturb in the first place.
-// `*this` is likewise just an explicit spelling of the receiver object
-// itself (ch05 §5.9), so it behaves exactly like reading `this`.
-void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, bool report_errors) {
+// Handles a raw-pointer/function-pointer/`*this` Deref expression used as
+// a plain read (not as a borrow source -- see resolve_borrow_source_root's
+// own Deref case for that). Class overloads of `operator*` are rewritten
+// to ordinary calls earlier in the pipeline, so they bypass this helper
+// entirely. A raw pointer has no ownership/move state of its own to
+// disturb. `*this` is likewise just an explicit spelling of the receiver
+// object itself (ch05 §5.9), so it behaves exactly like reading `this`.
+void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
+                 bool report_errors) {
     if (is_explicit_star_this(expr)) {
         if (!report_errors) return;
-        validate_deref_operand(*expr.lhs, state, body);
+        validate_deref_operand(*expr.lhs, state, body, signatures);
         return;
     }
     bool is_plain_identifier = expr.lhs->kind == ExprKind::Identifier;
-    // ch05 §5.12: `*this.p`/`*p` where `p` is an init-captured
-    // std::unique_ptr, rewritten to a `this.p` Member access by the
-    // closure's own field-access rewrite (rewrite_captured_identifiers_
-    // as_field_access) -- see validate_deref_operand's own comment for
-    // why a Member operand has no separate move/borrow state to check
-    // beyond its type.
+    // ch05 §5.12: `*this.p`/`*p`, where a captured raw/function pointer was
+    // rewritten to a `this.p` Member access by the closure's own
+    // field-access rewrite (rewrite_captured_identifiers_as_field_access)
+    // -- see validate_deref_operand's own comment for why a Member operand
+    // has no separate move/borrow state to check beyond its type.
     bool is_member_of_identifier =
         expr.lhs->kind == ExprKind::Member &&
         (expr.lhs->lhs->kind == ExprKind::Identifier || is_explicit_star_this(*expr.lhs->lhs));
     if (!is_plain_identifier && !is_member_of_identifier) {
         if (report_errors) {
-            throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr or "
-                                 "raw/function pointer variable, or a captured field of one ('this.field') (not a "
-                                 "subscript or other expression)",
+            throw DataflowError("dereference ('*') currently only supports a plain local raw/function pointer "
+                                 "variable, '*this', or a captured field of one ('this.field') (not a subscript "
+                                 "or other expression)",
                 state.current_loc);
         }
         return;
     }
     if (!report_errors) return; // purely diagnostic: doesn't move p or change any tracked state
-    validate_deref_operand(*expr.lhs, state, body);
+    validate_deref_operand(*expr.lhs, state, body, signatures);
     if (!is_plain_identifier) return; // no separate borrow-tracking key for a field -- see the comment above
     const std::string& name = expr.lhs->name;
     auto borrow_it = state.borrows.find(name);
@@ -1657,6 +1667,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
+        case ExprKind::TypeTrait:
             return;
         case ExprKind::New:
             for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
@@ -1944,12 +1955,6 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         case ExprKind::Identifier: {
             const std::string& bound_name = expr.name;
             if (report_errors) {
-                auto type_it = body.local_types.find(bound_name);
-                if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
-                    throw DataflowError("cannot borrow std::unique_ptr variable '" + bound_name +
-                                         "' in this version",
-                        state.current_loc);
-                }
                 LocalState current = lookup(state.locals, bound_name);
                 if (current != LocalState::Initialized) {
                     throw DataflowError(describe_bad_state(bound_name, current),
@@ -1973,8 +1978,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
         case ExprKind::Unary: {
-            // `*p`/`p->x` (a std::unique_ptr local always, or -- only
-            // inside unsafe {} -- a raw pointer local; see
+            // `*p`/`p->x` (a raw pointer local here, or a class
+            // `operator*` call rewritten elsewhere; see
             // validate_deref_operand): the root is `p` itself, *not* p's
             // pointee, so that moving or reassigning `p` while a
             // reference into `*p` is alive is rejected by the exact same
@@ -1988,14 +1993,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 if (report_errors) {
                     throw DataflowError("a reference can currently only borrow a plain local variable, a "
                                          "field of one ('a.b'), an array element of one ('arr[i]'), a "
-                                         "dereferenced std::unique_ptr/raw-pointer local ('*p'/'p->x'), or "
+                                         "dereferenced raw-pointer local ('*p'/'p->x'), or "
                                          "the result of a call to a reference-returning function -- not an "
                                          "arbitrary expression",
                         state.current_loc);
                 }
                 return "";
             }
-            if (report_errors) validate_deref_operand(*expr.lhs, state, body);
+            if (report_errors) validate_deref_operand(*expr.lhs, state, body, signatures);
             if (expr.lhs->kind == ExprKind::Identifier) return resolve_root_place(expr.lhs->name, state);
             if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
                 return resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures, report_errors);
@@ -2023,6 +2028,13 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             }
             check_call_arguments(expr, state, body, signatures, report_errors);
             size_t elided_index = *sig->elided_param_index;
+            if (expr.name == "operator_deref" && expr.lhs != nullptr && elided_index < callee.param_offset) {
+                if (expr.lhs->kind == ExprKind::Identifier) return resolve_root_place(expr.lhs->name, state);
+                if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
+                    return resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures, report_errors);
+                }
+                return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+            }
             if (elided_index < callee.param_offset) {
                 // ch04 §4.2/ch05 §5.9: the elided parameter is the
                 // method's own implicit receiver (`this`, always
@@ -2055,7 +2067,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             if (report_errors) {
                 throw DataflowError("a reference can currently only borrow a plain local variable, a field of "
                                      "one ('a.b'), an array element of one ('arr[i]'), a dereferenced "
-                                     "std::unique_ptr/raw-pointer local ('*p'/'p->x'), or the result of a call "
+                                     "raw-pointer local ('*p'/'p->x'), or the result of a call "
                                      "to a reference-returning function -- not an arbitrary expression",
                     state.current_loc);
             }
@@ -2098,10 +2110,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // `*p`/`p->x`: read-only iff `p` (necessarily a plain
             // Identifier -- see resolve_borrow_source_root's own Unary
             // case) is itself a `const T*` (is_mutable_pointee == false).
-            // A std::unique_ptr pointee has no const-qualification
-            // concept in this version (it can never be a struct field,
-            // and there is no `const std::unique_ptr<T>&` parameter form
-            // yet), so it's always mutable through this path.
+            // Class `operator*` rewrites that yield a read-only view are
+            // handled by the Call case just below, via the method's own
+            // declared return type.
             if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
             if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
             auto it = body.local_types.find(expr.lhs->name);
@@ -2321,19 +2332,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     if (expr.lhs) {
         bool receiver_is_reference =
             sig != nullptr && !sig->param_types.empty() && is_reference(sig->param_types[0]) && !sig->param_types[0].is_rvalue_ref;
-        if (receiver_is_reference && expr.lhs->kind == ExprKind::Identifier) {
-            auto type_it = body.local_types.find(expr.lhs->name);
-            if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
-                LocalState current = lookup(state.locals, expr.lhs->name);
-                if (report_errors && current != LocalState::Initialized) {
-                    throw DataflowError(describe_bad_state(expr.lhs->name, current), expr.lhs->loc);
-                }
-            } else {
-                apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
-            }
-        } else {
-            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
-        }
+        (void)receiver_is_reference;
+        apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
     }
     std::string callee_display = expr.name;
     if (callee_display.empty()) {
@@ -2550,10 +2550,11 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 // zero new move/borrow logic beyond this per-capture dispatch):
 //  - an init-capture's own expression is evaluated normally (e.g.
 //    permitting std::move(p) for a move-only type).
-//  - a plain by-value capture is an ordinary read: rejects an un-moved
-//    std::unique_ptr, exactly like reading any other Identifier (there
-//    is no implicit-copy escape hatch for a move-only type -- use an
-//    init-capture with std::move instead, ch05 §5.12's own example).
+//  - a by-value capture of a class type uses the same copy/move boundary
+//    rules as any other class value construction site in the language:
+//    a bare same-type lvalue copies only if the class is
+//    copy-constructible, otherwise the source must be an rvalue (e.g.
+//    `std::move(p)` in an init-capture).
 //  - a by-reference capture is checked exactly like a reference-typed
 //    call argument (apply_reference_argument): the closure's own field
 //    genuinely borrows it, for as long as `reference_capture_borrows`
@@ -2561,22 +2562,54 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
                             const Body& body, const Signatures& signatures, bool report_errors,
                             std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows = nullptr) {
+    auto apply_by_value_capture_source = [&](const Expr& source, const Type& source_type,
+                                             const std::string& capture_display) {
+        if (is_named_class_type(source_type, body)) {
+            bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body);
+            bool is_rvalue_source = produces_rvalue_of_type(source, source_type, body, signatures);
+            if (report_errors) {
+                if (is_copy_source) {
+                    if (state.classes_with_copy_ctor == nullptr ||
+                        !state.classes_with_copy_ctor->contains(source_type.name)) {
+                        throw DataflowError(
+                            "capture '" + capture_display + "' of class '" + source_type.name +
+                               "' requires std::move or another rvalue source because the class is not "
+                               "copy-constructible (spec §6.5/§5.12)",
+                            state.current_loc);
+                    }
+                } else if (!is_rvalue_source) {
+                    throw DataflowError(
+                        "capture '" + capture_display + "' of class '" + source_type.name +
+                            "' must use a plain same-typed variable (if copy-constructible) or an rvalue such as "
+                            "std::move(...) (spec §6.5/§5.12)",
+                        state.current_loc);
+                }
+            }
+            apply_expr(source, /*is_move_target_context=*/is_rvalue_source, state, body, signatures, report_errors);
+            return;
+        }
+        apply_expr(source, /*is_move_target_context=*/source.kind == ExprKind::Move, state, body, signatures,
+                   report_errors);
+    };
     for (const LambdaCapture& capture : expr.lambda_captures) {
         if (capture.init) {
-            apply_expr(*capture.init, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+            std::optional<Type> init_type = infer_expr_type(*capture.init, body, signatures);
+            if (init_type.has_value()) {
+                apply_by_value_capture_source(*capture.init, *init_type, capture.name);
+            } else {
+                apply_expr(*capture.init, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+            }
             continue;
         }
         if (!capture.by_reference) {
-            if (report_errors) {
-                auto type_it = body.local_types.find(capture.name);
-                if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
-                    throw DataflowError(
-                        "use of std::unique_ptr variable '" + capture.name +
-                            "' requires std::move (copying is not allowed) -- capture it as an "
-                            "init-capture instead, e.g. '[" +
-                            capture.name + " = std::move(" + capture.name + ")]' (ch05 §5.12)",
-                        state.current_loc);
-                }
+            auto type_it = body.local_types.find(capture.name);
+            if (type_it != body.local_types.end()) {
+                Expr capture_ident;
+                capture_ident.kind = ExprKind::Identifier;
+                capture_ident.loc = expr.loc;
+                capture_ident.name = capture.name;
+                apply_by_value_capture_source(capture_ident, type_it->second, capture.name);
+                continue;
             }
             LocalState current = lookup(state.locals, capture.name);
             if (report_errors && current != LocalState::Initialized) {
@@ -2605,14 +2638,15 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
 // side effects and, when `report_errors` is true, throwing DataflowError
 // on an unsafe read. `is_move_target_context` is true exactly where
 // a bare `std::move(x)` is allowed to appear: a var-decl initializer, an
-// assignment RHS, a return value, a call argument, or a constructor-call
-// argument (ch04 §4.2 -- see check_constructor_arguments). ch04 §4.2/ch05
-// §5.15/spec §6.4: `std::move(x)` is legitimate here whether `x` is a
-// std::unique_ptr *or* a class-typed variable -- move construction/
-// assignment for `class` types is always the same compiler-provided,
-// memberwise operation (never user-written, spec §6.4(1)), so there is
-// no additional per-class validation to do here beyond the ordinary
-// move-state bookkeeping every movable type already gets.
+// assignment RHS, a return value, a call argument, a constructor-call
+// argument, or a by-value class lambda capture initializer (ch04 §4.2 --
+// see check_constructor_arguments and apply_lambda_captures). ch04
+// §4.2/ch05 §5.15/spec §6.4: `std::move(x)` is legitimate here for any
+// class-typed variable -- move construction/assignment for `class` types
+// is always the compiler-provided memberwise operation (never
+// user-written, spec §6.4(1)), so there is no additional per-class
+// validation to do here beyond the ordinary move-state bookkeeping every
+// movable type already gets.
 //
 // This function is run twice per program point: once during the
 // worklist's fixed-point iteration (report_errors=false, just to compute
@@ -2635,17 +2669,13 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
+        case ExprKind::TypeTrait:
             return;
 
         case ExprKind::Identifier: {
             if (!report_errors) return;
             auto type_it = body.local_types.find(expr.name);
             if (type_it == body.local_types.end()) return; // unknown name: left to codegen's own check
-            if (is_unique_ptr(type_it->second)) {
-                throw DataflowError("use of std::unique_ptr variable '" + expr.name +
-                                     "' requires std::move (copying is not allowed)",
-                    state.current_loc);
-            }
             LocalState current = lookup(state.locals, expr.name);
             if (current != LocalState::Initialized) {
                 throw DataflowError(describe_bad_state(expr.name, current),
@@ -2682,11 +2712,11 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             const std::string& name = expr.lhs->name;
             auto type_it = body.local_types.find(name);
-            // ch04 §4.2/spec §6.4: std::unique_ptr, or any class type
-            // (move construction/assignment, always the compiler-
-            // provided memberwise operation -- never a struct/scalar,
-            // which isn't move-restricted at all (always freely
-            // copyable). Also recognizes an rvalue-reference-*to*-class
+            // ch04 §4.2/spec §6.4: any class type (move
+            // construction/assignment, always the compiler-provided
+            // memberwise operation -- never a struct/scalar, which isn't
+            // move-restricted at all (always freely copyable). Also
+            // recognizes an rvalue-reference-*to*-class
             // local/parameter (`Inner&& i`, ch03/ch05 §5.11): `i` itself
             // is a name, like any other, that can appear as `std::move`'s
             // own operand (mirrors real C++: a *named* rvalue reference
@@ -2704,11 +2734,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 (is_named_class(type_it->second) ||
                  (type_it->second.kind == TypeKind::Reference && type_it->second.is_rvalue_ref &&
                   type_it->second.pointee && is_named_class(*type_it->second.pointee)));
-            if (type_it == body.local_types.end() || !(is_unique_ptr(type_it->second) || is_movable_class)) {
+            if (type_it == body.local_types.end() || !is_movable_class) {
                 if (report_errors) {
-                    throw DataflowError("std::move is only supported for std::unique_ptr or class-typed "
-                                         "variables in this version; '" +
-                                         name + "' is neither",
+                    throw DataflowError("std::move is only supported for class-typed variables in this version; '" +
+                                         name + "' is not one",
                         state.current_loc);
                 }
                 return;
@@ -2728,8 +2757,8 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             state.locals[name] = LocalState::MovedOut;
             if (report_errors && !is_move_target_context) {
-                throw DataflowError("std::move(" + name + ") must be used to initialize or assign into a "
-                                                            "std::unique_ptr or a same-typed class variable",
+                throw DataflowError("std::move(" + name + ") must be used to initialize, assign into, return, "
+                                                            "pass, or capture a same-typed class value",
                     state.current_loc);
             }
             return;
@@ -2761,7 +2790,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 
         case ExprKind::Unary:
             if (expr.unary_op == UnaryOp::Deref) {
-                apply_deref(expr, state, body, report_errors);
+                apply_deref(expr, state, body, signatures, report_errors);
                 return;
             }
             if (expr.unary_op == UnaryOp::AddressOf) {
@@ -2803,12 +2832,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 
         case ExprKind::Binary:
             if (expr.binary_op == BinaryOp::Assign) {
-                bool target_is_unique_ptr = false;
                 bool target_is_movable_class = false;
                 std::optional<Type> target_class_type;
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto it = body.local_types.find(expr.lhs->name);
-                    target_is_unique_ptr = it != body.local_types.end() && is_unique_ptr(it->second);
                     if (it != body.local_types.end() && it->second.kind == TypeKind::Named &&
                         state.class_names != nullptr && state.class_names->contains(it->second.name)) {
                         target_is_movable_class = true;
@@ -2826,14 +2853,12 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     // worth resolving here is whether std::move is
                     // *licensed* at all for this field's own declared
                     // type, exactly like the Identifier case just above.
-                    // Previously scoped to unique_ptr fields only; now
-                    // also recognizes a class-typed field, so a
-                    // constructor moving a by-value/by-move parameter
-                    // directly into its own field (e.g. `Outer(Inner&& i)
-                    // { this.inner = std::move(i); }`) works the same way
-                    // it already did for a std::unique_ptr field.
+                    // Recognizes any class-typed field, so a constructor
+                    // moving a by-value/by-move parameter directly into
+                    // its own field (e.g. `Outer(Inner&& i) { this.inner =
+                    // std::move(i); }`) works the same way as any other
+                    // class move.
                     std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state);
-                    target_is_unique_ptr = field_type.has_value() && is_unique_ptr(*field_type);
                     if (field_type.has_value() && field_type->kind == TypeKind::Named &&
                         state.class_names != nullptr && state.class_names->contains(field_type->name)) {
                         target_is_movable_class = true;
@@ -2865,7 +2890,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                          "licensed",
                         state.current_loc);
                 }
-                bool is_move_target = target_is_unique_ptr || target_is_movable_class;
+                bool is_move_target = target_is_movable_class;
                 apply_expr(*expr.rhs, is_move_target, state, body, signatures, report_errors);
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto it = body.local_types.find(expr.lhs->name);
@@ -2879,11 +2904,6 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                         check_function_pointer_assignment(*field_type, *expr.rhs, body, signatures, state.current_loc,
                                                           expr.lhs->name, report_errors);
                     }
-                }
-                if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*expr.rhs, body, signatures)) {
-                    throw DataflowError("assigning to a std::unique_ptr variable requires std::move or "
-                                        "std::make_unique (copying is not allowed)",
-                        state.current_loc);
                 }
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     // The assignment target is never a "read": whatever
@@ -2924,19 +2944,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             return;
 
         case ExprKind::Member: {
-            if (expr.lhs->kind == ExprKind::Identifier) {
-                auto type_it = body.local_types.find(expr.lhs->name);
-                if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
-                    LocalState current = lookup(state.locals, expr.lhs->name);
-                    if (report_errors && current != LocalState::Initialized) {
-                        throw DataflowError(describe_bad_state(expr.lhs->name, current), expr.lhs->loc);
-                    }
-                } else {
-                    apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-                }
-            } else {
-                apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-            }
+            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             // ch04 §4.2: real, unrestricted C++ access control -- a
             // member variable may be `public` or `private` in any
             // combination. External access (from outside the class's
@@ -3239,8 +3247,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 return;
             }
             if (type_it != body.local_types.end() && state.class_names != nullptr &&
-                type_it->second.kind == TypeKind::Named && !is_unique_ptr(type_it->second) &&
-                state.class_names->contains(type_it->second.name)) {
+                type_it->second.kind == TypeKind::Named && state.class_names->contains(type_it->second.name)) {
                 // ch04 §4.2: unlike a plain `struct` (an ordinary,
                 // freely-reassignable trivial value), a class-typed local
                 // is conservatively bound once at construction and never
@@ -3275,21 +3282,19 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // appearance).
                 //
                 // spec §6.4(3): a genuine reassignment is nonetheless
-                // allowed exactly when it's `y = std::move(x);` with `x`
-                // the exact same class type -- dispatching to the
+                // allowed when the RHS is any rvalue of the exact same
+                // class type (`y = std::move(x);`, a by-value call result,
+                // a factory expression, ...) -- dispatching to the
                 // compiler-synthesized move assignment operator --
-                // provided the class has no reference-typed member
-                // (spec §6.4(3)'s own exception: a reference member
-                // can't be re-seated by assignment, only ever bound once
-                // at construction, mirroring real C++'s
+                // provided the class has no reference-typed member (spec
+                // §6.4(3)'s own exception: a reference member can't be
+                // re-seated by assignment, only ever bound once at
+                // construction, mirroring real C++'s
                 // [class.copy.assign]). Anything else (including a
-                // same-class std::move on a class *with* a reference
+                // same-class rvalue source for a class *with* a reference
                 // member) falls through to the unconditional "no copy
                 // semantics" rejection just below, unchanged.
-                bool is_move_assignment = stmt.expr->kind == ExprKind::Move &&
-                                           stmt.expr->lhs->kind == ExprKind::Identifier &&
-                                           body.local_types.contains(stmt.expr->lhs->name) &&
-                                           types_equal(body.local_types.at(stmt.expr->lhs->name), type_it->second);
+                bool is_move_assignment = produces_rvalue_of_type(*stmt.expr, type_it->second, body, signatures);
                 if (is_move_assignment && state.locals.contains(stmt.local)) {
                     if (report_errors) {
                         bool has_reference_member = false;
@@ -3309,6 +3314,13 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                                 "class '" + type_it->second.name +
                                     "' has a reference-typed member, so it has no move assignment operator "
                                     "(spec §6.4(3)) -- '" + stmt.local + "' cannot be reassigned",
+                                state.current_loc);
+                        }
+                        auto borrow_it = state.borrows.find(stmt.local);
+                        if (borrow_it != state.borrows.end() &&
+                            (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                            throw DataflowError("cannot assign to class variable '" + stmt.local +
+                                                 "': it is currently borrowed",
                                 state.current_loc);
                         }
                     }
@@ -3332,12 +3344,21 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // irrelevant here (there is no std::move to license).
                 if (is_bare_same_type_copy_source(*stmt.expr, type_it->second, body) &&
                     state.locals.contains(stmt.local)) {
-                    if (report_errors && (state.classes_with_copy_assign == nullptr ||
-                                          !state.classes_with_copy_assign->contains(type_it->second.name))) {
-                        throw DataflowError("class '" + type_it->second.name +
-                                             "' is not copy-assignable (spec §6.5(3)) -- '" + stmt.local +
-                                             "' cannot be reassigned this way",
-                            state.current_loc);
+                    if (report_errors) {
+                        if (state.classes_with_copy_assign == nullptr ||
+                            !state.classes_with_copy_assign->contains(type_it->second.name)) {
+                            throw DataflowError("class '" + type_it->second.name +
+                                                 "' is not copy-assignable (spec §6.5(3)) -- '" + stmt.local +
+                                                 "' cannot be reassigned this way",
+                                state.current_loc);
+                        }
+                        auto borrow_it = state.borrows.find(stmt.local);
+                        if (borrow_it != state.borrows.end() &&
+                            (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                            throw DataflowError("cannot assign to class variable '" + stmt.local +
+                                                 "': it is currently borrowed",
+                                state.current_loc);
+                        }
                     }
                     apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
                     state.locals[stmt.local] = LocalState::Initialized;
@@ -3367,6 +3388,12 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                         state.closure_capture_borrows[stmt.local] = std::move(closure_capture_borrows);
                     }
                 } else {
+                    if (produces_rvalue_of_type(*stmt.expr, type_it->second, body, signatures)) {
+                        apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures,
+                                   report_errors);
+                        state.locals[stmt.local] = LocalState::Initialized;
+                        return;
+                    }
                     // spec §6.5: `ClassName y = x;` (a bare, non-move,
                     // non-lambda initializer -- this variable's first-
                     // ever appearance, per the surrounding comment) is
@@ -3407,17 +3434,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 return;
             }
 
-            bool target_is_unique_ptr = type_it != body.local_types.end() && is_unique_ptr(type_it->second);
-            apply_expr(*stmt.expr, target_is_unique_ptr, state, body, signatures, report_errors);
+            apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             if (type_it != body.local_types.end()) {
                 check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
                                                   stmt.local, report_errors);
-            }
-            if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*stmt.expr, body, signatures)) {
-                throw DataflowError("variable '" + stmt.local +
-                                    "' of type std::unique_ptr must be initialized via std::move or "
-                                    "std::make_unique (copying a unique_ptr is not allowed)",
-                    state.current_loc);
             }
 
             // `T* p = &expr;` (ch05 §5.7): if `p`'s declared type wants a
@@ -3472,10 +3492,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // in the same or an enclosing scope of) the reference
             // itself, so the borrow is always released -- at the latest
             // at the reference's own ScopeExit -- before the root's own
-            // ScopeExit (if any) is ever reached -- and the only
-            // *movable* type (unique_ptr) can't be referenced at all yet
-            // (see codegen's validate_reference_pointee), so "move a
-            // borrowed place" can't arise either.
+            // ScopeExit (if any) is ever reached, so "drop a still-
+            // borrowed local at scope exit" can't arise here either.
             release_reference_borrow(stmt.local, state, body);
             release_closure_capture_borrows(stmt.local, state);
             // `stmt.local` just went out of lexical scope: forget its
@@ -3844,10 +3862,6 @@ StmtPtr clone_stmt(const Stmt& stmt) {
 [[nodiscard]] std::string mangle_type_for_clone_name(const Type& type) {
     switch (type.kind) {
         case TypeKind::Named: {
-            if (is_unique_ptr(type)) {
-                const Type* element = unique_ptr_element_type(type);
-                return element ? mangle_type_for_clone_name(*element) + "_uptr" : "std_unique_ptr";
-            }
             if (type.template_args.empty()) return type.name;
             std::string result = type.name;
             for (const Type& arg : type.template_args) result += "_" + mangle_type_for_clone_name(arg);
@@ -4172,6 +4186,14 @@ public:
         // unresolved generic-type Named type it can't make sense of.
         resolve_generic_types();
         check_generic_type_methods_once();
+        // resolve_generic_types/check_generic_type_methods_once may
+        // monomorphize generic types and rewrite existing function
+        // signatures/return types (e.g. `MyBox<int>` -> its concrete
+        // synthesized class name). Rebuild the signature table before any
+        // later overload resolution or generic-function constraint check
+        // consults it, so those queries see the fully concrete program
+        // shape rather than the pre-resolution templates.
+        signatures_ = build_signatures(program_);
         // A snapshot of the function count *before* any clone is
         // injected: new clones/synthesized closure classes are appended
         // to program_.functions/program_.classes as we go (see
@@ -4651,6 +4673,18 @@ private:
                 ClassDef check_class;
                 check_class.name = check_class_name;
                 check_class.is_synthetic_check_only = true;
+                check_class.thread_movable_override = program_.classes[i].thread_movable_override;
+                check_class.thread_shareable_override = program_.classes[i].thread_shareable_override;
+                if (program_.classes[i].thread_movable_if_movable_expr) {
+                    check_class.thread_movable_if_movable_expr = clone_expr(*program_.classes[i].thread_movable_if_movable_expr);
+                    substitute_type_param_in_expr(*check_class.thread_movable_if_movable_expr, type_param_name, witness_type);
+                    resolve_generic_types_in_expr(*check_class.thread_movable_if_movable_expr);
+                }
+                if (program_.classes[i].thread_movable_if_shareable_expr) {
+                    check_class.thread_movable_if_shareable_expr = clone_expr(*program_.classes[i].thread_movable_if_shareable_expr);
+                    substitute_type_param_in_expr(*check_class.thread_movable_if_shareable_expr, type_param_name, witness_type);
+                    resolve_generic_types_in_expr(*check_class.thread_movable_if_shareable_expr);
+                }
                 std::unordered_map<std::string, Type> field_types;
                 for (const ClassField& f : fields_copy) {
                     ClassField nf;
@@ -4854,6 +4888,12 @@ private:
                 Type new_type = resolve_generic_type(old_type, SourceLocation{});
                 program_.classes[i].fields[j].type = new_type;
             }
+            if (program_.classes[i].thread_movable_if_movable_expr) {
+                resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_movable_expr);
+            }
+            if (program_.classes[i].thread_movable_if_shareable_expr) {
+                resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_shareable_expr);
+            }
         }
         size_t original_count = program_.functions.size();
         for (size_t i = 0; i < original_count; i++) {
@@ -4930,6 +4970,15 @@ private:
             if (c.init) resolve_generic_types_in_expr(*c.init);
         }
         if (expr.lambda_body) resolve_generic_types_in_stmt(*expr.lambda_body);
+        if (expr.kind == ExprKind::TypeTrait) {
+            bool value = expr.name == "is_thread_movable" ? is_thread_movable(expr.type) : is_thread_shareable(expr.type);
+            expr.kind = ExprKind::BoolLiteral;
+            expr.bool_value = value;
+            expr.name.clear();
+            expr.lhs.reset();
+            expr.rhs.reset();
+            expr.args.clear();
+        }
     }
 
     // ch05 §5.14: resolves a (possibly not-yet-resolved) generic-type
@@ -5074,6 +5123,18 @@ private:
             ClassDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
+            concrete.thread_movable_override = tmpl.thread_movable_override;
+            concrete.thread_shareable_override = tmpl.thread_shareable_override;
+            if (tmpl.thread_movable_if_movable_expr) {
+                concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
+                substitute_type_param_in_expr(*concrete.thread_movable_if_movable_expr, type_param_name, named_concrete);
+                resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+            }
+            if (tmpl.thread_movable_if_shareable_expr) {
+                concrete.thread_movable_if_shareable_expr = clone_expr(*tmpl.thread_movable_if_shareable_expr);
+                substitute_type_param_in_expr(*concrete.thread_movable_if_shareable_expr, type_param_name, named_concrete);
+                resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+            }
             for (const ClassField& f : fields_copy) {
                 ClassField nf;
                 nf.name = f.name;
@@ -5161,6 +5222,16 @@ private:
             ClassDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
+            concrete.thread_movable_override = tmpl.thread_movable_override;
+            concrete.thread_shareable_override = tmpl.thread_shareable_override;
+            if (tmpl.thread_movable_if_movable_expr) {
+                concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
+                resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+            }
+            if (tmpl.thread_movable_if_shareable_expr) {
+                concrete.thread_movable_if_shareable_expr = clone_expr(*tmpl.thread_movable_if_shareable_expr);
+                resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+            }
             for (const ClassField& field : fields_copy) concrete.fields.push_back(field);
             program_.classes.push_back(std::move(concrete));
 
@@ -5262,6 +5333,16 @@ private:
             ClassDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = base_case_tmpl->namespace_path;
+            concrete.thread_movable_override = base_case_tmpl->thread_movable_override;
+            concrete.thread_shareable_override = base_case_tmpl->thread_shareable_override;
+            if (base_case_tmpl->thread_movable_if_movable_expr) {
+                concrete.thread_movable_if_movable_expr = clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
+                resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+            }
+            if (base_case_tmpl->thread_movable_if_shareable_expr) {
+                concrete.thread_movable_if_shareable_expr = clone_expr(*base_case_tmpl->thread_movable_if_shareable_expr);
+                resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+            }
             program_.classes.push_back(std::move(concrete));
             variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
             return cache_key;
@@ -5328,6 +5409,18 @@ private:
         concrete.namespace_path = namespace_path_copy;
         concrete.base_class_name = base_concrete_name;
         concrete.base_access = base_access;
+        concrete.thread_movable_override = recursive_tmpl->thread_movable_override;
+        concrete.thread_shareable_override = recursive_tmpl->thread_shareable_override;
+        if (recursive_tmpl->thread_movable_if_movable_expr) {
+            concrete.thread_movable_if_movable_expr = clone_expr(*recursive_tmpl->thread_movable_if_movable_expr);
+            substitute_type_param_in_expr(*concrete.thread_movable_if_movable_expr, head_param.name, head_concrete);
+            resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+        }
+        if (recursive_tmpl->thread_movable_if_shareable_expr) {
+            concrete.thread_movable_if_shareable_expr = clone_expr(*recursive_tmpl->thread_movable_if_shareable_expr);
+            substitute_type_param_in_expr(*concrete.thread_movable_if_shareable_expr, head_param.name, head_concrete);
+            resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+        }
         for (const ClassField& f : fields_copy) {
             ClassField nf;
             nf.name = f.name;
@@ -5477,19 +5570,57 @@ private:
     // already determine), mirroring how a real compiler's own auto-trait
     // computation (e.g. Rust's `Send`/`Sync` auto-derivation) handles a
     // recursive type without looping forever.
+    [[nodiscard]] bool evaluate_thread_bool_constant_expr(const Expr& expr, std::unordered_set<std::string> visiting = {}) {
+        switch (expr.kind) {
+            case ExprKind::BoolLiteral:
+                return expr.bool_value;
+            case ExprKind::TypeTrait:
+                return expr.name == "is_thread_movable" ? is_thread_movable(expr.type, visiting)
+                                                        : is_thread_shareable(expr.type, visiting);
+            case ExprKind::Unary:
+                if (expr.unary_op == UnaryOp::Not && expr.lhs) {
+                    return !evaluate_thread_bool_constant_expr(*expr.lhs, visiting);
+                }
+                break;
+            case ExprKind::Binary:
+                if (!expr.lhs || !expr.rhs) break;
+                if (expr.binary_op == BinaryOp::And) {
+                    return evaluate_thread_bool_constant_expr(*expr.lhs, visiting) &&
+                           evaluate_thread_bool_constant_expr(*expr.rhs, visiting);
+                }
+                if (expr.binary_op == BinaryOp::Or) {
+                    return evaluate_thread_bool_constant_expr(*expr.lhs, visiting) ||
+                           evaluate_thread_bool_constant_expr(*expr.rhs, visiting);
+                }
+                if (expr.binary_op == BinaryOp::Eq) {
+                    return evaluate_thread_bool_constant_expr(*expr.lhs, visiting) ==
+                           evaluate_thread_bool_constant_expr(*expr.rhs, visiting);
+                }
+                if (expr.binary_op == BinaryOp::Ne) {
+                    return evaluate_thread_bool_constant_expr(*expr.lhs, visiting) !=
+                           evaluate_thread_bool_constant_expr(*expr.rhs, visiting);
+                }
+                break;
+            default:
+                break;
+        }
+        throw DataflowError("thread-trait override expressions must be boolean constant expressions built from "
+                            "bool literals, !, &&, ||, ==, !=, and scpp::is_thread_movable/shareable(T)",
+                            expr.loc);
+    }
+
     [[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {}) {
         switch (type.kind) {
             case TypeKind::Named: {
-                if (is_unique_ptr(type)) {
-                    const Type* element = unique_ptr_element_type(type);
-                    return element && is_thread_movable(*element, visiting);
-                }
                 if (is_scalar_type_name(type.name)) return true;
                 if (visiting.contains(type.name)) return true; // cycle -- see this function's own comment
                 visiting.insert(type.name);
                 for (const ClassDef& c : program_.classes) {
                     if (c.name != type.name) continue;
                     if (c.thread_movable_override) return true;
+                    if (c.thread_movable_if_movable_expr) {
+                        return evaluate_thread_bool_constant_expr(*c.thread_movable_if_movable_expr, visiting);
+                    }
                     // ch05 §5.15: a `mutable` member variable (ch04
                     // §4.2's own interior-mutability construct) would
                     // never itself defeat thread-movable (it's always a
@@ -5563,16 +5694,15 @@ private:
     [[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {}) {
         switch (type.kind) {
             case TypeKind::Named: {
-                if (is_unique_ptr(type)) {
-                    const Type* element = unique_ptr_element_type(type);
-                    return element && is_thread_shareable(*element, visiting);
-                }
                 if (is_scalar_type_name(type.name)) return true;
                 if (visiting.contains(type.name)) return true;
                 visiting.insert(type.name);
                 for (const ClassDef& c : program_.classes) {
                     if (c.name != type.name) continue;
                     if (c.thread_shareable_override) return true;
+                    if (c.thread_movable_if_shareable_expr) {
+                        return evaluate_thread_bool_constant_expr(*c.thread_movable_if_shareable_expr, visiting);
+                    }
                     for (const ClassField& f : c.fields) {
                         if (!is_thread_shareable(f.type, visiting)) return false;
                     }
