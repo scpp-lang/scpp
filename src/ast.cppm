@@ -33,6 +33,7 @@ struct SourceLocation {
 enum class TypeKind {
     Named,     // scalar (int/bool) or a user-declared struct name
     Pointer,   // T*
+    FunctionPointer, // Ret (*p)(Args...) / Ret (* [[scpp::unsafe]] p)(Args...)
     Array,     // T[N]
     UniquePtr, // std::unique_ptr<T> -- unique ownership, move-only (see ch05)
     Reference, // T& (mutable borrow) / const T& (shared borrow) -- see ch05.2
@@ -57,6 +58,11 @@ struct Type {
     // Array
     std::shared_ptr<Type> element;
     long long array_size = 0;
+
+    // FunctionPointer
+    std::shared_ptr<Type> function_return;
+    std::vector<Type> function_params;
+    bool is_unsafe_function_pointer = false;
 
     // Reference: true for `T&` (mutable/exclusive borrow), false for
     // `const T&` (shared borrow). Span: true for `std::span<T>` (mutable

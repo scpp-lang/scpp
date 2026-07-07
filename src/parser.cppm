@@ -900,6 +900,45 @@ private:
         return base;
     }
 
+    [[nodiscard]] bool starts_function_pointer_declarator() const {
+        return check(TokenKind::LParen) && peek_at(1).kind == TokenKind::Star;
+    }
+
+    std::vector<Type> parse_function_pointer_param_types() {
+        std::vector<Type> params;
+        expect(TokenKind::LParen, "'('");
+        if (!check(TokenKind::RParen)) {
+            do {
+                Type param_type = parse_type(/*allow_rvalue_ref=*/true);
+                if (check(TokenKind::Identifier)) advance(); // optional parameter name, ignored in a function type
+                param_type = parse_array_suffix(param_type);
+                if (param_type.kind == TypeKind::Array) {
+                    Type decayed;
+                    decayed.kind = TypeKind::Pointer;
+                    decayed.pointee = param_type.element;
+                    param_type = std::move(decayed);
+                }
+                params.push_back(std::move(param_type));
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::RParen, "')'");
+        return params;
+    }
+
+    Type parse_function_pointer_declarator(Type return_type, std::string& out_name) {
+        expect(TokenKind::LParen, "'('");
+        expect(TokenKind::Star, "'*'");
+        ParsedAttributes ptr_attrs = parse_attribute_specifier_seq();
+        out_name = std::string(expect(TokenKind::Identifier, "function pointer name").text);
+        expect(TokenKind::RParen, "')'");
+        Type type;
+        type.kind = TypeKind::FunctionPointer;
+        type.function_return = std::make_shared<Type>(std::move(return_type));
+        type.function_params = parse_function_pointer_param_types();
+        type.is_unsafe_function_pointer = ptr_attrs.has("unsafe");
+        return type;
+    }
+
     // ch11 §11.3/§11.4: parses an optional module declaration at the very
     // start of the file -- `export module <dotted.name>[:<partition>];`
     // (a primary interface unit, or -- with the `:partition` suffix -- an
@@ -1516,8 +1555,12 @@ private:
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             StructField field;
             Type base = parse_type();
-            field.name = std::string(expect(TokenKind::Identifier, "field name").text);
-            field.type = parse_array_suffix(base);
+            if (starts_function_pointer_declarator()) {
+                field.type = parse_function_pointer_declarator(std::move(base), field.name);
+            } else {
+                field.name = std::string(expect(TokenKind::Identifier, "field name").text);
+                field.type = parse_array_suffix(base);
+            }
             expect(TokenKind::Semicolon, "';'");
             def.fields.push_back(std::move(field));
         }
@@ -2522,6 +2565,19 @@ private:
                 program.functions.push_back(std::move(fn));
                 continue;
             }
+            if (starts_function_pointer_declarator()) {
+                if (member_requested_unsafe) {
+                    throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
+                                      "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
+                                      "compound-statement or a function's own declaration (ch01 §1.3)");
+                }
+                ClassField field;
+                field.type = parse_function_pointer_declarator(std::move(member_type), field.name);
+                field.access = current_access;
+                expect(TokenKind::Semicolon, "';'");
+                def.fields.push_back(std::move(field));
+                continue;
+            }
             std::string member_name = std::string(expect(TokenKind::Identifier, "field or method name").text);
             if (check(TokenKind::LParen)) {
                 Function fn;
@@ -2759,8 +2815,12 @@ private:
             return stmt;
         }
         Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
-        stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
-        stmt->type = parse_array_suffix(base);
+        if (starts_function_pointer_declarator()) {
+            stmt->type = parse_function_pointer_declarator(std::move(base), stmt->var_name);
+        } else {
+            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            stmt->type = parse_array_suffix(base);
+        }
         if (match(TokenKind::Assign)) {
             stmt->init = parse_expr();
         } else if (match(TokenKind::LParen)) {
@@ -3074,25 +3134,12 @@ private:
                 node->lhs = std::move(expr);
                 node->rhs = std::move(index);
                 expr = std::move(node);
-            } else if (expr->kind == ExprKind::Lambda && check(TokenKind::LParen)) {
-                // ch05 §5.12: an IIFE (immediately-invoked lambda
-                // expression), e.g. `[](int x) { return x; }(5)` -- sugar
-                // for calling the literal's own synthesized "call"
-                // method directly, exactly like `obj.method(args)`
-                // above just with the receiver being the lambda literal
-                // itself rather than a named variable (movecheck's
-                // closure-resolution pass resolves `expr`'s synthesized
-                // class the same way either way -- see
-                // resolve_callee_signature/codegen_lvalue's own Lambda
-                // cases). Scoped to exactly a Lambda literal (not any
-                // other expression kind): scpp has no other "callable
-                // value" concept (no function pointers/std::function)
-                // that could sensibly appear directly before `(` here.
+            } else if (check(TokenKind::LParen)) {
                 advance(); // '('
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Call;
                 node->loc = expr->loc;
-                node->name = "call";
+                node->name = expr->kind == ExprKind::Lambda ? "call" : "";
                 node->lhs = std::move(expr);
                 if (!check(TokenKind::RParen)) {
                     do {
