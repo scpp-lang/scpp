@@ -311,6 +311,46 @@
     单独重载的运算符名字，只会给同一个受借用检查约束的效果再开一条路，
     目前没有额外表达力需求逼着这样做。见
     [§5.17](ch05-static-checks.md#517-解引用运算符作用于-class)。
+18. **`class` 值要不要允许按值穿过调用/返回边界，还是继续维持原来那种
+    "除了特例之外都只能走引用"的规则？** **已定：允许普通的 class 按值
+    参数和按值返回，而且复用的就是别的 class 构造点早就有的同一套
+    copy/move 语义。** 先拿当前编译器实测过：一个可 copy 的左值传给按值
+    参数，会调用 copy 构造函数；一个 move-only class 要穿过按值参数或者
+    按值返回边界，必须先变成一个**新鲜值**（比如 `std::move(x)`，或者一
+    个本来就按值返回这个 class 的调用）；而一旦进入被调用函数，那个参数
+    就只是一个普通的局部对象，所以再从它身上 move，会把这个参数自己置成
+    moved-out，并像别的 moved-out 局部变量一样跳过析构。还有一个细节值得
+    明确拍板，因为真实 C++ 在这里做得很糟：重载可行性要**感知 copyability**。
+    面对一个不可 copy 的裸局部变量时，`choose(Token)` 这种按值候选就应该
+    直接不算 viable，这样 `choose(Token&)` 重载还能正常胜出。这里也顺手
+    拿真实 C++ 自己验证过：同样的形状，它会留下二义性，哪怕那个按值路径
+    实际上根本走不通，因为它把"是不是 viable"和"deleted copy 到底何时报错"
+    放在了后面的阶段。scpp 直接把"这个边界根本构不出来"当成候选不能参与，
+    把这个坑堵掉。见 [§4.2](ch04-struct-vs-class.md) 以及
+    [§6.6](../spec/zh/02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)/
+    [§6.7](../spec/zh/02-ownership-and-move.md#67-class-类型的按值返回by-value-return-of-class-typestmt.return)。
+19. **scpp 要不要有 `std::function` 这种拥有型、类型擦除的可调用对象包装器？
+    如果要，要不要保留真实 C++ 那种 nullable/empty 状态？** **已定：要，
+    而且同时要 `std::function<Sig>` 和 `std::move_only_function<Sig>`；
+    但不要内部 empty 状态，也不要深度编译器内建。** 这里重新直接验证了
+    真实 C++：拿一个 move-only callable 去构造 `std::function<int(int)>`
+    会触发标准库自己那条"target must be copy-constructible"失败；而
+    `std::move_only_function` 可以接 move-only callable，也支持像
+    `void() const`、`void() &`、`void() &&` 这种 ref/cv-qualified
+    签名；这两个真实包装器还都能默认构造、能用 `operator bool` 测空，
+    而且对一个 empty 的 `std::function` 去调用，会抛
+    `std::bad_function_call`。Rust 也检查过：`Box<dyn Fn(i32) -> i32>` 根本
+    没有对应的默认 empty 状态——可选性要写成 `Option<Box<dyn Fn...>>`。
+    scpp 走的就是这个形状：如果程序"可能有，也可能没有 callable"，那就用
+    `std::optional<std::function<Sig>>` /
+    `std::optional<std::move_only_function<Sig>>` 把这个事实写进类型里，而
+    不是把"没有"偷偷塞进包装器内部当哨兵状态。包装器本身是库类型，不是
+    编译器认识的魔法名字：等泛型 class 模板能表达多参数特化、以及把函数
+    类型模板实参 `R(Args...)` 拆开之后，剩下的都只是普通库代码。唯一可
+    接受的编译器级帮助，就是这一步拆解——对应真实 C++ 对函数类型做偏特化
+    匹配的那个角色。允许有个 `release()` 风格的抽取操作，但也只能是消费式
+    的：包装器自己之后变成 moved-out，而不是"还活着、只是内部变空"。见
+    [§5.18](ch05-static-checks.md#518-类型擦除调用包装器stdfunction-与-stdmove_only_function)。
 
 ---
 

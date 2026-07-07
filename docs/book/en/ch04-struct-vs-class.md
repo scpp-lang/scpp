@@ -158,6 +158,26 @@ itself the explicit declaration, and the compiler verifies triviality.
     copy constructor, but never a compiler-provided copy assignment
     operator (a user-written one is still permitted, subject to whatever
     that reference member allows the author to actually do in its body).
+- **Passing or returning a `class` by value reuses exactly these same
+  copy/move rules; there is no separate "parameter transport" mechanism.**
+  A by-value parameter or by-value return slot of class type is just one
+  more construction site for an object of that class:
+  - A **copyable bare local of exactly that class type** initializes the
+    boundary object by copy construction.
+  - Otherwise, the boundary requires a **fresh value** of that class type
+    -- for example `std::move(x)` or a call already returning that class
+    by value -- and initializes the boundary object by move construction.
+    A move-only bare local therefore does **not** silently bind to a
+    by-value slot; it must be moved explicitly.
+  - Once control crosses the boundary, the parameter object is an
+    ordinary local `class` value inside the callee. Moving out of that
+    parameter marks **that parameter object itself** moved-out and skips
+    its destructor later by the same [§5.1](ch05-static-checks.md) rule
+    as any other moved-out local.
+  - Overload resolution treats an unavailable copy as making that
+    by-value candidate non-viable, so a `T&`/`const T&` overload can
+    still win for a noncopyable bare local instead of the call becoming
+    ambiguously "almost viable" the way real C++ can.
 - **Fallible construction and destruction**: a constructor or destructor has no
   channel to hand back a `std::expected<T, E>` -- scpp has no exceptions
   to throw through instead (see [§5.6](ch05-static-checks.md)/

@@ -191,6 +191,52 @@ public:
 };
 ```
 
+## 6.6 class 类型的按值参数（By-value parameters of class type）[expr.call]
+
+(1) 如果一个函数参数的类型是 class 类型 `T`，并且它不是引用类型，那么每次
+调用时，这个参数对象都按本小节初始化。
+
+(2) 如果对应的实参是一个 *id-expression*，指代的是某个局部对象（包括一个
+参数），并且它的类型恰好就是 `T`，同时 `T` 拥有 copy 构造函数（6.5），
+那么这个参数对象就从那个局部对象 copy 构造出来。
+
+(3) 否则，对应的实参必须是一个类型为 `T` 的**新鲜值（fresh value）**。
+就本文档而言，一个类型为 `T` 的新鲜值是：
+
+  (3.1) 一个形如 `std::move(E)` 的表达式，其中 `E` 指代一个类型为 `T`
+  的对象；或者
+
+  (3.2) 一个类型为 `T` 的调用表达式。
+
+(4) 如果既不满足 (2)，也不满足 (3)，程序就不合法（ill-formed）。
+
+(5) 一旦按 (2) 或者 (3) 完成初始化，这个参数对象在被调用函数体内部就是一
+个普通的、类型为 `T` 的自动对象，完全按
+[§6.2](02-ownership-and-move.md#62-所有权与-move-状态ownership-and-move-statebasiclife)-[§6.5](02-ownership-and-move.md#65-copy-构造与-copy-赋值copy-construction-and-copy-assignmentclass.copy.ctorclass.copy.assign)
+去约束，跟任何别的 class 类型局部对象没有区别。
+
+(6) 一个候选函数，如果它那个按值 class 参数没法按本小节要求完成初始化，
+那么它对重载决议来说就不是可行候选（viable）。
+
+## 6.7 class 类型的按值返回（By-value return of class type）[stmt.return]
+
+(1) 如果一个函数的返回类型是 class 类型 `T`，那么一条 `return` 语句的
+操作数，按本小节去初始化被返回的对象。
+
+(2) 如果这个操作数是一个 *id-expression*，指代某个局部对象（包括一个
+参数），并且它的类型恰好就是 `T`，同时 `T` 拥有 copy 构造函数（6.5），
+那么被返回的对象就从那个局部对象 copy 构造出来。
+
+(3) 否则，这个操作数必须是一个类型为 `T` 的新鲜值，定义见
+[§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
+(3)。被返回的对象会从这个新鲜值 move 构造出来。
+
+(4) 如果既不满足 (2)，也不满足 (3)，程序就不合法（ill-formed）。
+
+(5) 一个类型为 class 类型 `T` 的调用表达式，对本小节和
+[§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
+来说，本身就是一个类型为 `T` 的新鲜值。
+
 ---
 
 [← 上一节：`[[scpp::unsafe]]` Attribute](01-unsafe.md) · [目录](README.md) · [下一节：解引用与成员访问 →](03-dereference-and-member-access.md)

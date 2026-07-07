@@ -728,11 +728,14 @@ void print_area(const Shape auto& s) {
 - **Explicitly out of scope for this round**: recursive pack-splitting
   inside a function body (as opposed to fold expressions, above),
   explicit specialization of a function template, template-template
-  parameters, default template arguments, associated types, and dynamic
-  dispatch/type erasure (scpp's virtual-function/`dyn`-equivalent,
-  deferred alongside inheritance). Generic `struct`/`class` types, once
-  out of scope entirely, are now designed -- see
-  [§5.14](#514-generic-types).
+  parameters, default template arguments, associated types, and
+  **general** dynamic dispatch / object-safe interface erasure
+  (scpp's virtual-function/`dyn`-equivalent, deferred alongside
+  inheritance). Generic `struct`/`class` types, once out of scope
+  entirely, are now designed -- see [§5.14](#514-generic-types). A
+  narrower, callable-specific owning erasure layer
+  (`std::function`/`std::move_only_function`) is designed separately in
+  [§5.18](#518-type-erased-call-wrappers-stdfunction-and-stdmove_only_function).
 
 ## 5.12 Closures (Lambda Expressions)
 
@@ -793,11 +796,10 @@ applies to a closure's members directly, with no new machinery:
 method call ([§5.9](#59-methods-and-this)) -- nothing closure-specific
 about it.
 
-**Passing a closure to another function** uses a concept-constrained
-generic parameter ([§5.11](#511-generic-functions-and-concepts)), not
-`std::function` -- monomorphized per concrete closure type, zero-cost,
-consistent with how scpp already avoids type erasure/dynamic dispatch
-elsewhere:
+**Passing a closure to another function** has two distinct shapes. The
+zero-cost path uses a concept-constrained generic parameter
+([§5.11](#511-generic-functions-and-concepts)) and stays monomorphized
+per concrete closure type:
 
 ```cpp
 template<typename T>
@@ -807,6 +809,13 @@ void for_each_doubled(std::span<int> s, IntConsumer auto&& f) {
     for (int i = 0; i < s.size; ++i) f(s[i] * 2);
 }
 ```
+
+This remains the default for algorithm-style code. The owning,
+type-erased path is [§5.18](#518-type-erased-call-wrappers-stdfunction-and-stdmove_only_function)'s
+`std::function<Sig>` / `std::move_only_function<Sig>` family instead:
+use those when what matters is storing, returning, or heterogeneously
+owning "some callable of this signature", not preserving the concrete
+closure type at compile time.
 
 **Nothing new is needed to stop a reference-capturing closure from
 escaping** -- e.g. into a global array, via some other function it's
@@ -1383,6 +1392,93 @@ pointer-like types.
   operator names such as `operator+` remain out of scope here, and
   `operator=` remains governed separately by the ordinary copy-assignment
   rules from [§4.2](ch04-struct-vs-class.md).
+
+## 5.18 Type-Erased Call Wrappers: `std::function` and `std::move_only_function`
+
+scpp supports two owning, type-erased callable wrappers, following real
+C++'s split:
+
+- **`std::function<Sig>`** stores a callable target of signature `Sig`,
+  but only when that target is copy-constructible.
+- **`std::move_only_function<Sig>`** stores a callable target of
+  signature `Sig` even when the target is move-only.
+
+The key design point is what these wrappers are **not**: they are not a
+deep compiler builtin in the old `unique_ptr`/`span`/`expected` sense.
+Once generic `class` templates can express the needed surface --
+multiple template parameters, partial specialization on a function-type
+template argument, generic constructors, and named parameter packs in
+methods -- both wrappers are ordinary library code. The only
+compiler-intrinsic help they need is the ability to decompose a
+function-type template argument such as `int(int, int)` into "return type
+`int` plus parameter-type pack `(int, int)`", the same role real C++
+already gives partial-specialization pattern matching on `R(Args...)`.
+
+```cpp
+template<typename Sig>
+class function;
+
+template<typename R, typename... Args>
+class function<R(Args...)> {
+    // ...
+};
+
+template<typename Sig>
+class move_only_function;
+```
+
+**These wrappers never have a null / empty state.** This is a deliberate
+departure from real C++'s `std::function`/`std::move_only_function`,
+which are default-constructible, testable with `operator bool`, and may
+be empty. In scpp, once a `function<Sig>` or `move_only_function<Sig>`
+object exists, it always owns a valid callable target. If a program
+needs optionality, it spells that in the type:
+
+```cpp
+std::optional<std::function<void(int)>> maybe_callback;
+std::optional<std::move_only_function<void()>> maybe_job;
+```
+
+That keeps "there might be no callable here" explicit, instead of
+hiding it as a sentinel state inside a nominally owning wrapper. Moving a
+wrapper therefore follows the ordinary [§4.2](ch04-struct-vs-class.md)
+class rules: the target is moved to the destination wrapper, and the
+source wrapper itself becomes an ordinary moved-out object, not a
+special still-usable-but-empty callable box.
+
+**`std::move_only_function` supports cv/ref-qualified signatures from
+the start.** This includes signatures such as:
+
+```cpp
+std::move_only_function<void() const> f1;
+std::move_only_function<void() &>     f2;
+std::move_only_function<void() &&>    f3;
+```
+
+The qualifier belongs to the stored callable's call operator contract,
+exactly as it does in real C++23: a wrapper instantiated for `void() &`
+promises an lvalue-callable target; one instantiated for `void() &&`
+promises an rvalue-callable target.
+
+**A release/extract operation is acceptable, but it should be
+consuming.** scpp does not want a post-extraction "empty callable"
+sentinel any more than it wants a post-move one. So the acceptable shape
+is the moral equivalent of `unique_ptr::release()`, but expressed in the
+same moved-out-state model the rest of scpp already uses: extract the
+underlying callable by value without destroying it, and treat the wrapper
+object itself as consumed / moved-out thereafter.
+
+**Use the erased wrappers only when erasure is actually the point.** If a
+function merely wants to call whatever closure or function object it was
+given, the generic path from [§5.11](#511-generic-functions-and-concepts)
+and [§5.12](#512-closures-lambda-expressions) stays preferable: no heap
+box, no erased dispatch, and full visibility of the concrete type to the
+compiler. `std::function` and `std::move_only_function` exist for the
+cases generic monomorphization cannot express cleanly: storing several
+different callable types behind one owning field, returning "some
+callable of this signature" without exposing its concrete type, or
+passing a callback across an ABI / architectural boundary where the
+static type must be hidden.
 
 ---
 
