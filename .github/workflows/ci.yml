@@ -21,14 +21,24 @@ jobs:
       - name: Install build dependencies
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates curl gnupg
+          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          if [ ! -f "${ubuntu_sources}" ]; then
+            ubuntu_sources=/etc/apt/sources.list
+          fi
+          scoped_update() {
+            sudo apt-get update \
+              -o Dir::Etc::sourcelist="$1" \
+              -o Dir::Etc::sourceparts="-" \
+              -o APT::Get::List-Cleanup="0"
+          }
+          scoped_update "${ubuntu_sources}"
+          sudo apt-get install -y ca-certificates curl gnupg cmake ninja-build libzstd-dev
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor > llvm-archive-keyring.gpg
           sudo install -o root -g root -m 644 llvm-archive-keyring.gpg /usr/share/keyrings/llvm-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
           rm llvm-archive-keyring.gpg
-          sudo apt-get update
-          sudo apt-get install -y clang-22 cmake ninja-build llvm-22-dev libzstd-dev
+          scoped_update /etc/apt/sources.list.d/llvm.list
+          sudo apt-get install -y clang-22 llvm-22-dev
 
       - name: Configure main project
         run: cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}"
