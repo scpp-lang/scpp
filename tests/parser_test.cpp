@@ -2280,6 +2280,28 @@ void test_generic_function_multiple_type_params_parses() {
            "generic_function_multiple_type_params_parses: expected template params [T, U]");
 }
 
+// ch05 §5.11: an abbreviated generic parameter may be a trailing pack,
+// usable via a fold expression.
+void test_abbreviated_generic_parameter_pack_and_fold_parse() {
+    scpp::Program program = scpp::parse("template<typename T> concept HasGet = requires(T t) { t.get(); };\n"
+                                         "int sum_two(const HasGet auto&... args) {\n"
+                                         "    return (args.get() + ...);\n"
+                                         "}\n"
+                                         "int main() { return 0; }\n");
+    const scpp::Function* sum_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "sum_two") sum_fn = &fn;
+    }
+    expect(sum_fn != nullptr, "abbreviated_generic_parameter_pack_and_fold_parse: expected function 'sum_two'");
+    expect(sum_fn->params.size() == 1 && sum_fn->params[0].is_parameter_pack,
+           "abbreviated_generic_parameter_pack_and_fold_parse: expected a single pack parameter");
+    expect(!sum_fn->params[0].generic_concept.empty(),
+           "abbreviated_generic_parameter_pack_and_fold_parse: pack should be generic-constrained");
+    const scpp::Stmt& ret = *sum_fn->body->statements[0];
+    expect(ret.kind == scpp::StmtKind::Return && ret.expr != nullptr && ret.expr->kind == scpp::ExprKind::Fold,
+           "abbreviated_generic_parameter_pack_and_fold_parse: expected a Fold return expression");
+}
+
 // ch05 §5.11: `name<Arg>(...)` -- an explicit call-site template
 // argument (e.g. a "return-type-only" generic, `make<Circle>()`) --
 // recorded on the Call expression's own explicit_template_args.
@@ -2515,6 +2537,7 @@ int main() {
     test_variadic_specialization_without_primary_is_rejected();
     test_generic_function_full_header_form_parses();
     test_generic_function_multiple_type_params_parses();
+    test_abbreviated_generic_parameter_pack_and_fold_parse();
     test_explicit_type_template_argument_call_parses();
     test_explicit_non_type_template_argument_call_parses();
     test_variadic_specialization_with_leading_non_type_param_parses();
