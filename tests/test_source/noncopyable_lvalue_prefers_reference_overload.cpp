@@ -1,0 +1,25 @@
+import std;
+
+class Token {
+private:
+    std::unique_ptr<int> p;
+public:
+    Token(int value) {
+        this->p = std::make_unique<int>(value);
+        return;
+    }
+};
+
+int choose(Token token) {
+    return 10;
+}
+
+int choose(Token& token) {
+    return 20;
+}
+
+int main() {
+    Token token(1);
+    print_int(choose(token));
+    return 0;
+}

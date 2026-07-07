@@ -447,16 +447,14 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
 
-// spec §6.5(5)'s own note: a field's own copy-constructibility --
-// std::unique_ptr never is (scpp's one move-restricted type, mirrors
-// real C++ having no unique_ptr copy constructor at all); a reference
-// always is (bound once, from the source's own referent, exactly like
-// move construction's identical carve-out, spec §6.4); a nested class
-// recurses; everything else (scalar, struct -- always bitwise-copyable
-// per ch04 §4.1 regardless of its own fields, raw pointer, array of any
-// of these) is unconditionally copy-constructible.
+// spec §6.5(5)'s own note: a field's own copy-constructibility -- a
+// reference always is (bound once, from the source's own referent,
+// exactly like move construction's identical carve-out, spec §6.4); a
+// nested class recurses; everything else (scalar, struct -- always
+// bitwise-copyable per ch04 §4.1 regardless of its own fields, raw
+// pointer, array of any of these) is unconditionally
+// copy-constructible.
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program) {
-    if (is_unique_ptr(type)) return false;
     if (type.kind == TypeKind::Reference) return true;
     if (type.kind == TypeKind::Array) return is_field_copy_constructible(*type.element, program);
     if (type.kind == TypeKind::Named) {
@@ -478,7 +476,6 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 // reference-typed except via this exact direct case -- kept anyway for
 // symmetry and defensiveness).
 [[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program) {
-    if (is_unique_ptr(type)) return false;
     if (type.kind == TypeKind::Reference) return false;
     if (type.kind == TypeKind::Array) return is_field_copy_assignable(*type.element, program);
     if (type.kind == TypeKind::Named) {
@@ -753,6 +750,19 @@ struct CalleeSignature {
 // near is_move_construction_shape) needs it for the Member-target copy-
 // assignment eligibility check.
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body);
+[[nodiscard]] bool is_named_class_type(const Type& type, const Body& body) {
+    if (type.kind != TypeKind::Named || body.program == nullptr) return false;
+    for (const ClassDef& def : body.program->classes) {
+        if (def.name == type.name) return !def.is_concept_witness;
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type, const Body& body) {
+    return body.program != nullptr && is_named_class_type(target_type, body) &&
+           is_bare_same_type_copy_source(expr, target_type, body) &&
+           is_copy_constructible(target_type.name, *body.program);
+}
 
 // Whether `arg` is a legitimate argument for a candidate overload's
 // parameter declared as `param_type`, for exact-type-match overload
@@ -762,15 +772,6 @@ struct CalleeSignature {
 // several candidates is *the* match.
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
                                                 const Signatures& signatures) {
-    if (is_unique_ptr(param_type)) {
-        // ch05 §5.1/§5.10: std::unique_ptr is scpp's one move-restricted
-        // type -- a bare lvalue is never a legitimate by-value (owning)
-        // argument for it (that would be an implicit, unmarked move, ch05
-        // §5.1); only std::move(x)/std::make_unique<T>(...) are.
-        if (!produces_unique_ptr_rvalue(arg, body, signatures)) return false;
-        std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-        return arg_type.has_value() && types_equal(*arg_type, param_type);
-    }
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
         // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the mirror image of
         // the ordinary-reference case just below: needs a genuine
@@ -800,14 +801,13 @@ struct CalleeSignature {
         std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
         return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
     }
-    // By-value scalar/struct parameter (ch04 §4.1: freely, implicitly
-    // copyable) -- unlike std::unique_ptr above, an ordinary lvalue
-    // argument is just as viable as any rvalue here (a plain copy); no
-    // std::move required. (A class-typed by-value parameter can't occur
-    // at all -- check_function's own by-value-parameter rejection, ch04
-    // §4.2 -- so this path is only ever reached for a scalar/struct T.)
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-    return arg_type.has_value() && types_equal(*arg_type, param_type);
+    if (!arg_type.has_value() || !types_equal(*arg_type, param_type)) return false;
+    if (is_named_class_type(param_type, body)) {
+        return is_copyable_class_lvalue_boundary_source(arg, param_type, body) ||
+               produces_rvalue_of_type(arg, param_type, body, signatures);
+    }
+    return true;
 }
 
 // Resolves `call_expr` to the single FunctionSignature (among possibly
@@ -2399,12 +2399,18 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
                                       report_errors);
         } else {
-            // Parameter types aren't resolved here for anything other
-            // than reference detection above; a unique_ptr argument
-            // must be `std::move(x)` regardless of position, so
-            // std::move is simply allowed in every non-reference
-            // argument slot.
-            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+            bool class_value_param =
+                sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
+            bool copyable_lvalue_source =
+                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body);
+            if (report_errors && class_value_param && !copyable_lvalue_source &&
+                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
+                throw DataflowError("passing class '" + sig->param_types[param_index].name +
+                                     "' by value requires either a copyable bare local of that exact type or "
+                                     "a fresh value such as std::move(x) or a call returning by value",
+                    state.current_loc);
+            }
+            apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
 
             // `&expr` (ch05 §5.7) passed directly as a call argument --
             // the primary motivating use case (an `extern "C"` out
@@ -2509,10 +2515,18 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
                                       report_errors);
         } else {
-            // A unique_ptr/class-typed by-value argument must be
-            // std::move(x) regardless of position, same reasoning as
-            // check_call_arguments' own identical fallback branch.
-            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+            bool class_value_param =
+                sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
+            bool copyable_lvalue_source =
+                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body);
+            if (report_errors && class_value_param && !copyable_lvalue_source &&
+                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
+                throw DataflowError("passing class '" + sig->param_types[param_index].name +
+                                     "' by value requires either a copyable bare local of that exact type or "
+                                     "a fresh value such as std::move(x) or a call returning by value",
+                    state.current_loc);
+            }
+            apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
         }
     }
 }
@@ -3522,11 +3536,16 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 }
                 return;
             }
-            bool return_is_unique_ptr = is_unique_ptr(fn.return_type);
-            apply_expr(*term.return_value, return_is_unique_ptr, state, body, signatures, /*report_errors=*/true);
-            if (return_is_unique_ptr && !produces_unique_ptr_rvalue(*term.return_value, body, signatures)) {
-                throw DataflowError(
-                    "returning a std::unique_ptr requires std::move or std::make_unique (copying is not allowed)",
+            bool return_is_class_value = is_named_class_type(fn.return_type, body);
+            bool copyable_lvalue_source =
+                return_is_class_value && is_copyable_class_lvalue_boundary_source(*term.return_value, fn.return_type, body);
+            apply_expr(*term.return_value, return_is_class_value && !copyable_lvalue_source, state, body, signatures,
+                       /*report_errors=*/true);
+            if (return_is_class_value && !copyable_lvalue_source &&
+                !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures)) {
+                throw DataflowError("returning class '" + fn.return_type.name +
+                                     "' by value requires either a copyable bare local of that exact type or "
+                                     "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc);
             }
             return;
@@ -3545,12 +3564,14 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 // Splitting into these two phases avoids both false positives (from
 // not-yet-stable intermediate states) and duplicate diagnostics (a block
 // can be visited many times during fixed-point iteration).
-void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names,
+void check_function(const Function& fn, const Program& program, const Signatures& signatures,
+                     const std::unordered_set<std::string>& class_names,
                      const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access,
                      const std::unordered_set<std::string>& classes_with_copy_ctor,
                      const std::unordered_set<std::string>& classes_with_copy_assign,
                      const std::unordered_set<std::string>& witness_class_names) {
     Body body = build_mir(fn);
+    body.program = &program;
 
     size_t n = body.blocks.size();
 
@@ -3601,56 +3622,6 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     entry_state.classes_with_copy_assign = &classes_with_copy_assign;
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;
-        // ch04 §4.2: like a class-typed local (see the Assign case
-        // below), a class-typed *parameter* cannot be passed by value
-        // either -- scpp has no copy constructor, so a by-value
-        // parameter would bitwise-copy whatever resource-owning fields
-        // the class has, and the callee's copy would then run its own
-        // destructor on the same underlying resource at scope-exit,
-        // independently of the caller's original -- a double-free. Take
-        // a `const T&`/`T&` parameter instead (this doesn't apply to
-        // `this` itself, which is always Reference-typed already, never
-        // bare Named -- see make_this_param). Exempts a witness class
-        // (ClassDef::is_concept_witness -- a generic function's
-        // concept-constrained or bare-`auto` parameter, ch05 §5.11) --
-        // its declared type only *names* an abstract stand-in, not a
-        // real one, so this abstract, checked-once-at-definition pass
-        // cannot yet know whether the eventual concrete argument type
-        // will itself be copy-restricted; by-value passing of a bare
-        // scalar/struct (ch06's "move/store/pass-through/return"
-        // guarantee) must remain legal here.
-        if (param.type.kind == TypeKind::Named && !is_unique_ptr(param.type) && class_names.contains(param.type.name) &&
-            !witness_class_names.contains(param.type.name)) {
-            throw DataflowError("parameter '" + param.name + "' of function '" + fn.name + "' cannot take class '" +
-                                 param.type.name +
-                                 "' by value (no copy semantics are defined yet -- take 'const " +
-                                 param.type.name + "&' or '" + param.type.name + "&' instead, see ch04 §4.2)",
-                                 fn.loc);
-        }
-    }
-    // Symmetric to the by-value-parameter rejection above: returning a
-    // class by value would require copying it out of the callee's local
-    // scope, the exact same unsupported bitwise-copy-of-a-resource-
-    // owning-value hazard. A method/function that hands back a class
-    // instance must do so via a reference to an already-existing one
-    // (e.g. `this`, via the this-elision rule, ch05 §5.3/§5.9) or the
-    // caller must construct its own directly -- there is no by-value
-    // "return a freshly-built class instance" form in this version.
-    // Exempts a witness class for the identical reason the parameter
-    // check above does -- notably reached by a generic lambda whose
-    // return type is *inferred* from its own body (infer_lambda_return_
-    // type) rather than explicitly declared: when that body's own
-    // top-level `return` expression is itself witness-typed (e.g.
-    // `return x + x;` for a bare-`auto` parameter `x`), the inferred
-    // return type is the same witness, abstractly, until a real call
-    // site's monomorphized clone substitutes a concrete one.
-    if (fn.return_type.kind == TypeKind::Named && !is_unique_ptr(fn.return_type) &&
-        class_names.contains(fn.return_type.name) &&
-        !witness_class_names.contains(fn.return_type.name)) {
-        throw DataflowError("function '" + fn.name + "' cannot return class '" + fn.return_type.name +
-                             "' by value (no copy semantics are defined yet -- return '" + fn.return_type.name +
-                             "&'/'const " + fn.return_type.name + "&' instead, see ch04 §4.2)",
-                             fn.loc);
     }
 
     std::vector<DataflowState> in_states(n);
@@ -4260,6 +4231,7 @@ public:
             // independently (via StmtPtr/ExprPtr) and never relocates
             // just because the enclosing vector reallocates elsewhere.
             Body body = build_mir(program_.functions[i]);
+            body.program = &program_;
             bool allow_generic_monomorphization = !program_.functions[i].is_generic_template;
             walk_stmt(*program_.functions[i].body, body, this_type_of(program_.functions[i]),
                       allow_generic_monomorphization);
@@ -6385,6 +6357,7 @@ private:
         // enabled here.
         if (synthesized.body) {
             Body synthesized_body = build_mir(synthesized);
+            synthesized_body.program = &program_;
             walk_stmt(*synthesized.body, synthesized_body, this_type_of(synthesized),
                       /*allow_generic_monomorphization=*/!synthesized.is_generic_template);
         }
@@ -6939,7 +6912,7 @@ void check_moves(const Program& program) {
         // any call site" guarantee, accepted given this form's added
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
-        check_function(fn, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
+        check_function(fn, program, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
                        classes_with_copy_assign, witness_class_names);
     }
 }

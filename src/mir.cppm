@@ -143,6 +143,11 @@ struct Body {
     std::vector<BasicBlock> blocks;
     std::unordered_map<std::string, Type> local_types;
     std::vector<std::string> locals_in_order;
+    // The owning program this MIR came from, so later movecheck passes can
+    // answer whole-program questions (e.g. whether a Named type is really a
+    // class, and whether that class is copy-constructible) while walking just
+    // this function body.
+    const Program* program = nullptr;
     // Every local declared `const` (Stmt::is_const, ch05/ch06 -- an
     // immutable local, not a parameter: those don't support `const` yet,
     // see parse_param_type) -- consulted by movecheck's own

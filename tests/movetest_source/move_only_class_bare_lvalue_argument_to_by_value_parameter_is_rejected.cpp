@@ -1,0 +1,21 @@
+import std;
+
+class Resource {
+private:
+    std::unique_ptr<int> p;
+public:
+    Resource(int value) {
+        this->p = std::make_unique<int>(value);
+        return;
+    }
+};
+
+void take_by_value(Resource resource) {
+    return;
+}
+
+int main() {
+    Resource resource(1);
+    take_by_value(resource);
+    return 0;
+}
