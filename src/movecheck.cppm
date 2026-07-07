@@ -4012,6 +4012,51 @@ private:
         }
     }
 
+    void substitute_non_type_param_in_expr(Expr& expr, const std::string& param_name, int replacement) {
+        if (expr.kind == ExprKind::Identifier && expr.name == param_name) {
+            expr.kind = ExprKind::IntegerLiteral;
+            expr.int_value = replacement;
+            expr.name.clear();
+            expr.lhs.reset();
+            expr.rhs.reset();
+            expr.args.clear();
+            expr.explicit_template_args.clear();
+            return;
+        }
+        if (expr.lhs) substitute_non_type_param_in_expr(*expr.lhs, param_name, replacement);
+        if (expr.rhs) substitute_non_type_param_in_expr(*expr.rhs, param_name, replacement);
+        for (ExprPtr& arg : expr.args) substitute_non_type_param_in_expr(*arg, param_name, replacement);
+        for (LambdaCapture& c : expr.lambda_captures) {
+            if (c.init) substitute_non_type_param_in_expr(*c.init, param_name, replacement);
+        }
+        if (expr.lambda_body) substitute_non_type_param_in_stmt(*expr.lambda_body, param_name, replacement);
+    }
+
+    void substitute_non_type_param_in_stmt(Stmt& stmt, const std::string& param_name, int replacement) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                if (stmt.init) substitute_non_type_param_in_expr(*stmt.init, param_name, replacement);
+                for (ExprPtr& arg : stmt.ctor_args) substitute_non_type_param_in_expr(*arg, param_name, replacement);
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) substitute_non_type_param_in_expr(*stmt.expr, param_name, replacement);
+                return;
+            case StmtKind::If:
+                substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
+                substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
+                if (stmt.else_branch) substitute_non_type_param_in_stmt(*stmt.else_branch, param_name, replacement);
+                return;
+            case StmtKind::While:
+                substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
+                substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
+                return;
+            case StmtKind::Block:
+                for (StmtPtr& s : stmt.statements) substitute_non_type_param_in_stmt(*s, param_name, replacement);
+                return;
+        }
+    }
+
     // ch05 §5.14: every method (including a constructor/destructor) of
     // the generic class/struct template named `template_name` -- found
     // via each candidate's own `this` parameter type (reliable
@@ -4527,6 +4572,18 @@ private:
             return type;
         }
         if (type.template_args.empty()) {
+            if (!type.non_type_args.empty()) {
+                std::vector<int> resolved_non_type_args;
+                resolved_non_type_args.reserve(type.non_type_args.size());
+                for (const std::shared_ptr<Expr>& arg : type.non_type_args) {
+                    resolved_non_type_args.push_back(evaluate_non_type_arg(*arg, {}));
+                }
+                std::string concrete_name =
+                    instantiate_non_type_generic_type(type.name, resolved_non_type_args, loc);
+                type.name = concrete_name;
+                type.non_type_args.clear();
+                return type;
+            }
             if (type.pointee) type.pointee = std::make_shared<Type>(resolve_generic_type(*type.pointee, loc));
             if (type.element) type.element = std::make_shared<Type>(resolve_generic_type(*type.element, loc));
             return type;
@@ -4646,6 +4703,79 @@ private:
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) substitute_type_param_in_stmt(*clone.body, type_param_name, named_concrete);
+                program_.functions.push_back(std::move(clone));
+            }
+            return cache_key;
+        }
+
+        throw DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc);
+    }
+
+    [[nodiscard]] std::string instantiate_non_type_generic_type(const std::string& template_name,
+                                                                const std::vector<int>& non_type_args,
+                                                                SourceLocation loc) {
+        std::string cache_key = template_name;
+        for (int value : non_type_args) cache_key += "." + std::to_string(value);
+        auto cached = generic_type_instance_cache_.find(cache_key);
+        if (cached != generic_type_instance_cache_.end()) return cached->second;
+        generic_type_instance_cache_[cache_key] = cache_key;
+
+        for (const StructDef& tmpl : program_.structs) {
+            if (tmpl.name != template_name || tmpl.template_params.size() != non_type_args.size() ||
+                tmpl.template_params.empty() || !tmpl.template_params[0].is_non_type) {
+                continue;
+            }
+            StructDef concrete;
+            concrete.name = cache_key;
+            concrete.namespace_path = tmpl.namespace_path;
+            concrete.fields = tmpl.fields;
+            program_.structs.push_back(std::move(concrete));
+            return cache_key;
+        }
+
+        for (const ClassDef& tmpl : program_.classes) {
+            if (tmpl.name != template_name || tmpl.template_params.size() != non_type_args.size() ||
+                tmpl.template_params.empty() || !tmpl.template_params[0].is_non_type) {
+                continue;
+            }
+            std::vector<GenericTypeParam> params_copy = tmpl.template_params;
+            std::vector<ClassField> fields_copy = tmpl.fields;
+            ClassDef concrete;
+            concrete.name = cache_key;
+            concrete.namespace_path = tmpl.namespace_path;
+            for (const ClassField& f : fields_copy) concrete.fields.push_back(f);
+            program_.classes.push_back(std::move(concrete));
+
+            std::vector<Function> methods = method_templates_of(template_name);
+            for (const Function& method_tmpl : methods) {
+                Function clone;
+                clone.name = cache_key + method_tmpl.name.substr(template_name.size());
+                clone.loc = method_tmpl.loc;
+                clone.namespace_path = method_tmpl.namespace_path;
+                clone.is_exported = false;
+                clone.is_unsafe = method_tmpl.is_unsafe;
+                clone.return_type = method_tmpl.return_type;
+                clone.params.reserve(method_tmpl.params.size());
+                for (const Param& p : method_tmpl.params) {
+                    Param np;
+                    np.name = p.name;
+                    if (p.name == "this") {
+                        Type this_type;
+                        this_type.kind = TypeKind::Reference;
+                        this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = cache_key});
+                        this_type.is_mutable_ref = p.type.is_mutable_ref;
+                        np.type = std::move(this_type);
+                    } else {
+                        np.type = p.type;
+                    }
+                    clone.params.push_back(std::move(np));
+                }
+                clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
+                if (clone.body) {
+                    for (size_t i = 0; i < params_copy.size(); i++) {
+                        substitute_non_type_param_in_stmt(*clone.body, params_copy[i].name, non_type_args[i]);
+                    }
+                }
                 program_.functions.push_back(std::move(clone));
             }
             return cache_key;
