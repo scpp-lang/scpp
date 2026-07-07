@@ -145,6 +145,17 @@ struct DataflowState {
     // external field access the way an earlier, stricter version of this
     // rule did.
     const ClassFieldAccess* class_field_access = nullptr;
+    // spec §6.5: every class name that has a copy constructor (user-
+    // declared or compiler-eligible) / copy assignment operator,
+    // respectively -- built once by check_moves (mirrors class_names'
+    // identical lifetime/non-null-once-set contract). Needed to decide
+    // whether `ClassName y = x;` / `y(x)` (copy construction) and
+    // `y = x;` (copy assignment) are licensed at all for a given class,
+    // and whether they dispatch to a user-declared function or the
+    // compiler-synthesized memberwise one (see is_copy_constructible/
+    // is_copy_assignable and has_user_declared_copy_ctor/copy_assign).
+    const std::unordered_set<std::string>* classes_with_copy_ctor = nullptr;
+    const std::unordered_set<std::string>* classes_with_copy_assign = nullptr;
     // Where the statement/expression currently being processed begins in
     // the source (see SourceLocation, ast.cppm) -- refreshed by
     // apply_statement/apply_expr as they recurse, so any DataflowError
@@ -162,7 +173,9 @@ struct DataflowState {
         return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
                unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
                class_names == other.class_names && class_field_types == other.class_field_types &&
-               class_field_access == other.class_field_access;
+               class_field_access == other.class_field_access &&
+               classes_with_copy_ctor == other.classes_with_copy_ctor &&
+               classes_with_copy_assign == other.classes_with_copy_assign;
     }
 };
 
@@ -295,6 +308,11 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         a.class_names,
         a.class_field_types,
         a.class_field_access,
+        // Same "set once, never changes, no real join needed" reasoning
+        // as class_names/class_field_types/class_field_access just
+        // above.
+        a.classes_with_copy_ctor,
+        a.classes_with_copy_assign,
         // `current_loc` carries no dataflow meaning at all (see its own
         // comment on DataflowState) and is excluded from operator==, so
         // which side's value ends up here doesn't affect correctness --
@@ -325,6 +343,141 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
+
+// spec §6.5: whether `class_name` has declared its own copy constructor
+// -- a function named "class_name_new" (see parse_class_def) whose sole
+// non-`this` parameter is `const class_name&` (an ordinary, non-rvalue,
+// read-only reference to the class's own type -- the shape spec §6.5's
+// own worked example, and the overwhelmingly common real-world one,
+// uses; a mutable-reference-parameter copy constructor, while legal
+// real C++, is out of scope for this recognition).
+[[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
+    std::string ctor_name = class_name + "_new";
+    for (const Function& fn : program.functions) {
+        if (fn.name != ctor_name || fn.params.size() != 2) continue;
+        const Type& p = fn.params[1].type;
+        if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
+            p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// spec §6.5: whether `class_name` has declared its own copy assignment
+// operator -- a function named "class_name_operator_assign" (see
+// parse_class_body_into's operator= parsing) whose sole non-`this`
+// parameter is `const class_name&`, mirroring has_user_declared_copy_ctor
+// exactly (an operator= overload taking any other shape is simply an
+// ordinary, unrelated overload of the name -- not *the* copy assignment
+// operator this recognizes).
+[[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program) {
+    std::string op_name = class_name + "_operator_assign";
+    for (const Function& fn : program.functions) {
+        if (fn.name != op_name || fn.params.size() != 2) continue;
+        const Type& p = fn.params[1].type;
+        if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
+            p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program) {
+    std::string dtor_name = class_name + "_delete";
+    for (const Function& fn : program.functions) {
+        if (fn.name == dtor_name) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
+[[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
+
+// spec §6.5(5)'s own note: a field's own copy-constructibility --
+// std::unique_ptr never is (scpp's one move-restricted type, mirrors
+// real C++ having no unique_ptr copy constructor at all); a reference
+// always is (bound once, from the source's own referent, exactly like
+// move construction's identical carve-out, spec §6.4); a nested class
+// recurses; everything else (scalar, struct -- always bitwise-copyable
+// per ch04 §4.1 regardless of its own fields, raw pointer, array of any
+// of these) is unconditionally copy-constructible.
+[[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program) {
+    if (type.kind == TypeKind::UniquePtr) return false;
+    if (type.kind == TypeKind::Reference) return true;
+    if (type.kind == TypeKind::Array) return is_field_copy_constructible(*type.element, program);
+    if (type.kind == TypeKind::Named) {
+        for (const ClassDef& def : program.classes) {
+            if (def.name == type.name) return is_copy_constructible(type.name, program);
+        }
+        return true; // scalar, struct, or an unrecognized/generic-witness name
+    }
+    return true; // Pointer, Span, ...: always bitwise-copyable, no restriction
+}
+
+// Same as is_field_copy_constructible, but for assignment -- a reference
+// field is the one case that differs (never assignable, spec §6.4/§6.5's
+// identical "can't be re-seated" carve-out); is_copy_assignable's own
+// direct-field loop already rejects a *directly* reference-typed field
+// before ever consulting this helper, but nested recursion still needs
+// its own answer for one reachable transitively (impossible in the
+// current v0.1 subset, since a struct/class field can never itself be
+// reference-typed except via this exact direct case -- kept anyway for
+// symmetry and defensiveness).
+[[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program) {
+    if (type.kind == TypeKind::UniquePtr) return false;
+    if (type.kind == TypeKind::Reference) return false;
+    if (type.kind == TypeKind::Array) return is_field_copy_assignable(*type.element, program);
+    if (type.kind == TypeKind::Named) {
+        for (const ClassDef& def : program.classes) {
+            if (def.name == type.name) return is_copy_assignable(type.name, program);
+        }
+        return true;
+    }
+    return true;
+}
+
+// spec §6.5(2): a class has an implicitly-defined copy constructor iff
+// it declares none of {copy constructor, copy assignment operator,
+// destructor} itself (ch08 Q15's "no mixed state" tightening) *and*
+// every field is itself copy-constructible (spec §6.5(5)'s own
+// recursive note) -- a user-declared copy constructor always wins
+// regardless of fields (it's the user's own code, not compiler-derived).
+[[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program) {
+    if (has_user_declared_copy_ctor(class_name, program)) return true;
+    if (has_user_declared_dtor(class_name, program) || has_user_declared_copy_assign(class_name, program)) {
+        return false;
+    }
+    for (const ClassDef& def : program.classes) {
+        if (def.name != class_name) continue;
+        for (const ClassField& f : def.fields) {
+            if (!is_field_copy_constructible(f.type, program)) return false;
+        }
+        return true;
+    }
+    return false; // not a recognized class at all
+}
+
+// spec §6.5(3): symmetric to is_copy_constructible, plus the reference-
+// member carve-out (a class with a directly reference-typed field has
+// no compiler-provided copy assignment operator at all, exactly
+// mirroring move assignment's identical spec §6.4(3) rule).
+[[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program) {
+    if (has_user_declared_copy_assign(class_name, program)) return true;
+    if (has_user_declared_dtor(class_name, program) || has_user_declared_copy_ctor(class_name, program)) {
+        return false;
+    }
+    for (const ClassDef& def : program.classes) {
+        if (def.name != class_name) continue;
+        for (const ClassField& f : def.fields) {
+            if (is_reference(f.type)) return false;
+            if (!is_field_copy_assignable(f.type, program)) return false;
+        }
+        return true;
+    }
+    return false;
+}
 
 // Returns the class/struct name `type` resolves to as a Named type,
 // seeing through a Reference (e.g. `this`'s own declared type, ch05
@@ -432,6 +585,11 @@ struct CalleeSignature {
 [[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                             const Signatures& signatures);
+// spec §6.5: forward-declared since apply_expr's own Binary/Assign case
+// (defined well before is_bare_same_type_copy_source's own definition,
+// near is_move_construction_shape) needs it for the Member-target copy-
+// assignment eligibility check.
+[[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body);
 
 // Whether `arg` is a legitimate argument for a candidate overload's
 // parameter declared as `param_type`, for exact-type-match overload
@@ -595,6 +753,35 @@ struct CalleeSignature {
 // a Reference at all.
 [[nodiscard]] std::optional<size_t> resolve_elided_param_index(const Function& fn) {
     if (!is_reference(fn.return_type)) return std::nullopt;
+
+    // ch04 §4.2/ch05 §5.9/spec §6.5: a method's own `this` (always
+    // params[0], see make_this_param) is *always* the elision source
+    // when present, regardless of how many other reference parameters
+    // the method also takes -- the "this-elision rule" other comments
+    // in this file already reference by name. This isn't a general
+    // multiple-reference-parameter lifetime-group solution (ch05 §5.3's
+    // own `[[scpp::lifetime(name)]]` design remains unimplemented,
+    // tracked past v0.1) -- it's a narrow, specifically-justified
+    // special case for exactly the shape a user-declared copy
+    // assignment operator needs (spec §6.5's own worked example,
+    // `RefCounted& operator=(const RefCounted& other) { ...; return
+    // *this; }`): real C++'s own universal convention is that an
+    // assignment operator always returns `*this`, never its argument,
+    // so `this` is the only sound choice regardless of what other
+    // reference parameters are also in scope -- exactly like the
+    // single-reference-parameter case below, this is a structural,
+    // signature-level inference (never verified against what the body
+    // actually returns), just extended to cover this one additional,
+    // well-understood shape.
+    if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) {
+        if (fn.return_type.is_mutable_ref && !fn.params[0].type.is_mutable_ref) {
+            throw DataflowError("function '" + fn.name +
+                                 "' returns a mutable reference ('T&') but its 'this' is a read-only ('const') "
+                                 "receiver; a mutable reference cannot be manufactured from a shared one",
+                fn.loc);
+        }
+        return 0;
+    }
 
     std::optional<size_t> found;
     for (size_t i = 0; i < fn.params.size(); i++) {
@@ -1475,12 +1662,32 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             }
             check_call_arguments(expr, state, body, signatures, report_errors);
             size_t elided_index = *sig->elided_param_index;
+            if (elided_index < callee.param_offset) {
+                // ch04 §4.2/ch05 §5.9: the elided parameter is the
+                // method's own implicit receiver (`this`, always
+                // params[0] when present -- see make_this_param and
+                // resolve_elided_param_index's own this-elision special
+                // case) -- resolved through `expr.lhs` (the receiver
+                // expression), never `expr.args` (which has no entry for
+                // the receiver at all -- see resolve_callee_signature).
+                // A real, discovered-and-fixed bug: indexing `expr.args`
+                // directly with an elided index that actually refers to
+                // `this` (e.g. any reference-returning method taking no
+                // *other* reference-compatible parameter, such as a
+                // plain getter `int& get() { return this.v; }`, or the
+                // copy-assignment-operator shape this feature adds)
+                // previously read out of bounds whenever the call had
+                // fewer explicit arguments than the elided index alone
+                // would suggest.
+                return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+            }
             // The elided parameter's *own* argument is what the call's
             // result transitively borrows from -- resolve it the exact
             // same way as any other borrow source (recursively, so a
             // chain of reference-returning calls is followed all the
             // way back to a real place).
-            return resolve_borrow_source_root(*expr.args[elided_index], state, body, signatures, report_errors);
+            return resolve_borrow_source_root(*expr.args[elided_index - callee.param_offset], state, body,
+                                               signatures, report_errors);
         }
 
         default:
@@ -2094,14 +2301,17 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             if (expr.binary_op == BinaryOp::Assign) {
                 bool target_is_unique_ptr = false;
                 bool target_is_movable_class = false;
+                std::optional<Type> target_class_type;
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto it = body.local_types.find(expr.lhs->name);
                     target_is_unique_ptr = it != body.local_types.end() && is_unique_ptr(it->second);
-                    target_is_movable_class = it != body.local_types.end() && it->second.kind == TypeKind::Named &&
-                                               state.class_names != nullptr &&
-                                               state.class_names->contains(it->second.name);
+                    if (it != body.local_types.end() && it->second.kind == TypeKind::Named &&
+                        state.class_names != nullptr && state.class_names->contains(it->second.name)) {
+                        target_is_movable_class = true;
+                        target_class_type = it->second;
+                    }
                 } else if (expr.lhs->kind == ExprKind::Member) {
-                    // ch04 §4.2/spec §6.4: `this.field = std::move(x);`
+                    // ch04 §4.2/spec §6.4/§6.5: `this.field = std::move(x);`
                     // (or any `obj.field = std::move(x);`) -- a field
                     // write is always "reinitializing" regardless of
                     // prior state (see this case's own Member branch
@@ -2120,9 +2330,36 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     // it already did for a std::unique_ptr field.
                     std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state);
                     target_is_unique_ptr = field_type.has_value() && is_unique_ptr(*field_type);
-                    target_is_movable_class = field_type.has_value() && field_type->kind == TypeKind::Named &&
-                                               state.class_names != nullptr &&
-                                               state.class_names->contains(field_type->name);
+                    if (field_type.has_value() && field_type->kind == TypeKind::Named &&
+                        state.class_names != nullptr && state.class_names->contains(field_type->name)) {
+                        target_is_movable_class = true;
+                        target_class_type = field_type;
+                    }
+                }
+                // spec §6.5: a bare (non-move) same-type Identifier RHS
+                // assigned into a class-typed *field* target is copy
+                // assignment -- licensed only when the class is copy-
+                // assignable. This is the only gate a field-target copy
+                // assignment gets at all (a field write is never subject
+                // to the whole-local-only "first write vs. reassignment"
+                // restriction the MirStatementKind::Assign case enforces
+                // for a plain local target, which is also where a
+                // *whole-local* copy assignment's own, separate
+                // eligibility check already lives -- a whole-local
+                // Assign statement lowers directly to that MIR node, and
+                // never reaches this general expression-level handler at
+                // all, so there is no duplicate/conflicting check here
+                // for that case; this exists for the Member-target case
+                // specifically, previously a real, unchecked gap -- see
+                // is_bare_same_type_copy_source's own comment).
+                if (report_errors && target_class_type.has_value() &&
+                    is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body) &&
+                    (state.classes_with_copy_assign == nullptr ||
+                     !state.classes_with_copy_assign->contains(target_class_type->name))) {
+                    throw DataflowError("class '" + target_class_type->name +
+                                         "' is not copy-assignable (spec §6.5(3)) -- this assignment is not "
+                                         "licensed",
+                        state.current_loc);
                 }
                 bool is_move_target = target_is_unique_ptr || target_is_movable_class;
                 apply_expr(*expr.rhs, is_move_target, state, body, signatures, report_errors);
@@ -2371,6 +2608,19 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
     return type_it != body.local_types.end() && types_equal(type_it->second, constructed_type);
 }
 
+// spec §6.5: true exactly when `expr` is a bare (non-move) plain
+// variable of the exact same class type as `target_type` -- the shape
+// spec §6.5's own worked example uses for both copy construction
+// (`Foo b = a;`) and copy assignment (`b = a;`). Scoped to exactly this
+// one shape (a plain Identifier, not a Member/Subscript/Call chain) --
+// the same narrow, deliberate scoping is_move_construction_shape above
+// uses for its own single-argument std::move recognition.
+[[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body) {
+    if (expr.kind != ExprKind::Identifier) return false;
+    auto type_it = body.local_types.find(expr.name);
+    return type_it != body.local_types.end() && types_equal(type_it->second, target_type);
+}
+
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors) {
     // See apply_expr's identical opening comment -- same reasoning, one
@@ -2502,6 +2752,33 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     state.locals[stmt.local] = LocalState::Initialized;
                     return;
                 }
+                // spec §6.5(3): `y = x;` (a bare, non-move reassignment)
+                // is copy assignment when `x` is a plain variable of the
+                // exact same class type -- licensed only when the class
+                // is copy-assignable (user-declared or compiler-
+                // eligible). A class ineligible for copy assignment
+                // (e.g. one with a reference member, or one whose
+                // destructor/copy-constructor declaration suppresses
+                // auto-generation with no user-declared operator=) falls
+                // through to the unconditional "no copy semantics"
+                // rejection just below, unchanged. Unlike move
+                // assignment, copying never changes `x`'s own state
+                // (spec §6.5's own note) -- no MovedOut transition for
+                // it, so apply_expr is called with is_move_target_context
+                // irrelevant here (there is no std::move to license).
+                if (is_bare_same_type_copy_source(*stmt.expr, type_it->second, body) &&
+                    state.locals.contains(stmt.local)) {
+                    if (report_errors && (state.classes_with_copy_assign == nullptr ||
+                                          !state.classes_with_copy_assign->contains(type_it->second.name))) {
+                        throw DataflowError("class '" + type_it->second.name +
+                                             "' is not copy-assignable (spec §6.5(3)) -- '" + stmt.local +
+                                             "' cannot be reassigned this way",
+                            state.current_loc);
+                    }
+                    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                    state.locals[stmt.local] = LocalState::Initialized;
+                    return;
+                }
                 if (report_errors && state.locals.contains(stmt.local)) {
                     throw DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                          "' cannot be reassigned after construction in this version (no copy "
@@ -2521,6 +2798,39 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     // handling would otherwise use.
                     apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors);
                 } else {
+                    // spec §6.5: `ClassName y = x;` (a bare, non-move,
+                    // non-lambda initializer -- this variable's first-
+                    // ever appearance, per the surrounding comment) is
+                    // copy construction when `x` is a plain variable of
+                    // the exact same class type -- licensed only when
+                    // the class is copy-constructible (user-declared or
+                    // compiler-eligible, spec §6.5(2)/is_copy_
+                    // constructible). Recognizes exactly the shape spec
+                    // §6.5's own worked example uses (`Foo b = a;`);
+                    // anything else (a different type, a non-plain-
+                    // variable expression) is rejected -- this used to be
+                    // an entirely unchecked, silent bitwise copy for
+                    // *any* expression shape at all (a real gap, closed
+                    // as part of implementing this feature).
+                    if (report_errors) {
+                        if (!is_bare_same_type_copy_source(*stmt.expr, type_it->second, body)) {
+                            throw DataflowError(
+                                "class '" + type_it->second.name + "'-typed variable '" + stmt.local +
+                                    "' can only be initialized via constructor-call syntax ('" +
+                                    type_it->second.name + " " + stmt.local +
+                                    "(args);'), std::move of the same type, or (if the class is copy-"
+                                    "constructible, spec §6.5) a plain copy of another '" + type_it->second.name +
+                                    "' variable",
+                                state.current_loc);
+                        }
+                        if (state.classes_with_copy_ctor == nullptr ||
+                            !state.classes_with_copy_ctor->contains(type_it->second.name)) {
+                            throw DataflowError("class '" + type_it->second.name +
+                                                 "' is not copy-constructible (spec §6.5(2)) -- '" + stmt.local +
+                                                 "' cannot be initialized this way",
+                                state.current_loc);
+                        }
+                    }
                     apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures,
                                report_errors);
                 }
@@ -2676,7 +2986,9 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 // not-yet-stable intermediate states) and duplicate diagnostics (a block
 // can be visited many times during fixed-point iteration).
 void check_function(const Function& fn, const Signatures& signatures, const std::unordered_set<std::string>& class_names,
-                     const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access) {
+                     const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access,
+                     const std::unordered_set<std::string>& classes_with_copy_ctor,
+                     const std::unordered_set<std::string>& classes_with_copy_assign) {
     Body body = build_mir(fn);
 
     size_t n = body.blocks.size();
@@ -2724,6 +3036,8 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     entry_state.class_names = &class_names;
     entry_state.class_field_types = &class_field_types;
     entry_state.class_field_access = &class_field_access;
+    entry_state.classes_with_copy_ctor = &classes_with_copy_ctor;
+    entry_state.classes_with_copy_assign = &classes_with_copy_assign;
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;
         // ch04 §4.2: like a class-typed local (see the Assign case
@@ -5243,6 +5557,19 @@ void check_moves(const Program& program) {
             class_field_access[def.name][field.name] = field.access;
         }
     }
+    // spec §6.5: every class eligible for copy construction/assignment
+    // (user-declared or compiler-provided) -- see DataflowState's own
+    // comment and is_copy_constructible/is_copy_assignable. No cycle
+    // protection needed unlike ch05 §5.15's thread-safety derivation: a
+    // class can never contain itself by value (infinite size), so the
+    // field-containment recursion this walks is always a DAG, not a
+    // graph that could cycle.
+    std::unordered_set<std::string> classes_with_copy_ctor;
+    std::unordered_set<std::string> classes_with_copy_assign;
+    for (const ClassDef& def : program.classes) {
+        if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
+        if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
+    }
     for (const Function& fn : program.functions) {
         // A bodyless `extern "C"` declaration (ch02 §2.1) has no
         // statements to run the dataflow analysis over -- it's already
@@ -5266,7 +5593,8 @@ void check_moves(const Program& program) {
         // any call site" guarantee, accepted given this form's added
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
-        check_function(fn, signatures, class_names, class_field_types, class_field_access);
+        check_function(fn, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
+                       classes_with_copy_assign);
     }
 }
 

@@ -2269,11 +2269,45 @@ private:
                 continue;
             }
 
-            // Otherwise: an ordinary field or method, both starting with
-            // a declared type -- same "parse a type, then a name, then
-            // see what follows" disambiguation parse_var_decl/
-            // parse_struct_def already use.
+            // Otherwise: an ordinary field, method, or `operator=` --
+            // all start with a declared type -- same "parse a type,
+            // then a name, then see what follows" disambiguation
+            // parse_var_decl/parse_struct_def already use.
             Type member_type = parse_type();
+            // spec §6.5: `ReturnType operator=(Params) { ... }` -- a
+            // user-declared copy (or otherwise custom) assignment
+            // operator. Unlike a move constructor (spec §6.4(1), always
+            // rejected), a program *may* freely declare its own -- no
+            // shape restriction here at all, mirroring how an ordinary
+            // constructor accepts any parameter list; only the exact
+            // shape `operator=(const ClassName&)` is later recognized
+            // (movecheck's has_user_declared_copy_assign) as *the* copy
+            // assignment operator for spec §6.5(3)'s auto-generation-
+            // suppression rule -- any other parameter shape is simply an
+            // ordinary (if unusual) overload of the name, resolved like
+            // any other method. Distinguished from an ordinary method
+            // named "operator" (impossible: `operator` is not a
+            // keyword, but the very next token being `=` -- itself
+            // never a legal start of a parameter list -- makes this
+            // unambiguous) by peeking one token ahead before committing.
+            if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
+                peek_at(1).kind == TokenKind::Assign) {
+                advance(); // 'operator'
+                advance(); // '='
+                Function fn;
+                fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
+                fn.params = parse_param_list();
+                reject_generic_params(fn.params, "an operator=");
+                bool is_const = match(TokenKind::KwConst);
+                fn.return_type = std::move(member_type);
+                fn.name = qualified_class_name + "_operator_assign";
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                fn.body = parse_block();
+                finish_member_fn(fn);
+                program.functions.push_back(std::move(fn));
+                continue;
+            }
             std::string member_name = std::string(expect(TokenKind::Identifier, "field or method name").text);
             if (check(TokenKind::LParen)) {
                 Function fn;

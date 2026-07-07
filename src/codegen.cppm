@@ -866,6 +866,21 @@ private:
     // pipeline; see driver.cppm), so this only has to reject a
     // structurally-invalid signature up front.
     void validate_reference_return_elision(const Function& fn) {
+        // ch04 §4.2/ch05 §5.9/spec §6.5: `this` (always params[0] when
+        // present) is always the elision source when the function is a
+        // method, regardless of how many other reference parameters it
+        // also takes -- see movecheck's resolve_elided_param_index for
+        // the full rationale (this is its structural codegen-side
+        // counterpart, kept in sync).
+        if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.kind == TypeKind::Reference) {
+            if (fn.return_type.is_mutable_ref && !fn.params[0].type.is_mutable_ref) {
+                throw CodegenError("function '" + fn.name +
+                                    "' returns a mutable reference ('T&') but its 'this' is a read-only "
+                                    "('const') receiver",
+                    current_loc_);
+            }
+            return;
+        }
         const Param* found = nullptr;
         for (const Param& param : fn.params) {
             // ch03/ch05 §5.11: exclude a `T&&` parameter -- see
@@ -1473,6 +1488,27 @@ private:
                     // any other overloaded name.
                     const Function* ctor_def = resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
                     if (ctor_def == nullptr) {
+                        // spec §6.5: `ClassName y(x);` with no matching
+                        // user-declared constructor found by ordinary
+                        // resolution just above (which would already
+                        // have found a user-declared copy constructor,
+                        // if one exists, since it's registered like any
+                        // other overload) -- if this is a bare (non-
+                        // move) same-type single argument and the class
+                        // is copy-constructible, synthesize the
+                        // compiler-provided recursive memberwise copy
+                        // directly, exactly like move construction's own
+                        // analogous fallback above.
+                        if (stmt.ctor_args.size() == 1 && stmt.ctor_args[0]->kind == ExprKind::Identifier) {
+                            auto src_it = locals_.find(stmt.ctor_args[0]->name);
+                            if (src_it != locals_.end() && types_equal(src_it->second.type, stmt.type) &&
+                                is_copy_constructible(stmt.type.name)) {
+                                codegen_memberwise_copy_construct(slot, src_it->second.alloca, stmt.type.name);
+                                locals_[stmt.var_name].moved_flag =
+                                    create_moved_flag_if_has_destructor(stmt.type.name);
+                                return;
+                            }
+                        }
                         throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                             current_loc_);
                     }
@@ -1487,6 +1523,32 @@ private:
                     return;
                 }
                 if (stmt.init) {
+                    if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name) &&
+                        stmt.init->kind == ExprKind::Identifier) {
+                        // spec §6.5: `ClassName y = x;` -- copy
+                        // construction (movecheck has already verified
+                        // `x` is the exact same class type and that the
+                        // class is copy-constructible). Dispatch to the
+                        // user-declared copy constructor if one exists
+                        // (a real function call, so any side effects --
+                        // e.g. incrementing a reference count, spec
+                        // §6.5's own worked example -- actually run,
+                        // unlike a blind byte copy); otherwise the
+                        // compiler-provided recursive memberwise copy.
+                        LValue src = codegen_lvalue(*stmt.init);
+                        if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
+                            llvm::Function* ctor = module_->getFunction(overload_names_.at(user_ctor));
+                            builder_->CreateCall(ctor, {slot, src.ptr});
+                        } else {
+                            codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name);
+                        }
+                        locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                        locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                        if (!scope_stack_.empty()) {
+                            scope_stack_.back().push_back(stmt.var_name);
+                        }
+                        return;
+                    }
                     llvm::Value* init_value = codegen_expr(*stmt.init);
                     // Refresh to `stmt`'s own position: codegen_expr just
                     // recursed through `stmt.init` (possibly a compound
@@ -2098,6 +2160,152 @@ private:
         return module_->getFunction(class_name + "_delete");
     }
 
+    // spec §6.5: codegen's own counterpart to movecheck's identically-
+    // named helpers (has_user_declared_copy_ctor/copy_assign/dtor and
+    // is_copy_constructible/is_copy_assignable) -- kept as a small,
+    // separately-duplicated copy per module (the established pattern
+    // already used for is_unique_ptr/types_equal, rather than a shared
+    // cross-module utility), since codegen has direct Program access
+    // (`program_`) rather than movecheck's Body-only architecture.
+    [[nodiscard]] const Function* find_user_declared_copy_ctor_ast(const std::string& class_name) {
+        std::string ctor_name = class_name + "_new";
+        for (const Function& fn : program_->functions) {
+            if (fn.name != ctor_name || fn.params.size() != 2) continue;
+            const Type& p = fn.params[1].type;
+            if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
+                p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+                return &fn;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const Function* find_user_declared_copy_assign_ast(const std::string& class_name) {
+        std::string op_name = class_name + "_operator_assign";
+        for (const Function& fn : program_->functions) {
+            if (fn.name != op_name || fn.params.size() != 2) continue;
+            const Type& p = fn.params[1].type;
+            if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
+                p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+                return &fn;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] bool has_user_declared_dtor(const std::string& class_name) {
+        return find_destructor(class_name) != nullptr;
+    }
+
+    [[nodiscard]] bool is_copy_constructible(const std::string& class_name) {
+        if (find_user_declared_copy_ctor_ast(class_name) != nullptr) return true;
+        if (has_user_declared_dtor(class_name) || find_user_declared_copy_assign_ast(class_name) != nullptr) {
+            return false;
+        }
+        auto it = structs_.find(class_name);
+        if (it == structs_.end()) return false;
+        for (const Type& field_type : it->second.field_types) {
+            if (!is_field_copy_constructible(field_type)) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool is_copy_assignable(const std::string& class_name) {
+        if (find_user_declared_copy_assign_ast(class_name) != nullptr) return true;
+        if (has_user_declared_dtor(class_name) || find_user_declared_copy_ctor_ast(class_name) != nullptr) {
+            return false;
+        }
+        auto it = structs_.find(class_name);
+        if (it == structs_.end()) return false;
+        for (const Type& field_type : it->second.field_types) {
+            if (field_type.kind == TypeKind::Reference) return false;
+            if (!is_field_copy_assignable(field_type)) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool is_field_copy_constructible(const Type& type) {
+        if (type.kind == TypeKind::UniquePtr) return false;
+        if (type.kind == TypeKind::Reference) return true;
+        if (type.kind == TypeKind::Array) return is_field_copy_constructible(*type.element);
+        if (type.kind == TypeKind::Named && structs_.contains(type.name)) return is_copy_constructible(type.name);
+        return true;
+    }
+
+    [[nodiscard]] bool is_field_copy_assignable(const Type& type) {
+        if (type.kind == TypeKind::UniquePtr) return false;
+        if (type.kind == TypeKind::Reference) return false;
+        if (type.kind == TypeKind::Array) return is_field_copy_assignable(*type.element);
+        if (type.kind == TypeKind::Named && structs_.contains(type.name)) return is_copy_assignable(type.name);
+        return true;
+    }
+
+    // spec §6.5(5): the compiler-provided copy constructor -- a *real*
+    // recursive memberwise copy (unlike move construction's whole-
+    // aggregate-load shortcut, codegen_stmt's VarDecl case): a nested
+    // class-typed field's own copy constructor must actually run (it
+    // may be user-declared, with arbitrary side effects -- e.g. spec
+    // §6.5's own RefCounted example incrementing a reference count --
+    // that a blind byte copy would silently skip), never just copied as
+    // bytes. Scalar/struct/raw-pointer/reference fields are bitwise-
+    // copied directly (struct is always bitwise-copyable per ch04 §4.1
+    // regardless of its own fields; a reference field is simply rebound
+    // to the same referent the source has, exactly like move
+    // construction's own identical reasoning).
+    void codegen_memberwise_copy_construct(llvm::Value* dest_ptr, llvm::Value* src_ptr,
+                                            const std::string& class_name) {
+        const StructInfo& info = structs_.at(class_name);
+        for (size_t i = 0; i < info.field_names.size(); i++) {
+            const Type& field_type = info.field_types[i];
+            llvm::Value* dest_field = builder_->CreateStructGEP(info.llvm_type, dest_ptr, i, info.field_names[i]);
+            llvm::Value* src_field = builder_->CreateStructGEP(info.llvm_type, src_ptr, i, info.field_names[i]);
+            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+                if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name)) {
+                    llvm::Function* ctor = module_->getFunction(overload_names_.at(user_ctor));
+                    builder_->CreateCall(ctor, {dest_field, src_field});
+                } else {
+                    codegen_memberwise_copy_construct(dest_field, src_field, field_type.name);
+                }
+            } else {
+                llvm::Type* llvm_field_type = to_llvm_type(field_type);
+                llvm::Value* value = builder_->CreateLoad(llvm_field_type, src_field, "copiedfield");
+                builder_->CreateStore(value, dest_field);
+            }
+        }
+    }
+
+    // spec §6.5(6): the compiler-provided copy assignment operator --
+    // symmetric to codegen_memberwise_copy_construct, calling each
+    // class-typed field's own copy-assignment operator (never a
+    // destructor -- real C++'s own implicitly-defined copy assignment
+    // operator recursively copy-*assigns* each member, it never
+    // destroys-then-reconstructs one) recursively. No std::unique_ptr
+    // field can be present here at all (is_copy_assignable's own
+    // eligibility check already precludes it, since std::unique_ptr is
+    // never copy-assignable), so there is nothing to release first the
+    // way move assignment's own codegen_release_nested_unique_ptrs needs
+    // to.
+    void codegen_memberwise_copy_assign(llvm::Value* dest_ptr, llvm::Value* src_ptr, const std::string& class_name) {
+        const StructInfo& info = structs_.at(class_name);
+        for (size_t i = 0; i < info.field_names.size(); i++) {
+            const Type& field_type = info.field_types[i];
+            llvm::Value* dest_field = builder_->CreateStructGEP(info.llvm_type, dest_ptr, i, info.field_names[i]);
+            llvm::Value* src_field = builder_->CreateStructGEP(info.llvm_type, src_ptr, i, info.field_names[i]);
+            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+                if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name)) {
+                    llvm::Function* op = module_->getFunction(overload_names_.at(user_assign));
+                    builder_->CreateCall(op, {dest_field, src_field});
+                } else {
+                    codegen_memberwise_copy_assign(dest_field, src_field, field_type.name);
+                }
+            } else {
+                llvm::Type* llvm_field_type = to_llvm_type(field_type);
+                llvm::Value* value = builder_->CreateLoad(llvm_field_type, src_field, "copiedfield");
+                builder_->CreateStore(value, dest_field);
+            }
+        }
+    }
+
     // spec §6.4: a fresh, zero-initialized (`false`) `i1` slot for
     // tracking whether a class-typed local has been moved-out, so
     // scope-exit cleanup (codegen_call_destructor_unless_moved) can
@@ -2625,6 +2833,41 @@ private:
     llvm::Value* codegen_binary(const Expr& expr) {
         if (expr.binary_op == BinaryOp::Assign) {
             LValue lv = codegen_lvalue(*expr.lhs);
+            // spec §6.5: `y = x;` -- copy assignment (movecheck has
+            // already verified `x` is the exact same class type and
+            // that the class is copy-assignable) -- checked *before*
+            // the generic value-evaluation path below, since this needs
+            // to dispatch to a real function call (the user-declared
+            // operator=, so its own side effects -- e.g. incrementing a
+            // reference count -- actually run) or a recursive
+            // memberwise copy-assign, neither of which is "evaluate the
+            // RHS as one flat value, then store it" the way every other
+            // assignment kind (including move assignment, which reuses
+            // that same generic path below) is.
+            if (lv.type.kind == TypeKind::Named && structs_.contains(lv.type.name) &&
+                expr.rhs->kind == ExprKind::Identifier) {
+                auto src_it = locals_.find(expr.rhs->name);
+                if (src_it != locals_.end() && types_equal(src_it->second.type, lv.type)) {
+                    if (const Function* user_assign = find_user_declared_copy_assign_ast(lv.type.name)) {
+                        llvm::Function* op = module_->getFunction(overload_names_.at(user_assign));
+                        builder_->CreateCall(op, {lv.ptr, src_it->second.alloca});
+                    } else {
+                        codegen_memberwise_copy_assign(lv.ptr, src_it->second.alloca, lv.type.name);
+                    }
+                    if (expr.lhs->kind == ExprKind::Identifier) {
+                        // See the move-assignment path's identical
+                        // comment below for why this reset is needed
+                        // (covers reassigning a previously-moved-out
+                        // variable via a copy this time).
+                        auto target_it = locals_.find(expr.lhs->name);
+                        if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
+                            builder_->CreateStore(llvm::ConstantInt::getFalse(*context_),
+                                                   target_it->second.moved_flag);
+                        }
+                    }
+                    return lv.ptr;
+                }
+            }
             llvm::Value* value = codegen_expr(*expr.rhs);
             // Refresh to `expr`'s own position -- see the VarDecl case's
             // identical comment in codegen_stmt.

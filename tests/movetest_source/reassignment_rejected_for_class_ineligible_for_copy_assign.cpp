@@ -1,0 +1,22 @@
+// spec §6.5(2)/(3): a class with a user-declared destructor (and no
+// user-declared copy constructor or copy assignment operator of its
+// own) has *neither* a compiler-provided copy constructor *nor* a
+// compiler-provided copy assignment operator (ch08 Q15's "no mixed
+// state" tightening) -- so an ordinary (non-move) reassignment of it
+// remains rejected. A plain scalar-only class with *no* destructor/
+// ctor/assign declared at all, by contrast, is now copy-assignable by
+// default (spec §6.5) -- this test is updated from an earlier version
+// that (correctly, at the time) asserted rejection for exactly that
+// simpler case, before copy construction/assignment existed at all.
+class Widget {
+public:
+    Widget() { return; }
+    ~Widget() { return; }
+    int val;
+};
+int main() {
+    Widget x;
+    Widget y;
+    y = x;
+    return 0;
+}

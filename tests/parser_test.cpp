@@ -294,6 +294,29 @@ void test_constructor_taking_other_type_rvalue_reference_parses() {
            "constructor_taking_other_type_rvalue_reference_parses: expected 2 params (this + f)");
 }
 
+// spec §6.5: `ReturnType operator=(Params) { ... }` parses as an
+// ordinary method mangled to "ClassName_operator_assign", with the
+// implicit `this` inserted as params[0] like any other method.
+void test_operator_assign_parses() {
+    scpp::Program program = scpp::parse(
+        "class Widget {\n"
+        "public:\n"
+        "    Widget(int v) { this.v = v; return; }\n"
+        "    Widget& operator=(const Widget& other) { this.v = other.v; return this; }\n"
+        "    int v;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* op_assign = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Widget_operator_assign") op_assign = &fn;
+    }
+    expect(op_assign != nullptr, "operator_assign_parses: expected a 'Widget_operator_assign' Function");
+    expect(op_assign->params.size() == 2, "operator_assign_parses: expected 2 params (this + other)");
+    expect(op_assign->params[0].name == "this", "operator_assign_parses: params[0] should be 'this'");
+    expect(op_assign->return_type.kind == scpp::TypeKind::Reference,
+           "operator_assign_parses: return type should be a Reference ('Widget&')");
+}
+
 void test_operator_precedence() {
     // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3.
     scpp::Program program = scpp::parse("int f() { return 1 + 2 * 3; }");
@@ -2235,6 +2258,7 @@ int main() {
     test_thread_safety_attribute_on_parameter_parses();
     test_user_declared_move_constructor_is_rejected();
     test_constructor_taking_other_type_rvalue_reference_parses();
+    test_operator_assign_parses();
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();
