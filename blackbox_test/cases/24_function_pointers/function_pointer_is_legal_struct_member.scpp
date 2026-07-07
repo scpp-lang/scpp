@@ -1,0 +1,17 @@
+// ch04 §4.1: "Function pointers... likewise carry no compiler-tracked
+// lifetime" and are listed alongside raw pointers among the trivial
+// types a `struct` may hold as a member (ch05 §5.16: "freely copyable
+// and a legal `struct` member").
+int add(int a, int b) {
+    return a + b;
+}
+
+struct Op {
+    int (*fn)(int, int);
+};
+
+int main() {
+    Op op;
+    op.fn = add;
+    return op.fn(2, 3);
+}

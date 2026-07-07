@@ -92,6 +92,7 @@ cmake --build build
 | `21_generic_types` | 泛型 `struct`/`class` 类型（ch05 §5.14）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
 | `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免 |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`（ch05 §5.15）：结构化推导与手动覆盖 |
+| `24_function_pointers` | 函数指针（ch05 §5.16）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析——**照文档写的，还没实现，见"现状"** |
 
 ## 测试理念
 
@@ -149,7 +150,8 @@ cmake --build build
 
 ## 现状
 
-**总共 218 个用例，197 个通过。** `01_basics`-`17_modules` 里的 137 个，
+**总共 230 个用例，按运行器的原始统计是 205 个通过——但这个数字这一轮有点
+误导人，见下文。** `01_basics`-`17_modules` 里的 137 个，
 加上 `18_closures` 里的 17/20 个，都是之前已经验证过的（两轮的详细内容见
 下文）；上一轮还额外验证了 179/197 个用例，那是在文档和 `src/` 同时发生
 一次大更新之后做的（`[[scpp::unsafe]]`、public class 成员、泛型函数/类型、
@@ -172,7 +174,44 @@ cmake --build build
 （它们的 COMPILE_ERROR 结果没有变：不管 class 是否具备拷贝资格，按值传参
 和按值返回在这个版本里依然无条件被拒绝——用一个编译器可以正常拷贝的
 普通 class 实证确认过——这是 ch04 §4.2 的新规则并未放松的一条独立的、
-依然成立的限制）。
+依然成立的限制）。这一轮发现的 3 个已知失败里，有 2 个**在同一轮内就被
+修复并重新验证通过**（`src/` commit `16ddcf8`）：对已移出的 class 对象
+调用方法现在能被正确拒绝了，不再只有直接字段读取才被拒绝；用户声明的
+移动赋值运算符现在也会被拒绝了，跟移动构造函数的形式一样。同一次重新
+验证还顺带发现，**之前几轮**记录的 2 个已知失败也已经修好了，是这一轮
+`src/` 工作的副作用，没有找到专门对应的修复 commit：`12_struct_vs_class`
+的 public 字段借用与修改状态方法调用的冲突检测、以及 `06_unsafe_blocks`
+的指针运算解引用（`*(p + 1)`）——这两个分类现在都完全通过了。
+
+**紧接着又有一次纯文档更新**（`src/` 没有改动，commit `ce979c6`），加入了
+ch05 §5.16：函数指针——沿用真实 C/C++ 的 `RetType (*p)(ParamTypes...)`
+语法，外加一条新规则：一个函数指针类型要么是 *unsafe-qualified* 要么不是
+（`[[scpp::unsafe]]` 写在 `*` 后面），这个区分是类型本身的一部分，跟 Rust
+的 `fn` 与 `unsafe fn` 指针类型完全对应（ch08 Q16）。照着这份文档写了一个
+新分类 `24_function_pointers`（12 个用例），覆盖：基本的声明/调用、显式
+取地址和显式解引用调用两种语法、"非-unsafe-qualified → unsafe-qualified"
+单向转换（以及反向转换被拒绝）在 `[[scpp::unsafe]]` 标记的 scpp 函数和
+无函数体的 `extern "C"` 声明这两种来源上都成立、通过 unsafe-qualified
+指针调用需要 `[[scpp::unsafe]] { }`、作为 struct 成员的合法性、可拷贝性
+（不参与移动跟踪）、以及 `&overloaded_name` 按目标指针类型解析。**这个
+分类目前还没有验证过**：简单探测一下就能确认 `scpp` 的解析器目前完全
+不认识函数指针的声明语法（报错"expected variable name but found
+'('"），所以这些用例纯粹是照着文档写的，等 `src/` 实现了这个特性之后再
+检验。运行器机械地报告说这 12 个里有 3 个"通过"，但这是一个**假阳性，
+不是真的验证通过**：这 3 个用例期望的是 `COMPILE_ERROR`，而解析器对这段
+未识别语法的一概拒绝，碰巧满足了这个期望，根本没有真正触发被测试的那条
+unsafe-qualification 规则——目前应该把 `24_function_pointers` 当成
+0/12 有意义地验证过。另外，`src/` 这一轮还在进行中的工作（从当前还没有
+staged 的 `tests/movetest_source/const_local_variable_*` 用例能看出来）
+顺带把 `04_references_borrow` 剩下的两个已知失败都当副作用修好了，是
+重新跑完整套件时发现的：一个普通的 `const`-qualified 局部变量声明
+（`const int x = 5;`）现在能编译通过了——从
+`const_qualified_local_variable_is_not_yet_supported.scpp` 改名成了
+`const_qualified_local_variable_is_allowed.scpp`；`const T&` 参数现在
+也能直接绑定字面量/临时值了，不再只能绑定具名左值——从
+`const_reference_parameter_binding_to_a_literal_is_not_yet_supported.scpp`
+改名成了 `const_reference_parameter_binding_to_a_literal_is_allowed.scpp`。
+`04_references_borrow` 现在完全通过了。
 
 **上一轮迄今为止最重要的发现**：绝大部分标量类型现在根本没法用，而且
 标量间的显式转换完全不工作（`19_scalar_types`，8/8 全部失败）——
@@ -185,24 +224,19 @@ cmake --build build
 发现的——`docs/book/` 里没有任何地方暗示这是已知缺口（ch06 的标量表把
 整个家族都当作无条件可用的，没有任何"尚未实现"的标注）。
 
-总共 21 个已知失败，都是真正的实现发现（测试本身合规，没有改动；之前几轮的
-发现这里只简要总结，完整内容见 git 历史）：
+总共 16 个已知失败（比之前的 18 个少两个，见上文），都是真正的实现发现
+（测试本身合规，没有改动；之前几轮的发现这里只简要总结，完整内容见 git
+历史）。这个数字不包括 `24_function_pointers` 那 12 个还没验证过的用例
+（见上文）——它们是在等一个还没开始做的实现，而不是跟一个已有实现之间的
+不一致：
 
-- **`14_classes`**（这一轮新增 3 个失败，总共 31 个用例）：（1）对一个已经
-  被移出的 class 对象调用方法——哪怕是一个 `const` 的只读 getter——完全
-  没有被拒绝，尽管对同一个已移出对象做*直接字段读取*是能被正确拒绝的；
-  确认这个问题在移动赋值的来源对象上、以及在会修改状态的方法调用上同样
-  存在，不只是移动构造
-  （`class_method_call_on_moved_out_object_is_rejected.scpp`）。（2）用户
-  声明的移动*赋值*运算符（`operator=(ClassName&&)`）能编译通过，尽管
-  对应的移动*构造函数*形式能被正确地、干净地拒绝——ch08 Q14 的拒绝逻辑
-  只接到了这两种语法形式里的一种
-  （`class_user_defined_move_assignment_is_rejected.scpp`）。（3）对 `this`
-  解引用（`*this`）会被直接拒绝（"only std::unique_ptr or a raw
-  pointer... is supported"），哪怕只是通过它做一次普通的字段读取，这跟
-  ch05 §5.9 "`this->x`、`(*this).x`……不变" 的说法矛盾——这同时也导致没法
-  用地道的真实 C++ 写法（`return *this;`）来写用户自定义的拷贝/移动赋值
-  运算符；新增的拷贝赋值用例改用 `void` 返回类型绕开了这个缺口
+- **`14_classes`**（还剩 1 个失败，总共 31 个用例；这一轮发现的另外 2 个
+  已在同一轮内修复并重新验证通过，见上文）：对 `this` 解引用（`*this`）
+  会被直接拒绝（"only std::unique_ptr or a raw pointer... is
+  supported"），哪怕只是通过它做一次普通的字段读取，这跟 ch05 §5.9
+  "`this->x`、`(*this).x`……不变" 的说法矛盾——这同时也导致没法用地道的
+  真实 C++ 写法（`return *this;`）来写用户自定义的拷贝/移动赋值运算符；
+  新增的拷贝赋值用例改用 `void` 返回类型绕开了这个缺口
   （`this_dereference_via_star_this_is_allowed.scpp`）。另外记录一点，
   不算失败：class 的拷贝构造不具备资格时（比如一个只有析构函数的
   class），目前被发现的时间点比对应的拷贝赋值不具备资格的情形要晚得多
@@ -249,22 +283,6 @@ cmake --build build
   更窄、独立的缺口，而不再是"还在等拷贝语义落地"那么简单；lambda 的
   裸 `auto` 参数没法解析（跟上面 `20_generic_functions` 的发现是同一个
   根本原因）。
-- **`12_struct_vs_class`**（3/4 通过，这一轮新增）：public 成员变量的
-  普通读写工作正常，但对同一个对象，一个 public 字段的活跃借用**没有**
-  正确地跟调用一个会修改状态的方法产生冲突——尽管 whole-root-conservative
-  的字段对字段借用冲突（两个不同的 public 字段）是能正常工作的——ch04
-  §4.2 描述的那种组合方式（"两者最终都会针对同一个根对象记录一次借用"）
-  在字段路径和方法调用路径之间还没有完全接通。
-- **`04_references_borrow` 里的 2 个发现**，跟任何具体的新章节都无关，
-  是在构造其它测试时顺带发现的：`const T&` 参数没法绑定到一个临时值/
-  字面量参数上（只能绑定到一个具名的左值——`f(42)` 会失败，而对一个局部
-  变量 `int v` 调用 `f(v)` 是可以的），以及一个普通的 `const` 局部变量
-  声明（`const int x = 5;`）会被直接拒绝（"'const' is only supported
-  directly before a reference type or a pointer type"）。
-- **`06_unsafe_blocks` 里的 1 个发现**：对指针运算的结果做解引用
-  （`*(p + 1)`）还不支持——目前只支持对一个裸的局部变量/字段直接解引用，
-  比 ch05 §5.5 里把"对指针类型的值做间接寻址，或者做指针运算"列为同一条
-  受控操作要窄。
 
 `01_basics`-`17_modules`（前几轮验证过的分类）目前没有已知失败。
 
@@ -277,6 +295,19 @@ Python/Rust 程序员很可能下意识去试的写法——所以
 `13_unsupported_robustness/import_as_aliasing_is_rejected_not_crashed.scpp`
 保留了下来（改成验证"不支持/不存在的语法必须干净地报错"，而不是"文档
 定义了但还没实现"）。
+
+这一轮确认修复的问题（`src/` commit `16ddcf8`，外加拷贝/移动构造那部分
+工作——`bf7e188` 到 `017693b`——顺带带来的副作用）：
+- `class_method_call_on_moved_out_object_is_rejected.scpp`：对一个已经
+  被移出的 class 对象调用方法，现在能被正确拒绝了，跟直接字段读取一样
+  ——之前 `check_call_arguments` 只会去检查 `Member` 字段访问的根对象，
+  从来没检查过方法调用自己的接收者（`expr.lhs`）。
+- `class_user_defined_move_assignment_is_rejected.scpp`：用户声明的
+  移动赋值运算符现在会被拒绝了，跟用户声明的移动构造函数一样。
+- `12_struct_vs_class/public_field_borrow_conflicts_with_mutating_method_call.scpp`
+  和 `06_unsafe_blocks` 里指针运算解引用那个用例（都是前几轮记录的已知
+  失败）现在也都通过了——是这一轮重新验证时顺带发现已经修好的，没有找到
+  各自专门对应的修复 commit。
 
 上一轮验证时的修正，留作参考：
 - `07_extern_c` 里有两个用例错误地以为带函数体的 `extern "C"` 函数不用

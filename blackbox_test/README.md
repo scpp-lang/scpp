@@ -103,6 +103,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access |
 | `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` (ch05 §5.15): structural derivation and manual override |
+| `24_function_pointers` | function pointers (ch05 §5.16): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution -- **written from spec, not yet implemented, see Status** |
 
 ## Testing philosophy
 
@@ -180,7 +181,9 @@ Pass `--scpp-bin <path>` to point at a different build.
 
 ## Status
 
-**218 cases total, 197 passing.** 137/137 in `01_basics`-`17_modules` plus
+**230 cases total, 205 passing by the runner's raw count -- but that
+number is misleading this round, see below.** 137/137 in
+`01_basics`-`17_modules` plus
 17/20 in `18_closures` were previously verified (see below for both
 rounds' details); the prior round additionally verified 179/197 after a
 large, simultaneous doc + `src/` update (`[[scpp::unsafe]]`, public class
@@ -211,7 +214,55 @@ superseded (their COMPILE_ERROR outcomes were unaffected: by-value
 parameter passing and by-value return remain unconditionally rejected
 for a class type regardless of copy-eligibility, confirmed empirically
 against a plain compiler-copyable class -- a separate, still-standing
-restriction ch04 §4.2's new rules don't relax).
+restriction ch04 §4.2's new rules don't relax). Of the 3 known failures
+this round found, 2 were **fixed and re-verified within the same
+round** (`src/` commit `16ddcf8`): moved-out class objects are now
+correctly rejected through a method call, not just a direct field read,
+and a user-declared move assignment operator is now rejected exactly
+like the constructor form already was. The same re-verification pass
+also found 2 known failures **from earlier rounds** now fixed as a
+side effect of this round's `src/` work, with no dedicated fix commit
+identified: `12_struct_vs_class`'s public-field-borrow-vs-mutating-
+method-call conflict, and `06_unsafe_blocks`'s pointer-arithmetic
+dereference (`*(p + 1)`) -- both categories are now fully passing.
+
+**Immediately after, a further doc-only update** (`src/` untouched,
+commit `ce979c6`) added ch05 §5.16: function pointers, reusing real
+C/C++ `RetType (*p)(ParamTypes...)` syntax verbatim plus one addition --
+a pointer-to-function type is either *unsafe-qualified* or not
+(`[[scpp::unsafe]]` spelled right after the `*`), tracked as part of the
+type itself, exactly parallel to Rust's `fn` vs `unsafe fn` pointer
+types (ch08 Q16). A new `24_function_pointers` category (12 cases) was
+written straight from this spec, covering basic declaration/call, both
+explicit-address-of and explicit-dereference-call syntax, the
+one-directional not-unsafe-qualified -> unsafe-qualified conversion (and
+its reverse being rejected) for both an `[[scpp::unsafe]]`-marked scpp
+function and a bodyless `extern "C"` declaration, calling through an
+unsafe-qualified pointer needing `[[scpp::unsafe]] { }`, struct-member
+legality, copyability with no move tracking, and `&overloaded_name`
+resolving via the target pointer type. **This category is not yet
+verified**: a quick probe confirms `scpp`'s parser does not recognize
+function-pointer declarator syntax at all yet ("expected variable name
+but found '('"), so every case was written purely from the spec, to be
+checked once `src/` implements the feature. The runner mechanically
+reports 3 of the 12 as passing, but this is a **false positive, not
+real coverage**: those 3 cases expect `COMPILE_ERROR`, and the parser's
+blanket rejection of the unrecognized syntax trivially satisfies that
+expectation without ever exercising the unsafe-qualification rule the
+test is actually about -- treat `24_function_pointers` as 0/12
+meaningfully verified for now. Separately, `src/` work still in
+progress during this same round (judging by currently-unstaged
+`tests/movetest_source/const_local_variable_*` cases) fixed both
+remaining known failures in `04_references_borrow` as a side effect,
+found on re-running the full suite: a plain `const`-qualified local
+variable declaration (`const int x = 5;`) now compiles -- renamed from
+`const_qualified_local_variable_is_not_yet_supported.scpp` to
+`const_qualified_local_variable_is_allowed.scpp` to match -- and a
+`const T&` parameter now binds directly to a literal/temporary, not
+just a named lvalue -- renamed from
+`const_reference_parameter_binding_to_a_literal_is_not_yet_supported.scpp`
+to `const_reference_parameter_binding_to_a_literal_is_allowed.scpp`.
+`04_references_borrow` is now fully passing.
 
 **The single most important finding of the previous round, by far**: most of the
 scalar type family is currently unusable, and no explicit scalar-to-scalar
@@ -227,22 +278,16 @@ nothing in `docs/book/` suggests any of this is a known gap (ch06's
 scalar table presents the whole family as unconditionally available, no
 "not yet implemented" annotation anywhere).
 
-21 known failures overall, all genuine implementation findings (tests are
-spec-conformant, left unchanged; findings from earlier rounds are
-summarized only briefly here, see git history for the full original
-writeups):
+16 known failures overall (down from 18, see above), all genuine
+implementation findings (tests are spec-conformant, left unchanged;
+findings from earlier rounds are summarized only briefly here, see git
+history for the full original writeups). This excludes
+`24_function_pointers`'s 12 unverified cases (see above), which are
+pending a not-yet-started implementation rather than a mismatch against
+an existing one:
 
-- **`14_classes`** (3 new failures this round, out of 31 cases): (1)
-  calling a method on a moved-out class object -- even a `const`,
-  read-only getter -- is not rejected at all, even though a *direct
-  field read* of the same moved-out object correctly is; confirmed to
-  also affect a move-assignment source and a mutating method call, not
-  just move-construction (`class_method_call_on_moved_out_object_is_rejected.scpp`).
-  (2) a user-declared move *assignment* operator (`operator=(ClassName&&)`)
-  compiles successfully, even though the analogous move *constructor*
-  form is correctly rejected with a clean diagnostic -- ch08 Q14's
-  rejection is only wired up for one of the two syntactic forms
-  (`class_user_defined_move_assignment_is_rejected.scpp`). (3)
+- **`14_classes`** (1 remaining failure, out of 31 cases; 2 others found
+  this round were fixed and re-verified in the same round, see above):
   dereferencing `this` (`*this`) is rejected outright ("only
   std::unique_ptr or a raw pointer... is supported"), even for a bare
   field read through it, contradicting ch05 §5.9's "`this->x`,
@@ -306,26 +351,6 @@ writeups):
   narrower gap than originally described, not just "waiting on copy
   semantics to land"; a lambda's bare `auto` parameter doesn't parse
   (same root cause as the `20_generic_functions` finding above).
-- **`12_struct_vs_class`** (3/4 passing, new this round): public member
-  variables work correctly for ordinary read/write, but a live borrow of
-  a public field does *not* correctly conflict with a call to a mutating
-  method on the same object, even though whole-root-conservative
-  field-vs-field borrow conflicts (two different public fields) do work
-  -- the composition ch04 §4.2 describes ("both already record a borrow
-  against the same root object") isn't fully wired up between the field
-  path and the method-call path yet.
-- **2 findings in `04_references_borrow`**, unrelated to any specific new
-  section, discovered incidentally while constructing other tests: a
-  `const T&` parameter cannot bind to a temporary/literal argument (only
-  to a named lvalue -- `f(42)` fails, `f(v)` for a local `int v` works),
-  and a plain `const`-qualified local variable declaration
-  (`const int x = 5;`) is rejected outright ("'const' is only supported
-  directly before a reference type or a pointer type").
-- **1 finding in `06_unsafe_blocks`**: dereferencing the result of
-  pointer arithmetic (`*(p + 1)`) isn't supported -- only a bare local
-  variable/field dereference is, narrower than ch05 §5.5's listing of
-  "indirection through, or pointer arithmetic on, a value of pointer
-  type" as one gated operation.
 
 No known failures in `01_basics`-`17_modules` (the categories verified in
 earlier rounds).
@@ -346,6 +371,22 @@ instinctively try -- so
 was kept (re-targeted at "unsupported/nonexistent syntax must fail
 cleanly" rather than "documented but not yet implemented").
 
+
+Fixes confirmed this round (`src/` commit `16ddcf8` plus incidental
+side effects of the copy/move construction work, `bf7e188`-`017693b`):
+- `class_method_call_on_moved_out_object_is_rejected.scpp`: calling a
+  method on a moved-out class object is now rejected, same as a direct
+  field read already was -- `check_call_arguments` was only visiting a
+  `Member` field access's root, never a method call's own receiver
+  (`expr.lhs`).
+- `class_user_defined_move_assignment_is_rejected.scpp`: a
+  user-declared move assignment operator is now rejected exactly like
+  a user-declared move constructor already was.
+- `12_struct_vs_class/public_field_borrow_conflicts_with_mutating_method_call.scpp`
+  and `06_unsafe_blocks`'s pointer-arithmetic-dereference case (both
+  known failures from earlier rounds) are now passing too -- found
+  fixed on this round's re-verification pass, no specific fix commit
+  identified for either.
 
 Earlier fixes from the previous verification round, for reference:
 - Two `07_extern_c` cases wrongly assumed a with-body `extern "C"`

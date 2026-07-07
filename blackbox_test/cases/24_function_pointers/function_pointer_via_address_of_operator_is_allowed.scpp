@@ -1,0 +1,12 @@
+// ch05 §5.16: "an ordinary function name, or `&function-name`, decays
+// to a value of that type ([expr.unary.op]/[conv.func]), exactly as in
+// real C++." The explicit `&add` form is equivalent to the bare `add`
+// form used in function_pointer_declaration_and_call_is_allowed.scpp.
+int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    int (*fp)(int, int) = &add;
+    return fp(2, 3);
+}

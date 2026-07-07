@@ -1,0 +1,15 @@
+// ch05 §5.16: "Trivial, like any other raw pointer... no compiler-
+// tracked lifetime and never participates in move/borrow checking...
+// It is freely copyable." Unlike a move-only type (e.g.
+// `std::unique_ptr`), copying a function pointer to another variable
+// does not consume/move-out the original -- both remain independently
+// usable afterward, with no "use of moved-out variable" error.
+int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    int (*fp1)(int, int) = add;
+    int (*fp2)(int, int) = fp1;
+    return fp1(2, 3) + fp2(10, 20);
+}

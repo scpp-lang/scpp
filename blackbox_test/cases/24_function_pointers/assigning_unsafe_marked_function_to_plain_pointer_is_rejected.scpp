@@ -1,0 +1,15 @@
+// ch05 §5.16: the reverse of the one-directional conversion is
+// rejected -- "the reverse is rejected" -- storing the address of an
+// `[[scpp::unsafe]]`-marked function (unsafe-qualified) into a plain,
+// not-unsafe-qualified pointer variable is ill-formed. This is exactly
+// the spec's own "bad" example: get_unchecked's address is
+// unsafe-qualified, `sp` isn't.
+[[scpp::unsafe]] int get_unchecked(int* base, int index) {
+    return base[index];
+}
+
+int main() {
+    int arr[3];
+    int (*sp)(int*, int) = get_unchecked;
+    return sp(arr, 0);
+}

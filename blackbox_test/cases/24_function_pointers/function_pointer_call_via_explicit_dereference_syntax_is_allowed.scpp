@@ -1,0 +1,11 @@
+// ch05 §5.16: "`fp(args)` (or the equivalent `(*fp)(args)`, also legal,
+// exactly as in real C++)" -- both calling syntaxes are accepted and
+// behave identically.
+int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    int (*fp)(int, int) = add;
+    return (*fp)(2, 3);
+}

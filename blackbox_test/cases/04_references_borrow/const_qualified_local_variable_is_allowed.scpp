@@ -1,0 +1,14 @@
+// ch06 scalar table and elsewhere assume ordinary C++ `const`-qualified
+// local variables work (e.g. a `const int x = 5;` is unremarkable real
+// C++), same as `const` before a reference type (`const T&`) or a
+// pointer type (`const T*`). Originally written as a known failure
+// (found while probing whether a closure capturing a genuinely
+// `const`-qualified outer variable by reference would be treated as a
+// shared, not mutable, reference capture for ch05 §5.15's
+// thread-shareable structural derivation) -- confirmed fixed on
+// re-verification, renamed from
+// `const_qualified_local_variable_is_not_yet_supported.scpp` to match.
+int main() {
+    const int x = 5;
+    return x;
+}

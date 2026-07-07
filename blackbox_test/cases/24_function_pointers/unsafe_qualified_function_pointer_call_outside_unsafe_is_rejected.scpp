@@ -1,0 +1,18 @@
+// ch05 §5.16: "Calling through an unsafe-qualified pointer... requires
+// an unsafe context, just like calling an `[[scpp::unsafe]]`-marked
+// function by name." Calling `up(...)` outside `[[scpp::unsafe]] { }`
+// must be rejected, even though `get_unchecked` itself would be fine to
+// call this way if named directly and even though a not-unsafe-
+// qualified function pointer (see
+// function_pointer_declaration_and_call_is_allowed.scpp) never needs
+// this.
+[[scpp::unsafe]] int get_unchecked(int* base, int index) {
+    return base[index];
+}
+
+int main() {
+    int arr[3];
+    arr[0] = 10;
+    int (* [[scpp::unsafe]] up)(int*, int) = get_unchecked;
+    return up(arr, 0);
+}

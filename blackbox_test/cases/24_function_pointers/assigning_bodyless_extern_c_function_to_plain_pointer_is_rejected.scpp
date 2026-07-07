@@ -1,0 +1,14 @@
+// ch05 §5.16/ch08 Q16: symmetric to
+// assigning_unsafe_marked_function_to_plain_pointer_is_rejected.scpp --
+// a bodyless extern "C" declaration's address is unsafe-qualified, so
+// storing it in a plain, not-unsafe-qualified pointer variable is
+// ill-formed. Same one-directional-conversion rule, applied to the
+// other source of an unsafe-qualified pointer value (a bodyless
+// extern "C" declaration, ch02 §2.1, rather than an
+// `[[scpp::unsafe]]`-marked scpp function).
+extern "C" int abs(int x);
+
+int main() {
+    int (*sp)(int) = abs;
+    return sp(-7);
+}

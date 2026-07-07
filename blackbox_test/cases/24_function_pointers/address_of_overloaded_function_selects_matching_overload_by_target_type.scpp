@@ -1,0 +1,18 @@
+// ch05 §5.16/ch08 Q16: "This also resolves §5.10's own deferred item:
+// `&overloaded_name` now picks the one overload whose type exactly
+// matches the target pointer-to-function type, real C++'s own
+// target-type-driven rule, reused verbatim." `describe` is overloaded
+// on `int` vs `bool`; the target type `int (*)(int)` must select the
+// `int` overload, never the `bool` one.
+int describe(int x) {
+    return 100;
+}
+
+bool describe(bool x) {
+    return false;
+}
+
+int main() {
+    int (*fp)(int) = describe;
+    return fp(5);
+}

@@ -1,0 +1,15 @@
+// ch05 §5.16: real C/C++ function pointer syntax, reused verbatim.
+// `int (*fp)(int, int)` declares `fp` as a pointer to function; an
+// ordinary function name decays to a value of that type. A
+// not-unsafe-qualified pointer (the default, no `[[scpp::unsafe]]`
+// after the `*`) never needs `[[scpp::unsafe]] {}` to call through --
+// calling is a distinct operation from dereferencing a pointer to read
+// data, so this is not the raw-pointer-dereference gate in disguise.
+int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    int (*fp)(int, int) = add;
+    return fp(2, 3);
+}

@@ -1,0 +1,20 @@
+// ch05 §5.16: "One-directional implicit conversion: not-unsafe-
+// qualified -> unsafe-qualified only... it only ever *widens* the
+// caller's obligation, never removes a real one." `add` is an ordinary
+// (not-unsafe-qualified) function, yet it may still be stored in an
+// `[[scpp::unsafe]]`-qualified pointer variable. Calling through that
+// variable still requires `[[scpp::unsafe]] { }` regardless -- the
+// obligation is driven by the *pointer's own type*, not by which
+// function actually happens to be stored in it at runtime.
+int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    int (* [[scpp::unsafe]] up)(int, int) = add;
+    int result;
+    [[scpp::unsafe]] {
+        result = up(2, 3);
+    }
+    return result;
+}

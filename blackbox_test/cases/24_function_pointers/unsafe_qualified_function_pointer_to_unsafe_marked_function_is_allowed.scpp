@@ -1,0 +1,23 @@
+// ch05 §5.16: taking the address of a function whose own declaration
+// is `[[scpp::unsafe]]`-marked yields a value of the unsafe-qualified
+// pointer-to-function type; assigning it to a `[[scpp::unsafe]]`-
+// qualified pointer variable (the marker spelled right after the `*`)
+// is licensed, and calling through that variable -- a new gated
+// operation joining ch05 §5.5's list -- is allowed inside
+// `[[scpp::unsafe]] { }`.
+[[scpp::unsafe]] int get_unchecked(int* base, int index) {
+    return base[index];
+}
+
+int main() {
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    int (* [[scpp::unsafe]] up)(int*, int) = get_unchecked;
+    int result;
+    [[scpp::unsafe]] {
+        result = up(arr, 1);
+    }
+    return result;
+}
