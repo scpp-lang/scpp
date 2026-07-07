@@ -231,4 +231,4 @@ public:
 
 ---
 
-[← Previous: The `[[scpp::unsafe]]` Attribute](01-unsafe.md) · [Table of Contents](README.md)
+[← Previous: The `[[scpp::unsafe]]` Attribute](01-unsafe.md) · [Table of Contents](README.md) · [Next: Dereference and Member Access →](03-dereference-and-member-access.md)

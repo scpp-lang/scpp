@@ -56,13 +56,17 @@ distinct from an ordinary type/borrow-check error):
   [§5.9](ch05-static-checks.md)): readable/writable through a `const`
   `this`, but never referenceable, scpp's phase-1 (`Cell`-equivalent)
   answer to interior mutability ([§8](ch08-open-questions.md) Q4).
-- `std::unique_ptr<T>`, `std::span<T>`/`std::span<const T>`
-  (constructible from a fixed-size array only, see
-  [§3](ch03-syntactic-sugar.md)). `std::vector<T>`
-  is deferred (only fixed-size arrays `T[N]` are in scope for v0.1).
+- `std::unique_ptr<T>` and `std::make_unique<T>(...)`, provided by the
+  `std` module via `import std;` as ordinary library code, not as a
+  compiler builtin. Its move-only behavior is just the ordinary
+  consequence of the general `class` rules from
+  [§4.2](ch04-struct-vs-class.md).
+- `std::span<T>`/`std::span<const T>` (constructible from a fixed-size
+  array only, see [§3](ch03-syntactic-sugar.md)). `std::vector<T>` is
+  deferred (only fixed-size arrays `T[N]` are in scope for v0.1).
 - `std::expected<T, E>` (see [§5.6](ch05-static-checks.md)): scpp's only vehicle for recoverable
-  errors; a compiler builtin type, same treatment as `unique_ptr`/`span`,
-  not a real libstdc++/libc++ template instantiation.
+  errors; a compiler builtin type, not a real libstdc++/libc++ template
+  instantiation.
 - **Generic `struct`/`class` types** (`template<typename T> class X { ... }`,
   real C++ syntax verbatim, including multiple type parameters and
   parameter packs -- see [§5.14](ch05-static-checks.md)): scpp's
@@ -117,10 +121,11 @@ distinct from an ordinary type/borrow-check error):
   what the concept's `requires`-expression guarantees -- not deferred to
   instantiation the way real C++ templates otherwise work. A
   concept-constrained parameter may also be a pack (`Concept auto&...
-  args`), usable only through a fold expression (real C++17 syntax
-  verbatim) -- covers variadic call patterns (e.g. a `std::format`-style
-  function) without needing to check a recursively-split pack, which is
-  not supported in a function body.
+  args`), usable through a fold expression (real C++17 syntax verbatim).
+  The full header form now also supports parameter packs
+  (`template<typename... Args> ... Args... args`), including forwarding a
+  pack into another argument list such as `g(args...)` or `new T(args...)`;
+  recursively splitting a pack inside a function body remains unsupported.
 - **Lambda expressions** (`[capture-list](params) { body }`, real C++
   syntax verbatim -- see [§5.12](ch05-static-checks.md)): desugars to an
   anonymous, compiler-synthesized class exactly as in real C++, so no
@@ -161,6 +166,11 @@ distinct from an ordinary type/borrow-check error):
 - Member access, subscript (fixed-size arrays, `span` -- `span` carries a
   runtime bounds check by default, skipped inside `[[scpp::unsafe]] { }`,
   see [§8](ch08-open-questions.md)).
+- Unary `*` and `->` on a `class` that declares `operator*()`/`operator*() const`
+  (see [§5.17](ch05-static-checks.md)): `*x` desugars to an ordinary
+  method call, and `x->y` to `(*x).y`. There is no separate `operator->`
+  feature, and other operator-name overloading (e.g. `operator+`) is out
+  of scope here.
 - `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
   for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)).
 - `[[scpp::unsafe]] { }` blocks (see [§1.3](ch01-safety-context.md)): ordinary

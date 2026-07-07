@@ -48,12 +48,16 @@
   通过 `const` 的 `this` 也能读写，但永远不能被引用，是 scpp 对内部
   可变性的第一阶段（`Cell` 等价）答案（[§8](ch08-open-questions.md)
   Q4）。
-- `std::unique_ptr<T>`、`std::span<T>`/`std::span<const T>`
-  （只能从定长数组构造，见
-  [§3](ch03-syntactic-sugar.md)）。`std::vector<T>` 已推迟
-  （v0.1 范围内只有定长数组 `T[N]`）。
-- `std::expected<T, E>`（见 [§5.6](ch05-static-checks.md)）：scpp 唯一的可恢复错误载体；是编译器内置类型，跟
-  `unique_ptr`/`span` 待遇一样，不是真实 libstdc++/libc++ 模板的实例化。
+- `std::unique_ptr<T>` 和 `std::make_unique<T>(...)`：由 `std` module
+  通过 `import std;` 作为普通库代码提供，不是编译器内建类型。它的
+  move-only 行为，只是 [§4.2](ch04-struct-vs-class.md) 那套通用 `class`
+  规则的普通结果。
+- `std::span<T>`/`std::span<const T>`（只能从定长数组构造，见
+  [§3](ch03-syntactic-sugar.md)）。`std::vector<T>` 已推迟（v0.1 范围内
+  只有定长数组 `T[N]`）。
+- `std::expected<T, E>`（见 [§5.6](ch05-static-checks.md)）：scpp 唯一的
+  可恢复错误载体；是编译器内置类型，不是真实 libstdc++/libc++ 模板的
+  实例化。
 - **泛型 `struct`/`class` 类型**（`template<typename T> class X { ... }`，
   原样复用真实 C++ 语法，支持多个类型参数和参数包——见
   [§5.14](ch05-static-checks.md)）：scpp 的编译期多态机制
@@ -96,9 +100,11 @@
   编译期多态机制。按每个具体类型单态化（零开销，没有 vtable）；受约束
   的函数体在它自己定义的地方就检查一遍，只认 concept 的 `requires`
   表达式保证过的东西——不像真实 C++ 模板那样延迟到实例化才检查。受约束
-  的参数也可以是参数包（`Concept auto&... args`），但只能通过 fold
-  expression 使用（原样复用真实 C++17 语法）——覆盖变参调用场景（比如
-  `std::format`那种），不需要检查递归拆包的 pack（函数体内不支持）。
+  的参数也可以是参数包（`Concept auto&... args`），可通过 fold
+  expression 使用（原样复用真实 C++17 语法）。完整 header 形式现在也
+  支持参数包（`template<typename... Args> ... Args... args`），包括把
+  这个 pack 继续转发进另一个实参列表（如 `g(args...)` 或
+  `new T(args...)`）；函数体内部递归拆包依然不支持。
 - **lambda 表达式**（`[capture-list](params) { body }`，原样复用真实
   C++ 语法——见 [§5.12](ch05-static-checks.md)）：跟真实 C++ 一样脱糖
   成一个匿名的、编译器合成的类，所以除了 `struct`/`class` 已有的规则
@@ -129,6 +135,10 @@
 - 成员访问、下标（定长数组、`span`，span 默认带运行时边界
   检查，在 `[[scpp::unsafe]] { }` 里跳过——见
   [§8](ch08-open-questions.md)）。
+- 对声明了 `operator*()`/`operator*() const` 的 `class` 使用一元 `*`
+  和 `->`（见 [§5.17](ch05-static-checks.md)）：`*x` 脱糖成一次普通方法
+  调用，`x->y` 脱糖成 `(*x).y`。没有单独的 `operator->` 特性，其它
+  运算符名字的重载（比如 `operator+`）也不在这一轮范围内。
 - `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
   跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)）。
 - 带 `[[scpp::unsafe]]` attribute 的语句块（见 [§1.3](ch01-safety-context.md)）：

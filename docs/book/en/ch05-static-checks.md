@@ -212,14 +212,14 @@ split already settled for panics ([§8](ch08-open-questions.md) Q3):
   ...): represented as an ordinary value of type `std::expected<T, E>`,
   returned like any other value, never thrown.
 
-`std::expected<T, E>` is a **compiler builtin type** -- the same
-treatment as `std::unique_ptr`/`std::span` (not a real instantiation of
-the libstdc++/libc++ template, and not dependent on generics/templates
-landing first). Unlike real C++23's `std::expected`, its accessors never
-throw -- there is no exception mechanism in scpp for them to throw
-*through*: misusing one (e.g. dereferencing a value-less `expected`) is a
-contract violation, checked and handled by aborting the same way as every
-other bug in scpp, never a thrown `std::bad_expected_access<E>`.
+`std::expected<T, E>` is a **compiler builtin type**, not a real
+instantiation of the libstdc++/libc++ template and not dependent on
+generics/templates landing first. Unlike real C++23's `std::expected`,
+its accessors never throw -- there is no exception mechanism in scpp for
+them to throw *through*: misusing one (e.g. dereferencing a value-less
+`expected`) is a contract violation, checked and handled by aborting the
+same way as every other bug in scpp, never a thrown
+`std::bad_expected_access<E>`.
 
 **Mandatory checking**: a `std::expected<T, E>` value produced by a call
 cannot be silently discarded -- as if every such function were implicitly
@@ -641,15 +641,16 @@ void print_area(const Shape auto& s) {
   `requires`-expression additionally guarantees, checked the same
   once-at-definition way. The same rule governs a generic type's own
   type parameter ([§5.14](#514-generic-types)).
-- **A pack of the abbreviated form (`Concept auto&... args`) is
-  supported, but only usable through a fold expression** -- real C++17
-  syntax verbatim (`(pack op ...)`, `(... op pack)`, or with an initial
-  value on either side). A fold expression's meaning is defined for a
-  pack of any length, including zero, so checking one reduces to
-  checking the folded operator once against what the concept guarantees
-  per element -- no different in kind from checking any other
-  concept-guaranteed operation, and still entirely at the generic
-  function's own definition:
+- **Parameter packs are supported in both generic-function spellings, but
+  not with identical body-level power.** An abbreviated-form pack
+  (`Concept auto&... args`) is supported, but only usable through a fold
+  expression -- real C++17 syntax verbatim (`(pack op ...)`,
+  `(... op pack)`, or with an initial value on either side). A fold
+  expression's meaning is defined for a pack of any length, including
+  zero, so checking one reduces to checking the folded operator once
+  against what the concept guarantees per element -- no different in kind
+  from checking any other concept-guaranteed operation, and still
+  entirely at the generic function's own definition:
   ```cpp
   template<typename T>
   concept Formattable = requires(const T& t, std::ostream& os) { os << t; };
@@ -658,14 +659,19 @@ void print_area(const Shape auto& s) {
       (std::cout << ... << args) << "\n";
   }
   ```
-  **Splitting a pack recursively is not supported in a function body**
-  (peeling off a first element and recursing on the rest, the classic
-  C++ variadic-template idiom) -- each recursive step would need its own
-  separately-checked signature, breaking the once-at-definition
-  property. Recursive pack-splitting is, however, how a generic *type*'s
-  own storage is built ([§5.14](#514-generic-types)) -- there, it's the
-  type definition itself doing the recursion, with each step still
-  checked once, not a function body's control flow.
+  A **full-header-form** pack
+  (`template<typename... Args> void f(Args... args)`) is likewise
+  supported, and may additionally be forwarded as a pack expansion in
+  another call or construction argument list (`g(args...)`,
+  `new T(args...)`) because the template header names the pack directly.
+  **What is still not supported is recursively splitting a pack inside a
+  function body** (peeling off a first element and recursing on the rest,
+  the classic C++ variadic-template idiom) -- each recursive step would
+  need its own separately-checked signature, breaking the
+  once-at-definition property. Recursive pack-splitting is, however, how
+  a generic *type*'s own storage is built ([§5.14](#514-generic-types))
+  -- there, it's the type definition itself doing the recursion, with
+  each step still checked once, not a function body's control flow.
 - **Compound requirements (`{ expr } -> Constraint;`) must constrain the
   result to an exact type, spelled `std::same_as<T>`** -- never
   `std::convertible_to<T>`, and never a bare type name (`-> T` is not
@@ -1264,6 +1270,56 @@ types (formalized in
   pointer, where real C++'s own declarator grammar makes the leading and
   trailing attribute positions ambiguous with each other for the *outer*
   function. Neither has an existing use case forcing the issue yet.
+
+## 5.17 Dereference Operators on Classes
+
+scpp lets a `class` declare `operator*()` as an ordinary non-static
+member function, in the two useful shapes:
+
+```cpp
+class Box {
+public:
+    T& operator*();
+    const T& operator*() const;
+};
+```
+
+The important point is what scpp **does not** do here: it introduces no
+new borrow rule, no new ownership exception, and no separate `operator->`
+protocol. The compiler simply treats `*x` as sugar for an ordinary method
+call, and `x->y` as the same old `(*x).y` sugar it already used for
+pointer-like types.
+
+- **`*x` is an ordinary method call.** If `x` has class type and that
+  class declares a matching `operator*()`, the expression `*x` is checked
+  exactly as if the user had written `x.operator*()`. The non-`const`
+  overload is selected for a mutable receiver, the `const` overload for a
+  `const` receiver, by the same receiver-borrowing rules as any other
+  method call ([§5.9](#59-methods-and-this)).
+- **The return value is just an ordinary returned reference.** Because the
+  supported shape returns `T&` or `const T&`, everything that already
+  applies to a reference returned from a method applies here too:
+  borrowing `*x` records a borrow against `x`'s root object, and keeping
+  that reference alive blocks moving or reassigning `x` for exactly the
+  same reason keeping a method-returned reference alive does
+  ([§5.3](#53-lifetime)/[§5.9](#59-methods-and-this)). For example,
+  `int& r = *b; Box c(std::move(b));` is rejected not by a special
+  "`operator*` rule", but by the existing "cannot move while borrowed"
+  rule.
+- **`x->y` is still only sugar for `(*x).y`.** So once `*x` works for a
+  user-defined `class`, `x->field` and `x->method()` work automatically
+  too -- no second design is needed. A `std::unique_ptr<T>` still works
+  the same way; a user-defined `class` merely joins that same surface.
+- **There is no separately overloadable `operator->`.** scpp does not
+  provide real C++'s separate `operator->` protocol. The language gets the
+  useful `x->y` spelling already from the single `(*x).y` rewrite above,
+  so adding a second operator name would only create a second path to the
+  same borrow-checked effect.
+- **Current scope is intentionally narrow.** This is a `class` feature,
+  not a `struct` one; the new operator name is `operator*` only. Other
+  operator names such as `operator+` remain out of scope here, and
+  `operator=` remains governed separately by the ordinary copy-assignment
+  rules from [§4.2](ch04-struct-vs-class.md).
 
 ---
 

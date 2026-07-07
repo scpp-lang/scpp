@@ -15,3 +15,4 @@
 0. [前言部分（适用范围、规范性引用文件、术语和定义、一致性）](00-front-matter.md)
 5. [`[[scpp::unsafe]]` Attribute](01-unsafe.md)
 6. [所有权、初始化与 Move](02-ownership-and-move.md)
+7. [解引用与成员访问](03-dereference-and-member-access.md)
