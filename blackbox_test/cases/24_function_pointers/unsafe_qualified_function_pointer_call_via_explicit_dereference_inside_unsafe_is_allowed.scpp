@@ -1,0 +1,21 @@
+// ch05 §5.16: both `fp(args)` and `(*fp)(args)` are legal real-C++
+// function-pointer call syntaxes, and an unsafe-qualified pointer call
+// is permitted inside `[[scpp::unsafe]] { }`. This also exercises the
+// explicit `&function-name` address-taking form for an
+// `[[scpp::unsafe]]`-marked function.
+[[scpp::unsafe]] int get_unchecked(int* base, int index) {
+    return base[index];
+}
+
+int main() {
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    int (* [[scpp::unsafe]] up)(int*, int) = &get_unchecked;
+    int result;
+    [[scpp::unsafe]] {
+        result = (*up)(arr, 2);
+    }
+    return result;
+}

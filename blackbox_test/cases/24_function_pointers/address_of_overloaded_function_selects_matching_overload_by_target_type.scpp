@@ -13,6 +13,6 @@ bool describe(bool x) {
 }
 
 int main() {
-    int (*fp)(int) = describe;
+    int (*fp)(int) = &describe;
     return fp(5);
 }

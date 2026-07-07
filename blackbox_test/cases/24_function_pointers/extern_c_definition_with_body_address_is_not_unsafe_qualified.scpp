@@ -1,0 +1,15 @@
+// ch05 §5.16 / spec 01-unsafe §5.2(3.1)/(3.2): only a bodyless
+// extern "C" declaration's address is unsafe-qualified. An extern "C"
+// function *with* a body is not covered by that exception, so taking
+// its address yields an ordinary, not-unsafe-qualified function
+// pointer. Directly naming the function in a call is still an
+// extern-"C" call and therefore gated by ch05 §5.5; this case tests
+// the separate pointer-type-selection rule only.
+extern "C" int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    int (*fp)(int, int) = add;
+    return fp(4, 7);
+}
