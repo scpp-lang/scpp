@@ -1911,6 +1911,29 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 // every other signature-based check in this file.
 void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors) {
+    // A method call's receiver (`obj.method(...)`/`this->method(...)`,
+    // stored in `expr.lhs`, never part of `expr.args` -- see
+    // CalleeSignature's own comment) is an ordinary read of `obj` and was
+    // previously never visited at all here, unlike the identical
+    // receiver sub-expression on a field access (ExprKind::Member's own
+    // `apply_expr(*expr.lhs, ...)` call) -- a real, discovered-and-fixed
+    // gap: calling *any* method (a mutating one or a read-only `const`
+    // getter alike) on a moved-out class-typed variable went entirely
+    // unchecked, even though reading one of its fields directly was
+    // already correctly rejected. Also covers an IIFE's lambda literal
+    // receiver (`[capture](args){...}(...)`, ExprKind::Lambda -- see
+    // resolve_callee_signature's own comment): this is also the only
+    // place that would otherwise ever visit that literal at all when it
+    // is called immediately rather than bound to a variable first, so
+    // this fix incidentally makes an IIFE's own captures subject to the
+    // same checking (apply_expr's Lambda case, which calls
+    // apply_lambda_captures) that a stored closure already got via the
+    // VarDecl case in apply_statement -- previously entirely unchecked
+    // too (e.g. an IIFE could init-capture an already-moved-out
+    // std::unique_ptr without error).
+    if (expr.lhs) {
+        apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+    }
     CalleeSignature callee = resolve_callee_signature(expr, body);
     auto name_it = signatures.find(callee.key);
     const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);

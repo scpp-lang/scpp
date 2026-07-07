@@ -317,6 +317,30 @@ void test_operator_assign_parses() {
            "operator_assign_parses: return type should be a Reference ('Widget&')");
 }
 
+// spec §6.4(1)/ch08 Q14: same unconditional rejection as
+// test_user_declared_move_constructor_is_rejected, for
+// `operator=(ClassName&&)` instead of the constructor -- a real,
+// discovered-and-fixed gap: when `operator=` parsing was first added
+// (test_operator_assign_parses above), the move-constructor shape check
+// had no counterpart here at all, so a user-declared move assignment
+// operator silently parsed as an ordinary (if unusual) overload instead
+// of being rejected the same way the equivalent move constructor already
+// correctly is.
+void test_user_declared_move_assignment_operator_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("class Foo {\n"
+                    "public:\n"
+                    "    Foo() { return; }\n"
+                    "    Foo& operator=(Foo&& other) { return this; }\n"
+                    "};\n"
+                    "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "user_declared_move_assignment_operator_is_rejected: expected a ParseError");
+}
+
 void test_operator_precedence() {
     // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3.
     scpp::Program program = scpp::parse("int f() { return 1 + 2 * 3; }");
@@ -2259,6 +2283,7 @@ int main() {
     test_user_declared_move_constructor_is_rejected();
     test_constructor_taking_other_type_rvalue_reference_parses();
     test_operator_assign_parses();
+    test_user_declared_move_assignment_operator_is_rejected();
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();

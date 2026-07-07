@@ -2248,11 +2248,11 @@ private:
                 // §6.4(2)), dispatched directly at each `ClassName y
                 // (std::move(x));` call site (see movecheck's
                 // is_move_construction_shape) -- never through this
-                // user-declared-constructor machinery at all. (There is
-                // no `operator=` declaration syntax in this version at
-                // all, so spec §6.4(1)'s "move assignment operator" half
-                // is already vacuously satisfied -- nothing further to
-                // reject for that.)
+                // user-declared-constructor machinery at all. See the
+                // `operator=` parsing block further below for spec
+                // §6.4(1)'s other half (a move *assignment* operator,
+                // `ClassName& operator=(ClassName&& other)`), rejected by
+                // the identical shape check.
                 if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
                     fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
                     fn.params[0].type.pointee->kind == TypeKind::Named &&
@@ -2299,6 +2299,30 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator=");
+                // spec §6.4(1): a program shall not declare a move
+                // assignment operator for a class type either -- the
+                // identical shape check the constructor case above uses
+                // for a move *constructor* (exactly one parameter, of
+                // type rvalue reference to the class's own type). Every
+                // class instead gets a compiler-synthesized one
+                // (dispatched directly at each `y = std::move(x);` call
+                // site, see movecheck's is_move_construction_shape) --
+                // never through this user-declared-operator machinery.
+                // This was a real, discovered-and-fixed gap: unlike the
+                // constructor case, this shape check didn't exist at all
+                // when `operator=` parsing was first added, so a
+                // user-declared move assignment operator silently parsed
+                // as an ordinary (if unusual) overload instead of being
+                // rejected.
+                if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
+                    fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
+                    fn.params[0].type.pointee->kind == TypeKind::Named &&
+                    fn.params[0].type.pointee->name == class_name) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a move assignment operator cannot be user-declared for class '" +
+                                          class_name + "' -- the compiler always provides one (spec "
+                                          "§6.4(1)/(2), ch04 §4.2)");
+                }
                 bool is_const = match(TokenKind::KwConst);
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_operator_assign";

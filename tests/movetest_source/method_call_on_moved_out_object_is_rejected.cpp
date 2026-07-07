@@ -1,0 +1,19 @@
+// ch05 §5.1/§6.2/§6.4: same "moved-out is unusable" rule as
+// move_construction_use_after_move_is_rejected.cpp, but reached through a
+// method call (`x.get_val()`) rather than a direct field read (`x.val`) --
+// a real, discovered-and-fixed gap: check_call_arguments never visited a
+// method call's own receiver (`expr.lhs`) at all, so calling *any* method
+// (even this read-only `const` getter) on a moved-out class-typed variable
+// went completely unchecked.
+class Widget {
+public:
+    Widget() { return; }
+    int get_val() const { return this->val; }
+    int val;
+};
+int main() {
+    Widget x;
+    x.val = 5;
+    Widget y(std::move(x));
+    return x.get_val();
+}
