@@ -184,8 +184,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **233 cases total**
-- **233/233 passing**
+- **243 cases total**
+- **243/243 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -196,6 +196,15 @@ re-run via `./build/run_tests`:
   - a user-defined destructor-owning class with a manually-managed
     resource (`strdup`/`free`), verifying that the old target state is
     torn down before the moved-in state replaces it
+- **Class by-value transport is now covered in both the positive and
+  negative shapes**:
+  - copyable classes passed/returned by value
+  - move-only classes passed/returned by value via `std::move(...)`
+  - non-copyable bare locals still rejected when a copy would be needed
+- **Thread-trait overrides now cover the rewritten §5.15/§8 docs**:
+  builtin trait predicates, conditional overrides on generic classes,
+  unconditional generic override propagation, and `std::unique_ptr<T>`'s
+  trait forwarding behavior
 
 No known implementation gaps remain in the full black-box suite at this
 snapshot.

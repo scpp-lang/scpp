@@ -1,0 +1,25 @@
+import std;
+// ch05 §5.15's worked example: `std::unique_ptr<T>` is thread-movable
+// only when `T` itself is thread-movable. A pointee type with a
+// reference member is not thread-movable, so this constrained call must
+// be rejected.
+class NotThreadMovable {
+private:
+    int& ref;
+public:
+    NotThreadMovable(int& x) : ref(x) {
+        return;
+    }
+};
+
+template<typename T>
+void spawn(T&& value [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    int x = 0;
+    std::unique_ptr<NotThreadMovable> p = std::make_unique<NotThreadMovable>(x);
+    spawn(std::move(p));
+    return 0;
+}

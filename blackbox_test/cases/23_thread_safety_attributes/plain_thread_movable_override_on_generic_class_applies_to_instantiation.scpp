@@ -1,0 +1,27 @@
+// ch05 §5.15/spec §8.1(5): a plain `[[scpp::thread_movable]]` override
+// on a generic class applies to its instantiations too, even though the
+// raw-pointer field would otherwise make the class structurally
+// non-thread-movable.
+template<typename T>
+class [[scpp::thread_movable]] RawBox {
+private:
+    int* p;
+public:
+    RawBox() {
+        [[scpp::unsafe]] {
+            this->p = new int(0);
+        }
+        return;
+    }
+};
+
+template<typename T>
+void spawn(T&& value [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    RawBox<int> box;
+    spawn(std::move(box));
+    return 0;
+}
