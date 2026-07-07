@@ -3159,18 +3159,12 @@ private:
                 first = false;
 
                 if (match(TokenKind::Star)) {
-                    // `[*this]` -- captures the enclosing object *by
-                    // value*, which needs a class-copy mechanism this
-                    // codebase doesn't have yet (classes have no copy
-                    // constructor at all, ch04 §4.2) -- an honest "not
-                    // yet supported" error rather than silently
-                    // constructing something unsound.
                     expect(TokenKind::KwThis, "'this' (after '*' in a capture)");
-                    const Token& this_tok = peek();
-                    throw ParseError(this_tok.line, this_tok.column,
-                                      "'[*this]' is not supported in this version (capturing the enclosing "
-                                      "object by value would need class copy semantics, which don't exist "
-                                      "yet) -- use '[this]' to capture a reference to it instead");
+                    LambdaCapture capture;
+                    capture.name = "this";
+                    capture.by_reference = false;
+                    node->lambda_captures.push_back(std::move(capture));
+                    continue;
                 }
                 LambdaCapture capture;
                 if (match(TokenKind::KwThis)) {

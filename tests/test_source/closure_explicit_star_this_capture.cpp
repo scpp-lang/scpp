@@ -1,0 +1,18 @@
+class Box {
+private:
+    int value;
+public:
+    Box(int v) {
+        this->value = v;
+        return;
+    }
+    int get_via_star_this_capture() {
+        return [*this]() { return this->value; }();
+    }
+};
+
+int main() {
+    Box b(42);
+    print_int(b.get_via_star_this_capture());
+    return 0;
+}

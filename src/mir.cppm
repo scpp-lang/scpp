@@ -150,6 +150,12 @@ struct Body {
     // single, initializing Assign/Declare a const local's own VarDecl
     // itself lowers to.
     std::unordered_set<std::string> const_locals;
+    // ch05 §5.12: every local whose initializer is a lambda with at least
+    // one by-reference capture. Such a closure value itself keeps those
+    // borrows alive until its own last use / ScopeExit, so movecheck's
+    // reference-liveness pass treats reads of the closure local itself as
+    // "reference-like" uses too.
+    std::unordered_set<std::string> borrow_holding_closure_locals;
 };
 
 Body build_mir(const Function& fn);
@@ -251,6 +257,14 @@ private:
             case StmtKind::VarDecl: {
                 declare_local(stmt.var_name, stmt.type);
                 if (stmt.is_const) body_.const_locals.insert(stmt.var_name);
+                if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
+                    for (const LambdaCapture& capture : stmt.init->lambda_captures) {
+                        if (capture.by_reference) {
+                            body_.borrow_holding_closure_locals.insert(stmt.var_name);
+                            break;
+                        }
+                    }
+                }
                 if (stmt.type.kind == TypeKind::Reference || stmt.type.kind == TypeKind::Span) {
                     // `expr` is null when the source omitted an
                     // initializer (`int& r;` / `std::span<int> s;`,
