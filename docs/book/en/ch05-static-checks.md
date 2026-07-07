@@ -164,6 +164,12 @@ the following properties, unconditionally, everywhere:
   function-level marker distinct from wrapping a *nested* block, used
   when a function's soundness depends on a precondition only its caller
   can guarantee (mirrors Rust's `unsafe fn`).
+- Calling through a value of pointer-to-function type whose own type is
+  `[[scpp::unsafe]]`-qualified (see [§5.16](#516-function-pointers)) --
+  the same call-site obligation as the previous item, extended to an
+  *indirect* call, since the callee behind such a pointer is unknown at
+  compile time and may be an `[[scpp::unsafe]]`-marked function or an
+  `extern "C"` declaration with no body.
 
 Note what's deliberately *not* on this list: taking a raw pointer's
 address in the first place (`&expr`, [§5.7](#57-address-of-x-and-raw-pointers))
@@ -559,9 +565,16 @@ while designing this section, not assumed).
   (templates/generics, chiefly) reintroduces the possibility.
 - **Explicitly out of scope for this round**: overload resolution
   involving templates/generic functions (deferred alongside templates),
-  default parameter values (a separate, undesigned feature), and taking
-  the address of an overloaded name as a function pointer (deferred until
-  function pointers themselves are designed).
+  and default parameter values (a separate, undesigned feature). Taking
+  the address of an overloaded name as a function pointer, once deferred
+  until function pointers themselves were designed, is now resolved by
+  [§5.16](#516-function-pointers): the target pointer-to-function type
+  (from the declaration being initialized, a parameter being passed, or
+  an explicit cast) selects the one overload whose parameter-type-list
+  and return type match it exactly -- the same target-type-driven rule
+  real C++ already uses for `&overloaded_name`, reused verbatim, and
+  still deterministic since exact-type matching (above) guarantees at
+  most one candidate can ever match a given target type.
 
 ## 5.11 Generic Functions and Concepts
 
@@ -1133,6 +1146,124 @@ ordinary user-written code.
   scoped threads each capturing `const T&` from the same enclosing
   scope) -- this is exactly the case thread-shareable exists to answer
   for.
+
+## 5.16 Function Pointers
+
+Real C/C++ function pointer syntax, reused verbatim, plus one addition: a
+pointer-to-function type is either *unsafe-qualified* or not, tracking, as
+part of the type itself, whether calling through it needs an unsafe
+context -- exactly parallel to Rust's own `fn` vs `unsafe fn` pointer
+types (formalized in
+[the formal spec's §5.2](../../spec/en/01-unsafe.md#52-function-pointer-types-dclptrscppunsafe)).
+
+- **Grammar and spelling: identical to real C++.** `RetType (*p)(ParamTypes...)`
+  declares `p` as a pointer to function; an ordinary function name, or
+  `&function-name`, decays to a value of that type
+  ([expr.unary.op]/[conv.func]), exactly as in real C++. Nothing about
+  this needs new syntax.
+- **Why a plain function pointer type isn't enough.** [§1.2](ch01-safety-context.md)
+  already lets a function's own declaration opt into call-site gating
+  (`[[scpp::unsafe]] RetType f(...)`) -- calling `f` then requires an
+  unsafe context. If taking `f`'s address produced an ordinary, ungated
+  pointer-to-function value, storing it in a plain-looking variable and
+  calling through that variable would silently bypass the gate -- the
+  exact hazard [§5.5](#55-prohibited-unless-in-scppunsafe)'s enumerated
+  list exists to close everywhere else. So the pointer's type itself must
+  carry the same obligation.
+- **Spelling the marked type: `[[scpp::unsafe]]` right after the `*`.**
+  ```cpp
+  int (* [[scpp::unsafe]] up)(int, int);  // unsafe-qualified
+  int (*                  sp)(int, int);  // not unsafe-qualified (default)
+  ```
+  This is the one placement real C++ grammar already gives an attribute
+  on a pointer declarator (`T* [[attr]] p;`), so, like
+  `[[scpp::unsafe]]`'s other two placements ([§1.3](ch01-safety-context.md)),
+  it introduces no new grammar. Two other candidate positions were
+  considered and rejected: immediately before the `*` (where a vendor
+  calling-convention keyword like MSVC's `__stdcall` goes) is not a
+  position real `[[...]]` attribute grammar accepts at all (verified:
+  clang rejects it, "an attribute list cannot appear here"); after the
+  parameter list (attaching to the *function type*, per
+  [§1.3](ch01-safety-context.md)'s own note about that position) also
+  parses, but attaching the marker to the *pointer* itself, right where
+  it is written, was chosen as the more direct spelling.
+- **Taking a function's address picks the type automatically.** The
+  address of an ordinary function -- one whose own declaration is not
+  `[[scpp::unsafe]]`-marked -- is a value of the *not*-unsafe-qualified
+  pointer type. The address of a function whose own declaration *is*
+  `[[scpp::unsafe]]`-marked, or of an `extern "C"` declaration with no
+  body ([§2.1](ch02-boundary-rules.md), already gated the same way,
+  [§5.5](#55-prohibited-unless-in-scppunsafe)), is a value of the
+  unsafe-qualified pointer type. There is nothing to annotate at the
+  point the address is taken -- the flavor follows from the function
+  being pointed to, not from how the pointer variable happens to be
+  spelled.
+  ```cpp
+  [[scpp::unsafe]] int get_unchecked(int* base, int index) { return base[index]; }
+  int add(int a, int b) { return a + b; }
+
+  int (* [[scpp::unsafe]] up)(int*, int) = get_unchecked;  // OK
+  int (*                  sp)(int, int)  = add;            // OK
+  int (*                  bad)(int*, int) = get_unchecked; // ill-formed:
+                                     // get_unchecked's address is
+                                     // unsafe-qualified, bad isn't
+  ```
+- **One-directional implicit conversion: not-unsafe-qualified →
+  unsafe-qualified only.** A not-unsafe-qualified pointer-to-function
+  value can always be stored in an unsafe-qualified pointer variable
+  (harmless -- it only ever *widens* the caller's obligation, never
+  removes a real one); the reverse is rejected. This mirrors real
+  C++17's own rule for `noexcept` function pointers (a pointer to a
+  `noexcept` function converts to a plain one, never the reverse,
+  [conv.fctptr]) -- the identical shape of rule, applied to a different
+  promise.
+  ```cpp
+  int (* [[scpp::unsafe]] up2)(int, int) = add;   // OK: widening
+  int (*                  sp2)(int*, int) = get_unchecked;  // ill-formed
+  ```
+- **Calling through the pointer.** Calling through a not-unsafe-qualified
+  pointer is an ordinary, ungated operation -- exactly like calling a
+  named ordinary function, since by construction only an ordinary
+  function's address can ever have populated it. Calling through an
+  unsafe-qualified pointer joins
+  [§5.5](#55-prohibited-unless-in-scppunsafe)'s list: it requires an
+  unsafe context, just like calling an `[[scpp::unsafe]]`-marked function
+  by name.
+  ```cpp
+  int r1 = up(base, 0);                   // ill-formed: outside unsafe context
+  int r2;
+  [[scpp::unsafe]] { r2 = up(base, 0); }  // OK
+  int r3 = sp(1, 2);                      // OK: sp is never unsafe-qualified
+  ```
+  This is a genuinely new gated operation, not a restatement of an
+  existing one: [§5.5](#55-prohibited-unless-in-scppunsafe)'s existing
+  "calling a function marked `[[scpp::unsafe]]`" entry only covers a call
+  that names the function directly -- a call through a pointer's
+  *postfix-expression* denotes the pointer value, not the function
+  itself, so it needed its own rule.
+- **Calling is not dereferencing.** `fp(args)` (or the equivalent
+  `(*fp)(args)`, also legal, exactly as in real C++) never triggers
+  [§5.5](#55-prohibited-unless-in-scppunsafe)'s raw-pointer-dereference
+  gate: that gate is about reading data *through* a pointer
+  ([§5.7](#57-address-of-x-and-raw-pointers)), and invoking code at an
+  address is a distinct operation with its own rule, stated above. A
+  not-unsafe-qualified function pointer therefore never needs
+  `[[scpp::unsafe]]` to call, no matter how it's written.
+- **Trivial, like any other raw pointer.** A function pointer (either
+  flavor) carries no compiler-tracked lifetime and never participates in
+  move/borrow checking
+  ([§5.1](#51-ownership--move)-[§5.2](#52-borrow--aliasing)) -- the same
+  treatment `T*` already gets ([§4.1](ch04-struct-vs-class.md)). It is
+  freely copyable and a legal `struct` member.
+- **Resolves [§5.10](#510-function-overloading)'s deferred item**:
+  `&overloaded_name` now has a rule -- see there.
+- **Explicitly out of scope for this round**: pointer-to-member-function
+  (`RetType (Class::*)(ParamTypes...)`), which additionally interacts
+  with [§5.9](#59-methods-and-this)'s `this`-as-borrowed-parameter model
+  in ways not yet designed; and a function that returns a function
+  pointer, where real C++'s own declarator grammar makes the leading and
+  trailing attribute positions ambiguous with each other for the *outer*
+  function. Neither has an existing use case forcing the issue yet.
 
 ---
 

@@ -31,8 +31,10 @@
   成员访问、裸 `new`/`delete`、可变全局/静态变量访问、调用一个
   `extern "C"` 函数（`extern "C"` 声明永远不会被任何 scpp 编译器检查，见
   [§2.1](ch02-boundary-rules.md)，所以调用它跟清单上其它每一项
-  一样，都需要 `[[scpp::unsafe]]` 提供的这份担保），以及调用一个自己
-  被标记为 `[[scpp::unsafe]]` 的函数。
+  一样，都需要 `[[scpp::unsafe]]` 提供的这份担保）、调用一个自己
+  被标记为 `[[scpp::unsafe]]` 的函数，以及通过一个自身类型就是
+  `[[scpp::unsafe]]`-qualified 的函数指针去调用（见
+  [§5.16](ch05-static-checks.md#516-函数指针function-pointers)）。
 - **`span` 的边界检查（[§8](ch08-open-questions.md) Q1）和整数
   溢出检查（[§5.8](ch05-static-checks.md)）在 `[[scpp::unsafe]]`
   上下文里也会被放宽**，但理由跟上面不一样：不是因为它们在别处不合法（两者
@@ -152,8 +154,10 @@ int caller(int* arr) {
   `[[scpp::unsafe]]` 上下文里恰好被解锁，且**仅**解锁这些：裸指针解引用/
   指针算术、`reinterpret_cast`/不兼容类型间的 C 风格强转、未加标签的
   `union` 成员访问、裸 `new`/`delete`、可变全局/静态变量访问、调用
-  一个 `extern "C"` 函数，以及调用一个自己被标记为 `[[scpp::unsafe]]`
-  的函数。
+  一个 `extern "C"` 函数、调用一个自己被标记为 `[[scpp::unsafe]]`
+  的函数，以及通过一个自身类型就是 `[[scpp::unsafe]]`-qualified 的
+  函数指针去调用（见
+  [§5.16](ch05-static-checks.md#516-函数指针function-pointers)）。
 - **`[[scpp::unsafe]]` 上下文里还额外放宽了这些，但理由不一样**：`span`
   的边界检查（[§8](ch08-open-questions.md) Q1）和整数溢出检查
   （[§5.8](ch05-static-checks.md)）也会被跳过——但跟上面那些不一样，

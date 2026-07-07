@@ -253,6 +253,46 @@
     copy 构造函数或者 copy 赋值运算符共存，所以不管别不别名都没什么好
     双重释放的）——一个用户自己写的 copy 赋值运算符，如果需要，得自己
     判断 `this != &other`，跟真实 C++ 一样，scpp 不限制它能做什么。
+16. **函数指针：scpp 需不需要，safe/unsafe 怎么跟它交互？** 真实
+    C++ 的 `RetType (*)(ParamTypes...)` 到目前为止完全没设计过（见
+    [§5.10](ch05-static-checks.md) 原来那条 deferred 的注）。**已定：
+    照抄，外加一个 unsafe-qualified/不是 unsafe-qualified 的类型区分**
+    （见 [§5.16](ch05-static-checks.md#516-函数指针function-pointers)）。
+    核心风险：[§1.2](ch01-safety-context.md) 已经允许一个函数自己的
+    声明要求调用方把调用包进 `[[scpp::unsafe]] {}`——如果取这个函数的
+    地址造出来的是一个普通、不受管制的指针值，把它存进一个看起来很
+    "普通"的变量，任何调用方就能绕开 unsafe context 直接调它，函数级
+    标记整个白设。先拿真实 Rust 验证过：Rust 自己的 `fn(...)` 跟
+    `unsafe fn(...)` 指针类型正好就是这个区分（用 `rustc` 确认过：
+    在 `unsafe {}` 外面调用一个 `unsafe fn` 指针会被拒绝，报错
+    E0133；一个 safe 的 `fn` 能隐式转成 `unsafe fn` 指针类型，反过来
+    不行）。scpp 这版把标记 `[[scpp::unsafe]]` 写在指向函数的指针
+    声明符里 `*` 的后面（`int (* [[scpp::unsafe]] p)(int)`）——这是
+    真实 C++ attribute 语法本来就接受的、指针声明符上的唯一位置
+    （`T* [[attr]] p;`），拿真实 clang 验证过；另外两个候选位置试过
+    也都被否了：紧贴在 `*` 前面（MSVC 的 `__stdcall` 写的位置）压根
+    不是真实 `[[...]]` attribute 语法能接受的位置（clang："an
+    attribute list cannot appear here"），写在参数列表后面能编译过，
+    但附着的是函数类型而不是指针本身。取一个普通函数的地址，得到不是
+    unsafe-qualified 的类型；取一个标记了 `[[scpp::unsafe]]` 的函数、
+    或者一个没有函数体的 `extern "C"` 声明的地址，得到 unsafe-qualified
+    的类型——全自动，取地址那一刻不需要额外标注。转换是单向的（只能
+    从不是 unsafe-qualified 转成 unsafe-qualified），跟真实 C++17 对
+    `noexcept` 函数指针那条形状完全一样的规则一致（[conv.fctptr]：
+    一个指向 `noexcept` 函数的指针能转换成普通指针，反过来不行）。
+    通过 unsafe-qualified 的指针调用，加入
+    [§5.5](ch05-static-checks.md) 的 gated operation 清单；通过不是
+    unsafe-qualified 的指针调用是普通操作——而且因为在某个地址上调用
+    代码，跟解引用指针读数据是两个不同的操作，不管怎样都不需要
+    `[[scpp::unsafe]]`。不管哪种，函数指针都是 trivial 的，跟裸数据
+    指针待遇一样（见 [§4.1](ch04-struct-vs-class.md)）：不带编译器
+    跟踪的生命周期，不参与 move/借用跟踪，可以自由复制，能合法当
+    `struct` 成员。这也顺带解决了 [§5.10](ch05-static-checks.md) 自己
+    留的坑：`&重载名字` 现在会挑类型跟目标指向函数的指针类型精确匹配的
+    那一个重载——真实 C++ 自己那套目标类型规则，原样复用。还没有实际
+    用例逼着解决、所以往后放的：pointer-to-member-function，以及一个
+    自己返回函数指针的函数（这时候外层函数自己的前置/后置 attribute
+    位置会跟返回的指针那个位置产生歧义，需要另外消歧义）。
 
 ---
 

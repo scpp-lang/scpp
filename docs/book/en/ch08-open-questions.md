@@ -331,6 +331,57 @@
     regardless of aliasing) -- a user-written copy assignment operator
     must defensively check `this != &other` itself if it needs to,
     exactly like real C++, since scpp does not restrict what it may do.
+16. **Function pointers: does scpp need them, and how do safe/unsafe
+    interact with them?** Real C++'s `RetType (*)(ParamTypes...)` was
+    entirely undesigned until now (see [§5.10](ch05-static-checks.md)'s
+    former deferred note). **Settled: reused verbatim, plus an
+    unsafe-qualified/not-unsafe-qualified type split** (see
+    [§5.16](ch05-static-checks.md#516-function-pointers)). The core
+    risk: [§1.2](ch01-safety-context.md) already lets a function's own
+    declaration require callers to wrap the call in `[[scpp::unsafe]] {}`
+    -- if taking that function's address produced an ordinary, ungated
+    pointer value, storing it in a plain-looking variable would let any
+    caller invoke it without ever entering an unsafe context, defeating
+    the function-level marker entirely. Verified against real Rust
+    first: Rust's own `fn(...)` vs `unsafe fn(...)` pointer types are
+    exactly this split (confirmed with `rustc`: calling an `unsafe fn`
+    pointer outside `unsafe {}` is rejected, error E0133; a safe `fn`
+    implicitly coerces to the `unsafe fn` pointer type, never the
+    reverse). scpp's version spells the marker `[[scpp::unsafe]]`
+    immediately after the `*` in a pointer-to-function declarator
+    (`int (* [[scpp::unsafe]] p)(int)`) -- the one placement real C++
+    attribute grammar already accepts on a pointer declarator
+    (`T* [[attr]] p;`), verified against real clang; two alternatives
+    were tried and rejected first: immediately before the `*` (where
+    MSVC's `__stdcall` goes) is not a position real `[[...]]` attribute
+    grammar accepts at all (clang: "an attribute list cannot appear
+    here"), and after the parameter list parses but attaches to the
+    function type rather than the pointer itself. Taking the address of
+    an ordinary function yields the not-unsafe-qualified type; taking
+    the address of a function marked `[[scpp::unsafe]]`, or of a
+    bodyless `extern "C"` declaration, yields the unsafe-qualified type
+    -- automatically, with nothing to annotate at the point the address
+    is taken. Conversion is one-directional (not-unsafe-qualified →
+    unsafe-qualified only), mirroring real C++17's identically-shaped
+    rule for `noexcept` function pointers ([conv.fctptr]: a pointer to a
+    `noexcept` function converts to a plain one, never the reverse).
+    Calling through an unsafe-qualified pointer joins
+    [§5.5](ch05-static-checks.md)'s gated-operation list; calling
+    through one that isn't is an ordinary operation, and -- since
+    invoking code at an address is a distinct operation from
+    dereferencing a pointer to read data -- never needs
+    `[[scpp::unsafe]]` regardless. A function pointer of either flavor
+    is trivial, exactly like a raw data pointer (see
+    [§4.1](ch04-struct-vs-class.md)): no compiler-tracked lifetime, no
+    move/borrow tracking, freely copyable, legal as a `struct` member.
+    This also resolves [§5.10](ch05-static-checks.md)'s own deferred
+    item: `&overloaded_name` now picks the one overload whose type
+    exactly matches the target pointer-to-function type, real C++'s own
+    target-type-driven rule, reused verbatim. Deferred, with no forcing
+    use case yet: pointer-to-member-function, and a function that
+    itself returns a function pointer (the outer function's own
+    leading/trailing attribute positions would need disambiguating from
+    the returned pointer's).
 
 ---
 

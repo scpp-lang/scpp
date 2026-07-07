@@ -11,6 +11,10 @@ completely different semantics.
   - Scalar types: `bool`, integers, floats, `char`.
   - Raw pointers `T*` (carry no compiler-tracked lifetime; dereferencing
     still requires `[[scpp::unsafe]] {}`, see [§2](ch02-boundary-rules.md)).
+  - Function pointers (either the unsafe-qualified or the
+    not-unsafe-qualified pointer-to-function type, see
+    [§5.16](ch05-static-checks.md#516-function-pointers)) -- likewise
+    carry no compiler-tracked lifetime.
   - Other `struct` types that themselves satisfy this rule (recursively).
   - Fixed-size arrays of trivial types.
 - The following are **forbidden** as `struct` members and must instead be

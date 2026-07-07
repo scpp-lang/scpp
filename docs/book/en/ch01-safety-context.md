@@ -39,8 +39,10 @@ unconditionally.
   an `extern "C"` function (an `extern "C"` declaration is never itself
   checked by any scpp compiler, see [§2.1](ch02-boundary-rules.md), so
   calling one always needs the same vouching `[[scpp::unsafe]]`
-  provides for every other item on that list), and calling a function
-  that is itself declared `[[scpp::unsafe]]`.
+  provides for every other item on that list), calling a function
+  that is itself declared `[[scpp::unsafe]]`, and calling through a
+  function pointer whose type is itself `[[scpp::unsafe]]`-qualified
+  (see [§5.16](ch05-static-checks.md#516-function-pointers)).
 - **`span`'s bounds check ([§8](ch08-open-questions.md) Q1) and
   integer-overflow checking ([§5.8](ch05-static-checks.md)) are also
   relaxed inside an `[[scpp::unsafe]]` context**, for a different reason than the
@@ -184,8 +186,10 @@ unsafe context directly, with no re-wrapping required.
   `[[scpp::unsafe]]` context: raw pointer dereference/arithmetic,
   `reinterpret_cast`/ incompatible C-style casts, untagged `union` member
   access, raw `new`/`delete`, mutable global/static access, calling an
-  `extern "C"` function, and calling a function itself declared
-  `[[scpp::unsafe]]`.
+  `extern "C"` function, calling a function itself declared
+  `[[scpp::unsafe]]`, and calling through a function pointer whose type
+  is itself `[[scpp::unsafe]]`-qualified (see
+  [§5.16](ch05-static-checks.md#516-function-pointers)).
 - **Also relaxed inside an `[[scpp::unsafe]]` context, for a different reason**:
   `span`'s bounds check ([§8](ch08-open-questions.md) Q1) and
   integer-overflow checking ([§5.8](ch05-static-checks.md)) are skipped

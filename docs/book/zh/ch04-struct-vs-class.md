@@ -9,6 +9,10 @@
   - 标量类型：`bool`、整型、浮点、`char`。
   - 裸指针 `T*`（不带编译器跟踪的生命周期；解引用仍需 `[[scpp::unsafe]] {}`，见
     [§2](ch02-boundary-rules.md)）。
+  - 函数指针（不管是 unsafe-qualified 还是不是 unsafe-qualified 的
+    指向函数的指针类型，见
+    [§5.16](ch05-static-checks.md#516-函数指针function-pointers)）——
+    同样不带编译器跟踪的生命周期。
   - 其他同样满足本规则的 `struct` 类型（递归）。
   - 平凡类型的定长数组。
 - 以下类型**禁止**作为 `struct` 成员，必须改用 `class`：

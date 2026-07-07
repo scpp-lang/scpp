@@ -120,6 +120,92 @@ unsafe context 是通过 (3) 的哪种方式达成的，它都不会放宽任何
 于 (7) 的合法性规则、单独授予的许可（如果真的授予的话），是由引入
 这项检查的那个条款授予的，不是本条款授予的。——注释结束】
 
+## 5.2 函数指针类型（Function pointer types）[dcl.ptr.scpp.unsafe]
+
+(1) *attribute-namespace* `scpp` 下的 attribute-token `unsafe`，也可以施加到
+构成"指向函数的指针类型"的 `*` *ptr-operator*（[dcl.ptr]）上，通过这个
+*ptr-operator* 自己的 *attribute-specifier-seq*。不能带
+*attribute-argument-clause*。
+
+【注：这里没有引入任何新语法：[dcl.ptr] 本来就给每一个 `*` *ptr-operator*
+配了一个可选的、属于它自己的 *attribute-specifier-seq*（就像
+`int* [[maybe_unused]] p;` 那样）；本小节只是给 attribute-token `unsafe`
+在这个已经存在的语法位置上赋予含义，跟
+[§5.1](01-unsafe.md#51-attribute属性dclattrscppunsafe) 在它覆盖的那两个
+语法位置上赋予含义完全一样。——注释结束】
+
+```cpp
+int (* [[scpp::unsafe]] up)(int, int);   // 指向一个 unsafe-qualified
+                                          // 函数类型的指针
+int (*                  sp)(int, int);   // 指向一个不是 unsafe-qualified
+                                    // 的函数类型的指针——按 (2)，这跟 up
+                                    // 是不同的类型
+```
+
+(2) 一个被 attribute-token `unsafe` 附着 (1) 的、指向函数的指针类型（下称
+*unsafe-qualified* 指向函数的指针类型），和与它别的方面都相同、但没被附着的
+那个指向函数的指针类型，是两个不同的类型。
+
+【注：这跟一个 *noexcept-specifier* 对函数类型（[dcl.fct]）的效果是同一
+回事：`void(*)()` 和 `void(*)() noexcept` 同样是两个不同的类型。这两种
+情形里，两个类型中的一个都对"被指向的东西能被怎样使用"多做了一个承诺，
+而另一个没有，这个承诺被当成类型自身的一部分来跟踪。——注释结束】
+
+(3) 一个由一元 `&` 运算符施加在指代某个函数的 *id-expression* 上构成的
+表达式（[expr.unary.op]），或者一个指代某个函数、并被转换成指向函数的
+指针类型的纯右值的 *id-expression*（[conv.func]），其类型：
+
+  (3.1) 是 unsafe-qualified 的指向函数的指针类型，如果这个函数是一个被
+  含有 attribute-token `unsafe` 的 *attribute-specifier-seq* 附着
+  （[§5.1](01-unsafe.md#51-attribute属性dclattrscppunsafe) (1.2)）的函数，
+  或者是一个声明为 C 语言链接、且没有 *function-body* 的函数
+  （[dcl.link]、[dcl.fct.def.general]）；
+
+  (3.2) 否则，是不是 unsafe-qualified 的指向函数的指针类型。
+
+【注：(3.1) 的第二种情形，就是一个没有函数体的 `extern "C"` 声明；调用它
+本来就已经是一个 gated operation（
+[§5.1](01-unsafe.md#51-attribute属性dclattrscppunsafe) (5.6)）——理由是
+一样的：取它的地址不能造出一个调用者不进 unsafe context 就能调用的指向
+函数的指针类型。——注释结束】
+
+(4) 一个不是 unsafe-qualified 的、指向函数的指针类型的纯右值，可以被转换
+成与它别的方面都相同、但是 unsafe-qualified 的指向函数的指针类型的纯右值。
+反过来没有这种隐式转换。
+
+【注：这跟 [conv.fctptr] 的规则是同一回事：一个指向 `noexcept` 函数的
+指针，可以转换成一个指向与它别的方面都相同、但不是 `noexcept` 的函数的
+指针，反过来不行——转换只被允许指向"对拿着这个指针的代码承诺更少"的那个
+类型，永远不允许指向"比造出它的那个类型承诺更多"的类型。——注释结束】
+
+(5) 一个函数调用（[expr.call]），如果它的 *postfix-expression* 是一个
+unsafe-qualified 的、指向函数的指针类型的纯右值，就是一个 gated
+operation（[§3.4](00-front-matter.md#3-术语和定义terms-and-definitions)）。
+
+【注：[§5.1](01-unsafe.md#51-attribute属性dclattrscppunsafe) (5.7) 已经
+管制了一个 *postfix-expression* 按名字指代某个被 attribute-token `unsafe`
+附着的函数的函数调用；那一条本身管不到"通过从这样一个函数取到的指针去
+调用"这种情况，因为这时候 *postfix-expression* 指代的是一个指针值，不是
+函数本身。本条款补上这个缺口。——注释结束】
+
+```cpp
+[[scpp::unsafe]] int get_unchecked(int* base, int index) { return base[index]; }
+int add(int a, int b) { return a + b; }
+
+int (* [[scpp::unsafe]] up)(int*, int) = get_unchecked;   // OK：(3.1)
+int (*                  sp)(int, int)  = add;             // OK：(3.2)
+
+int (* [[scpp::unsafe]] up2)(int, int) = add;   // OK：(4)，一次放宽方向
+                                                  // 的转换
+int (*                  sp2)(int*, int) = get_unchecked;  // 不合法：(4)
+                                          // 不允许这个方向的转换
+
+int r1 = up(base, 0);                       // 不合法：(5)，safe context
+int r2;
+[[scpp::unsafe]] { r2 = up(base, 0); }      // OK：unsafe context
+int r3 = sp(1, 2);                          // OK：sp 不是 unsafe-qualified
+```
+
 ---
 
 [← 上一节：前言部分](00-front-matter.md) · [目录](README.md) · [下一节：所有权、初始化与 Move →](02-ownership-and-move.md)

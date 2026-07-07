@@ -131,6 +131,99 @@ check is a distinct permission from (7)'s well-formedness rule, granted
 (if at all) by the clause that introduces the check, not by this
 clause. — end note]
 
+## 5.2 Function pointer types [dcl.ptr.scpp.unsafe]
+
+(1) The attribute-token `unsafe`, in the *attribute-namespace* `scpp`, may
+also appertain to a `*` *ptr-operator* ([dcl.ptr]) that forms a pointer to
+function type, via that *ptr-operator*'s own *attribute-specifier-seq*. No
+*attribute-argument-clause* shall be present.
+
+[Note: this introduces no new grammar: [dcl.ptr] already gives every `*`
+*ptr-operator* an optional *attribute-specifier-seq* of its own (as in
+`int* [[maybe_unused]] p;`); this subclause gives meaning to the
+attribute-token `unsafe` in that existing grammar slot, exactly as
+[§5.1](01-unsafe.md#51-attributes-dclattrscppunsafe) gives it meaning in the
+two grammar slots that subclause covers. — end note]
+
+```cpp
+int (* [[scpp::unsafe]] up)(int, int);   // pointer to an unsafe-qualified
+                                          // function type
+int (*                  sp)(int, int);   // pointer to a function type that
+                                          // is not unsafe-qualified -- a
+                                          // different type from up's, by (2)
+```
+
+(2) A pointer-to-function type to which the attribute-token `unsafe`
+appertains (1) (an *unsafe-qualified* pointer-to-function type), and the
+otherwise-identical pointer-to-function type to which it does not, are
+distinct types.
+
+[Note: this parallels a *noexcept-specifier*'s effect on a function type
+([dcl.fct]): `void(*)()` and `void(*)() noexcept` are likewise distinct
+types. In each case, one of the two types promises something about how the
+pointee may be used that the other does not, and that promise is tracked as
+part of the type itself. — end note]
+
+(3) An expression consisting of the unary `&` operator applied to an
+*id-expression* that designates a function ([expr.unary.op]), or an
+*id-expression* designating a function converted to a prvalue of
+pointer-to-function type ([conv.func]), has:
+
+  (3.1) unsafe-qualified pointer-to-function type, if that function is one
+  to which an *attribute-specifier-seq* containing the attribute-token
+  `unsafe` appertains
+  ([§5.1](01-unsafe.md#51-attributes-dclattrscppunsafe) (1.2)), or a
+  function declared with C language linkage and no *function-body*
+  ([dcl.link], [dcl.fct.def.general]);
+
+  (3.2) pointer-to-function type that is not unsafe-qualified, otherwise.
+
+[Note: (3.1)'s second case is an `extern "C"` declaration with no body;
+calling it is already a gated operation
+([§5.1](01-unsafe.md#51-attributes-dclattrscppunsafe) (5.6)) for the same
+reason: taking its address must not produce a pointer-to-function type a
+caller could invoke without ever entering an unsafe context. — end note]
+
+(4) A prvalue of pointer-to-function type that is not unsafe-qualified can
+be converted to a prvalue of the otherwise-identical unsafe-qualified
+pointer-to-function type. There is no implicit conversion in the other
+direction.
+
+[Note: this parallels [conv.fctptr]'s rule that a pointer to a `noexcept`
+function converts to a pointer to an otherwise-identical non-`noexcept`
+function, and not the reverse: conversion is permitted only towards the
+type that promises less to the code holding the resulting pointer, never
+towards the type that promises more than what produced it. — end note]
+
+(5) A function call ([expr.call]) whose *postfix-expression* is a prvalue
+of unsafe-qualified pointer-to-function type is a gated operation
+([§3.4](00-front-matter.md#3-terms-and-definitions)).
+
+[Note: [§5.1](01-unsafe.md#51-attributes-dclattrscppunsafe) (5.7) already
+gates a function call whose *postfix-expression* denotes a function, by
+name, to which the attribute-token `unsafe` appertains; that paragraph does
+not by itself extend to a call through a pointer obtained from such a
+function, whose *postfix-expression* denotes a pointer value rather than
+the function itself. This paragraph closes that gap. — end note]
+
+```cpp
+[[scpp::unsafe]] int get_unchecked(int* base, int index) { return base[index]; }
+int add(int a, int b) { return a + b; }
+
+int (* [[scpp::unsafe]] up)(int*, int) = get_unchecked;   // OK: (3.1)
+int (*                  sp)(int, int)  = add;             // OK: (3.2)
+
+int (* [[scpp::unsafe]] up2)(int, int) = add;   // OK: (4), a widening
+                                                  // conversion
+int (*                  sp2)(int*, int) = get_unchecked;  // ill-formed: (4)
+                                    // permits no conversion in this direction
+
+int r1 = up(base, 0);                       // ill-formed: (5), a safe context
+int r2;
+[[scpp::unsafe]] { r2 = up(base, 0); }      // OK: an unsafe context
+int r3 = sp(1, 2);                          // OK: sp is not unsafe-qualified
+```
+
 ---
 
 [← Previous: Front Matter](00-front-matter.md) · [Table of Contents](README.md) · [Next: Ownership, Initialization, and Move →](02-ownership-and-move.md)
