@@ -68,15 +68,16 @@
   （[§4.1](ch04-struct-vs-class.md)）是整个类型的性质。变参泛型类型的
   存储靠递归继承实现（真实 C++ 没有能把 pack 直接展开成成员列表的
   语法）；非类型模板参数只支持标量类型。
-- **`[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`**（见
-  [§5.15](ch05-static-checks.md)）：两个 attribute，施加到一个
-  `struct`/`class` 自己的声明上时手动断言这个性质（覆盖结构化推导
-  结果），施加到一个泛型函数的参数上时约束这个参数——默认情况下的
-  计算方式跟真实 C++ 编译器内置的 type trait（比如
-  `std::is_trivially_copyable_v<T>`）一样，不是当成普通用户代码去
-  求值的。让库代码（比如一个负责创建线程的函数）能通过普通的参数
-  attribute，去要求"传给我的东西，能安全地移动/共享给另一个线程"——
-  对应 Rust 的 `Send`/`Sync`，以及它的 `unsafe impl` 逃生舱。
+- **`[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`/
+  `[[scpp::thread_movable_if(a, b)]]`**，以及内置谓词
+  `scpp::is_thread_movable(T)`/`scpp::is_thread_shareable(T)`（见
+  [§5.15](ch05-static-checks.md)）：这些 attribute 可以用来约束一个
+  泛型函数参数，或者覆盖一个 `struct`/`class` 自己推导出来的结果；那
+  两个谓词则是对类型名求值的编译器 intrinsic（写法类似
+  `__is_trivially_copyable(T)`），不是普通用户代码。让库代码（比如一个
+  负责创建线程的函数）能通过普通的参数 attribute，去要求"传给我的东西，
+  能安全地移动/共享给另一个线程"——对应 Rust 的 `Send`/`Sync`，以及它的
+  `unsafe impl` 逃生舱。
 
 **表达式 / 语句**
 - 局部变量声明与初始化。

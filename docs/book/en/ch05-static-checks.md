@@ -1041,26 +1041,39 @@ monolithically:
   above), template-template parameters, default template arguments,
   class-typed non-type template parameters, and associated types.
 
-## 5.15 Thread-Safety Structural Properties: `[[scpp::thread_movable]]` and `[[scpp::thread_shareable]]`
+## 5.15 Thread-Safety Structural Properties: `[[scpp::thread_movable]]`, `[[scpp::thread_shareable]]`, and `[[scpp::thread_movable_if(a, b)]]`
 
 Lets library code (a thread-spawning function, for instance) require,
 via an ordinary parameter attribute, that whatever it's handed is
-actually safe to use across a genuine concurrency boundary. Two
-attributes make this possible: `[[scpp::thread_movable]]` and
-`[[scpp::thread_shareable]]`. Applied to a generic function's parameter,
-either constrains that parameter's (possibly template-deduced) type to
-satisfy the corresponding property, exactly like stacking
-`[[scpp::lifetime(name)]]` on a parameter ([§5.3](#53-lifetime-groups));
-applied instead to a `struct`/`class`'s own declaration, either manually
-asserts that the property holds for that type, overriding what the
+actually safe to use across a genuine concurrency boundary. The two
+properties involved are still the same -- thread-movable and
+thread-shareable -- but scpp exposes them in three surface forms:
+
+- the parameter/type-declaration attributes `[[scpp::thread_movable]]`
+  and `[[scpp::thread_shareable]]`;
+- the conditional type-declaration attribute
+  `[[scpp::thread_movable_if(a, b)]]`; and
+- the builtin predicates `scpp::is_thread_movable(T)` and
+  `scpp::is_thread_shareable(T)`.
+
+Applied to a generic function's parameter, `[[scpp::thread_movable]]`
+or `[[scpp::thread_shareable]]` constrains that parameter's (possibly
+template-deduced) type to satisfy the corresponding property, exactly
+like stacking `[[scpp::lifetime(name)]]` on a parameter
+([§5.3](#53-lifetime-groups)). Applied instead to a `struct`/`class`'s
+own declaration, the attributes become the library author's explicit
+statement of that type's thread-safety contract, overriding what the
 structural derivation below would otherwise conclude on its own --
-mirroring Rust's `unsafe impl Send`/`unsafe impl Sync`. Neither
-attribute needs a `requires`-expression or a concept: by default (that
-is, absent the manual override), the property is computed automatically
-from a type's structure -- including members a `requires`-expression
-could never otherwise see, the same way a real C++ compiler intrinsic
-like `std::is_trivially_copyable_v<T>` is computed, not evaluated as
-ordinary user-written code.
+mirroring Rust's explicit `unsafe impl Send`/`unsafe impl Sync`.
+
+The builtin predicates are compiler intrinsics, not ordinary function
+calls: they take a **type name** in parentheses, exactly the way a real
+C++ builtin trait is written (`__is_trivially_copyable(T)`-style), and
+may appear anywhere a boolean constant-expression is allowed. For any
+type `T`, `scpp::is_thread_movable(T)` means: "the thread-movable value
+of `T` after applying any override on `T` itself, otherwise `T`'s
+structural result below"; `scpp::is_thread_shareable(T)` is defined the
+same way for the thread-shareable property.
 
 - **`[[scpp::thread_movable]]`** answers: can a value of this type be
   handed, by value, to a newly spawned thread, such that the spawning
@@ -1071,7 +1084,7 @@ ordinary user-written code.
 - **Structural derivation** (the default, absent a manual override on
   the type itself), computed recursively:
   - Every scalar type: both properties hold.
-  - A type containing a reference member (`T&`/`const T&` -- whether an
+  - A type containing a reference member (`T&`/`const T&`/`T&&` -- whether an
     ordinary `class` field or a by-reference closure capture, see
     [§5.12](#512-closures-lambda-expressions)) is never thread-movable
     -- moving such a value to another thread does not transfer the
@@ -1091,17 +1104,6 @@ ordinary user-written code.
     its own ([§5.5](#55-prohibited-unless-in-scppunsafe)); vouch by
     wrapping it in a `struct`/`class` marked `[[scpp::thread_movable]]`/
     `[[scpp::thread_shareable]]`, below.
-  - `std::unique_ptr<T>`: thread-movable/thread-shareable each follow
-    `T`'s own, independently (mirrors `Box<T>`: unique ownership means
-    handing the whole `unique_ptr` to another thread transfers
-    exclusive access to the pointee along with it).
-  - `std::shared_ptr<T>`: thread-movable and thread-shareable, for the
-    `shared_ptr` itself, both require `T` to be **both** thread-movable
-    and thread-shareable (mirrors `Arc<T>`: moving one `shared_ptr`
-    handle to another thread does not revoke access from any other
-    surviving handle, so the pointee is inherently already shared the
-    moment more than one handle exists, regardless of which specific
-    handle physically moved).
   - A closure ([§5.12](#512-closures-lambda-expressions)): thread-movable
     if and only if it has no by-reference capture at all (see above) and
     every by-value-captured member's type is itself thread-movable.
@@ -1127,6 +1129,67 @@ ordinary user-written code.
   and is the only way to make a type whose structure the compiler cannot
   verify on its own (most commonly, one containing a raw pointer)
   participate in either property at all.
+- **Conditional override on a type declaration**: a (typically generic)
+  `class` may instead declare
+  `[[scpp::thread_movable_if(a, b)]]`, where `a` and `b` are boolean
+  constant-expressions evaluated separately for each instantiation. The
+  first argument becomes the type's own thread-movable value; the second
+  becomes its own thread-shareable value. Together they replace, for that
+  instantiation of that type, whatever the structural derivation above
+  would otherwise have concluded from the type's fields alone. The usual
+  way to write such conditions is in terms of the builtin predicates on
+  the type's parameters:
+  ```cpp
+  template<typename T>
+  class [[scpp::thread_movable_if(
+      scpp::is_thread_movable(T),
+      scpp::is_thread_shareable(T)
+  )]] MyOwningBox {
+      T* ptr;
+  };
+  ```
+  This is the general mechanism for expressing "my internal representation
+  contains pieces (for example raw pointers) whose bare structure is not
+  enough for the compiler to infer the real concurrency invariant, but I,
+  the type author, can state that invariant explicitly."
+- **`std::unique_ptr<T>` is one worked example of that general mechanism.**
+  Its implementation may explicitly say:
+  ```cpp
+  template<typename T>
+  class [[scpp::thread_movable_if(
+      scpp::is_thread_movable(T),
+      scpp::is_thread_shareable(T)
+  )]] unique_ptr {
+      // ...
+  };
+  ```
+  This is **not** a compiler-hardcoded exception for the library type
+  name `std::unique_ptr`. It is ordinary library code using the same
+  attribute any user-defined owning box can use. The point of the
+  override is that `unique_ptr`'s raw-pointer field, viewed by structure
+  alone, is indistinguishable from an arbitrary aliased pointer; the
+  library author is explicitly vouching for the stronger invariant that
+  this pointer is the unique owner, so handing the whole `unique_ptr` to
+  another thread transfers that exclusive access as well. This mirrors
+  Rust's explicit conditional `Send`/`Sync` impls for uniquely owned heap
+  pointers.
+- **`std::shared_ptr<T>` is another worked example, but with a conjunctive
+  rule rather than independent forwarding.** Its declaration may say:
+  ```cpp
+  template<typename T>
+  class [[scpp::thread_movable_if(
+      scpp::is_thread_movable(T) && scpp::is_thread_shareable(T),
+      scpp::is_thread_movable(T) && scpp::is_thread_shareable(T)
+  )]] shared_ptr {
+      // ...
+  };
+  ```
+  Again, this is an ordinary library declaration using the general
+  override mechanism, not a magic compiler rule for one specific type
+  name. The conjunction matters: moving one `shared_ptr` handle to
+  another thread does **not** revoke access through any other surviving
+  handle, so the pointee must already be safe both to move across a
+  thread boundary and to be shared across one.
 - **Constraining a parameter**: a thread-spawning function attaches
   either attribute directly to its closure parameter, exactly like
   attaching `[[scpp::lifetime(name)]]`:

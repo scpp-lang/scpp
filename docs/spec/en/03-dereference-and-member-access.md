@@ -53,4 +53,4 @@ int f(Box& b) {
 
 ---
 
-[← Previous: Ownership, Initialization, and Move](02-ownership-and-move.md) · [Table of Contents](README.md)
+[← Previous: Ownership, Initialization, and Move](02-ownership-and-move.md) · [Table of Contents](README.md) · [Next: Thread-Safety Properties →](04-thread-safety-properties.md)
