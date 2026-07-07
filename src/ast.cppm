@@ -244,8 +244,15 @@ enum class ExprKind {
     Call,
     Member,
     Subscript,
+    New,        // `new T` / `new T(args...)` -- raw heap allocation, gated by
+                // `[[scpp::unsafe]]`, returning `T*` (spec §5.1(5.4)).
+    Delete,     // `delete expr` -- destroys the pointed-to object (if any) and
+                // frees its storage; also gated by `[[scpp::unsafe]]`.
     Move,       // std::move(x) -- compiler builtin move hint, not an ordinary call
     MakeUnique, // std::make_unique<T>(args...) -- compiler builtin heap allocation
+    PackExpansion, // `expr...` in a generic function body, currently only
+                   // meaningful inside a call/new/constructor argument list
+                   // before monomorphization expands it to concrete args.
     Lambda,     // `[captures](params) { body }` (ch05 §5.12) -- desugars to
                 // constructing an anonymous, compiler-synthesized class; see
                 // Expr's own lambda_* fields below.
@@ -358,7 +365,8 @@ struct Expr {
     // Unary (operand stored in `lhs`)
     UnaryOp unary_op{};
 
-    // Call arguments / MakeUnique constructor arguments
+    // Call arguments / New constructor arguments / MakeUnique constructor
+    // arguments
     std::vector<ExprPtr> args;
 
     // ch05 §5.11/§5.14: Call only -- non-empty only for a call to a
@@ -370,12 +378,18 @@ struct Expr {
     // entirely by argument-position deduction).
     std::vector<ExplicitTemplateArg> explicit_template_args;
 
-    // MakeUnique: the allocated element type `T` in `make_unique<T>(...)`.
+    // New / MakeUnique: the allocated element type `T` in `new T...` /
+    // `make_unique<T>(...)`.
     // Lambda: the explicit trailing return type (`-> Type`), only
     // meaningful when has_lambda_explicit_return_type is true.
     // Cast: the target type `T` in `static_cast<T>(expr)`/`(T)expr`
     // (operand stored in `lhs`, like Unary).
     Type type;
+    // New only: distinguishes `new T` (false) from `new T(...)` (true,
+    // including the explicit-empty `new T()` form) so codegen can mirror
+    // local-construction syntax's own "bare declaration vs explicit ctor
+    // call" distinction.
+    bool has_paren_init = false;
 
     // Member: object stored in `lhs`, field name in `name`.
     // Subscript: array/collection stored in `lhs`, index expr in `rhs`.

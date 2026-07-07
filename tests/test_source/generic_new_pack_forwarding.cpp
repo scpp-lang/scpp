@@ -1,0 +1,25 @@
+class Pair {
+public:
+    Pair(int x, int y) { this.x = x; this.y = y; return; }
+    ~Pair() { print_int(this.x + this.y); return; }
+    int sum() { return this.x + this.y; }
+private:
+    int x;
+    int y;
+};
+
+template<typename T, typename... Args>
+T* make_it(Args... args) {
+    [[scpp::unsafe]] {
+        return new T(args...);
+    }
+}
+
+int main() {
+    [[scpp::unsafe]] {
+        Pair* p = make_it<Pair>(3, 4);
+        print_int(p->sum());
+        delete p;
+    }
+    return 0;
+}

@@ -68,6 +68,8 @@ enum class TokenKind {
     KwElse,
     KwWhile,
     KwFor,
+    KwNew,
+    KwDelete,
     KwExtern,
     KwTrue,
     KwFalse,
@@ -129,7 +131,8 @@ enum class TokenKind {
     Semicolon,
     Comma,
     Dot,
-    Ellipsis, // `...` -- extern "C" variadic parameter marker only (ch02 §2.1)
+    Ellipsis, // `...` -- variadic parameter marker, fold-expression token, or
+              // pack expansion marker, depending on parser context.
     ColonColon,
     Colon, // `:` -- class access-specifier sections (`public:`/`private:`,
            // ch04 §4.2) only, in this version.
@@ -242,6 +245,8 @@ private:
         if (text == "else") return TokenKind::KwElse;
         if (text == "while") return TokenKind::KwWhile;
         if (text == "for") return TokenKind::KwFor;
+        if (text == "new") return TokenKind::KwNew;
+        if (text == "delete") return TokenKind::KwDelete;
         if (text == "extern") return TokenKind::KwExtern;
         if (text == "true") return TokenKind::KwTrue;
         if (text == "false") return TokenKind::KwFalse;

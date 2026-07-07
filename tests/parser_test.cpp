@@ -755,6 +755,64 @@ void test_make_unique_of_struct_type() {
     expect(is_named_type(decl.init->type, "Point"), "make_unique_of_struct_type: element type should be 'Point'");
 }
 
+void test_new_and_delete_parse() {
+    scpp::Program program = scpp::parse(
+        "int f() { [[scpp::unsafe]] { int* p = new int(7); delete p; } return 0; }");
+    const scpp::Stmt& unsafe_block = *program.functions[0].body->statements[0];
+    expect(unsafe_block.kind == scpp::StmtKind::Block && unsafe_block.is_unsafe,
+           "new_and_delete_parse: first statement should be an unsafe block");
+    expect(unsafe_block.statements.size() == 2, "new_and_delete_parse: unsafe block should have 2 statements");
+    const scpp::Stmt& decl = *unsafe_block.statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "new_and_delete_parse: statement 0 should be VarDecl");
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::New,
+           "new_and_delete_parse: initializer should be a New expression");
+    expect(is_named_type(decl.init->type, "int"), "new_and_delete_parse: new element type should be 'int'");
+    expect(decl.init->has_paren_init, "new_and_delete_parse: new int(7) should record paren-init");
+    expect(decl.init->args.size() == 1 && decl.init->args[0]->kind == scpp::ExprKind::IntegerLiteral &&
+               decl.init->args[0]->int_value == 7,
+           "new_and_delete_parse: expected a single IntegerLiteral ctor arg");
+    const scpp::Stmt& del = *unsafe_block.statements[1];
+    expect(del.kind == scpp::StmtKind::ExprStmt, "new_and_delete_parse: statement 1 should be ExprStmt");
+    expect(del.expr != nullptr && del.expr->kind == scpp::ExprKind::Delete,
+           "new_and_delete_parse: expr should be a Delete expression");
+    expect(del.expr->lhs != nullptr && del.expr->lhs->kind == scpp::ExprKind::Identifier && del.expr->lhs->name == "p",
+           "new_and_delete_parse: delete operand should be identifier 'p'");
+}
+
+void test_full_header_parameter_pack_and_new_pack_expansion_parse() {
+    scpp::Program program = scpp::parse(
+        "template<typename T, typename... Args>\n"
+        "T* make_it(Args... args) { [[scpp::unsafe]] { return new T(args...); } }\n");
+    expect(program.functions.size() == 1,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: expected 1 function");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.template_params.size() == 2,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: expected 2 template params");
+    expect(fn.template_params[1].is_pack,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: Args should be a pack");
+    expect(fn.params.size() == 1 && fn.params[0].is_parameter_pack,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: parameter should be a pack");
+    expect(fn.params[0].name == "args",
+           "full_header_parameter_pack_and_new_pack_expansion_parse: parameter name should be 'args'");
+    expect(fn.body->statements.size() == 1,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: expected 1 top-level statement");
+    const scpp::Stmt& unsafe_block = *fn.body->statements[0];
+    expect(unsafe_block.kind == scpp::StmtKind::Block && unsafe_block.is_unsafe,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: statement should be an unsafe block");
+    expect(unsafe_block.statements.size() == 1 && unsafe_block.statements[0]->kind == scpp::StmtKind::Return,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: unsafe block should contain a Return");
+    const scpp::Stmt& ret = *unsafe_block.statements[0];
+    expect(ret.expr != nullptr && ret.expr->kind == scpp::ExprKind::New,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: return expr should be New");
+    expect(is_named_type(ret.expr->type, "T"),
+           "full_header_parameter_pack_and_new_pack_expansion_parse: new element type should be 'T'");
+    expect(ret.expr->args.size() == 1 && ret.expr->args[0]->kind == scpp::ExprKind::PackExpansion,
+           "full_header_parameter_pack_and_new_pack_expansion_parse: ctor arg should be PackExpansion");
+    expect(ret.expr->args[0]->lhs != nullptr && ret.expr->args[0]->lhs->kind == scpp::ExprKind::Identifier &&
+               ret.expr->args[0]->lhs->name == "args",
+           "full_header_parameter_pack_and_new_pack_expansion_parse: pack expansion should expand 'args'");
+}
+
 void test_extern_c_single_declaration() {
     // ch02 §2.1: a bodyless `extern "C"` declaration.
     scpp::Program program = scpp::parse("extern \"C\" int c_abs(int n); int main() { return 0; }");
@@ -2479,6 +2537,7 @@ int main() {
     test_make_unique_zero_args();
     test_make_unique_with_arg();
     test_make_unique_of_struct_type();
+    test_new_and_delete_parse();
     test_extern_c_single_declaration();
     test_extern_c_block_form();
     test_extern_c_definition_is_checked_like_any_function();
@@ -2567,6 +2626,7 @@ int main() {
     test_variadic_specialization_without_primary_is_rejected();
     test_generic_function_full_header_form_parses();
     test_generic_function_multiple_type_params_parses();
+    test_full_header_parameter_pack_and_new_pack_expansion_parse();
     test_abbreviated_generic_parameter_pack_and_fold_parse();
     test_explicit_type_template_argument_call_parses();
     test_explicit_non_type_template_argument_call_parses();

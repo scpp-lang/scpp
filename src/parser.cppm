@@ -210,6 +210,12 @@ private:
     // operators, the classic ambiguity) and to know, for each argument
     // position, whether to parse a type or a non-type expression.
     std::unordered_map<std::string, std::vector<GenericTypeParam>> generic_function_template_params_;
+    // Non-empty only while parsing one full-header-form generic function's
+    // signature/body (`template<...> ReturnType name(...) { ... }`). Lets the
+    // ordinary parameter parser recognize `Args... args` as a real template
+    // parameter pack rather than rejecting every non-concept pack as the
+    // abbreviated-generic-only form.
+    std::vector<GenericTypeParam> current_function_template_params_;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -291,6 +297,19 @@ private:
     [[nodiscard]] const Token& peek_at(size_t offset) const {
         size_t idx = pos_ + offset;
         return idx < tokens_.size() ? tokens_[idx] : tokens_.back();
+    }
+
+    [[nodiscard]] std::optional<std::string> referenced_pack_type_param_name(const Type& type) const {
+        const Type* current = &type;
+        if (current->kind == TypeKind::Reference && current->pointee) current = current->pointee.get();
+        if (current->kind != TypeKind::Named || !current->template_args.empty() || !current->non_type_args.empty()) {
+            return std::nullopt;
+        }
+        for (const GenericTypeParam& param : current_function_template_params_) {
+            if (!param.is_pack || param.is_non_type) continue;
+            if (param.name == current->name) return param.name;
+        }
+        return std::nullopt;
     }
 
     // ch05 §5.14: given the offset of a `<` (e.g. a `template<...>`
@@ -1591,7 +1610,8 @@ private:
                 Param param;
                 Type base_type = parse_param_type(param.generic_concept);
                 param.is_parameter_pack = match(TokenKind::Ellipsis);
-                if (param.is_parameter_pack && param.generic_concept.empty()) {
+                if (param.is_parameter_pack && param.generic_concept.empty() &&
+                    !referenced_pack_type_param_name(base_type).has_value()) {
                     const Token& tok = peek();
                     throw ParseError(tok.line, tok.column,
                                       "parameter packs are only supported for the abbreviated generic form "
@@ -1912,7 +1932,10 @@ private:
             class_names_.insert(p.name);
         }
 
+        std::vector<GenericTypeParam> saved_template_params = current_function_template_params_;
+        current_function_template_params_ = template_params;
         Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe);
+        current_function_template_params_ = std::move(saved_template_params);
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
@@ -2656,7 +2679,8 @@ private:
                 Param param;
                 Type base_type = parse_param_type(param.generic_concept);
                 param.is_parameter_pack = match(TokenKind::Ellipsis);
-                if (param.is_parameter_pack && param.generic_concept.empty()) {
+                if (param.is_parameter_pack && param.generic_concept.empty() &&
+                    !referenced_pack_type_param_name(base_type).has_value()) {
                     const Token& tok = peek();
                     throw ParseError(tok.line, tok.column,
                                       "parameter packs are only supported for the abbreviated generic form "
@@ -3074,6 +3098,19 @@ private:
             node->lhs = parse_unary();
             return node;
         }
+        if (match(TokenKind::KwDelete)) {
+            if (match(TokenKind::LBracket)) {
+                expect(TokenKind::RBracket, "']' after 'delete['");
+                throw ParseError(loc.line, loc.column,
+                                  "'delete[]' is not supported in this version yet; only scalar/object 'delete "
+                                  "expr' is implemented");
+            }
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Delete;
+            node->loc = loc;
+            node->lhs = parse_unary();
+            return node;
+        }
         if (match(TokenKind::Amp)) {
             // `&expr` (address-of, ch05 §5.7) -- unlike `*`, `Amp` never
             // doubles as a binary operator in scpp (there is no bitwise
@@ -3133,6 +3170,12 @@ private:
                 node->loc = expr->loc;
                 node->lhs = std::move(expr);
                 node->rhs = std::move(index);
+                expr = std::move(node);
+            } else if (match(TokenKind::Ellipsis)) {
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::PackExpansion;
+                node->loc = expr->loc;
+                node->lhs = std::move(expr);
                 expr = std::move(node);
             } else if (check(TokenKind::LParen)) {
                 advance(); // '('
@@ -3334,6 +3377,30 @@ private:
                 } while (match(TokenKind::Comma));
             }
             expect(TokenKind::RParen, "')'");
+            return node;
+        }
+
+        if (match(TokenKind::KwNew)) {
+            Type element_type = parse_type();
+            if (match(TokenKind::LBracket)) {
+                expect(TokenKind::RBracket, "']' after 'new T['");
+                throw ParseError(loc.line, loc.column,
+                                  "'new T[n]' is not supported in this version yet; only scalar/object 'new T' "
+                                  "and 'new T(args...)' are implemented");
+            }
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::New;
+            node->loc = loc;
+            node->type = std::move(element_type);
+            if (match(TokenKind::LParen)) {
+                node->has_paren_init = true;
+                if (!check(TokenKind::RParen)) {
+                    do {
+                        node->args.push_back(parse_expr());
+                    } while (match(TokenKind::Comma));
+                }
+                expect(TokenKind::RParen, "')'");
+            }
             return node;
         }
 

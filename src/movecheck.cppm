@@ -1204,6 +1204,7 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
     switch (expr.kind) {
         case ExprKind::Move:
         case ExprKind::MakeUnique:
+        case ExprKind::New:
         case ExprKind::IntegerLiteral:
         case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
@@ -1294,6 +1295,17 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
             return result;
         }
 
+        case ExprKind::New: {
+            Type result;
+            result.kind = TypeKind::Pointer;
+            result.pointee = std::make_shared<Type>(expr.type);
+            result.is_mutable_pointee = true;
+            return result;
+        }
+
+        case ExprKind::Delete:
+            return Type{.kind = TypeKind::Named, .name = "void"};
+
         // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): the cast's own
         // declared target type, unconditionally -- see codegen's
         // identical infer_type case.
@@ -1383,6 +1395,9 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             return sig == nullptr ? std::nullopt : std::optional<Type>(sig->return_type);
         }
+
+        case ExprKind::PackExpansion:
+            return std::nullopt;
 
         case ExprKind::Member:
         case ExprKind::Subscript:
@@ -1626,6 +1641,13 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::BoolLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
+            return;
+        case ExprKind::New:
+            for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
+            return;
+        case ExprKind::Delete:
+        case ExprKind::PackExpansion:
+            collect_reference_uses(expr->lhs.get(), body, out);
             return;
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr->name);
@@ -2707,6 +2729,31 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             return;
 
+        case ExprKind::New:
+            if (report_errors && state.unsafe_depth == 0) {
+                throw DataflowError("cannot use 'new' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
+                                    state.current_loc);
+            }
+            for (const auto& arg : expr.args) {
+                apply_expr(*arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            }
+            return;
+
+        case ExprKind::Delete:
+            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (report_errors && state.unsafe_depth == 0) {
+                throw DataflowError("cannot use 'delete' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
+                                    state.current_loc);
+            }
+            if (report_errors) {
+                std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
+                if (!operand_type.has_value() || operand_type->kind != TypeKind::Pointer) {
+                    throw DataflowError("'delete' requires a raw pointer operand in this version",
+                                        state.current_loc);
+                }
+            }
+            return;
+
         case ExprKind::Fold:
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             if (expr.rhs) apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
@@ -2887,6 +2934,13 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             // are ordinary values, checked as plain reads.
             for (const auto& arg : expr.args) {
                 apply_expr(*arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            }
+            return;
+
+        case ExprKind::PackExpansion:
+            if (report_errors) {
+                throw DataflowError("unexpanded parameter-pack expression reached move checking",
+                                    state.current_loc);
             }
             return;
 
@@ -3693,6 +3747,7 @@ ExprPtr clone_expr(const Expr& expr) {
         clone->explicit_template_args.push_back(std::move(cloned_arg));
     }
     clone->type = expr.type;
+    clone->has_paren_init = expr.has_paren_init;
     clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
     return clone;
 }
@@ -4274,6 +4329,28 @@ private:
             result.element = std::make_shared<Type>(substitute_type_param(*result.element, param_name, replacement));
         }
         return result;
+    }
+
+    [[nodiscard]] static std::optional<std::string>
+    referenced_type_pack_param_name(const Type& type, const std::vector<GenericTypeParam>& template_params) {
+        if (type.kind == TypeKind::Named) {
+            for (const GenericTypeParam& tp : template_params) {
+                if (tp.is_pack && !tp.is_non_type && tp.name == type.name) return tp.name;
+            }
+        }
+        if (type.pointee) {
+            if (std::optional<std::string> found =
+                    referenced_type_pack_param_name(*type.pointee, template_params)) {
+                return found;
+            }
+        }
+        if (type.element) {
+            if (std::optional<std::string> found =
+                    referenced_type_pack_param_name(*type.element, template_params)) {
+                return found;
+            }
+        }
+        return std::nullopt;
     }
 
     // ch05 §5.14: applies substitute_type_param to every Type appearing
@@ -5557,6 +5634,7 @@ private:
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
         std::vector<std::pair<size_t, Type>> upcasts;
+        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
 
         for (size_t p = 0; p < expr.explicit_template_args.size() && p < tmpl.template_params.size(); p++) {
             const GenericTypeParam& tp = tmpl.template_params[p];
@@ -5578,7 +5656,22 @@ private:
             }
         }
 
-        for (size_t i = 0; i < tmpl.params.size() && i < expr.args.size(); i++) {
+        size_t arg_cursor = 0;
+        for (size_t i = 0; i < tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
+            if (tmpl.params[i].is_parameter_pack) {
+                std::optional<std::string> pack_type_name =
+                    referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
+                for (; arg_cursor < expr.args.size(); arg_cursor++) {
+                    std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+                    if (!arg_type.has_value()) continue;
+                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    Type substituted = pack_type_name.has_value()
+                                           ? substitute_type_param(tmpl.params[i].type, *pack_type_name, named)
+                                           : tmpl.params[i].type;
+                    concrete_pack_param_types[i].push_back(std::move(substituted));
+                }
+                continue;
+            }
             const Type& param_type = tmpl.params[i].type;
             const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
             if (underlying.kind != TypeKind::Named) continue;
@@ -5588,18 +5681,20 @@ private:
                 // this template's own type parameters (e.g. "T x").
                 for (const GenericTypeParam& tp : tmpl.template_params) {
                     if (tp.is_non_type || tp.name != underlying.name || type_bindings.contains(tp.name)) continue;
-                    std::optional<Type> arg_type = infer_expr_type(*expr.args[i], body, signatures_);
+                    std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) continue;
                     Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
                     type_bindings[tp.name] = named;
                 }
+                arg_cursor++;
                 continue;
             }
             // Case B: a base-class-deduction pattern (e.g.
             // "TupleImpl<I, Head, Tail...>& t").
             if (variadic_generic_type_names_.contains(underlying.name)) {
-                deduce_via_base_class_chain(expr, i, underlying, body, type_bindings, value_bindings, upcasts);
+                deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings, upcasts);
             }
+            arg_cursor++;
         }
 
         for (const GenericTypeParam& tp : tmpl.template_params) {
@@ -5629,9 +5724,13 @@ private:
 
         std::string cache_key = tmpl.name;
         for (const GenericTypeParam& tp : tmpl.template_params) {
-            if (tp.is_pack) continue; // never individually bound -- see the validation loop's own comment above
+            if (tp.is_pack) continue; // bound via concrete_pack_param_types below
             cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings[tp.name]))
                                         : ("." + mangle_type_for_clone_name(type_bindings[tp.name]));
+        }
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            if (!tmpl.params[i].is_parameter_pack) continue;
+            for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
         }
         auto cached = generic_function_clone_cache_.find(cache_key);
         if (cached == generic_function_clone_cache_.end()) {
@@ -5648,7 +5747,19 @@ private:
                 clone.return_type = substitute_type_param(clone.return_type, name, replacement);
             }
             clone.params.reserve(tmpl.params.size());
+            std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
             for (size_t i = 0; i < tmpl.params.size(); i++) {
+                if (tmpl.params[i].is_parameter_pack) {
+                    pack_param_names[tmpl.params[i].name] = {};
+                    for (size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
+                        Param p;
+                        p.name = tmpl.params[i].name + "$" + std::to_string(j);
+                        p.type = concrete_pack_param_types[i][j];
+                        clone.params.push_back(std::move(p));
+                        pack_param_names[tmpl.params[i].name].push_back(tmpl.params[i].name + "$" + std::to_string(j));
+                    }
+                    continue;
+                }
                 Param p;
                 p.name = tmpl.params[i].name;
                 p.type = tmpl.params[i].type;
@@ -5674,6 +5785,10 @@ private:
             if (clone.body) {
                 for (const auto& [name, replacement] : type_bindings) {
                     substitute_type_param_in_stmt(*clone.body, name, replacement);
+                }
+                for (const auto& [pack_name, concrete_names] : pack_param_names) {
+                    expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names);
+                    expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
                 }
             }
             program_.functions.push_back(std::move(clone));
@@ -6464,6 +6579,44 @@ private:
         return result;
     }
 
+    [[nodiscard]] std::vector<ExprPtr> expand_pack_argument(const Expr& expr, const std::string& pack_name,
+                                                            const std::vector<std::string>& concrete_names) {
+        if (expr.kind != ExprKind::PackExpansion || expr.lhs == nullptr) {
+            std::vector<ExprPtr> single;
+            single.push_back(clone_expr(expr));
+            return single;
+        }
+        if (!expr_mentions_identifier(*expr.lhs, pack_name)) {
+            throw DataflowError("pack expansion does not mention parameter pack '" + pack_name + "'", expr.loc);
+        }
+        std::vector<ExprPtr> expanded;
+        expanded.reserve(concrete_names.size());
+        for (const std::string& concrete_name : concrete_names) {
+            ExprPtr arg = instantiate_pack_operand(*expr.lhs, pack_name, concrete_name);
+            expanded.push_back(std::move(arg));
+        }
+        return expanded;
+    }
+
+    void expand_pack_expansions_in_expr(Expr& expr, const std::string& pack_name,
+                                        const std::vector<std::string>& concrete_names) {
+        if (expr.lhs) expand_pack_expansions_in_expr(*expr.lhs, pack_name, concrete_names);
+        if (expr.rhs) expand_pack_expansions_in_expr(*expr.rhs, pack_name, concrete_names);
+        for (ExprPtr& arg : expr.args) expand_pack_expansions_in_expr(*arg, pack_name, concrete_names);
+        if (!expr.args.empty()) {
+            std::vector<ExprPtr> expanded_args;
+            for (ExprPtr& arg : expr.args) {
+                std::vector<ExprPtr> expanded = expand_pack_argument(*arg, pack_name, concrete_names);
+                for (ExprPtr& item : expanded) expanded_args.push_back(std::move(item));
+            }
+            expr.args = std::move(expanded_args);
+        }
+        for (LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init) expand_pack_expansions_in_expr(*capture.init, pack_name, concrete_names);
+        }
+        if (expr.lambda_body) expand_pack_expansions_in_stmt(*expr.lambda_body, pack_name, concrete_names);
+    }
+
     void expand_pack_folds_in_expr(Expr& expr, const std::string& pack_name, const std::vector<std::string>& concrete_names) {
         if (expr.kind == ExprKind::Fold &&
             (expr_mentions_identifier(expr, pack_name) ||
@@ -6501,6 +6654,40 @@ private:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) expand_pack_folds_in_stmt(*s, pack_name, concrete_names);
+                return;
+        }
+    }
+
+    void expand_pack_expansions_in_stmt(Stmt& stmt, const std::string& pack_name,
+                                        const std::vector<std::string>& concrete_names) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                if (stmt.init) expand_pack_expansions_in_expr(*stmt.init, pack_name, concrete_names);
+                if (!stmt.ctor_args.empty()) {
+                    for (ExprPtr& arg : stmt.ctor_args) expand_pack_expansions_in_expr(*arg, pack_name, concrete_names);
+                    std::vector<ExprPtr> expanded_args;
+                    for (ExprPtr& arg : stmt.ctor_args) {
+                        std::vector<ExprPtr> expanded = expand_pack_argument(*arg, pack_name, concrete_names);
+                        for (ExprPtr& item : expanded) expanded_args.push_back(std::move(item));
+                    }
+                    stmt.ctor_args = std::move(expanded_args);
+                }
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) expand_pack_expansions_in_expr(*stmt.expr, pack_name, concrete_names);
+                return;
+            case StmtKind::If:
+                expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
+                expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names);
+                if (stmt.else_branch) expand_pack_expansions_in_stmt(*stmt.else_branch, pack_name, concrete_names);
+                return;
+            case StmtKind::While:
+                expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
+                expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names);
+                return;
+            case StmtKind::Block:
+                for (StmtPtr& s : stmt.statements) expand_pack_expansions_in_stmt(*s, pack_name, concrete_names);
                 return;
         }
     }
