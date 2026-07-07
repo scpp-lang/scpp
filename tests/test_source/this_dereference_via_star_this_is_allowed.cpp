@@ -1,0 +1,16 @@
+class Widget {
+public:
+    Widget(int v) {
+        this->val = v;
+        return;
+    }
+    int get() const {
+        return (*this).val;
+    }
+    int val;
+};
+
+int main() {
+    Widget a(9);
+    return a.get();
+}

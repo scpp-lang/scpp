@@ -415,8 +415,12 @@ private:
                     }
                     case UnaryOp::Deref: {
                         std::optional<Type> operand = infer_type(*expr.lhs);
-                        if (!operand ||
-                            (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer)) {
+                        if (!operand) return std::nullopt;
+                        if (expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this" &&
+                            operand->kind == TypeKind::Reference && operand->pointee) {
+                            return *operand->pointee;
+                        }
+                        if (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer) {
                             return std::nullopt;
                         }
                         return *operand->pointee;
@@ -3021,6 +3025,15 @@ private:
                 if (expr.unary_op != UnaryOp::Deref) {
                     throw CodegenError("expression is not assignable",
                         current_loc_);
+                }
+                if (expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this") {
+                    // parser/movecheck model `this` as a reference-typed
+                    // pseudo-parameter, but ch05 §5.9 keeps the real-C++
+                    // `(*this).x` spelling valid at expression level. That
+                    // makes `*this` just an explicit spelling of the same
+                    // referent codegen_lvalue(Identifier "this") already
+                    // resolves.
+                    return codegen_lvalue(*expr.lhs);
                 }
                 LValue operand = codegen_lvalue(*expr.lhs);
                 if (operand.type.kind != TypeKind::UniquePtr && operand.type.kind != TypeKind::Pointer) {

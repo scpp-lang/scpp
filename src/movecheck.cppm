@@ -344,6 +344,10 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
+[[nodiscard]] bool is_explicit_star_this(const Expr& expr) {
+    return expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr &&
+           expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this";
+}
 
 // ch06 §6: the complete scalar/numeric family a `static_cast<T>(expr)`/
 // `(T)expr` may legally convert between (ExprKind::Cast's own apply_expr
@@ -578,6 +582,9 @@ struct CalleeSignature {
         std::string class_name;
         if (call_expr.lhs->kind == ExprKind::Identifier) {
             auto type_it = body.local_types.find(call_expr.lhs->name);
+            if (type_it != body.local_types.end()) class_name = named_type_name(type_it->second);
+        } else if (is_explicit_star_this(*call_expr.lhs)) {
+            auto type_it = body.local_types.find("this");
             if (type_it != body.local_types.end()) class_name = named_type_name(type_it->second);
         } else if (call_expr.lhs->kind == ExprKind::Lambda && !call_expr.lhs->name.empty()) {
             class_name = call_expr.lhs->name;
@@ -920,8 +927,11 @@ struct CalleeSignature {
             // so it's never read-only through this path.
             if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
             auto it = body.local_types.find(expr.lhs->name);
-            return it != body.local_types.end() && it->second.kind == TypeKind::Pointer &&
-                   !it->second.is_mutable_pointee;
+            if (it == body.local_types.end()) return false;
+            if (expr.lhs->name == "this" && it->second.kind == TypeKind::Reference) {
+                return !it->second.is_mutable_ref;
+            }
+            return it->second.kind == TypeKind::Pointer && !it->second.is_mutable_pointee;
         }
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body);
@@ -983,6 +993,7 @@ struct CalleeSignature {
         case ExprKind::Subscript:
             return direct_write_root(*expr.lhs, body);
         case ExprKind::Unary:
+            if (is_explicit_star_this(expr)) return "this";
             if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) {
                 return std::nullopt;
             }
@@ -1157,7 +1168,11 @@ struct CalleeSignature {
                 }
                 case UnaryOp::Deref: {
                     std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
-                    if (!operand || (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer)) {
+                    if (!operand) return std::nullopt;
+                    if (is_explicit_star_this(expr) && operand->kind == TypeKind::Reference && operand->pointee) {
+                        return *operand->pointee;
+                    }
+                    if (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer) {
                         return std::nullopt;
                     }
                     return *operand->pointee;
@@ -1207,18 +1222,27 @@ struct CalleeSignature {
 }
 
 // Resolves a `base.field` Member expression's own declared field type --
-// `base` must be a plain Identifier naming a struct/class-typed local or
-// parameter (covers `this.field`, ch05 §5.12's rewritten captured-name
-// access, as well as an ordinary `obj.field`); anything else (a nested
-// `a.b.c`, `arr[i].field`, ...) returns nullopt, left unsupported for now
-// -- see DataflowState::class_field_types' own comment for why this
-// lookup is possible at all despite movecheck's otherwise Body-only
-// (no Program access) architecture.
+// `base` must be either a plain Identifier naming a struct/class-typed
+// local or parameter (covers `this.field`, ch05 §5.12's rewritten
+// captured-name access, as well as an ordinary `obj.field`) or the
+// equivalent explicit `*this` spelling (`(*this).field`, ch05 §5.9).
+// Anything else (a nested `a.b.c`, `arr[i].field`, ...) returns nullopt,
+// left unsupported for now -- see DataflowState::class_field_types' own
+// comment for why this lookup is possible at all despite movecheck's
+// otherwise Body-only (no Program access) architecture.
 [[nodiscard]] std::optional<Type> resolve_member_field_type(const Expr& member_expr, const Body& body,
                                                               const DataflowState& state) {
-    if (member_expr.kind != ExprKind::Member || member_expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
+    if (member_expr.kind != ExprKind::Member) return std::nullopt;
     if (state.class_field_types == nullptr) return std::nullopt;
-    auto base_it = body.local_types.find(member_expr.lhs->name);
+    std::string base_name;
+    if (member_expr.lhs->kind == ExprKind::Identifier) {
+        base_name = member_expr.lhs->name;
+    } else if (is_explicit_star_this(*member_expr.lhs)) {
+        base_name = "this";
+    } else {
+        return std::nullopt;
+    }
+    auto base_it = body.local_types.find(base_name);
     if (base_it == body.local_types.end()) return std::nullopt;
     const Type& base_type = base_it->second;
     const std::string& type_name = (base_type.kind == TypeKind::Reference ? *base_type.pointee : base_type).name;
@@ -1252,7 +1276,9 @@ void validate_deref_operand(const Expr& operand, const DataflowState& state, con
         }();
     bool is_uptr = resolved.has_value() && is_unique_ptr(*resolved);
     bool is_raw_ptr = resolved.has_value() && resolved->kind == TypeKind::Pointer;
-    if (!is_uptr && !is_raw_ptr) {
+    bool is_this_ref = resolved.has_value() && operand.kind == ExprKind::Identifier && operand.name == "this" &&
+                       resolved->kind == TypeKind::Reference;
+    if (!is_uptr && !is_raw_ptr && !is_this_ref) {
         throw DataflowError("cannot dereference ('*') '" + describe +
                              "': only std::unique_ptr or a raw pointer (inside '[[scpp::unsafe]] { }') is "
                              "supported",
@@ -1279,7 +1305,14 @@ void validate_deref_operand(const Expr& operand, const DataflowState& state, con
 // pointee's value without disturbing p's own ownership, exactly like
 // reading a struct field doesn't move the struct that owns it. A raw
 // pointer has no ownership/move state to disturb in the first place.
+// `*this` is likewise just an explicit spelling of the receiver object
+// itself (ch05 §5.9), so it behaves exactly like reading `this`.
 void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, bool report_errors) {
+    if (is_explicit_star_this(expr)) {
+        if (!report_errors) return;
+        validate_deref_operand(*expr.lhs, state, body);
+        return;
+    }
     bool is_plain_identifier = expr.lhs->kind == ExprKind::Identifier;
     // ch05 §5.12: `*this.p`/`*p` where `p` is an init-captured
     // std::unique_ptr, rewritten to a `this.p` Member access by the
@@ -1693,6 +1726,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // borrow check above) -- freeing or reassigning p's
             // allocation out from under a live reference would otherwise
             // be a use-after-free.
+            if (is_explicit_star_this(expr)) return "this";
             if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) {
                 if (report_errors) {
                     throw DataflowError("a reference can currently only borrow a plain local variable, a "
@@ -1808,6 +1842,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // concept in this version (it can never be a struct field,
             // and there is no `const std::unique_ptr<T>&` parameter form
             // yet), so it's always mutable through this path.
+            if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
             if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
             auto it = body.local_types.find(expr.lhs->name);
             if (it == body.local_types.end() || it->second.kind != TypeKind::Pointer) return false;
