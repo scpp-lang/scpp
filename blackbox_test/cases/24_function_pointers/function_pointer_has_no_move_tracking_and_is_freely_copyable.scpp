@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.16: "Trivial, like any other raw pointer... no compiler-
 // tracked lifetime and never participates in move/borrow checking...
 // It is freely copyable." Unlike a move-only type (e.g.

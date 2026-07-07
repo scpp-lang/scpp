@@ -77,6 +77,18 @@
 #ifndef SCPP_DEFAULT_SCPP_BINARY
 #error "SCPP_DEFAULT_SCPP_BINARY must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_MODULE_PATH
+#error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
+#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
+#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -236,6 +248,13 @@ struct Outcome {
     std::string detail;
 };
 
+std::vector<std::string> default_std_build_args() {
+    return {"--import", std::string("std=") + SCPP_STDLIB_STD_MODULE_PATH,
+            "--import", std::string("std:string=") + SCPP_STDLIB_STD_STRING_MODULE_PATH,
+            "--import", std::string("std:memory=") + SCPP_STDLIB_STD_MEMORY_MODULE_PATH,
+            "--link", SCPP_STDLIB_STRING_WRAPPER_LIB_PATH};
+}
+
 // Parses a module test case directory's `main.imports`, if present: each
 // non-blank, non-`#`-comment line is `module_name=relative_path`,
 // resolved relative to `dir`, and turned into a `--import
@@ -247,6 +266,7 @@ std::vector<std::string> parse_imports_file(const fs::path& dir) {
     if (!fs::exists(imports_path)) {
         return args;
     }
+
     std::istringstream stream(read_file(imports_path));
     std::string line;
     while (std::getline(stream, line)) {
@@ -282,7 +302,9 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
     fs::remove(out_binary, ec);
 
     std::vector<std::string> build_argv = {scpp_bin.string(), "build", scpp_path.string(), "-o",
-                                            out_binary.string()};
+                                           out_binary.string()};
+    std::vector<std::string> default_build_args = default_std_build_args();
+    build_argv.insert(build_argv.end(), default_build_args.begin(), default_build_args.end());
     build_argv.insert(build_argv.end(), extra_build_args.begin(), extra_build_args.end());
     RunResult compile_result = run_process(build_argv, temp_dir, std::chrono::seconds(kTimeoutSeconds));
 

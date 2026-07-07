@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.12: an init-capture (`[q = std::move(p)]`) is how a move-only
 // type (std::unique_ptr) crosses into a closure -- the construction
 // itself (moving `p` into the closure's own field) works end-to-end.

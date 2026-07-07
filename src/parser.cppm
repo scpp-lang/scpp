@@ -262,7 +262,7 @@ private:
         // auto` in parameter position, parse_param_type) is never the
         // very first token of a statement, so there's no ambiguity here.
         if (tok.kind == TokenKind::KwAuto) return true;
-        if (check_std_qualified("unique_ptr") || check_std_qualified("span")) return true;
+        if (check_std_qualified("span")) return true;
         if (tok.kind != TokenKind::Identifier) return false;
         // ch11: a bare identifier might be the *first segment* of a
         // qualified name (`std::string`) rather than a plain type name --
@@ -394,10 +394,10 @@ private:
         return result;
     }
 
-    // Checks (without consuming) for the 3-token sequence `std :: <member>`,
-    // e.g. `std::unique_ptr` or `std::move`. These are recognized as fixed,
-    // special-cased spellings rather than via a general `::`-qualified-name
-    // grammar, matching the "minimal additions" design philosophy.
+    // Checks (without consuming) for the 3-token sequence `std :: <member>`.
+    // Only the still-builtin spellings (`std::move`, plus the parser-only
+    // `std::span` type form) use this helper; ordinary library names now
+    // flow through the general qualified-name path.
     [[nodiscard]] bool check_std_qualified(std::string_view member) const {
         return peek().kind == TokenKind::Identifier && peek().text == "std" &&
                peek_at(1).kind == TokenKind::ColonColon && peek_at(2).kind == TokenKind::Identifier &&
@@ -444,6 +444,77 @@ private:
             joined += advance().text;
         }
         return joined;
+    }
+
+    ExprPtr clone_expr(const Expr& expr) {
+        auto clone = std::make_unique<Expr>();
+        clone->kind = expr.kind;
+        clone->loc = expr.loc;
+        clone->int_value = expr.int_value;
+        clone->float_value = expr.float_value;
+        clone->bool_value = expr.bool_value;
+        clone->name = expr.name;
+        clone->binary_op = expr.binary_op;
+        if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
+        if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
+        clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
+        clone->unary_op = expr.unary_op;
+        clone->args.clear();
+        for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
+        clone->explicit_template_args.clear();
+        for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            ExplicitTemplateArg cloned_arg = arg;
+            if (arg.value) cloned_arg.value = std::shared_ptr<Expr>(clone_expr(*arg.value).release());
+            clone->explicit_template_args.push_back(std::move(cloned_arg));
+        }
+        clone->lambda_captures.clear();
+        for (const LambdaCapture& capture : expr.lambda_captures) {
+            LambdaCapture cloned_capture;
+            cloned_capture.name = capture.name;
+            cloned_capture.by_reference = capture.by_reference;
+            if (capture.init) cloned_capture.init = clone_expr(*capture.init);
+            clone->lambda_captures.push_back(std::move(cloned_capture));
+        }
+        clone->lambda_blanket_mode = expr.lambda_blanket_mode;
+        clone->lambda_params = expr.lambda_params;
+        clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
+        clone->lambda_is_mutable = expr.lambda_is_mutable;
+        if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
+        clone->type = expr.type;
+        clone->has_paren_init = expr.has_paren_init;
+        return clone;
+    }
+
+    StmtPtr clone_stmt(const Stmt& stmt) {
+        auto clone = std::make_unique<Stmt>();
+        clone->kind = stmt.kind;
+        clone->loc = stmt.loc;
+        clone->type = stmt.type;
+        clone->var_name = stmt.var_name;
+        if (stmt.init) clone->init = clone_expr(*stmt.init);
+        clone->has_ctor_args = stmt.has_ctor_args;
+        clone->ctor_args.clear();
+        for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_expr(*arg));
+        if (stmt.expr) clone->expr = clone_expr(*stmt.expr);
+        if (stmt.condition) clone->condition = clone_expr(*stmt.condition);
+        if (stmt.then_branch) clone->then_branch = clone_stmt(*stmt.then_branch);
+        if (stmt.else_branch) clone->else_branch = clone_stmt(*stmt.else_branch);
+        clone->statements.clear();
+        for (const StmtPtr& s : stmt.statements) clone->statements.push_back(clone_stmt(*s));
+        clone->is_unsafe = stmt.is_unsafe;
+        return clone;
+    }
+
+    [[nodiscard]] bool is_exported_generic_type_template(const Program& program, const std::string& name) const {
+        for (const StructDef& def : program.structs) {
+            if (!def.is_exported || def.name != name) continue;
+            if (!def.template_params.empty()) return true;
+        }
+        for (const ClassDef& def : program.classes) {
+            if (!def.is_exported || def.name != name) continue;
+            if (!def.template_params.empty() || def.is_variadic_primary_template) return true;
+        }
+        return false;
     }
 
     // ch11 §11.4/§11.5: joins `bare_name` onto the current
@@ -528,17 +599,6 @@ private:
     // an outer pointer level), never a later/outer one, mirroring how
     // real C++ reads `const int**` as "pointer to (pointer to const int)".
     Type parse_unqualified_type(bool const_qualifies_first_pointer = false) {
-        if (check_std_qualified("unique_ptr")) {
-            consume_std_qualified();
-            expect(TokenKind::Less, "'<'");
-            Type element = parse_type();
-            expect(TokenKind::Greater, "'>'");
-            Type type;
-            type.kind = TypeKind::UniquePtr;
-            type.pointee = std::make_shared<Type>(std::move(element));
-            return type;
-        }
-
         if (check_std_qualified("span")) {
             consume_std_qualified();
             expect(TokenKind::Less, "'<'");
@@ -1066,27 +1126,42 @@ private:
         }
     }
 
-    // Manually clones a Function *declaration* (never its body -- see
-    // merge_imported_module) since Function::body is a unique_ptr and so
-    // Function itself has no implicit copy constructor. `fallback_owning_module`
-    // is only used when `fn` doesn't already have an owning_module of its
-    // own (i.e. `fn` is `imported`'s own local declaration, not itself a
-    // pass-through re-export -- see merge_imported_module's own comment
-    // for why preserving an already-set owning_module matters).
+    // Manually clones a Function (including every semantic flag the
+    // movechecker/parser rely on) since Function::body is a unique_ptr and
+    // so Function itself has no implicit copy constructor.
+    //
+    // Imported *ordinary* functions keep only their declaration surface:
+    // the defining module's own separately-compiled object file provides
+    // the body. Imported *templates*, though, need their body cloned into
+    // the importer so the importer's own later monomorphization can
+    // instantiate concrete copies locally (exactly like a C++ template
+    // definition being reachable from an import). `keep_body` selects
+    // between those two cases.
+    //
+    // `fallback_owning_module` is only used when `fn` doesn't already have
+    // an owning_module of its own (i.e. `fn` is `imported`'s own local
+    // declaration, not itself a pass-through re-export -- see
+    // merge_imported_module's own comment for why preserving an already-set
+    // owning_module matters).
     // `is_reexport` gates whether the clone stays exported at all (ch11
     // §11.8: a private, non-reexporting import must not forward what it
     // sees to whoever imports the *current* file in turn).
-    static Function clone_function_declaration(const Function& fn, const std::string& fallback_owning_module,
-                                                 bool is_reexport) {
+    Function clone_function_declaration(const Function& fn, const std::string& fallback_owning_module,
+                                        bool is_reexport, bool keep_body) {
         Function clone;
         clone.return_type = fn.return_type;
         clone.name = fn.name;
         clone.loc = fn.loc;
         clone.params = fn.params;
-        // clone.body intentionally left null -- see merge_imported_module.
+        if (keep_body && fn.body) clone.body = clone_stmt(*fn.body);
         clone.is_extern_c = fn.is_extern_c;
         clone.is_module_extern = fn.is_module_extern;
+        clone.is_unsafe = fn.is_unsafe;
         clone.has_varargs = fn.has_varargs;
+        clone.method_requires_concept = fn.method_requires_concept;
+        clone.is_generic_template = fn.is_generic_template;
+        clone.template_params = fn.template_params;
+        clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
         clone.is_exported = is_reexport && fn.is_exported;
         clone.owning_module = fn.owning_module.empty() ? fallback_owning_module : fn.owning_module;
@@ -1111,20 +1186,25 @@ private:
     // §11.8's own "private, non-transitive" rule) -- `struct_names_`/
     // `class_names_` registration is unaffected either way, since that's
     // about the type being usable in *this* file's own subsequent
-    // parsing, not about further forwarding. A cloned Function's body is
-    // always cleared (even though the source Program's own copy has a
-    // real one): check_moves/codegen's existing "body == nullptr ->
-    // already declared/defined elsewhere, don't re-check/re-define"
-    // handling (today used for `extern "C"`/bare `extern`) picks this up
-    // with zero new logic -- exactly ch11 §11.8's "zero new checker
-    // logic" framing. Only `is_exported` declarations are visible to an
-    // importer at all -- a module-private helper is invisible outside
-    // its own file, matching real C++20 modules.
+    // parsing, not about further forwarding. Imported template
+    // definitions do keep their body (see clone_function_declaration
+    // above) so the importer can monomorphize them locally; ordinary,
+    // non-template functions stay declaration-only and are defined by the
+    // imported module's own object file. Only `is_exported`
+    // declarations are visible to an importer at all -- a module-private
+    // helper is invisible outside its own file, matching real C++20
+    // modules.
     void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
                                 bool is_reexport) {
         for (const StructDef& def : imported.structs) {
             if (!def.is_exported) continue;
             struct_names_.insert(def.name);
+            if (!def.template_params.empty()) {
+                generic_type_names_.insert(def.name);
+                if (def.template_params.size() == 1) {
+                    phase1_generic_type_single_param_[def.name] = def.template_params[0];
+                }
+            }
             StructDef clone = def;
             if (clone.owning_module.empty()) clone.owning_module = imported_name;
             clone.is_exported = is_reexport && clone.is_exported;
@@ -1134,6 +1214,14 @@ private:
             if (!def.is_exported) continue;
             struct_names_.insert(def.name);
             class_names_.insert(def.name);
+            if (!def.template_params.empty() || def.is_variadic_primary_template) {
+                generic_type_names_.insert(def.name);
+                if (def.is_variadic_primary_template) {
+                    variadic_primary_template_params_[def.name] = def.template_params;
+                } else if (def.template_params.size() == 1) {
+                    phase1_generic_type_single_param_[def.name] = def.template_params[0];
+                }
+            }
             ClassDef clone = def;
             if (clone.owning_module.empty()) clone.owning_module = imported_name;
             clone.is_exported = is_reexport && clone.is_exported;
@@ -1141,7 +1229,12 @@ private:
         }
         for (const Function& fn : imported.functions) {
             if (!fn.is_exported) continue;
-            program.functions.push_back(clone_function_declaration(fn, imported_name, is_reexport));
+            if (!fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
+            bool keep_body =
+                fn.is_generic_template ||
+                (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
+                 is_exported_generic_type_template(imported, fn.params[0].type.pointee->name));
+            program.functions.push_back(clone_function_declaration(fn, imported_name, is_reexport, keep_body));
         }
     }
 
@@ -2525,7 +2618,7 @@ private:
                 continue;
             }
 
-            // Otherwise: an ordinary field, method, or `operator=` --
+            // Otherwise: an ordinary field, method, `operator*`, or `operator=` --
             // all start with a declared type -- same "parse a type,
             // then a name, then see what follows" disambiguation
             // parse_var_decl/parse_struct_def already use.
@@ -2546,6 +2639,24 @@ private:
             // keyword, but the very next token being `=` -- itself
             // never a legal start of a parameter list -- makes this
             // unambiguous) by peeking one token ahead before committing.
+            if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
+                peek_at(1).kind == TokenKind::Star) {
+                advance(); // 'operator'
+                advance(); // '*'
+                Function fn;
+                fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
+                fn.params = parse_param_list();
+                reject_generic_params(fn.params, "an operator*");
+                bool is_const = match(TokenKind::KwConst);
+                fn.return_type = std::move(member_type);
+                fn.name = qualified_class_name + "_operator_deref";
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                fn.body = parse_block();
+                finish_member_fn(fn);
+                program.functions.push_back(std::move(fn));
+                continue;
+            }
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Assign) {
                 advance(); // 'operator'
@@ -3358,25 +3469,6 @@ private:
             node->kind = ExprKind::Move;
             node->loc = loc;
             node->lhs = std::move(inner);
-            return node;
-        }
-
-        if (check_std_qualified("make_unique")) {
-            consume_std_qualified();
-            expect(TokenKind::Less, "'<'");
-            Type element_type = parse_type();
-            expect(TokenKind::Greater, "'>'");
-            expect(TokenKind::LParen, "'('");
-            auto node = std::make_unique<Expr>();
-            node->kind = ExprKind::MakeUnique;
-            node->loc = loc;
-            node->type = std::move(element_type);
-            if (!check(TokenKind::RParen)) {
-                do {
-                    node->args.push_back(parse_expr());
-                } while (match(TokenKind::Comma));
-            }
-            expect(TokenKind::RParen, "')'");
             return node;
         }
 

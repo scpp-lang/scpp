@@ -4,7 +4,7 @@
 // scpp_string_wrapper.h. Every function is a thin, direct forward onto
 // real std::string -- this file's only job is translating between the
 // plain-C ABI scpp can call and std::string's actual C++ API; see that
-// header for the exported contract and stdlib/string/README.md for how
+// header for the exported contract and stdlib/README.md for how
 // this fits into the overall String demo.
 #include "scpp_string_wrapper.h"
 

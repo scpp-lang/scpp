@@ -1,3 +1,4 @@
+import std;
 // ch04 §4.2/ch08 Q14: "self-move-assignment (`x = std::move(x)`) needs
 // no defensive `this != &other` check the way real C++ does: evaluating
 // `std::move(x)` places `x` in the moved-out state before the

@@ -1,3 +1,4 @@
+import std;
 // ch04 §4.2/spec §6.4: `this.field = std::move(i);` where `field` is
 // class-typed (not just std::unique_ptr-typed) -- the same field-target
 // move-assignment generalization, now for a nested class-typed field.

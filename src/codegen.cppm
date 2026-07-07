@@ -36,6 +36,25 @@ struct CodegenError : std::runtime_error {
     SourceLocation loc;
 };
 
+[[nodiscard]] bool is_unique_ptr_name(const std::string& name) {
+    return name == "std::unique_ptr" || name.rfind("std::unique_ptr.", 0) == 0;
+}
+
+[[nodiscard]] bool is_unique_ptr(const Type& type) {
+    return type.kind == TypeKind::Named && is_unique_ptr_name(type.name);
+}
+
+[[nodiscard]] const Type* unique_ptr_element_type(const Type& type) {
+    if (!is_unique_ptr(type)) return nullptr;
+    if (type.template_args.size() == 1) return &type.template_args[0];
+    static Type fallback;
+    if (type.name.rfind("std::unique_ptr.", 0) == 0) {
+        fallback = Type{.kind = TypeKind::Named, .name = type.name.substr(std::string("std::unique_ptr.").size())};
+        return &fallback;
+    }
+    return nullptr;
+}
+
 // Lowers the M1/M2 AST subset (scalars + locals + control flow + functions +
 // trivial structs, no borrow/move checks yet) directly to LLVM IR.
 class Codegen {
@@ -279,6 +298,7 @@ private:
     std::unique_ptr<llvm::IRBuilder<>> builder_;
     std::map<std::string, LocalSlot> locals_;
     std::unordered_map<std::string, StructInfo> structs_;
+    std::unordered_set<std::string> declaring_aggregates_;
     // ch05 §5.10: each Function's actual LLVM symbol name -- the plain
     // `fn.name` unchanged for the overwhelmingly common case (exactly one
     // function under that name; critically, this is what keeps `main`/
@@ -355,13 +375,6 @@ private:
                 return it == locals_.end() ? std::nullopt : std::optional<Type>(it->second.type);
             }
 
-            case ExprKind::MakeUnique: {
-                Type result;
-                result.kind = TypeKind::UniquePtr;
-                result.pointee = std::make_shared<Type>(expr.type);
-                return result;
-            }
-
             case ExprKind::New: {
                 Type result;
                 result.kind = TypeKind::Pointer;
@@ -435,7 +448,20 @@ private:
                             return *operand->pointee;
                         }
                         if (operand->kind == TypeKind::FunctionPointer) return *operand;
-                        if (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer) {
+                        const Type& underlying =
+                            operand->kind == TypeKind::Reference && operand->pointee ? *operand->pointee : *operand;
+                        if (underlying.kind == TypeKind::Named) {
+                            std::vector<ExprPtr> no_args;
+                            bool receiver_is_mutable = !(operand->kind == TypeKind::Reference && !operand->is_mutable_ref);
+                            if (const Function* callee =
+                                    resolve_overload_by_type(underlying.name + "_operator_deref", no_args, 1,
+                                                             receiver_is_mutable)) {
+                                return callee->return_type.kind == TypeKind::Reference
+                                           ? std::optional<Type>(*callee->return_type.pointee)
+                                           : std::optional<Type>(callee->return_type);
+                            }
+                        }
+                        if (operand->kind != TypeKind::Pointer) {
                             return std::nullopt;
                         }
                         return *operand->pointee;
@@ -525,7 +551,6 @@ private:
     bool produces_rvalue_of_type(const Expr& arg, const Type& expected_type) {
         switch (arg.kind) {
             case ExprKind::Move:
-            case ExprKind::MakeUnique:
             case ExprKind::New:
             case ExprKind::IntegerLiteral:
             case ExprKind::BoolLiteral:
@@ -551,12 +576,15 @@ private:
     // by-reference/std::unique_ptr distinctions), just phrased over
     // codegen's own infer_type/types_equal instead of movecheck's.
     bool argument_matches_parameter(const Expr& arg, const Type& param_type) {
-        if (param_type.kind == TypeKind::UniquePtr) {
-            bool produces_rvalue = arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique;
+        if (is_unique_ptr(param_type)) {
+            bool produces_rvalue = arg.kind == ExprKind::Move;
+            if (!produces_rvalue && arg.kind == ExprKind::Call) {
+                std::optional<Type> arg_type = infer_type(arg);
+                produces_rvalue = arg_type.has_value() && is_unique_ptr(*arg_type);
+            }
             if (!produces_rvalue) return false;
             std::optional<Type> arg_type = infer_type(arg);
-            return arg_type.has_value() && arg_type->kind == TypeKind::UniquePtr &&
-                   types_equal(*arg_type->pointee, *param_type.pointee);
+            return arg_type.has_value() && types_equal(*arg_type, param_type);
         }
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
             // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- mirror image of
@@ -572,7 +600,7 @@ private:
             if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee)) {
                 return true;
             }
-            if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique || arg.kind == ExprKind::New ||
+            if (arg.kind == ExprKind::Move || arg.kind == ExprKind::New ||
                 arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::BoolLiteral ||
                 arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
                 return false;
@@ -712,10 +740,6 @@ private:
             case TypeKind::Pointer:
             case TypeKind::FunctionPointer:
                 return;
-            case TypeKind::UniquePtr:
-                throw CodegenError("std::unique_ptr carries ownership and cannot be a struct field; "
-                                    "use class instead",
-                    current_loc_);
             case TypeKind::Reference:
                 throw CodegenError("a reference cannot be a struct field in this version",
                     current_loc_);
@@ -727,6 +751,11 @@ private:
                 validate_trivial(*type.element, in_progress);
                 return;
             case TypeKind::Named: {
+                if (is_unique_ptr(type)) {
+                    throw CodegenError("std::unique_ptr carries ownership and cannot be a struct field; "
+                                        "use class instead",
+                        current_loc_);
+                }
                 if (type.name == "int" || type.name == "bool" || type.name == "char") return;
                 if (type.name == "void") {
                     throw CodegenError("'void' cannot be a struct field (only a return type or a "
@@ -755,6 +784,8 @@ private:
     }
 
     void declare_struct(const StructDef& def) {
+        if (declaring_aggregates_.contains(def.name)) return;
+        declaring_aggregates_.insert(def.name);
         std::vector<std::string> in_progress;
         for (const StructField& field : def.fields) {
             try {
@@ -777,6 +808,7 @@ private:
         }
         info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "struct." + def.name);
         structs_[def.name] = std::move(info);
+        declaring_aggregates_.erase(def.name);
     }
 
     // Registers a `class`'s layout the same way declare_struct does for a
@@ -806,6 +838,8 @@ private:
     // base-class-deduction, ch05 §5.14's indexed-access pattern) via a
     // plain bitcast, with no pointer adjustment.
     void declare_class(const ClassDef& def) {
+        if (declaring_aggregates_.contains(def.name)) return;
+        declaring_aggregates_.insert(def.name);
         StructInfo info;
         if (!def.base_class_name.empty()) {
             const StructInfo& base_info = structs_.at(def.base_class_name);
@@ -822,12 +856,12 @@ private:
         }
         info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "class." + def.name);
         structs_[def.name] = std::move(info);
+        declaring_aggregates_.erase(def.name);
     }
 
     llvm::Type* to_llvm_type(const Type& type) {
         switch (type.kind) {
             case TypeKind::Pointer:
-            case TypeKind::UniquePtr:
             case TypeKind::Reference:
                 // A unique_ptr is just a possibly-null owning pointer at the
                 // ABI/codegen level in v0.1: no destructor/drop codegen
@@ -918,6 +952,23 @@ private:
                     auto it = structs_.find(type.name);
                     if (it != structs_.end()) return it->second.llvm_type;
                 }
+                if (!declaring_aggregates_.contains(type.name) && program_ != nullptr) {
+                    for (const StructDef& def : program_->structs) {
+                        if (def.name == type.name && def.template_params.empty()) {
+                            declare_struct(def);
+                            auto it = structs_.find(type.name);
+                            if (it != structs_.end()) return it->second.llvm_type;
+                        }
+                    }
+                    for (const ClassDef& def : program_->classes) {
+                        if (def.name == type.name && def.template_params.empty() && !def.is_synthetic_check_only &&
+                            !def.is_concept_witness) {
+                            declare_class(def);
+                            auto it = structs_.find(type.name);
+                            if (it != structs_.end()) return it->second.llvm_type;
+                        }
+                    }
+                }
                 throw CodegenError("unsupported type '" + type.name + "'",
                     current_loc_);
         }
@@ -933,10 +984,6 @@ private:
     // analysis is likewise out of scope for v0.1's intraprocedural,
     // first-order borrow checking.
     void validate_reference_pointee(const Type& pointee) {
-        if (pointee.kind == TypeKind::UniquePtr) {
-            throw CodegenError("a reference to std::unique_ptr is not yet supported in this version",
-                current_loc_);
-        }
         if (pointee.kind == TypeKind::Reference) {
             throw CodegenError("a reference to a reference is not supported",
                 current_loc_);
@@ -1028,15 +1075,16 @@ private:
                                     const std::string& context_description) {
         switch (type.kind) {
             case TypeKind::Named:
+                if (is_unique_ptr(type)) {
+                    throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                                        " cannot be std::unique_ptr -- it has no defined C representation "
+                                        "(spec ch02 §2.1)",
+                        current_loc_);
+                }
             case TypeKind::Pointer:
             case TypeKind::FunctionPointer:
             case TypeKind::Array:
                 return;
-            case TypeKind::UniquePtr:
-                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
-                                    " cannot be std::unique_ptr -- it has no defined C representation "
-                                    "(spec ch02 §2.1)",
-                    current_loc_);
             case TypeKind::Reference:
                 throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                     " cannot be a reference -- it has no defined C representation (spec "
@@ -1061,7 +1109,12 @@ private:
     [[nodiscard]] static bool types_equal(const Type& a, const Type& b) {
         if (a.kind != b.kind) return false;
         switch (a.kind) {
-            case TypeKind::Named: return a.name == b.name;
+            case TypeKind::Named:
+                if (a.name != b.name || a.template_args.size() != b.template_args.size()) return false;
+                for (size_t i = 0; i < a.template_args.size(); i++) {
+                    if (!types_equal(a.template_args[i], b.template_args[i])) return false;
+                }
+                return true;
             case TypeKind::Pointer: return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
             case TypeKind::FunctionPointer:
                 if (a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
@@ -1073,7 +1126,6 @@ private:
                     if (!types_equal(a.function_params[i], b.function_params[i])) return false;
                 }
                 return true;
-            case TypeKind::UniquePtr: return types_equal(*a.pointee, *b.pointee);
             case TypeKind::Reference:
                 return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref &&
                        types_equal(*a.pointee, *b.pointee);
@@ -1094,7 +1146,17 @@ private:
     // just as correct for the one job this specific helper needs it for.
     [[nodiscard]] static std::string mangle_type(const Type& type) {
         switch (type.kind) {
-            case TypeKind::Named: return type.name;
+            case TypeKind::Named:
+                if (is_unique_ptr(type)) {
+                    const Type* element = unique_ptr_element_type(type);
+                    return element ? mangle_type(*element) + "_uptr" : "std_unique_ptr";
+                }
+                if (type.template_args.empty()) return type.name;
+                {
+                    std::string result = type.name;
+                    for (const Type& arg : type.template_args) result += "_" + mangle_type(arg);
+                    return result;
+                }
             case TypeKind::Pointer: return mangle_type(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
             case TypeKind::FunctionPointer: {
                 std::string result = mangle_type(*type.function_return) +
@@ -1102,7 +1164,6 @@ private:
                 for (const Type& param : type.function_params) result += "_" + mangle_type(param);
                 return result;
             }
-            case TypeKind::UniquePtr: return mangle_type(*type.pointee) + "_uptr";
             case TypeKind::Reference:
                 return mangle_type(*type.pointee) +
                        (type.is_rvalue_ref ? "_rref" : (type.is_mutable_ref ? "_ref" : "_cref"));
@@ -1190,7 +1251,17 @@ private:
     // small, stable, one-purpose functions).
     [[nodiscard]] static std::string verbatim_type_spelling(const Type& type) {
         switch (type.kind) {
-            case TypeKind::Named: return type.name;
+            case TypeKind::Named:
+                if (type.template_args.empty()) return type.name;
+                {
+                    std::string result = type.name + "<";
+                    for (size_t i = 0; i < type.template_args.size(); i++) {
+                        if (i > 0) result += ", ";
+                        result += verbatim_type_spelling(type.template_args[i]);
+                    }
+                    result += ">";
+                    return result;
+                }
             case TypeKind::Pointer:
                 return (type.is_mutable_pointee ? std::string() : std::string("const ")) +
                        verbatim_type_spelling(*type.pointee) + "*";
@@ -1205,7 +1276,6 @@ private:
                 result += ")";
                 return result;
             }
-            case TypeKind::UniquePtr: return "std::unique_ptr<" + verbatim_type_spelling(*type.pointee) + ">";
             case TypeKind::Reference:
                 if (type.is_rvalue_ref) return verbatim_type_spelling(*type.pointee) + "&&";
                 return (type.is_mutable_ref ? std::string() : std::string("const ")) +
@@ -2512,9 +2582,6 @@ private:
                 throw CodegenError("'delete' is only supported as a standalone statement in this version",
                     current_loc_);
 
-            case ExprKind::MakeUnique:
-                return codegen_make_unique(expr);
-
             case ExprKind::Fold:
             case ExprKind::PackExpansion:
                 throw CodegenError("fold expression should have been expanded before codegen",
@@ -2630,11 +2697,13 @@ private:
                 std::string ctor_name = expr.type.name + "_new";
                 const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
                 if (ctor_def == nullptr) {
+                    if (expr.args.empty()) return heap_ptr;
                     throw CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
                         current_loc_);
                 }
                 llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
                 if (ctor == nullptr) {
+                    if (expr.args.empty()) return heap_ptr;
                     throw CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
                         current_loc_);
                 }
@@ -2751,7 +2820,6 @@ private:
     }
 
     [[nodiscard]] bool is_field_copy_constructible(const Type& type) {
-        if (type.kind == TypeKind::UniquePtr) return false;
         if (type.kind == TypeKind::Reference) return true;
         if (type.kind == TypeKind::Array) return is_field_copy_constructible(*type.element);
         if (type.kind == TypeKind::Named && structs_.contains(type.name)) return is_copy_constructible(type.name);
@@ -2759,7 +2827,6 @@ private:
     }
 
     [[nodiscard]] bool is_field_copy_assignable(const Type& type) {
-        if (type.kind == TypeKind::UniquePtr) return false;
         if (type.kind == TypeKind::Reference) return false;
         if (type.kind == TypeKind::Array) return is_field_copy_assignable(*type.element);
         if (type.kind == TypeKind::Named && structs_.contains(type.name)) return is_copy_assignable(type.name);
@@ -2901,12 +2968,7 @@ private:
         llvm::Function* free_fn = get_or_declare_free();
         for (size_t i = 0; i < info.field_types.size(); i++) {
             const Type& field_type = info.field_types[i];
-            if (field_type.kind == TypeKind::UniquePtr) {
-                llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, ptr, i, info.field_names[i]);
-                llvm::Value* old_value =
-                    builder_->CreateLoad(to_llvm_type(field_type), field_ptr, "oldnestedtmp");
-                builder_->CreateCall(free_fn, {old_value});
-            } else if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, ptr, i, info.field_names[i]);
                 codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
             }
@@ -2933,12 +2995,8 @@ private:
     // pop_scope() and removed from `locals_`, so they aren't double-
     // freed/double-destructed here.
     void free_unique_ptr_locals() {
-        llvm::Function* free_fn = get_or_declare_free();
         for (const auto& [name, slot] : locals_) {
-            if (slot.type.kind == TypeKind::UniquePtr) {
-                llvm::Value* current = builder_->CreateLoad(to_llvm_type(slot.type), slot.alloca, "droptmp");
-                builder_->CreateCall(free_fn, {current});
-            } else if (slot.type.kind == TypeKind::Named) {
+            if (slot.type.kind == TypeKind::Named) {
                 if (llvm::Function* dtor = find_destructor(slot.type.name)) {
                     codegen_call_destructor_unless_moved(dtor, slot.alloca, slot.moved_flag);
                 }
@@ -2966,15 +3024,10 @@ private:
 
         bool already_terminated = builder_->GetInsertBlock()->getTerminator() != nullptr;
         if (!already_terminated) {
-            llvm::Function* free_fn = get_or_declare_free();
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
-                if (slot_it->second.type.kind == TypeKind::UniquePtr) {
-                    llvm::Value* current = builder_->CreateLoad(to_llvm_type(slot_it->second.type),
-                                                                 slot_it->second.alloca, "scopedroptmp");
-                    builder_->CreateCall(free_fn, {current});
-                } else if (slot_it->second.type.kind == TypeKind::Named) {
+                if (slot_it->second.type.kind == TypeKind::Named) {
                     if (llvm::Function* dtor = find_destructor(slot_it->second.type.name)) {
                         codegen_call_destructor_unless_moved(dtor, slot_it->second.alloca, slot_it->second.moved_flag);
                     }
@@ -3395,7 +3448,27 @@ private:
                     return codegen_lvalue(*expr.lhs);
                 }
                 LValue operand = codegen_lvalue(*expr.lhs);
-                if (operand.type.kind != TypeKind::UniquePtr && operand.type.kind != TypeKind::Pointer) {
+                if (operand.type.kind == TypeKind::Named) {
+                    std::vector<ExprPtr> no_args;
+                    bool receiver_is_mutable = !is_read_only_place(*expr.lhs);
+                    if (const Function* callee_def =
+                            resolve_overload_by_type(operand.type.name + "_operator_deref", no_args, 1,
+                                                     receiver_is_mutable)) {
+                        llvm::Function* callee = module_->getFunction(overload_names_.at(callee_def));
+                        if (callee == nullptr) {
+                            throw CodegenError("call to unknown function '" + operand.type.name + "_operator_deref'",
+                                current_loc_);
+                        }
+                        llvm::Value* referent_ptr = builder_->CreateCall(callee, {operand.ptr});
+                        if (callee_def->return_type.kind != TypeKind::Reference) {
+                            throw CodegenError("operator* on class '" + operand.type.name +
+                                                   "' must return a reference to be assignable",
+                                current_loc_);
+                        }
+                        return LValue{referent_ptr, *callee_def->return_type.pointee};
+                    }
+                }
+                if (operand.type.kind != TypeKind::Pointer) {
                     // Whether a raw pointer dereference is licensed here
                     // (ch01 §1.3: only inside `unsafe {}`) is the move
                     // checker's job (scpp.movecheck), not codegen's --
@@ -3407,8 +3480,7 @@ private:
                     // reference-typed local, so `*r` where `r` is `T&`
                     // would already have `r` resolved to its referent by
                     // the time this runs).
-                    throw CodegenError(
-                        "dereference ('*') is only supported for std::unique_ptr or a raw pointer",
+                    throw CodegenError("dereference ('*') is only supported for a raw pointer or a class with operator*",
                         current_loc_);
                 }
                 // A unique_ptr's/raw pointer's own storage holds the
@@ -3518,17 +3590,7 @@ private:
             // identical comment in codegen_stmt.
             current_loc_ = expr.loc;
             check_store_type(value, to_llvm_type(lv.type), "'" + expr.lhs->name + "'");
-            if (lv.type.kind == TypeKind::UniquePtr) {
-                // Move-assignment semantics: release whatever this
-                // unique_ptr currently owns *before* overwriting it with
-                // the new value, so reassigning one that already owns a
-                // real allocation doesn't leak it. free(NULL) is a safe
-                // no-op, so this is correct whether or not there was a
-                // real prior allocation (freshly declared, already moved
-                // out, etc).
-                llvm::Value* old_value = builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "oldtmp");
-                builder_->CreateCall(get_or_declare_free(), {old_value});
-            } else if (lv.type.kind == TypeKind::Named && structs_.contains(lv.type.name)) {
+            if (lv.type.kind == TypeKind::Named && structs_.contains(lv.type.name)) {
                 // spec §6.4(3)/(5): `y = std::move(x);` -- the compiler-
                 // synthesized move assignment operator (movecheck has
                 // already verified `expr.rhs` is exactly this shape --

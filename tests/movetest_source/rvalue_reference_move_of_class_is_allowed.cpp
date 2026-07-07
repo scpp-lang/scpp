@@ -1,3 +1,4 @@
+import std;
 // spec §6.4/ch04 §4.2: now that class types have move construction and
 // move assignment (the compiler-synthesized memberwise operation), a
 // class-typed local can be moved into a `T&&` parameter exactly like

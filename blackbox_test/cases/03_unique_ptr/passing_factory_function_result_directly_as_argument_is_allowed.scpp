@@ -1,3 +1,4 @@
+import std;
 // A function returning std::unique_ptr<T> by value, with its result
 // passed directly as a by-value argument to another function (no
 // intermediate named local) -- ch09 M2 says unique_ptr's "move semantics

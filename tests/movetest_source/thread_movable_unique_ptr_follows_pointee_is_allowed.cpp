@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.15: `std::unique_ptr<T>` is thread-movable iff `T` itself is
 // (here, `int`, always thread-movable) -- unique ownership means handing
 // the whole `unique_ptr` to another thread transfers exclusive access to

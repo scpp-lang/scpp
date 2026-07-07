@@ -1,3 +1,4 @@
+import std;
 // ch00 §4/ch01/ch08 Q13: "every function is checked unconditionally, by
 // default, with no per-function or per-file annotation needed to enable
 // it." There is no `safe` keyword (or any other annotation) in scpp

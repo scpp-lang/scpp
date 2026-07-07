@@ -389,7 +389,9 @@ private:
     void insert_drops_before_returns() {
         std::vector<std::string> unique_ptr_locals;
         for (const std::string& name : body_.locals_in_order) {
-            if (body_.local_types.at(name).kind == TypeKind::UniquePtr) {
+            const Type& type = body_.local_types.at(name);
+            if (type.kind == TypeKind::Named &&
+                (type.name == "std::unique_ptr" || type.name.rfind("std::unique_ptr.", 0) == 0)) {
                 unique_ptr_locals.push_back(name);
             }
         }

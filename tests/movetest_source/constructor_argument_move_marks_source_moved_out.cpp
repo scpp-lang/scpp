@@ -1,3 +1,4 @@
+import std;
 // Prerequisite fix for move construction: a constructor-call VarDecl's
 // own arguments are now visible to the dataflow checker (previously a
 // `has_ctor_args` VarDecl lowered to an argument-blind MIR Declare, so

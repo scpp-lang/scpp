@@ -35,7 +35,6 @@ enum class TypeKind {
     Pointer,   // T*
     FunctionPointer, // Ret (*p)(Args...) / Ret (* [[scpp::unsafe]] p)(Args...)
     Array,     // T[N]
-    UniquePtr, // std::unique_ptr<T> -- unique ownership, move-only (see ch05)
     Reference, // T& (mutable borrow) / const T& (shared borrow) -- see ch05.2
     Span,      // std::span<T> (mutable view) / std::span<const T> (read-only
                // view) -- a non-owning, lifetime-checked {pointer, size}
@@ -52,7 +51,7 @@ struct Type {
     // Named
     std::string name;
 
-    // Pointer / UniquePtr / Reference / Span (element/referent type)
+    // Pointer / Reference / Span (element/referent type)
     std::shared_ptr<Type> pointee;
 
     // Array
@@ -249,7 +248,6 @@ enum class ExprKind {
     Delete,     // `delete expr` -- destroys the pointed-to object (if any) and
                 // frees its storage; also gated by `[[scpp::unsafe]]`.
     Move,       // std::move(x) -- compiler builtin move hint, not an ordinary call
-    MakeUnique, // std::make_unique<T>(args...) -- compiler builtin heap allocation
     PackExpansion, // `expr...` in a generic function body, currently only
                    // meaningful inside a call/new/constructor argument list
                    // before monomorphization expands it to concrete args.
@@ -284,17 +282,19 @@ enum class BinaryOp {
 enum class UnaryOp {
     Neg,
     Not,
-    Deref, // `*p` -- p must be std::unique_ptr<T> (always allowed) or a raw
-           // pointer `T*` (only inside `unsafe { }`, see ch01 §1.3/movecheck's
-           // validate_deref_operand). A reference dereference makes no
-           // sense here and never reaches this: a reference already *is*
-           // its referent (see codegen_lvalue's auto-deref).
+    Deref, // `*p` -- either a raw pointer `T*` (only inside `unsafe { }`,
+           // see ch01 §1.3/movecheck's validate_deref_operand) or a user
+           // class type whose `operator*` method movecheck desugars this
+           // to call. A reference dereference makes no sense here and
+           // never reaches this: a reference already *is* its referent
+           // (see codegen_lvalue's auto-deref).
     AddressOf, // `&expr` -- always legal (no `unsafe {}` needed to *create*
                // a raw pointer, only to dereference one -- ch05 §5.7).
                // `expr` must be one of the same forms accepted as
                // a borrow source for `T&`/`const T&` (ch05.2): a plain local/
-               // parameter, a `.field`/`[index]` projection, or `*p`/`p->x`
-               // off a std::unique_ptr. Evaluates to a `T*`, registering no
+               // parameter, a `.field`/`[index]` projection, or a
+               // dereference/member access that ultimately resolves back to
+               // one of those roots. Evaluates to a `T*`, registering no
                // lasting borrow (see movecheck's apply_address_of).
 };
 
@@ -365,8 +365,7 @@ struct Expr {
     // Unary (operand stored in `lhs`)
     UnaryOp unary_op{};
 
-    // Call arguments / New constructor arguments / MakeUnique constructor
-    // arguments
+    // Call arguments / New constructor arguments
     std::vector<ExprPtr> args;
 
     // ch05 §5.11/§5.14: Call only -- non-empty only for a call to a
@@ -378,8 +377,7 @@ struct Expr {
     // entirely by argument-position deduction).
     std::vector<ExplicitTemplateArg> explicit_template_args;
 
-    // New / MakeUnique: the allocated element type `T` in `new T...` /
-    // `make_unique<T>(...)`.
+    // New: the allocated element type `T` in `new T...`.
     // Lambda: the explicit trailing return type (`-> Type`), only
     // meaningful when has_lambda_explicit_return_type is true.
     // Cast: the target type `T` in `static_cast<T>(expr)`/`(T)expr`

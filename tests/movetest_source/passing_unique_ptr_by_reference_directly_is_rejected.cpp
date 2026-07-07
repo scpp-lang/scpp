@@ -1,3 +1,4 @@
+import std;
 int inc(int& v) {
     v = v + 1;
     return 0;

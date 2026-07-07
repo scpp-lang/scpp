@@ -1,3 +1,4 @@
+import std;
 // spec §6.4/ch08 Q14: self-move-assignment (`a = std::move(a);`) needs
 // no defensive `this != &other` check the way real C++ does -- and,
 // critically, `a` must remain fully valid and destructible afterward

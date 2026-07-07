@@ -1,3 +1,4 @@
+import std;
 // A std::move(x) result that is never stored anywhere (bare expression
 // statement) can't actually transfer ownership to anything -- scpp
 // requires the move hint be used to initialize or assign into a

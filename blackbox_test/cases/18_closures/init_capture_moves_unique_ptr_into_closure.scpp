@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.12: "Init-capture is how a move-only type crosses into a
 // closure, exactly like passing one to a constructor:
 // `[p = std::move(p)]` for a `std::unique_ptr<T> p`." Called immediately

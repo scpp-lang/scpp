@@ -1,3 +1,4 @@
+import std;
 // ch01 §1.2: "Neither form changes §5.1-§5.4's checking in any way" --
 // a function-level `[[scpp::unsafe]]` marker (unlike a nested block) is
 // a *different* mechanism from wrapping the body in

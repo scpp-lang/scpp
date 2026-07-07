@@ -358,7 +358,22 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     }
 }
 
-[[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
+[[nodiscard]] bool is_unique_ptr_name(const std::string& name) {
+    return name == "std::unique_ptr" || name.rfind("std::unique_ptr.", 0) == 0;
+}
+[[nodiscard]] bool is_unique_ptr(const Type& type) {
+    return type.kind == TypeKind::Named && is_unique_ptr_name(type.name);
+}
+[[nodiscard]] const Type* unique_ptr_element_type(const Type& type) {
+    if (!is_unique_ptr(type)) return nullptr;
+    if (type.template_args.size() == 1) return &type.template_args[0];
+    static Type fallback;
+    if (type.name.rfind("std::unique_ptr.", 0) == 0) {
+        fallback = Type{.kind = TypeKind::Named, .name = type.name.substr(std::string("std::unique_ptr.").size())};
+        return &fallback;
+    }
+    return nullptr;
+}
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
 [[nodiscard]] bool is_function_pointer(const Type& type) { return type.kind == TypeKind::FunctionPointer; }
@@ -441,7 +456,7 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 // per ch04 §4.1 regardless of its own fields, raw pointer, array of any
 // of these) is unconditionally copy-constructible.
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program) {
-    if (type.kind == TypeKind::UniquePtr) return false;
+    if (is_unique_ptr(type)) return false;
     if (type.kind == TypeKind::Reference) return true;
     if (type.kind == TypeKind::Array) return is_field_copy_constructible(*type.element, program);
     if (type.kind == TypeKind::Named) {
@@ -463,7 +478,7 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 // reference-typed except via this exact direct case -- kept anyway for
 // symmetry and defensiveness).
 [[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program) {
-    if (type.kind == TypeKind::UniquePtr) return false;
+    if (is_unique_ptr(type)) return false;
     if (type.kind == TypeKind::Reference) return false;
     if (type.kind == TypeKind::Array) return is_field_copy_assignable(*type.element, program);
     if (type.kind == TypeKind::Named) {
@@ -547,7 +562,11 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
         case TypeKind::Named:
-            return a.name == b.name;
+            if (a.name != b.name || a.template_args.size() != b.template_args.size()) return false;
+            for (size_t i = 0; i < a.template_args.size(); i++) {
+                if (!types_equal(a.template_args[i], b.template_args[i])) return false;
+            }
+            return true;
         case TypeKind::Pointer:
             return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
         case TypeKind::FunctionPointer:
@@ -560,8 +579,6 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
                 if (!types_equal(a.function_params[i], b.function_params[i])) return false;
             }
             return true;
-        case TypeKind::UniquePtr:
-            return types_equal(*a.pointee, *b.pointee);
         case TypeKind::Reference:
             return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref &&
                    types_equal(*a.pointee, *b.pointee);
@@ -613,6 +630,7 @@ struct CalleeSignature {
 // general type-checker). Shared by check_call_arguments and
 // produces_unique_ptr_rvalue so both resolve a method call's callee
 // identically.
+[[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
                                                         const ClassFieldTypes* class_field_types = nullptr) {
     if (call_expr.lhs && call_expr.name.empty()) {
@@ -701,6 +719,10 @@ struct CalleeSignature {
                 }
             }
         }
+        if (class_name.empty()) {
+            std::optional<Type> receiver_type = infer_expr_type(*call_expr.lhs, body, {});
+            if (receiver_type.has_value()) class_name = named_type_name(*receiver_type);
+        }
         if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1};
     }
     return CalleeSignature{call_expr.name, 0};
@@ -747,8 +769,7 @@ struct CalleeSignature {
         // §5.1); only std::move(x)/std::make_unique<T>(...) are.
         if (!produces_unique_ptr_rvalue(arg, body, signatures)) return false;
         std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-        return arg_type.has_value() && arg_type->kind == TypeKind::UniquePtr &&
-               types_equal(*arg_type->pointee, *param_type.pointee);
+        return arg_type.has_value() && types_equal(*arg_type, param_type);
     }
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
         // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the mirror image of
@@ -770,7 +791,7 @@ struct CalleeSignature {
         // viable against a T&/const T& parameter; std::move/MakeUnique/a
         // literal never is (there's no place to borrow from) unless the
         // rvalue-binding case just above already accepted it.
-        if (arg.kind == ExprKind::Move || arg.kind == ExprKind::MakeUnique ||
+        if (arg.kind == ExprKind::Move ||
             arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
             arg.kind == ExprKind::BoolLiteral || arg.kind == ExprKind::CharLiteral ||
             arg.kind == ExprKind::StringLiteral) {
@@ -1165,7 +1186,7 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
 // check_call_arguments, which already allows this same Call expression
 // shape unconditionally when passed directly as another call's argument.
 [[nodiscard]] bool produces_unique_ptr_rvalue(const Expr& expr, const Body& body, const Signatures& signatures) {
-    if (expr.kind == ExprKind::Move || expr.kind == ExprKind::MakeUnique) return true;
+    if (expr.kind == ExprKind::Move) return true;
     if (expr.kind == ExprKind::Call) {
         CalleeSignature callee = resolve_callee_signature(expr, body);
         const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
@@ -1203,7 +1224,6 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
                                             const Signatures& signatures) {
     switch (expr.kind) {
         case ExprKind::Move:
-        case ExprKind::MakeUnique:
         case ExprKind::New:
         case ExprKind::IntegerLiteral:
         case ExprKind::FloatLiteral:
@@ -1288,13 +1308,6 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
             return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
         }
 
-        case ExprKind::MakeUnique: {
-            Type result;
-            result.kind = TypeKind::UniquePtr;
-            result.pointee = std::make_shared<Type>(expr.type);
-            return result;
-        }
-
         case ExprKind::New: {
             Type result;
             result.kind = TypeKind::Pointer;
@@ -1358,10 +1371,12 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
                         return *operand->pointee;
                     }
                     if (is_function_pointer(*operand)) return *operand;
-                    if (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer) {
+                    if (!is_unique_ptr(*operand) && operand->kind != TypeKind::Pointer) {
                         return std::nullopt;
                     }
-                    return *operand->pointee;
+                    if (operand->kind == TypeKind::Pointer) return *operand->pointee;
+                    const Type* element = unique_ptr_element_type(*operand);
+                    return element ? std::optional<Type>(*element) : std::nullopt;
                 }
             }
             return std::nullopt;
@@ -1515,7 +1530,8 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
     // why a Member operand has no separate move/borrow state to check
     // beyond its type.
     bool is_member_of_identifier =
-        expr.lhs->kind == ExprKind::Member && expr.lhs->lhs->kind == ExprKind::Identifier;
+        expr.lhs->kind == ExprKind::Member &&
+        (expr.lhs->lhs->kind == ExprKind::Identifier || is_explicit_star_this(*expr.lhs->lhs));
     if (!is_plain_identifier && !is_member_of_identifier) {
         if (report_errors) {
             throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr or "
@@ -1678,11 +1694,6 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
                     out.insert(expr->name);
                 }
             }
-            for (const auto& arg : expr->args) {
-                collect_reference_uses(arg.get(), body, out);
-            }
-            return;
-        case ExprKind::MakeUnique:
             for (const auto& arg : expr->args) {
                 collect_reference_uses(arg.get(), body, out);
             }
@@ -1973,7 +1984,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // allocation out from under a live reference would otherwise
             // be a use-after-free.
             if (is_explicit_star_this(expr)) return "this";
-            if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) {
+            if (expr.unary_op != UnaryOp::Deref) {
                 if (report_errors) {
                     throw DataflowError("a reference can currently only borrow a plain local variable, a "
                                          "field of one ('a.b'), an array element of one ('arr[i]'), a "
@@ -1984,9 +1995,12 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 }
                 return "";
             }
-            const std::string& name = expr.lhs->name;
             if (report_errors) validate_deref_operand(*expr.lhs, state, body);
-            return name;
+            if (expr.lhs->kind == ExprKind::Identifier) return resolve_root_place(expr.lhs->name, state);
+            if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
+                return resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures, report_errors);
+            }
+            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
         }
 
         case ExprKind::Call: {
@@ -2301,12 +2315,26 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     // VarDecl case in apply_statement -- previously entirely unchecked
     // too (e.g. an IIFE could init-capture an already-moved-out
     // std::unique_ptr without error).
-    if (expr.lhs) {
-        apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
-    }
     CalleeSignature callee = resolve_callee_signature(expr, body, state.class_field_types);
     auto name_it = signatures.find(callee.key);
     const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+    if (expr.lhs) {
+        bool receiver_is_reference =
+            sig != nullptr && !sig->param_types.empty() && is_reference(sig->param_types[0]) && !sig->param_types[0].is_rvalue_ref;
+        if (receiver_is_reference && expr.lhs->kind == ExprKind::Identifier) {
+            auto type_it = body.local_types.find(expr.lhs->name);
+            if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
+                LocalState current = lookup(state.locals, expr.lhs->name);
+                if (report_errors && current != LocalState::Initialized) {
+                    throw DataflowError(describe_bad_state(expr.lhs->name, current), expr.lhs->loc);
+                }
+            } else {
+                apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            }
+        } else {
+            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+        }
+    }
     std::string callee_display = expr.name;
     if (callee_display.empty()) {
         if (expr.lhs && expr.lhs->kind == ExprKind::Identifier) {
@@ -2882,7 +2910,19 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             return;
 
         case ExprKind::Member: {
-            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+            if (expr.lhs->kind == ExprKind::Identifier) {
+                auto type_it = body.local_types.find(expr.lhs->name);
+                if (type_it != body.local_types.end() && is_unique_ptr(type_it->second)) {
+                    LocalState current = lookup(state.locals, expr.lhs->name);
+                    if (report_errors && current != LocalState::Initialized) {
+                        throw DataflowError(describe_bad_state(expr.lhs->name, current), expr.lhs->loc);
+                    }
+                } else {
+                    apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+                }
+            } else {
+                apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+            }
             // ch04 §4.2: real, unrestricted C++ access control -- a
             // member variable may be `public` or `private` in any
             // combination. External access (from outside the class's
@@ -2926,15 +2966,6 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         case ExprKind::Subscript:
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
-            return;
-
-        case ExprKind::MakeUnique:
-            // std::make_unique<T>(args...) itself never reads a
-            // unique_ptr (it *produces* one); its constructor arguments
-            // are ordinary values, checked as plain reads.
-            for (const auto& arg : expr.args) {
-                apply_expr(*arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
-            }
             return;
 
         case ExprKind::PackExpansion:
@@ -3194,7 +3225,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 return;
             }
             if (type_it != body.local_types.end() && state.class_names != nullptr &&
-                type_it->second.kind == TypeKind::Named && state.class_names->contains(type_it->second.name)) {
+                type_it->second.kind == TypeKind::Named && !is_unique_ptr(type_it->second) &&
+                state.class_names->contains(type_it->second.name)) {
                 // ch04 §4.2: unlike a plain `struct` (an ordinary,
                 // freely-reassignable trivial value), a class-typed local
                 // is conservatively bound once at construction and never
@@ -3587,7 +3619,7 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
         // will itself be copy-restricted; by-value passing of a bare
         // scalar/struct (ch06's "move/store/pass-through/return"
         // guarantee) must remain legal here.
-        if (param.type.kind == TypeKind::Named && class_names.contains(param.type.name) &&
+        if (param.type.kind == TypeKind::Named && !is_unique_ptr(param.type) && class_names.contains(param.type.name) &&
             !witness_class_names.contains(param.type.name)) {
             throw DataflowError("parameter '" + param.name + "' of function '" + fn.name + "' cannot take class '" +
                                  param.type.name +
@@ -3612,7 +3644,8 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
     // `return x + x;` for a bare-`auto` parameter `x`), the inferred
     // return type is the same witness, abstractly, until a real call
     // site's monomorphized clone substitutes a concrete one.
-    if (fn.return_type.kind == TypeKind::Named && class_names.contains(fn.return_type.name) &&
+    if (fn.return_type.kind == TypeKind::Named && !is_unique_ptr(fn.return_type) &&
+        class_names.contains(fn.return_type.name) &&
         !witness_class_names.contains(fn.return_type.name)) {
         throw DataflowError("function '" + fn.name + "' cannot return class '" + fn.return_type.name +
                              "' by value (no copy semantics are defined yet -- return '" + fn.return_type.name +
@@ -3839,7 +3872,16 @@ StmtPtr clone_stmt(const Stmt& stmt) {
 // own independently-duplicated types_equal.
 [[nodiscard]] std::string mangle_type_for_clone_name(const Type& type) {
     switch (type.kind) {
-        case TypeKind::Named: return type.name;
+        case TypeKind::Named: {
+            if (is_unique_ptr(type)) {
+                const Type* element = unique_ptr_element_type(type);
+                return element ? mangle_type_for_clone_name(*element) + "_uptr" : "std_unique_ptr";
+            }
+            if (type.template_args.empty()) return type.name;
+            std::string result = type.name;
+            for (const Type& arg : type.template_args) result += "_" + mangle_type_for_clone_name(arg);
+            return result;
+        }
         case TypeKind::Pointer:
             return mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
         case TypeKind::FunctionPointer: {
@@ -3848,7 +3890,6 @@ StmtPtr clone_stmt(const Stmt& stmt) {
             for (const Type& param : type.function_params) result += "_" + mangle_type_for_clone_name(param);
             return result;
         }
-        case TypeKind::UniquePtr: return mangle_type_for_clone_name(*type.pointee) + "_uptr";
         case TypeKind::Reference:
             return mangle_type_for_clone_name(*type.pointee) +
                    (type.is_rvalue_ref ? "_rref" : (type.is_mutable_ref ? "_ref" : "_cref"));
@@ -4322,11 +4363,21 @@ private:
                                                      const Type& replacement) {
         if (type.kind == TypeKind::Named && type.name == param_name) return replacement;
         Type result = type;
+        for (Type& arg : result.template_args) {
+            arg = substitute_type_param(arg, param_name, replacement);
+        }
         if (result.pointee) {
             result.pointee = std::make_shared<Type>(substitute_type_param(*result.pointee, param_name, replacement));
         }
         if (result.element) {
             result.element = std::make_shared<Type>(substitute_type_param(*result.element, param_name, replacement));
+        }
+        if (result.function_return) {
+            result.function_return =
+                std::make_shared<Type>(substitute_type_param(*result.function_return, param_name, replacement));
+        }
+        for (Type& param : result.function_params) {
+            param = substitute_type_param(param, param_name, replacement);
         }
         return result;
     }
@@ -5029,6 +5080,7 @@ private:
                 StructField nf;
                 nf.name = f.name;
                 nf.type = substitute_type_param(f.type, type_param.name, named_concrete);
+                nf.type = resolve_generic_type(nf.type, loc);
                 concrete.fields.push_back(std::move(nf));
             }
             program_.structs.push_back(std::move(concrete));
@@ -5055,6 +5107,7 @@ private:
                 nf.name = f.name;
                 nf.access = f.access;
                 nf.type = substitute_type_param(f.type, type_param_name, named_concrete);
+                nf.type = resolve_generic_type(nf.type, loc);
                 concrete.fields.push_back(std::move(nf));
             }
             program_.classes.push_back(std::move(concrete));
@@ -5074,6 +5127,7 @@ private:
                 clone.is_exported = false;
                 clone.is_unsafe = method_tmpl.is_unsafe;
                 clone.return_type = substitute_type_param(method_tmpl.return_type, type_param_name, named_concrete);
+                clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
                 clone.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
                     Param np;
@@ -5086,11 +5140,15 @@ private:
                         np.type = std::move(this_type);
                     } else {
                         np.type = substitute_type_param(p.type, type_param_name, named_concrete);
+                        np.type = resolve_generic_type(np.type, method_tmpl.loc);
                     }
                     clone.params.push_back(std::move(np));
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
-                if (clone.body) substitute_type_param_in_stmt(*clone.body, type_param_name, named_concrete);
+                if (clone.body) {
+                    substitute_type_param_in_stmt(*clone.body, type_param_name, named_concrete);
+                    resolve_generic_types_in_stmt(*clone.body);
+                }
                 program_.functions.push_back(std::move(clone));
             }
             return cache_key;
@@ -5450,6 +5508,10 @@ private:
     [[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {}) {
         switch (type.kind) {
             case TypeKind::Named: {
+                if (is_unique_ptr(type)) {
+                    const Type* element = unique_ptr_element_type(type);
+                    return element && is_thread_movable(*element, visiting);
+                }
                 if (is_scalar_type_name(type.name)) return true;
                 if (visiting.contains(type.name)) return true; // cycle -- see this function's own comment
                 visiting.insert(type.name);
@@ -5493,12 +5555,6 @@ private:
             case TypeKind::FunctionPointer:
                 return true;
             case TypeKind::Array: return type.element && is_thread_movable(*type.element, visiting);
-            case TypeKind::UniquePtr:
-                // ch05 §5.15: follows T's own property independently --
-                // moving the whole unique_ptr transfers exclusive
-                // ownership of the pointee along with it (mirrors
-                // `Box<T>`).
-                return type.pointee && is_thread_movable(*type.pointee, visiting);
             case TypeKind::Reference:
                 // ch05 §5.15: "a type containing a reference member...
                 // is never thread-movable" -- applied here to a bare
@@ -5535,6 +5591,10 @@ private:
     [[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {}) {
         switch (type.kind) {
             case TypeKind::Named: {
+                if (is_unique_ptr(type)) {
+                    const Type* element = unique_ptr_element_type(type);
+                    return element && is_thread_shareable(*element, visiting);
+                }
                 if (is_scalar_type_name(type.name)) return true;
                 if (visiting.contains(type.name)) return true;
                 visiting.insert(type.name);
@@ -5559,7 +5619,6 @@ private:
             case TypeKind::Pointer: return false;
             case TypeKind::FunctionPointer: return true;
             case TypeKind::Array: return type.element && is_thread_shareable(*type.element, visiting);
-            case TypeKind::UniquePtr: return type.pointee && is_thread_shareable(*type.pointee, visiting);
             case TypeKind::Reference:
                 // ch05 §5.15: an *rvalue* reference (`T&&`) represents a
                 // move, not a borrow (see is_thread_movable's own,
@@ -5746,6 +5805,7 @@ private:
             for (const auto& [name, replacement] : type_bindings) {
                 clone.return_type = substitute_type_param(clone.return_type, name, replacement);
             }
+            clone.return_type = resolve_generic_type(clone.return_type, tmpl.loc);
             clone.params.reserve(tmpl.params.size());
             std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
             for (size_t i = 0; i < tmpl.params.size(); i++) {
@@ -5779,6 +5839,7 @@ private:
                         p.type = substitute_type_param(p.type, name, replacement);
                     }
                 }
+                p.type = resolve_generic_type(p.type, tmpl.loc);
                 clone.params.push_back(std::move(p));
             }
             clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
@@ -5790,6 +5851,7 @@ private:
                     expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names);
                     expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
                 }
+                resolve_generic_types_in_stmt(*clone.body);
             }
             program_.functions.push_back(std::move(clone));
         }
@@ -5921,6 +5983,23 @@ private:
         if (expr.lhs) walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization);
         if (expr.rhs) walk_expr(*expr.rhs, body, enclosing_this_type, allow_generic_monomorphization);
         for (ExprPtr& arg : expr.args) walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
+
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {
+            std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures_);
+            if (operand_type.has_value()) {
+                const Type& underlying =
+                    operand_type->kind == TypeKind::Reference && operand_type->pointee ? *operand_type->pointee
+                                                                                        : *operand_type;
+                if (underlying.kind == TypeKind::Named &&
+                    signatures_.contains(underlying.name + "_operator_deref")) {
+                    ExprPtr receiver = std::move(expr.lhs);
+                    expr.kind = ExprKind::Call;
+                    expr.name = "operator_deref";
+                    expr.lhs = std::move(receiver);
+                    expr.unary_op = UnaryOp::Not;
+                }
+            }
+        }
 
         // Generic-call monomorphization is suppressed entirely while
         // walking a generic template's own body (see run()'s own

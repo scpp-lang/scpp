@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.1: `std::move(x)` marks `x` moved-out and transfers ownership;
 // the new owner can be dereferenced normally.
 int main() {

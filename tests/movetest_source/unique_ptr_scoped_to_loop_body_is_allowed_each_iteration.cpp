@@ -1,3 +1,4 @@
+import std;
 int f() {
     while (true) {
         std::unique_ptr<int> a = std::make_unique<int>();

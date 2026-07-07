@@ -1,3 +1,4 @@
+import std;
 // ch04 §4.2/spec §6.4(5): `b = std::move(a);` first destroys `b`'s old
 // state, then overwrites it with `a`'s moved value; `a` itself is left in
 // the moved-out state so only the newly-assigned `b` runs again at

@@ -1,10 +1,23 @@
 import scpp.parser;
 import scpp.ast;
 
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+
+#ifndef SCPP_STDLIB_STD_MODULE_PATH
+#error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
+#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
+#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
+#endif
 
 namespace {
 
@@ -19,6 +32,63 @@ void expect(bool condition, std::string_view message) {
 
 bool is_named_type(const scpp::Type& type, std::string_view name) {
     return type.kind == scpp::TypeKind::Named && type.name == name;
+}
+
+const scpp::Function* find_function_named(const scpp::Program& program, std::string_view name) {
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == name) return &fn;
+    }
+    return nullptr;
+}
+
+std::string read_file(const std::string& path) {
+    std::ifstream file(path);
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+class TestModuleCache {
+public:
+    const scpp::Program& resolve(const std::string& module_name) {
+        auto it = cache_.find(module_name);
+        if (it != cache_.end()) return it->second;
+        const std::string* path = module_path(module_name);
+        if (path == nullptr) throw std::runtime_error("unknown test module '" + module_name + "'");
+        scpp::Program parsed = scpp::parse(
+            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
+        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed));
+        return inserted->second;
+    }
+
+    scpp::Program resolve_partition(const std::string& key) {
+        const std::string* path = module_path(key);
+        if (path == nullptr) throw std::runtime_error("unknown test partition '" + key + "'");
+        return scpp::parse(
+            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
+    }
+
+private:
+    const std::string* module_path(const std::string& name) const {
+        static const std::string std_module = SCPP_STDLIB_STD_MODULE_PATH;
+        static const std::string std_string_module = SCPP_STDLIB_STD_STRING_MODULE_PATH;
+        static const std::string std_memory_module = SCPP_STDLIB_STD_MEMORY_MODULE_PATH;
+        if (name == "std") return &std_module;
+        if (name == "std:string") return &std_string_module;
+        if (name == "std:memory") return &std_memory_module;
+        return nullptr;
+    }
+
+    std::unordered_map<std::string, scpp::Program> cache_;
+};
+
+scpp::Program parse_with_std_imports(std::string_view source) {
+    TestModuleCache cache;
+    return scpp::parse(
+        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
 }
 
 void test_int_main_return() {
@@ -643,27 +713,28 @@ void test_struct_before_use_is_required() {
 }
 
 void test_unique_ptr_type_declaration() {
-    scpp::Program program = scpp::parse("int f() { std::unique_ptr<int> a; return 0; }");
-    const scpp::Function& fn = program.functions[0];
+    scpp::Program program = parse_with_std_imports("import std;\nint f() { std::unique_ptr<int> a; return 0; }");
+    const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "unique_ptr_type_declaration: statement 0 should be VarDecl");
-    expect(decl.type.kind == scpp::TypeKind::UniquePtr,
-           "unique_ptr_type_declaration: type should be UniquePtr");
-    expect(decl.type.pointee != nullptr && is_named_type(*decl.type.pointee, "int"),
+    expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "std::unique_ptr",
+           "unique_ptr_type_declaration: type should be std::unique_ptr");
+    expect(decl.type.template_args.size() == 1 && is_named_type(decl.type.template_args[0], "int"),
            "unique_ptr_type_declaration: pointee should be 'int'");
     expect(decl.var_name == "a", "unique_ptr_type_declaration: variable name should be 'a'");
     expect(decl.init == nullptr, "unique_ptr_type_declaration: no initializer given");
 }
 
 void test_unique_ptr_of_struct_type() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
         "struct Point { int x; int y; };"
         "int f() { std::unique_ptr<Point> a; return 0; }");
-    const scpp::Function& fn = program.functions[0];
+    const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[0];
-    expect(decl.type.kind == scpp::TypeKind::UniquePtr,
-           "unique_ptr_of_struct_type: type should be UniquePtr");
-    expect(decl.type.pointee != nullptr && is_named_type(*decl.type.pointee, "Point"),
+    expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "std::unique_ptr",
+           "unique_ptr_of_struct_type: type should be std::unique_ptr");
+    expect(decl.type.template_args.size() == 1 && is_named_type(decl.type.template_args[0], "Point"),
            "unique_ptr_of_struct_type: pointee should be 'Point'");
 }
 
@@ -689,13 +760,14 @@ void test_span_of_const_element_type() {
 }
 
 void test_move_expression() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
         "int f() {"
         "    std::unique_ptr<int> a;"
         "    std::unique_ptr<int> b = std::move(a);"
         "    return 0;"
         "}");
-    const scpp::Function& fn = program.functions[0];
+    const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[1];
     expect(decl.kind == scpp::StmtKind::VarDecl, "move_expression: statement 1 should be VarDecl");
     expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::Move,
@@ -705,17 +777,19 @@ void test_move_expression() {
 }
 
 void test_move_as_function_argument() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
         "int consume(std::unique_ptr<int> p) { return 0; }"
         "int f() {"
         "    std::unique_ptr<int> a;"
         "    return consume(std::move(a));"
         "}");
-    const scpp::Function& consume_fn = program.functions[0];
-    expect(consume_fn.params.size() == 1 && consume_fn.params[0].type.kind == scpp::TypeKind::UniquePtr,
-           "move_as_function_argument: 'consume' should take a UniquePtr param");
+    const scpp::Function& consume_fn = *find_function_named(program, "consume");
+    expect(consume_fn.params.size() == 1 && consume_fn.params[0].type.kind == scpp::TypeKind::Named &&
+               consume_fn.params[0].type.name == "std::unique_ptr",
+           "move_as_function_argument: 'consume' should take a std::unique_ptr param");
 
-    const scpp::Function& f_fn = program.functions[1];
+    const scpp::Function& f_fn = *find_function_named(program, "f");
     const scpp::Stmt& ret = *f_fn.body->statements[1];
     expect(ret.expr->kind == scpp::ExprKind::Call && ret.expr->name == "consume",
            "move_as_function_argument: return expr should be a call to 'consume'");
@@ -724,35 +798,42 @@ void test_move_as_function_argument() {
 }
 
 void test_make_unique_zero_args() {
-    scpp::Program program = scpp::parse("int f() { std::unique_ptr<int> a = std::make_unique<int>(); return 0; }");
-    const scpp::Function& fn = program.functions[0];
+    scpp::Program program =
+        parse_with_std_imports("import std;\nint f() { std::unique_ptr<int> a = std::make_unique<int>(); return 0; }");
+    const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[0];
-    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::MakeUnique,
-           "make_unique_zero_args: initializer should be a MakeUnique expression");
-    expect(is_named_type(decl.init->type, "int"), "make_unique_zero_args: element type should be 'int'");
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::Call && decl.init->name == "std::make_unique",
+           "make_unique_zero_args: initializer should be a std::make_unique call");
+    expect(decl.init->explicit_template_args.size() == 1 && decl.init->explicit_template_args[0].is_type &&
+               is_named_type(decl.init->explicit_template_args[0].type, "int"),
+           "make_unique_zero_args: element type should be 'int'");
     expect(decl.init->args.empty(), "make_unique_zero_args: expected 0 arguments");
 }
 
 void test_make_unique_with_arg() {
-    scpp::Program program = scpp::parse("int f() { std::unique_ptr<int> a = std::make_unique<int>(42); return 0; }");
-    const scpp::Function& fn = program.functions[0];
+    scpp::Program program = parse_with_std_imports(
+        "import std;\nint f() { std::unique_ptr<int> a = std::make_unique<int>(42); return 0; }");
+    const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[0];
-    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::MakeUnique,
-           "make_unique_with_arg: initializer should be a MakeUnique expression");
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::Call && decl.init->name == "std::make_unique",
+           "make_unique_with_arg: initializer should be a std::make_unique call");
     expect(decl.init->args.size() == 1 && decl.init->args[0]->kind == scpp::ExprKind::IntegerLiteral &&
                decl.init->args[0]->int_value == 42,
            "make_unique_with_arg: expected a single IntegerLiteral 42 argument");
 }
 
 void test_make_unique_of_struct_type() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
         "struct Point { int x; int y; };"
         "int f() { std::unique_ptr<Point> a = std::make_unique<Point>(); return 0; }");
-    const scpp::Function& fn = program.functions[0];
+    const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[0];
-    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::MakeUnique,
-           "make_unique_of_struct_type: initializer should be a MakeUnique expression");
-    expect(is_named_type(decl.init->type, "Point"), "make_unique_of_struct_type: element type should be 'Point'");
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::Call && decl.init->name == "std::make_unique",
+           "make_unique_of_struct_type: initializer should be a std::make_unique call");
+    expect(decl.init->explicit_template_args.size() == 1 && decl.init->explicit_template_args[0].is_type &&
+               is_named_type(decl.init->explicit_template_args[0].type, "Point"),
+           "make_unique_of_struct_type: element type should be 'Point'");
 }
 
 void test_new_and_delete_parse() {
@@ -1432,7 +1513,11 @@ void test_rvalue_reference_rejected_outside_parameter_position() {
     auto expect_rejected = [](const std::string& source, const char* label) {
         bool threw = false;
         try {
-            scpp::parse(source);
+            if (source.find("import std;") != std::string::npos) {
+                parse_with_std_imports(source);
+            } else {
+                scpp::parse(source);
+            }
         } catch (const scpp::ParseError&) {
             threw = true;
         }
@@ -1447,7 +1532,7 @@ void test_rvalue_reference_rejected_outside_parameter_position() {
         "    int&& field;\n"
         "};\n",
         "class field");
-    expect_rejected("int f() { std::unique_ptr<int&&> p; return 0; }", "unique_ptr element type");
+    expect_rejected("import std;\nint f() { std::unique_ptr<int&&> p; return 0; }", "unique_ptr element type");
 }
 
 // ch05 §5.11: `template<typename T> concept Name = requires(...) { ...
@@ -1889,7 +1974,8 @@ void test_lambda_blanket_capture_modes_parse() {
 // expression -- how a move-only type crosses into a closure, e.g.
 // `[p = std::move(p)]`.
 void test_lambda_init_capture_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
         "int apply(int x, int y) { return x; }\n"
         "int main() {\n"
         "    std::unique_ptr<int> p = std::make_unique<int>(5);\n"

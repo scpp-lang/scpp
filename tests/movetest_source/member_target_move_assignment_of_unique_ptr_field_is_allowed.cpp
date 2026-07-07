@@ -1,3 +1,4 @@
+import std;
 // ch04 §4.2/spec §6.4: `this.field = std::move(x);` -- moving into a
 // std::unique_ptr *field* from a constructor parameter -- now also
 // generalizes to a class-typed field (previously this exact shape only

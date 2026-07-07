@@ -1,3 +1,4 @@
+import std;
 // ch04 §4.2/spec §6.4(5): move assignment destroys the target's old
 // initialized state before replacing it with the moved-in one. For a
 // user-defined destructor-owning class (not `std::unique_ptr` itself),

@@ -1,3 +1,4 @@
+import std;
 int consume(std::unique_ptr<int> p) {
     return 0;
 }

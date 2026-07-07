@@ -3,7 +3,7 @@
 // A plain C ABI (`extern "C"`) wrapper around real C++ `std::string`,
 // consumed by stdlib/string/String.cpp's scpp `class String`. This is the
 // concrete demonstration of scpp calling into a real C/C++ library (see
-// stdlib/string/README.md): the wrapper is compiled by an ordinary C++
+// stdlib/README.md): the wrapper is compiled by an ordinary C++
 // compiler (clang++/g++) into a small static library, entirely independent
 // of the scpp toolchain, and scpp code links against it like any other
 // native library.
