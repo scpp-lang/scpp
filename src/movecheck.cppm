@@ -73,6 +73,15 @@ using BorrowMap = std::unordered_map<std::string, BorrowState>;
 // *root* place it (transitively) borrows -- see `resolve_root_place`.
 using RefTargetMap = std::unordered_map<std::string, std::string>;
 
+struct ClosureCaptureBorrow {
+    std::string root;
+    bool is_mutable = false;
+
+    bool operator==(const ClosureCaptureBorrow&) const = default;
+};
+
+using ClosureCaptureBorrowMap = std::unordered_map<std::string, std::vector<ClosureCaptureBorrow>>;
+
 // Every struct/class's own declared field name -> Type, across the whole
 // program -- see DataflowState::class_field_types' own comment for why
 // this exists (movecheck's Body-only architecture otherwise has no way
@@ -96,6 +105,7 @@ struct DataflowState {
     StateMap locals;
     BorrowMap borrows;
     RefTargetMap ref_targets;
+    ClosureCaptureBorrowMap closure_capture_borrows;
     // Ch01 §1.3's nesting counter: incremented by UnsafeEnter, decremented
     // by UnsafeExit (see apply_statement). Zero means "not currently
     // licensed to relax ch05.5's checks"; greater than zero means inside
@@ -172,6 +182,7 @@ struct DataflowState {
 
     [[nodiscard]] bool operator==(const DataflowState& other) const {
         return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
+               closure_capture_borrows == other.closure_capture_borrows &&
                unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
                class_names == other.class_names && class_field_types == other.class_field_types &&
                class_field_access == other.class_field_access &&
@@ -285,11 +296,20 @@ RefTargetMap join_ref_targets(const RefTargetMap& a, const RefTargetMap& b) {
     return result;
 }
 
+ClosureCaptureBorrowMap join_closure_capture_borrows(const ClosureCaptureBorrowMap& a, const ClosureCaptureBorrowMap& b) {
+    ClosureCaptureBorrowMap result = a;
+    for (const auto& [name, borrows] : b) {
+        result.insert_or_assign(name, borrows);
+    }
+    return result;
+}
+
 DataflowState join_states(const DataflowState& a, const DataflowState& b) {
     return DataflowState{
         join_maps(a.locals, b.locals),
         join_borrow_maps(a.borrows, b.borrows),
         join_ref_targets(a.ref_targets, b.ref_targets),
+        join_closure_capture_borrows(a.closure_capture_borrows, b.closure_capture_borrows),
         // In a well-formed program every incoming path agrees on the
         // unsafe nesting depth at a given program point (see
         // DataflowState::unsafe_depth) -- min is just a conservative,
@@ -1393,6 +1413,24 @@ void release_reference_borrow(const std::string& name, DataflowState& state, con
     state.ref_targets.erase(ref_it);
 }
 
+void release_closure_capture_borrows(const std::string& name, DataflowState& state) {
+    auto closure_it = state.closure_capture_borrows.find(name);
+    if (closure_it == state.closure_capture_borrows.end()) return;
+    for (const ClosureCaptureBorrow& capture_borrow : closure_it->second) {
+        auto borrow_it = state.borrows.find(capture_borrow.root);
+        if (borrow_it == state.borrows.end()) continue;
+        if (capture_borrow.is_mutable) {
+            borrow_it->second.mutable_borrow = false;
+        } else if (borrow_it->second.shared_count > 0) {
+            borrow_it->second.shared_count--;
+        }
+        if (!borrow_it->second.mutable_borrow && borrow_it->second.shared_count == 0) {
+            state.borrows.erase(borrow_it);
+        }
+    }
+    state.closure_capture_borrows.erase(closure_it);
+}
+
 std::vector<size_t> successors(const Terminator& term) {
     switch (term.kind) {
         case TerminatorKind::Goto: return {term.target};
@@ -1432,7 +1470,9 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
             return;
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr->name);
-            if (it != body.local_types.end() && (is_reference(it->second) || is_span(it->second))) {
+            if (it != body.local_types.end() &&
+                (is_reference(it->second) || is_span(it->second) ||
+                 body.borrow_holding_closure_locals.contains(expr->name))) {
                 out.insert(expr->name);
             }
             return;
@@ -1643,6 +1683,13 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
     }
     for (const std::string& name : dead) {
         release_reference_borrow(name, state, body);
+    }
+    dead.clear();
+    for (const auto& [name, borrows] : state.closure_capture_borrows) {
+        if (!live_after_stmt.contains(name)) dead.push_back(name);
+    }
+    for (const std::string& name : dead) {
+        release_closure_capture_borrows(name, state);
     }
 }
 
@@ -2259,7 +2306,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 //    genuinely borrows it, for as long as `reference_capture_borrows`
 //    (see above) says it lasts.
 void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
-                            const Body& body, const Signatures& signatures, bool report_errors) {
+                            const Body& body, const Signatures& signatures, bool report_errors,
+                            std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows = nullptr) {
     for (const LambdaCapture& capture : expr.lambda_captures) {
         if (capture.init) {
             apply_expr(*capture.init, /*is_move_target_context=*/true, state, body, signatures, report_errors);
@@ -2287,11 +2335,16 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
         capture_ident.kind = ExprKind::Identifier;
         capture_ident.loc = expr.loc;
         capture_ident.name = capture.name;
+        std::string root =
+            resolve_borrow_source_root(capture_ident, state, body, signatures, report_errors);
         Type ref_type;
         ref_type.kind = TypeKind::Reference;
         ref_type.is_mutable_ref = true; // matches resolve_lambda's own field choice
         apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
                                   report_errors);
+        if (out_closure_capture_borrows != nullptr) {
+            out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, true});
+        }
     }
 }
 
@@ -3000,7 +3053,12 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     // apply_lambda_captures' own comment) rather than a
                     // throwaway map that apply_expr's generic Lambda
                     // handling would otherwise use.
-                    apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors);
+                    std::vector<ClosureCaptureBorrow> closure_capture_borrows;
+                    apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors,
+                                          &closure_capture_borrows);
+                    if (!closure_capture_borrows.empty()) {
+                        state.closure_capture_borrows[stmt.local] = std::move(closure_capture_borrows);
+                    }
                 } else {
                     // spec §6.5: `ClassName y = x;` (a bare, non-move,
                     // non-lambda initializer -- this variable's first-
@@ -3108,6 +3166,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // (see codegen's validate_reference_pointee), so "move a
             // borrowed place" can't arise either.
             release_reference_borrow(stmt.local, state, body);
+            release_closure_capture_borrows(stmt.local, state);
             // `stmt.local` just went out of lexical scope: forget its
             // tracked state entirely. Erasing is equivalent to setting
             // it to Bottom (lookup() treats a missing key as Bottom) and
@@ -5398,16 +5457,25 @@ private:
         if (expr.rhs) walk_expr(*expr.rhs, body, enclosing_this_type, allow_generic_monomorphization);
         for (ExprPtr& arg : expr.args) walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
 
-        // Only a bare (no-receiver) Call can ever target a generic
-        // template -- generic *methods* are rejected at parse time (see
-        // parser.cppm's reject_generic_params), so `expr.lhs != nullptr`
-        // (a method-call shape) can never be one. Suppressed entirely
-        // while walking a generic template's own body (see run()'s own
+        // Generic-call monomorphization is suppressed entirely while
+        // walking a generic template's own body (see run()'s own
         // comment): a nested generic-to-generic call is left targeting
         // the original, codegen-excluded template instead.
         if (!allow_generic_monomorphization) return;
-        if (expr.kind != ExprKind::Call || expr.lhs != nullptr) return;
-        auto template_it = generic_template_indices_.find(expr.name);
+        if (expr.kind != ExprKind::Call) return;
+        std::string generic_template_name = expr.name;
+        size_t param_offset = 0;
+        std::string cloned_method_suffix_prefix;
+        if (expr.lhs != nullptr) {
+            std::optional<Type> receiver = infer_expr_type(*expr.lhs, body, signatures_);
+            if (!receiver.has_value()) return;
+            const Type& receiver_named = receiver->kind == TypeKind::Reference ? *receiver->pointee : *receiver;
+            if (receiver_named.kind != TypeKind::Named) return;
+            generic_template_name = receiver_named.name + "_" + expr.name;
+            param_offset = 1;
+            cloned_method_suffix_prefix = receiver_named.name + "_";
+        }
+        auto template_it = generic_template_indices_.find(generic_template_name);
         if (template_it == generic_template_indices_.end()) return;
         const Function& tmpl = program_.functions[template_it->second];
 
@@ -5428,12 +5496,17 @@ private:
         concrete_param_types.reserve(tmpl.params.size());
         for (size_t i = 0; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
+            if (i < param_offset) {
+                concrete_param_types.push_back(param.type);
+                continue;
+            }
             if (param.generic_concept.empty()) {
                 concrete_param_types.push_back(param.type);
                 continue;
             }
-            if (i >= expr.args.size()) return; // arg-count mismatch -- leave for codegen's own error
-            std::optional<Type> arg_type = infer_expr_type(*expr.args[i], body, signatures_);
+            size_t arg_index = i - param_offset;
+            if (arg_index >= expr.args.size()) return; // arg-count mismatch -- leave for codegen's own error
+            std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_index], body, signatures_);
             if (!arg_type.has_value()) return;
             // The concept is checked against the argument's *underlying*
             // named type -- e.g. a `const Shape auto&` parameter's
@@ -5443,14 +5516,16 @@ private:
             // resolve to the same concrete type for concept-satisfaction
             // and substitution purposes.
             Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-            auto concept_it = concepts_by_name_.find(param.generic_concept);
-            if (concept_it == concepts_by_name_.end()) return;
-            if (!type_satisfies_concept(named, *concept_it->second, program_)) {
-                throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
-                                     param.generic_concept + "' required by generic function '" + tmpl.name +
-                                     "' (ch05 §5.11 -- every requirement's method must exist with a matching "
-                                     "signature)",
-                    expr.loc);
+            if (param.generic_concept != "$auto") {
+                auto concept_it = concepts_by_name_.find(param.generic_concept);
+                if (concept_it == concepts_by_name_.end()) return;
+                if (!type_satisfies_concept(named, *concept_it->second, program_)) {
+                    throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
+                                           param.generic_concept + "' required by generic function '" + tmpl.name +
+                                           "' (ch05 §5.11 -- every requirement's method must exist with a matching "
+                                           "signature)",
+                        expr.loc);
+                }
             }
             Type substituted = param.type;
             if (substituted.kind == TypeKind::Reference) {
@@ -5466,24 +5541,29 @@ private:
         // comment; this form's own concrete param types are already
         // fully resolved in concrete_param_types by this point, so no
         // extra type_bindings substitution is needed here.
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        for (size_t i = param_offset; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
             if (param.require_thread_movable && !is_thread_movable(concrete_param_types[i])) {
                 throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                         tmpl.name +
-                                         "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
+                                        tmpl.name +
+                                        "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
                     expr.loc);
             }
             if (param.require_thread_shareable && !is_thread_shareable(concrete_param_types[i])) {
                 throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                         tmpl.name +
-                                         "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
+                                        tmpl.name +
+                                        "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
                     expr.loc);
             }
         }
 
-        expr.name = get_or_create_clone(tmpl, concrete_param_types);
+        std::string clone_name = get_or_create_clone(tmpl, concrete_param_types);
+        if (expr.lhs == nullptr) {
+            expr.name = std::move(clone_name);
+        } else {
+            expr.name = clone_name.substr(cloned_method_suffix_prefix.size());
+        }
     }
 
     // ch05 §5.12: resolves a single Lambda expression node in place --
@@ -5601,6 +5681,7 @@ private:
             closure_class.fields.push_back(std::move(field));
         }
         program_.classes.push_back(std::move(closure_class));
+        known_type_names_.insert(class_name);
 
         Function call_method;
         call_method.name = class_name + "_call";
@@ -5629,6 +5710,9 @@ private:
         this_param.type = std::move(this_type);
         call_method.params.push_back(std::move(this_param));
         for (const Param& p : expr.lambda_params) call_method.params.push_back(p);
+        call_method.is_generic_template =
+            std::any_of(expr.lambda_params.begin(), expr.lambda_params.end(),
+                        [](const Param& param) { return !param.generic_concept.empty(); });
 
         call_method.body = expr.lambda_body ? clone_stmt(*expr.lambda_body) : nullptr;
         // ch05 §5.12: "a by-value capture can't be reassigned inside the
@@ -5688,6 +5772,10 @@ private:
 
         program_.functions.push_back(std::move(call_method));
         Function& synthesized = program_.functions.back();
+        known_function_names_.insert(synthesized.name);
+        if (synthesized.is_generic_template) {
+            generic_template_indices_[synthesized.name] = program_.functions.size() - 1;
+        }
 
         expr.name = class_name;
 
@@ -5703,7 +5791,7 @@ private:
         if (synthesized.body) {
             Body synthesized_body = build_mir(synthesized);
             walk_stmt(*synthesized.body, synthesized_body, this_type_of(synthesized),
-                      /*allow_generic_monomorphization=*/true);
+                      /*allow_generic_monomorphization=*/!synthesized.is_generic_template);
         }
     }
 
@@ -5810,6 +5898,18 @@ private:
         // synthesized clone with a compiler-synthesized name).
         clone.is_exported = false;
         clone.is_unsafe = tmpl.is_unsafe;
+        std::unordered_map<std::string, Type> witness_replacements;
+        for (size_t i = 0; i < tmpl.params.size() && i < concrete_param_types.size(); i++) {
+            if (!tmpl.params[i].generic_concept.empty()) {
+                const Type& concrete = concrete_param_types[i].kind == TypeKind::Reference
+                                           ? *concrete_param_types[i].pointee
+                                           : concrete_param_types[i];
+                witness_replacements[tmpl.params[i].generic_concept] = concrete;
+            }
+        }
+        for (const auto& [witness_name, concrete] : witness_replacements) {
+            clone.return_type = substitute_type_param(clone.return_type, witness_name, concrete);
+        }
         clone.params.reserve(tmpl.params.size());
         for (size_t i = 0; i < tmpl.params.size(); i++) {
             Param p;
@@ -5818,6 +5918,11 @@ private:
             clone.params.push_back(std::move(p));
         }
         clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
+        if (clone.body) {
+            for (const auto& [witness_name, concrete] : witness_replacements) {
+                substitute_type_param_in_stmt(*clone.body, witness_name, concrete);
+            }
+        }
         // is_generic_template stays false (default): the clone is an
         // ordinary, fully concrete function from here on, checked
         // normally by movecheck (see monomorphize_generics's own

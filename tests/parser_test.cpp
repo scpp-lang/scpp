@@ -1851,9 +1851,8 @@ void test_lambda_init_capture_parses() {
 }
 
 // ch05 §5.12: `[this]` captures a reference to the enclosing method's
-// own receiver; `[*this]` (capturing the object by value) is rejected
-// -- scpp classes have no copy constructor yet (ch04 §4.2).
-void test_lambda_this_capture_parses_and_star_this_is_rejected() {
+// own receiver, while `[*this]` captures the enclosing object by value.
+void test_lambda_this_and_star_this_captures_parse() {
     scpp::Program program = scpp::parse(
         "int apply(int x, int y) { return x; }\n"
         "class Widget {\n"
@@ -1868,27 +1867,31 @@ void test_lambda_this_capture_parses_and_star_this_is_rejected() {
     for (const scpp::Function& fn : program.functions) {
         if (fn.name == "Widget_use_lambda") method = &fn;
     }
-    expect(method != nullptr, "lambda_this_capture_parses_and_star_this_is_rejected: expected 'Widget_use_lambda'");
+    expect(method != nullptr, "lambda_this_and_star_this_captures_parse: expected 'Widget_use_lambda'");
     const scpp::Expr& lambda = *method->body->statements[0]->expr->args[0];
     expect(lambda.lambda_captures.size() == 1 && lambda.lambda_captures[0].name == "this" &&
                lambda.lambda_captures[0].by_reference,
-           "lambda_this_capture_parses_and_star_this_is_rejected: expected 1 capture '&this'");
+           "lambda_this_and_star_this_captures_parse: expected 1 capture '&this'");
 
-    bool threw = false;
-    try {
-        scpp::parse(
-            "int apply(int x, int y) { return x; }\n"
-            "class Widget {\n"
-            "public:\n"
-            "    Widget() { return; }\n"
-            "    int use_lambda() {\n"
-            "        return apply([*this](int z) { return z; }, 3);\n"
-            "    }\n"
-            "};\n");
-    } catch (const scpp::ParseError&) {
-        threw = true;
+    scpp::Program star_program = scpp::parse(
+        "int apply(int x, int y) { return x; }\n"
+        "class Widget {\n"
+        "public:\n"
+        "    Widget() { return; }\n"
+        "    int use_lambda() {\n"
+        "        return apply([*this](int z) { return z; }, 3);\n"
+        "    }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* star_method = nullptr;
+    for (const scpp::Function& fn : star_program.functions) {
+        if (fn.name == "Widget_use_lambda") star_method = &fn;
     }
-    expect(threw, "lambda_this_capture_parses_and_star_this_is_rejected: expected '[*this]' to be a ParseError");
+    expect(star_method != nullptr, "lambda_this_and_star_this_captures_parse: expected star-this method");
+    const scpp::Expr& star_lambda = *star_method->body->statements[0]->expr->args[0];
+    expect(star_lambda.lambda_captures.size() == 1 && star_lambda.lambda_captures[0].name == "this" &&
+              !star_lambda.lambda_captures[0].by_reference,
+           "lambda_this_and_star_this_captures_parse: expected 1 capture '*this'");
 }
 
 // ch05 §5.12: a lambda's own parameter list does not support a
@@ -2493,7 +2496,7 @@ int main() {
     test_lambda_with_explicit_captures_parses();
     test_lambda_blanket_capture_modes_parse();
     test_lambda_init_capture_parses();
-    test_lambda_this_capture_parses_and_star_this_is_rejected();
+    test_lambda_this_and_star_this_captures_parse();
     test_lambda_generic_parameter_is_rejected();
     test_lambda_mutable_keyword_parses();
     test_generic_class_bare_type_param_parses();
