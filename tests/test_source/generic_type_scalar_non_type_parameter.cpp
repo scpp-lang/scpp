@@ -1,0 +1,13 @@
+template<int N>
+class FixedValue {
+public:
+    int get_n() {
+        return N;
+    }
+};
+
+int main() {
+    FixedValue<42> v;
+    print_int(v.get_n());
+    return 0;
+}
