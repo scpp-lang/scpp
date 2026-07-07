@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.12: a by-value (non-init) capture of a std::unique_ptr is an
 // implicit copy of a move-only type -- rejected exactly like reading
 // any other std::unique_ptr variable without std::move (ch05 §5.1).

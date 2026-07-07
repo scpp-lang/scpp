@@ -1,3 +1,4 @@
+import std;
 // spec §6.2(4)/§6.4: reassigning a *previously* moved-out variable
 // (`b = std::move(a);` after `b` itself was already moved-out earlier,
 // via `Resource c(std::move(b));`) must restore it to a normal,

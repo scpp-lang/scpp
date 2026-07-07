@@ -1,3 +1,4 @@
+import std;
 int f(bool cond) {
     std::unique_ptr<int> a;
     if (cond) {

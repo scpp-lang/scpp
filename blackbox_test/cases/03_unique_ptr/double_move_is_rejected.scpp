@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.1: every value has a unique owner -- moving twice from the same
 // source is a double-move and must be rejected.
 int main() {

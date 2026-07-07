@@ -5,6 +5,11 @@ project(scpp
     DESCRIPTION "A compiler frontend for a C++-looking language with safe regions"
     LANGUAGES CXX)
 
+set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/std.cpp")
+set(SCPP_STDLIB_STD_STRING_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/string/std_string.cpp")
+set(SCPP_STDLIB_STD_MEMORY_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/memory/std_memory.cpp")
+set(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_string_wrapper.a")
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -98,14 +103,21 @@ add_test(NAME lexer_test COMMAND lexer_test)
 add_executable(parser_test tests/parser_test.cpp)
 target_link_libraries(parser_test PRIVATE scpp_parser scpp_ast scpp_lexer)
 target_compile_features(parser_test PRIVATE cxx_std_23)
+target_compile_definitions(parser_test PRIVATE
+    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_STD_STRING_MODULE_PATH="${SCPP_STDLIB_STD_STRING_MODULE_PATH}"
+    SCPP_STDLIB_STD_MEMORY_MODULE_PATH="${SCPP_STDLIB_STD_MEMORY_MODULE_PATH}")
 
 add_test(NAME parser_test COMMAND parser_test)
 
 add_executable(codegen_test tests/codegen_test.cpp)
-target_link_libraries(codegen_test PRIVATE scpp_codegen scpp_parser scpp_ast scpp_lexer)
+target_link_libraries(codegen_test PRIVATE scpp_codegen scpp_movecheck scpp_parser scpp_ast scpp_lexer)
 target_compile_features(codegen_test PRIVATE cxx_std_23)
 target_compile_definitions(codegen_test PRIVATE
-    SCPP_CODEGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source")
+    SCPP_CODEGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source"
+    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_STD_STRING_MODULE_PATH="${SCPP_STDLIB_STD_STRING_MODULE_PATH}"
+    SCPP_STDLIB_STD_MEMORY_MODULE_PATH="${SCPP_STDLIB_STD_MEMORY_MODULE_PATH}")
 
 add_test(NAME codegen_test COMMAND codegen_test)
 
@@ -113,7 +125,10 @@ add_executable(movecheck_test tests/movecheck_test.cpp)
 target_link_libraries(movecheck_test PRIVATE scpp_movecheck scpp_parser scpp_ast scpp_lexer)
 target_compile_features(movecheck_test PRIVATE cxx_std_23)
 target_compile_definitions(movecheck_test PRIVATE
-    SCPP_MOVETEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/movetest_source")
+    SCPP_MOVETEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/movetest_source"
+    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_STD_STRING_MODULE_PATH="${SCPP_STDLIB_STD_STRING_MODULE_PATH}"
+    SCPP_STDLIB_STD_MEMORY_MODULE_PATH="${SCPP_STDLIB_STD_MEMORY_MODULE_PATH}")
 
 add_test(NAME movecheck_test COMMAND movecheck_test)
 
@@ -121,11 +136,14 @@ add_executable(driver_test tests/driver_test.cpp)
 target_link_libraries(driver_test PRIVATE scpp_driver scpp_codegen scpp_movecheck scpp_parser scpp_ast scpp_lexer)
 target_compile_features(driver_test PRIVATE cxx_std_23)
 target_compile_definitions(driver_test PRIVATE
-    SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source")
+    SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source"
+    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_STD_STRING_MODULE_PATH="${SCPP_STDLIB_STD_STRING_MODULE_PATH}"
+    SCPP_STDLIB_STD_MEMORY_MODULE_PATH="${SCPP_STDLIB_STD_MEMORY_MODULE_PATH}"
+    SCPP_STDLIB_STRING_WRAPPER_LIB_PATH="${SCPP_STDLIB_STRING_WRAPPER_LIB_PATH}")
 
 add_test(NAME driver_test COMMAND driver_test)
 
-# Builds and tests stdlib/string's String demo end-to-end -- see
-# stdlib/string/CMakeLists.txt for the full explanation.
-add_subdirectory(stdlib/string)
-
+# Builds stdlib helper libraries (e.g. the native wrapper behind
+# std::string). Library behavior itself is covered by tests/, not demos.
+add_subdirectory(stdlib)

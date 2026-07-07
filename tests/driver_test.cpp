@@ -24,6 +24,18 @@ import scpp.ast;
 #ifndef SCPP_TEST_SOURCE_DIR
 #error "SCPP_TEST_SOURCE_DIR must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_MODULE_PATH
+#error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
+#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
+#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 
 namespace {
 
@@ -44,6 +56,53 @@ std::string read_file(const std::filesystem::path& path) {
     return buffer.str();
 }
 
+std::unordered_map<std::string, std::string> std_import_paths() {
+    return {{"std", SCPP_STDLIB_STD_MODULE_PATH},
+            {"std:string", SCPP_STDLIB_STD_STRING_MODULE_PATH},
+            {"std:memory", SCPP_STDLIB_STD_MEMORY_MODULE_PATH}};
+}
+
+std::vector<std::string> std_link_inputs() {
+    return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH};
+}
+
+class TestModuleCache {
+public:
+    explicit TestModuleCache(std::unordered_map<std::string, std::string> import_paths)
+        : import_paths_(std::move(import_paths)) {}
+
+    const scpp::Program& resolve(const std::string& module_name) {
+        auto it = cache_.find(module_name);
+        if (it != cache_.end()) return it->second;
+        auto path_it = import_paths_.find(module_name);
+        if (path_it == import_paths_.end()) throw std::runtime_error("unknown test module '" + module_name + "'");
+        scpp::Program parsed = scpp::parse(
+            read_file(path_it->second), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
+        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed));
+        return inserted->second;
+    }
+
+    scpp::Program resolve_partition(const std::string& key) {
+        auto path_it = import_paths_.find(key);
+        if (path_it == import_paths_.end()) throw std::runtime_error("unknown test partition '" + key + "'");
+        return scpp::parse(
+            read_file(path_it->second), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
+    }
+
+private:
+    std::unordered_map<std::string, std::string> import_paths_;
+    std::unordered_map<std::string, scpp::Program> cache_;
+};
+
+scpp::Program parse_with_std_imports(std::string_view source) {
+    TestModuleCache cache(std_import_paths());
+    return scpp::parse(
+        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
 struct RunResult {
     int exit_code;
     std::string stdout_text;
@@ -53,7 +112,7 @@ struct RunResult {
 // its stdout and exit code (0-255, matching POSIX wait status semantics).
 RunResult compile_and_run(std::string_view source, const std::string& case_name) {
     std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
-    scpp::compile_to_executable(source, exe_path.string());
+    scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), std_import_paths());
 
     FILE* pipe = popen(exe_path.string().c_str(), "r");
     std::string output;
@@ -159,19 +218,20 @@ void run_error_location_tests() {
 
     std::vector<Case> dataflow_cases = {
         {"use_after_move",
-         "int f() {\n    std::unique_ptr<int> p = std::make_unique<int>(5);\n    std::unique_ptr<int> q = "
+         "import std;\nint f() {\n    std::unique_ptr<int> p = std::make_unique<int>(5);\n    std::unique_ptr<int> q = "
          "std::move(p);\n    return *p;\n}\nint main() { return f(); }\n",
-         4},
+         5},
     };
     for (const Case& c : dataflow_cases) {
         cases_run++;
         try {
-            scpp::Program program = scpp::parse(c.source);
-            scpp::check_moves(program);
-            expect(false, c.name + ": expected a DataflowError, none was thrown");
+           scpp::Program program = parse_with_std_imports(c.source);
+           scpp::monomorphize_generics(program);
+           scpp::check_moves(program);
+           expect(false, c.name + ": expected a DataflowError, none was thrown");
         } catch (const scpp::DataflowError& e) {
-            expect(e.loc.is_known(), c.name + ": DataflowError has no location");
-            expect(e.loc.line == c.expected_line, c.name + ": expected line " +
+           expect(e.loc.is_known(), c.name + ": DataflowError has no location");
+           expect(e.loc.line == c.expected_line, c.name + ": expected line " +
                                                        std::to_string(c.expected_line) + ", got " +
                                                        std::to_string(e.loc.line));
         }

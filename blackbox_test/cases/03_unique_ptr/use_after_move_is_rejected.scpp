@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.1: "After std::move(x), x enters the moved-out state; reading a
 // moved-out value -> error."
 int main() {

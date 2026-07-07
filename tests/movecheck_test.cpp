@@ -8,6 +8,7 @@ import scpp.ast;
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // SCPP_MOVETEST_SOURCE_DIR is injected by CMake (see the movecheck_test
@@ -16,6 +17,15 @@ import scpp.ast;
 // the working directory it's run from.
 #ifndef SCPP_MOVETEST_SOURCE_DIR
 #error "SCPP_MOVETEST_SOURCE_DIR must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_MODULE_PATH
+#error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
+#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
+#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
 #endif
 
 namespace {
@@ -45,9 +55,52 @@ std::string trim(std::string s) {
     return s;
 }
 
+class TestModuleCache {
+public:
+    const scpp::Program& resolve(const std::string& module_name) {
+        auto it = cache_.find(module_name);
+        if (it != cache_.end()) return it->second;
+        const std::string* path = module_path(module_name);
+        if (path == nullptr) throw std::runtime_error("unknown test module '" + module_name + "'");
+        scpp::Program parsed = scpp::parse(
+            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
+        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed));
+        return inserted->second;
+    }
+
+    scpp::Program resolve_partition(const std::string& key) {
+        const std::string* path = module_path(key);
+        if (path == nullptr) throw std::runtime_error("unknown test partition '" + key + "'");
+        return scpp::parse(
+            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
+    }
+
+private:
+    const std::string* module_path(const std::string& name) const {
+        static const std::string std_module = SCPP_STDLIB_STD_MODULE_PATH;
+        static const std::string std_string_module = SCPP_STDLIB_STD_STRING_MODULE_PATH;
+        static const std::string std_memory_module = SCPP_STDLIB_STD_MEMORY_MODULE_PATH;
+        if (name == "std") return &std_module;
+        if (name == "std:string") return &std_string_module;
+        if (name == "std:memory") return &std_memory_module;
+        return nullptr;
+    }
+
+    std::unordered_map<std::string, scpp::Program> cache_;
+};
+
+scpp::Program parse_with_std_imports(std::string_view source) {
+    TestModuleCache cache;
+    return scpp::parse(
+        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
 bool throws_move_error(std::string_view source) {
     try {
-        scpp::Program program = scpp::parse(source);
+        scpp::Program program = parse_with_std_imports(source);
         // ch05 §5.11: monomorphize_generics must run before check_moves,
         // exactly like the real pipeline (driver.cppm's
         // emit_object_file_for_program) -- a generic function's call

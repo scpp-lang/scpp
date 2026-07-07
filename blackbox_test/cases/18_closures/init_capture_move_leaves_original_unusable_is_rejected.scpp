@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.12 + §5.1: init-capture (`[p = std::move(p)]`) moves out of
 // `p` exactly like `std::unique_ptr<int> b = std::move(p);` would --
 // using `p` again afterward is a use-after-move and must be rejected.

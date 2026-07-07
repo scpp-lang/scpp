@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.1/§5.12: an immediately-invoked lambda's own literal
 // (`[capture](args){...}(...)`) is stored in the enclosing Call
 // expression's `expr.lhs`, never visited at all before check_call_arguments

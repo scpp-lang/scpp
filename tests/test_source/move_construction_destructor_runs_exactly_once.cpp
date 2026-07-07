@@ -1,3 +1,4 @@
+import std;
 // spec §6.2/§6.3/§6.4: after `Resource b(std::move(a));` (move
 // construction), `a` is in the moved-out state, so its destructor is
 // never invoked for it -- only `b`'s runs, exactly once (not twice --

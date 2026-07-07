@@ -1,3 +1,4 @@
+import std;
 // KNOWN FAILURE (found incidentally while writing user-defined copy
 // assignment operators for ch04 §4.2): ch05 §5.9 says `this`'s "actual
 // spelling/type at expression level (`this->x`, `(*this).x`) is

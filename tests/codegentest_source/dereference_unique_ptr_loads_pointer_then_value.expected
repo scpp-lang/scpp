@@ -1,1 +1,1 @@
-sequence: %deref = load ptr, ptr %p | %loadtmp = load i32, ptr %deref
+sequence: operator_deref | %loadtmp = load i32, ptr

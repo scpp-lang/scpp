@@ -5,12 +5,12 @@
 // around the extern "C" functions declared below, which are themselves
 // a plain-C-ABI shim over real C++ `std::string` (see
 // scpp_string_wrapper.h/.cpp, built separately as a native library --
-// stdlib/string/README.md explains the full build story). Every
+// stdlib/README.md explains the full build story). Every
 // method's body is `[[scpp::unsafe]] { <one extern "C" call> }`, exactly like any
 // other call to an `extern "C"` function (ch01 §1.3/ch02). std.cpp (the
 // module's primary interface unit) aggregates this partition via
 // `export import :string;`, so a consumer never imports this file
-// directly -- only `import std;` (see demo.cpp), then `std::string`.
+// directly -- only `import std;`, then `std::string`.
 export module std:string;
 
 // The extern "C" wrapper functions stay at file scope, *outside*

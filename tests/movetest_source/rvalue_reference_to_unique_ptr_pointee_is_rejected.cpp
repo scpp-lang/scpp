@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.2/pre-existing v0.1 restriction: a reference's referent may
 // never itself be std::unique_ptr (would require the borrow checker to
 // also reason about moving/dropping the owner out from under a live

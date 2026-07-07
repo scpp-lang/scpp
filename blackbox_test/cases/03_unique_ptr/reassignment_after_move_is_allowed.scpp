@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.1: "Reassignment returns a variable to the initialized state" --
 // a previously-moved-from unique_ptr can be reassigned and used again.
 int main() {

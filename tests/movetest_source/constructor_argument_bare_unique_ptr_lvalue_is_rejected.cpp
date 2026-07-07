@@ -1,3 +1,4 @@
+import std;
 // Same prerequisite fix (see constructor_argument_move_marks_source_moved_out.cpp):
 // constructor arguments are now genuinely checked, not just tracked for
 // move-state -- a bare (non-move) std::unique_ptr lvalue is never a

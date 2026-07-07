@@ -1,0 +1,62 @@
+// std_memory.cpp
+//
+// The `:memory` interface partition of the "std" module: a pure-scpp
+// `std::unique_ptr<T>` and `std::make_unique<T>(...)`, consumed via
+// `import std;` through std.cpp's `export import :memory;` aggregation,
+// exactly like std::string's own `:string` partition.
+export module std:memory;
+
+namespace std {
+
+export template<typename T>
+class unique_ptr {
+private:
+    T* ptr_;
+    bool owns_;
+
+public:
+    unique_ptr() {
+        this->owns_ = false;
+        return;
+    }
+
+    unique_ptr(T* ptr) {
+        this->ptr_ = ptr;
+        this->owns_ = true;
+        return;
+    }
+
+    ~unique_ptr() {
+        if (this->owns_) {
+            [[scpp::unsafe]] {
+                T* raw = this->ptr_;
+                delete raw;
+            }
+        }
+        return;
+    }
+
+    T& operator*() {
+        [[scpp::unsafe]] {
+            return *this->ptr_;
+        }
+    }
+
+    const T& operator*() const {
+        [[scpp::unsafe]] {
+            return *this->ptr_;
+        }
+    }
+};
+
+export template<typename T, typename... Args>
+std::unique_ptr<T> make_unique(Args... args) {
+    T* raw;
+    [[scpp::unsafe]] {
+        raw = new T(args...);
+    }
+    std::unique_ptr<T> result(raw);
+    return std::move(result);
+}
+
+} // namespace std

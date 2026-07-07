@@ -1,4 +1,5 @@
 import scpp.codegen;
+import scpp.movecheck;
 import scpp.parser;
 import scpp.ast;
 
@@ -9,6 +10,7 @@ import scpp.ast;
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // SCPP_CODEGEN_TEST_SOURCE_DIR is injected by CMake (see the codegen_test
@@ -17,6 +19,15 @@ import scpp.ast;
 // the working directory it's run from.
 #ifndef SCPP_CODEGEN_TEST_SOURCE_DIR
 #error "SCPP_CODEGEN_TEST_SOURCE_DIR must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_MODULE_PATH
+#error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
+#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
+#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
 #endif
 
 namespace {
@@ -38,8 +49,52 @@ std::string read_file(const std::filesystem::path& path) {
     return buffer.str();
 }
 
+class TestModuleCache {
+public:
+    const scpp::Program& resolve(const std::string& module_name) {
+        auto it = cache_.find(module_name);
+        if (it != cache_.end()) return it->second;
+        const std::string* path = module_path(module_name);
+        if (path == nullptr) throw std::runtime_error("unknown test module '" + module_name + "'");
+        scpp::Program parsed = scpp::parse(
+            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
+        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed));
+        return inserted->second;
+    }
+
+    scpp::Program resolve_partition(const std::string& key) {
+        const std::string* path = module_path(key);
+        if (path == nullptr) throw std::runtime_error("unknown test partition '" + key + "'");
+        return scpp::parse(
+            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
+    }
+
+private:
+    const std::string* module_path(const std::string& name) const {
+        static const std::string std_module = SCPP_STDLIB_STD_MODULE_PATH;
+        static const std::string std_string_module = SCPP_STDLIB_STD_STRING_MODULE_PATH;
+        static const std::string std_memory_module = SCPP_STDLIB_STD_MEMORY_MODULE_PATH;
+        if (name == "std") return &std_module;
+        if (name == "std:string") return &std_string_module;
+        if (name == "std:memory") return &std_memory_module;
+        return nullptr;
+    }
+
+    std::unordered_map<std::string, scpp::Program> cache_;
+};
+
+scpp::Program parse_with_std_imports(std::string_view source) {
+    TestModuleCache cache;
+    return scpp::parse(
+        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
 std::string generate_ir(std::string_view source) {
-    scpp::Program program = scpp::parse(source);
+    scpp::Program program = parse_with_std_imports(source);
+    scpp::monomorphize_generics(program);
     scpp::Codegen codegen("test_module");
     codegen.generate(program);
     return codegen.module_ir();
@@ -189,11 +244,11 @@ void run_test_case_files() {
 
             std::string actual = "none";
             try {
-                scpp::Program program = scpp::parse(source);
-                scpp::Codegen codegen("test_module");
-                codegen.generate(program);
+                generate_ir(source);
             } catch (const scpp::ParseError&) {
                 actual = "ParseError";
+            } catch (const scpp::DataflowError&) {
+                actual = "DataflowError";
             } catch (const scpp::CodegenError&) {
                 actual = "CodegenError";
             }

@@ -1,1 +1,1 @@
-sequence: store ptr %newptr, ptr %a | %scopedroptmp = load ptr, ptr %a | call void @free(ptr %scopedroptmp)
+sequence: store %"class.std::unique_ptr.int" %0, ptr %a | call void @"std::unique_ptr.int_delete"(ptr %a)

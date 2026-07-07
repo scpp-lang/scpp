@@ -95,10 +95,20 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
     return "?";
 }
 
+std::string type_to_string(const scpp::Type& type);
+
 std::string type_to_string(const scpp::Type& type) {
     switch (type.kind) {
-        case scpp::TypeKind::Named:
-            return type.name;
+        case scpp::TypeKind::Named: {
+            if (type.template_args.empty()) return type.name;
+            std::string result = type.name + "<";
+            for (size_t i = 0; i < type.template_args.size(); i++) {
+                if (i > 0) result += ", ";
+                result += type_to_string(type.template_args[i]);
+            }
+            result += ">";
+            return result;
+        }
         case scpp::TypeKind::Pointer:
             return (type.is_mutable_pointee ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
                    "*";
@@ -115,8 +125,6 @@ std::string type_to_string(const scpp::Type& type) {
         }
         case scpp::TypeKind::Array:
             return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
-        case scpp::TypeKind::UniquePtr:
-            return "std::unique_ptr<" + type_to_string(*type.pointee) + ">";
         case scpp::TypeKind::Reference:
             if (type.is_rvalue_ref) return type_to_string(*type.pointee) + "&&";
             return (type.is_mutable_ref ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
@@ -308,10 +316,6 @@ void print_expr(const scpp::Expr& expr, int depth) {
         case scpp::ExprKind::Cast:
             std::cout << "Cast " << type_to_string(expr.type) << "\n";
             print_expr(*expr.lhs, depth + 1);
-            break;
-        case scpp::ExprKind::MakeUnique:
-            std::cout << "MakeUnique " << type_to_string(expr.type) << "\n";
-            for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
             break;
         case scpp::ExprKind::New:
             std::cout << "New " << type_to_string(expr.type) << "\n";

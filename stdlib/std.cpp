@@ -12,4 +12,5 @@
 // across more than one file without a preprocessor.
 export module std;
 
+export import :memory;
 export import :string;

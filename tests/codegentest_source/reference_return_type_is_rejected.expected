@@ -1,1 +1,1 @@
-throws: CodegenError
+throws: DataflowError

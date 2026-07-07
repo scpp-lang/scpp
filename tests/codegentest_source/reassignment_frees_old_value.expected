@@ -1,2 +1,2 @@
-contains: %oldtmp = load ptr, ptr %a
-sequence: %oldtmp = load ptr, ptr %a | call void @free(ptr %oldtmp)
+contains: call void @"std::unique_ptr.int_delete"(ptr %a)
+sequence: call void @"std::unique_ptr.int_delete"(ptr %a) | store %"class.std::unique_ptr.int"

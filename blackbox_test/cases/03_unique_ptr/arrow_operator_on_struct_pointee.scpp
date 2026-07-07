@@ -1,3 +1,4 @@
+import std;
 // ch03: `p->x` (`p` a std::unique_ptr<T>) is safe member access sugar,
 // yielding an lvalue for the pointee's field -- both read and write.
 struct Point {

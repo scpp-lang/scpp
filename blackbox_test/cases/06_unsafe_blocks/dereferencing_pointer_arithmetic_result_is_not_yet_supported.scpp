@@ -1,3 +1,4 @@
+import std;
 // ch05 §5.5/ch01 §1.1 list "indirection through, or pointer arithmetic
 // on, a value of pointer type" together as one gated operation, implying
 // `*(p + 1)` (dereferencing the result of pointer arithmetic) should be

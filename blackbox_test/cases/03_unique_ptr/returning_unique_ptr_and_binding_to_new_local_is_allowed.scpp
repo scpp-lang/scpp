@@ -1,3 +1,4 @@
+import std;
 // A function returning std::unique_ptr<T> by value, whose result is
 // bound directly to a new named local at the call site -- the ordinary
 // "factory function" pattern (`T x = factory();` is unremarkable,

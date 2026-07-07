@@ -1,3 +1,4 @@
+import std;
 // spec §6.4(3)/(5): `b = std::move(a);` (move assignment) first destroys
 // `b`'s old state, then overwrites it with `a`'s moved value; `a` is left
 // moved-out so only the newly-assigned `b` runs again at scope-exit. That

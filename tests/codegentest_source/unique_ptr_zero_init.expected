@@ -1,2 +1,2 @@
-contains: %a = alloca ptr
-contains: store ptr null, ptr %a
+contains: %a = alloca %"class.std::unique_ptr.int"
+contains: store %"class.std::unique_ptr.int" zeroinitializer, ptr %a

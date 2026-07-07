@@ -326,4 +326,3 @@ void compile_to_executable(std::string_view source, const std::string& executabl
 }
 
 } // namespace scpp
-

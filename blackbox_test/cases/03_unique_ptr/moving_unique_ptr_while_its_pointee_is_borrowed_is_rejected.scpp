@@ -1,3 +1,4 @@
+import std;
 // ch03: "a borrow of *p is recorded against p, so moving (std::move(p))
 // ... while that borrow is alive is rejected (it would otherwise
 // dangle/use-after-free)."

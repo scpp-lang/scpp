@@ -24,5 +24,8 @@ target_compile_definitions(run_tests PRIVATE
     # default `scpp` binary regardless of the working directory it's run
     # from, or where the build system places the compiled executable.
     SCPP_BLACKBOX_TEST_CASES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cases"
-    SCPP_DEFAULT_SCPP_BINARY="${CMAKE_CURRENT_SOURCE_DIR}/../build/scpp")
-
+    SCPP_DEFAULT_SCPP_BINARY="${CMAKE_CURRENT_SOURCE_DIR}/../build/scpp"
+    SCPP_STDLIB_STD_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/std.cpp"
+    SCPP_STDLIB_STD_STRING_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/string/std_string.cpp"
+    SCPP_STDLIB_STD_MEMORY_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/memory/std_memory.cpp"
+    SCPP_STDLIB_STRING_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_string_wrapper.a")
