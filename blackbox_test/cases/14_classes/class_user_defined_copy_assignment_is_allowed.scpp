@@ -1,0 +1,30 @@
+// ch04 §4.2/ch08 Q15: unlike move, a class *may* declare its own copy
+// assignment operator with arbitrary logic (real C++ syntax verbatim,
+// `operator=(const ClassName&)`). Proof the user-written body actually
+// runs: this operator doubles the source's value instead of copying it
+// verbatim. Returns `void` rather than the idiomatic `ClassName&` (real
+// C++ would `return *this;` for chaining) because dereferencing `this`
+// (`*this`) is not yet supported by scpp at all -- see
+// this_dereference_via_star_this_is_allowed.scpp -- a return type isn't
+// pinned down by ch04 §4.2/ch08 Q15 either way, so `void` sidesteps
+// that unrelated gap while still exercising the copy-assignment rule
+// this test is actually about.
+class Doubler {
+public:
+    Doubler(int v) {
+        this->val = v;
+        return;
+    }
+    void operator=(const Doubler& other) {
+        this->val = other.val * 2;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    Doubler a(5);
+    Doubler b(1);
+    b = a;
+    return b.val;
+}

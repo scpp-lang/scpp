@@ -1,0 +1,20 @@
+// ch04 §4.2: "every class gets a compiler-synthesized move
+// constructor *unconditionally*, even one with a reference-typed
+// member (only move *assignment* is conditionally suppressed for such
+// a class... construction is unaffected)" -- contrast
+// class_move_assignment_rejected_for_class_with_reference_member.scpp.
+class RefHolder {
+public:
+    RefHolder(int& r) {
+        return;
+    }
+private:
+    int& r;
+};
+
+int main() {
+    int a = 1;
+    RefHolder x(a);
+    RefHolder y(std::move(x));
+    return 0;
+}

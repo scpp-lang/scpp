@@ -1,0 +1,24 @@
+// ch04 §4.2/ch08 Q15: the symmetric case of
+// class_declaring_copy_constructor_alone_suppresses_copy_assignment.scpp
+// -- `Widget` declares only its own copy assignment operator (no
+// destructor) -- this suppresses the compiler-provided copy constructor
+// too, even though `Widget` declares no copy constructor of its own
+// either.
+class Widget {
+public:
+    Widget() {
+        this->val = 0;
+        return;
+    }
+    void operator=(const Widget& other) {
+        this->val = other.val;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    Widget a;
+    Widget b = a;
+    return 0;
+}

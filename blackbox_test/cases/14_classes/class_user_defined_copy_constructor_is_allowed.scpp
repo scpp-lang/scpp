@@ -1,0 +1,23 @@
+// ch04 §4.2/ch08 Q15: unlike move, a class *may* declare its own copy
+// constructor with arbitrary logic (real C++ syntax verbatim,
+// `ClassName(const ClassName&)`). Proof the user-written body actually
+// runs (not silently replaced by a memberwise copy): this constructor
+// doubles the source's value instead of copying it verbatim.
+class Doubler {
+public:
+    Doubler(int v) {
+        this->val = v;
+        return;
+    }
+    Doubler(const Doubler& other) {
+        this->val = other.val * 2;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    Doubler a(5);
+    Doubler b(a);
+    return b.val;
+}

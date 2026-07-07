@@ -1,0 +1,25 @@
+// ch04 §4.2/ch08 Q14-15: copy and move are two independent, separately
+// governed mechanisms -- declaring a user-defined copy constructor
+// (which is licensed, ch08 Q15) does not disturb the compiler-provided
+// move constructor (which is unconditional and never user-overridable,
+// ch08 Q14): `Widget` here has its own copy constructor, yet
+// `std::move` still works on it via the compiler-synthesized move
+// constructor.
+class Widget {
+public:
+    Widget(int v) {
+        this->val = v;
+        return;
+    }
+    Widget(const Widget& other) {
+        this->val = other.val;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    Widget a(5);
+    Widget b(std::move(a));
+    return b.val;
+}

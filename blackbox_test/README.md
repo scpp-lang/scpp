@@ -93,7 +93,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `10_bool_and_char` | no implicit scalar conversions, short-circuit evaluation |
 | `12_struct_vs_class` | `struct` vs `class` access-control divergence |
 | `13_unsupported_robustness` | unsupported/not-yet-implemented syntax fails cleanly, never crashes |
-| `14_classes` | constructors/destructors, private access control, no-copy-semantics, method borrow checking, `this` |
+| `14_classes` | constructors/destructors, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
@@ -180,24 +180,40 @@ Pass `--scpp-bin <path>` to point at a different build.
 
 ## Status
 
-**197 cases total, 179 passing.** 137/137 in `01_basics`-`17_modules` plus
+**218 cases total, 197 passing.** 137/137 in `01_basics`-`17_modules` plus
 17/20 in `18_closures` were previously verified (see below for both
-rounds' details). This round re-verified everything after a large,
-simultaneous doc + `src/` update: `unsafe { }` was redesigned as the
-`[[scpp::unsafe]]` attribute (ch01 §1.1-1.3, applicable to a block *or* a
-function declaration -- scpp's `unsafe fn` equivalent), `class` member
-variables may now be `public` (ch04 §4.2, reversing an earlier
-"variables must be private" rule), and four substantial new sections
-landed in ch05: generic functions revised (§5.11: bare/full-header-form/
-multi-param/return-type-only), closures (§5.12, previously verified),
-lifetime-generic parameters (§5.13), generic types (§5.14), and
-thread-safety structural properties (§5.15). All existing `.scpp` files
-were bulk-updated from `unsafe { }` to `[[scpp::unsafe]] { }`, plus 2
-new categories (`06_unsafe_blocks`, `12_struct_vs_class`) and 5 brand new
-ones (`19_scalar_types` through `23_thread_safety_attributes`) were
-added/extended this round.
+rounds' details); the prior round additionally verified 179/197 after a
+large, simultaneous doc + `src/` update (`[[scpp::unsafe]]`, public class
+members, generic functions/types, lifetime-generic parameters, and
+thread-safety attributes -- see git history for that round's full
+writeup). **This round** caught `14_classes` up to a large ch04/ch08
+doc update defining `class` copy/move construction and assignment
+semantics: move construction and move assignment are always
+compiler-synthesized and never user-declarable, for every `class`
+unconditionally (ch04 §4.2, ch08 Q14); copy construction and copy
+assignment, unlike move, may be user-written, but are compiler-provided
+only when a class declares **none** of a copy constructor, a copy
+assignment operator, or a destructor itself -- declaring any *one* of
+the three suppresses the *other* special member function's automatic
+generation too, a deliberate "no mixed state" tightening stricter than
+real C++ (ch08 Q15); a class with a reference-typed member may have a
+compiler-provided copy/move constructor but never a compiler-provided
+copy/move assignment operator. 21 new cases were added to `14_classes`
+covering all of this (compiler-provided and user-defined copy
+construction/assignment, the "no mixed state" suppression rule in both
+directions, user-declared move rejection, the reference-member
+carve-outs for both copy and move, self-move-assignment safety, and
+destructor-runs-exactly-once after a move, all observed via process
+exit code and, where needed, `printf` rather than internal test
+scaffolding) -- plus 4 pre-existing cases whose comments cited an
+outdated blanket "no copy semantics" rule that ch04 §4.2 has now
+superseded (their COMPILE_ERROR outcomes were unaffected: by-value
+parameter passing and by-value return remain unconditionally rejected
+for a class type regardless of copy-eligibility, confirmed empirically
+against a plain compiler-copyable class -- a separate, still-standing
+restriction ch04 §4.2's new rules don't relax).
 
-**The single most important finding this round, by far**: most of the
+**The single most important finding of the previous round, by far**: most of the
 scalar type family is currently unusable, and no explicit scalar-to-scalar
 cast works at all (`19_scalar_types`, 8/8 failing) --
 `int8_t`/`int16_t`/`int32_t`/`int64_t`, their `uint*_t` counterparts,
@@ -211,11 +227,35 @@ nothing in `docs/book/` suggests any of this is a known gap (ch06's
 scalar table presents the whole family as unconditionally available, no
 "not yet implemented" annotation anywhere).
 
-18 known failures overall, all genuine implementation findings (tests are
-spec-conformant, left unchanged; findings from the closures round are
+21 known failures overall, all genuine implementation findings (tests are
+spec-conformant, left unchanged; findings from earlier rounds are
 summarized only briefly here, see git history for the full original
-writeup):
+writeups):
 
+- **`14_classes`** (3 new failures this round, out of 31 cases): (1)
+  calling a method on a moved-out class object -- even a `const`,
+  read-only getter -- is not rejected at all, even though a *direct
+  field read* of the same moved-out object correctly is; confirmed to
+  also affect a move-assignment source and a mutating method call, not
+  just move-construction (`class_method_call_on_moved_out_object_is_rejected.scpp`).
+  (2) a user-declared move *assignment* operator (`operator=(ClassName&&)`)
+  compiles successfully, even though the analogous move *constructor*
+  form is correctly rejected with a clean diagnostic -- ch08 Q14's
+  rejection is only wired up for one of the two syntactic forms
+  (`class_user_defined_move_assignment_is_rejected.scpp`). (3)
+  dereferencing `this` (`*this`) is rejected outright ("only
+  std::unique_ptr or a raw pointer... is supported"), even for a bare
+  field read through it, contradicting ch05 §5.9's "`this->x`,
+  `(*this).x`... is unchanged" -- this also blocks writing a
+  user-defined copy/move assignment operator the idiomatic real-C++ way
+  (`return *this;`); the new copy-assignment cases work around it with
+  a `void` return instead (`this_dereference_via_star_this_is_allowed.scpp`).
+  Also worth noting, not a failure: a class-typed copy-construction
+  ineligibility (e.g. a destructor-only class) is currently caught much
+  later than the analogous copy-assignment ineligibility -- an LLVM
+  module-verification failure rather than a clean sema-level diagnostic
+  -- still a clean positive exit status either way, so this doesn't
+  affect any test's pass/fail outcome, just diagnostic quality.
 - **`19_scalar_types`** (8/8 failing): see above.
 - **`20_generic_functions`** (4/6 passing): the full header form (bare,
   concept-constrained, multi-type-parameter, return-type-only) all work
@@ -257,9 +297,15 @@ writeup):
 - **`18_closures`** (17/20 passing, from the previous round): a
   by-reference-capturing closure's borrow doesn't release at last use the
   way NLL promises (contrast `std::span`, which does); `[*this]` is
-  blocked by the pre-existing "no class copy semantics" gap; a lambda's
-  bare `auto` parameter doesn't parse (same root cause as the
-  `20_generic_functions` finding above).
+  rejected by a hardcoded "capturing the enclosing object by value would
+  need class copy semantics, which don't exist yet" check -- **re-checked
+  this round: still rejected verbatim, even though class copy semantics
+  now genuinely exist** (ch04 §4.2) for a plain, compiler-copyable
+  receiver like this test's `Box` -- the closure-capture code path simply
+  hasn't been updated to use them yet, so this is now a distinct,
+  narrower gap than originally described, not just "waiting on copy
+  semantics to land"; a lambda's bare `auto` parameter doesn't parse
+  (same root cause as the `20_generic_functions` finding above).
 - **`12_struct_vs_class`** (3/4 passing, new this round): public member
   variables work correctly for ordinary read/write, but a live borrow of
   a public field does *not* correctly conflict with a call to a mutating

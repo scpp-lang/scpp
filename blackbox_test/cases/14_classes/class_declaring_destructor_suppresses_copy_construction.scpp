@@ -1,0 +1,23 @@
+// ch04 §4.2/ch08 Q15: a class declaring a destructor (and no copy
+// constructor/assignment of its own) gets *neither* a compiler-provided
+// copy constructor nor a compiler-provided copy assignment operator --
+// complements class_reassignment_is_rejected.scpp, which covers the
+// assignment half of this same rule; this covers the construction half.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+};
+
+int main() {
+    Counter a(5);
+    Counter b(a);
+    return 0;
+}

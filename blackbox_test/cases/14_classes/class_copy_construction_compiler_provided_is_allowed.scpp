@@ -1,0 +1,23 @@
+// ch04 §4.2/ch08 Q15: a class declaring none of a copy constructor, a
+// copy assignment operator, or a destructor gets a compiler-provided
+// copy constructor -- `Widget b = a;` (bare copy-init) is licensed.
+// Proof that the copy is a real, independent value (not an alias):
+// mutating `b` afterward must not affect `a` -- if the compiler
+// accidentally aliased instead of copying, `a.val` would also become
+// 100 and the result would be 200 instead of 101.
+class Widget {
+public:
+    Widget() {
+        this->val = 0;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    Widget a;
+    a.val = 1;
+    Widget b = a;
+    b.val = 100;
+    return a.val + b.val;
+}

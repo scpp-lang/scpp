@@ -1,0 +1,26 @@
+// ch04 §4.2/ch08 Q15: "there is no 'mixed' state where one is
+// user-written and the other silently compiler-provided." `Widget`
+// declares only its own copy constructor (no destructor) -- this
+// suppresses the compiler-provided copy assignment operator too, even
+// though `Widget` declares no copy assignment operator of its own
+// either. This is deliberately stricter than real C++, which would
+// still (deprecatedly) generate the copy assignment operator here.
+class Widget {
+public:
+    Widget() {
+        this->val = 0;
+        return;
+    }
+    Widget(const Widget& other) {
+        this->val = other.val;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    Widget a;
+    Widget b;
+    b = a;
+    return 0;
+}

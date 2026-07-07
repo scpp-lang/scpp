@@ -1,0 +1,22 @@
+// ch04 §4.2/ch08 Q15: a class declaring none of a copy constructor, a
+// copy assignment operator, or a destructor gets a compiler-provided
+// copy assignment operator -- `b = a;` (bare reassignment) is licensed.
+// Same independence proof as the copy-construction case: mutating `b`
+// afterward must not affect `a`.
+class Widget {
+public:
+    Widget() {
+        this->val = 0;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    Widget a;
+    a.val = 1;
+    Widget b;
+    b = a;
+    b.val = 100;
+    return a.val + b.val;
+}

@@ -1,0 +1,25 @@
+// ch04 §4.2/ch08 Q14: same unconditional rejection as
+// class_user_defined_move_constructor_is_rejected.scpp, for
+// `operator=(ClassName&&)` instead of the constructor.
+//
+// KNOWN FAILURE: unlike the constructor form (which is correctly
+// rejected with a clean "a move constructor cannot be user-declared"
+// diagnostic), a user-declared move *assignment* operator compiles
+// successfully -- the ch08 Q14 rejection is wired up for
+// `ClassName(ClassName&&)` but not for `operator=(ClassName&&)`.
+class Widget {
+public:
+    Widget() {
+        this->val = 0;
+        return;
+    }
+    void operator=(Widget&& other) {
+        this->val = other.val;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    return 0;
+}

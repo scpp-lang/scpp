@@ -1,0 +1,33 @@
+// ch04 §4.2: "The moved-from object is placed in the *moved-out* state
+// ([§5.1](ch05-static-checks.md)), exactly like moving any other value
+// -- its destructor, if it has one, is then never invoked for it." `b =
+// std::move(a);` moves `a`'s resource into `b`, releasing whatever `b`
+// already owned; at scope-exit only `b`'s destructor may run (`a`'s
+// must not) -- exactly one "dtor" line, not two, and not zero.
+extern "C" int printf(const char* fmt, ...);
+
+class Resource {
+public:
+    Resource(int v) {
+        this->p = std::make_unique<int>(v);
+        return;
+    }
+    ~Resource() {
+        [[scpp::unsafe]] {
+            printf("dtor\n");
+        }
+        return;
+    }
+    int get() {
+        return *this->p;
+    }
+private:
+    std::unique_ptr<int> p;
+};
+
+int main() {
+    Resource a(1);
+    Resource b(2);
+    b = std::move(a);
+    return b.get();
+}

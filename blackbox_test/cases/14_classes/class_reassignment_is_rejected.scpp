@@ -1,5 +1,9 @@
-// Same no-copy-semantics rule, for plain reassignment of an existing
-// class-typed variable.
+// ch04 §4.2 / ch08 Q15: `Counter` declares a destructor and nothing
+// else copy-related, so it gets *neither* a compiler-provided copy
+// constructor nor a compiler-provided copy assignment operator (no
+// "mixed" state where one is silently auto-generated) -- and since it
+// declares no copy assignment operator of its own either, `a = b;`
+// (bare reassignment) has no copy assignment operator to call at all.
 class Counter {
 private:
     int value;

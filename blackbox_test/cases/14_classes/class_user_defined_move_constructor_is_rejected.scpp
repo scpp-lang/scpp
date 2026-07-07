@@ -1,0 +1,21 @@
+// ch04 §4.2/ch08 Q14: "a program that declares its own
+// `ClassName(ClassName&&)`... is rejected, for *every* `class` type,
+// unconditionally" -- the compiler always provides the move
+// constructor instead, so authors have no hook to get it wrong (real
+// C++'s classic "forgot to null out the source" footgun class).
+class Widget {
+public:
+    Widget() {
+        this->val = 0;
+        return;
+    }
+    Widget(Widget&& other) {
+        this->val = other.val;
+        return;
+    }
+    int val;
+};
+
+int main() {
+    return 0;
+}

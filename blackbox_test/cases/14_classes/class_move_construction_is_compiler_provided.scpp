@@ -1,0 +1,26 @@
+// ch04 §4.2/ch08 Q14: every class gets a compiler-synthesized move
+// constructor unconditionally -- even `Counter`, which (having a
+// user-declared destructor and no copy constructor/assignment of its
+// own) is *not* copy-eligible at all (ch08 Q15). Move and copy are
+// independent tracks: `Counter y(std::move(x));` still works here.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    Counter x(5);
+    Counter y(std::move(x));
+    return y.get();
+}

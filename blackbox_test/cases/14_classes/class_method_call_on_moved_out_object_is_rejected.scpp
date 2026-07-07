@@ -1,0 +1,32 @@
+// KNOWN FAILURE (found incidentally while testing ch04 §4.2's new class
+// move rules): ch05 §5.1 says a moved-out value must not be used, full
+// stop -- this is correctly enforced for a *direct field read* of a
+// moved-out object (class_move_construction_use_after_move_is_rejected.scpp),
+// but calling a method on a moved-out class object -- even a `const`,
+// read-only getter, as here -- is NOT rejected at all: `a.get()` below
+// compiles and runs, silently returning a value read back out of `a`'s
+// already-moved-from storage (empirically 0, not the original 5),
+// instead of being flagged the same way direct field access already
+// is. Confirmed to also affect a move *assignment* source and a
+// mutating method call, not just move-construction and `const` methods.
+class Counter {
+private:
+    int value;
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    Counter a(5);
+    Counter b(std::move(a));
+    return a.get();
+}

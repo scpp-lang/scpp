@@ -1,0 +1,27 @@
+// KNOWN FAILURE (found incidentally while writing user-defined copy
+// assignment operators for ch04 §4.2): ch05 §5.9 says `this`'s "actual
+// spelling/type at expression level (`this->x`, `(*this).x`) is
+// unchanged" from real C++ -- but dereferencing `this` (`*this`) is
+// currently rejected outright ("cannot dereference ('*') 'this': only
+// std::unique_ptr or a raw pointer... is supported"), even for a bare
+// field read through it. This also blocks writing a user-defined copy/
+// move assignment operator the idiomatic real-C++ way (`ClassName&
+// operator=(...) { ...; return *this; }`) -- see
+// class_user_defined_copy_assignment_is_allowed.scpp, which works
+// around this gap with a `void` return instead.
+class Widget {
+public:
+    Widget(int v) {
+        this->val = v;
+        return;
+    }
+    int get() const {
+        return (*this).val;
+    }
+    int val;
+};
+
+int main() {
+    Widget a(9);
+    return a.get();
+}

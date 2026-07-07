@@ -1,0 +1,23 @@
+// ch04 §4.2: "Same reference-member carve-out as move: a class with a
+// non-static data member of reference type may have a compiler-provided
+// copy constructor, but never a compiler-provided copy assignment
+// operator (a user-written one is still permitted...)." This is the
+// copy-side counterpart of
+// class_move_assignment_rejected_for_class_with_reference_member.scpp.
+class RefHolder {
+public:
+    RefHolder(int& r) {
+        return;
+    }
+private:
+    int& r;
+};
+
+int main() {
+    int a = 1;
+    int b = 2;
+    RefHolder x(a);
+    RefHolder y(b);
+    y = x;
+    return 0;
+}

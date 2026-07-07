@@ -1,0 +1,23 @@
+// ch05 §5.1: "moved-out values are not dropped... [and are not] used."
+// After `Counter b(std::move(a));`, `a` is moved-out; reading its field
+// directly (`a.value`) must be rejected. (Contrast
+// class_method_call_on_moved_out_object_is_rejected.scpp, a known
+// failure where the same moved-out state is not checked when the
+// access goes through a method call instead of a direct field read.)
+class Counter {
+public:
+    int value;
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    ~Counter() {
+        return;
+    }
+};
+
+int main() {
+    Counter a(5);
+    Counter b(std::move(a));
+    return a.value;
+}

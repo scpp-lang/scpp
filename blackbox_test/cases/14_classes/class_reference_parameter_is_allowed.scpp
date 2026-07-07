@@ -1,4 +1,5 @@
-// The documented workaround for classes' no-copy-semantics rule: pass by
+// The documented workaround for the by-value-parameter restriction
+// (see class_by_value_parameter_is_rejected.scpp): pass by
 // `const Counter&`/`Counter&` instead of by value.
 class Counter {
 private:

@@ -1,0 +1,21 @@
+// ch04 §4.2: the copy-side counterpart of
+// class_move_construction_allowed_for_class_with_reference_member.scpp
+// -- a class with a reference-typed member may still have a
+// compiler-provided copy *constructor* (only copy *assignment* is
+// suppressed for it, per
+// class_copy_assignment_rejected_for_class_with_reference_member.scpp).
+class RefHolder {
+public:
+    RefHolder(int& r) {
+        return;
+    }
+private:
+    int& r;
+};
+
+int main() {
+    int a = 1;
+    RefHolder x(a);
+    RefHolder y(x);
+    return 0;
+}

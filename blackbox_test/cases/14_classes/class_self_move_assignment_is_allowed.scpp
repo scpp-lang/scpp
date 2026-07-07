@@ -1,0 +1,36 @@
+// ch04 §4.2/ch08 Q14: "self-move-assignment (`x = std::move(x)`) needs
+// no defensive `this != &other` check the way real C++ does: evaluating
+// `std::move(x)` places `x` in the moved-out state before the
+// assignment's own 'destroy the old value' step runs, so that step is
+// always a no-op for this case." Proof: `a = std::move(a);` must leave
+// `a` fully valid and destructible -- both its post-assignment read
+// (`a.get()`) and its destructor at scope-exit must behave normally
+// (the destructor's `printf` must fire exactly once, not zero times
+// from a wrongly-still-moved-out object nor more than once from a
+// double-free).
+extern "C" int printf(const char* fmt, ...);
+
+class Resource {
+public:
+    Resource(int v) {
+        this->p = std::make_unique<int>(v);
+        return;
+    }
+    ~Resource() {
+        [[scpp::unsafe]] {
+            printf("dtor\n");
+        }
+        return;
+    }
+    int get() {
+        return *this->p;
+    }
+private:
+    std::unique_ptr<int> p;
+};
+
+int main() {
+    Resource a(7);
+    a = std::move(a);
+    return a.get();
+}

@@ -1,8 +1,12 @@
-// stdlib/string's README and ch04 §4.2: "No copy semantics ... movecheck
-// rejects [by-value parameters] ... this isn't specific to String; it
-// applies to every class type in this version, since scpp has no
-// copy-constructor concept yet." Pass `const Counter&`/`Counter&`
-// instead.
+// A by-value parameter of class type is rejected unconditionally in
+// this version, regardless of whether the class type itself is
+// copy-eligible per ch04 §4.2 -- this is a separate, still-standing
+// restriction from copy/move construction and assignment (`Foo b = a;`/
+// `b = a;`), not something ch04 §4.2's compiler-provided/user-defined
+// copy rules relax. `Counter` here is additionally not copy-eligible at
+// all (a user-declared destructor with no copy constructor/assignment
+// of its own suppresses both, ch08 Q15). Pass `const Counter&`/
+// `Counter&` instead.
 class Counter {
 private:
     int value;
