@@ -17,8 +17,53 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only change set
+        id: change-scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          docs_only=false
+          base_sha=""
+          head_sha=""
+          zero_sha=0000000000000000000000000000000000000000
+
+          case "${{ github.event_name }}" in
+            pull_request)
+              base_sha="${{ github.event.pull_request.base.sha }}"
+              head_sha="${{ github.event.pull_request.head.sha }}"
+              ;;
+            push)
+              base_sha="${{ github.event.before }}"
+              head_sha="${{ github.event.after }}"
+              ;;
+          esac
+
+          if [ -n "${base_sha}" ] && [ -n "${head_sha}" ] && [ "${base_sha}" != "${zero_sha}" ] &&
+             git cat-file -e "${base_sha}^{commit}" 2>/dev/null &&
+             git cat-file -e "${head_sha}^{commit}" 2>/dev/null; then
+            mapfile -t changed_files < <(git diff --name-only "${base_sha}" "${head_sha}")
+            if [ "${#changed_files[@]}" -gt 0 ]; then
+              docs_only=true
+              for path in "${changed_files[@]}"; do
+                if [[ "${path}" != docs/* ]]; then
+                  docs_only=false
+                  break
+                fi
+              done
+            fi
+          fi
+
+          echo "docs_only=${docs_only}" >> "${GITHUB_OUTPUT}"
+
+      - name: Report docs-only fast path
+        if: steps.change-scope.outputs.docs_only == 'true'
+        run: echo "Docs-only change set detected; skipping build and test steps."
 
       - name: Install build dependencies
+        if: steps.change-scope.outputs.docs_only != 'true'
         run: |
           set -euxo pipefail
           ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
@@ -41,19 +86,25 @@ jobs:
           sudo apt-get install -y clang-22 llvm-22-dev
 
       - name: Configure main project
+        if: steps.change-scope.outputs.docs_only != 'true'
         run: cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}"
 
       - name: Build main project
+        if: steps.change-scope.outputs.docs_only != 'true'
         run: cmake --build build
 
       - name: Run unit tests
+        if: steps.change-scope.outputs.docs_only != 'true'
         run: ctest --test-dir build --output-on-failure
 
       - name: Configure blackbox test runner
+        if: steps.change-scope.outputs.docs_only != 'true'
         run: cmake -S blackbox_test -B blackbox_test/build
 
       - name: Build blackbox test runner
+        if: steps.change-scope.outputs.docs_only != 'true'
         run: cmake --build blackbox_test/build
 
       - name: Run blackbox suite
+        if: steps.change-scope.outputs.docs_only != 'true'
         run: ./blackbox_test/build/run_tests
