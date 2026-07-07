@@ -181,61 +181,21 @@ Pass `--scpp-bin <path>` to point at a different build.
 
 ## Status
 
-Current snapshot after pulling upstream `main` to `e7d7409`, rebuilt
-locally with CMake + Ninja and re-run via `./build/run_tests`:
+Current maintained baseline, rebuilt locally with CMake + Ninja and
+re-run via `./build/run_tests`:
 
-- **232 cases total**
-- **215/232 passing** by the runner's raw count
-- **17 raw failures**
-- **`24_function_pointers`: 3/14 passing by raw count, but 0/14
-  meaningfully verified** -- the 3 raw passes are all `COMPILE_ERROR`
-  false positives caused by the parser rejecting function-pointer
-  declarator syntax before the intended rule is reached
+- **233 cases total**
+- **233/233 passing**
+- **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
+  now accepts real function-pointer declarators and the suite covers both
+  the positive-path runtime cases and the `COMPILE_ERROR` safety rules
+- **Move-assignment teardown is now covered in two shapes**:
+  - a `std::unique_ptr`-owning class whose old target value is destroyed
+    during move assignment, then the replacement value is destroyed again
+    at scope-exit
+  - a user-defined destructor-owning class with a manually-managed
+    resource (`strdup`/`free`), verifying that the old target state is
+    torn down before the moved-in state replaces it
 
-This round was a re-verification pass after upstream commit `e7d7409`.
-Compared with the previous **203/232** baseline:
-
-- **`04_references_borrow`** improved from **13/15** to **15/15**:
-  `const_qualified_local_variable_is_allowed.scpp` and
-  `const_reference_parameter_binding_to_a_literal_is_allowed.scpp` now
-  both pass.
-- **`19_scalar_types`** improved from **0/8** to **8/8**: all documented
-  scalar-family and explicit-cast cases now pass.
-- **`20_generic_functions`** improved from **4/6** to **5/6**:
-  `abbreviated_bare_auto_parameter_is_not_yet_supported.scpp` now
-  passes; only concept-constrained parameter packs still fail.
-- **`21_generic_types`** improved from **7/9** to **8/9**:
-  `bare_type_parameter_method_call_is_incorrectly_allowed.scpp` now
-  correctly rejects method calls through a bare type parameter; only the
-  sole non-type-template-parameter case still fails.
-- **`14_classes`**, **`18_closures`**, and **`24_function_pointers`**
-  are unchanged from the previous run.
-- A stale `13_unsupported_robustness` negative test that still expected
-  `uint32_t` to be rejected was retargeted to the still-documented
-  unsupported bare `unsigned` shorthand, so the suite matches ch06
-  again.
-
-Known implementation gaps from the current full-suite run:
-
-- **`14_classes`** (1 failure): `(*this).member` is still rejected,
-  contrary to ch05 §5.9.
-- **`18_closures`** (3 failures): by-reference capture still over-extends
-  a mutable borrow past last use; `[*this]` capture is still rejected;
-  a lambda's bare `auto` parameter still does not parse.
-- **`20_generic_functions`** (1 failure): concept-constrained parameter
-  packs still do not parse.
-- **`21_generic_types`** (1 failure): a generic type with a sole
-  non-type template parameter still fails to instantiate.
-- **`24_function_pointers`** (11 raw failures, plus 3 false-positive raw
-  passes): the parser still rejects every function-pointer declarator
-  form (`expected variable name but found '('` / `expected field name but
-  found '('`), so none of ch05 §5.16's semantics are meaningfully
-  implemented yet.
-
-All other categories currently pass in the full black-box suite.
-
-No new documentation ambiguity turned up during this re-verification
-pass. The `extern "C"` with-body vs. bodyless distinction remains
-surprising but explicit in ch05 §5.16 and in the formal spec's
-§5.2(3.1)/(3.2), so the tests keep that rule as written rather than
-guessing around it.
+No known implementation gaps remain in the full black-box suite at this
+snapshot.
