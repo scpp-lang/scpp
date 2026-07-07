@@ -1,0 +1,33 @@
+extern "C" {
+    void* malloc(int size);
+    void free(void* p);
+}
+
+class RawOwner {
+public:
+    RawOwner(int v) {
+        [[scpp::unsafe]] {
+            void* raw = malloc(4);
+            this->p = raw;
+            *this->p = v;
+        }
+        return;
+    }
+
+    ~RawOwner() {
+        [[scpp::unsafe]] {
+            free(this->p);
+        }
+        return;
+    }
+
+private:
+    int* p;
+};
+
+int main() {
+    RawOwner a(1);
+    RawOwner b(2);
+    b = std::move(a);
+    return 0;
+}
