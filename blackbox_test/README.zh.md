@@ -150,41 +150,46 @@ cmake --build build
 
 ## 现状
 
-当前 `HEAD` `944d0b5` 的快照：已用 CMake + Ninja 重新构建，并重新运行
-`./build/run_tests`：
+当前是在拉取上游 `main` 到 `e7d7409` 之后的快照：已用 CMake + Ninja
+重新构建，并重新运行 `./build/run_tests`：
 
 - **总共 232 个用例**
-- 运行器原始统计 **203/232 通过**
-- **29 个失败**，都是真正的实现缺口
+- 运行器原始统计 **215/232 通过**
+- **17 个原始失败**
 - **`24_function_pointers` 原始统计 3/14 通过，但有意义的验证是 0/14**：
   那 3 个"通过"全都是期望 `COMPILE_ERROR` 的假阳性——解析器在走到被测语义
   之前，就先把函数指针声明语法整体拒绝掉了
 
-这一轮重新对照 ch05 §5.16 和 formal spec §5.2 检查了
-`24_function_pointers`，顺手修正了一个已有 overload 用例，让它直接使用文档
-写明的 `&overloaded_name` 形式；修正了一条过时注释；并补了两条新的、
-照规范写的用例：
+这一轮是在上游提交 `e7d7409` 之后做的**重新验证**。跟之前
+**203/232** 的基线相比：
 
-- `extern_c_definition_with_body_address_is_not_unsafe_qualified.scpp`：
-  覆盖 `extern "C"` **无函数体** 与 **有函数体** 在取地址时的类型区分。
-- `unsafe_qualified_function_pointer_call_via_explicit_dereference_inside_unsafe_is_allowed.scpp`：
-  覆盖 unsafe-qualified 指针在 `[[scpp::unsafe]] { }` 里用 `(*fp)(...)`
-  这种真实 C++ 写法调用，同时也顺带覆盖 `&get_unchecked` 这种显式取地址形式。
+- **`04_references_borrow`** 从 **13/15** 提升到 **15/15**：
+  `const_qualified_local_variable_is_allowed.scpp` 和
+  `const_reference_parameter_binding_to_a_literal_is_allowed.scpp`
+  现在都通过了。
+- **`19_scalar_types`** 从 **0/8** 提升到 **8/8**：文档列出的标量家族
+  和显式 cast 用例现在全部通过。
+- **`20_generic_functions`** 从 **4/6** 提升到 **5/6**：
+  `abbreviated_bare_auto_parameter_is_not_yet_supported.scpp`
+  现在通过；只剩概念约束参数包还失败。
+- **`21_generic_types`** 从 **7/9** 提升到 **8/9**：
+  `bare_type_parameter_method_call_is_incorrectly_allowed.scpp`
+  现在会正确拒绝通过裸类型参数调用方法；只剩"只有非类型模板参数"那条
+  还失败。
+- **`14_classes`**、**`18_closures`**、**`24_function_pointers`**
+  跟上次运行相比没有变化。
+- 一个过时的 `13_unsupported_robustness` 负向用例原来还在期待
+  `uint32_t` 被拒绝；现在已改成测试文档仍明确写着不支持的裸
+  `unsigned` 简写，让套件重新跟 ch06 对齐。
 
 当前完整套件跑出来的实现缺口：
 
-- **`04_references_borrow`**（2 个失败）：普通 `const` 局部变量声明仍被拒绝；
-  `const T&` 形参仍不能直接绑定字面量/临时值。
 - **`14_classes`**（1 个失败）：`(*this).member` 仍被拒绝，跟 ch05 §5.9 不符。
 - **`18_closures`**（3 个失败）：按引用捕获的可变借用不会在最后一次使用后释放；
   `[*this]` 捕获仍被拒绝；lambda 的裸 `auto` 形参仍无法解析。
-- **`19_scalar_types`**（8 个失败）：目前实际上只有 `bool` / `int` / `char`
-  能用；文档列出的其它标量类型都还无法作为类型名解析，`static_cast<T>(expr)`
-  和 `(T)expr` 也都不工作。
-- **`20_generic_functions`**（2 个失败）：缩写形式的裸 `auto` 形参、以及概念约束
-  的参数包，仍都无法解析。
-- **`21_generic_types`**（2 个失败）：无约束类型参数仍被错误地允许直接调方法；
-  只有非类型模板参数、没有类型参数的泛型类型，仍无法实例化。
+- **`20_generic_functions`**（1 个失败）：概念约束的参数包仍无法解析。
+- **`21_generic_types`**（1 个失败）：只有非类型模板参数、没有类型参数的泛型类型，
+  仍无法实例化。
 - **`24_function_pointers`**（11 个原始失败，外加 3 个假阳性原始通过）：
   解析器仍会把所有函数指针声明形式一起拒绝（`expected variable name but
   found '('` / `expected field name but found '('`），所以 ch05 §5.16 的语义
@@ -192,6 +197,6 @@ cmake --build build
 
 除此之外，其它分类目前都在完整黑盒套件里通过。
 
-这次写函数指针测试时，没有发现新的文档歧义。`extern "C"` 有函数体 vs 无函数体
+这次重新验证时，没有发现新的文档歧义。`extern "C"` 有函数体 vs 无函数体
 在取地址时的区别虽然有点反直觉，但 ch05 §5.16 和 formal spec §5.2(3.1)/(3.2)
 都写得很明确，所以测试按文档原文保留，不去自行猜测或改写规则。

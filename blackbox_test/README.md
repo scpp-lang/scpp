@@ -181,49 +181,51 @@ Pass `--scpp-bin <path>` to point at a different build.
 
 ## Status
 
-Current snapshot at `HEAD` `944d0b5`, rebuilt locally with CMake + Ninja
-and re-run via `./build/run_tests`:
+Current snapshot after pulling upstream `main` to `e7d7409`, rebuilt
+locally with CMake + Ninja and re-run via `./build/run_tests`:
 
 - **232 cases total**
-- **203/232 passing** by the runner's raw count
-- **29 failing** as genuine implementation gaps
+- **215/232 passing** by the runner's raw count
+- **17 raw failures**
 - **`24_function_pointers`: 3/14 passing by raw count, but 0/14
   meaningfully verified** -- the 3 raw passes are all `COMPILE_ERROR`
   false positives caused by the parser rejecting function-pointer
   declarator syntax before the intended rule is reached
 
-This round refreshed `24_function_pointers` against ch05 §5.16 and the
-formal spec's §5.2, corrected one existing overload-resolution case to
-use the documented `&overloaded_name` form directly, corrected one stale
-comment, and added two more spec-faithful cases:
+This round was a re-verification pass after upstream commit `e7d7409`.
+Compared with the previous **203/232** baseline:
 
-- `extern_c_definition_with_body_address_is_not_unsafe_qualified.scpp`
-  covers the explicit bodyless-vs-with-body `extern "C"` distinction in
-  the address-of rule.
-- `unsafe_qualified_function_pointer_call_via_explicit_dereference_inside_unsafe_is_allowed.scpp`
-  covers `(*fp)(...)` on an unsafe-qualified pointer inside
-  `[[scpp::unsafe]] { }`, while also exercising the explicit
-  `&get_unchecked` form.
+- **`04_references_borrow`** improved from **13/15** to **15/15**:
+  `const_qualified_local_variable_is_allowed.scpp` and
+  `const_reference_parameter_binding_to_a_literal_is_allowed.scpp` now
+  both pass.
+- **`19_scalar_types`** improved from **0/8** to **8/8**: all documented
+  scalar-family and explicit-cast cases now pass.
+- **`20_generic_functions`** improved from **4/6** to **5/6**:
+  `abbreviated_bare_auto_parameter_is_not_yet_supported.scpp` now
+  passes; only concept-constrained parameter packs still fail.
+- **`21_generic_types`** improved from **7/9** to **8/9**:
+  `bare_type_parameter_method_call_is_incorrectly_allowed.scpp` now
+  correctly rejects method calls through a bare type parameter; only the
+  sole non-type-template-parameter case still fails.
+- **`14_classes`**, **`18_closures`**, and **`24_function_pointers`**
+  are unchanged from the previous run.
+- A stale `13_unsupported_robustness` negative test that still expected
+  `uint32_t` to be rejected was retargeted to the still-documented
+  unsupported bare `unsigned` shorthand, so the suite matches ch06
+  again.
 
 Known implementation gaps from the current full-suite run:
 
-- **`04_references_borrow`** (2 failures): `const`-qualified local
-  variables are still rejected, and a `const T&` parameter still cannot
-  bind directly to a literal/temporary.
 - **`14_classes`** (1 failure): `(*this).member` is still rejected,
   contrary to ch05 §5.9.
 - **`18_closures`** (3 failures): by-reference capture still over-extends
   a mutable borrow past last use; `[*this]` capture is still rejected;
   a lambda's bare `auto` parameter still does not parse.
-- **`19_scalar_types`** (8 failures): only `bool`/`int`/`char` currently
-  work; the rest of the documented scalar family is still unrecognized,
-  and neither `static_cast<T>(expr)` nor `(T)expr` works even between
-  working scalar types.
-- **`20_generic_functions`** (2 failures): abbreviated bare `auto`
-  parameters and concept-constrained parameter packs still do not parse.
-- **`21_generic_types`** (2 failures): an unconstrained type parameter is
-  still incorrectly allowed to call methods, and a generic type with a
-  sole non-type template parameter still fails to instantiate.
+- **`20_generic_functions`** (1 failure): concept-constrained parameter
+  packs still do not parse.
+- **`21_generic_types`** (1 failure): a generic type with a sole
+  non-type template parameter still fails to instantiate.
 - **`24_function_pointers`** (11 raw failures, plus 3 false-positive raw
   passes): the parser still rejects every function-pointer declarator
   form (`expected variable name but found '('` / `expected field name but
@@ -232,7 +234,8 @@ Known implementation gaps from the current full-suite run:
 
 All other categories currently pass in the full black-box suite.
 
-No documentation ambiguity was found while writing the function-pointer
-tests. The `extern "C"` with-body vs. bodyless distinction is surprising
-but explicit in ch05 §5.16 and in the formal spec's §5.2(3.1)/(3.2), so
-the tests keep that rule as written rather than guessing around it.
+No new documentation ambiguity turned up during this re-verification
+pass. The `extern "C"` with-body vs. bodyless distinction remains
+surprising but explicit in ch05 §5.16 and in the formal spec's
+§5.2(3.1)/(3.2), so the tests keep that rule as written rather than
+guessing around it.

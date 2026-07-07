@@ -1,0 +1,6 @@
+// ch06 scalar table: bare single-word `unsigned` is intentionally *not*
+// valid scpp; only the full two-word spelling `unsigned int` is accepted.
+int main() {
+    unsigned x = 0;
+    return 0;
+}
