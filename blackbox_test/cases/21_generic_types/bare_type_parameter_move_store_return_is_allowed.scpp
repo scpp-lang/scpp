@@ -1,0 +1,24 @@
+// ch05 §5.14: "A generic type's own type parameter(s) may be left bare
+// -- exactly like a bare generic-function parameter (§5.11), this means
+// 'no operations guaranteed beyond the universal baseline every scpp
+// type already has' (move, store as a field, pass to a compatible
+// parameter, return)." Real C++ template syntax verbatim
+// (`template<typename T> class X { ... };`).
+template<typename T>
+class Holder {
+    T item;
+public:
+    Holder(const T& x) {
+        this->item = x;
+        return;
+    }
+    T get() {
+        return this->item;
+    }
+};
+
+int main() {
+    int val = 42;
+    Holder<int> h(val);
+    return h.get();
+}

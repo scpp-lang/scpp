@@ -1,0 +1,24 @@
+// ch05 §5.14: "Non-type template parameters are supported, restricted to
+// scalar types" -- real C++ template syntax verbatim
+// (`template<int N> class X { ... };`). This is a genuine finding: a
+// generic type with a SOLE non-type parameter (no accompanying type
+// parameter) fails ("expected a type name" at the instantiation's
+// argument list) -- but the same non-type-parameter mechanism does work
+// when combined with a type-parameter pack in the spec's own
+// recursive-inheritance shape (see
+// indexed_access_via_base_class_deduction.scpp, which instantiates
+// `TupleImpl<0, int, bool>` successfully). The gap seems specific to a
+// plain, non-recursive generic type whose only parameter is a non-type
+// one.
+template<int N>
+class FixedValue {
+public:
+    int get_n() {
+        return N;
+    }
+};
+
+int main() {
+    FixedValue<42> v;
+    return v.get_n();
+}

@@ -1,0 +1,11 @@
+// Same finding as static_cast_between_scalar_types_is_not_supported.scpp,
+// for the C-style cast spelling instead of `static_cast`: `(int)b` is
+// also rejected ("expected an expression but found 'int'"). Real C++
+// accepts both spellings for this kind of conversion; scpp's docs don't
+// call out a preference for one over the other (ch06 scalar table just
+// says "requires an explicit cast"), so both are worth checking.
+int main() {
+    bool b = true;
+    int x = (int)b;
+    return x;
+}

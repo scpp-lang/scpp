@@ -1,0 +1,25 @@
+// ch05 §5.11: the full header form (`template<Concept T> ...`) unlocks
+// whatever the concept's requires-expression guarantees, checked once at
+// the generic function's own definition -- exactly like the abbreviated
+// `Concept auto` form, just spelled differently.
+template<typename T>
+concept HasGet = requires(T t) { t.get(); };
+
+class Num {
+public:
+    int v;
+    int get() const {
+        return this->v;
+    }
+};
+
+template <HasGet T>
+int use_it(const T& x) {
+    return x.get();
+}
+
+int main() {
+    Num n;
+    n.v = 42;
+    return use_it(n);
+}

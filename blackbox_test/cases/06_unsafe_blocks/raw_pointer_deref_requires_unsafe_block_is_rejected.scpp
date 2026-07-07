@@ -1,4 +1,4 @@
-// ch02: "Raw pointer dereference | Must be inside unsafe { }."
+// ch02: "Raw pointer dereference | Must be inside [[scpp::unsafe]] { }."
 int f(int* p) {
     return *p;
 }

@@ -8,7 +8,7 @@ extern "C" {
 
 int use_heap() {
     int result = 0;
-    unsafe {
+    [[scpp::unsafe]] {
         void* raw = malloc(4);
         int* typed = raw;
         *typed = 77;

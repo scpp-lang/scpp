@@ -1,0 +1,15 @@
+// ch05 §5.11: "Generic functions may be spelled with either the
+// abbreviated C++20 form ... or the full header form
+// (template<Concept T> void f(T& x)) -- real C++ treats the two as
+// fully equivalent, and so does scpp." A bare type parameter (no concept
+// name) in the full header form means "no operations guaranteed beyond
+// the universal baseline" -- move/store/pass-through/return only, which
+// is exactly what `identity` needs.
+template <typename T>
+T identity(T x) {
+    return x;
+}
+
+int main() {
+    return identity(42);
+}

@@ -4,7 +4,7 @@
 int f() {
     int x = 1;
     int* p = &x;
-    unsafe {
+    [[scpp::unsafe]] {
         *p = 9;
     }
     return x;

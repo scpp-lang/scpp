@@ -1,0 +1,29 @@
+// ch05 §5.15: "Manual override on a type declaration: a struct/class may
+// be declared [[scpp::thread_movable]] ... This overrides the
+// structural derivation above entirely for that type -- exactly like
+// Rust's unsafe impl Send for RawBufferHandle {} -- and is the only way
+// to make a type whose structure the compiler cannot verify on its own
+// (most commonly, one containing a raw pointer) participate in either
+// property at all."
+struct [[scpp::thread_movable]] RawBufferHandle {
+    int* data;
+    int len;
+};
+
+RawBufferHandle make_handle(int* p, int n) {
+    RawBufferHandle h;
+    h.data = p;
+    h.len = n;
+    return h;
+}
+
+template<typename T>
+void spawn(T&& f [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    int arr[3];
+    spawn(make_handle(arr, 3));
+    return 0;
+}

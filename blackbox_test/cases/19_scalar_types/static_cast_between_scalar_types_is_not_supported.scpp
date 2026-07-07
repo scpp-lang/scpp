@@ -1,0 +1,12 @@
+// ch06 scalar table: "No implicit conversion to or from any other
+// type... scpp requires an explicit cast in both directions" (stated for
+// `bool`, and "now applies uniformly across the entire numeric family").
+// This implies an explicit cast is the sanctioned way to convert between
+// scalar types -- but `static_cast<T>(expr)` is currently rejected
+// ("expected an expression but found 'int'"), even between the two
+// scalar types (`bool`, `int`) that otherwise work fine on their own.
+int main() {
+    bool b = true;
+    int x = static_cast<int>(b);
+    return x;
+}

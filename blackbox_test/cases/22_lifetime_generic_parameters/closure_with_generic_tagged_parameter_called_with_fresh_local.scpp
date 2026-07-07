@@ -1,0 +1,34 @@
+// ch05 §5.13: the overall "thread::scope-shaped" pattern this section
+// targets -- a wrapper function invents a value internally (here,
+// `tok`, a function-local `Token`) and calls a passed-in closure with a
+// reference to it; the closure's own parameter is tagged
+// `[[scpp::lifetime(generic)]]`, matching how the spec's own example is
+// written (modulo the concept probe-parameter tag, which isn't parsed
+// yet -- see concept_probe_parameter_lifetime_generic_tag_is_not_yet_
+// parsed.scpp -- so the concept here checks plain callability only,
+// without itself requiring the generic tag).
+class Token {
+public:
+    int value;
+};
+
+template<typename T>
+concept AcceptsToken = requires(T a, Token& tok) {
+    { a(tok) } -> std::same_as<void>;
+};
+
+void with_fresh_token(AcceptsToken auto&& f) {
+    Token tok;
+    tok.value = 42;
+    f(tok);
+    return;
+}
+
+int main() {
+    int result = 0;
+    with_fresh_token([&result](Token& t [[scpp::lifetime(generic)]]) {
+        result = t.value;
+        return;
+    });
+    return result;
+}

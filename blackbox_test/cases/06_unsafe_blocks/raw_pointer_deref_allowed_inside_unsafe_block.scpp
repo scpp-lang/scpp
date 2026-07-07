@@ -1,6 +1,6 @@
-// ch01 §1.1: `unsafe { }` locally relaxes raw pointer dereference.
+// ch01 §1.1: `[[scpp::unsafe]] { }` locally relaxes raw pointer dereference.
 int f(int* p) {
-    unsafe {
+    [[scpp::unsafe]] {
         return *p;
     }
 }

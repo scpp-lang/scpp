@@ -1,0 +1,19 @@
+// ch06 scalar table: "`size_t` | unsigned, pointer-width | matches real
+// C++/Rust (`usize`) semantics" and "`ptrdiff_t` | signed, pointer-width
+// | same target-triple-following semantics as `size_t`" -- both core
+// builtin scalar types (e.g. `std::span::size` and array indexing
+// contexts would ordinarily be expected to use `size_t`). Neither
+// currently parses as a type name.
+size_t identity_sz(size_t x) {
+    return x;
+}
+
+ptrdiff_t identity_pd(ptrdiff_t x) {
+    return x;
+}
+
+int main() {
+    size_t a = 1;
+    ptrdiff_t b = 2;
+    return 0;
+}

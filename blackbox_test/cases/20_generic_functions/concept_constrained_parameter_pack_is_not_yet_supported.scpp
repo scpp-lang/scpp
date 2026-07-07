@@ -1,0 +1,27 @@
+// ch05 §5.11: "A concept-constrained parameter may also be a pack
+// (Concept auto&... args), usable only through a fold expression ...
+// covers variadic call patterns (e.g. a std::format-style function)."
+// This is explicitly documented syntax, but currently rejected
+// ("expected parameter name but found '...'").
+template<typename T>
+concept HasGet = requires(T t) { t.get(); };
+
+class Num {
+public:
+    int v;
+    int get() const {
+        return this->v;
+    }
+};
+
+int sum_two(const HasGet auto&... args) {
+    return (args.get() + ...);
+}
+
+int main() {
+    Num a;
+    a.v = 3;
+    Num b;
+    b.v = 4;
+    return sum_two(a, b);
+}

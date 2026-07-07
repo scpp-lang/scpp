@@ -1,13 +1,13 @@
 // ch02 §2.1: the `extern "C" { ... }` block form is sugar for repeating
 // `extern "C"` on every declaration inside it. Calling `puts` still needs
-// unsafe { }, same as any other extern "C" call.
+// [[scpp::unsafe]] { }, same as any other extern "C" call.
 extern "C" {
     int puts(const char* s);
     void abort();
 }
 
 int main() {
-    unsafe {
+    [[scpp::unsafe]] {
         puts("block form works");
     }
     return 0;

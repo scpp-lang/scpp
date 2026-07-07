@@ -1,0 +1,28 @@
+// ch05 §5.14: "Indexed access into a recursively-defined variadic type
+// reuses deduction from a base class ... Threading a scalar, non-type
+// index through the recursive definition ... lets an accessor deduce, in
+// one step, exactly which level of the inheritance chain holds the
+// requested element." This is the spec's own `TupleImpl`/`get<I>`
+// example verbatim (using `int` in place of `size_t` for the index,
+// since `size_t` doesn't currently parse as a type name -- see
+// 19_scalar_types/size_t_and_ptrdiff_t_are_not_recognized.scpp).
+template<int Idx, typename... Ts> class TupleImpl;
+
+template<int Idx> class TupleImpl<Idx> {};
+
+template<int Idx, typename Head, typename... Tail>
+class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {
+public:
+    Head value;
+};
+
+template<int I, typename Head, typename... Tail>
+Head& get(TupleImpl<I, Head, Tail...>& t) {
+    return t.value;
+}
+
+int main() {
+    TupleImpl<0, int, bool> t;
+    t.value = 42;
+    return get<0>(t);
+}

@@ -1,0 +1,18 @@
+// ch01 §1.3: "an attribute-specifier-seq written immediately after a
+// function's parameter list ... attaches to the function's *type*
+// ([dcl.fct]), not to the function itself and not to its body, and so
+// has no effect at all" -- this describes it as legal, if semantically
+// inert, grammar (real C++ [dcl.fct] already gives a function's type
+// its own optional attribute-specifier-seq in this position). As
+// currently implemented, though, this position isn't parsed at all yet
+// (a plain syntax error, "expected '{' but found '['") rather than
+// silently accepted-but-ignored -- a narrower gap than the spec
+// describes, worth double-checking against §1.3 once this grammar
+// position is wired up.
+int harmless() [[scpp::unsafe]] {
+    return 5;
+}
+
+int main() {
+    return harmless();
+}

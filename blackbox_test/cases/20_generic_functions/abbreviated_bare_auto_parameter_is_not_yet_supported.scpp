@@ -1,0 +1,18 @@
+// ch05 §5.11: "A concept is optional, not mandatory, on a constrained
+// parameter. Writing bare auto (no concept name in front of it) is
+// legal -- it means the parameter's type is treated as fully opaque:
+// the body may move it, store it, pass it to another function accepting
+// a compatible (bare-or-narrower) parameter, and return it." This is
+// explicitly documented as supported, but currently rejected ("expected
+// a type name") -- confirmed not specific to lambdas either (see
+// 18_closures/generic_lambda_with_auto_parameter.scpp, the same gap for
+// a lambda's own bare auto parameter). Only the full-header-form bare
+// type parameter (see full_header_form_with_bare_type_parameter.scpp)
+// currently works.
+int identity(auto x) {
+    return x;
+}
+
+int main() {
+    return identity(42);
+}

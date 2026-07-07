@@ -1,8 +1,8 @@
-// ch01 §1.3: "unsafe { } may nest inside another unsafe { } --
+// ch01 §1.3: "[[scpp::unsafe]] { } may nest inside another [[scpp::unsafe]] { } --
 // harmless, not an error."
 int f(int* p) {
-    unsafe {
-        unsafe {
+    [[scpp::unsafe]] {
+        [[scpp::unsafe]] {
             return *p;
         }
     }

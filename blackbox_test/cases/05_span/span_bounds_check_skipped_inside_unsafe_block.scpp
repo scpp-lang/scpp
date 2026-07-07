@@ -1,9 +1,9 @@
-// ch01 §1.1: the bounds check is one of only two things `unsafe { }`
+// ch01 §1.1: the bounds check is one of only two things `[[scpp::unsafe]] { }`
 // relaxes for a "runtime check" reason (alongside integer overflow) --
 // here only the access itself is wrapped, proving the block's effect is
 // purely lexical/local, not a whole-function switch.
 int oob(std::span<int> s) {
-    unsafe {
+    [[scpp::unsafe]] {
         return s[10];
     }
 }

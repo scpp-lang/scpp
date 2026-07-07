@@ -1,5 +1,5 @@
 // ch02: "Calling an extern "C" function | Must be wrapped in
-// unsafe { }, otherwise a compile error." A bodyless extern "C"
+// [[scpp::unsafe]] { }, otherwise a compile error." A bodyless extern "C"
 // declaration is always implicitly unchecked -- no scpp compiler ever
 // sees its real implementation.
 extern "C" int abs(int x);

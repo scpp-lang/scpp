@@ -1,10 +1,10 @@
 // ch01 §1.3 / ch02: wrapping the call to an extern "C" function in
-// `unsafe { }` is exactly the "programmer vouches for it" escape hatch.
+// `[[scpp::unsafe]] { }` is exactly the "programmer vouches for it" escape hatch.
 extern "C" int abs(int x);
 
 int caller() {
     int result = 0;
-    unsafe {
+    [[scpp::unsafe]] {
         result = abs(-7);
     }
     return result;

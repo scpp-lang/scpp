@@ -1,0 +1,18 @@
+// ch01 §1.2: "Neither form changes §5.1-§5.4's checking in any way" --
+// a function-level `[[scpp::unsafe]]` marker (unlike a nested block) is
+// a *different* mechanism from wrapping the body in
+// `[[scpp::unsafe]] { }`, but it must still not act as a blanket
+// exemption: a double-move inside an unsafe-marked function's own body
+// is still rejected.
+[[scpp::unsafe]] int f() {
+    std::unique_ptr<int> a = std::make_unique<int>(1);
+    std::unique_ptr<int> b = std::move(a);
+    std::unique_ptr<int> c = std::move(a);
+    return *c;
+}
+
+int main() {
+    [[scpp::unsafe]] {
+        return f();
+    }
+}

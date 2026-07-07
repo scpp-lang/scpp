@@ -1,11 +1,11 @@
 // ch01 §1.1: "Everything in §5.1-§5.4 ... runs unconditionally,
-// everywhere, including inside an unsafe { } block. unsafe { } never
+// everywhere, including inside an [[scpp::unsafe]] { } block. [[scpp::unsafe]] { } never
 // disables this analysis." Two mutable borrows of the same place still
-// conflict even when both borrows are taken inside an unsafe { } block --
-// alias-XOR-mutability is never one of the things unsafe { } relaxes.
+// conflict even when both borrows are taken inside an [[scpp::unsafe]] { } block --
+// alias-XOR-mutability is never one of the things [[scpp::unsafe]] { } relaxes.
 int f() {
     int x = 5;
-    unsafe {
+    [[scpp::unsafe]] {
         int& r1 = x;
         int& r2 = x;
         return r1 + r2;

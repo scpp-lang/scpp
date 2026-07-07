@@ -2,12 +2,12 @@
 // parsed and carry a has_varargs flag; this exercises an actual variadic
 // call site with a real `int` argument, not just the fixed `fmt`
 // parameter. Calling `printf` (an extern "C" function) always needs
-// unsafe { }, regardless of context.
+// [[scpp::unsafe]] { }, regardless of context.
 extern "C" int printf(const char* fmt, ...);
 
 int main() {
     int x = 99;
-    unsafe {
+    [[scpp::unsafe]] {
         printf("%d\n", x);
     }
     return 0;

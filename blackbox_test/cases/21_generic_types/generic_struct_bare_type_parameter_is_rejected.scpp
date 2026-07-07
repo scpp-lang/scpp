@@ -1,0 +1,18 @@
+// ch05 §5.14: "A generic struct's type parameter(s) cannot be left bare
+// -- unlike class, a struct's fields must all be trivial ... A generic
+// struct's type parameter(s) must therefore be constrained, at the
+// struct itself, by a concept that guarantees triviality." Writing a
+// bare (unconstrained) type parameter directly on a generic `struct`
+// (as opposed to `class`) must therefore be rejected.
+template<typename T>
+struct Pair {
+    T a;
+    T b;
+};
+
+int main() {
+    Pair<int> p;
+    p.a = 3;
+    p.b = 4;
+    return p.a + p.b;
+}

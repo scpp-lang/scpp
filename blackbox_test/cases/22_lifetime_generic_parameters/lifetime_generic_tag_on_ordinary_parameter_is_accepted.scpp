@@ -1,0 +1,24 @@
+// ch05 §5.13: "[[scpp::lifetime(generic)]] is a reserved group name.
+// Tagging a reference parameter this way assigns it a fresh,
+// compiler-synthesized group that no other group anywhere in the
+// program can ever be unified with... a generic-tagged parameter (or
+// anything derived from it) may be used for ordinary, synchronous
+// operations -- read it, call a method on it..." Basic acceptance: the
+// attribute is legal on an ordinary reference parameter, and using it
+// for an ordinary synchronous read/write inside the function works.
+class Token {
+public:
+    int value;
+};
+
+void consume(Token& t [[scpp::lifetime(generic)]]) {
+    t.value = 99;
+    return;
+}
+
+int main() {
+    Token tok;
+    tok.value = 1;
+    consume(tok);
+    return tok.value;
+}

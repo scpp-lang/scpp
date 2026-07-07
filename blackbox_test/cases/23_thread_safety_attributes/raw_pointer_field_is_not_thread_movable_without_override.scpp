@@ -1,0 +1,27 @@
+// ch05 §5.15: "Raw pointer T*: neither, by default ... vouch by wrapping
+// it in a struct/class marked [[scpp::thread_movable]]/
+// [[scpp::thread_shareable]]." A struct containing a raw pointer field,
+// with no manual override, must fail a `[[scpp::thread_movable]]`
+// constraint.
+struct RawBufferHandle {
+    int* data;
+    int len;
+};
+
+RawBufferHandle make_handle(int* p, int n) {
+    RawBufferHandle h;
+    h.data = p;
+    h.len = n;
+    return h;
+}
+
+template<typename T>
+void spawn(T&& f [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    int arr[3];
+    spawn(make_handle(arr, 3));
+    return 0;
+}

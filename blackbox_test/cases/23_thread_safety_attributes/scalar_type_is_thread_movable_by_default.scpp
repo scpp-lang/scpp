@@ -1,0 +1,14 @@
+// ch05 §5.15: "Every scalar type: both properties hold" -- a scalar
+// value is trivially both thread-movable and thread-shareable.
+// Constraining a generic function's parameter with
+// `[[scpp::thread_movable]]` (attached like `[[scpp::lifetime(name)]]`)
+// accepts a plain scalar argument with no manual override needed.
+template<typename T>
+void spawn(T&& f [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    spawn(5);
+    return 0;
+}

@@ -1,0 +1,15 @@
+// ch05 §5.15: "A type containing a reference member (T&/const T& --
+// whether an ordinary class field or a by-reference closure capture) is
+// never thread-movable -- moving such a value to another thread does
+// not transfer the referent's ownership." A closure with a by-reference
+// capture must therefore fail a `[[scpp::thread_movable]]` constraint.
+template<typename T>
+void spawn(T&& f [[scpp::thread_movable]]) {
+    return;
+}
+
+int main() {
+    int x = 5;
+    spawn([&x]() { return x; });
+    return 0;
+}

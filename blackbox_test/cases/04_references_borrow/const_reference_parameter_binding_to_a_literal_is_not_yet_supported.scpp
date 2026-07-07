@@ -1,0 +1,21 @@
+// ch03: "`T&`/`const T&` -- reuses real C++ reference syntax." Real C++
+// allows a `const T&` parameter to bind directly to a temporary (a
+// literal constant, or any other rvalue), extending the temporary's
+// lifetime for the call -- a common, idiomatic pattern
+// (`f(42)` for `void f(const int& x)`). This is currently rejected: a
+// reference "can currently only borrow a plain local variable, a field
+// of one, an array element of one, a dereferenced
+// std::unique_ptr/raw-pointer local, or the result of a call to a
+// reference-returning function -- not an arbitrary expression"
+// (confirmed to include a bare literal). Passing a named local variable
+// instead works fine (see writing_through_const_reference_parameter_is_
+// rejected.scpp and others in this category, all of which happen to
+// only ever pass named locals).
+int f(const int& x) {
+    int y = x;
+    return y;
+}
+
+int main() {
+    return f(42);
+}

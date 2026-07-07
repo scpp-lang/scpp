@@ -1,0 +1,34 @@
+// ch05 §5.14: "A generic struct's type parameter(s) cannot be left bare
+// -- unlike class, a struct's fields must all be trivial, and triviality
+// is a whole-type layout/ABI property... A generic struct's type
+// parameter(s) must therefore be constrained, at the struct itself, by
+// a concept that guarantees triviality." This only exercises the
+// declaration syntax (`template<Concept T> struct` is accepted) -- fully
+// instantiating `Wrapper<T>` for some concrete, concept-satisfying T
+// isn't attempted here: the current requires-expression restriction
+// (only a `t.method(...)` call shape is accepted, see
+// 13_unsupported_robustness's compound-requirement finding) means a
+// concept can currently only be satisfied by a type with matching
+// *methods* -- but every type valid as a trivial struct field (scalars,
+// other structs) has none, making a meaningfully-satisfied
+// concept-constrained generic struct hard to construct under today's
+// implementation regardless of this feature's own correctness.
+template<typename T>
+concept HasGet = requires(T t) { t.get(); };
+
+struct Pair {
+    int a;
+    int b;
+};
+
+template<HasGet T>
+struct Wrapper {
+    T inner;
+};
+
+int main() {
+    Pair p;
+    p.a = 3;
+    p.b = 4;
+    return p.a + p.b;
+}

@@ -12,7 +12,7 @@ extern "C" {
 int query_socket_type(int fd) {
     int value = 0;
     int len = 4;
-    unsafe {
+    [[scpp::unsafe]] {
         getsockopt(fd, 1, 3, &value, &len);
     }
     return value;
@@ -20,11 +20,11 @@ int query_socket_type(int fd) {
 
 int main() {
     int fd = 0;
-    unsafe {
+    [[scpp::unsafe]] {
         fd = socket(2, 2, 0);
     }
     int socket_type = query_socket_type(fd);
-    unsafe {
+    [[scpp::unsafe]] {
         close(fd);
     }
     return socket_type;

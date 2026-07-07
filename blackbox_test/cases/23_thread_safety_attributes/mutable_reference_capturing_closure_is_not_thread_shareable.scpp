@@ -1,0 +1,21 @@
+// ch05 §5.15: "Thread-shareable if and only if it has no
+// by-*mutable*-reference capture (concurrent calls through a shared
+// mutable reference could race)." A closure capturing a non-const
+// variable by reference must fail a `[[scpp::thread_shareable]]`
+// constraint, exactly like it fails `[[scpp::thread_movable]]` (see
+// reference_capturing_closure_is_not_thread_movable.scpp) -- a mutable
+// reference member disqualifies both properties, not just one.
+template<typename T>
+void share(T&& f [[scpp::thread_shareable]]) {
+    return;
+}
+
+int f() {
+    int x = 5;
+    share([&x]() { x = 10; return x; });
+    return 0;
+}
+
+int main() {
+    return f();
+}

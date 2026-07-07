@@ -1,0 +1,18 @@
+// ch06 scalar table: "`unsigned int` | alias for `uint32_t`" and
+// "`unsigned long` | alias for `uint64_t`" -- both core builtin scalar
+// types (only the bare single-word `unsigned` shorthand is meant to be
+// rejected; the full two-word spellings are supposed to be valid). Both
+// two-word spellings are currently rejected as type names.
+unsigned int identity_ui(unsigned int x) {
+    return x;
+}
+
+unsigned long identity_ul(unsigned long x) {
+    return x;
+}
+
+int main() {
+    unsigned int a = 1;
+    unsigned long b = 2;
+    return 0;
+}

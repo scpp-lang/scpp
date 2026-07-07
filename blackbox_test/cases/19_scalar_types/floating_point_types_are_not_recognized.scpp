@@ -1,0 +1,28 @@
+// ch06 scalar table: `float32_t`/`float64_t` "reuse real,
+// already-standardized C++23 `<stdfloat>` names verbatim"; `float`/
+// `double` are their respective aliases, "matches how real C++ already
+// behaves everywhere in practice." All four are core builtin scalar
+// types, not a backlog item -- none currently parse as a type name.
+float32_t identity32(float32_t x) {
+    return x;
+}
+
+float64_t identity64(float64_t x) {
+    return x;
+}
+
+float identity_f(float x) {
+    return x;
+}
+
+double identity_d(double x) {
+    return x;
+}
+
+int main() {
+    float32_t a = 1.0;
+    float64_t b = 2.0;
+    float c = 3.0;
+    double d = 4.0;
+    return 0;
+}

@@ -1,0 +1,13 @@
+// ch01 §1.2/§1.3: attaching `[[scpp::unsafe]]` directly to a function's
+// own declaration makes calling it one of §5.5's gated operations --
+// scpp's equivalent of Rust's `unsafe fn`. An ordinary, unmarked caller
+// can no longer call it without wrapping the call in
+// `[[scpp::unsafe]] { }`.
+[[scpp::unsafe]] int get_unchecked(int* p) {
+    return *p;
+}
+
+int main() {
+    int x = 10;
+    return get_unchecked(&x);
+}

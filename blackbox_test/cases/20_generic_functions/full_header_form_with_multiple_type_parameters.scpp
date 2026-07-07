@@ -1,0 +1,12 @@
+// ch05 §5.11: "The full header form also allows multiple type
+// parameters (template<typename T, typename U> void f(T& a, U& b),
+// matching generic types, §5.14)" -- something the abbreviated `auto`
+// form has no direct equivalent for spelling as cleanly.
+template<typename T, typename U>
+T first(T a, U b) {
+    return a;
+}
+
+int main() {
+    return first(42, true);
+}

@@ -1,0 +1,27 @@
+// ch04 §4.2: "No inheritance in v0.1 (deferred, not a permanent
+// exclusion)" -- general class inheritance, as distinct from ch05
+// §5.14's narrow variadic-generic-type recursive-inheritance pattern
+// (Tuple/TupleImpl), should still be out of scope. `class Derived :
+// public Base { ... }` unrelated to any generic/variadic type is
+// currently accepted at the declaration, but produces confusing/wrong
+// behavior when actually used: accessing `d.v`, a member declared
+// `public` in `Base`, is rejected as "cannot access private member 'v'
+// of class 'Derived'" -- neither a clean "inheritance not supported"
+// rejection at the declaration (as the "deferred" wording would suggest)
+// nor a genuinely working inheritance feature.
+class Base {
+public:
+    int v;
+};
+
+class Derived : public Base {
+public:
+    int w;
+};
+
+int main() {
+    Derived d;
+    d.v = 3;
+    d.w = 4;
+    return d.v + d.w;
+}

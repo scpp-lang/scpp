@@ -1,0 +1,16 @@
+// ch04 §4.2: "real, unrestricted C++ access control -- a member variable
+// or member function may be public or private in any combination,
+// exactly like real C++" (reversed from an earlier round's "member
+// variables can never be public" rule). Direct external access to a
+// public member variable is checked exactly like a struct field access
+// (whole-root conservative, ch05 §5.2).
+class Widget {
+public:
+    int value;
+};
+
+int main() {
+    Widget w;
+    w.value = 42;
+    return w.value;
+}

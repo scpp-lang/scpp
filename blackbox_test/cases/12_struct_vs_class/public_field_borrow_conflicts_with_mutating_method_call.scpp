@@ -1,0 +1,26 @@
+// ch04 §4.2: "a live borrow of a public field correctly conflicts with a
+// call to a mutating method on the same object, exactly as two
+// conflicting borrows of the same root always do." `r` borrows `c`'s
+// public field `value` (recorded against the whole root `c`, ch05 §5.2's
+// whole-root-conservative treatment); `increment()` needs its own
+// mutable borrow of `c` via `this` (ch05 §5.9) while `r` is still alive
+// (used in the final `return`) -- the two conflict.
+class Counter {
+public:
+    int value;
+    Counter(int v) {
+        this->value = v;
+        return;
+    }
+    void increment() {
+        this->value = this->value + 1;
+        return;
+    }
+};
+
+int main() {
+    Counter c(5);
+    int& r = c.value;
+    c.increment();
+    return r;
+}

@@ -24,7 +24,7 @@
      （一个真正的诊断信息，而不是崩溃）。具体的错误文案不做检查——规范并未
      锁定措辞。
   3. **`NO_ABORT`**：仅用于极少数场景——某个 scpp 插入的运行时检查（span
-     边界检查、溢出检查）在一个 `unsafe { }` 块内被有意地*跳过*了（见
+     边界检查、溢出检查）在一个 `[[scpp::unsafe]] { }` 块内被有意地*跳过*了（见
      ch01 §1.1），因此读到/算出的值本身就是不确定的垃圾值，没法固定下来
      断言——但进程仍必须正常终止（return/exit），而不是被信号杀死。
 - **多文件（ch11 模块）用例**：有些规则（跨文件的 import/export、
@@ -75,10 +75,10 @@ cmake --build build
 | `03_unique_ptr` | `std::make_unique`/`std::move`、移出检查、箭头语法糖 |
 | `04_references_borrow` | `T&`/`const T&`、alias-XOR-mutability、NLL 借用释放、生命周期省略 |
 | `05_span` | `std::span<T>` 的构造/下标/边界检查 |
-| `06_unsafe_blocks` | `unsafe { }` 的门控与作用域规则；§5.1-§5.4 在其内部依然生效 |
+| `06_unsafe_blocks` | `[[scpp::unsafe]] { }` 的门控与作用域规则；§5.1-§5.4 在其内部依然生效；函数级 `[[scpp::unsafe]]` 标记（ch01 §1.2，scpp 版的 `unsafe fn`） |
 | `07_extern_c` | `extern "C"` 声明/定义、真实 libc 互操作 |
 | `08_address_of` | `&expr`、`const T*`/`T*` 的区分 |
-| `09_integer_overflow` | 默认检查并 abort、`unsafe` 下环绕、除法/取模的特殊情形 |
+| `09_integer_overflow` | 默认检查并 abort、`[[scpp::unsafe]]` 下环绕、除法/取模的特殊情形 |
 | `10_bool_and_char` | 标量间无隐式转换、逻辑运算符的短路求值 |
 | `12_struct_vs_class` | `struct` 与 `class` 在访问控制上的分歧 |
 | `13_unsupported_robustness` | 不支持/尚未实现的语法能干净地报错，不会崩溃 |
@@ -87,6 +87,11 @@ cmake --build build
 | `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套；`using namespace` 被拒绝 |
 | `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition |
 | `18_closures` | lambda 表达式（ch05 §5.12）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
+| `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06），以及标量间的显式转换 |
+| `20_generic_functions` | ch05 §5.11 的修订：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
+| `21_generic_types` | 泛型 `struct`/`class` 类型（ch05 §5.14）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
+| `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免 |
+| `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`（ch05 §5.15）：结构化推导与手动覆盖 |
 
 ## 测试理念
 
@@ -102,14 +107,19 @@ cmake --build build
 - 每个函数体（包括返回 `void` 的）都需要显式的 `return` 语句——scpp 目前没有
   隐式地"落到函数末尾就返回"这回事，尽管 `docs/book/` 里并没有明确点出这一点。
 - **没有 `safe` 关键字**——每个函数默认都无条件被检查（ch01/ch08 Q13）；
-  `unsafe { }` 是语言里唯一的安全上下文构造，且只放松 ch05 §5.5 里那一小串
-  固定的操作（裸指针解引用、调用 `extern "C"` 函数等）外加 span 边界检查/
-  溢出检查——所有权/移动/别名/生命周期检查（§5.1-§5.4）即便在 `unsafe { }`
-  内部也无条件持续生效。调用 `extern "C"` 函数永远都需要 `unsafe { }`，跟
-  调用方是谁无关，**也跟这个函数有没有函数体无关**——`extern "C"` 这个链接
-  方式本身就标记了 FFI 边界（ch02 的边界表并没有区分这两种情况）；一个带函数
-  体的 `extern "C"` 函数自己内部依然按普通函数一样被检查（例如它内部的裸指针
-  解引用照样需要自己的 `unsafe { }`）。
+  `[[scpp::unsafe]]` 是语言里唯一的安全上下文构造（一个 attribute，不是关键字
+  ——见 ch01 §1.3，这一轮从裸的 `unsafe { }` 块重新设计成了
+  `[[scpp::unsafe]] { }`），且只放松 ch05 §5.5 里那一小串固定的操作（裸指针
+  解引用、调用 `extern "C"` 函数等）外加 span 边界检查/溢出检查——所有权/
+  移动/别名/生命周期检查（§5.1-§5.4）即便在 `[[scpp::unsafe]] { }` 内部也
+  无条件持续生效。调用 `extern "C"` 函数永远都需要 `[[scpp::unsafe]] { }`，
+  跟调用方是谁无关，**也跟这个函数有没有函数体无关**——`extern "C"` 这个
+  链接方式本身就标记了 FFI 边界（ch02 的边界表并没有区分这两种情况）；一个
+  带函数体的 `extern "C"` 函数自己内部依然按普通函数一样被检查（例如它内部
+  的裸指针解引用照样需要自己的 `[[scpp::unsafe]] { }`）。这一轮新增的机制：
+  把 `[[scpp::unsafe]]` 直接标注在函数自己的声明上（返回类型之前），会让
+  整个函数体变成 unsafe 上下文，*同时*让调用这个函数本身也变成 §5.5 的
+  受控操作之一——相当于 scpp 版的 Rust `unsafe fn`（ch01 §1.2）。
 - **`17_modules` 里 `--import name=path` 的具体行为现在已经验证过了**：
   `path` 确实直接指向该模块的原始 `.scpp` 接口源码，即时编译，不需要"先把
   模块编译成 `.scppm`"这一独立步骤——由 10 个通过的多文件用例实证确认。
@@ -139,43 +149,85 @@ cmake --build build
 
 ## 现状
 
-**总共 157 个用例，154 个通过。** `01_basics`-`17_modules` 里的 137 个
-（之前已验证，见下）加上 `18_closures` 里的 17/20 个（ch05 §5.12 lambda
-表达式）已经针对 `src/` 一起实现的泛型函数/概念（§5.11）和闭包（§5.12）
-验证通过。`auto` 局部变量/返回类型推导这个假设也确认没问题。
+**总共 197 个用例，179 个通过。** `01_basics`-`17_modules` 里的 137 个，
+加上 `18_closures` 里的 17/20 个，都是之前已经验证过的（两轮的详细内容见
+下文）。这一轮是在文档和 `src/` 同时发生一次大更新之后重新做的完整验证：
+`unsafe { }` 被重新设计成了 `[[scpp::unsafe]]` attribute（ch01 §1.1-1.3，
+既能标在一个块上，也能标在函数声明上——scpp 版的 `unsafe fn`），`class`
+成员变量现在可以是 `public`（ch04 §4.2，推翻了之前"成员变量必须私有"的
+规则），ch05 里新增了四大块内容：泛型函数修订（§5.11：裸/完整 header 形式/
+多参数/仅返回类型）、闭包（§5.12，之前已验证过）、生命周期泛型参数
+（§5.13）、泛型类型（§5.14）、线程安全结构化属性（§5.15）。所有现有的
+`.scpp` 文件都从 `unsafe { }` 批量改成了 `[[scpp::unsafe]] { }`，另外
+扩充了 2 个已有分类（`06_unsafe_blocks`、`12_struct_vs_class`），新增了
+5 个全新分类（`19_scalar_types` 到 `23_thread_safety_attributes`）。
 
-`18_closures` 里有 3 个已知失败，都是真正的实现发现（不是测试的问题——
-当初写这些用例时标注的那 2 个依赖，最终都不是导致失败的原因）：
+**这一轮迄今为止最重要的发现**：绝大部分标量类型现在根本没法用，而且
+标量间的显式转换完全不工作（`19_scalar_types`，8/8 全部失败）——
+`int8_t`/`int16_t`/`int32_t`/`int64_t`、对应的 `uint*_t`、`long`、
+`unsigned int`、`unsigned long`、`float32_t`/`float64_t`/`float`/
+`double`、`size_t`、`ptrdiff_t` **全部**都没法作为类型名解析（目前只有
+`bool`、`int`、`char` 能用），`static_cast<T>(expr)` 和 C 风格的
+`(T)expr` 转换也都不接受，哪怕是在两个本身都能正常工作的标量类型
+（`bool`/`int`）之间转换也不行。这是在探测泛型的非类型模板参数时偶然
+发现的——`docs/book/` 里没有任何地方暗示这是已知缺口（ch06 的标量表把
+整个家族都当作无条件可用的，没有任何"尚未实现"的标注）。
 
-- `by_reference_capture_mutates_and_reads_after_last_use.scpp`：一个按
-  引用捕获的闭包，它的借用并**没有**像 §5.3 的 NLL 模型承诺的那样在最后
-  一次使用后释放——在闭包自己最后一次使用之后，直接写（甚至只是读）被
-  捕获的局部变量，会被拒绝，报错 "cannot use 'x' while it is mutably
-  borrowed"。已经对照 `std::span`（ch05 §5.12 原文里明确拿来跟闭包类比
-  的对象："exactly like a class holding a T&/const T& field, or
-  std::span"）做了实证隔离：完全相同的"创建一次/使用一次/之后直接碰一下
-  原变量"这个形状，对 `std::span` 来说编译通过，说明 span 自己的借用
-  确实在最后一次使用后正确释放了，而闭包捕获的引用没有。很可能是"把 NLL
-  的最后一次使用后释放"这个机制扩展到闭包内部引用类型捕获成员这一步
-  上有缺口。
-- `explicit_star_this_capture_is_allowed.scpp`：`[*this]` 被一个清晰、
-  明确的诊断信息拒绝了——"capturing the enclosing object by value would
-  need class copy semantics, which don't exist yet -- use `[this]` to
-  capture a reference to it instead"。这不是一个新缺口：这正是
-  `14_classes/class_by_value_parameter_is_rejected.scpp` 早就覆盖过的
-  "class 类型还没有拷贝语义"这同一个老限制，现在通过闭包又冒出来了。
-  `[this]`（按引用）以及笼统/显式成员形式不受影响——只有 `[*this]`
-  专门依赖这个。
-- `generic_lambda_with_auto_parameter.scpp`：lambda 的裸（也就是不带
-  概念约束的）`auto` 参数——报错 "expected a type name"。已经实证隔离：
-  这不是 lambda 专属的问题——一个普通（非 lambda）函数的裸 `auto` 参数
-  会以完全相同的方式失败，而 `Concept auto`（概念约束）参数则工作正常
-  （见通过的 `passing_closure_to_concept_constrained_generic_function.scpp`，
-  用的正是这种形式）。所以目前泛型函数支持只覆盖了概念约束的情形；ch05
-  §5.12 同样声称支持的、不带约束的 C++14 泛型 lambda/泛型函数形式
-  （"generic (C++14, `auto` parameter) lambdas"）还没覆盖到。
+总共 18 个已知失败，都是真正的实现发现（测试本身合规，没有改动；闭包那
+一轮的发现这里只简要总结，完整内容见 git 历史）：
 
-之前已验证过的 `01_basics`-`17_modules` 分类目前没有已知失败。
+- **`19_scalar_types`**（8/8 失败）：见上文。
+- **`20_generic_functions`**（4/6 通过）：完整 header 形式（裸类型参数、
+  概念约束、多类型参数、仅返回类型）全都工作正常。有两种文档里写明的形式
+  还没法解析：缩写形式的裸 `auto` 参数（`int f(auto x)`——已确认不是
+  lambda 专属的，跟 `18_closures` 发现的是同一个缺口），以及概念约束的
+  参数包（`const Concept auto&... args`，报错"expected parameter name
+  but found '...'"）。
+- **`21_generic_types`**（7/9 通过）：裸类型参数、逐方法 `requires`
+  子句、泛型 struct 的概念约束强制检查、通过递归继承实现的 variadic
+  类型（`Tuple`/`TupleImpl` 那两种模式）、非类型参数配合类型参数包，
+  全都工作正常。两个发现：（1）裸（不受约束）的泛型类型参数错误地允许
+  在它上面调用方法——比如 `Holder<T>` 内部的 `this->item.doubled()`
+  能编译通过，尽管 `T` 在那里完全没有约束，这跟 §5.11/§5.14 都确立的
+  "一次性在定义处检查"原则矛盾（要等到调用方用不兼容的类型实例化时才会
+  报错，而不该是这样）；（2）只带一个非类型参数、没有类型参数的泛型类型
+  （比如 `template<int N> class X`）没法实例化（"expected a type
+  name"），尽管同一个机制配合类型参数包时是能正常工作的。另外记录了一个
+  非新增的旧发现：一般（非泛型、非 variadic）的 class 继承按理说还应该是
+  推迟支持的（ch04 §4.2）——它在声明处并没有被干净地拒绝，但用起来会对一
+  个继承来的、原本是 `public` 的字段报出令人困惑的"cannot access
+  private member"，既不是干净的拒绝，也不是真正能用的继承。
+- **`22_lifetime_generic_parameters`**（3/3 通过）：`[[scpp::lifetime
+  (generic)]]` 标签在普通函数参数上工作正常，"被调用方内部现造一个值、
+  再拿它去调用传进来的闭包"这个核心模式，在概念只需要检查"可调用"的时候
+  也能正常工作。有一种文档里写的形式没法解析：给 `requires` 表达式自己的
+  探测参数打上同样的 attribute（"expected ')' but found '['"）。
+- **`23_thread_safety_attributes`**（6/6 通过）：测试到的每一条结构化
+  推导规则（标量类型、按引用捕获 vs 按值捕获的闭包、带不带手动覆盖的裸
+  指针字段）都跟文档描述完全一致。
+- **`18_closures`**（17/20 通过，上一轮的发现）：按引用捕获的闭包，其
+  借用没有像 NLL 承诺的那样在最后一次使用后释放（对比 `std::span`，
+  它是能正确释放的）；`[*this]` 被"class 还没有拷贝语义"这个早就存在的
+  缺口挡住了；lambda 的裸 `auto` 参数没法解析（跟上面
+  `20_generic_functions` 的发现是同一个根本原因）。
+- **`12_struct_vs_class`**（3/4 通过，这一轮新增）：public 成员变量的
+  普通读写工作正常，但对同一个对象，一个 public 字段的活跃借用**没有**
+  正确地跟调用一个会修改状态的方法产生冲突——尽管 whole-root-conservative
+  的字段对字段借用冲突（两个不同的 public 字段）是能正常工作的——ch04
+  §4.2 描述的那种组合方式（"两者最终都会针对同一个根对象记录一次借用"）
+  在字段路径和方法调用路径之间还没有完全接通。
+- **`04_references_borrow` 里的 2 个发现**，跟任何具体的新章节都无关，
+  是在构造其它测试时顺带发现的：`const T&` 参数没法绑定到一个临时值/
+  字面量参数上（只能绑定到一个具名的左值——`f(42)` 会失败，而对一个局部
+  变量 `int v` 调用 `f(v)` 是可以的），以及一个普通的 `const` 局部变量
+  声明（`const int x = 5;`）会被直接拒绝（"'const' is only supported
+  directly before a reference type or a pointer type"）。
+- **`06_unsafe_blocks` 里的 1 个发现**：对指针运算的结果做解引用
+  （`*(p + 1)`）还不支持——目前只支持对一个裸的局部变量/字段直接解引用，
+  比 ch05 §5.5 里把"对指针类型的值做间接寻址，或者做指针运算"列为同一条
+  受控操作要窄。
+
+`01_basics`-`17_modules`（前几轮验证过的分类）目前没有已知失败。
 
 `import ... as`（模块别名）**不是** scpp 的特性——它曾短暂地出现在
 ch11 §11.8 里，但后来确认这根本不是真实的 C++20 语法（对照 cppreference

@@ -1,0 +1,16 @@
+// ch05 §5.11: "the full header form also allows ... a
+// 'return-type-only' generic function -- a type parameter with no
+// corresponding function-parameter position at all, requiring the
+// caller to supply it explicitly at the call site (e.g.
+// template<typename T> T make(); make<Circle>();) -- something the
+// abbreviated form cannot express."
+template<typename T>
+T make_default() {
+    T x;
+    return x;
+}
+
+int main() {
+    int x = make_default<int>();
+    return x;
+}

@@ -1,0 +1,18 @@
+// ch05 §5.5/ch01 §1.1 list "indirection through, or pointer arithmetic
+// on, a value of pointer type" together as one gated operation, implying
+// `*(p + 1)` (dereferencing the result of pointer arithmetic) should be
+// legal inside `[[scpp::unsafe]] { }`, exactly like bare `*p`. As
+// currently implemented, though, dereference only supports a plain
+// local raw-pointer/unique_ptr variable or a captured field of one --
+// not a subscript or any other expression -- so this is rejected with
+// "dereference ('*') currently only supports a plain local
+// std::unique_ptr or raw pointer variable...". A narrower gap than
+// documented; worth checking again once pointer arithmetic composes with
+// dereference.
+int main() {
+    int x = 5;
+    int* p = &x;
+    [[scpp::unsafe]] {
+        return *(p + 0);
+    }
+}

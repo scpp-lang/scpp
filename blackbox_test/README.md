@@ -30,7 +30,7 @@ on, or knowledge of, scpp's internal compiler modules.
      never checked -- the spec doesn't pin down wording.
   3. **`NO_ABORT`**: used only for the handful of cases where a
      scpp-inserted runtime check (span bounds, overflow) is deliberately
-     *skipped* inside an `unsafe { }` block (ch01 §1.1), so the resulting
+     *skipped* inside an `[[scpp::unsafe]] { }` block (ch01 §1.1), so the resulting
      value is genuine, unspecified garbage that can't be pinned down --
      but the process must still terminate normally, not be killed by a
      signal.
@@ -86,10 +86,10 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `03_unique_ptr` | `std::make_unique`/`std::move`, move-out checking, arrow sugar |
 | `04_references_borrow` | `T&`/`const T&`, alias-XOR-mutability, NLL release, lifetime elision |
 | `05_span` | `std::span<T>` construction/indexing/bounds checks |
-| `06_unsafe_blocks` | `unsafe { }` gating and scoping rules; §5.1-§5.4 staying active inside it |
+| `06_unsafe_blocks` | `[[scpp::unsafe]] { }` gating and scoping rules; §5.1-§5.4 staying active inside it; function-level `[[scpp::unsafe]]` marker (ch01 §1.2, scpp's `unsafe fn`) |
 | `07_extern_c` | `extern "C"` declarations/definitions, real libc interop |
 | `08_address_of` | `&expr`, `const T*`/`T*` distinction |
-| `09_integer_overflow` | checked-abort by default, wrapping in `unsafe`, div/mod special cases |
+| `09_integer_overflow` | checked-abort by default, wrapping in `[[scpp::unsafe]]`, div/mod special cases |
 | `10_bool_and_char` | no implicit scalar conversions, short-circuit evaluation |
 | `12_struct_vs_class` | `struct` vs `class` access-control divergence |
 | `13_unsupported_robustness` | unsupported/not-yet-implemented syntax fails cleanly, never crashes |
@@ -98,6 +98,11 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
 | `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
+| `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), and explicit scalar-to-scalar casts |
+| `20_generic_functions` | ch05 §5.11 revisions: full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
+| `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access |
+| `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime |
+| `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` (ch05 §5.15): structural derivation and manual override |
 
 ## Testing philosophy
 
@@ -118,18 +123,24 @@ Pass `--scpp-bin <path>` to point at a different build.
   `return` statement -- scpp currently has no implicit fall-off-the-end
   return, even though this isn't called out explicitly in `docs/book/`.
 - There is **no `safe` keyword** -- every function is checked
-  unconditionally by default (ch01/ch08 Q13); `unsafe { }` is the only
-  safety-context construct, and it only relaxes ch05 §5.5's fixed
-  operation list (raw pointer deref, calling an `extern "C"` function,
-  etc.) plus span-bounds/overflow checking -- ownership/move/alias/
-  lifetime checking (§5.1-§5.4) keeps running unconditionally even inside
-  `unsafe { }`. Calling an `extern "C"` function always needs `unsafe { }`
-  regardless of the caller *and regardless of whether that function has a
-  body* -- extern "C" linkage itself marks the FFI boundary (ch02's
-  boundary table draws no distinction); a with-body extern "C" function's
-  own internals are otherwise checked exactly like any other function
-  (e.g. a raw-pointer dereference inside it still needs its own
-  `unsafe { }`).
+  unconditionally by default (ch01/ch08 Q13); `[[scpp::unsafe]]` is the
+  only safety-context construct (an attribute, not a keyword -- see ch01
+  §1.3, "redesigned from a bare `unsafe { }` block to
+  `[[scpp::unsafe]] { }`" this round), and it only relaxes ch05 §5.5's
+  fixed operation list (raw pointer deref, calling an `extern "C"`
+  function, etc.) plus span-bounds/overflow checking -- ownership/move/
+  alias/lifetime checking (§5.1-§5.4) keeps running unconditionally even
+  inside `[[scpp::unsafe]] { }`. Calling an `extern "C"` function always
+  needs `[[scpp::unsafe]] { }` regardless of the caller *and regardless
+  of whether that function has a body* -- extern "C" linkage itself
+  marks the FFI boundary (ch02's boundary table draws no distinction); a
+  with-body extern "C" function's own internals are otherwise checked
+  exactly like any other function (e.g. a raw-pointer dereference inside
+  it still needs its own `[[scpp::unsafe]] { }`). A *new* mechanism this
+  round: attaching `[[scpp::unsafe]]` directly to a function's own
+  declaration (before its return type) makes the whole body an unsafe
+  context *and* makes calling that function itself one of §5.5's gated
+  operations -- scpp's equivalent of Rust's `unsafe fn` (ch01 §1.2).
 - **`17_modules`'s `--import name=path` mechanics are now verified**:
   `path` does point directly at a module's raw `.scpp` interface source,
   compiled on the fly -- no separate "compile a module to `.scppm` first"
@@ -169,49 +180,110 @@ Pass `--scpp-bin <path>` to point at a different build.
 
 ## Status
 
-**157 cases total, 154 passing.** 137/137 in `01_basics`-`17_modules`
-(previously verified, see below) plus 17/20 in `18_closures` (ch05 §5.12
-lambda expressions) are verified against `scpp` after `src/` implemented
-generic functions/concepts (§5.11) and closures (§5.12) together.
-`auto` local-variable/return-type deduction turned out to already work
-fine, as assumed.
+**197 cases total, 179 passing.** 137/137 in `01_basics`-`17_modules` plus
+17/20 in `18_closures` were previously verified (see below for both
+rounds' details). This round re-verified everything after a large,
+simultaneous doc + `src/` update: `unsafe { }` was redesigned as the
+`[[scpp::unsafe]]` attribute (ch01 §1.1-1.3, applicable to a block *or* a
+function declaration -- scpp's `unsafe fn` equivalent), `class` member
+variables may now be `public` (ch04 §4.2, reversing an earlier
+"variables must be private" rule), and four substantial new sections
+landed in ch05: generic functions revised (§5.11: bare/full-header-form/
+multi-param/return-type-only), closures (§5.12, previously verified),
+lifetime-generic parameters (§5.13), generic types (§5.14), and
+thread-safety structural properties (§5.15). All existing `.scpp` files
+were bulk-updated from `unsafe { }` to `[[scpp::unsafe]] { }`, plus 2
+new categories (`06_unsafe_blocks`, `12_struct_vs_class`) and 5 brand new
+ones (`19_scalar_types` through `23_thread_safety_attributes`) were
+added/extended this round.
 
-3 known failures in `18_closures`, all genuine implementation findings
-(not test issues -- the 2 dependencies flagged when these cases were
-written did *not* end up being the cause of any of them):
+**The single most important finding this round, by far**: most of the
+scalar type family is currently unusable, and no explicit scalar-to-scalar
+cast works at all (`19_scalar_types`, 8/8 failing) --
+`int8_t`/`int16_t`/`int32_t`/`int64_t`, their `uint*_t` counterparts,
+`long`, `unsigned int`, `unsigned long`, `float32_t`/`float64_t`/`float`/
+`double`, `size_t`, and `ptrdiff_t` **all** fail to parse as a type name
+at all (only `bool`, `int`, and `char` currently work), and neither
+`static_cast<T>(expr)` nor a C-style `(T)expr` cast is accepted, even
+between the two scalar types that do work. This was discovered
+incidentally while probing generic non-type template parameters --
+nothing in `docs/book/` suggests any of this is a known gap (ch06's
+scalar table presents the whole family as unconditionally available, no
+"not yet implemented" annotation anywhere).
 
-- `by_reference_capture_mutates_and_reads_after_last_use.scpp`: a
-  by-reference-capturing closure's borrow does **not** get released at
-  its last use the way §5.3's NLL model promises -- writing (or even just
-  reading) the captured local directly, right after the closure's own
-  last use, is rejected with "cannot use 'x' while it is mutably
-  borrowed". Isolated empirically against `std::span` (explicitly compared
-  to closures in ch05 §5.12's own text: "exactly like a class holding a
-  `T&`/`const T&` field, or `std::span`"): the exact same
-  create-once/use-once/touch-the-original-directly-afterward shape
-  compiles fine for `std::span`, so span's own borrow correctly releases
-  at last use while a closure's captured reference does not. Likely a
-  gap in extending NLL release-at-last-use to a closure's internal
-  reference-typed capture members specifically.
-- `explicit_star_this_capture_is_allowed.scpp`: `[*this]` is rejected
-  with a clear, deliberate diagnostic -- "capturing the enclosing object
-  by value would need class copy semantics, which don't exist yet -- use
-  `[this]` to capture a reference to it instead." This isn't a new gap:
-  it's the same pre-existing "no copy semantics for class types"
-  limitation `14_classes/class_by_value_parameter_is_rejected.scpp`
-  already covers, now surfacing through closures too. `[this]` (by
-  reference) and blanket/explicit-member forms are unaffected -- only
-  `[*this]` specifically depends on this.
-- `generic_lambda_with_auto_parameter.scpp`: a lambda's bare (i.e.
-  unconstrained, no concept) `auto` parameter -- "expected a type name".
-  Isolated empirically: this isn't lambda-specific -- a bare `auto`
-  parameter on an *ordinary* (non-lambda) function fails identically,
-  while a `Concept auto` (concept-constrained) parameter works fine (see
-  the passing `passing_closure_to_concept_constrained_generic_function.scpp`,
-  which uses exactly that form). So generic-function support currently
-  only covers the concept-constrained case; the unconstrained C++14
-  generic-lambda/generic-function form ch05 §5.12 also claims ("generic
-  (C++14, `auto` parameter) lambdas") isn't covered yet.
+18 known failures overall, all genuine implementation findings (tests are
+spec-conformant, left unchanged; findings from the closures round are
+summarized only briefly here, see git history for the full original
+writeup):
+
+- **`19_scalar_types`** (8/8 failing): see above.
+- **`20_generic_functions`** (4/6 passing): the full header form (bare,
+  concept-constrained, multi-type-parameter, return-type-only) all work
+  correctly. Two documented forms don't parse yet: the abbreviated bare
+  `auto` parameter (`int f(auto x)` -- confirmed not lambda-specific,
+  same gap `18_closures` found), and a concept-constrained parameter pack
+  (`const Concept auto&... args`, "expected parameter name but found
+  '...'").
+- **`21_generic_types`** (7/9 passing): bare type parameters, per-method
+  `requires` clauses, generic-struct concept-constraint enforcement,
+  variadic types via recursive inheritance (the `Tuple`/`TupleImpl`
+  patterns), and non-type parameters combined with a type-parameter pack
+  all work correctly. Two findings: (1) a bare (unconstrained) generic
+  type parameter incorrectly allows calling a method on it -- e.g.
+  `this->item.doubled()` compiles inside `Holder<T>` even though `T` is
+  completely unconstrained there, contradicting the once-at-definition
+  checking principle §5.11/§5.14 both establish (no error appears until
+  a caller instantiates with an incompatible type, which isn't how this
+  is supposed to work); (2) a generic type with a *sole* non-type
+  parameter (no accompanying type parameter, e.g. `template<int N> class
+  X`) fails to instantiate ("expected a type name"), even though the same
+  mechanism works fine combined with a type-parameter pack. Also noted,
+  not a new failure: general (non-generic, non-variadic) class
+  inheritance is still supposed to be deferred (ch04 §4.2) -- it's not
+  cleanly rejected at the declaration, but using it produces a confusing
+  "cannot access private member" error for an inherited *public* field,
+  neither a clean rejection nor working inheritance.
+- **`22_lifetime_generic_parameters`** (3/3 passing): the
+  `[[scpp::lifetime(generic)]]` tag works fine on an ordinary function
+  parameter, and the core "callee invents a value internally and calls a
+  passed-in closure with it" pattern works when concept satisfaction only
+  needs plain callability. One documented form doesn't parse: tagging a
+  `requires`-expression's own probe parameter with the same attribute
+  ("expected ')' but found '['").
+- **`23_thread_safety_attributes`** (6/6 passing): every structural
+  derivation rule tested (scalar types, reference-capturing vs.
+  value-capturing closures, raw pointer fields with/without manual
+  override) matches the spec exactly.
+- **`18_closures`** (17/20 passing, from the previous round): a
+  by-reference-capturing closure's borrow doesn't release at last use the
+  way NLL promises (contrast `std::span`, which does); `[*this]` is
+  blocked by the pre-existing "no class copy semantics" gap; a lambda's
+  bare `auto` parameter doesn't parse (same root cause as the
+  `20_generic_functions` finding above).
+- **`12_struct_vs_class`** (3/4 passing, new this round): public member
+  variables work correctly for ordinary read/write, but a live borrow of
+  a public field does *not* correctly conflict with a call to a mutating
+  method on the same object, even though whole-root-conservative
+  field-vs-field borrow conflicts (two different public fields) do work
+  -- the composition ch04 §4.2 describes ("both already record a borrow
+  against the same root object") isn't fully wired up between the field
+  path and the method-call path yet.
+- **2 findings in `04_references_borrow`**, unrelated to any specific new
+  section, discovered incidentally while constructing other tests: a
+  `const T&` parameter cannot bind to a temporary/literal argument (only
+  to a named lvalue -- `f(42)` fails, `f(v)` for a local `int v` works),
+  and a plain `const`-qualified local variable declaration
+  (`const int x = 5;`) is rejected outright ("'const' is only supported
+  directly before a reference type or a pointer type").
+- **1 finding in `06_unsafe_blocks`**: dereferencing the result of
+  pointer arithmetic (`*(p + 1)`) isn't supported -- only a bare local
+  variable/field dereference is, narrower than ch05 §5.5's listing of
+  "indirection through, or pointer arithmetic on, a value of pointer
+  type" as one gated operation.
+
+No known failures in `01_basics`-`17_modules` (the categories verified in
+earlier rounds).
+
 
 No known failures in the previously-verified `01_basics`-`17_modules`
 categories.

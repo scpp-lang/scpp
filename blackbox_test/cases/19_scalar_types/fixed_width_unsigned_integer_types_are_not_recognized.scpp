@@ -1,0 +1,27 @@
+// ch06 scalar table: `uint8_t`/`uint16_t`/`uint32_t`/`uint64_t` "same as
+// above [int8_t family] -- no uint128_t for the same reason", i.e. these
+// are likewise core, unconditionally-guaranteed builtin scalar types.
+// None of the four currently parse as a type name.
+uint8_t identity8(uint8_t x) {
+    return x;
+}
+
+uint16_t identity16(uint16_t x) {
+    return x;
+}
+
+uint32_t identity32(uint32_t x) {
+    return x;
+}
+
+uint64_t identity64(uint64_t x) {
+    return x;
+}
+
+int main() {
+    uint8_t a = 1;
+    uint16_t b = 2;
+    uint32_t c = 3;
+    uint64_t d = 4;
+    return 0;
+}
