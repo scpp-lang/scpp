@@ -80,17 +80,17 @@ distinct from an ordinary type/borrow-check error):
   via recursive inheritance (real C++ has no syntax to expand a pack
   directly into a member list); non-type template parameters are
   supported for scalar types only.
-- **`[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`** (see
-  [§5.15](ch05-static-checks.md)): attributes, applied to a `struct`/
-  `class`'s own declaration to manually assert the property (overriding
-  the structural derivation), or to a generic function's parameter to
-  constrain it -- computed by default the same way a real C++
-  compiler-intrinsic type trait (e.g. `std::is_trivially_copyable_v<T>`)
-  is, not evaluated as ordinary user-written code. Lets library code
-  (e.g. a thread-spawning function) require, via an ordinary parameter
-  attribute, that whatever it's handed is safe to move to, or share
-  with, another thread -- mirroring Rust's `Send`/`Sync` and its
-  `unsafe impl` escape hatch.
+- **`[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`/
+  `[[scpp::thread_movable_if(a, b)]]`** plus builtin predicates
+  `scpp::is_thread_movable(T)`/`scpp::is_thread_shareable(T)` (see
+  [§5.15](ch05-static-checks.md)): the attributes may constrain a generic
+  function parameter, or override a `struct`/`class`'s own derived
+  result; the predicates are compiler intrinsics over a type name
+  (`__is_trivially_copyable(T)` style), not ordinary user-written code.
+  Lets library code (e.g. a thread-spawning function) require, via an
+  ordinary parameter attribute, that whatever it's handed is safe to move
+  to, or share with, another thread -- mirroring Rust's `Send`/`Sync`
+  and its `unsafe impl` escape hatch.
 
 **Expressions / Statements**
 - Local variable declaration and initialization.

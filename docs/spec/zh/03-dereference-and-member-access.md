@@ -52,4 +52,4 @@ int f(Box& b) {
 
 ---
 
-[← 上一节：所有权、初始化与 Move](02-ownership-and-move.md) · [目录](README.md)
+[← 上一节：所有权、初始化与 Move](02-ownership-and-move.md) · [目录](README.md) · [下一节：线程安全属性 →](04-thread-safety-properties.md)

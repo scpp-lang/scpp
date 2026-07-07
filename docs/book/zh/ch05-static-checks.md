@@ -838,22 +838,33 @@ bound（`for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T`）才能拿到
   pack/Head+Tail 模式除外）、模板模板参数、默认模板实参、class 类型的
   非类型模板参数，以及关联类型。
 
-## 5.15 线程安全的结构性属性：`[[scpp::thread_movable]]` 与 `[[scpp::thread_shareable]]`
+## 5.15 线程安全的结构性属性：`[[scpp::thread_movable]]`、`[[scpp::thread_shareable]]` 与 `[[scpp::thread_movable_if(a, b)]]`
 
 让库代码（比如一个负责创建线程的函数）能通过一个普通的 attribute 标在
 参数上去要求"传给我的这个东西，真的能安全地跨越一个真实的并发边界使用"。
-靠的是两个 attribute：`[[scpp::thread_movable]]` 和
-`[[scpp::thread_shareable]]`。施加到一个泛型函数的参数上时，两者都会约束
-这个参数（可能是模板推导出来）的类型必须满足对应的性质，就跟把
-`[[scpp::lifetime(name)]]` 叠在参数上（[§5.3](#53-生命周期分组lifetime-groups)）
-是一回事；改成施加到一个 `struct`/`class` 自己的声明上时，两者都会手动
-断言这个类型满足对应的性质，覆盖掉下面结构化推导规则本来会得出的结论——
-对应 Rust 的 `unsafe impl Send`/`unsafe impl Sync`。这两个 attribute 都
-不需要 `requires`表达式或者 concept：默认情况下（也就是没有手动覆盖时），
-这个性质是编译器直接按类型结构自动算出来的——包括 `requires`表达式压根
-看不到的成员——跟真实 C++ 编译器内置的 type trait（比如
-`std::is_trivially_copyable_v<T>`）是同一回事，不是当成普通用户代码去
-求值的。
+这里涉及的底层性质，仍然只有 thread-movable 和 thread-shareable 这两个；
+但 scpp 把它们暴露成了三种表面形式：
+
+- 参数/类型声明 attribute：`[[scpp::thread_movable]]` 和
+  `[[scpp::thread_shareable]]`；
+- 条件式类型声明 attribute：`[[scpp::thread_movable_if(a, b)]]`；
+- 编译器内置谓词：`scpp::is_thread_movable(T)` 和
+  `scpp::is_thread_shareable(T)`。
+
+施加到一个泛型函数的参数上时，`[[scpp::thread_movable]]` 或
+`[[scpp::thread_shareable]]` 都会约束这个参数（可能是模板推导出来）的类型
+必须满足对应的性质，就跟把 `[[scpp::lifetime(name)]]` 叠在参数上
+（[§5.3](#53-生命周期分组lifetime-groups)）是一回事；改成施加到一个
+`struct`/`class` 自己的声明上时，这些 attribute 就变成了库作者对该类型
+线程安全契约的显式背书，覆盖掉下面结构化推导规则本来会得出的结论——
+对应 Rust 里显式写出来的 `unsafe impl Send`/`unsafe impl Sync`。
+
+这两个内置谓词是**编译器 intrinsic**，不是普通函数调用：它们在括号里接收
+的是一个**类型名**，写法跟真实 C++ 的 builtin trait 一样（`__is_trivially_copyable(T)`
+这种风格），并且可以出现在任何要求布尔常量表达式的地方。对任意类型 `T`
+来说，`scpp::is_thread_movable(T)` 的含义是："先看 `T` 自己身上有没有覆盖；
+如果有，就取那个覆盖值；如果没有，就取下面结构化推导算出来的结果"。
+`scpp::is_thread_shareable(T)` 对 thread-shareable 性质也完全同理。
 
 - **`[[scpp::thread_movable]]`** 回答的问题是：这个类型的一个值，能不能
   按值交给一个新起的线程，交出去之后原来那个线程完全碰不到它了？（对应
@@ -864,7 +875,7 @@ bound（`for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T`）才能拿到
 - **结构化推导规则**（没有在类型自己身上手动覆盖时的默认行为），递归
   计算：
   - 每个标量类型：两个性质都成立。
-  - 带引用成员的类型（`T&`/`const T&`——不管是普通 `class`的字段，
+  - 带引用成员的类型（`T&`/`const T&`/`T&&`——不管是普通 `class`的字段，
     还是闭包按引用 capture 的东西，见
     [§5.12](#512-闭包lambda-表达式)）永远不是 thread-movable——把
     这样的值"移动"给另一个线程，并不会转移被引用对象本身的所有权，
@@ -881,15 +892,6 @@ bound（`for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T`）才能拿到
     验证不了的东西背书是一致的（[§5.5](#55-禁止项除非在-scppunsafe-里)）；
     要背书就把它包进一个标记了 `[[scpp::thread_movable]]`/
     `[[scpp::thread_shareable]]` 的 `struct`/`class` 里，见下面。
-  - `std::unique_ptr<T>`：thread-movable/thread-shareable 各自独立
-    跟随 `T`自己（对应 `Box<T>`：唯一所有权意味着把整个 `unique_ptr`
-    交给另一个线程，指向的东西的独占访问权也跟着一起转移过去了）。
-  - `std::shared_ptr<T>`：`shared_ptr`自己的 thread-movable 和
-    thread-shareable，都要求 `T`**同时**满足 thread-movable 和
-    thread-shareable（对应 `Arc<T>`：把一个 `shared_ptr`的 handle
-    移到另一个线程，并不会收回其它还活着的 handle 的访问权，所以
-    只要存在不止一个 handle，指向的东西本来就已经是共享状态了，
-    跟具体是哪个 handle 物理上移动过去的没关系）。
   - 闭包（[§5.12](#512-闭包lambda-表达式)）：thread-movable 成立，
     当且仅当它完全没有按引用 capture（见上面），而且每个按值 capture
     的成员自己的类型都是 thread-movable。thread-shareable 成立，
@@ -911,6 +913,57 @@ bound（`for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T`）才能拿到
   `unsafe impl Send for RawBufferHandle {}`——也是唯一能让一个编译器
   自己验证不了的类型（最常见的情形就是带一个裸指针的类型）参与这两个
   性质的办法。
+- **在类型声明上做条件式覆盖**：一个（通常是泛型）`class` 也可以改为
+  声明 `[[scpp::thread_movable_if(a, b)]]`，其中 `a` 和 `b` 是两个按
+  每次实例化分别求值的布尔常量表达式。第一个实参成为这个类型自己的
+  thread-movable 值；第二个实参成为它自己的 thread-shareable 值。它们
+  两个加在一起，会替换掉这个类型该次实例化原本根据字段结构自动推导
+  出来的结果。最常见的写法，就是用上面那两个内置谓词去描述类型参数：
+  ```cpp
+  template<typename T>
+  class [[scpp::thread_movable_if(
+      scpp::is_thread_movable(T),
+      scpp::is_thread_shareable(T)
+  )]] MyOwningBox {
+      T* ptr;
+  };
+  ```
+  这就是表达下面这类意思的通用机制："我的内部表示里包含了某些单看结构
+  不足以让编译器推出真实并发不变式的东西（例如裸指针）；但作为类型作者，
+  我可以把那个不变式显式写出来。"
+- **`std::unique_ptr<T>` 就是这个通用机制的一个例子。** 它的声明可以显式
+  写成：
+  ```cpp
+  template<typename T>
+  class [[scpp::thread_movable_if(
+      scpp::is_thread_movable(T),
+      scpp::is_thread_shareable(T)
+  )]] unique_ptr {
+      // ...
+  };
+  ```
+  这**不是**编译器对 `std::unique_ptr` 这个库类型名字做的硬编码特判；
+  它只是普通库代码在使用任何用户自定义拥有型盒子都能使用的同一套
+  attribute。这里之所以需要覆盖，是因为 `unique_ptr` 的裸指针字段，
+  光看结构，跟一个任意别名化的裸指针没有区别；真正更强的不变式
+  ——"它是唯一 owner"——是库作者显式背书出来的，所以把整个 `unique_ptr`
+  交给另一个线程时，那份独占访问权也跟着一起转移。这个思路对应 Rust
+  对唯一拥有型堆指针显式写条件 `Send`/`Sync` impl 的做法。
+- **`std::shared_ptr<T>` 也是一个例子，但它不是独立转发，而是合取规则。**
+  它的声明可以写成：
+  ```cpp
+  template<typename T>
+  class [[scpp::thread_movable_if(
+      scpp::is_thread_movable(T) && scpp::is_thread_shareable(T),
+      scpp::is_thread_movable(T) && scpp::is_thread_shareable(T)
+  )]] shared_ptr {
+      // ...
+  };
+  ```
+  同样，这只是普通库声明在使用通用覆盖机制，不是编译器给某一个类型名字
+  的魔法规则。这里必须取合取：把一个 `shared_ptr` 的 handle 移到另一个
+  线程，并不会收回其它还活着的 handle 的访问权，所以 pointee 本身必须
+  已经既能安全跨线程移动，也能安全跨线程共享。
 - **约束一个参数**：一个负责创建线程的函数，把这两个 attribute 之一
   直接标在它的闭包参数上，就跟标 `[[scpp::lifetime(name)]]` 一样：
   ```cpp

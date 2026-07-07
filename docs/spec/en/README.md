@@ -18,3 +18,4 @@
 5. [The `[[scpp::unsafe]]` Attribute](01-unsafe.md)
 6. [Ownership, Initialization, and Move](02-ownership-and-move.md)
 7. [Dereference and Member Access](03-dereference-and-member-access.md)
+8. [Thread-Safety Properties](04-thread-safety-properties.md)
