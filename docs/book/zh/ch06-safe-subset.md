@@ -64,20 +64,29 @@
   （[§4.1](ch04-struct-vs-class.md)）是整个类型的性质。变参泛型类型的
   存储靠递归继承实现（真实 C++ 没有能把 pack 直接展开成成员列表的
   语法）；非类型模板参数只支持标量类型。
+- **`[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`**（见
+  [§5.15](ch05-static-checks.md)）：两个 attribute，施加到一个
+  `struct`/`class` 自己的声明上时手动断言这个性质（覆盖结构化推导
+  结果），施加到一个泛型函数的参数上时约束这个参数——默认情况下的
+  计算方式跟真实 C++ 编译器内置的 type trait（比如
+  `std::is_trivially_copyable_v<T>`）一样，不是当成普通用户代码去
+  求值的。让库代码（比如一个负责创建线程的函数）能通过普通的参数
+  attribute，去要求"传给我的东西，能安全地移动/共享给另一个线程"——
+  对应 Rust 的 `Send`/`Sync`，以及它的 `unsafe impl` 逃生舱。
 
 **表达式 / 语句**
 - 局部变量声明与初始化。
 - `&` / `const &` 借用；`std::span`/`std::span<const T>` 视图。
 - `&expr` 取地址，根据 `expr` 的 place 是只能只读访问还是可变访问，得到
-  `const T*` 或者 `T*`（见 [§5.7](ch05-static-checks.md)）：始终合法（不需要 `unsafe { }` 就能造出
+  `const T*` 或者 `T*`（见 [§5.7](ch05-static-checks.md)）：始终合法（不需要 `[[scpp::unsafe]] { }` 就能造出
   来——只有解引用裸指针才需要，见下面），是普通（默认受检查）代码给
   `extern "C"` 输出参数产出指针值的具体办法。`const T*`/`T*` 是真正
   不同的两个类型（只有单向的隐式 `T* -> const T*` 转换，没有
   `const_cast` 等价物）；通过 `const T*` 写是普通类型错误，无条件
-  成立，哪怕在 `unsafe { }` 里也一样。
+  成立，哪怕在 `[[scpp::unsafe]] { }` 里也一样。
 - `std::move`。
 - 函数调用，包括 [§2](ch02-boundary-rules.md) 里"调用 `extern "C"`
-  函数需要 `unsafe {}`"这条规则。
+  函数需要 `[[scpp::unsafe]] {}`"这条规则。
   函数（自由函数或方法）可以按参数列表**重载**，永远不能只靠返回类型
   区分（见 [§5.10](ch05-static-checks.md)）：
   只按类型精确匹配解析，因为 scpp 标量类型之间没有隐式转换（见上面
@@ -112,22 +121,27 @@
   修。如果以后真的出现"同一个函数编译期运行期都要用"的硬需求，到时候
   再考虑把 `constexpr` 函数加回来，不用现在想别的办法解决。
 - 算术/逻辑/比较运算。`+`/`-`/`*` 默认检查溢出（溢出就
-  `abort()`，有符号无符号都查；见 [§5.8](ch05-static-checks.md)）；在 `unsafe { }` 里不检查，但保证 wrap
+  `abort()`，有符号无符号都查；见 [§5.8](ch05-static-checks.md)）；在 `[[scpp::unsafe]] { }` 里不检查，但保证 wrap
   （绝不是 UB）。除以 0/模以 0（或者 `INT_MIN / -1`）无条件 `abort()`，
-  不管在不在 `unsafe { }` 里都一样。
+  不管在不在 `[[scpp::unsafe]] { }` 里都一样。
 - `if` / `while` / `return`。（`for`/range-for 不在 v0.1 范围内——目前只能用
   `while` 手写迭代。）
 - 成员访问、下标（定长数组、`span`，span 默认带运行时边界
-  检查，在 `unsafe { }` 里跳过——见
+  检查，在 `[[scpp::unsafe]] { }` 里跳过——见
   [§8](ch08-open-questions.md)）。
 - `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
   跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)）。
-- `unsafe { }` 语句块（见 [§1.3](ch01-safety-context.md)）：
+- 带 `[[scpp::unsafe]]` attribute 的语句块（见 [§1.3](ch01-safety-context.md)）：
   一个词法作用域的逃生窗口，局部放行裸指针解引用和
   调用一个 `extern "C"` 函数（这是 [§5.5](ch05-static-checks.md)
   禁止项列表里在 v0.1 范围内的部分，列表其余部分不在 v0.1 范围内，见下面），
   [§5](ch05-static-checks.md) 里的其余
   检查照常无条件继续跑。
+- 函数级 `[[scpp::unsafe]]` 标记（见 [§1.2](ch01-safety-context.md)）：
+  同一个 attribute，改挂在函数自己的声明上，让整个函数体变成 unsafe
+  context，也让调用这个函数本身变成 [§5.5](ch05-static-checks.md) 里的
+  一项受管制操作——对应 Rust 的 `unsafe fn`，用在函数的健全性依赖某个
+  只有调用者才能保证的前置条件的场景。
 - `extern "C"` 函数声明/定义（见 [§2.1](ch02-boundary-rules.md)），
   签名类型限定为 C-ABI 兼容类型，包括 `void`（作为返回类型和指针的
   指向类型）；数组形参（`T[N]`）会退化成 `T*`，跟普通

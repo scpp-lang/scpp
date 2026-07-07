@@ -115,7 +115,7 @@ the following properties, unconditionally, everywhere:
   the borrow is recorded against `p` itself, so moving (`std::move(p)`)
   or reassigning `p` while that borrow is alive is rejected (it would
   otherwise dangle / use-after-free). Dereferencing a raw pointer `T*`
-  still requires `unsafe { }`.
+  still requires `[[scpp::unsafe]]`.
 - Calling a function that returns a reference: the result can be
   consumed as an ordinary value (auto-dereferenced,
   `int y = get_ref(x);`), bound to a new named reference
@@ -148,37 +148,44 @@ the following properties, unconditionally, everywhere:
   provides a well-defined default value, leaving "is this default value
   the one you wanted" up to the programmer.
 
-## 5.5 Prohibited (unless in `unsafe { }`)
+## 5.5 Prohibited (unless in `[[scpp::unsafe]]`)
 - Raw pointer dereference, pointer arithmetic.
 - `reinterpret_cast`, C-style casts to incompatible types.
 - (Untagged) `union`.
 - Raw `new` / `delete`.
 - Access to mutable global/static variables.
 - Calling an `extern "C"` function.
+- Calling a function whose own declaration is itself marked
+  `[[scpp::unsafe]]` (see [§1.2](ch01-safety-context.md)) -- a
+  function-level marker distinct from wrapping a *nested* block, used
+  when a function's soundness depends on a precondition only its caller
+  can guarantee (mirrors Rust's `unsafe fn`).
 
 Note what's deliberately *not* on this list: taking a raw pointer's
 address in the first place (`&expr`, [§5.7](#57-address-of-x-and-raw-pointers))
 is always legal, same as in Rust -- it's
 *dereferencing* one that's gated here, not creating one. Also note that
-`unsafe { }` relaxes *dereferencing* a raw pointer, not the ordinary,
+`[[scpp::unsafe]]` relaxes *dereferencing* a raw pointer, not the ordinary,
 unconditional type-checking rule that a `const T*` can never be written
 through ([§5.7](#57-address-of-x-and-raw-pointers))
 -- that check isn't on this list either, because it isn't something
-`unsafe { }` ever relaxes. Two more things *do* join this list's effect
-(relaxed inside `unsafe { }`), but for a different reason than everything
-above: not because they're otherwise illegal (neither ever is), but
-because skipping them carries none of the "corrupted bookkeeping could
-leak into surrounding code" risk that keeps
+`[[scpp::unsafe]]` ever relaxes. Two more things *do* join this list's
+effect (relaxed inside `[[scpp::unsafe]]`), but for a different reason
+than everything above: not because they're otherwise illegal (neither
+ever is), but because skipping them carries none of the "corrupted
+bookkeeping could leak into surrounding code" risk that keeps
 [§5.1-§5.4](#51-ownership--move)'s checks unconditional -- `span`'s
 bounds check ([§8](ch08-open-questions.md) Q1) and integer-overflow
 checking ([§5.8](#58-integer-overflow))
 are both scpp-inserted *runtime* checks, not otherwise-illegal
-operations, and both are off inside `unsafe { }`, on everywhere else.
+operations, and both are off inside `[[scpp::unsafe]]`, on everywhere
+else.
 
-See [§1.3](ch01-safety-context.md) for `unsafe { }`'s exact rules: it
-relaxes precisely this list and nothing else -- every other check in this
-chapter (§5.1-§5.4) keeps running unconditionally inside an `unsafe { }`
-block.
+See [§1.3](ch01-safety-context.md) for `[[scpp::unsafe]]`'s exact rules:
+it relaxes precisely this list and nothing else -- every other check in
+this chapter (§5.1-§5.4) keeps running unconditionally inside any
+`[[scpp::unsafe]]` context, whether established by a nested block or by
+the function-level marker.
 
 ## 5.6 Recoverable Errors: `std::expected<T, E>`
 
@@ -216,10 +223,12 @@ scpp, not a lint.
 Rust-`?`-style postfix operator for propagating a `std::expected`'s error
 up to the caller was considered and **rejected** -- see
 [§8](ch08-open-questions.md) Q8 for the full reasoning. In short: unlike
-every other piece of scpp syntax, a brand-new operator token cannot be
-erased or ignored by a real C++ compiler, which would have broken the
-property that stripping `unsafe` out of a scpp file leaves an
-ordinary file a real C++ compiler still accepts unmodified (see
+every other piece of scpp syntax -- all of it spelled as an attribute in
+the `scpp` namespace -- a brand-new operator token has no silently-ignored
+fallback: a real C++ compiler already accepts an attribute it doesn't
+recognize unmodified, but it cannot parse past a brand-new operator token
+at all, which would have broken the property that a well-formed scpp file
+is already accepted by a real C++ compiler (see
 [ch00](ch00-design-philosophy.md) §2). v0.1 therefore requires spelling
 propagation out with ordinary `if`/`else`, exactly the way C has for
 decades:
@@ -269,11 +278,11 @@ the C++ standard itself evolves further in this area -- see
   `T*` -- v0.1 has no `const_cast`/Rust's `.cast_mut()` equivalent, so
   there is currently no way to obtain a `T*` from a `const T*` at all.
   **Writing through a `const T*` is an ordinary compile-time type error,
-  in *every* context, including inside `unsafe { }`** -- it isn't on
-  [§5.5](#55-prohibited-unless-in-unsafe--)'s list
-  because `unsafe { }` only ever relaxes *that* list, and this isn't a
+  in *every* context, including inside `[[scpp::unsafe]]`** -- it isn't on
+  [§5.5](#55-prohibited-unless-in-scppunsafe)'s list
+  because `[[scpp::unsafe]]` only ever relaxes *that* list, and this isn't a
   member of it: it's the same kind of ordinary type mismatch as assigning
-  a `std::string` to an `int`, which `unsafe { }` obviously doesn't
+  a `std::string` to an `int`, which `[[scpp::unsafe]]` obviously doesn't
   relax either. This exactly mirrors Rust, where `*p = x;` on a
   `p: *const T` is rejected even inside an `unsafe` block.
 - **Safe to create; only *using* the result is unsafe -- Rust's model,
@@ -285,14 +294,14 @@ the C++ standard itself evolves further in this area -- see
   carries no lifetime parameter for the checker to relate to `x`'s scope
   at all, so only returning an actual `&i32` reference (not a `*const
   i32`) would be rejected. scpp adopts the identical split: `&expr` is
-  always legal -- no `unsafe { }` needed to
+  always legal -- no `[[scpp::unsafe]]` needed to
   *write* it -- matching how it's raw-pointer *dereference*, never
-  creation, that [§5.5](#55-prohibited-unless-in-unsafe--)
-  actually lists as requiring `unsafe { }` ([§1.3](ch01-safety-context.md)).
+  creation, that [§5.5](#55-prohibited-unless-in-scppunsafe)
+  actually lists as requiring `[[scpp::unsafe]]` ([§1.3](ch01-safety-context.md)).
   The resulting `T*` may be stored, passed around, returned, or simply
   allowed to dangle once the place it was taken from goes away -- exactly
   as in Rust, and deliberately so: the soundness boundary is entirely at
-  the later `*p` dereference (already `unsafe`-gated), not at `&expr`
+  the later `*p` dereference (already `[[scpp::unsafe]]`-gated), not at `&expr`
   itself.
 - **What *is* checked at the moment `&expr` is evaluated:** the same
   definite-initialization check as an ordinary read of `expr`
@@ -320,20 +329,20 @@ the C++ standard itself evolves further in this area -- see
   int query(int fd) {
       int value = 0;
       int len = 4;
-      unsafe {
+      [[scpp::unsafe]] {
           getsockopt(fd, 1, 2, &value, &len);
       }
       return value;
   }
   ```
-  Note that `&value`/`&len` themselves need no `unsafe` -- only the
-  *call* to `getsockopt` (an `extern "C"` declaration) does, per
+  Note that `&value`/`&len` themselves need no `[[scpp::unsafe]]` -- only
+  the *call* to `getsockopt` (an `extern "C"` declaration) does, per
   [§1.3](ch01-safety-context.md)'s existing rule (unrelated to `&`).
 - **Deliberately not included**, to keep this a minimal, single-purpose
   addition:
   - Pointer arithmetic (`&x + 1`) -- already
-    [§5.5](#55-prohibited-unless-in-unsafe--)'s territory
-    (`unsafe { }`-gated), unaffected by this addition.
+    [§5.5](#55-prohibited-unless-in-scppunsafe)'s territory
+    (`[[scpp::unsafe]]`-gated), unaffected by this addition.
   - Taking the address of an rvalue/temporary, or of a reference's own
     storage -- `expr` must resolve to an existing place, matching the
     borrow-source grammar it reuses.
@@ -353,11 +362,11 @@ Real C++ leaves signed integer overflow **undefined behavior** -- even
 after C++20 mandated two's-complement *representation* for signed
 integers, overflow *behavior* remained a separate, still-unresolved
 question (see [ch00](ch00-design-philosophy.md) §8). scpp eliminates
-this UB entirely, both by default and inside `unsafe { }`, reusing the
-existing checked-by-default/`unsafe { }` axis rather than introducing a
-new debug/release build-mode one:
+this UB entirely, both by default and inside `[[scpp::unsafe]]`, reusing
+the existing checked-by-default/`[[scpp::unsafe]]` axis rather than
+introducing a new debug/release build-mode one:
 
-- **By default (everywhere outside `unsafe { }`)**:
+- **By default (everywhere outside `[[scpp::unsafe]]`)**:
   `+`, `-`, and `*` are checked -- for **both signed and unsigned**
   operands (unlike real C++, where unsigned wraparound is always
   "intentional" by definition; scpp treats an unsigned wraparound as
@@ -368,10 +377,10 @@ new debug/release build-mode one:
   mode the way Rust's is. Deliberately diverging from Rust here: Rust's
   checks are debug-only by default, providing zero protection in the
   release binaries that actually ship and face real attackers/real data
-  -- scpp instead reuses its existing checked-by-default/`unsafe`
+  -- scpp instead reuses its existing checked-by-default/`[[scpp::unsafe]]`
   axis, which already has no debug/release split anywhere else in the
   spec.
-- **In `unsafe { }`**: the check is skipped, but the underlying
+- **In `[[scpp::unsafe]]`**: the check is skipped, but the underlying
   operation is still **not UB** -- it's a guaranteed two's-complement
   wraparound, identical in spirit to how unsigned arithmetic already
   behaves in real C++. Concretely: scpp's codegen never emits LLVM's
@@ -385,13 +394,13 @@ new debug/release build-mode one:
   but to emit `nsw` otherwise, because the C++ standard mandates UB);
   scpp, generating its own IR directly, simply never opts in to begin
   with.
-- **Why this joins what `unsafe { }` relaxes, without reopening
+- **Why this joins what `[[scpp::unsafe]]` relaxes, without reopening
   [§1.3](ch01-safety-context.md)'s "narrow escape hatch, not a
   stop-checking-this-region switch" rule**: unlike
   [§5.1-§5.4](#51-ownership--move)'s checks (move state,
   borrow/aliasing, lifetimes, zero-init), which must keep running
-  unconditionally inside `unsafe { }` because skipping them would let
-  *inconsistent compiler bookkeeping* leak into the surrounding
+  unconditionally inside `[[scpp::unsafe]]` because skipping them would
+  let *inconsistent compiler bookkeeping* leak into the surrounding
   code once the block ends, overflow-checking carries no such risk: an
   unchecked wraparound just produces an ordinary (if numerically wrong)
   value in an ordinary variable -- it cannot corrupt move/borrow/
@@ -400,7 +409,7 @@ new debug/release build-mode one:
   value (e.g. using it as an out-of-bounds index) is still caught
   independently by whatever check governs *that* operation (`span`'s
   bounds check doesn't care why an index is wrong).
-- **Manual overflow detection becomes reliable inside `unsafe { }`**:
+- **Manual overflow detection becomes reliable inside `[[scpp::unsafe]]`**:
   the classic `if (x + 1 < x)` idiom is unreliable for signed `x` in
   real C++ -- compilers may (and GCC/Clang do) assume signed overflow
   never happens and optimize the check away as unreachable. Since scpp
@@ -413,8 +422,8 @@ new debug/release build-mode one:
   `INT_MIN / -1` (the one case where signed division itself overflows)
   and division/modulo by zero don't have a wrapped result to fall back
   on -- the hardware itself traps (x86 `#DE`). Both `abort()`
-  unconditionally, in *every* context, whether inside `unsafe { }` or
-  not -- there is no unchecked variant for these two.
+  unconditionally, in *every* context, whether inside `[[scpp::unsafe]]`
+  or not -- there is no unchecked variant for these two.
 
 ## 5.9 Methods and `this`
 
@@ -1008,6 +1017,118 @@ monolithically:
   specialization (beyond the one fixed empty-pack/head-and-tail pattern
   above), template-template parameters, default template arguments,
   class-typed non-type template parameters, and associated types.
+
+## 5.15 Thread-Safety Structural Properties: `[[scpp::thread_movable]]` and `[[scpp::thread_shareable]]`
+
+Lets library code (a thread-spawning function, for instance) require,
+via an ordinary parameter attribute, that whatever it's handed is
+actually safe to use across a genuine concurrency boundary. Two
+attributes make this possible: `[[scpp::thread_movable]]` and
+`[[scpp::thread_shareable]]`. Applied to a generic function's parameter,
+either constrains that parameter's (possibly template-deduced) type to
+satisfy the corresponding property, exactly like stacking
+`[[scpp::lifetime(name)]]` on a parameter ([§5.3](#53-lifetime-groups));
+applied instead to a `struct`/`class`'s own declaration, either manually
+asserts that the property holds for that type, overriding what the
+structural derivation below would otherwise conclude on its own --
+mirroring Rust's `unsafe impl Send`/`unsafe impl Sync`. Neither
+attribute needs a `requires`-expression or a concept: by default (that
+is, absent the manual override), the property is computed automatically
+from a type's structure -- including members a `requires`-expression
+could never otherwise see, the same way a real C++ compiler intrinsic
+like `std::is_trivially_copyable_v<T>` is computed, not evaluated as
+ordinary user-written code.
+
+- **`[[scpp::thread_movable]]`** answers: can a value of this type be
+  handed, by value, to a newly spawned thread, such that the spawning
+  thread retains no further access to it? (Mirrors Rust's `Send`.)
+- **`[[scpp::thread_shareable]]`** answers: is it safe for two or more
+  threads to simultaneously hold a `const T&` to the same object?
+  (Mirrors Rust's `Sync`.)
+- **Structural derivation** (the default, absent a manual override on
+  the type itself), computed recursively:
+  - Every scalar type: both properties hold.
+  - A type containing a reference member (`T&`/`const T&` -- whether an
+    ordinary `class` field or a by-reference closure capture, see
+    [§5.12](#512-closures-lambda-expressions)) is never thread-movable
+    -- moving such a value to another thread does not transfer the
+    referent's ownership, so doing so would not, unlike moving an owned
+    value, make the referent inaccessible to the original thread.
+  - `struct`/`class` (with no reference member): thread-movable and
+    thread-shareable each hold if and only if every member itself has
+    that property -- **except** a `mutable` member
+    ([§4.2](ch04-struct-vs-class.md)), which makes the whole type
+    thread-movable but **never** thread-shareable (mirrors Rust's
+    `Cell<T>`: safe to hand exclusively to one thread at a time, unsafe
+    for two threads to simultaneously read through what looks like a
+    shared reference, since `mutable` is precisely the sanctioned way
+    to write through one).
+  - Raw pointer `T*`: neither, by default -- matching how a raw pointer
+    already requires vouching for anything the checker cannot verify on
+    its own ([§5.5](#55-prohibited-unless-in-scppunsafe)); vouch by
+    wrapping it in a `struct`/`class` marked `[[scpp::thread_movable]]`/
+    `[[scpp::thread_shareable]]`, below.
+  - `std::unique_ptr<T>`: thread-movable/thread-shareable each follow
+    `T`'s own, independently (mirrors `Box<T>`: unique ownership means
+    handing the whole `unique_ptr` to another thread transfers
+    exclusive access to the pointee along with it).
+  - `std::shared_ptr<T>`: thread-movable and thread-shareable, for the
+    `shared_ptr` itself, both require `T` to be **both** thread-movable
+    and thread-shareable (mirrors `Arc<T>`: moving one `shared_ptr`
+    handle to another thread does not revoke access from any other
+    surviving handle, so the pointee is inherently already shared the
+    moment more than one handle exists, regardless of which specific
+    handle physically moved).
+  - A closure ([§5.12](#512-closures-lambda-expressions)): thread-movable
+    if and only if it has no by-reference capture at all (see above) and
+    every by-value-captured member's type is itself thread-movable.
+    Thread-shareable if and only if it has no by-*mutable*-reference
+    capture (concurrent calls through a shared mutable reference could
+    race), every by-value-captured member's type is thread-shareable,
+    and every by-*const*-reference-captured member's referent type is
+    thread-shareable.
+- **Manual override on a type declaration**: a `struct`/`class` may be
+  declared `[[scpp::thread_movable]]` and/or `[[scpp::thread_shareable]]`
+  directly, on its own definition:
+  ```cpp
+  struct [[scpp::thread_movable]] RawBufferHandle {
+      int* data;
+      int len;
+      // the author has verified this type's own invariants make it
+      // sound to hand to another thread, even though the structural
+      // rule above would say "no" for any type containing a raw pointer
+  };
+  ```
+  This overrides the structural derivation above entirely for that type
+  -- exactly like Rust's `unsafe impl Send for RawBufferHandle {}` --
+  and is the only way to make a type whose structure the compiler cannot
+  verify on its own (most commonly, one containing a raw pointer)
+  participate in either property at all.
+- **Constraining a parameter**: a thread-spawning function attaches
+  either attribute directly to its closure parameter, exactly like
+  attaching `[[scpp::lifetime(name)]]`:
+  ```cpp
+  template<typename T>
+  void spawn(T&& f [[scpp::thread_movable]]) {
+      // ...
+  }
+  ```
+  The compiler checks, at each call to `spawn`, whether the deduced
+  type of `f`'s argument is thread-movable (by the structural rule above,
+  or by its own manual override) -- ill-formed if not, precisely where
+  any other parameter-attribute violation would already be rejected.
+- **A by-reference capture's safety, where relevant, rests on what's
+  already there.** A *mutable* reference capture (`[&x]` binding a
+  non-`const` `x`) is already an exclusive borrow
+  ([§5.2](#52-borrow--aliasing)): alias-XOR-mutability alone already
+  guarantees no other thread can be concurrently touching `x`, which is
+  why thread-movable/thread-shareable do not need to, and do not,
+  further constrain it. A *shared* (`const`) reference capture, by
+  contrast, can coexist with other shared borrows of the same root,
+  including ones held by other threads (for example, two different
+  scoped threads each capturing `const T&` from the same enclosing
+  scope) -- this is exactly the case thread-shareable exists to answer
+  for.
 
 ---
 

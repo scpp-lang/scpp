@@ -1,32 +1,42 @@
-# 2. Boundary Rules (Interaction with `unsafe { }` and `extern "C"`)
+# 2. Boundary Rules (Interaction with `[[scpp::unsafe]]` and `extern "C"`)
 
 This is critical for soundness and must be strict.
 
 | Situation | Rule |
 |-----------|------|
-| Calling an ordinary (checked-by-default) function | Freely allowed; participates in checking normally, from anywhere -- including from inside an `unsafe { }` block. |
-| Calling an `extern "C"` function | **Must be wrapped in `unsafe { }`**, otherwise a compile error. No scpp compiler ever sees the C implementation to check it, so the caller vouches for it instead. |
-| Raw pointer dereference | Must be inside `unsafe { }`. |
+| Calling an ordinary (checked-by-default) function | Freely allowed; participates in checking normally, from anywhere -- including from inside a `[[scpp::unsafe]] { }` block. |
+| Calling an `extern "C"` function | **Must be wrapped in `[[scpp::unsafe]] { }`**, otherwise a compile error. No scpp compiler ever sees the C implementation to check it, so the caller vouches for it instead. |
+| Raw pointer dereference | Must be inside `[[scpp::unsafe]] { }`. |
 
 - Data contracts at the boundary: references/pointers exposed to an
   `extern "C"` function, or obtained via a raw pointer inside
-  `unsafe { }`, carry lifetime obligations that are **not enforced**
-  beyond that point (the `unsafe { }` block's author is on their own).
+  `[[scpp::unsafe]] { }`, carry lifetime obligations that are **not enforced**
+  beyond that point (the `[[scpp::unsafe]] { }` block's author is on their own).
   Conversely, a reference or pointer value coming *from* an `extern "C"`
   call, or produced by dereferencing a raw pointer, is **assumed valid**
-  by the code that vouched for it via `unsafe { }` (that block's
+  by the code that vouched for it via `[[scpp::unsafe]] { }` (that block's
   obligation).
 - The compiler should be able to mark whether a specific `extern "C"`
   declaration has been "manually reviewed as safe to call" -- v0.1 does
-  not formalize this and relies on `unsafe { }` vouching at each call
+  not formalize this and relies on `[[scpp::unsafe]] { }` vouching at each call
   site instead.
 - Mechanism: see [§1.3](ch01-safety-context.md) for the concrete rules of
-  `unsafe { }`. In short, the
+  `[[scpp::unsafe]] { }`. In short, the
   checker rejects a `Call` whose callee is an `extern "C"` declaration
-  unless the call site is lexically inside an `unsafe { }` block -- the
-  same currently-inside-`unsafe` bit also gates raw pointer dereference,
+  unless the call site is lexically inside a `[[scpp::unsafe]]`-annotated block -- the
+  same currently-inside-that-block bit also gates raw pointer dereference,
   and will gate the rest of [§5.5](ch05-static-checks.md)'s list once
   their syntax exists.
+- An `extern "C"` declaration without a body is *unconditionally* gated
+  this way -- there is no opt-out, since no scpp compiler ever sees an
+  implementation to check. Ordinary scpp functions are checked, and
+  therefore callable freely, by default; a function's author may opt a
+  *specific* function into the same call-site gating `extern "C"` gets
+  automatically, by marking that function's own declaration
+  `[[scpp::unsafe]]` (see [§1.2](ch01-safety-context.md)) -- unlike
+  `extern "C"`, this is voluntary, and it additionally makes the marked
+  function's own body an unsafe context throughout, since (unlike
+  `extern "C"`) a scpp compiler does see, and does check, that body.
 
 ## 2.1 `extern "C"` declarations
 
@@ -51,8 +61,13 @@ below.
   - **No body** (`extern "C" int foo(int x);`): declares a function
     that's *defined elsewhere* and linked in externally. The compiler has
     no visibility into its implementation, so it is **always implicitly
-    unchecked** -- there is no way to mark it otherwise (no keyword
-    exists for that). Calling it therefore requires `unsafe { }`, via
+    unchecked** -- there is no way to mark it otherwise (unlike the
+    function-level `[[scpp::unsafe]]` marker of
+    [§1.2](ch01-safety-context.md), which only ever *adds* call-site
+    gating to a function scpp does check; there is no attribute that
+    *removes* an `extern "C"` declaration's unconditional gating). Calling
+    it therefore requires
+    `[[scpp::unsafe]] { }`, via
     the exact same mechanism as any other call to unchecked code (no new
     rule needed -- this is the main point of this section: `extern "C"`
     is just a new *source* of unchecked-by-construction function

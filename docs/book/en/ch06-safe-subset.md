@@ -76,22 +76,33 @@ distinct from an ordinary type/borrow-check error):
   via recursive inheritance (real C++ has no syntax to expand a pack
   directly into a member list); non-type template parameters are
   supported for scalar types only.
+- **`[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`** (see
+  [§5.15](ch05-static-checks.md)): attributes, applied to a `struct`/
+  `class`'s own declaration to manually assert the property (overriding
+  the structural derivation), or to a generic function's parameter to
+  constrain it -- computed by default the same way a real C++
+  compiler-intrinsic type trait (e.g. `std::is_trivially_copyable_v<T>`)
+  is, not evaluated as ordinary user-written code. Lets library code
+  (e.g. a thread-spawning function) require, via an ordinary parameter
+  attribute, that whatever it's handed is safe to move to, or share
+  with, another thread -- mirroring Rust's `Send`/`Sync` and its
+  `unsafe impl` escape hatch.
 
 **Expressions / Statements**
 - Local variable declaration and initialization.
 - `&` / `const &` borrows; `std::span`/`std::span<const T>` views.
 - `&expr` address-of, yielding `const T*` or `T*` depending on whether
   `expr`'s place is only reachable read-only or mutably (see
-  [§5.7](ch05-static-checks.md)): always legal (no `unsafe { }`
+  [§5.7](ch05-static-checks.md)): always legal (no `[[scpp::unsafe]] { }`
   needed to create one -- only dereferencing a raw pointer is gated, see
   below), the concrete way ordinary code produces a pointer value
   for an `extern "C"` out-parameter. `const T*`/`T*` are genuinely
   distinct types (a one-way implicit `T* -> const T*` conversion only,
   no `const_cast` equivalent yet); writing through a `const T*` is an
-  ordinary type error, unconditionally, even inside `unsafe { }`.
+  ordinary type error, unconditionally, even inside `[[scpp::unsafe]] { }`.
 - `std::move`.
 - Function calls, including the "calling an `extern "C"` function requires
-  `unsafe {}`" rule from [§2](ch02-boundary-rules.md). Functions (free or methods) may be
+  `[[scpp::unsafe]] {}`" rule from [§2](ch02-boundary-rules.md). Functions (free or methods) may be
   **overloaded** by parameter list, never by return type (see
   [§5.10](ch05-static-checks.md)): resolved by exact type match only, since no scpp
   scalar type implicitly converts to another (see the numeric family
@@ -142,23 +153,30 @@ distinct from an ordinary type/borrow-check error):
 - Arithmetic / logical / comparison operators. `+`/`-`/`*` are
   overflow-checked by default (`abort()` on overflow, both signed
   and unsigned; see [§5.8](ch05-static-checks.md)); unchecked but
-  guaranteed-wrapping (never UB) inside `unsafe { }`. Division/modulo by
-  zero (or `INT_MIN / -1`) always `abort()`, whether inside `unsafe { }`
+  guaranteed-wrapping (never UB) inside `[[scpp::unsafe]] { }`. Division/modulo by
+  zero (or `INT_MIN / -1`) always `abort()`, whether inside `[[scpp::unsafe]] { }`
   or not.
 - `if` / `while` / `return`. (`for`/range-for are deferred beyond v0.1
   -- iteration is expressed with `while` for now.)
 - Member access, subscript (fixed-size arrays, `span` -- `span` carries a
-  runtime bounds check by default, skipped inside `unsafe { }`,
+  runtime bounds check by default, skipped inside `[[scpp::unsafe]] { }`,
   see [§8](ch08-open-questions.md)).
 - `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
   for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)).
-- `unsafe { }` blocks (see [§1.3](ch01-safety-context.md)): a
-  lexically-scoped escape hatch that locally
+- `[[scpp::unsafe]] { }` blocks (see [§1.3](ch01-safety-context.md)): ordinary
+  compound-statements carrying the `[[scpp::unsafe]]` attribute, a lexically-scoped escape hatch that locally
   permits raw pointer dereference and calling an `extern "C"` function (the
   operations from [§5.5](ch05-static-checks.md)'s prohibited list that
   are in scope for v0.1; the rest of that list is deferred beyond v0.1,
   see below), while every other check in
   [§5](ch05-static-checks.md) keeps running unconditionally.
+- The function-level `[[scpp::unsafe]]` marker (see
+  [§1.2](ch01-safety-context.md)): the same attribute, applied instead to
+  a function's own declaration, making the entire body an unsafe context
+  and making calls to that function themselves one of
+  [§5.5](ch05-static-checks.md)'s gated operations -- scpp's equivalent
+  of Rust's `unsafe fn`, for a function whose soundness depends on a
+  precondition only its caller can guarantee.
 - `extern "C"` function declarations/definitions (see
   [§2.1](ch02-boundary-rules.md)), restricted to
   C-ABI-compatible signature types, including `void` as a return type

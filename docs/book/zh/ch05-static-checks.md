@@ -85,7 +85,7 @@
 - 引用可以指向 `std::unique_ptr` 指向的对象（`int& r = *p;` /
   `int& r = p->field;`，见 ch03 的 `*`/`->` 语法糖）：借用记在 `p`
   自己身上，`p` 在借用期间被 `std::move` 或重新赋值会报错（否则会
-  悬垂/释放后使用）。裸指针 `T*` 的解引用仍需 `unsafe {}`。
+  悬垂/释放后使用）。裸指针 `T*` 的解引用仍需 `[[scpp::unsafe]]`。
 - 调用一个返回引用的函数时，其结果可以直接当值使用（自动解引用，
   `int y = get_ref(x);`），也可以绑定给一个新的具名引用变量
   （`int& r = get_ref(x);`），或继续当作引用实参传给另一个函数
@@ -110,32 +110,37 @@
   初始化，读取是未定义行为）都不同：scpp 选择"总是给一个良定义的默认
   值"，把"这个默认值是否是你想要的"留给程序员自己判断。
 
-## 5.5 禁止项（除非在 `unsafe {}` 里）
+## 5.5 禁止项（除非在 `[[scpp::unsafe]]` 里）
 - 裸指针解引用、指针算术。
 - `reinterpret_cast`、C 风格强制转换到不兼容类型。
 - `union`（未加标签的）。
 - 原始 `new` / `delete`。
 - 可变全局/静态变量的访问。
 - 调用一个 `extern "C"` 函数。
+- 调用一个自己的声明就被标记为 `[[scpp::unsafe]]` 的函数（见
+  [§1.2](ch01-safety-context.md)）——这是区别于嵌套一个块的函数级
+  标记，用在函数的健全性依赖某个只有调用者才能保证的前置条件的场景
+  （对应 Rust 的 `unsafe fn`）。
 
 注意这里**没有**列上的一项：取一个裸指针的地址本身（`&expr`，见
 [§5.7](#57-取地址expr与裸指针)）始终合法，跟 Rust 一样——
 这里被 unsafe 拦住的是**解引用**，不是"造出"一个指针这件事本身。另外
-`unsafe { }` 放宽的是裸指针**解引用**，不是"`const T*` 不能被写"这条
-普通、无条件的类型检查规则（见
+`[[scpp::unsafe]]` 放宽的是裸指针**解引用**，不是"`const T*` 不能被写"
+这条普通、无条件的类型检查规则（见
 [§5.7](#57-取地址expr与裸指针)）——这条也没列在这里，
-因为它本来就不是 `unsafe { }` 会放宽的东西。还有两个东西**确实**跟这个
-列表一样在 `unsafe { }` 里被放宽，但理由跟上面几条不一样：不是因为
-它们本来就不合法（两个从来都合法），而是因为跳过它们完全没有"损坏的
-记账可能泄漏到外面代码"这种风险——这也是 §5.1-§5.4 那批检查
+因为它本来就不是 `[[scpp::unsafe]]` 会放宽的东西。还有两个东西**确实**
+跟这个列表一样在 `[[scpp::unsafe]]` 里被放宽，但理由跟上面几条不一样：
+不是因为它们本来就不合法（两个从来都合法），而是因为跳过它们完全没有
+"损坏的记账可能泄漏到外面代码"这种风险——这也是 §5.1-§5.4 那批检查
 必须无条件继续跑的理由——`span` 的边界检查（[§8](ch08-open-questions.md)
 Q1）和整数溢出检查（[§5.8](#58-整数溢出)）都是 scpp
-自己加的**运行时**检查，不是本来就不合法的操作，两个都是 `unsafe { }`
+自己加的**运行时**检查，不是本来就不合法的操作，两个都是 `[[scpp::unsafe]]`
 里关、别处一律开。
 
-`unsafe { }` 的具体规则见 [§1.3](ch01-safety-context.md)：它**只**放宽
-这个列表，别的一概不动——本章其余检查（§5.1-§5.4）在 `unsafe { }` 块内
-依旧无条件继续跑。
+`[[scpp::unsafe]]` 的具体规则见 [§1.3](ch01-safety-context.md)：它
+**只**放宽这个列表，别的一概不动——本章其余检查（§5.1-§5.4）在任何
+`[[scpp::unsafe]]` 上下文内依旧无条件继续跑，不管这个上下文是靠嵌套块
+还是靠函数级标记建立起来的。
 
 ## 5.6 可恢复错误：`std::expected<T, E>`
 
@@ -166,9 +171,11 @@ abort 处理，绝不会抛出 `std::bad_expected_access<E>`。
 **传播方式：现在故意就用普通的 `if`/`else`**。曾经考虑过一个类似 Rust
 `?` 的后缀运算符，用来把 `std::expected` 的错误往调用者那边传播，最后
 **否决**了——完整理由见 [§8](ch08-open-questions.md) Q8。简单说：跟
-scpp 目前所有其它语法不一样，一个全新的运算符 token 没法被真正的 C++
-编译器忽略或者擦除掉，这会打破"把 `unsafe` 从 scpp 文件里去掉，
-剩下的就是能被真 C++ 编译器原样接受的普通文件"这条性质（见
+scpp 目前所有其它语法不一样——全都拼写成 `scpp` 命名空间下的
+attribute——一个全新的运算符 token 没有"被悄悄忽略"这条退路：真正的
+C++ 编译器本来就会原样接受一个它不认识的 attribute，但绝对没法越过一个
+全新的运算符 token 继续解析下去，这会打破"一份合法的 scpp 文件本来就能
+被真 C++ 编译器接受"这条性质（见
 [ch00](ch00-design-philosophy.md) §2）。所以 v0.1 要求老老实实用普通
 `if`/`else` 写传播逻辑，跟 C 用了几十年的方式一样：
 
@@ -211,11 +218,11 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
   的规则一样）；`const T*` **不能**转换成 `T*`——v0.1 没有
   `const_cast`/Rust 的 `.cast_mut()` 等价物，所以现在完全没有办法从
   `const T*` 得到 `T*`。**通过 `const T*` 写，在任何上下文里都是普通的
-  编译期类型错误，包括在 `unsafe { }` 里面**——它不在
-  [§5.5](#55-禁止项除非在-unsafe--里) 的列表上，因为 `unsafe { }`
+  编译期类型错误，包括在 `[[scpp::unsafe]]` 里面**——它不在
+  [§5.5](#55-禁止项除非在-scppunsafe-里) 的列表上，因为 `[[scpp::unsafe]]`
   只放宽那个列表，这条根本不属于那个列表：它跟把 `std::string` 赋值给
-  `int` 是同一类普通类型不匹配，`unsafe { }` 显然也不会放宽后者。这跟
-  Rust 完全一致：`p: *const T` 时 `*p = x;` 哪怕在 `unsafe` 块里也会被
+  `int` 是同一类普通类型不匹配，`[[scpp::unsafe]]` 显然也不会放宽后者。
+  这跟 Rust 完全一致：`p: *const T` 时 `*p = x;` 哪怕在 `unsafe` 块里也会被
   拒绝。
 - **造出来是 safe 的；只有拿去用才是 unsafe 的——这是 Rust 的模型，不是
   新发明的**。在真实 Rust 里，`let p = &x as *const T;` 完全是安全代码
@@ -224,13 +231,13 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
   不会拒绝 `fn f() -> *const i32 { let x = 5; &x as *const i32 }`：裸指针
   不带生命周期参数，检查器根本没法把它和 `x` 的作用域关联起来；只有真的
   返回一个 `&i32` 引用才会被拒绝。scpp 采用完全一样的切分：`&expr`
-  始终合法——**写**它不需要 `unsafe { }`——跟
-  [§5.5](#55-禁止项除非在-unsafe--里) 里真正列出需要 `unsafe { }` 的是
-  裸指针**解引用**、而不是造出裸指针这件事本身，是一回事（见
+  始终合法——**写**它不需要 `[[scpp::unsafe]]`——跟
+  [§5.5](#55-禁止项除非在-scppunsafe-里) 里真正列出需要 `[[scpp::unsafe]]`
+  的是裸指针**解引用**、而不是造出裸指针这件事本身，是一回事（见
   [§1.3](ch01-safety-context.md)）。得到的 `T*` 可以被存起来、传来传去、
   当返回值返回，或者干脆放着让它在指向的地方消失之后变成悬垂指针——跟
   Rust 完全一样，而且是故意如此：健全性的边界完全在后面那次 `*p`
-  解引用上（已经由 `unsafe` 把关），不在 `&expr` 这一步。
+  解引用上（已经由 `[[scpp::unsafe]]` 把关），不在 `&expr` 这一步。
 - **`&expr` 求值那一刻真正会检查的东西**：跟普通读取 `expr` 一样的
   确定初始化检查（[§5.1](#51-所有权与移动move--ownership)），以及——出于
   保守考虑，因为这一刻还不知道得到的指针以后是拿去读还是写——跟新绑定一个
@@ -251,18 +258,19 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
   int query(int fd) {
       int value = 0;
       int len = 4;
-      unsafe {
+      [[scpp::unsafe]] {
           getsockopt(fd, 1, 2, &value, &len);
       }
       return value;
   }
   ```
-  注意 `&value`/`&len` 本身不需要 `unsafe`——需要 `unsafe` 的只是调用
-  `getsockopt`（一个 `extern "C"` 声明）这件事，这是
-  [§1.3](ch01-safety-context.md) 里已经有的规则（跟 `&` 没关系）。
+  注意 `&value`/`&len` 本身不需要 `[[scpp::unsafe]]`——需要
+  `[[scpp::unsafe]]` 的只是调用 `getsockopt`（一个 `extern "C"` 声明）
+  这件事，这是 [§1.3](ch01-safety-context.md) 里已经有的规则（跟 `&`
+  没关系）。
 - **故意没包含的东西**，为了让这次新增保持一个单一、最小的目的：
-  - 指针算术（`&x + 1`）——已经是 [§5.5](#55-禁止项除非在-unsafe--里)
-    管的地盘（`unsafe { }` 把关），跟这次新增无关。
+  - 指针算术（`&x + 1`）——已经是 [§5.5](#55-禁止项除非在-scppunsafe-里)
+    管的地盘（`[[scpp::unsafe]]` 把关），跟这次新增无关。
   - 给一个右值/临时对象取地址，或者给一个引用自己的存储取地址——`expr`
     必须能解析成一个已经存在的 place，这是它复用的借用来源语法本来的
     要求。
@@ -279,10 +287,11 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
 真实 C++ 里有符号整数溢出是**未定义行为**——哪怕 C++20 把有符号整数的
 **表示方式**钉死成了补码，溢出**行为**本身依然是另一个、依然悬而未决
 的问题（见 [ch00](ch00-design-philosophy.md) §8）。scpp 把这个 UB 彻底
-消除，不管默认状态还是 `unsafe { }` 里都是，而且复用已有的"默认受检查/
-`unsafe { }`"这条轴，不另外引入一条新的 debug/release 构建模式的轴：
+消除，不管默认状态还是 `[[scpp::unsafe]]` 里都是，而且复用已有的"默认
+受检查/`[[scpp::unsafe]]`"这条轴，不另外引入一条新的 debug/release
+构建模式的轴：
 
-- **默认状态下（`unsafe { }` 之外的任何地方）**：`+`、`-`、`*`
+- **默认状态下（`[[scpp::unsafe]]` 之外的任何地方）**：`+`、`-`、`*`
   都会检查——**有符号和无符号都查**（跟真实 C++ 不一样，那边无符号
   wrap 定义上就是"故意的"；scpp 认为无符号 wrap 跟有符号溢出一样，都很
   可能是 bug，这点跟 Rust 的判断一致）。溢出就 `abort()`，走跟 `span`
@@ -290,8 +299,9 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
   无条件生效，不像 Rust 那样受 debug/release 编译模式影响。这里故意跟
   Rust 不一样：Rust 的检查默认只在 debug 模式生效，对真正上线、面对真实
   攻击者/真实数据的 release 二进制毫无保护；scpp 改用已有的"默认受检查/
-  unsafe"这条轴，规范里其它地方本来就没有 debug/release 这个维度。
-- **`unsafe { }` 里**：不检查，但底层运算依然**不是 UB**——是保证的
+  `[[scpp::unsafe]]`"这条轴，规范里其它地方本来就没有 debug/release
+  这个维度。
+- **`[[scpp::unsafe]]` 里**：不检查，但底层运算依然**不是 UB**——是保证的
   补码 wrap，跟真实 C++ 里无符号运算的行为在精神上是一回事。具体做法：
   scpp 的 codegen 从不在自己产的 `add`/`sub`/`mul` 指令上打 `nsw`/`nuw`
   （"不会有符号/无符号溢出"）标记——这两个标记正是**赋予**优化器"可以
@@ -301,19 +311,19 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
   单元级别的粗粒度 `-fwrapv` 开关的情况下拿到同样的保证（不加的话
   Clang 别无选择只能打 `nsw`，因为 C++ 标准规定这是 UB）；scpp 直接产
   自己的 IR，压根不用开这张牌。
-- **为什么这一条能加入 `unsafe { }` 放宽的范围，而不用重新打开
+- **为什么这一条能加入 `[[scpp::unsafe]]` 放宽的范围，而不用重新打开
   [§1.3](ch01-safety-context.md) 那条"窄的逃生舱，不是停止检查这个
   区域的开关"的规则**：跟 [§5.1-§5.4](#51-所有权与移动move--ownership)
   那批检查（move 状态、借用/别名、生命周期、zero-init）不一样——那批
-  必须在 `unsafe { }` 里无条件继续跑，因为跳过它们会让**损坏的编译器
-  记账**泄漏到块结束之后的代码里；溢出检查没有这个风险：一次不
+  必须在 `[[scpp::unsafe]]` 里无条件继续跑，因为跳过它们会让**损坏的
+  编译器记账**泄漏到块结束之后的代码里；溢出检查没有这个风险：一次不
   检查的 wrap 只是让一个普通变量拿到一个普通的（哪怕数值不对的）值——
   不会污染 move/借用/生命周期的跟踪，这些跟踪本来就跟变量具体是什么值
   无关。这个错误值真正带来的内存安全后果（比如拿去当越界下标），还是会
   被管这件事的那个检查单独拦下来（`span` 的边界检查不关心下标为什么
   错）。
-- **在 `unsafe { }` 里手动检测溢出变得可靠了**：`if (x + 1 < x)` 这个
-  经典 idiom，对真实 C++ 里的有符号 `x` 是不可靠的——编译器可能（GCC/
+- **在 `[[scpp::unsafe]]` 里手动检测溢出变得可靠了**：`if (x + 1 < x)`
+  这个经典 idiom，对真实 C++ 里的有符号 `x` 是不可靠的——编译器可能（GCC/
   Clang 真的会）假设有符号溢出不会发生，把这个检查当成不可达代码优化
   掉。因为 scpp 从不打 `nsw`，没有这张牌可打，这个 idiom 就会严格按字面
   算术意思生效：`x = INT_MAX` 时 `x + 1` wrap 成 `INT_MIN`，
@@ -323,7 +333,7 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
 - **除法/取模是单独一类，不属于"会 wrap"**：`INT_MIN / -1`（有符号除法
   自己溢出的唯一情形）以及除以 0、模以 0，都没有一个"wrap 后的结果"可以
   退回去用——硬件本身就会 trap（x86 的 `#DE`）。这两种情况无条件
-  `abort()`，不管在不在 `unsafe { }` 里都一样——没有不检查的版本。
+  `abort()`，不管在不在 `[[scpp::unsafe]]` 里都一样——没有不检查的版本。
 
 ## 5.9 方法与 `this`
 
@@ -808,6 +818,101 @@ bound（`for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T`）才能拿到
 - **这一轮明确不做的**：任意/通用的模板特化（上面那种固定的空
   pack/Head+Tail 模式除外）、模板模板参数、默认模板实参、class 类型的
   非类型模板参数，以及关联类型。
+
+## 5.15 线程安全的结构性属性：`[[scpp::thread_movable]]` 与 `[[scpp::thread_shareable]]`
+
+让库代码（比如一个负责创建线程的函数）能通过一个普通的 attribute 标在
+参数上去要求"传给我的这个东西，真的能安全地跨越一个真实的并发边界使用"。
+靠的是两个 attribute：`[[scpp::thread_movable]]` 和
+`[[scpp::thread_shareable]]`。施加到一个泛型函数的参数上时，两者都会约束
+这个参数（可能是模板推导出来）的类型必须满足对应的性质，就跟把
+`[[scpp::lifetime(name)]]` 叠在参数上（[§5.3](#53-生命周期分组lifetime-groups)）
+是一回事；改成施加到一个 `struct`/`class` 自己的声明上时，两者都会手动
+断言这个类型满足对应的性质，覆盖掉下面结构化推导规则本来会得出的结论——
+对应 Rust 的 `unsafe impl Send`/`unsafe impl Sync`。这两个 attribute 都
+不需要 `requires`表达式或者 concept：默认情况下（也就是没有手动覆盖时），
+这个性质是编译器直接按类型结构自动算出来的——包括 `requires`表达式压根
+看不到的成员——跟真实 C++ 编译器内置的 type trait（比如
+`std::is_trivially_copyable_v<T>`）是同一回事，不是当成普通用户代码去
+求值的。
+
+- **`[[scpp::thread_movable]]`** 回答的问题是：这个类型的一个值，能不能
+  按值交给一个新起的线程，交出去之后原来那个线程完全碰不到它了？（对应
+  Rust 的 `Send`。）
+- **`[[scpp::thread_shareable]]`** 回答的问题是：两个或者更多线程同时各自
+  持有一个指向同一个对象的 `const T&`，安不安全？（对应 Rust 的
+  `Sync`。）
+- **结构化推导规则**（没有在类型自己身上手动覆盖时的默认行为），递归
+  计算：
+  - 每个标量类型：两个性质都成立。
+  - 带引用成员的类型（`T&`/`const T&`——不管是普通 `class`的字段，
+    还是闭包按引用 capture 的东西，见
+    [§5.12](#512-闭包lambda-表达式)）永远不是 thread-movable——把
+    这样的值"移动"给另一个线程，并不会转移被引用对象本身的所有权，
+    所以这么做不像移动一个拥有型的值那样，能让原来的线程碰不到
+    被引用的东西。
+  - `struct`/`class`（不带引用成员）：thread-movable 和
+    thread-shareable 各自成立，当且仅当每个成员自己都具备这个性质——
+    **除了** `mutable`成员（[§4.2](ch04-struct-vs-class.md)），它会
+    让整个类型是 thread-movable 但**永远不是** thread-shareable
+    （对应 Rust 的 `Cell<T>`：一次只交给一个线程独占没问题，但两个
+    线程同时通过一个"看起来共享"的引用去读，就不安全了，因为
+    `mutable`本来就是官方认可的、通过看似只读的引用去写的办法）。
+  - 裸指针 `T*`：默认两者都不成立——这跟裸指针本来就需要为检查器
+    验证不了的东西背书是一致的（[§5.5](#55-禁止项除非在-scppunsafe-里)）；
+    要背书就把它包进一个标记了 `[[scpp::thread_movable]]`/
+    `[[scpp::thread_shareable]]` 的 `struct`/`class` 里，见下面。
+  - `std::unique_ptr<T>`：thread-movable/thread-shareable 各自独立
+    跟随 `T`自己（对应 `Box<T>`：唯一所有权意味着把整个 `unique_ptr`
+    交给另一个线程，指向的东西的独占访问权也跟着一起转移过去了）。
+  - `std::shared_ptr<T>`：`shared_ptr`自己的 thread-movable 和
+    thread-shareable，都要求 `T`**同时**满足 thread-movable 和
+    thread-shareable（对应 `Arc<T>`：把一个 `shared_ptr`的 handle
+    移到另一个线程，并不会收回其它还活着的 handle 的访问权，所以
+    只要存在不止一个 handle，指向的东西本来就已经是共享状态了，
+    跟具体是哪个 handle 物理上移动过去的没关系）。
+  - 闭包（[§5.12](#512-闭包lambda-表达式)）：thread-movable 成立，
+    当且仅当它完全没有按引用 capture（见上面），而且每个按值 capture
+    的成员自己的类型都是 thread-movable。thread-shareable 成立，
+    当且仅当它没有按**可变**引用 capture 的东西（多个线程同时通过一个
+    共享的可变引用去调用，可能产生竞争），每个按值 capture 的成员
+    类型都是 thread-shareable，而且每个按**const**引用 capture 的
+    成员，它指向的那个类型也是 thread-shareable。
+- **在类型声明上手动覆盖**：一个 `struct`/`class` 可以直接在自己的定义
+  上标记 `[[scpp::thread_movable]]` 和/或 `[[scpp::thread_shareable]]`：
+  ```cpp
+  struct [[scpp::thread_movable]] RawBufferHandle {
+      int* data;
+      int len;
+      // 作者已经验证过这个类型自己的不变式，让它交给另一个线程是健全的，
+      // 哪怕上面那条结构化规则会说"不行"——因为它带了一个裸指针
+  };
+  ```
+  这会彻底覆盖掉这个类型的结构化推导结果——完全对应 Rust 的
+  `unsafe impl Send for RawBufferHandle {}`——也是唯一能让一个编译器
+  自己验证不了的类型（最常见的情形就是带一个裸指针的类型）参与这两个
+  性质的办法。
+- **约束一个参数**：一个负责创建线程的函数，把这两个 attribute 之一
+  直接标在它的闭包参数上，就跟标 `[[scpp::lifetime(name)]]` 一样：
+  ```cpp
+  template<typename T>
+  void spawn(T&& f [[scpp::thread_movable]]) {
+      // ...
+  }
+  ```
+  编译器在每次调用 `spawn` 时都会检查：`f` 这次调用推导出来的实参类型
+  是不是 thread-movable（靠上面的结构化规则，或者靠它自己身上的手动
+  覆盖）——不满足就是不合法（ill-formed），跟别的参数 attribute 违反
+  时的待遇完全一样。
+- **按引用 capture 该有的安全性，用的是已经有的机制。** 按**可变**
+  引用 capture（`[&x]`绑定一个非 `const`的 `x`）本来就是一个独占借用
+  （[§5.2](#52-借用与别名borrow--aliasing)）：光是别名 XOR 可变这条
+  规则，就已经保证了不会有别的线程同时在碰 `x`，这也是为什么
+  thread-movable/thread-shareable 不需要、也没有对它做额外约束。
+  按**共享**（`const`）引用 capture 就不一样了，它可以跟同一个根的
+  其它共享借用共存，包括别的线程持有的共享借用（比如两个不同的
+  scoped thread，各自从同一个外层作用域按 `const T&`capture 同一个
+  东西）——这正是 thread-shareable 要回答的场景。
 
 ---
 

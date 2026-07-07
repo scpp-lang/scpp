@@ -1,16 +1,19 @@
 # scpp
 
 A compiler frontend for a language that **looks exactly like idiomatic modern
-C++**, adding only a very small set of extensions — the core being the `unsafe`
-keyword. Every function is checked by default with **Rust-style sound
-compile-time safety checks** (ownership, borrowing, lifetimes); `unsafe { }`
-blocks locally relax a fixed, enumerated set of operations the checker can't
-otherwise verify. The backend generates native binaries via **LLVM**.
+C++**, adding only a very small set of extensions -- all of them spelled as
+attributes in the `scpp` namespace, so scpp introduces **zero new keywords**.
+The core one is `[[scpp::unsafe]]`. Every function is checked by default with
+**Rust-style sound compile-time safety checks** (ownership, borrowing,
+lifetimes); `[[scpp::unsafe]] { }` blocks locally relax a fixed, enumerated
+set of operations the checker can't otherwise verify. The backend generates
+native binaries via **LLVM**.
 
-> 一门"看起来就是原汁原味现代 C++"的语言，仅加入极少量扩展（核心是 `unsafe`
-> 关键字）。每个函数默认都启用 Rust 式健全的编译期安全检查（所有权、借用、
-> 生命周期）；`unsafe { }` 语句块局部放宽检查器本身无法验证的一小撮固定
-> 操作。后端经 LLVM 生成本地二进制。
+> 一门"看起来就是原汁原味现代 C++"的语言，仅加入极少量扩展——全都拼写成
+> `scpp` 命名空间下的 attribute，所以 scpp **零新增关键字**，核心是
+> `[[scpp::unsafe]]`。每个函数默认都启用 Rust 式健全的编译期安全检查（所有权、
+> 借用、生命周期）；`[[scpp::unsafe]] { }` 语句块局部放宽检查器本身无法验证
+> 的一小撮固定操作。后端经 LLVM 生成本地二进制。
 >
 > 中文版 README: [`README.zh.md`](README.zh.md)
 
@@ -18,15 +21,16 @@ otherwise verify. The backend generates native binaries via **LLVM**.
 
 - **It looks like C++.** Anyone familiar with modern C++ should, at a glance,
   believe this is C++.
-- **Minimal additions.** New syntax only when strictly necessary. The core
-  addition is just `unsafe`.
+- **Minimal additions, zero new keywords.** New syntax only when strictly
+  necessary, and always spelled as a `scpp`-namespaced attribute. The core
+  addition is just `[[scpp::unsafe]]`.
 - **Reuse known syntax, reassign semantics.** Existing spellings like
   `std::move()`, `T&`, `unique_ptr`, `span` gain stronger *static* meaning
   unconditionally, everywhere, without changing their outward appearance.
-- **Safety is the default; `unsafe` is the only opt-out, and it's local and
-  composable.** `unsafe { }` blocks relax a fixed, enumerated set of
-  operations — never a switch that turns off checking for an entire function
-  or file.
+- **Safety is the default; `[[scpp::unsafe]]` is the only opt-out, and it's
+  local and composable.** `[[scpp::unsafe]] { }` blocks relax a fixed,
+  enumerated set of operations — never a switch that turns off checking for
+  an entire function or file.
 - **Soundness over compatibility.** We would rather
   report "not yet supported" than admit an unsound check. 100% C++ compatibility
   is a non-goal.
@@ -45,8 +49,8 @@ int sum(std::span<const int> v) {   // checked by default: ownership, borrowing,
 }
 
 int legacy(int* p) {
-    unsafe {
-        return *p;   // raw pointer dereference needs an explicit unsafe { } block
+    [[scpp::unsafe]] {
+        return *p;   // raw pointer dereference needs an explicit [[scpp::unsafe]] block
     }
 }
 ```

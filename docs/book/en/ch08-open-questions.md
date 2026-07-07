@@ -6,7 +6,7 @@
    check by default, calling `abort()` on failure (`vector` is deferred
    beyond v0.1, see [§6](ch06-safe-subset.md), but will follow the same
    policy) -- this is the default,
-   checked-by-default behavior. Inside `unsafe { }`, the
+   checked-by-default behavior. Inside `[[scpp::unsafe]]`, the
    check is skipped -- same treatment, and for the same reason, as
    integer-overflow checking (Q2 below / [§5.8](ch05-static-checks.md)):
    skipping a scpp-inserted *runtime* check carries none of the
@@ -16,15 +16,15 @@
 2. **Integer overflow**: does scpp check signed overflow? **Settled**:
    yes -- checked by default (both signed and unsigned), `abort()`
    on overflow, unconditionally (no debug/release split); unchecked but
-   guaranteed-wrapping (never UB) inside `unsafe { }`,
+   guaranteed-wrapping (never UB) inside `[[scpp::unsafe]]`,
    achieved by never emitting LLVM's `nsw`/`nuw` on scpp's own
    arithmetic codegen. Division/modulo by zero or `INT_MIN / -1` always
-   `abort()`, whether inside `unsafe { }` or not -- there's no wrapped result for
+   `abort()`, whether inside `[[scpp::unsafe]]` or not -- there's no wrapped result for
    the hardware to fall back on. Deliberately diverges from Rust's
    debug-only default (see [§5.8](ch05-static-checks.md) for the full
    reasoning, including why overflow-checking -- unlike
    [§5.1-§5.4](ch05-static-checks.md)'s checks -- can safely join what
-   `unsafe { }` relaxes without risking the "leakage into surrounding
+   `[[scpp::unsafe]]` relaxes without risking the "leakage into surrounding
    code" that [§1.1](ch01-safety-context.md) otherwise guards
    against).
 3. **Panic model**: how do OOB / assertion failures terminate? `std::terminate`
@@ -63,7 +63,7 @@
    remains deferred, not part of this round.
 6. **ABI / interop with existing C++ libraries**: how to engineer ordinary
    (checked-by-default) code calling third-party headers (all inherently
-   unchecked) — treat them all as requiring `unsafe { }`?
+   unchecked) — treat them all as requiring `[[scpp::unsafe]]`?
    **Settled**: `extern "C"` ([§2.1](ch02-boundary-rules.md)) is scpp's *only* interop mechanism with the outside world;
    scpp-to-scpp code sharing across files is [ch11](ch11-modules-and-libraries.md). Interop with *existing, unmodified C++ libraries*
    specifically (arbitrary classes, templates, overloads, exceptions,
@@ -100,14 +100,16 @@
    up to the caller uses plain `if`/`else` in v0.1 -- a Rust-`?`-style
    postfix operator (spelled `??`, since C++ already uses a bare `?` for
    the ternary operator) was considered and **rejected**: unlike every
-   other piece of scpp syntax, a brand-new operator token can't be erased
-   or ignored by a real C++ compiler, which would have permanently broken
-   the property that stripping `unsafe` out of a scpp file leaves
-   an ordinary file a real C++ compiler still accepts (see
-   [ch00](ch00-design-philosophy.md) §2) -- a real compiler hard-errors
+   other piece of scpp syntax -- all of it spelled as an attribute in the
+   `scpp` namespace -- a brand-new operator token has no silently-ignored
+   fallback: a real C++ compiler already accepts an attribute it doesn't
+   recognize unmodified, but a real compiler hard-errors
    parsing past the second `?` (trigraphs, the only thing that ever gave
-   `??` meaning, were removed in C++17). Revisiting this is deferred
-   until the C++ standard itself evolves further in this area.
+   `??` meaning, were removed in C++17), which would have permanently
+   broken the property that a well-formed scpp file is already accepted
+   by a real C++ compiler (see [ch00](ch00-design-philosophy.md) §2).
+   Revisiting this is deferred until the C++ standard itself evolves
+   further in this area.
 9. **Are `const T*` and `T*` the same type?** An earlier draft of
    [§5.7](ch05-static-checks.md) (the `&expr` design) assumed scpp's
    `const T*`/`T*` were unified into one untracked type -- they are not,
@@ -121,7 +123,7 @@
    distinguishes `T&`/`const T&`); the one-way implicit conversion is
    real C++'s own existing rule, not a new one; writing through a
    `const T*` is an ordinary, always-enforced type error, not something
-   `unsafe { }` relaxes. No `const_cast` equivalent exists in v0.1 (see
+   `[[scpp::unsafe]]` relaxes. No `const_cast` equivalent exists in v0.1 (see
    [§5.7](ch05-static-checks.md)).
 10. **Namespace design**: how much of C++'s namespace feature does scpp
     support, and how does it interact with modules? **Settled**: scpp
@@ -218,20 +220,29 @@
     drafts) received *no* checking at all, not even
     [§5.1-§5.4](ch05-static-checks.md)'s move/borrow/lifetime analysis;
     `safe` opted a function into full checking. **Settled: reversed.**
-    scpp now has only `unsafe` -- every function is checked
-    ([§5](ch05-static-checks.md)) unconditionally, by default, with no
-    annotation; `unsafe { }` is a lexically scoped block that locally
-    relaxes exactly [§5.5](ch05-static-checks.md)'s fixed operation list,
-    never a whole-function or whole-file escape hatch (see
-    [ch01](ch01-safety-context.md)). The "native function" concept is
+    scpp now has no `safe`/`unsafe` keyword at all -- every function is
+    checked ([§5](ch05-static-checks.md)) unconditionally, by default,
+    with no annotation; `[[scpp::unsafe]]` never relaxes
+    [§5.1-§5.4](ch05-static-checks.md)'s move/borrow/lifetime analysis for
+    any function, marked or not -- only [§5.5](ch05-static-checks.md)'s
+    fixed operation list, and (for a function marked `[[scpp::unsafe]]`
+    itself) which callers may call it (see [ch01](ch01-safety-context.md)).
+    The "native function" concept is
     **fully retired**, not merely renamed: there is no longer any way to
     write a function with zero move/borrow/lifetime checking -- if a
     function's body genuinely needs broad access to
-    [§5.5](ch05-static-checks.md)'s operations, the way to express that
-    is to wrap the entire body in one `unsafe { }` block, which still
-    keeps [§5.1-§5.4](ch05-static-checks.md) fully active throughout (see
-    [§1.2](ch01-safety-context.md)) -- exactly mirroring how Rust's own
-    `unsafe fn` body is never exempt from borrow checking, at any
+    [§5.5](ch05-static-checks.md)'s operations, there are two ways to
+    express that, depending on who needs to vouch for it (see
+    [§1.2](ch01-safety-context.md)): wrap the entire body in one
+    `[[scpp::unsafe]] { }` block if the function can still vouch for
+    itself under any input it accepts, so ordinary code should keep being
+    able to call it freely; or mark the function's own declaration
+    `[[scpp::unsafe]]` if its soundness instead depends on a precondition
+    only the caller can guarantee (scpp's equivalent of Rust's `unsafe
+    fn`), which additionally requires every caller to vouch for the call
+    itself. Either way, [§5.1-§5.4](ch05-static-checks.md) stays fully
+    active throughout the body -- exactly mirroring how Rust's
+    own `unsafe fn` body is never exempt from borrow checking, at any
     edition. This was accepted specifically because scpp has no existing
     codebase to onboard incrementally yet (unlike a hypothetical
     "gradually adopt scpp in a legacy C++ project" scenario, where

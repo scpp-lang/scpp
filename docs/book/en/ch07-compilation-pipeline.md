@@ -17,9 +17,17 @@ source
 Key points:
 - **Unified AST**: every function shares one AST shape, with an
   unsafe-block flag on nodes marking which statements are lexically
-  inside an `unsafe { }` block ([§1](ch01-safety-context.md)).
+  inside a `[[scpp::unsafe]] { }` compound-statement
+  ([§1](ch01-safety-context.md)); the parser sets that flag while
+  handling the statement's ordinary attribute-specifier-seq, not via a
+  distinct `unsafe` grammar production. A function whose own declaration
+  carries the same attribute has that flag set on every statement in its
+  body directly (see [§1.2](ch01-safety-context.md)), and the function's
+  `FunctionDecl` node itself carries a separate flag the call-checking
+  pass consults to gate calls to it, exactly like the existing `extern
+  "C"` check.
 - **Borrow checking runs on every function's MIR, unconditionally** --
-  `unsafe { }` never skips this pass; it only relaxes the fixed,
+  `[[scpp::unsafe]] { }` never skips this pass; it only relaxes the fixed,
   enumerated operations in [§5.5](ch05-static-checks.md) *within* it (raw
   pointer dereference, calling an `extern "C"` function, etc.), exactly
   mirroring how Rust's own borrow checker keeps running inside an

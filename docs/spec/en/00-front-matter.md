@@ -46,23 +46,31 @@ For the purposes of this document, the terms and definitions given in
 the C++ standard apply, together with the following.
 
 **3.1 erasure**
-the source-level transformation of a SCPP26 translation unit obtained
-by, in order:
-  (3.1.1) replacing every *unsafe-compound-statement* ([§5](01-unsafe.md#52-statements-stmtunsafe)) with its own
-  contained *compound-statement*, discarding the `unsafe` keyword itself;
-  (3.1.2) removing every attribute whose *attribute-namespace*
-  ([dcl.attr.grammar]) is `scpp`.
+the source-level transformation of a SCPP26 translation unit obtained by
+removing every attribute whose *attribute-namespace* ([dcl.attr.grammar])
+is `scpp`.
 
 [Note: Clause 4 requires the result to be a well-formed C++26
-translation unit. — end note]
+translation unit. Because every SCPP26-specific construct is spelled as
+an attribute in the `scpp` *attribute-namespace* -- including
+`[[scpp::unsafe]]` ([§5](01-unsafe.md#51-attributes-dclattrscppunsafe))
+-- this is the transformation's only step; this document introduces no
+keyword, operator, or other token a real C++26 compiler cannot already
+parse and silently ignore unmodified (see also Clause 4 (2)'s note on
+`-Wno-unknown-attributes`). — end note]
 
 **3.2 safe context**
-any point in a SCPP26 program not lexically enclosed by the
-*compound-statement* of an *unsafe-compound-statement* ([§5](01-unsafe.md#52-statements-stmtunsafe)).
+any point in a SCPP26 program that is not part of an unsafe context (3.3).
 
 **3.3 unsafe context**
-any point in a SCPP26 program lexically enclosed by the
-*compound-statement* of an *unsafe-compound-statement* ([§5](01-unsafe.md#52-statements-stmtunsafe)).
+either of the following:
+  (3.3.1) a *compound-statement* to which an *attribute-specifier-seq*
+  containing the attribute-token `unsafe` in the `scpp`
+  *attribute-namespace* appertains ([§5](01-unsafe.md#51-attributes-dclattrscppunsafe)), together with every point lexically enclosed by it; or
+  (3.3.2) the entire *function-body* ([dcl.fct.def.general]) of a
+  function to which an *attribute-specifier-seq* containing the
+  attribute-token `unsafe` in the `scpp` *attribute-namespace* appertains
+  ([§5](01-unsafe.md#51-attributes-dclattrscppunsafe)), together with every point lexically enclosed by it.
 
 **3.4 gated operation**
 an operation this document identifies as ill-formed in a safe context
@@ -80,6 +88,19 @@ diagnosing a specific ill-formed construct.
 well-formed SCPP26 translation unit as a well-formed C++26 translation
 unit.
 
+[Note: because erasure (3.1) only ever removes `scpp`-namespaced
+attributes, and a C++26 compiler already accepts an unrecognized
+attribute unmodified ([dcl.attr.grammar]), a well-formed SCPP26
+translation unit is itself already accepted by a conforming C++26
+implementation even before erasure -- typically subject only to an
+unknown-attribute diagnostic, which an implementation's own options
+(for example, a command-line option resembling
+`-Wno-unknown-attributes`) may be used to suppress. Erasure (3.1)
+remains the only transformation this document requires a conforming
+implementation to accept; it exists to produce output free of any such
+diagnostic, not to make the translation unit compilable in the first
+place. — end note]
+
 [Note: this document may require an implementation to perform an
 additional runtime check (for example, a future clause's
 arithmetic-overflow check) that C++26 does not require when translating
@@ -89,4 +110,4 @@ note]
 
 ---
 
-[Table of Contents](README.md) · [Next: The `unsafe` Compound Statement →](01-unsafe.md)
+[Table of Contents](README.md) · [Next: The `[[scpp::unsafe]]` Attribute →](01-unsafe.md)

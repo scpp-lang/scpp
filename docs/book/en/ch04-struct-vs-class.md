@@ -10,7 +10,7 @@ completely different semantics.
   recursively:
   - Scalar types: `bool`, integers, floats, `char`.
   - Raw pointers `T*` (carry no compiler-tracked lifetime; dereferencing
-    still requires `unsafe {}`, see [§2](ch02-boundary-rules.md)).
+    still requires `[[scpp::unsafe]] {}`, see [§2](ch02-boundary-rules.md)).
   - Other `struct` types that themselves satisfy this rule (recursively).
   - Fixed-size arrays of trivial types.
 - The following are **forbidden** as `struct` members and must instead be
@@ -111,7 +111,7 @@ itself the explicit declaration, and the compiler verifies triviality.
     `const` no longer blocks direct access to this one field;
   - can **never** be referenced or have its address taken (`T&`/
     `const T&` binding, `&expr`) -- attempting either is a compile
-    error, unconditionally, whether inside `unsafe { }` or not.
+    error, unconditionally, whether inside `[[scpp::unsafe]] { }` or not.
   Because no reference to it can ever exist, there is no aliasing
   hazard to check at runtime at all -- reads/writes compile to a plain
   load/store, exactly as cheap as Rust's `Cell::get`/`Cell::set`. This

@@ -15,9 +15,14 @@
 
 要点：
 - **AST 统一**：每个函数共用同一套 AST 形状，节点上带一个 unsafe 块
-  标记，标出哪些语句词法上位于 `unsafe { }` 块内部
-  （[§1](ch01-safety-context.md)）。
-- **借用检查在每个函数的 MIR 上无条件运行**——`unsafe { }` 从不跳过
+  标记，标出哪些语句词法上位于 `[[scpp::unsafe]] { }` 复合语句内部
+  （[§1](ch01-safety-context.md)）；这个标记是在解析该语句原本就存在的
+  attribute-specifier-seq 时设上的，不是靠一个单独的 `unsafe` 语法产生式。
+  如果一个函数自己的声明也带同样的 attribute，函数体内每一条语句都会
+  直接被设上这个标记（见 [§1.2](ch01-safety-context.md)），而且函数自己
+  的 `FunctionDecl` 节点上还会带一个独立的标记，供检查调用点的那趟处理
+  用来给它自己的调用点把关，跟现有 `extern "C"` 检查的做法一样。
+- **借用检查在每个函数的 MIR 上无条件运行**——`[[scpp::unsafe]] { }` 从不跳过
   这一趟检查；它只在检查内部放宽 [§5.5](ch05-static-checks.md) 里那份
   固定、列举出来的操作（裸指针解引用、调用 `extern "C"` 函数等等），
   跟 Rust 自己的借用检查器在 `unsafe fn`/`unsafe { }` 块内部照样继续跑

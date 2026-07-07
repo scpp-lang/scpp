@@ -4,26 +4,30 @@
    believe this is C++.
 2. **Minimal additions, and they erase cleanly**: introduce new syntax only
    when strictly necessary, and only if deleting it leaves an ordinary file
-   a real C++ compiler still accepts unmodified. The core addition is
-   just `unsafe`: strip the keyword out (keeping its braces' contents) and
-   what remains is standard C++ -- **scpp = C++ + a checker**,
-   not a language with its own grammar. This is why lifetime grouping
-   reuses attribute syntax rather than inventing `'a`-style tokens (see
-   [§5.3](ch05-static-checks.md)), and why scpp rejected a Rust-`?`-style
-   error-propagation operator in favor of ordinary `if`/`else` (see
-   [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md) Q8): a real
-   C++ compiler can silently ignore an unknown attribute, but it cannot
-   parse past a brand-new operator token at all.
+   a real C++ compiler still accepts unmodified. scpp introduces **zero
+   new keywords**: every scpp-specific construct -- the `[[scpp::unsafe]]`
+   escape hatch ([§1](ch01-safety-context.md)) just as much as
+   `[[scpp::lifetime(name)]]` lifetime grouping ([§5.3](ch05-static-checks.md))
+   -- is spelled as an attribute in the `scpp` namespace, because a real
+   C++ compiler already parses, and silently accepts, any attribute it
+   doesn't itself define -- unlike a brand-new keyword or operator token,
+   which it cannot parse past at all. Stripping every `scpp`-namespaced
+   attribute out of a well-formed scpp file leaves standard C++ untouched
+   -- **scpp = C++ + a checker**, not a language with its own grammar.
+   This is also why scpp rejected a Rust-`?`-style error-propagation
+   operator in favor of ordinary `if`/`else` (see
+   [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md) Q8): an
+   operator token, unlike an attribute, has no silently-ignored fallback.
 3. **Reuse known syntax, reassign semantics**: existing spellings such as
    `std::move()`, `T&`, `unique_ptr`, `span` are given stronger *static* meaning
    (ownership / borrowing / lifetimes) without changing
    their outward appearance to the user.
-4. **Safety is the default; `unsafe` is the only opt-out, and it's local
-   and composable**: every function is checked
+4. **Safety is the default; `[[scpp::unsafe]]` is the only opt-out, and
+   it's local and composable**: every function is checked
    ([§5](ch05-static-checks.md)) unconditionally, with no per-function or
-   per-file annotation needed to enable it. `unsafe { }` is a lexically
-   scoped block, nestable and locally reversible, that relaxes exactly
-   the fixed, enumerated set of operations in
+   per-file annotation needed to enable it. `[[scpp::unsafe]] { }` is a
+   lexically scoped block, nestable and locally reversible, that relaxes
+   exactly the fixed, enumerated set of operations in
    [§5.5](ch05-static-checks.md) -- never a switch that turns off
    checking for an entire function or file. This is a deliberate reversal
    of an earlier design (a `safe` keyword marked which functions opted
@@ -70,7 +74,7 @@
    ratified names" rule are checked against -- bump it forward whenever
    a newer standard is ratified.
 8. **No UB, ever, for anything the compiler itself controls -- not even
-   inside `unsafe`.** Developers must always be able to know their
+   inside `[[scpp::unsafe]]`.** Developers must always be able to know their
    code's exact behavior. Real C++ leaves some operations undefined even
    when a program never does anything as drastic as dereferencing a
    wild pointer -- signed integer overflow being the clearest example
@@ -80,14 +84,15 @@
    there's no way to define it. scpp never grants itself that license:
    for any operation whose definedness is scpp's own codegen choice
    (arithmetic overflow being the first concrete case), it either keeps
-   checking it unconditionally (by default), or, inside `unsafe`,
+   checking it unconditionally (by default), or, inside `[[scpp::unsafe]]`,
    pins it to one specific, deterministic, documented outcome instead
    (e.g. a guaranteed two's-complement wraparound) -- never real UB.
    This doesn't extend to (and can't eliminate) the other kind of UB,
    the one that comes from an unverifiable *external* precondition
    (dereferencing a raw pointer is only ever sound if the pointer is
    genuinely valid, which no static analysis can prove in general) --
-   `unsafe` still means exactly what it means in Rust for that kind.
+   `[[scpp::unsafe]]` still means exactly what `unsafe` means in Rust for
+   that kind.
 
 ---
 

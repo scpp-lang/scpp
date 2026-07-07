@@ -204,8 +204,8 @@ elsewhere in this spec:
   `namespace cmath = org::lotx::cmath;` -- deliberately **not** a
   `using`-declaration. `using X = Y;` is a *type* alias in real C++, and a
   namespace is not a type; spelling a namespace alias that way would not
-  survive stripping `unsafe` and handing the result to a real C++
-  compiler ([ch00](ch00-design-philosophy.md) §6). This is a second,
+  survive erasure and remain accepted by a real C++ compiler
+  ([ch00](ch00-design-philosophy.md) §6). This is a second,
   orthogonal mechanism alongside `using foo::bar;` (imports one *name*,
   not a whole namespace) -- both can be used together freely.
 - **Namespace and module are otherwise orthogonal**, exactly as in real
@@ -304,13 +304,13 @@ implementation unit or a separately-distributed `.scppo` object file
 
 ```cpp
 extern int square(int x);                // ordinary scpp linkage, checked like any other function
-extern "C" int printf(const char*, ...); // C ABI, per §2.1, always requires unsafe { } to call
+extern "C" int printf(const char*, ...); // C ABI, per §2.1, always requires [[scpp::unsafe]] { } to call
 ```
 
 Unlike `extern "C"` -- whose implementation no
-scpp compiler ever sees, so calling it **always** requires `unsafe { }`
+scpp compiler ever sees, so calling it **always** requires `[[scpp::unsafe]] { }`
 (§2.1) -- calling a bare
-`extern` declaration needs no `unsafe { }` at all. The trust model is
+`extern` declaration needs no `[[scpp::unsafe]] { }` at all. The trust model is
 different: when the module's author builds the primary interface unit
 together with its implementation unit(s), the compiler checks that every
 implementation-unit definition's signature matches its interface

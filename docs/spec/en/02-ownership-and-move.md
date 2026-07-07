@@ -78,4 +78,4 @@ object's ownership/move state (6.2). — end note]
 
 ---
 
-[← Previous: The `unsafe` Compound Statement](01-unsafe.md) · [Table of Contents](README.md)
+[← Previous: The `[[scpp::unsafe]]` Attribute](01-unsafe.md) · [Table of Contents](README.md)
