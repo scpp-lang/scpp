@@ -844,9 +844,7 @@ private:
                 std::vector<llvm::Type*> params;
                 params.reserve(type.function_params.size());
                 for (const Type& param : type.function_params) params.push_back(to_llvm_type(param));
-                return llvm::PointerType::get(llvm::FunctionType::get(to_llvm_type(*type.function_return), params,
-                                                                       /*isVarArg=*/false),
-                                              0);
+                return llvm::PointerType::get(*context_, 0);
             }
             case TypeKind::Span:
                 // A non-owning {data pointer, element count} pair -- a
