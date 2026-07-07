@@ -1894,6 +1894,35 @@ void test_lambda_this_and_star_this_captures_parse() {
            "lambda_this_and_star_this_captures_parse: expected 1 capture '*this'");
 }
 
+void test_function_pointer_declarators_parse() {
+    scpp::Program program = scpp::parse(
+        "struct Op { int (*fn)(int, int); };\n"
+        "int add(int a, int b) { return a + b; }\n"
+        "int main() {\n"
+        "    int (*fp)(int, int) = add;\n"
+        "    int (* [[scpp::unsafe]] up)(int, int) = add;\n"
+        "    Op op;\n"
+        "    op.fn = fp;\n"
+        "    return op.fn(2, 3) + (*up)(1, 1);\n"
+        "}\n");
+    expect(program.structs.size() == 1, "function_pointer_declarators_parse: expected 1 struct");
+    expect(program.structs[0].fields.size() == 1, "function_pointer_declarators_parse: expected 1 field");
+    const scpp::Type& field_type = program.structs[0].fields[0].type;
+    expect(field_type.kind == scpp::TypeKind::FunctionPointer,
+           "function_pointer_declarators_parse: struct field should be a function pointer");
+    expect(field_type.function_return != nullptr && is_named_type(*field_type.function_return, "int"),
+           "function_pointer_declarators_parse: field return type should be 'int'");
+    expect(field_type.function_params.size() == 2 && is_named_type(field_type.function_params[0], "int") &&
+               is_named_type(field_type.function_params[1], "int"),
+           "function_pointer_declarators_parse: field params should be '(int, int)'");
+    const scpp::Function& main_fn = program.functions[1];
+    expect(main_fn.body->statements[0]->type.kind == scpp::TypeKind::FunctionPointer,
+           "function_pointer_declarators_parse: local fp should be a function pointer");
+    expect(main_fn.body->statements[1]->type.kind == scpp::TypeKind::FunctionPointer &&
+               main_fn.body->statements[1]->type.is_unsafe_function_pointer,
+           "function_pointer_declarators_parse: local up should be unsafe-qualified function pointer");
+}
+
 // ch05 §5.12: a lambda's own parameter list does not support a
 // concept-constrained ("ConceptName auto") parameter in this version --
 // mirrors the same restriction on methods/constructors.
@@ -2519,6 +2548,7 @@ int main() {
     test_lambda_blanket_capture_modes_parse();
     test_lambda_init_capture_parses();
     test_lambda_this_and_star_this_captures_parse();
+    test_function_pointer_declarators_parse();
     test_lambda_generic_parameter_is_rejected();
     test_lambda_mutable_keyword_parses();
     test_generic_class_bare_type_param_parses();

@@ -209,14 +209,11 @@ struct FunctionSignature {
     // Computed once by resolve_elided_param_index, which throws if
     // return_type is a Reference but no valid elision exists.
     std::optional<size_t> elided_param_index;
-    // Mirrors Function::is_extern_c. Every ordinary scpp function is
-    // checked by default (ch01) and needs no `unsafe { }` to call; an
-    // `extern "C"` *declaration* (no body -- its real implementation is
-    // never seen by any scpp compiler) is the one remaining always-
-    // unchecked callee category, so calling it is rejected unless the
-    // call site's DataflowState::unsafe_depth is greater than zero
-    // (ch01 §1.3/ch02) -- see check_call_arguments.
-    bool is_extern_c = false;
+    // True only for a bodyless `extern "C"` declaration. An `extern "C"`
+    // definition with a body is an ordinary checked function that merely
+    // requests C linkage; only the declaration-only form is always
+    // unchecked and therefore gated.
+    bool is_extern_c_declaration_only = false;
     // Mirrors Function::is_unsafe (ch01 §1.2/§1.3) -- the function-
     // level `[[scpp::unsafe]]` marker on this specific overload's own
     // declaration: calling it is one more of ch05 §5.5's gated
@@ -364,6 +361,7 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_unique_ptr(const Type& type) { return type.kind == TypeKind::UniquePtr; }
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
+[[nodiscard]] bool is_function_pointer(const Type& type) { return type.kind == TypeKind::FunctionPointer; }
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr) {
     return expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr &&
            expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this";
@@ -552,6 +550,16 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
             return a.name == b.name;
         case TypeKind::Pointer:
             return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
+        case TypeKind::FunctionPointer:
+            if (a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
+                !types_equal(*a.function_return, *b.function_return) ||
+                a.function_params.size() != b.function_params.size()) {
+                return false;
+            }
+            for (size_t i = 0; i < a.function_params.size(); i++) {
+                if (!types_equal(a.function_params[i], b.function_params[i])) return false;
+            }
+            return true;
         case TypeKind::UniquePtr:
             return types_equal(*a.pointee, *b.pointee);
         case TypeKind::Reference:
@@ -572,7 +580,16 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 struct CalleeSignature {
     std::string key;
     size_t param_offset = 0;
+    std::optional<FunctionSignature> direct_signature;
 };
+
+[[nodiscard]] FunctionSignature function_pointer_signature(const Type& type) {
+    FunctionSignature sig;
+    sig.param_types = type.function_params;
+    sig.return_type = *type.function_return;
+    sig.is_unsafe = type.is_unsafe_function_pointer;
+    return sig;
+}
 
 // Resolves a Call expression's signature-lookup key, accounting for a
 // method call's receiver (ch04 §4.2/ch05 §5.9): `obj.name(...)`/
@@ -598,6 +615,54 @@ struct CalleeSignature {
 // identically.
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
                                                         const ClassFieldTypes* class_field_types = nullptr) {
+    if (call_expr.lhs && call_expr.name.empty()) {
+        const Expr* callee_expr = call_expr.lhs.get();
+        if (callee_expr->kind == ExprKind::Unary && callee_expr->unary_op == UnaryOp::Deref && callee_expr->lhs) {
+            callee_expr = callee_expr->lhs.get();
+        }
+        if (callee_expr->kind == ExprKind::Identifier) {
+            auto type_it = body.local_types.find(callee_expr->name);
+            if (type_it != body.local_types.end() && is_function_pointer(type_it->second)) {
+                return CalleeSignature{"", 0, function_pointer_signature(type_it->second)};
+            }
+        } else if (class_field_types != nullptr && callee_expr->kind == ExprKind::Member && callee_expr->lhs &&
+                   callee_expr->lhs->kind == ExprKind::Identifier) {
+            auto base_it = body.local_types.find(callee_expr->lhs->name);
+            if (base_it != body.local_types.end()) {
+                const Type& base_type =
+                    base_it->second.kind == TypeKind::Reference ? *base_it->second.pointee : base_it->second;
+                if (base_type.kind == TypeKind::Named) {
+                    auto fields_it = class_field_types->find(base_type.name);
+                    if (fields_it != class_field_types->end()) {
+                        auto field_it = fields_it->second.find(callee_expr->name);
+                        if (field_it != fields_it->second.end() && is_function_pointer(field_it->second)) {
+                            return CalleeSignature{"", 0, function_pointer_signature(field_it->second)};
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (call_expr.lhs && !call_expr.name.empty() && class_field_types != nullptr &&
+        call_expr.lhs->kind == ExprKind::Identifier) {
+        auto base_it = body.local_types.find(call_expr.lhs->name);
+        if (base_it != body.local_types.end()) {
+            const Type& base_type =
+                base_it->second.kind == TypeKind::Reference ? *base_it->second.pointee : base_it->second;
+            if (base_type.kind == TypeKind::Named) {
+                auto fields_it = class_field_types->find(base_type.name);
+                if (fields_it != class_field_types->end()) {
+                    auto field_it = fields_it->second.find(call_expr.name);
+                    if (field_it != fields_it->second.end() && is_function_pointer(field_it->second)) {
+                        return CalleeSignature{"", 0, function_pointer_signature(field_it->second)};
+                    }
+                }
+            }
+        }
+    }
+    if (!call_expr.lhs && body.local_types.contains(call_expr.name) && is_function_pointer(body.local_types.at(call_expr.name))) {
+        return CalleeSignature{"", 0, function_pointer_signature(body.local_types.at(call_expr.name))};
+    }
     if (call_expr.lhs) {
         std::string class_name;
         if (call_expr.lhs->kind == ExprKind::Identifier) {
@@ -745,6 +810,11 @@ struct CalleeSignature {
 // reaching this exceedingly rare in a real, well-formed program.
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures) {
+    if (callee.direct_signature.has_value()) {
+        return callee.direct_signature->param_types.size() == call_expr.args.size() + callee.param_offset
+                   ? &*callee.direct_signature
+                   : nullptr;
+    }
     auto it = signatures.find(callee.key);
     if (it == signatures.end()) return nullptr;
     // The overwhelmingly common case: exactly one function has ever been
@@ -821,6 +891,66 @@ struct CalleeSignature {
         }
     }
     return unique_best ? best : matches[0];
+}
+
+[[nodiscard]] Type function_pointer_type_from_signature(const FunctionSignature& sig) {
+    Type type;
+    type.kind = TypeKind::FunctionPointer;
+    type.function_return = std::make_shared<Type>(sig.return_type);
+    type.function_params = sig.param_types;
+    type.is_unsafe_function_pointer = sig.is_unsafe || sig.is_extern_c_declaration_only;
+    return type;
+}
+
+[[nodiscard]] bool same_function_pointer_shape_ignoring_unsafe(const Type& a, const Type& b) {
+    if (!is_function_pointer(a) || !is_function_pointer(b) || a.function_params.size() != b.function_params.size() ||
+        !types_equal(*a.function_return, *b.function_return)) {
+        return false;
+    }
+    for (size_t i = 0; i < a.function_params.size(); i++) {
+        if (!types_equal(a.function_params[i], b.function_params[i])) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr, const Type& target_type,
+                                                                   const Body& body, const Signatures& signatures) {
+    const Expr* source = &expr;
+    if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
+    if (source->kind != ExprKind::Identifier || body.local_types.contains(source->name)) return std::nullopt;
+    auto it = signatures.find(source->name);
+    if (it == signatures.end()) return std::nullopt;
+    for (const FunctionSignature& sig : it->second) {
+        Type candidate = function_pointer_type_from_signature(sig);
+        if (same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) return candidate;
+    }
+    return std::nullopt;
+}
+
+void check_function_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
+                                       const Signatures& signatures, SourceLocation loc, const std::string& target_name,
+                                       bool report_errors) {
+    if (!report_errors || !is_function_pointer(target_type)) return;
+    std::optional<Type> source_type = resolve_function_designator_type(expr, target_type, body, signatures);
+    if (!source_type) source_type = infer_expr_type(expr, body, signatures);
+    if (!source_type || !is_function_pointer(*source_type)) {
+        throw DataflowError("cannot initialize function pointer '" + target_name +
+                             "' from this expression: expected a function or function pointer with matching "
+                             "signature",
+            loc);
+    }
+    if (types_equal(target_type, *source_type)) return;
+    if (same_function_pointer_shape_ignoring_unsafe(target_type, *source_type) && target_type.is_unsafe_function_pointer &&
+        !source_type->is_unsafe_function_pointer) {
+        return;
+    }
+    if (same_function_pointer_shape_ignoring_unsafe(target_type, *source_type) && !target_type.is_unsafe_function_pointer &&
+        source_type->is_unsafe_function_pointer) {
+        throw DataflowError("cannot assign an unsafe-qualified function pointer to plain function pointer '" +
+                                 target_name + "'",
+            loc);
+    }
+    throw DataflowError("function pointer '" + target_name + "' has a different signature than this source expression", loc);
 }
 
 // Structurally validates and resolves spec ch05.3's elision rule for a
@@ -1135,7 +1265,18 @@ struct CalleeSignature {
 
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
-            return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
+            if (it != body.local_types.end()) return it->second;
+            auto sig_it = signatures.find(expr.name);
+            if (sig_it != signatures.end() && sig_it->second.size() == 1) {
+                const FunctionSignature& sig = sig_it->second[0];
+                Type result;
+                result.kind = TypeKind::FunctionPointer;
+                result.function_return = std::make_shared<Type>(sig.return_type);
+                result.function_params = sig.param_types;
+                result.is_unsafe_function_pointer = sig.is_unsafe || sig.is_extern_c_declaration_only;
+                return result;
+            }
+            return std::nullopt;
         }
 
         case ExprKind::Move: {
@@ -1174,6 +1315,18 @@ struct CalleeSignature {
                 case UnaryOp::Not: return Type{.kind = TypeKind::Named, .name = "bool"};
                 case UnaryOp::Neg: return infer_expr_type(*expr.lhs, body, signatures);
                 case UnaryOp::AddressOf: {
+                    if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name)) {
+                        auto it = signatures.find(expr.lhs->name);
+                        if (it != signatures.end() && it->second.size() == 1) {
+                            const FunctionSignature& sig = it->second[0];
+                            Type result;
+                            result.kind = TypeKind::FunctionPointer;
+                            result.function_return = std::make_shared<Type>(sig.return_type);
+                            result.function_params = sig.param_types;
+                            result.is_unsafe_function_pointer = sig.is_unsafe || sig.is_extern_c_declaration_only;
+                            return result;
+                        }
+                    }
                     std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
                     if (!operand) return std::nullopt;
                     Type result;
@@ -1192,6 +1345,7 @@ struct CalleeSignature {
                     if (is_explicit_star_this(expr) && operand->kind == TypeKind::Reference && operand->pointee) {
                         return *operand->pointee;
                     }
+                    if (is_function_pointer(*operand)) return *operand;
                     if (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer) {
                         return std::nullopt;
                     }
@@ -1300,9 +1454,10 @@ void validate_deref_operand(const Expr& operand, const DataflowState& state, con
         }();
     bool is_uptr = resolved.has_value() && is_unique_ptr(*resolved);
     bool is_raw_ptr = resolved.has_value() && resolved->kind == TypeKind::Pointer;
+    bool is_fn_ptr = resolved.has_value() && is_function_pointer(*resolved);
     bool is_this_ref = resolved.has_value() && operand.kind == ExprKind::Identifier && operand.name == "this" &&
                        resolved->kind == TypeKind::Reference;
-    if (!is_uptr && !is_raw_ptr && !is_this_ref) {
+    if (!is_uptr && !is_raw_ptr && !is_fn_ptr && !is_this_ref) {
         throw DataflowError("cannot dereference ('*') '" + describe +
                              "': only std::unique_ptr or a raw pointer (inside '[[scpp::unsafe]] { }') is "
                              "supported",
@@ -1349,7 +1504,7 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
     if (!is_plain_identifier && !is_member_of_identifier) {
         if (report_errors) {
             throw DataflowError("dereference ('*') currently only supports a plain local std::unique_ptr or "
-                                 "raw pointer variable, or a captured field of one ('this.field') (not a "
+                                 "raw/function pointer variable, or a captured field of one ('this.field') (not a "
                                  "subscript or other expression)",
                 state.current_loc);
         }
@@ -1491,6 +1646,20 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
             collect_reference_uses(expr->lhs.get(), body, out);
             return;
         case ExprKind::Call:
+            if (expr->lhs != nullptr) {
+                collect_reference_uses(expr->lhs.get(), body, out);
+            } else {
+                auto it = body.local_types.find(expr->name);
+                if (it != body.local_types.end() &&
+                    (is_reference(it->second) || is_span(it->second) ||
+                     body.borrow_holding_closure_locals.contains(expr->name))) {
+                    out.insert(expr->name);
+                }
+            }
+            for (const auto& arg : expr->args) {
+                collect_reference_uses(arg.get(), body, out);
+            }
+            return;
         case ExprKind::MakeUnique:
             for (const auto& arg : expr->args) {
                 collect_reference_uses(arg.get(), body, out);
@@ -1941,6 +2110,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // rejected the same way taking a second one would be.
 void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                        bool report_errors) {
+    if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name) &&
+        signatures.contains(expr.lhs->name)) {
+        return;
+    }
     std::string root = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
     if (!report_errors || root.empty()) return;
     auto borrow_it = state.borrows.find(root);
@@ -2112,6 +2285,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     CalleeSignature callee = resolve_callee_signature(expr, body, state.class_field_types);
     auto name_it = signatures.find(callee.key);
     const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+    std::string callee_display = expr.name;
+    if (callee_display.empty()) {
+        if (expr.lhs && expr.lhs->kind == ExprKind::Identifier) {
+            callee_display = expr.lhs->name;
+        } else {
+            callee_display = "<function pointer>";
+        }
+    }
     // ch05 §5.10: a name that exists but has no overload whose parameters
     // match this call's actual arguments is a hard error (an explicit
     // cast/a genuinely matching overload is required) -- distinct from
@@ -2124,14 +2305,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                              "type match only; an explicit cast may be required)",
             state.current_loc);
     }
-    if (report_errors && sig != nullptr && sig->is_extern_c && state.unsafe_depth == 0) {
-        throw DataflowError("cannot call 'extern \"C\"' function '" + expr.name +
+    if (report_errors && sig != nullptr && sig->is_extern_c_declaration_only && state.unsafe_depth == 0) {
+        throw DataflowError("cannot call 'extern \"C\"' function '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': no scpp compiler ever sees its real "
                              "implementation to check it (spec ch01 §1.3/ch02)",
             state.current_loc);
     }
     if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
-        throw DataflowError("cannot call '" + expr.name +
+        throw DataflowError("cannot call '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                              "caller can guarantee (ch01 §1.2/§1.3)",
@@ -2597,6 +2778,19 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 }
                 bool is_move_target = target_is_unique_ptr || target_is_movable_class;
                 apply_expr(*expr.rhs, is_move_target, state, body, signatures, report_errors);
+                if (expr.lhs->kind == ExprKind::Identifier) {
+                    auto it = body.local_types.find(expr.lhs->name);
+                    if (it != body.local_types.end()) {
+                        check_function_pointer_assignment(it->second, *expr.rhs, body, signatures, state.current_loc,
+                                                          expr.lhs->name, report_errors);
+                    }
+                } else if (expr.lhs->kind == ExprKind::Member) {
+                    std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state);
+                    if (field_type.has_value()) {
+                        check_function_pointer_assignment(*field_type, *expr.rhs, body, signatures, state.current_loc,
+                                                          expr.lhs->name, report_errors);
+                    }
+                }
                 if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*expr.rhs, body, signatures)) {
                     throw DataflowError("assigning to a std::unique_ptr variable requires std::move or "
                                         "std::make_unique (copying is not allowed)",
@@ -3115,6 +3309,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
 
             bool target_is_unique_ptr = type_it != body.local_types.end() && is_unique_ptr(type_it->second);
             apply_expr(*stmt.expr, target_is_unique_ptr, state, body, signatures, report_errors);
+            if (type_it != body.local_types.end()) {
+                check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
+                                                  stmt.local, report_errors);
+            }
             if (report_errors && target_is_unique_ptr && !produces_unique_ptr_rvalue(*stmt.expr, body, signatures)) {
                 throw DataflowError("variable '" + stmt.local +
                                     "' of type std::unique_ptr must be initialized via std::move or "
@@ -3446,7 +3644,7 @@ void check_function(const Function& fn, const Signatures& signatures, const std:
         }
         sig.return_type = fn.return_type;
         sig.elided_param_index = resolve_elided_param_index(fn);
-        sig.is_extern_c = fn.is_extern_c;
+        sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr;
         sig.is_unsafe = fn.is_unsafe;
         sig.loc = fn.loc;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
@@ -3589,6 +3787,12 @@ StmtPtr clone_stmt(const Stmt& stmt) {
         case TypeKind::Named: return type.name;
         case TypeKind::Pointer:
             return mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
+        case TypeKind::FunctionPointer: {
+            std::string result = mangle_type_for_clone_name(*type.function_return) +
+                                 (type.is_unsafe_function_pointer ? "_ufnptr" : "_fnptr");
+            for (const Type& param : type.function_params) result += "_" + mangle_type_for_clone_name(param);
+            return result;
+        }
         case TypeKind::UniquePtr: return mangle_type_for_clone_name(*type.pointee) + "_uptr";
         case TypeKind::Reference:
             return mangle_type_for_clone_name(*type.pointee) +
@@ -4186,6 +4390,51 @@ private:
         return result;
     }
 
+    void substitute_non_type_param_in_expr(Expr& expr, const std::string& param_name, int replacement) {
+        if (expr.kind == ExprKind::Identifier && expr.name == param_name) {
+            expr.kind = ExprKind::IntegerLiteral;
+            expr.int_value = replacement;
+            expr.name.clear();
+            expr.lhs.reset();
+            expr.rhs.reset();
+            expr.args.clear();
+            expr.explicit_template_args.clear();
+            return;
+        }
+        if (expr.lhs) substitute_non_type_param_in_expr(*expr.lhs, param_name, replacement);
+        if (expr.rhs) substitute_non_type_param_in_expr(*expr.rhs, param_name, replacement);
+        for (ExprPtr& arg : expr.args) substitute_non_type_param_in_expr(*arg, param_name, replacement);
+        for (LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init) substitute_non_type_param_in_expr(*capture.init, param_name, replacement);
+        }
+        if (expr.lambda_body) substitute_non_type_param_in_stmt(*expr.lambda_body, param_name, replacement);
+    }
+
+    void substitute_non_type_param_in_stmt(Stmt& stmt, const std::string& param_name, int replacement) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                if (stmt.init) substitute_non_type_param_in_expr(*stmt.init, param_name, replacement);
+                for (ExprPtr& arg : stmt.ctor_args) substitute_non_type_param_in_expr(*arg, param_name, replacement);
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) substitute_non_type_param_in_expr(*stmt.expr, param_name, replacement);
+                return;
+            case StmtKind::If:
+                substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
+                substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
+                if (stmt.else_branch) substitute_non_type_param_in_stmt(*stmt.else_branch, param_name, replacement);
+                return;
+            case StmtKind::While:
+                substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
+                substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
+                return;
+            case StmtKind::Block:
+                for (StmtPtr& nested : stmt.statements) substitute_non_type_param_in_stmt(*nested, param_name, replacement);
+                return;
+        }
+    }
+
     // ch05 §5.14: for every class with a base (ClassDef::base_class_name),
     // synthesizes a "forwarding stub" Function (Function::forwards_to)
     // for every method the base class defines (recursively -- including
@@ -4686,8 +4935,7 @@ private:
                 for (const std::shared_ptr<Expr>& arg : type.non_type_args) {
                     resolved_non_type_args.push_back(evaluate_non_type_arg(*arg, {}));
                 }
-                std::string concrete_name =
-                    instantiate_non_type_generic_type(type.name, resolved_non_type_args, loc);
+                std::string concrete_name = instantiate_non_type_generic_type(type.name, resolved_non_type_args, loc);
                 type.name = concrete_name;
                 type.non_type_args.clear();
                 return type;
@@ -4851,7 +5099,7 @@ private:
             ClassDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
-            for (const ClassField& f : fields_copy) concrete.fields.push_back(f);
+            for (const ClassField& field : fields_copy) concrete.fields.push_back(field);
             program_.classes.push_back(std::move(concrete));
 
             std::vector<Function> methods = method_templates_of(template_name);
@@ -4864,19 +5112,19 @@ private:
                 clone.is_unsafe = method_tmpl.is_unsafe;
                 clone.return_type = method_tmpl.return_type;
                 clone.params.reserve(method_tmpl.params.size());
-                for (const Param& p : method_tmpl.params) {
-                    Param np;
-                    np.name = p.name;
-                    if (p.name == "this") {
+                for (const Param& param : method_tmpl.params) {
+                    Param new_param;
+                    new_param.name = param.name;
+                    if (param.name == "this") {
                         Type this_type;
                         this_type.kind = TypeKind::Reference;
                         this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = cache_key});
-                        this_type.is_mutable_ref = p.type.is_mutable_ref;
-                        np.type = std::move(this_type);
+                        this_type.is_mutable_ref = param.type.is_mutable_ref;
+                        new_param.type = std::move(this_type);
                     } else {
-                        np.type = p.type;
+                        new_param.type = param.type;
                     }
-                    clone.params.push_back(std::move(np));
+                    clone.params.push_back(std::move(new_param));
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
@@ -5210,6 +5458,8 @@ private:
                 // into the pointee, since a raw pointer's own structural
                 // shape carries no ownership/borrow information at all).
                 return false;
+            case TypeKind::FunctionPointer:
+                return true;
             case TypeKind::Array: return type.element && is_thread_movable(*type.element, visiting);
             case TypeKind::UniquePtr:
                 // ch05 §5.15: follows T's own property independently --
@@ -5275,6 +5525,7 @@ private:
                 return false;
             }
             case TypeKind::Pointer: return false;
+            case TypeKind::FunctionPointer: return true;
             case TypeKind::Array: return type.element && is_thread_shareable(*type.element, visiting);
             case TypeKind::UniquePtr: return type.pointee && is_thread_shareable(*type.pointee, visiting);
             case TypeKind::Reference:

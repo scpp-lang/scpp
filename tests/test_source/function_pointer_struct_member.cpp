@@ -1,0 +1,13 @@
+struct Op {
+    int (*fn)(int, int);
+};
+
+int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    Op op;
+    op.fn = add;
+    return op.fn(2, 3);
+}

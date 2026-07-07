@@ -345,7 +345,8 @@ private:
 
             case ExprKind::Identifier: {
                 auto it = locals_.find(expr.name);
-                return it == locals_.end() ? std::nullopt : std::optional<Type>(it->second.type);
+                if (it != locals_.end()) return it->second.type;
+                return resolve_function_designator_type(expr);
             }
 
             case ExprKind::Move: {
@@ -397,6 +398,7 @@ private:
                 if (!base) return std::nullopt;
                 if (base->kind == TypeKind::Array) return *base->element;
                 if (base->kind == TypeKind::Span) return *base->pointee;
+                if (base->kind == TypeKind::Pointer) return *base->pointee;
                 return std::nullopt;
             }
 
@@ -405,6 +407,7 @@ private:
                     case UnaryOp::Not: return Type{.kind = TypeKind::Named, .name = "bool"};
                     case UnaryOp::Neg: return infer_type(*expr.lhs);
                     case UnaryOp::AddressOf: {
+                        if (std::optional<Type> fn_ptr = resolve_function_designator_type(expr)) return fn_ptr;
                         std::optional<Type> operand = infer_type(*expr.lhs);
                         if (!operand) return std::nullopt;
                         Type result;
@@ -420,6 +423,7 @@ private:
                             operand->kind == TypeKind::Reference && operand->pointee) {
                             return *operand->pointee;
                         }
+                        if (operand->kind == TypeKind::FunctionPointer) return *operand;
                         if (operand->kind != TypeKind::UniquePtr && operand->kind != TypeKind::Pointer) {
                             return std::nullopt;
                         }
@@ -462,6 +466,22 @@ private:
                 return std::nullopt;
 
             case ExprKind::Call: {
+                if (expr.lhs != nullptr && expr.name.empty()) {
+                    const Expr* callee_expr = expr.lhs.get();
+                    if (callee_expr->kind == ExprKind::Unary && callee_expr->unary_op == UnaryOp::Deref &&
+                        callee_expr->lhs != nullptr) {
+                        callee_expr = callee_expr->lhs.get();
+                    }
+                    std::optional<Type> callee_type = infer_type(*callee_expr);
+                    if (callee_type.has_value() && callee_type->kind == TypeKind::FunctionPointer) {
+                        return *callee_type->function_return;
+                    }
+                    return std::nullopt;
+                }
+                if (expr.lhs == nullptr && locals_.contains(expr.name) &&
+                    locals_.at(expr.name).type.kind == TypeKind::FunctionPointer) {
+                    return *locals_.at(expr.name).type.function_return;
+                }
                 std::string callee_name = expr.name;
                 size_t param_offset = 0;
                 bool receiver_is_mutable = true;
@@ -677,6 +697,7 @@ private:
     void validate_trivial(const Type& type, std::vector<std::string>& in_progress) {
         switch (type.kind) {
             case TypeKind::Pointer:
+            case TypeKind::FunctionPointer:
                 return;
             case TypeKind::UniquePtr:
                 throw CodegenError("std::unique_ptr carries ownership and cannot be a struct field; "
@@ -806,6 +827,14 @@ private:
                 // codegen_lvalue's Identifier case) and enforces borrow
                 // discipline (scpp.movecheck), not the IR shape itself.
                 return llvm::PointerType::getUnqual(*context_);
+            case TypeKind::FunctionPointer: {
+                std::vector<llvm::Type*> params;
+                params.reserve(type.function_params.size());
+                for (const Type& param : type.function_params) params.push_back(to_llvm_type(param));
+                return llvm::PointerType::get(llvm::FunctionType::get(to_llvm_type(*type.function_return), params,
+                                                                       /*isVarArg=*/false),
+                                              0);
+            }
             case TypeKind::Span:
                 // A non-owning {data pointer, element count} pair -- a
                 // literal (unnamed) two-word LLVM struct, not registered
@@ -989,6 +1018,7 @@ private:
         switch (type.kind) {
             case TypeKind::Named:
             case TypeKind::Pointer:
+            case TypeKind::FunctionPointer:
             case TypeKind::Array:
                 return;
             case TypeKind::UniquePtr:
@@ -1022,6 +1052,16 @@ private:
         switch (a.kind) {
             case TypeKind::Named: return a.name == b.name;
             case TypeKind::Pointer: return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
+            case TypeKind::FunctionPointer:
+                if (a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
+                    !types_equal(*a.function_return, *b.function_return) ||
+                    a.function_params.size() != b.function_params.size()) {
+                    return false;
+                }
+                for (size_t i = 0; i < a.function_params.size(); i++) {
+                    if (!types_equal(a.function_params[i], b.function_params[i])) return false;
+                }
+                return true;
             case TypeKind::UniquePtr: return types_equal(*a.pointee, *b.pointee);
             case TypeKind::Reference:
                 return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref &&
@@ -1045,6 +1085,12 @@ private:
         switch (type.kind) {
             case TypeKind::Named: return type.name;
             case TypeKind::Pointer: return mangle_type(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
+            case TypeKind::FunctionPointer: {
+                std::string result = mangle_type(*type.function_return) +
+                                     (type.is_unsafe_function_pointer ? "_ufnptr" : "_fnptr");
+                for (const Type& param : type.function_params) result += "_" + mangle_type(param);
+                return result;
+            }
             case TypeKind::UniquePtr: return mangle_type(*type.pointee) + "_uptr";
             case TypeKind::Reference:
                 return mangle_type(*type.pointee) +
@@ -1053,6 +1099,77 @@ private:
             case TypeKind::Array: return mangle_type(*type.element) + "_arr" + std::to_string(type.array_size);
         }
         return "?";
+    }
+
+    [[nodiscard]] static Type function_pointer_type_from_signature(const Type& return_type,
+                                                                   const std::vector<Type>& param_types,
+                                                                   bool is_unsafe) {
+        Type type;
+        type.kind = TypeKind::FunctionPointer;
+        type.function_return = std::make_shared<Type>(return_type);
+        type.function_params = param_types;
+        type.is_unsafe_function_pointer = is_unsafe;
+        return type;
+    }
+
+    [[nodiscard]] static bool same_function_pointer_shape_ignoring_unsafe(const Type& a, const Type& b) {
+        if (a.kind != TypeKind::FunctionPointer || b.kind != TypeKind::FunctionPointer ||
+            !types_equal(*a.function_return, *b.function_return) || a.function_params.size() != b.function_params.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.function_params.size(); i++) {
+            if (!types_equal(a.function_params[i], b.function_params[i])) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr,
+                                                                       const std::optional<Type>& target_type = std::nullopt) {
+        const Expr* source = &expr;
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
+        if (source->kind != ExprKind::Identifier || locals_.contains(source->name)) return std::nullopt;
+        std::optional<Type> result;
+        for (const Function& fn : program_->functions) {
+            if (fn.name != source->name) continue;
+            Type candidate =
+                function_pointer_type_from_signature(fn.return_type, [&]() {
+                    std::vector<Type> params;
+                    params.reserve(fn.params.size());
+                    for (const Param& param : fn.params) params.push_back(param.type);
+                    return params;
+                }(),
+                    fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
+            if (target_type.has_value()) {
+                if (same_function_pointer_shape_ignoring_unsafe(candidate, *target_type)) return candidate;
+                continue;
+            }
+            if (result.has_value()) return std::nullopt;
+            result = std::move(candidate);
+        }
+        return result;
+    }
+
+    [[nodiscard]] llvm::Value* codegen_function_pointer_value_for_target(const Expr& expr, const Type& target_type) {
+        std::optional<Type> source_type = resolve_function_designator_type(expr, target_type);
+        if (!source_type.has_value()) return nullptr;
+        const Expr* source = &expr;
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
+        for (const Function& fn : program_->functions) {
+            if (fn.name != source->name) continue;
+            Type candidate = function_pointer_type_from_signature(fn.return_type, [&]() {
+                std::vector<Type> params;
+                params.reserve(fn.params.size());
+                for (const Param& param : fn.params) params.push_back(param.type);
+                return params;
+            }(), fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
+            if (!same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) continue;
+            auto name_it = overload_names_.find(&fn);
+            if (name_it == overload_names_.end()) continue;
+            llvm::Function* callee = module_->getFunction(name_it->second);
+            if (callee == nullptr) continue;
+            return callee;
+        }
+        return nullptr;
     }
 
     // The full, human-readable-spelled-out type text ch11 §11.9's real
@@ -1066,6 +1183,17 @@ private:
             case TypeKind::Pointer:
                 return (type.is_mutable_pointee ? std::string() : std::string("const ")) +
                        verbatim_type_spelling(*type.pointee) + "*";
+            case TypeKind::FunctionPointer: {
+                std::string result = verbatim_type_spelling(*type.function_return) + " (*";
+                if (type.is_unsafe_function_pointer) result += " [[scpp::unsafe]]";
+                result += ")(";
+                for (size_t i = 0; i < type.function_params.size(); i++) {
+                    if (i > 0) result += ", ";
+                    result += verbatim_type_spelling(type.function_params[i]);
+                }
+                result += ")";
+                return result;
+            }
             case TypeKind::UniquePtr: return "std::unique_ptr<" + verbatim_type_spelling(*type.pointee) + ">";
             case TypeKind::Reference:
                 if (type.is_rvalue_ref) return verbatim_type_spelling(*type.pointee) + "&&";
@@ -1780,6 +1908,95 @@ private:
     // see ClassDef's own comment) -- then `&obj` is passed as the
     // implicit first (`this`) argument, ahead of the explicit ones.
     CallResult codegen_call(const Expr& expr) {
+        if (expr.lhs != nullptr && !expr.name.empty() && expr.lhs->kind != ExprKind::Lambda) {
+            LValue base = codegen_lvalue(*expr.lhs);
+            if (base.type.kind == TypeKind::Named && structs_.contains(base.type.name)) {
+                const StructInfo& info = structs_.at(base.type.name);
+                std::optional<size_t> field_index_opt = info.find_field_index(expr.name);
+                if (field_index_opt.has_value() &&
+                    info.field_types[*field_index_opt].kind == TypeKind::FunctionPointer) {
+                    const Type& member_type = info.field_types[*field_index_opt];
+                    llvm::Value* field_ptr =
+                        builder_->CreateStructGEP(info.llvm_type, base.ptr, *field_index_opt, expr.name + ".fnptr");
+                    llvm::Value* callee_value = builder_->CreateLoad(to_llvm_type(member_type), field_ptr, expr.name + ".fn");
+                    std::vector<llvm::Value*> args =
+                        codegen_call_args_for_types(expr.args, member_type.function_params);
+                    auto* fn_type =
+                        llvm::FunctionType::get(to_llvm_type(*member_type.function_return),
+                                                [&]() {
+                                                    std::vector<llvm::Type*> params;
+                                                    params.reserve(member_type.function_params.size());
+                                                    for (const Type& param : member_type.function_params) {
+                                                        params.push_back(to_llvm_type(param));
+                                                    }
+                                                    return params;
+                                                }(),
+                                                /*isVarArg=*/false);
+                    return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
+                }
+            }
+            std::optional<Type> receiver_type = infer_type(*expr.lhs);
+            if (receiver_type.has_value() && receiver_type->kind == TypeKind::FunctionPointer) {
+                llvm::Value* callee_value = codegen_expr(*expr.lhs);
+                std::vector<llvm::Value*> args = codegen_call_args_for_types(expr.args, receiver_type->function_params);
+                auto* fn_type =
+                    llvm::FunctionType::get(to_llvm_type(*receiver_type->function_return),
+                                            [&]() {
+                                                std::vector<llvm::Type*> params;
+                                                params.reserve(receiver_type->function_params.size());
+                                                for (const Type& param : receiver_type->function_params) {
+                                                    params.push_back(to_llvm_type(param));
+                                                }
+                                                return params;
+                                            }(),
+                                            /*isVarArg=*/false);
+                return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
+            }
+        }
+        if (expr.lhs != nullptr && expr.name.empty()) {
+            const Expr* callee_expr = expr.lhs.get();
+            if (callee_expr->kind == ExprKind::Unary && callee_expr->unary_op == UnaryOp::Deref && callee_expr->lhs) {
+                callee_expr = callee_expr->lhs.get();
+            }
+            std::optional<Type> callee_type = infer_type(*callee_expr);
+            if (!callee_type.has_value() || callee_type->kind != TypeKind::FunctionPointer) {
+                throw CodegenError("indirect call requires a function pointer value", current_loc_);
+            }
+            llvm::Value* callee_value = codegen_expr(*callee_expr);
+            std::vector<llvm::Value*> args = codegen_call_args_for_types(expr.args, callee_type->function_params);
+            auto* fn_type =
+                llvm::FunctionType::get(to_llvm_type(*callee_type->function_return),
+                                        [&]() {
+                                            std::vector<llvm::Type*> params;
+                                            params.reserve(callee_type->function_params.size());
+                                            for (const Type& param : callee_type->function_params) {
+                                                params.push_back(to_llvm_type(param));
+                                            }
+                                            return params;
+                                        }(),
+                                        /*isVarArg=*/false);
+            return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
+        }
+        if (expr.lhs == nullptr) {
+            auto local_it = locals_.find(expr.name);
+            if (local_it != locals_.end() && local_it->second.type.kind == TypeKind::FunctionPointer) {
+                llvm::Value* callee_value = builder_->CreateLoad(to_llvm_type(local_it->second.type), local_it->second.alloca,
+                                                                 expr.name + ".fnptr");
+                std::vector<llvm::Value*> args = codegen_call_args_for_types(expr.args, local_it->second.type.function_params);
+                auto* fn_type =
+                    llvm::FunctionType::get(to_llvm_type(*local_it->second.type.function_return),
+                                            [&]() {
+                                                std::vector<llvm::Type*> params;
+                                                params.reserve(local_it->second.type.function_params.size());
+                                                for (const Type& param : local_it->second.type.function_params) {
+                                                    params.push_back(to_llvm_type(param));
+                                                }
+                                                return params;
+                                            }(),
+                                            /*isVarArg=*/false);
+                return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
+            }
+        }
         std::string callee_name = expr.name;
         llvm::Value* this_arg = nullptr;
         size_t param_offset = 0;
@@ -1905,6 +2122,30 @@ private:
         return result;
     }
 
+    std::vector<llvm::Value*> codegen_call_args_for_types(const std::vector<ExprPtr>& args,
+                                                          const std::vector<Type>& param_types) {
+        std::vector<llvm::Value*> result;
+        result.reserve(args.size());
+        for (size_t i = 0; i < args.size(); i++) {
+            bool param_is_reference = i < param_types.size() && param_types[i].kind == TypeKind::Reference;
+            const Type* ref_param_type = param_is_reference ? &param_types[i] : nullptr;
+            bool param_is_rvalue_reference = param_is_reference && ref_param_type->is_rvalue_ref;
+            bool param_is_const_reference_bound_to_rvalue =
+                param_is_reference && !param_is_rvalue_reference && !ref_param_type->is_mutable_ref &&
+                produces_rvalue_of_type(*args[i], *ref_param_type->pointee);
+            if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
+                result.push_back(codegen_materialize_rvalue_reference_source(*args[i]));
+            } else if (param_is_reference) {
+                result.push_back(codegen_lvalue(*args[i]).ptr);
+            } else if (i < param_types.size()) {
+                result.push_back(codegen_value_for_target(*args[i], param_types[i]));
+            } else {
+                result.push_back(codegen_expr(*args[i]));
+            }
+        }
+        return result;
+    }
+
     // Reads `lv`'s value for use as an ordinary rvalue. An array decays to
     // its own address instead of being loaded as a giant aggregate: a
     // bare array is never meaningfully read "by value" as a whole (there
@@ -2018,6 +2259,9 @@ private:
                 return llvm::ConstantFP::get(to_llvm_type(target_type), expr.float_value);
             }
         }
+        if (target_type.kind == TypeKind::FunctionPointer) {
+            if (llvm::Value* fn = codegen_function_pointer_value_for_target(expr, target_type)) return fn;
+        }
         return codegen_expr(expr);
     }
 
@@ -2119,7 +2363,16 @@ private:
                 return codegen_scalar_cast(operand, *source_type, expr.type);
             }
 
-            case ExprKind::Identifier:
+            case ExprKind::Identifier: {
+                if (!locals_.contains(expr.name)) {
+                    if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
+                        if (llvm::Value* fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
+                    }
+                }
+                LValue lv = codegen_lvalue(expr);
+                return load_value(lv);
+            }
+
             case ExprKind::Subscript: {
                 LValue lv = codegen_lvalue(expr);
                 return load_value(lv);
@@ -2147,6 +2400,10 @@ private:
 
             case ExprKind::Unary: {
                 if (expr.unary_op == UnaryOp::Deref) {
+                    if (std::optional<Type> operand_type = infer_type(*expr.lhs);
+                        operand_type.has_value() && operand_type->kind == TypeKind::FunctionPointer) {
+                        return codegen_expr(*expr.lhs);
+                    }
                     // Same lvalue-then-load pattern as Identifier/Member/
                     // Subscript above: codegen_lvalue resolves *what*
                     // `*p` addresses (see its own Unary case), this just
@@ -2155,6 +2412,9 @@ private:
                     return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
                 }
                 if (expr.unary_op == UnaryOp::AddressOf) {
+                    if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
+                        if (llvm::Value* fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
+                    }
                     // `&expr` (ch05 §5.7) -- the mirror image of Deref
                     // just above: codegen_lvalue already resolves
                     // expr.lhs's address (its `.ptr`); returning that
@@ -2977,6 +3237,13 @@ private:
                     // only known at runtime, so there's no way to reject an
                     // out-of-bounds constant index at compile time.
                     emit_span_bounds_check(index, size);
+                    llvm::Value* elem_ptr =
+                        builder_->CreateGEP(to_llvm_type(*base.type.pointee), data, {index}, "elemtmp");
+                    return LValue{elem_ptr, *base.type.pointee};
+                }
+                if (base.type.kind == TypeKind::Pointer) {
+                    llvm::Value* data = builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), base.ptr, "data");
+                    llvm::Value* index = codegen_expr(*expr.rhs);
                     llvm::Value* elem_ptr =
                         builder_->CreateGEP(to_llvm_type(*base.type.pointee), data, {index}, "elemtmp");
                     return LValue{elem_ptr, *base.type.pointee};
