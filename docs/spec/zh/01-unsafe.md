@@ -161,7 +161,7 @@ int (*                  sp)(int, int);   // 指向一个不是 unsafe-qualified
   或者是一个声明为 C 语言链接、且没有 *function-body* 的函数
   （[dcl.link]、[dcl.fct.def.general]）；
 
-  (3.2) 否则，是不是 unsafe-qualified 的指向函数的指针类型。
+  (3.2) 否则，是一个不是 unsafe-qualified 的指向函数的指针类型。
 
 【注：(3.1) 的第二种情形，就是一个没有函数体的 `extern "C"` 声明；调用它
 本来就已经是一个 gated operation（
