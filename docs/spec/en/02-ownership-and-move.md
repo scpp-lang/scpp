@@ -137,6 +137,98 @@ Outer y(std::move(x));   // (4): memberwise move-constructs y.a, y.b from x.a, x
                           // destructor, if declared, is not invoked for it (§6.3)
 ```
 
+## 6.5 Copy construction and copy assignment [class.copy.ctor], [class.copy.assign]
+
+(1) A program may declare a copy constructor ([class.copy.ctor]) or a
+copy assignment operator ([class.copy.assign]) for a class type.
+
+(2) A class type that has no user-declared copy constructor, no
+user-declared destructor, and no user-declared copy assignment
+operator has an implicitly-defined copy constructor with exactly one
+parameter, of type `const` reference to the class type, irrespective
+of whether the C++ standard's own conditions for implicitly declaring
+one ([class.copy.ctor]) are met. A class type that has a user-declared
+destructor or a user-declared copy assignment operator, and no
+user-declared copy constructor, has no copy constructor.
+
+(3) A class type that has no user-declared copy assignment operator, no
+user-declared destructor, and no user-declared copy constructor has an
+implicitly-defined copy assignment operator with exactly one parameter,
+of type `const` reference to the class type, irrespective of whether
+the C++ standard's own conditions for implicitly declaring one
+([class.copy.assign]) are met, unless the class has a non-static data
+member of reference type, in which case it has no copy assignment
+operator, exactly as the C++ standard's own conditions
+([class.copy.assign]) already provide. A class type that has a
+user-declared destructor or a user-declared copy constructor, and no
+user-declared copy assignment operator, has no copy assignment
+operator.
+
+(4) Whether a class type has a user-declared copy constructor is
+independent of whether it has a user-declared copy assignment operator,
+and conversely; a program may declare either without the other.
+
+(5) The implicitly-defined copy constructor for a class X initializes
+each non-static data member of the object being constructed with the
+corresponding non-static data member of the constructor's parameter,
+copied in the manner appropriate to that member's type, in declaration
+order.
+
+(6) The implicitly-defined copy assignment operator for a class X
+replaces the value of each non-static data member of the object denoted
+by `*this` with the corresponding non-static data member of the
+operator's parameter, copied in the manner appropriate to that member's
+type, in declaration order, and returns `*this`.
+
+[Note: (5) and (6) apply recursively where a non-static data member is
+itself of class type: that member's own type has, by this subclause,
+either an implicitly-defined copy constructor/copy assignment operator,
+a user-declared one, or none at all -- in the last case, (5) or (6),
+respectively, is not satisfiable for X, and X consequently likewise has
+no implicitly-defined copy constructor or copy assignment operator,
+respectively. — end note]
+
+[Note: unlike [§6.4](02-ownership-and-move.md#64-move-construction-and-move-assignment-classcopyctor-classcopyassign),
+this subclause does not forbid a user-declared copy constructor or copy
+assignment operator, and (5)/(6) leave the object denoted by the
+constructor's or operator's parameter completely unaffected -- copying,
+unlike moving, never changes the state of the object copied from,
+whether the constructor or operator invoked is user-declared or
+implicitly-defined. — end note]
+
+[Note: the circumstances in (2) under which a class type has no
+implicitly-defined copy constructor, and the circumstances in (3) under
+which it has no implicitly-defined copy assignment operator, are
+exactly the circumstances under which the C++ standard's own implicit
+definition of the corresponding special member function is deprecated
+rather than absent ([depr.impldec]). — end note]
+
+[Note: because (2) and (3) preclude an implicitly-defined copy
+constructor or copy assignment operator for a class type in the
+circumstances given there, and (5)/(6) never modify the object denoted by
+the parameter, an assignment of the form `x = x` through an
+implicitly-defined copy assignment operator (3) is unconditionally
+well-defined; this document imposes no corresponding guarantee on a
+user-declared copy assignment operator (1), whose behavior for such an
+assignment is exactly what its own definition gives it, as for any
+other user-declared function. — end note]
+
+```cpp
+class RefCounted {
+    int* count;
+public:
+    RefCounted(int* c) : count(c) {}
+    // user-declared: this class has a destructor, so it would otherwise
+    // have no copy constructor/assignment operator at all (2)/(3)
+    RefCounted(const RefCounted& other) : count(other.count) { ++(*count); }
+    RefCounted& operator=(const RefCounted& other) {
+        if (this != &other) { count = other.count; ++(*count); }
+        return *this;
+    }
+    ~RefCounted() { --(*count); }
+};
+```
+
 ---
 
 [← Previous: The `[[scpp::unsafe]]` Attribute](01-unsafe.md) · [Table of Contents](README.md)

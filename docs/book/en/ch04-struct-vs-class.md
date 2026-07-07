@@ -76,13 +76,9 @@ itself the explicit declaration, and the compiler verifies triviality.
   hazard real C++'s own implicit special member function rules still
   allow today (declaring only a destructor still merely *deprecates*,
   rather than deletes, the implicitly-declared copy constructor --
-  [depr.impldec]). scpp's rule reaches the same place scpp's own
-  `struct`/`class` split already reaches for copying ([§4.1](#41-struct-a-purely-trivial-aggregate)'s
-  `struct` is always bitwise-copyable, `class` is not copyable at all by
-  default in v0.1): move is likewise always exactly one thing,
-  structural and compiler-owned, never a place for author-supplied logic
-  to go wrong. See [§8](ch08-open-questions.md) Q14 for this decision's
-  full record.
+  [depr.impldec]). Move is always exactly one thing, structural and
+  compiler-owned, never a place for author-supplied logic to go wrong --
+  see [§8](ch08-open-questions.md) Q14 for this decision's full record.
   - The moved-from object is placed in the *moved-out* state
     ([§5.1](ch05-static-checks.md)), exactly like moving any other value
     -- its destructor, if it has one, is then never invoked for it
@@ -101,6 +97,63 @@ itself the explicit declaration, and the compiler verifies triviality.
     C++'s own rule ([class.copy.assign]) for the same reason (a
     reference cannot be re-seated by assignment) -- only a move
     constructor (references can still be bound once, at construction).
+- **Copy construction and copy assignment, unlike move, may be
+  user-written** -- real C++ syntax verbatim
+  (`ClassName(const ClassName&)`/`operator=(const ClassName&)`), with
+  whatever logic the author wants. A `class` gets a compiler-provided
+  copy constructor only if it declares **none** of a copy constructor,
+  a copy assignment operator, or a destructor itself; symmetrically, it
+  gets a compiler-provided copy assignment operator only if it declares
+  **none** of a copy assignment operator, a copy constructor, or a
+  destructor itself. Declaring any *one* of the three is therefore
+  enough to suppress the *other* special member function's automatic
+  generation -- there is no "mixed" state where one is user-written and
+  the other silently compiler-provided; a `class` that declares only a
+  copy constructor (with no destructor) must also declare its own copy
+  assignment operator if it wants one at all, and vice versa. See
+  [§8](ch08-open-questions.md) Q15 for this decision's full record.
+  - This is deliberately **stricter** than real C++'s own rule: real
+    C++ only *deprecates* -- but still implicitly generates -- the
+    copy constructor when the class has a user-declared destructor or
+    copy assignment operator (and symmetrically deprecates, but still
+    generates, the copy assignment operator when the class has a
+    user-declared destructor or copy constructor), rather than omitting
+    the function outright ([depr.impldec]). The C++ standard itself
+    flags this as a stopgap, not a final answer: "It is possible that
+    future versions of C++ will specify that these implicit definitions
+    are deleted" ([depr.impldec]/1). scpp simply adopts that
+    already-anticipated future now, turning what real C++ treats as a
+    deprecation warning at the point of use into an outright absence of
+    the function -- a compile error at the point of use, not a warning.
+  - This is scpp's version of Rust's `Clone`, reusing real C++'s own
+    copy-constructor/assignment spelling and its ordinary implicit
+    triggering (`Foo b = a;`, `b = a;`) instead of an explicit
+    `.clone()` call -- deliberately, unlike move, where scpp mirrors
+    Rust's *no custom logic at all* rule exactly (see above). The
+    reason copy can safely allow what move cannot: Rust's own ban on
+    combining `Copy` with `Drop` exists to stop a resource-owning type
+    from being *silently, implicitly* bitwise-duplicated -- and scpp
+    already achieves that without needing to ban custom logic outright,
+    simply by never auto-generating a copy for a `class` with a
+    destructor in the first place. A resource-owning `class`'s author
+    must explicitly opt back in with their own reviewed copy
+    constructor/assignment (typically incrementing a reference count or
+    duplicating owned data, e.g. a hand-rolled `shared_ptr`-like type) --
+    there is no scenario where copying silently duplicates a resource
+    the author never actively wrote code to duplicate correctly.
+  - Because user-declared logic is now possible, self-copy-assignment
+    (`x = x`) safety is **only** guaranteed for the compiler-provided
+    case (which, per the rule above, never coexists with a
+    user-declared destructor, copy constructor, or copy assignment
+    operator, so there is nothing to double-release regardless of
+    aliasing) -- a user-written copy assignment operator must
+    defensively check `this != &other` itself if it needs to, exactly
+    like real C++, since scpp is not restricting what it may do.
+  - Same reference-member carve-out as move: a `class` with a
+    non-static data member of reference type may have a compiler-provided
+    copy constructor, but never a compiler-provided copy assignment
+    operator (a user-written one is still permitted, subject to whatever
+    that reference member allows the author to actually do in its body).
 - **Fallible construction and destruction**: a constructor or destructor has no
   channel to hand back a `std::expected<T, E>` -- scpp has no exceptions
   to throw through instead (see [§5.6](ch05-static-checks.md)/
