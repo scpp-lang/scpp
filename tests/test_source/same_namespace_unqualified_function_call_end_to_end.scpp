@@ -1,0 +1,14 @@
+namespace demo {
+int helper() {
+    return 7;
+}
+
+int run() {
+    return helper();
+}
+}
+
+int main() {
+    print_int(demo::run());
+    return 0;
+}

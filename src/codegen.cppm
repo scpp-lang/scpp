@@ -1032,6 +1032,25 @@ private:
             current_loc_);
     }
 
+    void zero_initialize_storage(llvm::Value* ptr, const Type& type) {
+        llvm::Type* llvm_type = to_llvm_type(type);
+        switch (type.kind) {
+            case TypeKind::Named:
+            case TypeKind::Array:
+            case TypeKind::Span: {
+                llvm::TypeSize size = module_->getDataLayout().getTypeAllocSize(llvm_type);
+                builder_->CreateMemSet(ptr,
+                                       llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), 0),
+                                       size,
+                                       llvm::Align(1));
+                return;
+            }
+            default:
+                builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), ptr);
+                return;
+        }
+    }
+
     // A reference's referent may not itself be another reference:
     // reference-to-reference aliasing analysis is still out of scope for
     // v0.1's intraprocedural, first-order borrow checking.
@@ -1812,7 +1831,7 @@ private:
                                             "(...)' constructor-call syntax is only supported for a class type",
                             current_loc_);
                     }
-                    builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
+                    zero_initialize_storage(slot, stmt.type);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                     if (!scope_stack_.empty()) {
@@ -1928,7 +1947,7 @@ private:
                     // zero-initialized (0 / false / null / all-zero
                     // fields), for every type -- scalars and raw pointers
                     // included, not just struct/array/unique_ptr.
-                    builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), slot);
+                    zero_initialize_storage(slot, stmt.type);
                 }
                 locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                 if (stmt.type.kind == TypeKind::Named) {
@@ -2181,7 +2200,7 @@ private:
             if (const ClassDef* class_def = find_class_def(expr.name)) {
                 llvm::Type* llvm_type = to_llvm_type(Type{.kind = TypeKind::Named, .name = expr.name});
                 llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtmp");
-                builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), temp);
+                zero_initialize_storage(temp, Type{.kind = TypeKind::Named, .name = expr.name});
                 if (!expr.args.empty() || expr.has_paren_init) {
                     std::string ctor_name = expr.name + "_new";
                     const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
@@ -2767,7 +2786,7 @@ private:
                 LValue lv = codegen_lvalue(*expr.lhs);
                 llvm::Type* llvm_type = to_llvm_type(lv.type);
                 llvm::Value* old_value = builder_->CreateLoad(llvm_type, lv.ptr, "movetmp");
-                builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), lv.ptr);
+                zero_initialize_storage(lv.ptr, lv.type);
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto local_it = locals_.find(expr.lhs->name);
                     if (local_it != locals_.end() && local_it->second.moved_flag != nullptr) {
@@ -2862,7 +2881,7 @@ private:
         llvm::Value* heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
 
         if (expr.type.kind == TypeKind::Named && structs_.contains(expr.type.name)) {
-            builder_->CreateStore(llvm::Constant::getNullValue(element_type), heap_ptr);
+            zero_initialize_storage(heap_ptr, expr.type);
             if (!expr.args.empty() || expr.has_paren_init) {
                 if (expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move) {
                     std::optional<Type> moved_type = infer_type(*expr.args[0]);

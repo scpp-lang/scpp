@@ -1,0 +1,470 @@
+export module httpserver:runtime;
+
+import :platform;
+
+namespace httpserver {
+
+void build_empty_response(Connection& conn, const char* status_line) {
+    conn.response_len_ = 0;
+    conn.response_sent_ = 0;
+    conn.response_[0] = '\0';
+    append_text(conn.response_, 512, conn.response_len_, status_line);
+    append_text(conn.response_, 512, conn.response_len_, "\r\nContent-Length: 0\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n");
+    return;
+}
+
+void build_ok_response(Connection& conn) {
+    conn.response_len_ = 0;
+    conn.response_sent_ = 0;
+    conn.response_[0] = '\0';
+    append_text(conn.response_, 512, conn.response_len_, "HTTP/1.1 200 OK\r\nContent-Length: ");
+    append_int(conn.response_, 512, conn.response_len_, conn.file_size_);
+    append_text(conn.response_, 512, conn.response_len_, "\r\nContent-Type: ");
+    append_text(conn.response_, 512, conn.response_len_, conn.content_type_);
+    append_text(conn.response_, 512, conn.response_len_, "\r\nConnection: close\r\n\r\n");
+    return;
+}
+
+void close_connection(int epoll_fd, Connection& conn) {
+    if (conn.fd_ >= 0) {
+        [[scpp::unsafe]] { scpp_httpserver_epoll_delete(epoll_fd, conn.fd_); }
+    }
+    conn.reset();
+    return;
+}
+
+int classify_open_error(int err) {
+    if (err == errno_einval()) return 400;
+    if (err == errno_enoent() || err == errno_enotdir()) return 404;
+    if (err == errno_eacces() || err == errno_eperm() || err == errno_eisdir() || err == errno_eloop()) return 403;
+    return 403;
+}
+
+bool open_index_from_directory(int dir_fd, int& out_file_fd, int& out_size, int& out_error) {
+    int file_fd;
+    [[scpp::unsafe]] { file_fd = scpp_httpserver_open_file_readonly(dir_fd, "index.html"); }
+    if (file_fd < 0) {
+        out_error = 0 - file_fd;
+        return false;
+    }
+    int is_dir = 0;
+    int is_reg = 0;
+    int size = 0;
+    int stat_result;
+    [[scpp::unsafe]] { stat_result = scpp_httpserver_stat_fd(file_fd, &is_dir, &is_reg, &size); }
+    if (stat_result < 0) {
+        out_error = 0 - stat_result;
+        close_fd(file_fd);
+        return false;
+    }
+    if (is_reg == 0) {
+        out_error = errno_einval();
+        close_fd(file_fd);
+        return false;
+    }
+    out_file_fd = file_fd;
+    out_size = size;
+    return true;
+}
+
+bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidden_files, const char* relative_path,
+                        int& out_file_fd, int& out_size, int& out_status_code) {
+    int root_fd;
+    [[scpp::unsafe]] { root_fd = scpp_httpserver_open_root_directory(root); }
+    if (root_fd < 0) {
+        out_status_code = 403;
+        return false;
+    }
+    if (text_length(relative_path) == 0) {
+        if (!allow_index_html) {
+            close_fd(root_fd);
+            out_status_code = 403;
+            return false;
+        }
+        int index_fd = -1;
+        int index_size = 0;
+        int index_error = 0;
+        bool ok = open_index_from_directory(root_fd, index_fd, index_size, index_error);
+        close_fd(root_fd);
+        if (!ok) {
+            out_status_code = classify_open_error(index_error);
+            return false;
+        }
+        out_file_fd = index_fd;
+        out_size = index_size;
+        return true;
+    }
+
+    int current_fd = root_fd;
+    int start = 0;
+    char segment[256];
+    while (true) {
+        int end = start;
+        while (relative_path[end] != '\0' && relative_path[end] != '/') { end = end + 1; }
+        int segment_len = end - start;
+        if (segment_len <= 0 || segment_len >= 256) {
+            close_fd(current_fd);
+            out_status_code = 400;
+            return false;
+        }
+        int i = 0;
+        while (i < segment_len) {
+            segment[i] = relative_path[start + i];
+            i = i + 1;
+        }
+        segment[segment_len] = '\0';
+        if (is_dot_segment(segment) || contains_forbidden_segment_char(segment)) {
+            close_fd(current_fd);
+            out_status_code = 400;
+            return false;
+        }
+        if (deny_hidden_files && segment[0] == '.') {
+            close_fd(current_fd);
+            out_status_code = 403;
+            return false;
+        }
+        if (relative_path[end] == '\0') {
+            int file_fd;
+            [[scpp::unsafe]] { file_fd = scpp_httpserver_open_file_readonly(current_fd, segment); }
+            if (file_fd < 0) {
+                int err = 0 - file_fd;
+                close_fd(current_fd);
+                out_status_code = classify_open_error(err);
+                return false;
+            }
+            int is_dir = 0;
+            int is_reg = 0;
+            int size = 0;
+            int stat_result;
+            [[scpp::unsafe]] { stat_result = scpp_httpserver_stat_fd(file_fd, &is_dir, &is_reg, &size); }
+            if (stat_result < 0) {
+                int err = 0 - stat_result;
+                close_fd(file_fd);
+                close_fd(current_fd);
+                out_status_code = classify_open_error(err);
+                return false;
+            }
+            if (is_dir != 0) {
+                if (!allow_index_html) {
+                    close_fd(file_fd);
+                    close_fd(current_fd);
+                    out_status_code = 403;
+                    return false;
+                }
+                int index_fd = -1;
+                int index_size = 0;
+                int index_error = 0;
+                bool ok = open_index_from_directory(file_fd, index_fd, index_size, index_error);
+                close_fd(file_fd);
+                close_fd(current_fd);
+                if (!ok) {
+                    out_status_code = classify_open_error(index_error);
+                    return false;
+                }
+                out_file_fd = index_fd;
+                out_size = index_size;
+                return true;
+            }
+            if (is_reg == 0) {
+                close_fd(file_fd);
+                close_fd(current_fd);
+                out_status_code = 403;
+                return false;
+            }
+            close_fd(current_fd);
+            out_file_fd = file_fd;
+            out_size = size;
+            return true;
+        }
+        int next_fd;
+        [[scpp::unsafe]] { next_fd = scpp_httpserver_open_subdirectory(current_fd, segment); }
+        if (next_fd < 0) {
+            int err = 0 - next_fd;
+            close_fd(current_fd);
+            out_status_code = classify_open_error(err);
+            return false;
+        }
+        close_fd(current_fd);
+        current_fd = next_fd;
+        start = end + 1;
+        if (relative_path[start] == '\0') {
+            if (!allow_index_html) {
+                close_fd(current_fd);
+                out_status_code = 403;
+                return false;
+            }
+            int index_fd = -1;
+            int index_size = 0;
+            int index_error = 0;
+            bool ok = open_index_from_directory(current_fd, index_fd, index_size, index_error);
+            close_fd(current_fd);
+            if (!ok) {
+                out_status_code = classify_open_error(index_error);
+                return false;
+            }
+            out_file_fd = index_fd;
+            out_size = index_size;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parse_request(Connection& conn, const char* root, bool allow_index_html, bool deny_hidden_files) {
+    int header_end = header_end_index(conn.request_, conn.request_len_);
+    if (header_end < 0) return false;
+    int line_end = first_line_end_index(conn.request_, conn.request_len_);
+    if (line_end < 0) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        return true;
+    }
+    int first_space = -1;
+    int second_space = -1;
+    int i = 0;
+    while (i < line_end) {
+        if (conn.request_[i] == ' ') {
+            if (first_space < 0) first_space = i;
+            second_space = i;
+        }
+        i = i + 1;
+    }
+    if (first_space < 0 || second_space <= first_space + 1) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        return true;
+    }
+    if (span_equals(conn.request_, 0, first_space, "GET")) {
+        conn.head_only_ = false;
+    } else if (span_equals(conn.request_, 0, first_space, "HEAD")) {
+        conn.head_only_ = true;
+    } else {
+        build_empty_response(conn, "HTTP/1.1 405 Method Not Allowed");
+        return true;
+    }
+    if (!(span_equals(conn.request_, second_space + 1, line_end, "HTTP/1.1") ||
+          span_equals(conn.request_, second_space + 1, line_end, "HTTP/1.0"))) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        return true;
+    }
+    if (!decode_request_path(conn.request_, first_space + 1, second_space, conn.relative_path_, 512)) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        return true;
+    }
+    int file_fd = -1;
+    int file_size = 0;
+    int status_code = 0;
+    if (!open_resolved_file(root, allow_index_html, deny_hidden_files, conn.relative_path_, file_fd, file_size, status_code)) {
+        if (status_code == 400) build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        else if (status_code == 404) build_empty_response(conn, "HTTP/1.1 404 Not Found");
+        else build_empty_response(conn, "HTTP/1.1 403 Forbidden");
+        return true;
+    }
+    conn.file_fd_ = file_fd;
+    conn.file_size_ = file_size;
+    conn.file_offset_ = 0;
+    conn.use_sendfile_ = true;
+    conn.file_buffer_len_ = 0;
+    conn.file_buffer_sent_ = 0;
+    conn.content_type_ = content_type_for(conn.relative_path_);
+    build_ok_response(conn);
+    return true;
+}
+
+int find_free_slot(Connection connections[64], int max_connections) {
+    int i = 0;
+    while (i < max_connections) {
+        if (connections[i].fd_ < 0) return i;
+        i = i + 1;
+    }
+    return -1;
+}
+
+void accept_ready_connections(int epoll_fd, int listener_fd, Connection connections[64], int max_connections) {
+    while (true) {
+        int fd;
+        [[scpp::unsafe]] { fd = scpp_httpserver_accept_nonblocking(listener_fd); }
+        if (fd < 0) {
+            int err = 0 - fd;
+            if (err == errno_eagain() || err == errno_eintr()) return;
+            return;
+        }
+        int slot = find_free_slot(connections, max_connections);
+        if (slot < 0) {
+            close_fd(fd);
+            continue;
+        }
+        connections[slot].reset();
+        connections[slot].fd_ = fd;
+        [[scpp::unsafe]] { scpp_httpserver_epoll_add(epoll_fd, fd, slot + 1, 1, 0); }
+    }
+    return;
+}
+
+void handle_readable(int epoll_fd, Connection connections[64], int slot, const char* root, bool allow_index_html,
+                     bool deny_hidden_files) {
+    char buffer[2048];
+    while (true) {
+        int n;
+        [[scpp::unsafe]] { n = scpp_httpserver_socket_read(connections[slot].fd_, buffer, 2048); }
+        if (n == 0) {
+            close_connection(epoll_fd, connections[slot]);
+            return;
+        }
+        if (n < 0) {
+            int err = 0 - n;
+            if (err == errno_eagain() || err == errno_eintr()) return;
+            close_connection(epoll_fd, connections[slot]);
+            return;
+        }
+        if (connections[slot].request_len_ + n >= 8192) {
+            connections[slot].request_len_ = 0;
+            connections[slot].request_[0] = '\0';
+            build_empty_response(connections[slot], "HTTP/1.1 400 Bad Request");
+            [[scpp::unsafe]] { scpp_httpserver_epoll_mod(epoll_fd, connections[slot].fd_, slot + 1, 0, 1); }
+            return;
+        }
+        int i = 0;
+        while (i < n) {
+            connections[slot].request_[connections[slot].request_len_] = buffer[i];
+            connections[slot].request_len_ = connections[slot].request_len_ + 1;
+            i = i + 1;
+        }
+        connections[slot].request_[connections[slot].request_len_] = '\0';
+        if (header_end_index(connections[slot].request_, connections[slot].request_len_) >= 0) {
+            parse_request(connections[slot], root, allow_index_html, deny_hidden_files);
+            [[scpp::unsafe]] { scpp_httpserver_epoll_mod(epoll_fd, connections[slot].fd_, slot + 1, 0, 1); }
+            return;
+        }
+    }
+    return;
+}
+
+void handle_writable(int epoll_fd, Connection connections[64], int slot) {
+    while (connections[slot].response_sent_ < connections[slot].response_len_) {
+        int n;
+        [[scpp::unsafe]] {
+            n = scpp_httpserver_socket_write(connections[slot].fd_,
+                                             &connections[slot].response_[connections[slot].response_sent_],
+                                             connections[slot].response_len_ - connections[slot].response_sent_);
+        }
+        if (n < 0) {
+            int err = 0 - n;
+            if (err == errno_eagain() || err == errno_eintr()) return;
+            close_connection(epoll_fd, connections[slot]);
+            return;
+        }
+        connections[slot].response_sent_ = connections[slot].response_sent_ + n;
+    }
+    if (connections[slot].head_only_ || connections[slot].file_fd_ < 0 || connections[slot].file_size_ == 0) {
+        close_connection(epoll_fd, connections[slot]);
+        return;
+    }
+    if (connections[slot].use_sendfile_) {
+        int remaining = connections[slot].file_size_ - connections[slot].file_offset_;
+        if (remaining > 0) {
+            int sent;
+            [[scpp::unsafe]] {
+                sent = scpp_httpserver_sendfile(connections[slot].fd_, connections[slot].file_fd_,
+                                                &connections[slot].file_offset_, remaining);
+            }
+            if (sent < 0) {
+                int err = 0 - sent;
+                if (err == errno_eagain() || err == errno_eintr()) return;
+                connections[slot].use_sendfile_ = false;
+                connections[slot].file_buffer_len_ = 0;
+                connections[slot].file_buffer_sent_ = 0;
+            }
+        }
+    }
+    if (!connections[slot].use_sendfile_) {
+        if (connections[slot].file_buffer_sent_ >= connections[slot].file_buffer_len_) {
+            int remaining = connections[slot].file_size_ - connections[slot].file_offset_;
+            int count = remaining;
+            if (count > 4096) count = 4096;
+            int read_count;
+            [[scpp::unsafe]] {
+                read_count = scpp_httpserver_pread(connections[slot].file_fd_, connections[slot].file_buffer_, count,
+                                                   connections[slot].file_offset_);
+            }
+            if (read_count <= 0) {
+                close_connection(epoll_fd, connections[slot]);
+                return;
+            }
+            connections[slot].file_buffer_len_ = read_count;
+            connections[slot].file_buffer_sent_ = 0;
+        }
+        int wrote;
+        [[scpp::unsafe]] {
+            wrote = scpp_httpserver_socket_write(connections[slot].fd_,
+                                                 &connections[slot].file_buffer_[connections[slot].file_buffer_sent_],
+                                                 connections[slot].file_buffer_len_ - connections[slot].file_buffer_sent_);
+        }
+        if (wrote < 0) {
+            int err = 0 - wrote;
+            if (err == errno_eagain() || err == errno_eintr()) return;
+            close_connection(epoll_fd, connections[slot]);
+            return;
+        }
+        connections[slot].file_buffer_sent_ = connections[slot].file_buffer_sent_ + wrote;
+        connections[slot].file_offset_ = connections[slot].file_offset_ + wrote;
+    }
+    if (connections[slot].file_offset_ >= connections[slot].file_size_) {
+        close_connection(epoll_fd, connections[slot]);
+    }
+    return;
+}
+
+export int run_server(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files) {
+    PlatformEvent events[64];
+    Connection connections[64];
+    if (max_connections > 64) max_connections = 64;
+    int listener_fd;
+    [[scpp::unsafe]] { listener_fd = scpp_httpserver_listen_any(port, 128); }
+    if (listener_fd < 0) return 1;
+    int epoll_fd;
+    [[scpp::unsafe]] { epoll_fd = scpp_httpserver_epoll_create(); }
+    if (epoll_fd < 0) {
+        close_fd(listener_fd);
+        return 1;
+    }
+    int add_result;
+    [[scpp::unsafe]] { add_result = scpp_httpserver_epoll_add(epoll_fd, listener_fd, 0, 1, 0); }
+    if (add_result < 0) {
+        close_fd(epoll_fd);
+        close_fd(listener_fd);
+        return 1;
+    }
+    int init_i = 0;
+    while (init_i < 64) {
+        connections[init_i].initialize_empty();
+        init_i = init_i + 1;
+    }
+    while (true) {
+        int ready;
+        [[scpp::unsafe]] { ready = scpp_httpserver_epoll_wait(epoll_fd, static_cast<void*>(&events[0]), 64, -1); }
+        if (ready < 0) continue;
+        int i = 0;
+        while (i < ready) {
+            if (events[i].token == 0) {
+                accept_ready_connections(epoll_fd, listener_fd, connections, max_connections);
+                i = i + 1;
+                continue;
+            }
+            int slot = events[i].token - 1;
+            if (slot < 0 || slot >= max_connections) { i = i + 1; continue; }
+            if (connections[slot].fd_ < 0) { i = i + 1; continue; }
+            if (events[i].error != 0 || events[i].hangup != 0) {
+                close_connection(epoll_fd, connections[slot]);
+                i = i + 1;
+                continue;
+            }
+            if (events[i].readable != 0) handle_readable(epoll_fd, connections, slot, root, allow_index_html, deny_hidden_files);
+            if (slot >= 0 && slot < max_connections && connections[slot].fd_ >= 0 && events[i].writable != 0) {
+                handle_writable(epoll_fd, connections, slot);
+            }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+} // namespace httpserver
