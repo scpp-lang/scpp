@@ -1,6 +1,7 @@
 module;
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -131,7 +132,12 @@ public:
         }
         auto path_it = import_paths_.find(key);
         if (path_it == import_paths_.end()) {
-            throw DriverError("cannot find partition '" + key + "' (use --import " + key + "=path/to/file)");
+            std::optional<std::string> inferred = infer_partition_path(key);
+            if (inferred.has_value()) {
+                path_it = import_paths_.emplace(key, *inferred).first;
+            } else {
+                throw DriverError("cannot find partition '" + key + "' (use --import " + key + "=path/to/file)");
+            }
         }
 
         partitions_resolving_.insert(key);
@@ -167,6 +173,21 @@ public:
     [[nodiscard]] Program& program_for(const std::string& module_name) { return cache_.at(module_name); }
 
 private:
+    [[nodiscard]] std::optional<std::string> infer_partition_path(const std::string& key) const {
+        size_t colon = key.find(':');
+        if (colon == std::string::npos) return std::nullopt;
+        std::string module_name = key.substr(0, colon);
+        std::string partition_name = key.substr(colon + 1);
+        auto module_it = import_paths_.find(module_name);
+        if (module_it == import_paths_.end()) return std::nullopt;
+        std::filesystem::path module_path(module_it->second);
+        std::filesystem::path candidate =
+            module_path.parent_path() / partition_name /
+            (module_path.stem().string() + "_" + partition_name + module_path.extension().string());
+        if (!std::filesystem::exists(candidate)) return std::nullopt;
+        return candidate.string();
+    }
+
     std::unordered_map<std::string, std::string> import_paths_;
     std::unordered_map<std::string, Program> cache_;
     std::unordered_set<std::string> resolving_;
