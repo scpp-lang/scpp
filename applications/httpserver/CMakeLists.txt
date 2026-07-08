@@ -1,9 +1,16 @@
 set(SCPP_HTTPSERVER_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/httpserver.scpp")
 set(SCPP_HTTPSERVER_DEFAULT_BINARY_PATH "${CMAKE_CURRENT_BINARY_DIR}/httpserver_app_bin")
+option(SCPP_HTTPSERVER_BUILD_STATIC "Build the httpserver app as a fully static binary" OFF)
+
+set(SCPP_HTTPSERVER_BUILD_FLAGS)
+if(SCPP_HTTPSERVER_BUILD_STATIC)
+    list(APPEND SCPP_HTTPSERVER_BUILD_FLAGS --static)
+endif()
 
 add_custom_target(httpserver_app ALL
     COMMAND $<TARGET_FILE:scpp> build ${CMAKE_CURRENT_SOURCE_DIR}/main.scpp -o ${SCPP_HTTPSERVER_DEFAULT_BINARY_PATH}
         --import httpserver=${SCPP_HTTPSERVER_MODULE_PATH}
+        ${SCPP_HTTPSERVER_BUILD_FLAGS}
     BYPRODUCTS "${SCPP_HTTPSERVER_DEFAULT_BINARY_PATH}"
     DEPENDS scpp
         "${CMAKE_CURRENT_SOURCE_DIR}/main.scpp"

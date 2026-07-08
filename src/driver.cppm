@@ -282,8 +282,9 @@ void emit_object_file(std::string_view source, const std::string& object_path,
 // `-lname`/`-Lpath` flags a caller wants forwarded straight to the linker;
 // empty by default (an ordinary, no-C++-interop build needs none of this).
 void link_executable(const std::string& object_path, const std::string& executable_path,
-                      const std::vector<std::string>& extra_link_inputs = {}) {
+                      const std::vector<std::string>& extra_link_inputs = {}, bool static_link = false) {
     std::string command = "cc \"" + object_path + "\"";
+    if (static_link) command += " -static";
     for (const std::string& input : extra_link_inputs) {
         command += " \"" + input + "\"";
     }
@@ -313,7 +314,8 @@ void link_executable(const std::string& object_path, const std::string& executab
 // exactly like ordinary multi-TU C/C++ builds always have.
 void compile_to_executable(std::string_view source, const std::string& executable_path,
                             const std::vector<std::string>& extra_link_inputs = {},
-                            const std::unordered_map<std::string, std::string>& import_paths = {}) {
+                            const std::unordered_map<std::string, std::string>& import_paths = {},
+                            bool static_link = false) {
     ModuleCache cache(import_paths);
     Program program = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
@@ -338,7 +340,7 @@ void compile_to_executable(std::string_view source, const std::string& executabl
     // relies on.
     std::vector<std::string> link_inputs = module_object_paths;
     link_inputs.insert(link_inputs.end(), extra_link_inputs.begin(), extra_link_inputs.end());
-    link_executable(object_path, executable_path, link_inputs);
+    link_executable(object_path, executable_path, link_inputs, static_link);
 
     llvm::sys::fs::remove(object_path);
     for (const std::string& module_object_path : module_object_paths) {

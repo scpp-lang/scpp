@@ -18,7 +18,9 @@ RUN set -eux; \
 
 COPY . .
 
-RUN cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}" && \
+RUN cmake -S . -B build -G Ninja \
+    -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}" \
+    -DSCPP_HTTPSERVER_BUILD_STATIC=ON && \
     cmake --build build -j2
 
 ARG DOCS_BUILD_SCRIPT=docs/site/build.sh
@@ -28,17 +30,12 @@ RUN SITE_OUTPUT_DIR=/work/site-dist \
     DOCS_BUILD_OUTPUT_DIR="${DOCS_BUILD_OUTPUT_DIR}" \
     bash website/build_site_for_docker.sh
 
-FROM ubuntu:24.04 AS runtime
-
-RUN set -eux; \
-    groupadd --system scpp; \
-    useradd --system --gid scpp --home-dir /srv/scpp-site --create-home scpp
+FROM scratch AS runtime
 
 WORKDIR /srv/scpp-site
-COPY --from=build /work/build/applications/httpserver/httpserver_app_bin ./scpp-httpserver
-COPY --from=build /work/site-dist/ ./
-RUN chown -R scpp:scpp /srv/scpp-site && chmod +x ./scpp-httpserver
+COPY --from=build --chown=65532:65532 /work/build/applications/httpserver/httpserver_app_bin /scpp-httpserver
+COPY --from=build --chown=65532:65532 /work/site-dist/ /srv/scpp-site/
 
-USER scpp
+USER 65532:65532
 EXPOSE 8080
-CMD ["./scpp-httpserver"]
+ENTRYPOINT ["/scpp-httpserver"]
