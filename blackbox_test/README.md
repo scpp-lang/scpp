@@ -106,6 +106,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `24_function_pointers` | function pointers (ch05 §5.16): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, automatic address-type selection (ordinary / `[[scpp::unsafe]]` / bodyless `extern "C"` / with-body `extern "C"`), one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution |
 | `25_function_wrappers` | `std::function` / `std::move_only_function` (ch05 §5.18): copyable vs move-only targets, cv/ref-qualified signatures, moved-from behavior |
 | `26_threads` | `std::thread` / `std::jthread`: thread-movable constructor constraint, join/detach/joinable transitions, `jthread` destructor auto-join |
+| `27_unions_packed_layout` | union member unsafe-gating and `[[scpp::packed]]` layout/FFI behavior, including the Linux `epoll_event` / `epoll_data_t` pattern |
 
 ## Testing philosophy
 
@@ -186,8 +187,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **268 cases total**
-- **268/268 passing**
+- **273 cases total**
+- **272/273 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -216,6 +217,12 @@ re-run via `./build/run_tests`:
   `break`/`continue`, ternary `?:`, ordinary forward declarations,
   same-namespace unqualified class lookup, and scalar-comparison
   rejection for mixed scalar types
+- **Union / packed-layout coverage now exists in direct black-box form**:
+  unsafe-gated union member access, raw-byte packed-struct layout, and the
+  real Linux `epoll_event` / `epoll_data_t` FFI declaration shape
 
-No known implementation gaps remain in the full black-box suite at this
-snapshot.
+Current known implementation gap exposed by the new coverage:
+
+- **`27_unions_packed_layout`** (1 failure): `packed_attribute_on_function_is_rejected.scpp`
+  is currently accepted, but spec §9.2 says `[[scpp::packed]]` is only
+  valid on `struct`/`union` declarations.

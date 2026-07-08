@@ -1,0 +1,12 @@
+// docs/book/en/ch01-safety-context.md §1.1 and docs/spec/en/05-unions-and-packed-layout.md §9.1:
+// every current union is untagged, so member access is gated by [[scpp::unsafe]].
+union IntOrChar {
+    int number;
+    char byte;
+};
+
+int main() {
+    IntOrChar value;
+    value.number = 65;
+    return 0;
+}

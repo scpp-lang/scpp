@@ -95,6 +95,7 @@ cmake --build build
 | `24_function_pointers` | 函数指针（ch05 §5.16）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、取地址时的自动类型选择（普通函数 / `[[scpp::unsafe]]` / 无函数体 `extern "C"` / 有函数体 `extern "C"`）、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析 |
 | `25_function_wrappers` | `std::function` / `std::move_only_function`（ch05 §5.18）：可拷贝/仅可移动 target、cv/ref-qualified 签名、moved-from 行为 |
 | `26_threads` | `std::thread` / `std::jthread`：thread-movable 构造约束、join/detach/joinable 状态变化、`jthread` 析构时自动 join |
+| `27_unions_packed_layout` | union 成员的 unsafe 门控，以及 `[[scpp::packed]]` 的布局/FFI 行为，包括 Linux `epoll_event` / `epoll_data_t` 形态 |
 
 ## 测试理念
 
@@ -155,8 +156,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 268 个用例**
-- 运行器原始统计 **268/268 通过**
+- **总共 273 个用例**
+- 运行器原始统计 **272/273 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -178,5 +179,12 @@ cmake --build build
 - **这轮还补上了几类此前"太基础以至于没人单独写测试"的语言角落**：
   `break`/`continue`、三目 `?:`、普通前向声明、同一命名空间内未限定类名查找，
   以及混合标量类型比较必须被拒绝而不是崩溃
+- **union / packed 布局现在也有直接黑盒覆盖**：
+  union 成员访问的 unsafe 门控、packed struct 的原始字节布局，以及
+  Linux `epoll_event` / `epoll_data_t` 的真实 FFI 声明形态
 
-在这个快照下，完整黑盒套件里**没有已知实现缺口**。
+新覆盖暴露出的当前实现缺口：
+
+- **`27_unions_packed_layout`**（1 个失败）：
+  `packed_attribute_on_function_is_rejected.scpp` 目前会被接受，
+  但 spec §9.2 明确规定 `[[scpp::packed]]` 只能用于 `struct`/`union` 声明。

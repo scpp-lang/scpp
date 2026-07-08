@@ -1,0 +1,80 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.2's epoll note:
+// this is the real Linux epoll_event / epoll_data_t packed FFI shape.
+extern "C" {
+    union [[scpp::packed]] epoll_data_t {
+        void* ptr;
+        int fd;
+        uint32_t u32;
+        uint64_t u64;
+    };
+
+    struct [[scpp::packed]] epoll_event {
+        uint32_t events;
+        epoll_data_t data;
+    };
+
+    int epoll_create1(int flags);
+    int epoll_ctl(int epoll_fd, int op, int fd, epoll_event* event);
+    int epoll_wait(int epoll_fd, epoll_event* events, int max_events, int timeout_ms);
+    int pipe(int* fds);
+    long write(int fd, const void* buffer, unsigned long count);
+    long read(int fd, void* buffer, unsigned long count);
+    int close(int fd);
+}
+
+int has_flag(int bits, int flag) {
+    int quotient = bits / flag;
+    if ((quotient - (quotient / 2) * 2) != 0) return 1;
+    return 0;
+}
+
+int main() {
+    int fds[2];
+    int epfd;
+    epoll_event ev;
+    epoll_event got[1];
+    char byte = 'x';
+    char out = '\0';
+
+    [[scpp::unsafe]] {
+        if (pipe(&fds[0]) != 0) return 1;
+        epfd = epoll_create1(0);
+    }
+    if (epfd < 0) return 2;
+
+    ev.events = static_cast<uint32_t>(1);
+    [[scpp::unsafe]] { ev.data.u32 = static_cast<uint32_t>(123); }
+
+    int ctl;
+    [[scpp::unsafe]] { ctl = epoll_ctl(epfd, 1, fds[0], &ev); }
+    if (ctl != 0) return 3;
+
+    long wrote;
+    [[scpp::unsafe]] { wrote = write(fds[1], &byte, 1); }
+    if (wrote != 1) return 4;
+
+    int ready;
+    [[scpp::unsafe]] { ready = epoll_wait(epfd, &got[0], 1, 1000); }
+    if (ready != 1) return 5;
+
+    int token;
+    uint32_t flags;
+    [[scpp::unsafe]] {
+        token = static_cast<int>(got[0].data.u32);
+        flags = got[0].events;
+    }
+    if (token != 123) return 6;
+    if (has_flag(static_cast<int>(flags), 1) == 0) return 7;
+
+    long nread;
+    [[scpp::unsafe]] { nread = read(fds[0], &out, 1); }
+    if (nread != 1) return 8;
+    if (out != 'x') return 9;
+
+    [[scpp::unsafe]] {
+        close(fds[0]);
+        close(fds[1]);
+        close(epfd);
+    }
+    return 0;
+}
