@@ -197,6 +197,9 @@ private:
         llvm::StructType* llvm_type = nullptr;
         std::vector<std::string> field_names;
         std::vector<Type> field_types;
+        bool is_union = false;
+        bool is_packed = false;
+        llvm::Align abi_align = llvm::Align(1);
 
         // ch05 §5.14: finds `name`'s own index in `field_names`, searching
         // from the *end* backwards -- needed since a derived class's
@@ -227,6 +230,7 @@ private:
     struct LValue {
         llvm::Value* ptr;
         Type type;
+        std::optional<llvm::Align> alignment;
     };
 
     // codegen_call's result: the raw LLVM call value, plus the resolved
@@ -783,8 +787,8 @@ private:
 
     // Recursively verifies a type is trivial per the language spec (ch04):
     // scalars, raw pointers (any pointee), fixed-size arrays of trivial
-    // types, and structs whose fields are themselves all trivial.
-    // `in_progress` detects a struct containing itself *by value*, which
+    // types, and structs/unions whose fields are themselves all trivial.
+    // `in_progress` detects a struct/union containing itself *by value*, which
     // must be rejected (as in C, this would be an infinitely-sized type);
     // self-reference via pointer is fine since pointers don't recurse here.
     void validate_trivial(const Type& type, std::vector<std::string>& in_progress) {
@@ -844,14 +848,17 @@ private:
             try {
                 validate_trivial(field.type, in_progress);
             } catch (const CodegenError& e) {
-                throw CodegenError("struct '" + def.name + "' field '" + field.name + "': " + e.what() +
-                                    " (only scalars, pointers, trivial structs, and fixed-size arrays "
-                                    "of trivial types are allowed in a struct; see spec ch04)",
+                throw CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
+                                        field.name + "': " + e.what() +
+                                        " (only scalars, pointers, trivial structs/unions, and fixed-size arrays "
+                                        "of trivial types are allowed here; see spec ch04)",
                     current_loc_);
             }
         }
 
         StructInfo info;
+        info.is_union = def.is_union;
+        info.is_packed = def.is_packed;
         std::vector<llvm::Type*> llvm_field_types;
         llvm_field_types.reserve(def.fields.size());
         for (const StructField& field : def.fields) {
@@ -859,7 +866,40 @@ private:
             info.field_types.push_back(field.type);
             llvm_field_types.push_back(to_llvm_type(field.type));
         }
-        info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "struct." + def.name);
+        if (!def.is_union) {
+            info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "struct." + def.name, def.is_packed);
+        } else {
+            if (llvm_field_types.empty()) {
+                throw CodegenError("union '" + def.name + "' must declare at least one field",
+                    current_loc_);
+            }
+            size_t align_value = def.is_packed ? 1 : 0;
+            size_t max_size = 0;
+            size_t max_rep_align = 0;
+            llvm::Type* rep_type = llvm_field_types[0];
+            size_t rep_size = module_->getDataLayout().getTypeAllocSize(rep_type);
+            for (llvm::Type* field_type : llvm_field_types) {
+                size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
+                size_t field_align = def.is_packed ? 1 : module_->getDataLayout().getABITypeAlign(field_type).value();
+                if (field_size > max_size) max_size = field_size;
+                if (field_align > align_value) align_value = field_align;
+                if (field_align > max_rep_align ||
+                    (field_align == max_rep_align && field_size > rep_size)) {
+                    rep_type = field_type;
+                    rep_size = field_size;
+                    max_rep_align = field_align;
+                }
+            }
+            if (align_value == 0) align_value = 1;
+            size_t union_size = ((max_size + align_value - 1) / align_value) * align_value;
+            std::vector<llvm::Type*> storage_fields;
+            storage_fields.push_back(rep_type);
+            if (union_size > rep_size) {
+                storage_fields.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), union_size - rep_size));
+            }
+            info.llvm_type = llvm::StructType::create(*context_, storage_fields, "union." + def.name, def.is_packed);
+        }
+        info.abi_align = module_->getDataLayout().getABITypeAlign(info.llvm_type);
         structs_[def.name] = std::move(info);
         declaring_aggregates_.erase(def.name);
     }
@@ -908,6 +948,7 @@ private:
             llvm_field_types.push_back(to_llvm_type(field.type));
         }
         info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "class." + def.name);
+        info.abi_align = module_->getDataLayout().getABITypeAlign(info.llvm_type);
         structs_[def.name] = std::move(info);
         declaring_aggregates_.erase(def.name);
     }
@@ -1032,7 +1073,27 @@ private:
             current_loc_);
     }
 
-    void zero_initialize_storage(llvm::Value* ptr, const Type& type) {
+    [[nodiscard]] std::optional<llvm::Align> alignment_for_type(const Type& type) const {
+        if (type.kind != TypeKind::Named) return std::nullopt;
+        auto it = structs_.find(type.name);
+        if (it == structs_.end()) return std::nullopt;
+        return it->second.abi_align;
+    }
+
+    llvm::LoadInst* create_load(llvm::Type* type, llvm::Value* ptr, std::optional<llvm::Align> alignment,
+                                const llvm::Twine& name = "") {
+        llvm::LoadInst* load = builder_->CreateLoad(type, ptr, name);
+        if (alignment.has_value()) load->setAlignment(*alignment);
+        return load;
+    }
+
+    llvm::StoreInst* create_store(llvm::Value* value, llvm::Value* ptr, std::optional<llvm::Align> alignment) {
+        llvm::StoreInst* store = builder_->CreateStore(value, ptr);
+        if (alignment.has_value()) store->setAlignment(*alignment);
+        return store;
+    }
+
+    void zero_initialize_storage(llvm::Value* ptr, const Type& type, std::optional<llvm::Align> alignment = std::nullopt) {
         llvm::Type* llvm_type = to_llvm_type(type);
         switch (type.kind) {
             case TypeKind::Named:
@@ -1042,11 +1103,11 @@ private:
                 builder_->CreateMemSet(ptr,
                                        llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), 0),
                                        size,
-                                       llvm::Align(1));
+                                       alignment.value_or(llvm::Align(1)));
                 return;
             }
             default:
-                builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), ptr);
+                create_store(llvm::Constant::getNullValue(llvm_type), ptr, alignment);
                 return;
         }
     }
@@ -2135,9 +2196,18 @@ private:
                 if (field_index_opt.has_value() &&
                     info.field_types[*field_index_opt].kind == TypeKind::FunctionPointer) {
                     const Type& member_type = info.field_types[*field_index_opt];
-                    llvm::Value* field_ptr =
-                        builder_->CreateStructGEP(info.llvm_type, base.ptr, *field_index_opt, expr.name + ".fnptr");
-                    llvm::Value* callee_value = builder_->CreateLoad(to_llvm_type(member_type), field_ptr, expr.name + ".fn");
+                    llvm::Value* field_ptr = info.is_union
+                                                 ? builder_->CreateBitCast(base.ptr,
+                                                                           llvm::PointerType::getUnqual(to_llvm_type(member_type)),
+                                                                           expr.name + ".fnptr")
+                                                 : builder_->CreateStructGEP(info.llvm_type, base.ptr, *field_index_opt,
+                                                                             expr.name + ".fnptr");
+                    llvm::Value* callee_value =
+                        create_load(to_llvm_type(member_type), field_ptr,
+                                    info.is_union ? base.alignment
+                                                  : (info.is_packed ? std::optional<llvm::Align>(llvm::Align(1))
+                                                                    : std::nullopt),
+                                    expr.name + ".fn");
                     std::vector<llvm::Value*> args =
                         codegen_call_args_for_types(expr.args, member_type.function_params);
                     auto* fn_type =
@@ -2438,7 +2508,7 @@ private:
         if (lv.type.kind == TypeKind::Array) {
             return lv.ptr;
         }
-        return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
+        return create_load(to_llvm_type(lv.type), lv.ptr, lv.alignment, "loadtmp");
     }
 
     // `bool` is stored/passed/returned as a full byte (i8; see
@@ -2715,7 +2785,7 @@ private:
                     // `*p` addresses (see its own Unary case), this just
                     // reads the value stored there.
                     LValue lv = codegen_lvalue(expr);
-                    return builder_->CreateLoad(to_llvm_type(lv.type), lv.ptr, "loadtmp");
+                    return create_load(to_llvm_type(lv.type), lv.ptr, lv.alignment, "loadtmp");
                 }
                 if (expr.unary_op == UnaryOp::AddressOf) {
                     if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
@@ -2785,8 +2855,8 @@ private:
                 // object) -- see codegen_call_destructor_unless_moved.
                 LValue lv = codegen_lvalue(*expr.lhs);
                 llvm::Type* llvm_type = to_llvm_type(lv.type);
-                llvm::Value* old_value = builder_->CreateLoad(llvm_type, lv.ptr, "movetmp");
-                zero_initialize_storage(lv.ptr, lv.type);
+                llvm::Value* old_value = create_load(llvm_type, lv.ptr, lv.alignment, "movetmp");
+                zero_initialize_storage(lv.ptr, lv.type, lv.alignment);
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto local_it = locals_.find(expr.lhs->name);
                     if (local_it != locals_.end() && local_it->second.moved_flag != nullptr) {
@@ -2849,7 +2919,7 @@ private:
                 ident.loc = expr.loc;
                 ident.name = capture.name;
                 llvm::Value* address = codegen_lvalue(ident).ptr;
-                builder_->CreateStore(address, field_ptr);
+                create_store(address, field_ptr, std::nullopt);
                 continue;
             }
             Expr ident;
@@ -2868,7 +2938,7 @@ private:
             }
             llvm::Value* value = codegen_value_for_target(source, field_type);
             check_store_type(value, to_llvm_type(field_type), "capture '" + capture.name + "'");
-            builder_->CreateStore(value, field_ptr);
+            create_store(value, field_ptr, std::nullopt);
         }
         return closure;
     }
@@ -3085,7 +3155,7 @@ private:
             } else {
                 llvm::Type* llvm_field_type = to_llvm_type(field_type);
                 llvm::Value* value = builder_->CreateLoad(llvm_field_type, src_field, "copiedfield");
-                builder_->CreateStore(value, dest_field);
+                create_store(value, dest_field, std::nullopt);
             }
         }
     }
@@ -3117,7 +3187,7 @@ private:
             } else {
                 llvm::Type* llvm_field_type = to_llvm_type(field_type);
                 llvm::Value* value = builder_->CreateLoad(llvm_field_type, src_field, "copiedfield");
-                builder_->CreateStore(value, dest_field);
+                create_store(value, dest_field, std::nullopt);
             }
         }
     }
@@ -3555,11 +3625,11 @@ private:
                     // caller (reads, writes-through, and Member/Subscript
                     // base resolution) transparently operates on the
                     // referent, exactly like a real C++ reference.
-                    llvm::Value* referent_ptr = builder_->CreateLoad(
-                        llvm::PointerType::getUnqual(*context_), it->second.alloca, "deref");
-                    return LValue{referent_ptr, *it->second.type.pointee};
+                    llvm::Value* referent_ptr =
+                        create_load(llvm::PointerType::getUnqual(*context_), it->second.alloca, std::nullopt, "deref");
+                    return LValue{referent_ptr, *it->second.type.pointee, alignment_for_type(*it->second.type.pointee)};
                 }
-                return LValue{it->second.alloca, it->second.type};
+                return LValue{it->second.alloca, it->second.type, alignment_for_type(it->second.type)};
             }
 
             case ExprKind::Member: {
@@ -3571,13 +3641,20 @@ private:
                 const StructInfo& info = structs_.at(base.type.name);
                 std::optional<size_t> field_index_opt = info.find_field_index(expr.name);
                 if (!field_index_opt.has_value()) {
-                    throw CodegenError("struct '" + base.type.name + "' has no field '" + expr.name + "'",
+                    throw CodegenError(std::string(info.is_union ? "union '" : "struct '") + base.type.name +
+                                           "' has no field '" + expr.name + "'",
                         current_loc_);
                 }
                 size_t field_index = *field_index_opt;
-                llvm::Value* field_ptr =
-                    builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
                 const Type& field_type = info.field_types[field_index];
+                std::optional<llvm::Align> field_alignment =
+                    info.is_union ? (base.alignment.has_value() ? base.alignment : alignment_for_type(base.type))
+                                  : (info.is_packed ? std::optional<llvm::Align>(llvm::Align(1))
+                                                    : alignment_for_type(field_type));
+                llvm::Value* field_ptr = info.is_union
+                                             ? builder_->CreateBitCast(base.ptr, llvm::PointerType::getUnqual(to_llvm_type(field_type)),
+                                                                       expr.name + ".unionfield")
+                                             : builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
                 if (field_type.kind == TypeKind::Reference) {
                     // ch05 §5.12: a Reference-typed field (e.g. a
                     // closure's own by-reference capture) stores just
@@ -3589,10 +3666,10 @@ private:
                     // operates on the referent, not the field's own
                     // storage slot.
                     llvm::Value* referent_ptr =
-                        builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), field_ptr, "fieldderef");
-                    return LValue{referent_ptr, *field_type.pointee};
+                        create_load(llvm::PointerType::getUnqual(*context_), field_ptr, field_alignment, "fieldderef");
+                    return LValue{referent_ptr, *field_type.pointee, alignment_for_type(*field_type.pointee)};
                 }
-                return LValue{field_ptr, field_type};
+                return LValue{field_ptr, field_type, field_alignment};
             }
 
             case ExprKind::Subscript: {
@@ -3612,14 +3689,14 @@ private:
                     emit_span_bounds_check(index, size);
                     llvm::Value* elem_ptr =
                         builder_->CreateGEP(to_llvm_type(*base.type.pointee), data, {index}, "elemtmp");
-                    return LValue{elem_ptr, *base.type.pointee};
+                    return LValue{elem_ptr, *base.type.pointee, alignment_for_type(*base.type.pointee)};
                 }
                 if (base.type.kind == TypeKind::Pointer) {
                     llvm::Value* data = builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), base.ptr, "data");
                     llvm::Value* index = codegen_expr(*expr.rhs);
                     llvm::Value* elem_ptr =
                         builder_->CreateGEP(to_llvm_type(*base.type.pointee), data, {index}, "elemtmp");
-                    return LValue{elem_ptr, *base.type.pointee};
+                    return LValue{elem_ptr, *base.type.pointee, alignment_for_type(*base.type.pointee)};
                 }
                 if (base.type.kind != TypeKind::Array) {
                     throw CodegenError("subscript on a non-array type",
@@ -3629,7 +3706,7 @@ private:
                 llvm::Value* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0);
                 llvm::Value* elem_ptr =
                     builder_->CreateGEP(to_llvm_type(base.type), base.ptr, {zero, index}, "elemtmp");
-                return LValue{elem_ptr, *base.type.element};
+                return LValue{elem_ptr, *base.type.element, alignment_for_type(*base.type.element)};
             }
 
             case ExprKind::Call: {
@@ -3654,7 +3731,8 @@ private:
                     throw CodegenError("expression is not assignable",
                         current_loc_);
                 }
-                return LValue{result.value, *result.callee_def->return_type.pointee};
+                return LValue{result.value, *result.callee_def->return_type.pointee,
+                              alignment_for_type(*result.callee_def->return_type.pointee)};
             }
 
             case ExprKind::Lambda: {
@@ -3666,7 +3744,8 @@ private:
                 // branch calls codegen_lvalue on it uniformly, regardless
                 // of receiver shape).
                 llvm::Value* ptr = codegen_construct_lambda(expr);
-                return LValue{ptr, Type{.kind = TypeKind::Named, .name = expr.name}};
+                return LValue{ptr, Type{.kind = TypeKind::Named, .name = expr.name},
+                              alignment_for_type(Type{.kind = TypeKind::Named, .name = expr.name})};
             }
 
             case ExprKind::Move:
@@ -3706,7 +3785,8 @@ private:
                                                    "' must return a reference to be assignable",
                                 current_loc_);
                         }
-                        return LValue{referent_ptr, *callee_def->return_type.pointee};
+                        return LValue{referent_ptr, *callee_def->return_type.pointee,
+                                      alignment_for_type(*callee_def->return_type.pointee)};
                     }
                 }
                 if (operand.type.kind != TypeKind::Pointer) {
@@ -3730,8 +3810,8 @@ private:
                 // it as the new base address, exactly like a reference's
                 // own auto-deref above.
                 llvm::Value* pointee_ptr =
-                    builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), operand.ptr, "deref");
-                return LValue{pointee_ptr, *operand.type.pointee};
+                    create_load(llvm::PointerType::getUnqual(*context_), operand.ptr, operand.alignment, "deref");
+                return LValue{pointee_ptr, *operand.type.pointee, alignment_for_type(*operand.type.pointee)};
             }
 
             default:
@@ -3851,7 +3931,7 @@ private:
                 }
                 codegen_destroy_old_class_state_for_move_assign(lv.ptr, lv.type.name, target_moved_flag);
             }
-            builder_->CreateStore(value, lv.ptr);
+            create_store(value, lv.ptr, lv.alignment);
             if (lv.type.kind == TypeKind::Named && expr.lhs->kind == ExprKind::Identifier) {
                 // spec §6.2(4)/§6.4: an assignment always leaves its own
                 // target in the initialized state, holding the newly

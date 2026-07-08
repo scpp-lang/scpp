@@ -1,0 +1,8 @@
+union Payload { int i; char c; };
+int main() {
+    Payload p;
+    [[scpp::unsafe]] {
+        p.i = 42;
+        return p.i;
+    }
+}

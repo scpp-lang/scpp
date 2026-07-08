@@ -589,12 +589,42 @@ void test_struct_declaration() {
     expect(program.structs.size() == 1, "struct_declaration: expected 1 struct");
     const scpp::StructDef& def = program.structs[0];
     expect(def.name == "Point", "struct_declaration: name should be 'Point'");
+    expect(!def.is_union, "struct_declaration: ordinary struct should not be marked as a union");
+    expect(!def.is_packed, "struct_declaration: ordinary struct should not be marked as packed");
     expect(def.fields.size() == 2, "struct_declaration: expected 2 fields");
     expect(is_named_type(def.fields[0].type, "int") && def.fields[0].name == "x",
            "struct_declaration: field 0 should be 'int x'");
     expect(is_named_type(def.fields[1].type, "int") && def.fields[1].name == "y",
            "struct_declaration: field 1 should be 'int y'");
     expect(program.functions.size() == 1, "struct_declaration: expected 1 function after the struct");
+}
+
+void test_union_declaration() {
+    scpp::Program program = scpp::parse("union Payload { int i; char c; }; int f() { return 0; }");
+    expect(program.structs.size() == 1, "union_declaration: expected 1 aggregate");
+    const scpp::StructDef& def = program.structs[0];
+    expect(def.name == "Payload", "union_declaration: name should be 'Payload'");
+    expect(def.is_union, "union_declaration: should be marked as a union");
+    expect(!def.is_packed, "union_declaration: plain union should not be marked as packed");
+    expect(def.fields.size() == 2, "union_declaration: expected 2 members");
+    expect(is_named_type(def.fields[0].type, "int") && def.fields[0].name == "i",
+           "union_declaration: member 0 should be 'int i'");
+    expect(is_named_type(def.fields[1].type, "char") && def.fields[1].name == "c",
+           "union_declaration: member 1 should be 'char c'");
+}
+
+void test_packed_struct_and_union_attributes_parse() {
+    scpp::Program program = scpp::parse(
+        "struct [[scpp::packed]] Event { char tag; int value; };"
+        "union [[scpp::packed]] Bits { int i; char raw[4]; };"
+        "int f() { return 0; }");
+    expect(program.structs.size() == 2, "packed_struct_and_union_attributes_parse: expected 2 aggregates");
+    expect(program.structs[0].name == "Event", "packed_struct_and_union_attributes_parse: first aggregate");
+    expect(program.structs[0].is_packed, "packed_struct_and_union_attributes_parse: struct should be packed");
+    expect(!program.structs[0].is_union, "packed_struct_and_union_attributes_parse: Event should be a struct");
+    expect(program.structs[1].name == "Bits", "packed_struct_and_union_attributes_parse: second aggregate");
+    expect(program.structs[1].is_packed, "packed_struct_and_union_attributes_parse: union should be packed");
+    expect(program.structs[1].is_union, "packed_struct_and_union_attributes_parse: Bits should be a union");
 }
 
 void test_struct_variable_and_member_access() {
@@ -2916,6 +2946,8 @@ int main() {
     test_parenthesized_expression();
     test_parse_error_on_missing_semicolon();
     test_struct_declaration();
+    test_union_declaration();
+    test_packed_struct_and_union_attributes_parse();
     test_struct_variable_and_member_access();
     test_nested_member_access();
     test_pointer_field_type();

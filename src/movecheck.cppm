@@ -3183,6 +3183,21 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 
         case ExprKind::Member: {
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+            if (report_errors && body.program != nullptr) {
+                std::optional<Type> base_type = infer_expr_type(*expr.lhs, body, signatures);
+                if (base_type.has_value()) {
+                    const Type& named = base_type->kind == TypeKind::Reference ? *base_type->pointee : *base_type;
+                    if (named.kind == TypeKind::Named) {
+                        for (const StructDef& def : body.program->structs) {
+                            if (def.name == named.name && def.is_union && state.unsafe_depth == 0) {
+                                throw DataflowError("accessing a union member requires [[scpp::unsafe]] "
+                                                    "(FFI union storage may alias multiple representations)",
+                                    state.current_loc);
+                            }
+                        }
+                    }
+                }
+            }
             // ch04 §4.2: real, unrestricted C++ access control -- a
             // member variable may be `public` or `private` in any
             // combination. External access (from outside the class's

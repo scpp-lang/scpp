@@ -20,9 +20,6 @@
 #ifndef SCPP_HTTPSERVER_MODULE_PATH
 #error "SCPP_HTTPSERVER_MODULE_PATH must be defined"
 #endif
-#ifndef SCPP_HTTPSERVER_PLATFORM_LIB_PATH
-#error "SCPP_HTTPSERVER_PLATFORM_LIB_PATH must be defined"
-#endif
 #ifndef SCPP_HTTPSERVER_TESTDATA_DIR
 #error "SCPP_HTTPSERVER_TESTDATA_DIR must be defined"
 #endif
@@ -99,8 +96,7 @@ std::filesystem::path build_server_binary(const std::filesystem::path& root, int
     std::ostringstream cmd;
     cmd << SCPP_BINARY_PATH << " build " << source.string()
         << " -o " << binary.string()
-        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH
-        << " --link " << SCPP_HTTPSERVER_PLATFORM_LIB_PATH;
+        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH;
     int rc = std::system(cmd.str().c_str());
     expect(rc == 0, "generated httpserver app compiles");
     return binary;

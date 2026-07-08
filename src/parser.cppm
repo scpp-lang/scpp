@@ -1784,6 +1784,13 @@ private:
             def.is_exported = is_exported;
             check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
+        } else if (check(TokenKind::KwUnion)) {
+            reject_unsafe_if_requested("a 'union' declaration");
+            SourceLocation loc = current_loc();
+            StructDef def = parse_union_def();
+            def.is_exported = is_exported;
+            check_export_namespace(program, is_exported, def.namespace_path, loc, "union '" + def.name + "'");
+            program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwClass)) {
             reject_unsafe_if_requested("a 'class' declaration");
             parse_class_def(program, is_exported);
@@ -1861,6 +1868,11 @@ private:
                 def.is_exported = is_exported;
                 check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
                 program.structs.push_back(std::move(def));
+            } else if (after_header_kind == TokenKind::KwUnion) {
+                reject_unsafe_if_requested("a 'union' declaration");
+                const Token& tok = peek_at(after_header);
+                throw ParseError(tok.line, tok.column,
+                                  "generic unions are not supported in this version");
             } else if (after_header_kind == TokenKind::KwConcept) {
                 reject_unsafe_if_requested("a 'concept' declaration");
                 parse_concept_def(program, is_exported);
@@ -1945,10 +1957,12 @@ private:
                 advance(); // '{'
                 while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
                     if (check(TokenKind::KwStruct)) {
-                        const Token& tok = peek();
-                        throw ParseError(tok.line, tok.column,
-                                          "an 'extern \"C\"' block currently only supports function "
-                                          "declarations/definitions, not structs");
+                        program.structs.push_back(parse_struct_def());
+                        continue;
+                    }
+                    if (check(TokenKind::KwUnion)) {
+                        program.structs.push_back(parse_union_def());
+                        continue;
                     }
                     SourceLocation item_loc = current_loc();
                     Function item_fn = parse_function(/*is_extern_c=*/true);
@@ -2087,6 +2101,7 @@ private:
         ParsedAttributes attrs = parse_attribute_specifier_seq();
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
+        def.is_packed = attrs.has("packed");
         if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
@@ -2156,6 +2171,49 @@ private:
                     class_names_.erase(param.name);
                 }
             }
+        }
+        return def;
+    }
+
+    StructDef parse_union_def() {
+        expect(TokenKind::KwUnion, "'union'");
+        StructDef def;
+        def.is_union = true;
+        ParsedAttributes attrs = parse_attribute_specifier_seq();
+        def.thread_movable_override = attrs.has("thread_movable");
+        def.thread_shareable_override = attrs.has("thread_shareable");
+        def.is_packed = attrs.has("packed");
+        if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations");
+        }
+        std::string bare_name = std::string(expect(TokenKind::Identifier, "union name").text);
+        def.name = qualify_name(bare_name);
+        def.namespace_path = namespace_stack_;
+        struct_names_.insert(def.name);
+
+        expect(TokenKind::LBrace, "'{'");
+        bool saw_field = false;
+        while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+            StructField field;
+            Type base = parse_type();
+            if (starts_function_pointer_declarator()) {
+                field.type = parse_function_pointer_declarator(std::move(base), field.name);
+            } else {
+                field.name = std::string(expect(TokenKind::Identifier, "field name").text);
+                field.type = parse_array_suffix(base);
+            }
+            expect(TokenKind::Semicolon, "';'");
+            def.fields.push_back(std::move(field));
+            saw_field = true;
+        }
+        expect(TokenKind::RBrace, "'}'");
+        expect(TokenKind::Semicolon, "';'");
+        if (!saw_field) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "a union must declare at least one field");
         }
         return def;
     }
@@ -2864,6 +2922,10 @@ private:
         SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
         ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        if (class_attrs.has("packed")) {
+            throw ParseError(loc.line, loc.column,
+                             "'[[scpp::packed]]' is only supported on struct/union declarations");
+        }
         if (!class_attrs.scpp_tokens.empty() || class_attrs.thread_movable_if_movable_expr ||
             class_attrs.thread_movable_if_shareable_expr) {
             throw ParseError(loc.line, loc.column,
@@ -2913,6 +2975,10 @@ private:
             }
         }
         ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        if (class_attrs.has("packed")) {
+            throw ParseError(loc.line, loc.column,
+                             "'[[scpp::packed]]' is only supported on struct/union declarations");
+        }
         std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
         std::string qualified_class_name = qualify_name(class_name);
         auto primary_it = ordinary_generic_type_template_params_.find(qualified_class_name);
@@ -3043,6 +3109,10 @@ private:
         // ch05 §5.15: `class [[scpp::thread_movable]] Name { ... };` --
         // see parse_struct_def's identical handling.
         ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        if (class_attrs.has("packed")) {
+            throw ParseError(loc.line, loc.column,
+                             "'[[scpp::packed]]' is only supported on struct/union declarations");
+        }
         // The bare, unqualified name as written -- used for the
         // constructor/destructor spelling checks below (`~string()`,
         // `string(...)`  inside the class body itself always use the
