@@ -2484,20 +2484,22 @@ private:
                 return builder_->CreateGlobalString(expr.name, "str");
 
             case ExprKind::Cast: {
-                // ch06 §6: `static_cast<T>(expr)`/`(T)expr` -- the only
-                // way to convert between two distinct scpp scalar types.
-                // Adapts a literal operand to whatever type it actually
-                // has to be read as first (e.g. `(int64_t)5` needs `5`
-                // materialized directly as an i64 constant, not the
-                // default i32 then converted -- though both give the
-                // same bit pattern here, this stays consistent with
-                // every other literal-context site), then dispatches on
-                // the (source, target) type pair.
+                // ch06 §6 / spec §5.1(5.2): `static_cast<T>(expr)`/`(T)expr`
+                // converts either between scalar types, or between raw
+                // pointer types (movecheck already enforces the latter's
+                // unsafe-context requirement). With LLVM opaque pointers,
+                // every raw pointer lowers to the same `ptr` type, so a
+                // pointer-to-pointer cast is a codegen no-op.
                 std::optional<Type> source_type = infer_type(*expr.lhs);
-                if (!source_type.has_value() || source_type->kind != TypeKind::Named ||
-                    expr.type.kind != TypeKind::Named) {
-                    throw CodegenError("cast is only supported between scalar types in this version",
-                        current_loc_);
+                if (!source_type.has_value()) {
+                    throw CodegenError("cast operand has no inferable type", current_loc_);
+                }
+                if (source_type->kind == TypeKind::Pointer && expr.type.kind == TypeKind::Pointer) {
+                    return codegen_value_for_target(*expr.lhs, *source_type);
+                }
+                if (source_type->kind != TypeKind::Named || expr.type.kind != TypeKind::Named) {
+                    throw CodegenError("cast is only supported between scalar types or raw pointer types in this version",
+                                       current_loc_);
                 }
                 llvm::Value* operand = codegen_value_for_target(*expr.lhs, *source_type);
                 return codegen_scalar_cast(operand, *source_type, expr.type);
