@@ -15,7 +15,7 @@
 
 | 路径 | 作用 |
 |---|---|
-| `std.cpp` | `std` 模块的主接口单元；通过 `export import :...;` 重新导出各分区 |
+| `std.scpp` | `std` 模块的主接口单元；通过 `export import :...;` 重新导出各分区 |
 | `string/` | `std:string` 分区，以及桥接真实 C++ `std::string` 的原生 `scpp_string_wrapper` |
 | `memory/` | `std:memory` 分区；目前是纯 scpp（`std::unique_ptr`、`std::make_unique`） |
 | `CMakeLists.txt` | 构建各 stdlib 分区所需的原生辅助库 |
@@ -31,16 +31,16 @@ import std;
 构建时显式传入模块映射，例如：
 
 ```sh
-scpp build app.cpp -o app \
-  --import std=stdlib/std.cpp \
-  --import std:string=stdlib/string/std_string.cpp \
-  --import std:memory=stdlib/memory/std_memory.cpp \
+scpp build app.scpp -o app \
+  --import std=stdlib/std.scpp \
+  --import std:string=stdlib/string/std_string.scpp \
+  --import std:memory=stdlib/memory/std_memory.scpp \
   --link build/stdlib/libscpp_string_wrapper.a
 ```
 
 说明：
 
-- `std.cpp` 负责聚合各个分区；源码消费者不应直接在代码里写
+- `std.scpp` 负责聚合各个分区；源码消费者不应直接在代码里写
   `import std:string;` 或 `import std:memory;`
 - 只有需要原生辅助库的分区才需要 `--link`。当前只有 `std:string`
   需要；`std:memory` 是纯 scpp，不需要额外原生库
@@ -50,13 +50,13 @@ scpp build app.cpp -o app \
 
 ### `std:string`
 
-- 文件：`string/std_string.cpp`
+- 文件：`string/std_string.scpp`
 - 底层实现：`string/scpp_string_wrapper.{h,cpp}`
 - 通过 `extern "C"` 包装函数提供一小部分 `std::string` 能力
 
 ### `std:memory`
 
-- 文件：`memory/std_memory.cpp`
+- 文件：`memory/std_memory.scpp`
 - 纯 scpp 实现
 - 提供 `std::unique_ptr<T>` 和 `std::make_unique<T>(...)`
 

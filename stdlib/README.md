@@ -18,7 +18,7 @@ The project convention is:
 
 | Path | Role |
 |---|---|
-| `std.cpp` | Primary interface unit of module `std`; re-exports partitions with `export import :...;` |
+| `std.scpp` | Primary interface unit of module `std`; re-exports partitions with `export import :...;` |
 | `string/` | `std:string` partition plus the native `scpp_string_wrapper` bridge to real C++ `std::string` |
 | `memory/` | `std:memory` partition; currently pure scpp (`std::unique_ptr`, `std::make_unique`) |
 | `CMakeLists.txt` | Builds native helper libraries needed by stdlib partitions |
@@ -34,16 +34,16 @@ import std;
 and the build passes the module mappings explicitly, for example:
 
 ```sh
-scpp build app.cpp -o app \
-  --import std=stdlib/std.cpp \
-  --import std:string=stdlib/string/std_string.cpp \
-  --import std:memory=stdlib/memory/std_memory.cpp \
+scpp build app.scpp -o app \
+  --import std=stdlib/std.scpp \
+  --import std:string=stdlib/string/std_string.scpp \
+  --import std:memory=stdlib/memory/std_memory.scpp \
   --link build/stdlib/libscpp_string_wrapper.a
 ```
 
 Notes:
 
-- `std.cpp` aggregates the partitions; consumers never import `std:string`
+- `std.scpp` aggregates the partitions; consumers never import `std:string`
   or `std:memory` directly in source.
 - `--link` is only needed for partitions with a native helper library.
   Today that means `std:string`; `std:memory` is pure scpp and needs no
@@ -55,13 +55,13 @@ Notes:
 
 ### `std:string`
 
-- File: `string/std_string.cpp`
+- File: `string/std_string.scpp`
 - Backed by: `string/scpp_string_wrapper.{h,cpp}`
 - Provides a small `std::string` surface via `extern "C"` wrapper calls
 
 ### `std:memory`
 
-- File: `memory/std_memory.cpp`
+- File: `memory/std_memory.scpp`
 - Pure scpp implementation
 - Provides `std::unique_ptr<T>` and `std::make_unique<T>(...)`
 

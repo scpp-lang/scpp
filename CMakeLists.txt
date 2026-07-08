@@ -5,10 +5,10 @@ project(scpp
     DESCRIPTION "A compiler frontend for a C++-looking language with safe regions"
     LANGUAGES CXX)
 
-set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/std.cpp")
-set(SCPP_STDLIB_STD_STRING_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/string/std_string.cpp")
-set(SCPP_STDLIB_STD_MEMORY_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/memory/std_memory.cpp")
-set(SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/functional/std_functional.cpp")
+set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/std.scpp")
+set(SCPP_STDLIB_STD_STRING_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/string/std_string.scpp")
+set(SCPP_STDLIB_STD_MEMORY_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/memory/std_memory.scpp")
+set(SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/functional/std_functional.scpp")
 set(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_string_wrapper.a")
 
 set(CMAKE_CXX_STANDARD 23)
@@ -140,6 +140,7 @@ add_executable(driver_test tests/driver_test.cpp)
 target_link_libraries(driver_test PRIVATE scpp_driver scpp_codegen scpp_movecheck scpp_parser scpp_ast scpp_lexer)
 target_compile_features(driver_test PRIVATE cxx_std_23)
 target_compile_definitions(driver_test PRIVATE
+    SCPP_BINARY_PATH="$<TARGET_FILE:scpp>"
     SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source"
     SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
     SCPP_STDLIB_STD_STRING_MODULE_PATH="${SCPP_STDLIB_STD_STRING_MODULE_PATH}"

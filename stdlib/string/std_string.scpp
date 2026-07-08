@@ -1,4 +1,4 @@
-// std_string.cpp
+// std_string.scpp
 //
 // The `:string` interface partition (ch11 §11.4) of the "std" module:
 // `namespace std { export class string { ... }; }`, a thin wrapper
@@ -7,7 +7,7 @@
 // scpp_string_wrapper.h/.cpp, built separately as a native library --
 // stdlib/README.md explains the full build story). Every
 // method's body is `[[scpp::unsafe]] { <one extern "C" call> }`, exactly like any
-// other call to an `extern "C"` function (ch01 §1.3/ch02). std.cpp (the
+// other call to an `extern "C"` function (ch01 §1.3/ch02). std.scpp (the
 // module's primary interface unit) aggregates this partition via
 // `export import :string;`, so a consumer never imports this file
 // directly -- only `import std;`, then `std::string`.

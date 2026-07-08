@@ -1,5 +1,6 @@
 module;
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -158,11 +159,17 @@ std::string read_file(std::string_view path) {
     return buffer.str();
 }
 
+bool require_scpp_input_path(std::string_view path, std::string_view role) {
+    if (std::filesystem::path(std::string(path)).extension() == ".scpp") return true;
+    std::cerr << "error: " << role << " must use the .scpp extension, got '" << path << "'\n";
+    return false;
+}
+
 // Renders a Clang/GCC-style diagnostic: "path:line:col: error: message",
 // followed by the offending source line and a caret pointing at the
 // exact column, e.g.:
 //
-//   foo.cpp:3:9: error: use of undeclared identifier 'foo'
+//   foo.scpp:3:9: error: use of undeclared identifier 'foo'
 //     3 |     int x = foo;
 //       |             ^
 //
@@ -208,6 +215,7 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
 }
 
 int run_lex(std::string_view path) {
+    if (!require_scpp_input_path(path, "input file")) return 1;
     std::string source;
     try {
         source = read_file(path);
@@ -425,6 +433,7 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
 }
 
 int run_parse(std::string_view path) {
+    if (!require_scpp_input_path(path, "input file")) return 1;
     std::string source;
     try {
         source = read_file(path);
@@ -470,6 +479,14 @@ int run_parse(std::string_view path) {
 int run_build(std::string_view input_path, std::string_view output_path,
               const std::vector<std::string>& extra_link_inputs,
               const std::unordered_map<std::string, std::string>& import_paths) {
+    if (!require_scpp_input_path(input_path, "input file")) return 1;
+    for (const auto& [module_name, path] : import_paths) {
+        if (std::filesystem::path(path).extension() != ".scpp") {
+            std::cerr << "error: import path for module '" << module_name
+                      << "' must use the .scpp extension, got '" << path << "'\n";
+            return 1;
+        }
+    }
     std::string source;
     try {
         source = read_file(input_path);
@@ -539,9 +556,9 @@ int run(int argc, char** argv) {
 
     std::string_view name = argc > 0 ? argv[0] : "scpp";
     std::cout << "Hello from " << name << " " << version << "!\n";
-    std::cout << "Usage: " << name << " lex <file>\n";
-    std::cout << "       " << name << " parse <file>\n";
-    std::cout << "       " << name << " build <file> [-o <output>] [--link <path>]... [--import name=path]...\n";
+    std::cout << "Usage: " << name << " lex <file.scpp>\n";
+    std::cout << "       " << name << " parse <file.scpp>\n";
+    std::cout << "       " << name << " build <file.scpp> [-o <output>] [--link <path>]... [--import name=path]...\n";
     return 0;
 }
 

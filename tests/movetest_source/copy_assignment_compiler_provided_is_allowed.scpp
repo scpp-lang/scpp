@@ -1,4 +1,4 @@
-// spec §6.5(3): symmetric to copy_construction_compiler_provided_is_allowed.cpp
+// spec §6.5(3): symmetric to copy_construction_compiler_provided_is_allowed.scpp
 // -- a plain class also has an implicitly-defined copy assignment
 // operator under the same conditions. `b = a;` (bare reassignment) is
 // licensed.
