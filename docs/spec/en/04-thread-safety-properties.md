@@ -197,4 +197,4 @@ other user-declared class template. — end note]
 
 ---
 
-[← Previous: Dereference and Member Access](03-dereference-and-member-access.md) · [Table of Contents](README.md)
+[← Previous: Dereference and Member Access](03-dereference-and-member-access.md) · [Table of Contents](README.md) · [Next: Union types and packed layout →](05-unions-and-packed-layout.md)

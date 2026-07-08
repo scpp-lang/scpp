@@ -81,10 +81,9 @@ int legacy_style_function(int* p, int n) {
   类型之间、且这两个类型互相都不能靠本文档允许的隐式转换互相转换时，
   做的任何 *explicit-type-conversion*（[expr.cast]）；
 
-  (5.3) 访问一个不是 tagged union 的 union 的非 static 数据成员
-  （SCPP26 的"tagged union"由未来的某个条款定义；在那样的条款加入
-  本文档之前，为此处的目的，每个 union 都当作 untagged 处理）
-  （[class.union]）；
+  (5.3) 访问一个 union 的非 static 数据成员
+  （[class.union]，按
+  [§9.1](05-unions-and-packed-layout.md#91-union-types) 修改）；
 
   (5.4) 一个 *new-expression* 或者 *delete-expression*（[expr.new]、
   [expr.delete]）；

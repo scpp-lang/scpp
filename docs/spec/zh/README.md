@@ -17,3 +17,4 @@
 6. [所有权、初始化与 Move](02-ownership-and-move.md)
 7. [解引用与成员访问](03-dereference-and-member-access.md)
 8. [线程安全属性](04-thread-safety-properties.md)
+9. [union 类型与 packed 布局](05-unions-and-packed-layout.md)

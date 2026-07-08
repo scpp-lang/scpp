@@ -352,6 +352,28 @@
     的：包装器自己之后变成 moved-out，而不是"还活着、只是内部变空"。见
     [§5.18](ch05-static-checks.md#518-类型擦除调用包装器stdfunction-与-stdmove_only_function)。
 
+
+20. **既然安全代码根本证明不了当前激活的是 union 的哪种表示，而且 ISO C++
+    到今天也没有标准化的 packed-layout attribute，scpp 还要不要支持原始
+    C 风格 `union` 和 packed 布局？** **已定：要，面向 FFI/存储重叠工作；
+    union 成员访问永远走 unsafe，而 `[[scpp::packed]]` 作为挂在
+    `struct`/`union` 上的显式布局 attribute。** 真实世界里的操作系统 ABI 和
+    线格式 ABI 依然大量依赖这两种模式；如果 scpp 拒绝表达它们，结果只会是
+    大量普通边界（比如 `epoll` 风格的平台结构体）都被迫额外包一层手写 C
+    shim。但 scpp 也不该假装自己能证明 union 当前活着的是哪一支：SCPP26
+    目前没有 tagged-union 构造，所以每个 `union` 都按未加标签处理，读写
+    `u.member` 跟裸指针解引用一样，必须由 `[[scpp::unsafe]]` 把关——程序员
+    自己为"这些字节现在该按这个成员类型来解释"背书。`[[scpp::packed]]`
+    之所以存在，哪怕 ISO C++26 里依然没有标准等价物，是因为"把这个外部字节
+    布局一字不差地匹配出来"是真实的边界需求，不是什么风格化的布局偏好；
+    今天的 C/C++ 编译器本来就用 `__attribute__((packed))`、`#pragma pack`
+    这类扩展在解决它，scpp 只是选择在自己的命名空间里给出一个明确拼写，
+    而不是假装这类需求不该存在。这个 attribute 故意收得很窄：只给
+    `struct`/`union`，只服务布局/互操作，不作为受所有权跟踪的 `class` 类型
+    的通用调参旋钮。见
+    [§5.19](ch05-static-checks.md#519-union-与-scpppacked) 和
+    [§9](../spec/zh/05-unions-and-packed-layout.md)。
+
 ---
 
 [← 上一章：编译管线](ch07-compilation-pipeline.md) · [目录](README.md) · [下一章：MVP 里程碑 →](ch09-milestones.md)

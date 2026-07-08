@@ -48,6 +48,12 @@
   通过 `const` 的 `this` 也能读写，但永远不能被引用，是 scpp 对内部
   可变性的第一阶段（`Cell` 等价）答案（[§8](ch08-open-questions.md)
   Q4）。
+- 用于 FFI / 存储重叠工作的 `union`（见
+  [§5.19](ch05-static-checks.md#519-union-与-scpppacked)）：普通安全代码可以
+  声明、携带一个 union 值，但访问成员必须放在 `[[scpp::unsafe]]` 里，因为
+  SCPP26 目前把所有 union 都按未加标签处理。`[[scpp::packed]]` 可以挂在
+  `struct` 或 `union` 上，请求取消成员间 padding，并把整个聚合类型的总对齐
+  降为 1。
 - `std::unique_ptr<T>` 和 `std::make_unique<T>(...)`：由 `std` module
   通过 `import std;` 作为普通库代码提供，不是编译器内建类型。它的
   move-only 行为，只是 [§4.2](ch04-struct-vs-class.md) 那套通用 `class`
@@ -143,7 +149,7 @@
 - `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
   跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)）。
 - 带 `[[scpp::unsafe]]` attribute 的语句块（见 [§1.3](ch01-safety-context.md)）：
-  一个词法作用域的逃生窗口，局部放行裸指针解引用和
+  一个词法作用域的逃生窗口，局部放行裸指针解引用、union 成员访问，以及
   调用一个 `extern "C"` 函数（这是 [§5.5](ch05-static-checks.md)
   禁止项列表里在 v0.1 范围内的部分，列表其余部分不在 v0.1 范围内，见下面），
   [§5](ch05-static-checks.md) 里的其余
@@ -176,7 +182,7 @@
   [§4.2](ch04-struct-vs-class.md)。
 - `shared_ptr` 的完整别名模型。
 - `for`/range-for、`std::vector`、`std::string`/`std::string_view`、
-  `reinterpret_cast`、`union`、裸 `new`/`delete`、全局变量。
+  `reinterpret_cast`、裸 `new`/`delete`、全局变量。
 
 ---
 

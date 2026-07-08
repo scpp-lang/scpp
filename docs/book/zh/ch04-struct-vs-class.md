@@ -13,7 +13,7 @@
     指向函数的指针类型，见
     [§5.16](ch05-static-checks.md#516-函数指针function-pointers)）——
     同样不带编译器跟踪的生命周期。
-  - 其他同样满足本规则的 `struct` 类型（递归）。
+  - 其他同样满足本规则的 `struct` 或 `union` 类型（递归）。
   - 平凡类型的定长数组。
 - 以下类型**禁止**作为 `struct` 成员，必须改用 `class`：
   - 引用 `T&` / `const T&`。
@@ -32,7 +32,9 @@
 [§5](ch05-static-checks.md) 描述的 move/借用检查——因为它不携带任何
 生命周期或独占所有权语义。这不是一个"可选的 Copy trait"（对比 Rust 需要
 显式 `#[derive(Copy)]`）：一个类型只要声明为 `struct`，编译器就会验证并
-保证它满足平凡性，`struct` 关键字本身就是显式声明。
+保证它满足平凡性，`struct` 关键字本身就是显式声明。`union` 也属于语言里
+这同一块低层、面向 ABI 的区域，只不过它用的是重叠存储，而不是彼此分离的
+成员偏移；见 [§5.19](ch05-static-checks.md#519-union-与-scpppacked)。
 
 ## 4.2 class：拥有资源/参与检查的类型
 
@@ -215,16 +217,23 @@ C 结构体产生的布局逐字节一致。具体规则：
    倍数（保证数组场景每个元素都正确对齐）。
 4. 第一个成员偏移量固定为 0（结构体地址即第一个成员地址）。
 
-实现上：编译器生成非 packed 的 LLVM 具名 struct 类型，交给目标 target 的
-`DataLayout` 计算布局——该 `DataLayout` 与 Clang 针对同一 target triple
-使用的完全一致，因此自动获得与 Clang/C 兼容的布局，无需 scpp 自行定义
-对齐算法。
+实现上：在没有请求布局覆盖时，编译器生成非 packed 的 LLVM 具名 struct
+类型，交给目标 target 的 `DataLayout` 计算布局——该 `DataLayout` 与
+Clang 针对同一 target triple 使用的完全一致，因此自动获得与 Clang/C
+兼容的布局，无需 scpp 自行定义对齐算法。
 
-**v0.1 明确不支持**：
+一个带 `[[scpp::packed]]` 的 `struct` 或 `union`
+（见 [§5.19](ch05-static-checks.md#519-union-与-scpppacked)）则显式请求
+packed 的 C 风格布局：成员顺序保持不变，但 `struct` 不再插入成员间
+padding，整个聚合类型的总对齐降为 1。这就是 scpp 针对外部 ABI 那类需求的
+明确拼写，对应今天各家 C/C++ 工具链通常用
+`__attribute__((packed))` 或 `#pragma pack` 暴露出来的能力。
+
+**v0.1 里仍然明确不支持**：
 - 位域（bit-field）——各平台/编译器版本实现差异大，暂不纳入。
-- 压缩布局（等价于 `#pragma pack(1)` / `__attribute__((packed))`）——留待
-  后续版本通过显式属性（如 `alignas` / `packed`）支持，映射到 LLVM 的
-  packed struct 类型。
+- 一个单独的、`alignas` 风格的用户布局控制特性。目前
+  `[[scpp::packed]]` 是唯一明确提供的布局逃生舱，而且故意只允许挂在
+  `struct`/`union` 声明上。
 
 ---
 

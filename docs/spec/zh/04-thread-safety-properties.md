@@ -188,4 +188,4 @@ class 模板上的用法完全一样。——注释结束】
 
 ---
 
-[← 上一节：解引用与成员访问](03-dereference-and-member-access.md) · [目录](README.md)
+[← 上一节：解引用与成员访问](03-dereference-and-member-access.md) · [目录](README.md) · [下一节：union 类型与 packed 布局 →](05-unions-and-packed-layout.md)

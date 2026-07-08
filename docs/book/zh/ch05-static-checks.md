@@ -117,7 +117,7 @@
 ## 5.5 禁止项（除非在 `[[scpp::unsafe]]` 里）
 - 裸指针解引用、指针算术。
 - `reinterpret_cast`、C 风格强制转换到不兼容类型。
-- `union`（未加标签的）。
+- 访问一个 `union` 成员（当前所有 `union` 都按未加标签处理）。
 - 原始 `new` / `delete`。
 - 可变全局/静态变量的访问。
 - 调用一个 `extern "C"` 函数。
@@ -284,8 +284,10 @@ std::expected<int, ParseError> parse_and_double(const char* s) {
     必须能解析成一个已经存在的 place，这是它复用的借用来源语法本来的
     要求。
   - Rust 的 `&raw const`/`&raw mut`（完全不经过中间引用就取地址，Rust
-    那边是给 packed struct/未初始化内存用的）——scpp 现在两个概念都没有，
-    所以没有普通 `&expr` 覆盖不到、需要额外补的场景。
+    那边是给 packed struct/未初始化内存用的）。SCPP26 现在已经有了
+    `[[scpp::packed]]`（见 [§5.19](#519-union-与-scpppacked)），但这一章
+    依然只定义普通的 `&expr` 作为取地址形式；这里不再额外引入第二套
+    raw-address 运算符。
   - 去掉 const（`const T*` → `T*`）——v0.1 没有 `const_cast`/Rust 的
     `.cast_mut()` 等价物。如果某个真实 C API 的签名确实要非 `const`，
     而 scpp 这边的借用来源只能只读访问，v0.1 里就没法调用——已推迟（见
@@ -1212,6 +1214,52 @@ move 之后留下一个还能继续用、只是内部为空的状态一样。所
 把几种不同 callable 类型存在同一个拥有型字段里；按值返回"某个这个
 签名的 callable"但不暴露具体类型；或者把一个回调跨 ABI / 架构边界传递，
 需要刻意隐藏它的静态类型。
+
+
+## 5.19 `union` 与 `[[scpp::packed]]`
+
+SCPP26 支持普通 C 风格的 `union` 声明，用来做低层存储重叠和 FFI 布局工作：
+
+```cpp
+union [[scpp::packed]] epoll_data_t {
+    void* ptr;
+    int fd;
+    uint32_t u32;
+    uint64_t u64;
+};
+
+struct [[scpp::packed]] epoll_event {
+    uint32_t events;
+    epoll_data_t data;
+};
+```
+
+关键规则有几条：
+
+- **`union` 是把几个成员声明重叠到同一片字节上。** 跟 `struct` 一样，它
+  是一个面向布局的聚合类型特性，不是新的、参与所有权跟踪的 `class`
+  机制。
+- **访问 union 成员永远属于 `[[scpp::unsafe]]` 地盘。** SCPP26 目前还没有
+  tagged-union 这种能让编译器证明哪个成员才是当前有效表示的特性，所以
+  普通安全代码可以声明、传递、存储一个 union 值，但真正去读写 `u.member`
+  本身，必须放在 `[[scpp::unsafe]]` 里。
+- **这个 unsafe gate 管的是“你现在把这些字节当成哪种表示来解释”，不是
+  把 [§5](#5-静态检查) 其余规则关掉。** 一旦进了那个 unsafe block，被选中的
+  成员表达式仍然照它自己的普通类型规则受管，而外围的所有权/生命周期检查
+  也照常继续运行。
+- **`[[scpp::packed]]` 可以挂在 `struct` 或 `union` 声明上。** 它请求一份
+  字节级精确的 packed 布局：对 `struct` 来说，不再插入成员间 padding，
+  整个聚合类型的总对齐降为 1；对 `union` 来说，每个成员仍然都从偏移 0
+  开始，而 `[[scpp::packed]]` 的意义在于把这个 union 自身的对齐要求也降为
+  1，这样把它嵌进另一个 packed 聚合类型时，外部 ABI 的布局就能原样保住。
+- **这故意是个很窄的 FFI/数据布局工具。** 真实 ISO C++26 到今天也没有
+  标准化的 packed-layout attribute；现有工具链通常用
+  `__attribute__((packed))` 或 `#pragma pack` 这类扩展来暴露这个需求。
+  SCPP26 只是选择在自己的命名空间里给它一个明确拼写，而不是假装这个需求
+  不存在。
+- **`[[scpp::packed]]` 不是 `class` 特性。** `class` 那一边承载的是构造、
+  析构和受所有权跟踪的不变量；字节重叠存储和强制非自然对齐属于布局/互操作
+  工具，所以这个 attribute 只允许出现在 `struct`/`union` 声明上。
 
 ---
 
