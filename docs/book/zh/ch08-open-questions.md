@@ -327,8 +327,8 @@
     实际上根本走不通，因为它把"是不是 viable"和"deleted copy 到底何时报错"
     放在了后面的阶段。scpp 直接把"这个边界根本构不出来"当成候选不能参与，
     把这个坑堵掉。见 [§4.2](ch04-struct-vs-class.md) 以及
-    [§6.6](../spec/zh/02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)/
-    [§6.7](../spec/zh/02-ownership-and-move.md#67-class-类型的按值返回by-value-return-of-class-typestmt.return)。
+    [§6.6](../../spec/zh/02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)/
+    [§6.7](../../spec/zh/02-ownership-and-move.md#67-class-类型的按值返回by-value-return-of-class-typestmt.return)。
 19. **scpp 要不要有 `std::function` 这种拥有型、类型擦除的可调用对象包装器？
     如果要，要不要保留真实 C++ 那种 nullable/empty 状态？** **已定：要，
     而且同时要 `std::function<Sig>` 和 `std::move_only_function<Sig>`；

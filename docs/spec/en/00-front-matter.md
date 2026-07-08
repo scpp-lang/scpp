@@ -3,7 +3,7 @@
 **Status**: Working draft. Incomplete -- clauses are added incrementally;
 absence of a clause on some topic means this document does not yet modify
 the C++ standard's treatment of that topic, not that SCPP26 has no rule
-for it (see [the book](../../book/README.md) for the topics not yet
+for it (see [the book](../../book/en/README.md) for the topics not yet
 formalized here).
 
 ---

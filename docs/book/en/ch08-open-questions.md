@@ -427,8 +427,8 @@
     making "this boundary cannot actually be constructed" stop the
     candidate from participating at all. See
     [§4.2](ch04-struct-vs-class.md) and
-    [§6.6](../spec/en/02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)/
-    [§6.7](../spec/en/02-ownership-and-move.md#67-by-value-return-of-class-type-stmtreturn).
+    [§6.6](../../spec/en/02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)/
+    [§6.7](../../spec/en/02-ownership-and-move.md#67-by-value-return-of-class-type-stmtreturn).
 19. **Should scpp have owning, type-erased callable wrappers like
     `std::function`, and if so should they keep real C++'s nullable/empty
     state?** **Settled: yes to both `std::function<Sig>` and
