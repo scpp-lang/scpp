@@ -227,6 +227,7 @@ struct FunctionSignature {
     // particular overload (e.g. a redefinition error naming the
     // conflicting declaration).
     SourceLocation loc;
+    ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
 };
 
 // ch05 §5.10: a name (free function or method, post class-mangling --
@@ -553,6 +554,9 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
         case TypeKind::Function:
         case TypeKind::FunctionPointer:
             if ((a.kind == TypeKind::FunctionPointer && a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) ||
+                (a.kind == TypeKind::Function &&
+                 (a.is_const_function != b.is_const_function ||
+                  a.function_ref_qualifier != b.function_ref_qualifier)) ||
                 !types_equal(*a.function_return, *b.function_return) ||
                 a.function_params.size() != b.function_params.size()) {
                 return false;
@@ -806,6 +810,22 @@ struct CalleeSignature {
     return true;
 }
 
+[[nodiscard]] bool receiver_matches_method_qualifier(const Expr& receiver_expr, const FunctionSignature& candidate,
+                                                     const Body& body, const Signatures& signatures) {
+    if (candidate.param_types.empty() || candidate.param_types[0].kind != TypeKind::Reference ||
+        candidate.param_types[0].pointee == nullptr) {
+        return true;
+    }
+    bool receiver_is_rvalue =
+        produces_rvalue_of_type(receiver_expr, *candidate.param_types[0].pointee, body, signatures);
+    switch (candidate.receiver_ref_qualifier) {
+        case ReceiverRefQualifier::None: return true;
+        case ReceiverRefQualifier::LValue: return !receiver_is_rvalue;
+        case ReceiverRefQualifier::RValue: return receiver_is_rvalue;
+    }
+    return true;
+}
+
 // Resolves `call_expr` to the single FunctionSignature (among possibly
 // several overloads sharing `callee.key`'s name) whose parameters match
 // this call's actual arguments (ch05 §5.10) -- exact type match only, so
@@ -849,7 +869,13 @@ struct CalleeSignature {
     // arguments is left to the checks that already existed before
     // overloading (apply_reference_argument, codegen's own type
     // checking, ...), exactly as before this feature.
-    if (it->second.size() == 1) return &it->second[0];
+    if (it->second.size() == 1) {
+        const FunctionSignature& only = it->second[0];
+        if (callee.param_offset == 1 && call_expr.lhs) {
+            if (!receiver_matches_method_qualifier(*call_expr.lhs, only, body, signatures)) return nullptr;
+        }
+        return &only;
+    }
 
     std::vector<const FunctionSignature*> matches;
     for (const FunctionSignature& candidate : it->second) {
@@ -862,6 +888,10 @@ struct CalleeSignature {
         // reachable check, applied here purely for resolution purposes).
         if (callee.param_offset == 1 && call_expr.lhs && candidate.param_types[0].is_mutable_ref &&
             is_read_only_reachable(*call_expr.lhs, body, signatures)) {
+            all_match = false;
+        }
+        if (all_match && callee.param_offset == 1 && call_expr.lhs &&
+            !receiver_matches_method_qualifier(*call_expr.lhs, candidate, body, signatures)) {
             all_match = false;
         }
         for (size_t i = 0; all_match && i < call_expr.args.size(); i++) {
@@ -884,6 +914,15 @@ struct CalleeSignature {
         if (callee.param_offset == 1 && call_expr.lhs && candidate.param_types[0].is_mutable_ref &&
             !is_read_only_reachable(*call_expr.lhs, body, signatures)) {
             score++;
+        }
+        if (callee.param_offset == 1 && call_expr.lhs) {
+            bool receiver_is_rvalue =
+                candidate.param_types[0].kind == TypeKind::Reference && candidate.param_types[0].pointee != nullptr &&
+                produces_rvalue_of_type(*call_expr.lhs, *candidate.param_types[0].pointee, body, signatures);
+            if ((receiver_is_rvalue && candidate.receiver_ref_qualifier == ReceiverRefQualifier::RValue) ||
+                (!receiver_is_rvalue && candidate.receiver_ref_qualifier == ReceiverRefQualifier::LValue)) {
+                score += 2;
+            }
         }
         for (size_t i = 0; i < call_expr.args.size(); i++) {
             const Type& param_type = candidate.param_types[i + callee.param_offset];
@@ -2359,7 +2398,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         bool receiver_is_reference =
             sig != nullptr && !sig->param_types.empty() && is_reference(sig->param_types[0]) && !sig->param_types[0].is_rvalue_ref;
         (void)receiver_is_reference;
-        apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+        apply_expr(*expr.lhs, /*is_move_target_context=*/expr.lhs->kind == ExprKind::Move, state, body, signatures,
+                   report_errors);
     }
     std::string callee_display = expr.name;
     if (callee_display.empty()) {
@@ -3765,13 +3805,14 @@ void check_function(const Function& fn, const Program& program, const Signatures
         sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr;
         sig.is_unsafe = fn.is_unsafe;
         sig.loc = fn.loc;
+        sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             bool same_params = existing.param_types.size() == sig.param_types.size();
             for (size_t i = 0; same_params && i < sig.param_types.size(); i++) {
                 same_params = types_equal(existing.param_types[i], sig.param_types[i]);
             }
-            if (same_params) {
+            if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
                 throw DataflowError("redefinition of '" + fn.name +
                                      "': a previous declaration with an identical parameter list already "
                                      "exists (ch05 §5.10 -- functions can only be overloaded by parameter "
@@ -3858,6 +3899,8 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.method_requires_concept = fn.method_requires_concept;
     clone.is_generic_template = fn.is_generic_template;
     clone.template_params = fn.template_params;
+    clone.generic_method_owner_id = fn.generic_method_owner_id;
+    clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
     clone.namespace_path = fn.namespace_path;
     clone.is_exported = fn.is_exported;
     clone.owning_module = fn.owning_module;
@@ -3914,6 +3957,9 @@ StmtPtr clone_stmt(const Stmt& stmt) {
         case TypeKind::Function: {
             std::string result = mangle_type_for_clone_name(*type.function_return) + "_fntype";
             for (const Type& param : type.function_params) result += "_" + mangle_type_for_clone_name(param);
+            if (type.is_const_function) result += "_const";
+            if (type.function_ref_qualifier == ReceiverRefQualifier::LValue) result += "_lrefq";
+            if (type.function_ref_qualifier == ReceiverRefQualifier::RValue) result += "_rrefq";
             return result;
         }
         case TypeKind::FunctionPointer: {
@@ -6345,6 +6391,161 @@ private:
         }
     }
 
+    std::string instantiate_full_header_generic_clone(const Function& tmpl,
+                                                      const std::unordered_map<std::string, Type>& type_bindings,
+                                                      const std::unordered_map<std::string, int>& value_bindings,
+                                                      const std::vector<std::vector<Type>>& concrete_pack_param_types,
+                                                      const std::vector<std::pair<size_t, Type>>& upcasts = {}) {
+        std::string cache_key = tmpl.name;
+        for (const GenericTypeParam& tp : tmpl.template_params) {
+            if (tp.is_pack) continue;
+            cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings.at(tp.name)))
+                                        : ("." + mangle_type_for_clone_name(type_bindings.at(tp.name)));
+        }
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            if (!tmpl.params[i].is_parameter_pack) continue;
+            for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
+        }
+        auto cached = generic_function_clone_cache_.find(cache_key);
+        if (cached != generic_function_clone_cache_.end()) return cached->second;
+        generic_function_clone_cache_[cache_key] = cache_key;
+
+        Function clone;
+        clone.name = cache_key;
+        clone.loc = tmpl.loc;
+        clone.namespace_path = tmpl.namespace_path;
+        clone.is_exported = false;
+        clone.is_unsafe = tmpl.is_unsafe;
+        clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
+        clone.return_type = tmpl.return_type;
+        for (const auto& [name, replacement] : type_bindings) {
+            clone.return_type = substitute_type_param(clone.return_type, name, replacement);
+        }
+        clone.return_type = resolve_generic_type(clone.return_type, tmpl.loc);
+        clone.params.reserve(tmpl.params.size());
+        std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            if (tmpl.params[i].is_parameter_pack) {
+                pack_param_names[tmpl.params[i].name] = {};
+                for (size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
+                    Param p;
+                    p.name = tmpl.params[i].name + "$" + std::to_string(j);
+                    p.type = concrete_pack_param_types[i][j];
+                    clone.params.push_back(std::move(p));
+                    pack_param_names[tmpl.params[i].name].push_back(tmpl.params[i].name + "$" + std::to_string(j));
+                }
+                continue;
+            }
+            Param p;
+            p.name = tmpl.params[i].name;
+            p.type = tmpl.params[i].type;
+            bool upcasted = false;
+            for (const auto& [idx, target] : upcasts) {
+                if (idx != i) continue;
+                if (p.type.kind == TypeKind::Reference) {
+                    p.type.pointee = std::make_shared<Type>(target);
+                } else {
+                    p.type = target;
+                }
+                upcasted = true;
+                break;
+            }
+            if (!upcasted) {
+                for (const auto& [name, replacement] : type_bindings) {
+                    p.type = substitute_type_param(p.type, name, replacement);
+                }
+            }
+            p.type = resolve_generic_type(p.type, tmpl.loc);
+            clone.params.push_back(std::move(p));
+        }
+        clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
+        if (clone.body) {
+            for (const auto& [name, replacement] : type_bindings) {
+                substitute_type_param_in_stmt(*clone.body, name, replacement);
+            }
+            for (const auto& [pack_name, concrete_names] : pack_param_names) {
+                expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names);
+                expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
+            }
+            resolve_generic_types_in_stmt(*clone.body);
+        }
+        known_function_names_.insert(clone.name);
+        program_.functions.push_back(std::move(clone));
+        return cache_key;
+    }
+
+    void monomorphize_generic_function_designator(Expr& expr, const Function& tmpl) {
+        std::unordered_map<std::string, Type> type_bindings;
+        std::unordered_map<std::string, int> value_bindings;
+        std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
+        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+
+        size_t explicit_index = 0;
+        for (size_t p = 0; p < tmpl.template_params.size(); p++) {
+            const GenericTypeParam& tp = tmpl.template_params[p];
+            if (tp.is_pack) {
+                std::vector<Type>& pack = explicit_pack_bindings[tp.name];
+                while (explicit_index < expr.explicit_template_args.size()) {
+                    const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
+                    if (!arg.is_type) {
+                        throw DataflowError("template parameter pack '" + tp.name + "' of generic function '" +
+                                                tmpl.name + "' only accepts type arguments in this version",
+                            expr.loc);
+                    }
+                    pack.push_back(arg.type);
+                }
+                continue;
+            }
+            if (explicit_index >= expr.explicit_template_args.size()) break;
+            const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
+            if (tp.is_non_type) {
+                if (arg.is_type || !arg.value) {
+                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
+                                            "' is a non-type parameter, but a type argument was given (ch05 §5.11)",
+                        expr.loc);
+                }
+                value_bindings[tp.name] = evaluate_non_type_arg(*arg.value, value_bindings);
+            } else {
+                if (!arg.is_type) {
+                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
+                                            "' is a type parameter, but a non-type argument was given (ch05 §5.11)",
+                        expr.loc);
+                }
+                type_bindings[tp.name] = arg.type;
+            }
+        }
+
+        if (explicit_index != expr.explicit_template_args.size()) {
+            throw DataflowError("too many explicit template arguments for generic function '" + tmpl.name + "'",
+                expr.loc);
+        }
+
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            if (!tmpl.params[i].is_parameter_pack) continue;
+            std::optional<std::string> pack_type_name =
+                referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
+            if (!pack_type_name.has_value()) continue;
+            auto pack_it = explicit_pack_bindings.find(*pack_type_name);
+            if (pack_it == explicit_pack_bindings.end()) continue;
+            for (const Type& concrete : pack_it->second) {
+                concrete_pack_param_types[i].push_back(substitute_type_param(tmpl.params[i].type, *pack_type_name, concrete));
+            }
+        }
+
+        for (const GenericTypeParam& tp : tmpl.template_params) {
+            if (tp.is_pack) continue;
+            bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
+            if (!bound) {
+                throw DataflowError("cannot form a function designator for generic function '" + tmpl.name +
+                                        "' without an explicit argument for template parameter '" + tp.name + "'",
+                    expr.loc);
+            }
+        }
+
+        expr.name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, concrete_pack_param_types);
+        expr.explicit_template_args.clear();
+    }
+
     // ch05 §5.11: monomorphizes a call to a full-header-form generic
     // function template (Function::template_params non-empty, e.g.
     // `get`/`make`) -- binds each of the template's own parameters to a
@@ -6449,82 +6650,9 @@ private:
         // reported at the call site that triggered it.
         check_thread_safety_constraints(expr, tmpl, type_bindings);
 
-        std::string cache_key = tmpl.name;
-        for (const GenericTypeParam& tp : tmpl.template_params) {
-            if (tp.is_pack) continue; // bound via concrete_pack_param_types below
-            cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings[tp.name]))
-                                        : ("." + mangle_type_for_clone_name(type_bindings[tp.name]));
-        }
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
-            if (!tmpl.params[i].is_parameter_pack) continue;
-            for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
-        }
-        auto cached = generic_function_clone_cache_.find(cache_key);
-        if (cached == generic_function_clone_cache_.end()) {
-            generic_function_clone_cache_[cache_key] = cache_key;
-
-            Function clone;
-            clone.name = cache_key;
-            clone.loc = tmpl.loc;
-            clone.namespace_path = tmpl.namespace_path;
-            clone.is_exported = false;
-            clone.is_unsafe = tmpl.is_unsafe;
-            clone.return_type = tmpl.return_type;
-            for (const auto& [name, replacement] : type_bindings) {
-                clone.return_type = substitute_type_param(clone.return_type, name, replacement);
-            }
-            clone.return_type = resolve_generic_type(clone.return_type, tmpl.loc);
-            clone.params.reserve(tmpl.params.size());
-            std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
-            for (size_t i = 0; i < tmpl.params.size(); i++) {
-                if (tmpl.params[i].is_parameter_pack) {
-                    pack_param_names[tmpl.params[i].name] = {};
-                    for (size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
-                        Param p;
-                        p.name = tmpl.params[i].name + "$" + std::to_string(j);
-                        p.type = concrete_pack_param_types[i][j];
-                        clone.params.push_back(std::move(p));
-                        pack_param_names[tmpl.params[i].name].push_back(tmpl.params[i].name + "$" + std::to_string(j));
-                    }
-                    continue;
-                }
-                Param p;
-                p.name = tmpl.params[i].name;
-                p.type = tmpl.params[i].type;
-                bool upcasted = false;
-                for (const auto& [idx, target] : upcasts) {
-                    if (idx != i) continue;
-                    if (p.type.kind == TypeKind::Reference) {
-                        p.type.pointee = std::make_shared<Type>(target);
-                    } else {
-                        p.type = target;
-                    }
-                    upcasted = true;
-                    break;
-                }
-                if (!upcasted) {
-                    for (const auto& [name, replacement] : type_bindings) {
-                        p.type = substitute_type_param(p.type, name, replacement);
-                    }
-                }
-                p.type = resolve_generic_type(p.type, tmpl.loc);
-                clone.params.push_back(std::move(p));
-            }
-            clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
-            if (clone.body) {
-                for (const auto& [name, replacement] : type_bindings) {
-                    substitute_type_param_in_stmt(*clone.body, name, replacement);
-                }
-                for (const auto& [pack_name, concrete_names] : pack_param_names) {
-                    expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names);
-                    expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
-                }
-                resolve_generic_types_in_stmt(*clone.body);
-            }
-            program_.functions.push_back(std::move(clone));
-        }
-
-        expr.name = member_name_prefix.empty() ? cache_key : cache_key.substr(member_name_prefix.size());
+        std::string clone_name =
+            instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, concrete_pack_param_types, upcasts);
+        expr.name = member_name_prefix.empty() ? clone_name : clone_name.substr(member_name_prefix.size());
         expr.explicit_template_args.clear();
     }
 
@@ -6675,11 +6803,29 @@ private:
             }
         }
 
+        if (expr.kind == ExprKind::Call && expr.lhs != nullptr && expr.name.empty()) {
+            std::optional<Type> callee_type = infer_expr_type(*expr.lhs, body, signatures_);
+            if (callee_type.has_value()) {
+                const Type& underlying =
+                    callee_type->kind == TypeKind::Reference && callee_type->pointee ? *callee_type->pointee
+                                                                                      : *callee_type;
+                if (underlying.kind == TypeKind::Named) expr.name = "call";
+            }
+        }
+
         // Generic-call monomorphization is suppressed entirely while
         // walking a generic template's own body (see run()'s own
         // comment): a nested generic-to-generic call is left targeting
         // the original, codegen-excluded template instead.
         if (!allow_generic_monomorphization) return;
+        if (expr.kind == ExprKind::Identifier && !expr.explicit_template_args.empty()) {
+            auto template_it = generic_template_indices_.find(expr.name);
+            if (template_it == generic_template_indices_.end()) return;
+            const Function& tmpl = program_.functions[template_it->second];
+            if (tmpl.template_params.empty()) return;
+            monomorphize_generic_function_designator(expr, tmpl);
+            return;
+        }
         if (expr.kind != ExprKind::Call) return;
         std::string generic_template_name = expr.name;
         size_t param_offset = 0;

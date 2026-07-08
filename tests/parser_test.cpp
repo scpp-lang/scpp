@@ -2250,6 +2250,69 @@ void test_function_type_template_argument_parses() {
            "function_type_template_argument_parses: expected int(int, int) function type argument");
 }
 
+void test_qualified_function_type_template_argument_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename Sig>\n"
+        "class Holder {\n"
+        "public:\n"
+        "    int value;\n"
+        "};\n"
+        "int main() { Holder<int(int) const &&> h; return 0; }\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    expect(main_fn != nullptr && main_fn->body != nullptr,
+           "qualified_function_type_template_argument_parses: expected main body");
+    const scpp::Stmt* decl = main_fn->body->statements[0].get();
+    expect(decl->kind == scpp::StmtKind::VarDecl && decl->type.template_args.size() == 1,
+           "qualified_function_type_template_argument_parses: expected Holder<...> var decl");
+    const scpp::Type& sig = decl->type.template_args[0];
+    expect(sig.kind == scpp::TypeKind::Function && sig.is_const_function &&
+               sig.function_ref_qualifier == scpp::ReceiverRefQualifier::RValue,
+           "qualified_function_type_template_argument_parses: expected const && function type argument");
+}
+
+void test_ref_qualified_methods_parse() {
+    scpp::Program program = scpp::parse(
+        "class Callable {\n"
+        "public:\n"
+        "    int call() & { return 1; }\n"
+        "    int call() && { return 2; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* lvalue = nullptr;
+    const scpp::Function* rvalue = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name != "Callable_call") continue;
+        if (fn.receiver_ref_qualifier == scpp::ReceiverRefQualifier::LValue) lvalue = &fn;
+        if (fn.receiver_ref_qualifier == scpp::ReceiverRefQualifier::RValue) rvalue = &fn;
+    }
+    expect(lvalue != nullptr, "ref_qualified_methods_parse: expected lvalue-qualified overload");
+    expect(rvalue != nullptr, "ref_qualified_methods_parse: expected rvalue-qualified overload");
+}
+
+void test_explicit_template_function_designator_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "int thunk(T x) { return x; }\n"
+        "int main() {\n"
+        "    int (*fp)(int) = thunk<int>;\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    expect(main_fn != nullptr && main_fn->body != nullptr,
+           "explicit_template_function_designator_parses: expected main body");
+    const scpp::Stmt* decl = main_fn->body->statements[0].get();
+    expect(decl->kind == scpp::StmtKind::VarDecl && decl->init != nullptr &&
+               decl->init->kind == scpp::ExprKind::Identifier &&
+               decl->init->explicit_template_args.size() == 1,
+           "explicit_template_function_designator_parses: expected identifier with one explicit template arg");
+}
+
 void test_class_partial_specialization_on_function_type_parses() {
     scpp::Program program = scpp::parse(
         "template<typename Sig>\n"
@@ -2855,6 +2918,9 @@ int main() {
     test_generic_class_named_pack_function_pointer_params_parse();
     test_class_member_templates_parse();
     test_function_type_template_argument_parses();
+    test_qualified_function_type_template_argument_parses();
+    test_ref_qualified_methods_parse();
+    test_explicit_template_function_designator_parses();
     test_class_partial_specialization_on_function_type_parses();
     test_generic_class_method_requires_clause_parses();
     test_generic_struct_concept_constrained_type_param_parses();
