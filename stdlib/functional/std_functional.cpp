@@ -1,0 +1,558 @@
+export module std:functional;
+
+namespace std {
+
+export template<typename F>
+void __move_only_function_destroy(void* erased) {
+    [[scpp::unsafe]] {
+        F* typed = static_cast<F*>(erased);
+        delete typed;
+    }
+    return;
+}
+
+export template<typename F>
+void* __function_copy(const void* erased) {
+    [[scpp::unsafe]] {
+        F* raw = static_cast<F*>(erased);
+        const F* typed = raw;
+        const F& source = *typed;
+        return static_cast<void*>(new F(source));
+    }
+}
+
+export template<typename F, typename R, typename... Args>
+R __move_only_function_invoke(void* erased, Args... args) {
+    [[scpp::unsafe]] {
+        F* typed = static_cast<F*>(erased);
+        return typed->call(args...);
+    }
+}
+
+export template<typename F, typename R, typename... Args>
+R __move_only_function_invoke_const(const void* erased, Args... args) {
+    [[scpp::unsafe]] {
+        F* raw = static_cast<F*>(erased);
+        const F* typed = raw;
+        return typed->call(args...);
+    }
+}
+
+export template<typename F, typename R, typename... Args>
+R __move_only_function_invoke_rvalue(void* erased, Args... args) {
+    [[scpp::unsafe]] {
+        F* typed = static_cast<F*>(erased);
+        F& callable = *typed;
+        return std::move(callable).call(args...);
+    }
+}
+
+export template<typename F, typename R, typename... Args>
+R __move_only_function_invoke_const_rvalue(const void* erased, Args... args) {
+    [[scpp::unsafe]] {
+        F* raw = static_cast<F*>(erased);
+        const F* typed = raw;
+        const F& callable = *typed;
+        return std::move(callable).call(args...);
+    }
+}
+
+export template<typename Sig>
+class move_only_function;
+
+export template<typename Sig>
+class function;
+
+export template<typename R, typename... Args>
+class move_only_function<R(Args...)> {
+private:
+    void* object_;
+    R (*invoke_)(void*, Args...);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    move_only_function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke<F, R, Args...>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    ~move_only_function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class move_only_function<R(Args...) const> {
+private:
+    void* object_;
+    R (*invoke_)(const void*, Args...);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    move_only_function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_const<F, R, Args...>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    ~move_only_function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) const {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class move_only_function<R(Args...) &> {
+private:
+    void* object_;
+    R (*invoke_)(void*, Args...);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    move_only_function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke<F, R, Args...>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    ~move_only_function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) & {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class move_only_function<R(Args...) const &> {
+private:
+    void* object_;
+    R (*invoke_)(const void*, Args...);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    move_only_function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_const<F, R, Args...>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    ~move_only_function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) const & {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class move_only_function<R(Args...) &&> {
+private:
+    void* object_;
+    R (*invoke_)(void*, Args...);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    move_only_function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_rvalue<F, R, Args...>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    ~move_only_function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) && {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class move_only_function<R(Args...) const &&> {
+private:
+    void* object_;
+    R (*invoke_)(const void*, Args...);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    move_only_function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_const_rvalue<F, R, Args...>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    ~move_only_function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) const && {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class function<R(Args...)> {
+private:
+    void* object_;
+    R (*invoke_)(void*, Args...);
+    void* (*copy_)(const void*);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke<F, R, Args...>;
+        this->copy_ = std::__function_copy<F>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    function(const std::function<R(Args...)>& other) {
+        this->object_ = other.copy_(other.object_);
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return;
+    }
+
+    std::function<R(Args...)>& operator=(const std::function<R(Args...)>& other) {
+        void* copied = other.copy_(other.object_);
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        this->object_ = copied;
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return *this;
+    }
+
+    ~function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class function<R(Args...) const> {
+private:
+    void* object_;
+    R (*invoke_)(const void*, Args...);
+    void* (*copy_)(const void*);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_const<F, R, Args...>;
+        this->copy_ = std::__function_copy<F>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    function(const std::function<R(Args...) const>& other) {
+        this->object_ = other.copy_(other.object_);
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return;
+    }
+
+    std::function<R(Args...) const>& operator=(const std::function<R(Args...) const>& other) {
+        void* copied = other.copy_(other.object_);
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        this->object_ = copied;
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return *this;
+    }
+
+    ~function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) const {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class function<R(Args...) &> {
+private:
+    void* object_;
+    R (*invoke_)(void*, Args...);
+    void* (*copy_)(const void*);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke<F, R, Args...>;
+        this->copy_ = std::__function_copy<F>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    function(const std::function<R(Args...) &>& other) {
+        this->object_ = other.copy_(other.object_);
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return;
+    }
+
+    std::function<R(Args...) &>& operator=(const std::function<R(Args...) &>& other) {
+        void* copied = other.copy_(other.object_);
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        this->object_ = copied;
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return *this;
+    }
+
+    ~function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) & {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class function<R(Args...) const &> {
+private:
+    void* object_;
+    R (*invoke_)(const void*, Args...);
+    void* (*copy_)(const void*);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_const<F, R, Args...>;
+        this->copy_ = std::__function_copy<F>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    function(const std::function<R(Args...) const &>& other) {
+        this->object_ = other.copy_(other.object_);
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return;
+    }
+
+    std::function<R(Args...) const &>& operator=(const std::function<R(Args...) const &>& other) {
+        void* copied = other.copy_(other.object_);
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        this->object_ = copied;
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return *this;
+    }
+
+    ~function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) const & {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class function<R(Args...) &&> {
+private:
+    void* object_;
+    R (*invoke_)(void*, Args...);
+    void* (*copy_)(const void*);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_rvalue<F, R, Args...>;
+        this->copy_ = std::__function_copy<F>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    function(const std::function<R(Args...) &&>& other) {
+        this->object_ = other.copy_(other.object_);
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return;
+    }
+
+    std::function<R(Args...) &&>& operator=(const std::function<R(Args...) &&>& other) {
+        void* copied = other.copy_(other.object_);
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        this->object_ = copied;
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return *this;
+    }
+
+    ~function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) && {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+export template<typename R, typename... Args>
+class function<R(Args...) const &&> {
+private:
+    void* object_;
+    R (*invoke_)(const void*, Args...);
+    void* (*copy_)(const void*);
+    void (*destroy_)(void*);
+
+public:
+    template<typename F>
+    function(F target) {
+        [[scpp::unsafe]] {
+            this->object_ = static_cast<void*>(new F(std::move(target)));
+        }
+        this->invoke_ = std::__move_only_function_invoke_const_rvalue<F, R, Args...>;
+        this->copy_ = std::__function_copy<F>;
+        this->destroy_ = std::__move_only_function_destroy<F>;
+        return;
+    }
+
+    function(const std::function<R(Args...) const &&>& other) {
+        this->object_ = other.copy_(other.object_);
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return;
+    }
+
+    std::function<R(Args...) const &&>& operator=(const std::function<R(Args...) const &&>& other) {
+        void* copied = other.copy_(other.object_);
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        this->object_ = copied;
+        this->invoke_ = other.invoke_;
+        this->copy_ = other.copy_;
+        this->destroy_ = other.destroy_;
+        return *this;
+    }
+
+    ~function() {
+        [[scpp::unsafe]] {
+            this->destroy_(this->object_);
+        }
+        return;
+    }
+
+    R call(Args... args) const && {
+        return this->invoke_(this->object_, args...);
+    }
+};
+
+} // namespace std

@@ -33,6 +33,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
 #error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
+#error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
 #endif
@@ -59,7 +62,8 @@ std::string read_file(const std::filesystem::path& path) {
 std::unordered_map<std::string, std::string> std_import_paths() {
     return {{"std", SCPP_STDLIB_STD_MODULE_PATH},
             {"std:string", SCPP_STDLIB_STD_STRING_MODULE_PATH},
-            {"std:memory", SCPP_STDLIB_STD_MEMORY_MODULE_PATH}};
+            {"std:memory", SCPP_STDLIB_STD_MEMORY_MODULE_PATH},
+            {"std:functional", SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH}};
 }
 
 std::vector<std::string> std_link_inputs() {
@@ -765,6 +769,39 @@ void run_generic_type_tests() {
                               "argument doesn't satisfy to fail");
 }
 
+void run_functional_tests() {
+    std::string case_name = "std_function_rejects_move_only_target";
+    cases_run++;
+    std::string source =
+        "import std;\n"
+        "class MoveOnlyAdder {\n"
+        "private:\n"
+        "    std::unique_ptr<int> value;\n"
+        "public:\n"
+        "    MoveOnlyAdder(std::unique_ptr<int> value) { this->value = std::move(value); return; }\n"
+        "    int call(int x) const { return x + *this->value; }\n"
+        "};\n"
+        "int main() {\n"
+        "    std::function<int(int) const> f(MoveOnlyAdder(std::make_unique<int>(5)));\n"
+        "    return f(7);\n"
+        "}\n";
+    bool threw = false;
+    try {
+        scpp::Program program = parse_with_std_imports(source);
+        scpp::monomorphize_generics(program);
+        scpp::check_moves(program);
+        scpp::Codegen codegen("test_module");
+        codegen.generate(program);
+    } catch (const scpp::DataflowError&) {
+        threw = true;
+    } catch (const scpp::CodegenError&) {
+        threw = true;
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, case_name + ": expected std::function to reject a move-only callable target");
+}
+
 } // namespace
 
 int main() {
@@ -773,6 +810,7 @@ int main() {
     run_module_system_tests();
     run_concept_tests();
     run_generic_type_tests();
+    run_functional_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

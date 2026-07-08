@@ -501,6 +501,9 @@ private:
                 return std::nullopt;
 
             case ExprKind::Call: {
+                if (expr.lhs == nullptr) {
+                    if (structs_.contains(expr.name)) return Type{.kind = TypeKind::Named, .name = expr.name};
+                }
                 if (expr.lhs != nullptr && expr.name.empty()) {
                     const Expr* callee_expr = expr.lhs.get();
                     if (callee_expr->kind == ExprKind::Unary && callee_expr->unary_op == UnaryOp::Deref &&
@@ -565,13 +568,21 @@ private:
                 return false;
         }
         std::optional<Type> arg_type = infer_type(arg);
-        return arg_type.has_value() && types_equal(*arg_type, expected_type);
+        if (!arg_type.has_value()) return false;
+        if (types_equal(*arg_type, expected_type)) return true;
+        if (arg.kind == ExprKind::Move && arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+            return types_equal(*arg_type->pointee, expected_type);
+        }
+        return false;
     }
 
     [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type) const {
         if (expr.kind != ExprKind::Identifier) return false;
         auto it = locals_.find(expr.name);
-        return it != locals_.end() && types_equal(it->second.type, target_type);
+        if (it == locals_.end()) return false;
+        if (types_equal(it->second.type, target_type)) return true;
+        return it->second.type.kind == TypeKind::Reference && !it->second.type.is_rvalue_ref &&
+               it->second.type.pointee != nullptr && types_equal(*it->second.type.pointee, target_type);
     }
 
     // Whether `arg` is a legitimate argument for a candidate overload's
@@ -1814,6 +1825,17 @@ private:
                             return;
                         }
                     }
+                    if (stmt.ctor_args.size() == 1 && find_user_declared_copy_ctor_ast(stmt.type.name) == nullptr &&
+                        is_bare_same_type_copy_source(*stmt.ctor_args[0], stmt.type) &&
+                        is_copy_constructible(stmt.type.name)) {
+                        LValue src = codegen_lvalue(*stmt.ctor_args[0]);
+                        if (types_equal(src.type, stmt.type)) {
+                            codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name);
+                            locals_[stmt.var_name].moved_flag =
+                                create_moved_flag_if_has_destructor(stmt.type.name);
+                            return;
+                        }
+                    }
                     std::string ctor_name = stmt.type.name + "_new";
                     // ch05 §5.10: a class may declare multiple
                     // constructors (all synthesized as "ClassName_new"),
@@ -1832,16 +1854,6 @@ private:
                         // compiler-provided recursive memberwise copy
                         // directly, exactly like move construction's own
                         // analogous fallback above.
-                        if (stmt.ctor_args.size() == 1 && stmt.ctor_args[0]->kind == ExprKind::Identifier) {
-                            auto src_it = locals_.find(stmt.ctor_args[0]->name);
-                            if (src_it != locals_.end() && types_equal(src_it->second.type, stmt.type) &&
-                                is_copy_constructible(stmt.type.name)) {
-                                codegen_memberwise_copy_construct(slot, src_it->second.alloca, stmt.type.name);
-                                locals_[stmt.var_name].moved_flag =
-                                    create_moved_flag_if_has_destructor(stmt.type.name);
-                                return;
-                            }
-                        }
                         throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                             current_loc_);
                     }
@@ -1928,14 +1940,19 @@ private:
                 // auto-dereference it, same as any other read).
                 llvm::Value* value = nullptr;
                 if (stmt.expr) {
-                    value = current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
-                                ? codegen_lvalue(*stmt.expr).ptr
-                                : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
-                                      find_class_def(current_function_def_->return_type.name) != nullptr
-                                      ? codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type)
-                                : current_function_def_ != nullptr
-                                      ? codegen_value_for_target(*stmt.expr, current_function_def_->return_type)
-                                      : codegen_expr(*stmt.expr);
+                    if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
+                        current_function_def_->return_type.name == "void") {
+                        codegen_expr(*stmt.expr);
+                    } else {
+                        value = current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
+                                    ? codegen_lvalue(*stmt.expr).ptr
+                                    : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
+                                          find_class_def(current_function_def_->return_type.name) != nullptr
+                                          ? codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type)
+                                    : current_function_def_ != nullptr
+                                          ? codegen_value_for_target(*stmt.expr, current_function_def_->return_type)
+                                          : codegen_expr(*stmt.expr);
+                    }
                 }
                 free_unique_ptr_locals();
                 if (value != nullptr) {
@@ -2127,6 +2144,28 @@ private:
             return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
         }
         if (expr.lhs == nullptr) {
+            if (const ClassDef* class_def = find_class_def(expr.name)) {
+                llvm::Type* llvm_type = to_llvm_type(Type{.kind = TypeKind::Named, .name = expr.name});
+                llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtmp");
+                builder_->CreateStore(llvm::Constant::getNullValue(llvm_type), temp);
+                if (!expr.args.empty() || expr.has_paren_init) {
+                    std::string ctor_name = expr.name + "_new";
+                    const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
+                    if (ctor_def == nullptr) {
+                        if (expr.args.empty()) return CallResult{builder_->CreateLoad(llvm_type, temp, "classtmp.value"), nullptr};
+                        throw CodegenError("class '" + expr.name + "' has no constructor matching this call", current_loc_);
+                    }
+                    llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
+                    if (ctor == nullptr) {
+                        if (expr.args.empty()) return CallResult{builder_->CreateLoad(llvm_type, temp, "classtmp.value"), nullptr};
+                        throw CodegenError("class '" + expr.name + "' has no constructor matching this call", current_loc_);
+                    }
+                    std::vector<llvm::Value*> ctor_args = codegen_call_args(expr.args, ctor_def, /*param_offset=*/1);
+                    ctor_args.insert(ctor_args.begin(), temp);
+                    builder_->CreateCall(ctor, ctor_args);
+                }
+                return CallResult{builder_->CreateLoad(llvm_type, temp, "classtmp.value"), nullptr};
+            }
             auto local_it = locals_.find(expr.name);
             if (local_it != locals_.end() && local_it->second.type.kind == TypeKind::FunctionPointer) {
                 llvm::Value* callee_value = builder_->CreateLoad(to_llvm_type(local_it->second.type), local_it->second.alloca,
@@ -2763,6 +2802,23 @@ private:
         if (expr.type.kind == TypeKind::Named && structs_.contains(expr.type.name)) {
             builder_->CreateStore(llvm::Constant::getNullValue(element_type), heap_ptr);
             if (!expr.args.empty() || expr.has_paren_init) {
+                if (expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move) {
+                    std::optional<Type> moved_type = infer_type(*expr.args[0]);
+                    if (moved_type.has_value() && types_equal(*moved_type, expr.type)) {
+                        llvm::Value* moved = codegen_expr(*expr.args[0]);
+                        builder_->CreateStore(moved, heap_ptr);
+                        return heap_ptr;
+                    }
+                }
+                if (expr.args.size() == 1 && find_user_declared_copy_ctor_ast(expr.type.name) == nullptr &&
+                    is_bare_same_type_copy_source(*expr.args[0], expr.type) &&
+                    is_copy_constructible(expr.type.name)) {
+                    LValue src = codegen_lvalue(*expr.args[0]);
+                    if (types_equal(src.type, expr.type)) {
+                        codegen_memberwise_copy_construct(heap_ptr, src.ptr, expr.type.name);
+                        return heap_ptr;
+                    }
+                }
                 std::string ctor_name = expr.type.name + "_new";
                 const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
                 if (ctor_def == nullptr) {

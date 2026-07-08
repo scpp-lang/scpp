@@ -630,6 +630,12 @@ struct CalleeSignature {
 // produces_rvalue_of_type so both resolve a method call's callee
 // identically.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
+                                  DataflowState& state, const Body& body, const Signatures& signatures,
+                                  bool report_errors);
+void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
+                                                      const std::vector<ExprPtr>& args, Body& body,
+                                                      SourceLocation loc);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
                                                         const ClassFieldTypes* class_field_types = nullptr) {
     if (call_expr.lhs && call_expr.name.empty()) {
@@ -1268,18 +1274,28 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            if (sig == nullptr) {
+                std::optional<Type> call_type = infer_expr_type(expr, body, signatures);
+                if (!expr.lhs && call_type.has_value() && types_equal(*call_type, expected_type)) break;
+                return false;
+            }
             // A reference-returning call yields a place/alias, not a
             // fresh value (see resolve_borrow_source_root's own Call
             // case) -- legitimate as a T&/const T& source elsewhere, but
             // not here.
-            if (sig == nullptr || is_reference(sig->return_type)) return false;
+            if (is_reference(sig->return_type)) return false;
             break;
         }
         default:
             return false;
     }
     std::optional<Type> actual_type = infer_expr_type(expr, body, signatures);
-    return actual_type.has_value() && types_equal(*actual_type, expected_type);
+    if (!actual_type.has_value()) return false;
+    if (types_equal(*actual_type, expected_type)) return true;
+    if (expr.kind == ExprKind::Move && actual_type->kind == TypeKind::Reference && actual_type->pointee != nullptr) {
+        return types_equal(*actual_type->pointee, expected_type);
+    }
+    return false;
 }
 
 // Infers `expr`'s scpp type, for function-overload resolution purposes
@@ -1448,7 +1464,16 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            return sig == nullptr ? std::nullopt : std::optional<Type>(sig->return_type);
+            if (sig != nullptr) return sig->return_type;
+            if (expr.lhs == nullptr && body.program != nullptr) {
+                for (const ClassDef& def : body.program->classes) {
+                    if (def.name == expr.name) return Type{.kind = TypeKind::Named, .name = expr.name};
+                }
+                for (const StructDef& def : body.program->structs) {
+                    if (def.name == expr.name) return Type{.kind = TypeKind::Named, .name = expr.name};
+                }
+            }
+            return std::nullopt;
         }
 
         case ExprKind::PackExpansion:
@@ -2391,6 +2416,12 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     // VarDecl case in apply_statement -- previously entirely unchecked
     // too (e.g. an IIFE could init-capture an already-moved-out
     // std::unique_ptr without error).
+    std::optional<Type> direct_call_type = expr.lhs == nullptr ? infer_expr_type(expr, body, signatures) : std::nullopt;
+    if (!expr.lhs && direct_call_type.has_value() && direct_call_type->kind == TypeKind::Named &&
+        state.class_names != nullptr && state.class_names->contains(expr.name)) {
+        check_constructor_arguments(direct_call_type->name, expr.args, state, body, signatures, report_errors);
+        return;
+    }
     CalleeSignature callee = resolve_callee_signature(expr, body, state.class_field_types);
     auto name_it = signatures.find(callee.key);
     const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
@@ -2798,8 +2829,8 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             bool is_movable_class =
                 type_it != body.local_types.end() &&
                 (is_named_class(type_it->second) ||
-                 (type_it->second.kind == TypeKind::Reference && type_it->second.is_rvalue_ref &&
-                  type_it->second.pointee && is_named_class(*type_it->second.pointee)));
+                 (type_it->second.kind == TypeKind::Reference && type_it->second.pointee &&
+                  is_named_class(*type_it->second.pointee)));
             if (type_it == body.local_types.end() || !is_movable_class) {
                 if (report_errors) {
                     throw DataflowError("std::move is only supported for class-typed variables in this version; '" +
@@ -2884,6 +2915,20 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             if (report_errors && state.unsafe_depth == 0) {
                 throw DataflowError("cannot use 'new' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
                                     state.current_loc);
+            }
+            if (expr.type.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(expr.type.name)) {
+                bool move_shape = expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move &&
+                                  produces_rvalue_of_type(*expr.args[0], expr.type, body, signatures);
+                if (move_shape) {
+                    apply_expr(*expr.args[0], /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                } else if (expr.args.size() == 1 &&
+                           body.program != nullptr && !has_user_declared_copy_ctor(expr.type.name, *body.program) &&
+                           is_copyable_class_lvalue_boundary_source(*expr.args[0], expr.type, body)) {
+                    apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                } else {
+                    check_constructor_arguments(expr.type.name, expr.args, state, body, signatures, report_errors);
+                }
+                return;
             }
             for (const auto& arg : expr.args) {
                 apply_expr(*arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
@@ -3253,7 +3298,10 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body) {
     if (expr.kind != ExprKind::Identifier) return false;
     auto type_it = body.local_types.find(expr.name);
-    return type_it != body.local_types.end() && types_equal(type_it->second, target_type);
+    if (type_it == body.local_types.end()) return false;
+    if (types_equal(type_it->second, target_type)) return true;
+    return type_it->second.kind == TypeKind::Reference && !type_it->second.is_rvalue_ref && type_it->second.pointee &&
+           types_equal(*type_it->second.pointee, target_type);
 }
 
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
@@ -3274,6 +3322,11 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             if (stmt.ctor_args != nullptr) {
                 if (is_move_construction_shape(*stmt.ctor_args, stmt.type, body)) {
                     apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/true, state, body, signatures,
+                               report_errors);
+                } else if (stmt.ctor_args->size() == 1 &&
+                           body.program != nullptr && !has_user_declared_copy_ctor(stmt.type.name, *body.program) &&
+                           is_copyable_class_lvalue_boundary_source(*(*stmt.ctor_args)[0], stmt.type, body)) {
+                    apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
                                report_errors);
                 } else {
                     check_constructor_arguments(stmt.type.name, *stmt.ctor_args, state, body, signatures,
@@ -4451,6 +4504,24 @@ private:
         return &program_.classes[it->second];
     }
 
+    [[nodiscard]] static std::string method_suffix_after_owner_prefix(const Function& fn, const std::string& class_name,
+                                                                       const std::string& owner_id) {
+        std::string owner_prefix = owner_id.empty() ? class_name : class_name + "__" + owner_id;
+        if (fn.name.rfind(owner_prefix, 0) == 0) return fn.name.substr(owner_prefix.size());
+        if (fn.name.rfind(class_name, 0) == 0) return fn.name.substr(class_name.size());
+        return fn.name;
+    }
+
+    void walk_new_concrete_function(size_t fn_index) {
+        if (fn_index >= program_.functions.size()) return;
+        Function& fn = program_.functions[fn_index];
+        if (fn.body == nullptr || !fn.template_params.empty()) return;
+        signatures_ = build_signatures(program_);
+        Body body = build_mir(fn);
+        body.program = &program_;
+        walk_stmt(*fn.body, body, this_type_of(fn), /*allow_generic_monomorphization=*/!fn.is_generic_template);
+    }
+
     // ch04 §4.2/ch05 §5.9: the enclosing function's own `this` parameter
     // type (Named(ClassName)), or nullopt if `fn` isn't a method at all
     // -- used to type a `[this]` lambda capture. `this` is always
@@ -4533,6 +4604,13 @@ private:
     // caller) must be substituted too.
     void substitute_type_param_in_expr(Expr& expr, const std::string& param_name, const Type& replacement) {
         expr.type = substitute_type_param(expr.type, param_name, replacement);
+        for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            if (arg.is_type) {
+                arg.type = substitute_type_param(arg.type, param_name, replacement);
+            } else if (arg.value) {
+                substitute_type_param_in_expr(*arg.value, param_name, replacement);
+            }
+        }
         if (expr.lhs) substitute_type_param_in_expr(*expr.lhs, param_name, replacement);
         if (expr.rhs) substitute_type_param_in_expr(*expr.rhs, param_name, replacement);
         for (ExprPtr& arg : expr.args) substitute_type_param_in_expr(*arg, param_name, replacement);
@@ -4591,6 +4669,9 @@ private:
             expr.args.clear();
             expr.explicit_template_args.clear();
             return;
+        }
+        for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            if (!arg.is_type && arg.value) substitute_non_type_param_in_expr(*arg.value, param_name, replacement);
         }
         if (expr.lhs) substitute_non_type_param_in_expr(*expr.lhs, param_name, replacement);
         if (expr.rhs) substitute_non_type_param_in_expr(*expr.rhs, param_name, replacement);
@@ -4786,7 +4867,9 @@ private:
                     if (pattern.is_unsafe_function_pointer != concrete.is_unsafe_function_pointer) return false;
                     [[fallthrough]];
                 case TypeKind::Function:
-                    return match_one(*pattern.function_return, *concrete.function_return) &&
+                    return pattern.is_const_function == concrete.is_const_function &&
+                           pattern.function_ref_qualifier == concrete.function_ref_qualifier &&
+                           match_one(*pattern.function_return, *concrete.function_return) &&
                            match_list(pattern.function_params, concrete.function_params);
             }
             return false;
@@ -5070,7 +5153,7 @@ private:
                 // against the checking class's own synthesized name
                 // instead of the template's -- mirrors ClassName_
                 // memberName's own established scheme.
-                check_fn.name = check_class_name + method_tmpl.name.substr(class_name_copy.size());
+                check_fn.name = check_class_name + method_suffix_after_owner_prefix(method_tmpl, class_name_copy, owner_id_copy);
                 check_fn.loc = method_tmpl.loc;
                 check_fn.is_generic_template = true;
                 check_fn.return_type = substitute_type_params(method_tmpl.return_type, type_replacements);
@@ -5507,8 +5590,18 @@ private:
         OrdinaryClassTemplateSelection class_selection = select_ordinary_class_template(template_name, named_concretes, loc);
         if (class_selection.def != nullptr) {
             const ClassDef& tmpl = *class_selection.def;
+            std::string tmpl_owner_id = tmpl.template_owner_id;
+            std::vector<std::string> tmpl_namespace_path = tmpl.namespace_path;
+            std::string tmpl_base_class_name = tmpl.base_class_name;
+            AccessSpecifier tmpl_base_access = tmpl.base_access;
+            bool tmpl_thread_movable_override = tmpl.thread_movable_override;
+            bool tmpl_thread_shareable_override = tmpl.thread_shareable_override;
+            ExprPtr tmpl_thread_movable_if_movable_expr =
+                tmpl.thread_movable_if_movable_expr ? clone_expr(*tmpl.thread_movable_if_movable_expr) : nullptr;
+            ExprPtr tmpl_thread_movable_if_shareable_expr =
+                tmpl.thread_movable_if_shareable_expr ? clone_expr(*tmpl.thread_movable_if_shareable_expr) : nullptr;
             std::vector<GenericTypeParam> template_params_copy = tmpl.template_params;
-            std::vector<Function> methods = method_templates_of_owner(tmpl.template_owner_id);
+            std::vector<Function> methods = method_templates_of_owner(tmpl_owner_id);
             for (const GenericTypeParam& type_param : template_params_copy) {
                 if (type_param.is_non_type) {
                     throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct", loc);
@@ -5537,19 +5630,19 @@ private:
             std::vector<ClassField> fields_copy = tmpl.fields;
             ClassDef concrete;
             concrete.name = cache_key;
-            concrete.namespace_path = tmpl.namespace_path;
-            concrete.base_class_name = tmpl.base_class_name;
-            concrete.base_access = tmpl.base_access;
-            concrete.thread_movable_override = tmpl.thread_movable_override;
-            concrete.thread_shareable_override = tmpl.thread_shareable_override;
-            if (tmpl.thread_movable_if_movable_expr) {
-                concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
+            concrete.namespace_path = tmpl_namespace_path;
+            concrete.base_class_name = tmpl_base_class_name;
+            concrete.base_access = tmpl_base_access;
+            concrete.thread_movable_override = tmpl_thread_movable_override;
+            concrete.thread_shareable_override = tmpl_thread_shareable_override;
+            if (tmpl_thread_movable_if_movable_expr) {
+                concrete.thread_movable_if_movable_expr = std::move(tmpl_thread_movable_if_movable_expr);
                 substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr,
                                                class_selection.bindings.type_replacements);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
             }
-            if (tmpl.thread_movable_if_shareable_expr) {
-                concrete.thread_movable_if_shareable_expr = clone_expr(*tmpl.thread_movable_if_shareable_expr);
+            if (tmpl_thread_movable_if_shareable_expr) {
+                concrete.thread_movable_if_shareable_expr = std::move(tmpl_thread_movable_if_shareable_expr);
                 substitute_type_params_in_expr(*concrete.thread_movable_if_shareable_expr,
                                                class_selection.bindings.type_replacements);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
@@ -5564,7 +5657,6 @@ private:
                 concrete.fields.push_back(std::move(nf));
             }
             program_.classes.push_back(std::move(concrete));
-
             for (const Function& method_tmpl : methods) {
                 if (!method_tmpl.method_requires_concept.empty()) {
                     auto concept_it = concepts_by_name_.find(method_tmpl.method_requires_concept);
@@ -5576,7 +5668,7 @@ private:
                     if (!satisfied) continue;
                 }
                 Function clone;
-                clone.name = cache_key + method_tmpl.name.substr(template_name.size());
+                clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, tmpl_owner_id);
                 clone.loc = method_tmpl.loc;
                 clone.namespace_path = method_tmpl.namespace_path;
                 clone.is_exported = false;
@@ -5632,6 +5724,12 @@ private:
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
                     substitute_type_params_in_stmt(*clone.body, class_selection.bindings.type_replacements);
+                    for (const auto& [class_pack_name, concrete_pack_types] : class_selection.bindings.type_pack_replacements) {
+                        std::vector<std::string> concrete_names;
+                        concrete_names.reserve(concrete_pack_types.size());
+                        for (const Type& concrete_type : concrete_pack_types) concrete_names.push_back(concrete_type.name);
+                        expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_names);
+                    }
                     for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
                         expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names);
                         expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names);
@@ -5640,7 +5738,8 @@ private:
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
-                if (!program_.functions.back().template_params.empty()) {
+                walk_new_concrete_function(program_.functions.size() - 1);
+                            if (!program_.functions.back().template_params.empty()) {
                     generic_template_indices_[program_.functions.back().name] = program_.functions.size() - 1;
                 }
             }
@@ -5699,7 +5798,7 @@ private:
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             for (const Function& method_tmpl : methods) {
                 Function clone;
-                clone.name = cache_key + method_tmpl.name.substr(template_name.size());
+                clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, owner_id_copy);
                 clone.loc = method_tmpl.loc;
                 clone.namespace_path = method_tmpl.namespace_path;
                 clone.is_exported = false;
@@ -5731,6 +5830,7 @@ private:
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
+                walk_new_concrete_function(program_.functions.size() - 1);
                 if (!program_.functions.back().template_params.empty()) {
                     generic_template_indices_[program_.functions.back().name] = program_.functions.size() - 1;
                 }
@@ -6325,7 +6425,10 @@ private:
                 generic_function_clone_cache_[cache_key] = tmpl.name;
 
                 Function clone;
-                clone.name = tmpl.name;
+                std::string concrete_ctor_owner_name = class_name;
+                if (std::optional<Type> this_type = this_type_of(tmpl)) concrete_ctor_owner_name = this_type->name;
+                clone.name = class_name +
+                             method_suffix_after_owner_prefix(tmpl, concrete_ctor_owner_name, tmpl.generic_method_owner_id);
                 clone.loc = tmpl.loc;
                 clone.namespace_path = tmpl.namespace_path;
                 clone.is_exported = false;
@@ -6385,6 +6488,7 @@ private:
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
+                walk_new_concrete_function(program_.functions.size() - 1);
             } catch (const DataflowError&) {
                 continue;
             }
@@ -6471,6 +6575,7 @@ private:
         }
         known_function_names_.insert(clone.name);
         program_.functions.push_back(std::move(clone));
+        walk_new_concrete_function(program_.functions.size() - 1);
         return cache_key;
     }
 
@@ -6784,6 +6889,21 @@ private:
         for (ExprPtr& arg : expr.args) walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
         if (expr.kind == ExprKind::New && expr.type.kind == TypeKind::Named) {
             maybe_instantiate_generic_constructor_overloads(expr.type.name, expr.args, body, expr.loc);
+        }
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
+            std::optional<Type> direct_call_type = infer_expr_type(expr, body, signatures_);
+            bool names_known_class = false;
+            if (direct_call_type.has_value() && direct_call_type->kind == TypeKind::Named) {
+                for (const ClassDef& def : program_.classes) {
+                    if (def.name == direct_call_type->name) {
+                        names_known_class = true;
+                        break;
+                    }
+                }
+            }
+            if (names_known_class) {
+                maybe_instantiate_generic_constructor_overloads(direct_call_type->name, expr.args, body, expr.loc);
+            }
         }
 
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {
@@ -7498,11 +7618,75 @@ private:
         return expanded;
     }
 
+    void expand_explicit_template_arg_packs_in_expr(Expr& expr, const std::string& pack_name,
+                                                   const std::vector<std::string>& concrete_names) {
+        if (expr.lhs) expand_explicit_template_arg_packs_in_expr(*expr.lhs, pack_name, concrete_names);
+        if (expr.rhs) expand_explicit_template_arg_packs_in_expr(*expr.rhs, pack_name, concrete_names);
+        for (ExprPtr& arg : expr.args) expand_explicit_template_arg_packs_in_expr(*arg, pack_name, concrete_names);
+        if (!expr.explicit_template_args.empty()) {
+            std::vector<ExplicitTemplateArg> expanded_template_args;
+            for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+                if (arg.is_type && arg.type.is_pack_expansion && arg.type.kind == TypeKind::Named && arg.type.name == pack_name) {
+                    for (const std::string& concrete_name : concrete_names) {
+                        ExplicitTemplateArg expanded_arg;
+                        expanded_arg.is_type = true;
+                        expanded_arg.type.kind = TypeKind::Named;
+                        expanded_arg.type.name = concrete_name;
+                        expanded_template_args.push_back(std::move(expanded_arg));
+                    }
+                    continue;
+                }
+                expanded_template_args.push_back(std::move(arg));
+            }
+            expr.explicit_template_args = std::move(expanded_template_args);
+        }
+        for (LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init) expand_explicit_template_arg_packs_in_expr(*capture.init, pack_name, concrete_names);
+        }
+        if (expr.lambda_body) {
+            for (StmtPtr& s : expr.lambda_body->statements) {
+                switch (s->kind) {
+                    case StmtKind::VarDecl:
+                        if (s->init) expand_explicit_template_arg_packs_in_expr(*s->init, pack_name, concrete_names);
+                        for (ExprPtr& a : s->ctor_args) expand_explicit_template_arg_packs_in_expr(*a, pack_name, concrete_names);
+                        break;
+                    case StmtKind::Return:
+                    case StmtKind::ExprStmt:
+                        if (s->expr) expand_explicit_template_arg_packs_in_expr(*s->expr, pack_name, concrete_names);
+                        break;
+                    case StmtKind::If:
+                    case StmtKind::While:
+                        expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_names);
+                        break;
+                    case StmtKind::Block:
+                        break;
+                }
+            }
+        }
+    }
+
     void expand_pack_expansions_in_expr(Expr& expr, const std::string& pack_name,
                                         const std::vector<std::string>& concrete_names) {
         if (expr.lhs) expand_pack_expansions_in_expr(*expr.lhs, pack_name, concrete_names);
         if (expr.rhs) expand_pack_expansions_in_expr(*expr.rhs, pack_name, concrete_names);
         for (ExprPtr& arg : expr.args) expand_pack_expansions_in_expr(*arg, pack_name, concrete_names);
+        if (!expr.explicit_template_args.empty()) {
+            std::vector<ExplicitTemplateArg> expanded_template_args;
+            for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+                if (arg.is_type && arg.type.is_pack_expansion && arg.type.kind == TypeKind::Named && arg.type.name == pack_name) {
+                    for (const std::string& concrete_name : concrete_names) {
+                        ExplicitTemplateArg expanded_arg;
+                        expanded_arg.is_type = true;
+                        expanded_arg.type.kind = TypeKind::Named;
+                        expanded_arg.type.name = concrete_name;
+                        expanded_template_args.push_back(std::move(expanded_arg));
+                    }
+                    continue;
+                }
+                expanded_template_args.push_back(std::move(arg));
+            }
+            expr.explicit_template_args = std::move(expanded_template_args);
+        }
         if (!expr.args.empty()) {
             std::vector<ExprPtr> expanded_args;
             for (ExprPtr& arg : expr.args) {
@@ -7515,6 +7699,32 @@ private:
             if (capture.init) expand_pack_expansions_in_expr(*capture.init, pack_name, concrete_names);
         }
         if (expr.lambda_body) expand_pack_expansions_in_stmt(*expr.lambda_body, pack_name, concrete_names);
+    }
+
+    void expand_explicit_template_arg_packs_in_stmt(Stmt& stmt, const std::string& pack_name,
+                                                   const std::vector<std::string>& concrete_names) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                if (stmt.init) expand_explicit_template_arg_packs_in_expr(*stmt.init, pack_name, concrete_names);
+                for (ExprPtr& arg : stmt.ctor_args) expand_explicit_template_arg_packs_in_expr(*arg, pack_name, concrete_names);
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) expand_explicit_template_arg_packs_in_expr(*stmt.expr, pack_name, concrete_names);
+                return;
+            case StmtKind::If:
+                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
+                expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_names);
+                if (stmt.else_branch) expand_explicit_template_arg_packs_in_stmt(*stmt.else_branch, pack_name, concrete_names);
+                return;
+            case StmtKind::While:
+                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
+                expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_names);
+                return;
+            case StmtKind::Block:
+                for (StmtPtr& s : stmt.statements) expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_names);
+                return;
+        }
     }
 
     void expand_pack_folds_in_expr(Expr& expr, const std::string& pack_name, const std::vector<std::string>& concrete_names) {
