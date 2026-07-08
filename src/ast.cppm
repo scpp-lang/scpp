@@ -712,6 +712,16 @@ struct StructField {
 struct StructDef {
     std::string name;
     std::vector<StructField> fields;
+    // False for an ordinary `struct`, true for a `union`. Both reuse this
+    // one AST node because they share the same "named aggregate with fields"
+    // surface at the parser/type-reference level; later passes consult this
+    // flag for layout and safety-rule differences (e.g. all union members
+    // overlap at offset 0, and union-member access is unsafe-gated).
+    bool is_union = false;
+    // `[[scpp::packed]]` on a struct/union declaration -- requests C-style
+    // packed layout (no implicit padding between fields, overall alignment 1)
+    // for FFI-facing aggregates.
+    bool is_packed = false;
     // See Function::namespace_path/is_exported/owning_module above --
     // same meaning, applied to a struct declaration (ch11 §11.3's
     // "struct definitions" are part of v0.1's exportable surface).

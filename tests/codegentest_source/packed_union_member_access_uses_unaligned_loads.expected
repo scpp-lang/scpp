@@ -1,0 +1,4 @@
+contains: %union.Payload = type { i32 }
+contains: %struct.Event = type <{ i8, %union.Payload }>
+contains: store i32 42
+count_at_least: 2 | align 1

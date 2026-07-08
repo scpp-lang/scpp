@@ -76,6 +76,7 @@ enum class TokenKind {
     KwTrue,
     KwFalse,
     KwStruct,
+    KwUnion,
     KwConst,
     KwClass,   // ch04 §4.2: owns resources, participates in move/borrow
                // checking, private-by-default access control -- unlike
@@ -256,6 +257,7 @@ private:
         if (text == "true") return TokenKind::KwTrue;
         if (text == "false") return TokenKind::KwFalse;
         if (text == "struct") return TokenKind::KwStruct;
+        if (text == "union") return TokenKind::KwUnion;
         if (text == "const") return TokenKind::KwConst;
         if (text == "class") return TokenKind::KwClass;
         if (text == "public") return TokenKind::KwPublic;

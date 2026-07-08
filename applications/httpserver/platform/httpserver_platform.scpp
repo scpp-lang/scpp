@@ -1,37 +1,58 @@
 export module httpserver:platform;
 
 extern "C" {
-    int scpp_httpserver_errno_eagain();
-    int scpp_httpserver_errno_eintr();
-    int scpp_httpserver_errno_enoent();
-    int scpp_httpserver_errno_eacces();
-    int scpp_httpserver_errno_eperm();
-    int scpp_httpserver_errno_einval();
-    int scpp_httpserver_errno_enotdir();
-    int scpp_httpserver_errno_eisdir();
-    int scpp_httpserver_errno_eloop();
-    int scpp_httpserver_errno_econnreset();
-    int scpp_httpserver_errno_epipe();
+    union [[scpp::packed]] epoll_data_t {
+        void* ptr;
+        int fd;
+        uint32_t u32;
+        uint64_t u64;
+    };
 
-    int scpp_httpserver_listen_any(int port, int backlog);
-    int scpp_httpserver_accept_nonblocking(int listener_fd);
-    int scpp_httpserver_close_fd(int fd);
+    struct [[scpp::packed]] epoll_event {
+        uint32_t events;
+        epoll_data_t data;
+    };
 
-    int scpp_httpserver_epoll_create();
-    int scpp_httpserver_epoll_add(int epoll_fd, int fd, int token, int readable, int writable);
-    int scpp_httpserver_epoll_mod(int epoll_fd, int fd, int token, int readable, int writable);
-    int scpp_httpserver_epoll_delete(int epoll_fd, int fd);
-    int scpp_httpserver_epoll_wait(int epoll_fd, void* events, int max_events, int timeout_ms);
+    struct in_addr {
+        uint32_t s_addr;
+    };
 
-    int scpp_httpserver_socket_read(int fd, char* buffer, int count);
-    int scpp_httpserver_socket_write(int fd, const char* buffer, int count);
+    struct sockaddr {
+        uint16_t sa_family;
+        char sa_data[14];
+    };
 
-    int scpp_httpserver_open_root_directory(const char* path);
-    int scpp_httpserver_open_subdirectory(int dir_fd, const char* path);
-    int scpp_httpserver_open_file_readonly(int dir_fd, const char* path);
-    int scpp_httpserver_stat_fd(int fd, int* out_is_dir, int* out_is_reg, int* out_size);
-    int scpp_httpserver_sendfile(int socket_fd, int file_fd, int* offset, int count);
-    int scpp_httpserver_pread(int file_fd, char* buffer, int count, int offset);
+    struct sockaddr_in {
+        uint16_t sin_family;
+        uint16_t sin_port;
+        in_addr sin_addr;
+        char sin_zero[8];
+    };
+
+    int socket(int domain, int type, int protocol);
+    int setsockopt(int socket_fd, int level, int option_name, const void* option_value, unsigned int option_len);
+    uint32_t htonl(uint32_t hostlong);
+    uint16_t htons(uint16_t hostshort);
+    int bind(int socket_fd, sockaddr* address, unsigned int address_len);
+    int listen(int socket_fd, int backlog);
+    int accept4(int socket_fd, void* address, unsigned int* address_len, int flags);
+    int close(int fd);
+
+    int epoll_create1(int flags);
+    int epoll_ctl(int epoll_fd, int op, int fd, epoll_event* event);
+    int epoll_wait(int epoll_fd, epoll_event* events, int max_events, int timeout_ms);
+
+    long read(int fd, char* buffer, unsigned long count);
+    long send(int fd, const char* buffer, unsigned long count, int flags);
+
+    int open(const char* path, int flags);
+    int openat(int dir_fd, const char* path, int flags);
+
+    long sendfile(int out_fd, int in_fd, long* offset, unsigned long count);
+    long pread(int fd, char* buffer, unsigned long count, long offset);
+    long lseek(int fd, long offset, int whence);
+
+    int* __errno_location();
 }
 
 namespace httpserver {
@@ -44,18 +65,249 @@ export struct PlatformEvent {
     int hangup;
 };
 
-export int errno_eagain() { [[scpp::unsafe]] { return scpp_httpserver_errno_eagain(); } }
-export int errno_eintr() { [[scpp::unsafe]] { return scpp_httpserver_errno_eintr(); } }
-export int errno_enoent() { [[scpp::unsafe]] { return scpp_httpserver_errno_enoent(); } }
-export int errno_eacces() { [[scpp::unsafe]] { return scpp_httpserver_errno_eacces(); } }
-export int errno_eperm() { [[scpp::unsafe]] { return scpp_httpserver_errno_eperm(); } }
-export int errno_einval() { [[scpp::unsafe]] { return scpp_httpserver_errno_einval(); } }
-export int errno_enotdir() { [[scpp::unsafe]] { return scpp_httpserver_errno_enotdir(); } }
-export int errno_eisdir() { [[scpp::unsafe]] { return scpp_httpserver_errno_eisdir(); } }
-export int errno_eloop() { [[scpp::unsafe]] { return scpp_httpserver_errno_eloop(); } }
-export int errno_econnreset() { [[scpp::unsafe]] { return scpp_httpserver_errno_econnreset(); } }
-export int errno_epipe() { [[scpp::unsafe]] { return scpp_httpserver_errno_epipe(); } }
-export int close_fd(int fd) { [[scpp::unsafe]] { return scpp_httpserver_close_fd(fd); } }
+int negative_errno() {
+    int* err_ptr;
+    [[scpp::unsafe]] { err_ptr = __errno_location(); }
+    int err_value;
+    [[scpp::unsafe]] { err_value = *err_ptr; }
+    return 0 - err_value;
+}
+
+int af_inet() { return 2; }
+int sock_stream() { return 1; }
+int sock_nonblock() { return 2048; }
+int sock_cloexec() { return 524288; }
+int sol_socket() { return 1; }
+int so_reuseaddr() { return 2; }
+int so_reuseport() { return 15; }
+int msg_nosignal() { return 16384; }
+int epoll_cloexec() { return 524288; }
+int epoll_ctl_add() { return 1; }
+int epoll_ctl_del() { return 2; }
+int epoll_ctl_mod() { return 3; }
+int epollin_flag() { return 1; }
+int epollout_flag() { return 4; }
+int epollerr_flag() { return 8; }
+int epollhup_flag() { return 16; }
+int epollrdhup_flag() { return 8192; }
+int o_rdonly() { return 0; }
+int o_directory() { return 65536; }
+int o_nofollow() { return 131072; }
+int o_cloexec() { return 524288; }
+int seek_set() { return 0; }
+int seek_end() { return 2; }
+int has_flag(int bits, int flag) {
+    int quotient = bits / flag;
+    if ((quotient - (quotient / 2) * 2) != 0) return 1;
+    return 0;
+}
+
+export int errno_eagain() { return 11; }
+export int errno_eintr() { return 4; }
+export int errno_enoent() { return 2; }
+export int errno_eacces() { return 13; }
+export int errno_eperm() { return 1; }
+export int errno_einval() { return 22; }
+export int errno_enotdir() { return 20; }
+export int errno_eisdir() { return 21; }
+export int errno_eloop() { return 40; }
+export int errno_econnreset() { return 104; }
+export int errno_epipe() { return 32; }
+export int errno_eoverflow() { return 75; }
+
+int scpp_httpserver_close_fd(int fd) {
+    if (fd >= 0) [[scpp::unsafe]] { close(fd); }
+    return 0;
+}
+
+export int close_fd(int fd) { return scpp_httpserver_close_fd(fd); }
+
+int scpp_httpserver_listen_any(int port, int backlog) {
+    int fd;
+    [[scpp::unsafe]] { fd = socket(af_inet(), sock_stream() + sock_nonblock() + sock_cloexec(), 0); }
+    if (fd < 0) return negative_errno();
+    int one = 1;
+    [[scpp::unsafe]] {
+        setsockopt(fd, sol_socket(), so_reuseaddr(), &one, 4);
+        setsockopt(fd, sol_socket(), so_reuseport(), &one, 4);
+    }
+    sockaddr_in addr;
+    addr.sin_family = static_cast<uint16_t>(af_inet());
+    [[scpp::unsafe]] {
+        addr.sin_port = htons(static_cast<uint16_t>(port));
+        addr.sin_addr.s_addr = htonl(static_cast<uint32_t>(0));
+    }
+    int i = 0;
+    while (i < 8) {
+        addr.sin_zero[i] = '\0';
+        i = i + 1;
+    }
+    int bind_result;
+    [[scpp::unsafe]] {
+        bind_result = bind(fd, static_cast<sockaddr*>(static_cast<void*>(&addr)),
+                           static_cast<unsigned int>(16));
+    }
+    if (bind_result != 0) {
+        int err = negative_errno();
+        scpp_httpserver_close_fd(fd);
+        return err;
+    }
+    int listen_result;
+    [[scpp::unsafe]] { listen_result = listen(fd, backlog); }
+    if (listen_result != 0) {
+        int err = negative_errno();
+        scpp_httpserver_close_fd(fd);
+        return err;
+    }
+    return fd;
+}
+
+int scpp_httpserver_accept_nonblocking(int listener_fd) {
+    sockaddr dummy_addr;
+    unsigned int dummy_len = 16;
+    int fd;
+    [[scpp::unsafe]] { fd = accept4(listener_fd, &dummy_addr, &dummy_len, sock_nonblock() + sock_cloexec()); }
+    if (fd < 0) return negative_errno();
+    return fd;
+}
+
+int scpp_httpserver_epoll_create() {
+    int fd;
+    [[scpp::unsafe]] { fd = epoll_create1(epoll_cloexec()); }
+    if (fd < 0) return negative_errno();
+    return fd;
+}
+
+int scpp_httpserver_epoll_add(int epoll_fd, int fd, int token, int readable, int writable) {
+    epoll_event ev;
+    int flags = 0;
+    if (readable != 0) flags = flags + epollin_flag();
+    if (writable != 0) flags = flags + epollout_flag();
+    flags = flags + epollerr_flag() + epollhup_flag() + epollrdhup_flag();
+    ev.events = static_cast<uint32_t>(flags);
+    [[scpp::unsafe]] { ev.data.u32 = static_cast<uint32_t>(token); }
+    int result;
+    [[scpp::unsafe]] { result = epoll_ctl(epoll_fd, epoll_ctl_add(), fd, &ev); }
+    if (result != 0) return negative_errno();
+    return 0;
+}
+
+int scpp_httpserver_epoll_mod(int epoll_fd, int fd, int token, int readable, int writable) {
+    epoll_event ev;
+    int flags = 0;
+    if (readable != 0) flags = flags + epollin_flag();
+    if (writable != 0) flags = flags + epollout_flag();
+    flags = flags + epollerr_flag() + epollhup_flag() + epollrdhup_flag();
+    ev.events = static_cast<uint32_t>(flags);
+    [[scpp::unsafe]] { ev.data.u32 = static_cast<uint32_t>(token); }
+    int result;
+    [[scpp::unsafe]] { result = epoll_ctl(epoll_fd, epoll_ctl_mod(), fd, &ev); }
+    if (result != 0) return negative_errno();
+    return 0;
+}
+
+int scpp_httpserver_epoll_delete(int epoll_fd, int fd) {
+    epoll_event ev;
+    ev.events = static_cast<uint32_t>(0);
+    [[scpp::unsafe]] { ev.data.u32 = static_cast<uint32_t>(0); }
+    int result;
+    [[scpp::unsafe]] { result = epoll_ctl(epoll_fd, epoll_ctl_del(), fd, &ev); }
+    if (result != 0) return negative_errno();
+    return 0;
+}
+
+int scpp_httpserver_epoll_wait(int epoll_fd, PlatformEvent* events, int max_events, int timeout_ms) {
+    epoll_event native_events[64];
+    if (max_events > 64) max_events = 64;
+    int ready;
+    [[scpp::unsafe]] { ready = epoll_wait(epoll_fd, &native_events[0], max_events, timeout_ms); }
+    if (ready < 0) return negative_errno();
+    int i = 0;
+    while (i < ready) {
+        int native_flags;
+        int token;
+        [[scpp::unsafe]] {
+            native_flags = static_cast<int>(native_events[i].events);
+            token = static_cast<int>(native_events[i].data.u32);
+        }
+        events[i].token = token;
+        events[i].readable = has_flag(native_flags, epollin_flag());
+        events[i].writable = has_flag(native_flags, epollout_flag());
+        events[i].error = has_flag(native_flags, epollerr_flag());
+        events[i].hangup = 0;
+        if (has_flag(native_flags, epollhup_flag()) != 0 || has_flag(native_flags, epollrdhup_flag()) != 0) {
+            events[i].hangup = 1;
+        }
+        i = i + 1;
+    }
+    return ready;
+}
+
+int scpp_httpserver_socket_read(int fd, char* buffer, int count) {
+    long n;
+    [[scpp::unsafe]] { n = read(fd, buffer, static_cast<unsigned long>(count)); }
+    if (n < 0) return negative_errno();
+    return static_cast<int>(n);
+}
+
+int scpp_httpserver_socket_write(int fd, const char* buffer, int count) {
+    long n;
+    [[scpp::unsafe]] { n = send(fd, buffer, static_cast<unsigned long>(count), msg_nosignal()); }
+    if (n < 0) return negative_errno();
+    return static_cast<int>(n);
+}
+
+int scpp_httpserver_open_root_directory(const char* path) {
+    int fd;
+    [[scpp::unsafe]] { fd = open(path, o_rdonly() + o_directory() + o_cloexec()); }
+    if (fd < 0) return negative_errno();
+    return fd;
+}
+
+int scpp_httpserver_open_subdirectory(int dir_fd, const char* path) {
+    int fd;
+    [[scpp::unsafe]] { fd = openat(dir_fd, path, o_rdonly() + o_directory() + o_nofollow() + o_cloexec()); }
+    if (fd < 0) return negative_errno();
+    return fd;
+}
+
+int scpp_httpserver_open_file_readonly(int dir_fd, const char* path) {
+    int fd;
+    [[scpp::unsafe]] { fd = openat(dir_fd, path, o_rdonly() + o_nofollow() + o_cloexec()); }
+    if (fd < 0) return negative_errno();
+    return fd;
+}
+
+int scpp_httpserver_file_size(int fd) {
+    long size;
+    [[scpp::unsafe]] { size = lseek(fd, static_cast<long>(0), seek_end()); }
+    if (size < 0) return negative_errno();
+    [[scpp::unsafe]] { lseek(fd, static_cast<long>(0), seek_set()); }
+    if (size > static_cast<long>(2147483647)) return 0 - errno_eoverflow();
+    return static_cast<int>(size);
+}
+
+int scpp_httpserver_sendfile(int socket_fd, int file_fd, int* offset, int count) {
+    int offset_value;
+    [[scpp::unsafe]] { offset_value = *offset; }
+    long native_offset = static_cast<long>(offset_value);
+    long n;
+    [[scpp::unsafe]] {
+        n = sendfile(socket_fd, file_fd, &native_offset, static_cast<unsigned long>(count));
+    }
+    if (n < 0) return negative_errno();
+    [[scpp::unsafe]] { *offset = static_cast<int>(native_offset); }
+    return static_cast<int>(n);
+}
+
+int scpp_httpserver_pread(int file_fd, char* buffer, int count, int offset) {
+    long n;
+    [[scpp::unsafe]] {
+        n = pread(file_fd, buffer, static_cast<unsigned long>(count), static_cast<long>(offset));
+    }
+    if (n < 0) return negative_errno();
+    return static_cast<int>(n);
+}
 
 export int text_length(const char* text) {
     int i = 0;

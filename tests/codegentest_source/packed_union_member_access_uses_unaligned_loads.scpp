@@ -1,0 +1,9 @@
+union Payload { int i; char raw[4]; };
+struct [[scpp::packed]] Event { char tag; Payload data; };
+int f() {
+    Event e;
+    [[scpp::unsafe]] {
+        e.data.i = 42;
+        return e.data.i;
+    }
+}

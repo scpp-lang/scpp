@@ -1,0 +1,5 @@
+union Payload { int i; char c; };
+int main() {
+    Payload p;
+    return p.i;
+}
