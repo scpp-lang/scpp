@@ -890,6 +890,29 @@ void run_cli_extension_tests() {
                    std::string::npos,
                case_name + ": expected import extension error, got '" + result.stdout_text + "'");
     }
+
+    {
+        std::string case_name = "cli_static_build_produces_self_contained_binary";
+        std::filesystem::path source_path =
+            std::filesystem::current_path() / "cli_static_build_produces_self_contained_binary.scpp";
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "cli_static_build_produces_self_contained_binary_exe";
+        cases_run++;
+        write_text_file(source_path, "int main() { return 7; }\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+                                                     " -o " + exe_path.string() + " --static 2>&1");
+        expect(build_result.exit_code == 0, case_name + ": static build should succeed, got '" +
+                                                build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 7, case_name + ": expected static binary exit code 7, got " +
+                                             std::to_string(run_result.exit_code));
+        RunResult ldd_result = run_command_capture("ldd " + exe_path.string() + " 2>&1");
+        expect(ldd_result.stdout_text.find("not a dynamic executable") != std::string::npos ||
+                   ldd_result.stdout_text.find("statically linked") != std::string::npos,
+               case_name + ": expected ldd to report a fully static binary, got '" + ldd_result.stdout_text + "'");
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
+    }
 }
 
 } // namespace
