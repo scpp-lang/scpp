@@ -169,6 +169,27 @@ void run_integration_test() {
     expect(get_file.find("Content-Type: text/plain") != std::string::npos, "GET /hello.txt has text/plain");
     expect(get_file.find("hello from file\n") != std::string::npos, "GET /hello.txt returns body");
 
+    std::string get_css = send_request(port, "GET /assets/site.css HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(get_css.find("HTTP/1.1 200 OK") == 0, "GET /assets/site.css returns 200");
+    expect(get_css.find("Content-Type: text/css") != std::string::npos, "GET /assets/site.css has text/css");
+    expect(get_css.find("font-family: sans-serif;") != std::string::npos, "GET /assets/site.css returns CSS body");
+
+    std::string nested_index = send_request(port, "GET /book/en/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(nested_index.find("HTTP/1.1 200 OK") == 0, "GET /book/en/ returns 200");
+    expect(nested_index.find("Content-Type: text/html") != std::string::npos, "GET /book/en/ has text/html");
+    expect(nested_index.find("<title>SCPP book EN</title>") != std::string::npos, "GET /book/en/ serves nested index");
+
+    std::string nested_index_without_slash = send_request(port, "GET /book/en HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(nested_index_without_slash.find("HTTP/1.1 200 OK") == 0, "GET /book/en returns 200");
+    expect(nested_index_without_slash.find("<h1>English book landing</h1>") != std::string::npos,
+           "GET /book/en serves directory index without trailing slash");
+
+    std::string nested_page = send_request(port, "GET /book/en/getting-started.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(nested_page.find("HTTP/1.1 200 OK") == 0, "GET nested html page returns 200");
+    expect(nested_page.find("Content-Type: text/html") != std::string::npos, "GET nested html page has text/html");
+    expect(nested_page.find("Getting started from generated site") != std::string::npos,
+           "GET nested html page returns nested body");
+
     std::string head_file = send_request(port, "HEAD /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(head_file.find("HTTP/1.1 200 OK") == 0, "HEAD /hello.txt returns 200");
     expect(head_file.find("hello from file\n") == std::string::npos, "HEAD omits body");
