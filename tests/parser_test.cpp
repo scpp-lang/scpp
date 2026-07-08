@@ -2160,6 +2160,49 @@ void test_generic_class_multiple_type_params_parse() {
            "generic_class_multiple_type_params_parse: fields should preserve both template parameter types");
 }
 
+void test_generic_class_named_pack_method_params_parse() {
+    scpp::Program program = scpp::parse(
+        "template<typename R, typename... Args>\n"
+        "class Invoker {\n"
+        "public:\n"
+        "    R call(Args... args) { return 0; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* call_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Invoker_call") call_fn = &fn;
+    }
+    expect(call_fn != nullptr, "generic_class_named_pack_method_params_parse: expected 'Invoker_call'");
+    expect(call_fn->params.size() == 2, "generic_class_named_pack_method_params_parse: expected this + one pack param");
+    expect(call_fn->params[1].is_parameter_pack, "generic_class_named_pack_method_params_parse: method param should be a pack");
+    expect(call_fn->params[1].type.kind == scpp::TypeKind::Named && call_fn->params[1].type.name == "Args",
+           "generic_class_named_pack_method_params_parse: pack element type should be Named('Args')");
+}
+
+void test_generic_class_named_pack_function_pointer_params_parse() {
+    scpp::Program program = scpp::parse(
+        "template<typename R, typename... Args>\n"
+        "class Invoker {\n"
+        "    R (*fp)(Args...);\n"
+        "public:\n"
+        "    int arity() const { return 0; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* invoker = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Invoker") invoker = &c;
+    }
+    expect(invoker != nullptr, "generic_class_named_pack_function_pointer_params_parse: expected ClassDef 'Invoker'");
+    expect(invoker->fields.size() == 1, "generic_class_named_pack_function_pointer_params_parse: expected one field");
+    expect(invoker->fields[0].type.kind == scpp::TypeKind::FunctionPointer,
+           "generic_class_named_pack_function_pointer_params_parse: field should be a function pointer");
+    expect(invoker->fields[0].type.function_params.size() == 1 &&
+               invoker->fields[0].type.function_params[0].kind == scpp::TypeKind::Named &&
+               invoker->fields[0].type.function_params[0].name == "Args" &&
+               invoker->fields[0].type.function_params[0].is_pack_expansion,
+           "generic_class_named_pack_function_pointer_params_parse: function pointer should carry an Args... pack expansion");
+}
+
 // ch05 §5.14: a method may layer its own `requires Concept<T>` clause,
 // recorded on Function::method_requires_concept -- independent of
 // whether the class's own type parameter is itself bare or constrained.
@@ -2724,6 +2767,8 @@ int main() {
     test_lambda_mutable_keyword_parses();
     test_generic_class_bare_type_param_parses();
     test_generic_class_multiple_type_params_parse();
+    test_generic_class_named_pack_method_params_parse();
+    test_generic_class_named_pack_function_pointer_params_parse();
     test_generic_class_method_requires_clause_parses();
     test_generic_struct_concept_constrained_type_param_parses();
     test_generic_struct_bare_type_param_is_rejected();

@@ -218,6 +218,11 @@ private:
     // parameter pack rather than rejecting every non-concept pack as the
     // abbreviated-generic-only form.
     std::vector<GenericTypeParam> current_function_template_params_;
+    // Non-empty only while parsing the body/signature surface of one
+    // generic class/specialization. Lets member parameter parsing and
+    // function-pointer declarators recognize named pack parameters from
+    // the enclosing type template as real pack expansions.
+    std::vector<GenericTypeParam> current_class_template_params_;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -306,6 +311,10 @@ private:
         if (current->kind == TypeKind::Reference && current->pointee) current = current->pointee.get();
         if (current->kind != TypeKind::Named || !current->template_args.empty() || !current->non_type_args.empty()) {
             return std::nullopt;
+        }
+        for (const GenericTypeParam& param : current_class_template_params_) {
+            if (!param.is_pack || param.is_non_type) continue;
+            if (param.name == current->name) return param.name;
         }
         for (const GenericTypeParam& param : current_function_template_params_) {
             if (!param.is_pack || param.is_non_type) continue;
@@ -1075,7 +1084,23 @@ private:
         if (!check(TokenKind::RParen)) {
             do {
                 Type param_type = parse_type(/*allow_rvalue_ref=*/true);
-                if (check(TokenKind::Identifier)) advance(); // optional parameter name, ignored in a function type
+                if (match(TokenKind::Ellipsis)) {
+                    if (!referenced_pack_type_param_name(param_type).has_value()) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column,
+                                          "a function-pointer parameter pack must name an enclosing type or "
+                                          "function template parameter pack");
+                    }
+                    param_type.is_pack_expansion = true;
+                    if (check(TokenKind::Identifier)) advance(); // optional parameter name, ignored in a function type
+                    if (!check(TokenKind::RParen)) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column,
+                                          "a function-pointer parameter pack must be the last parameter in the list");
+                    }
+                } else if (check(TokenKind::Identifier)) {
+                    advance(); // optional parameter name, ignored in a function type
+                }
                 param_type = parse_array_suffix(param_type);
                 if (param_type.kind == TypeKind::Array) {
                     Type decayed;
@@ -2662,6 +2687,8 @@ private:
             fn.namespace_path = namespace_stack_;
             fn.is_exported = is_exported;
         };
+        std::vector<GenericTypeParam> saved_class_template_params = current_class_template_params_;
+        current_class_template_params_ = template_params;
 
         expect(TokenKind::LBrace, "'{'");
         // Real C++'s own default: a class body starts `private` until the
@@ -2902,6 +2929,7 @@ private:
         }
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
+        current_class_template_params_ = std::move(saved_class_template_params);
         program.classes.push_back(std::move(def));
     }
 
