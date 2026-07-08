@@ -112,6 +112,15 @@ std::string type_to_string(const scpp::Type& type) {
         case scpp::TypeKind::Pointer:
             return (type.is_mutable_pointee ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
                    "*";
+        case scpp::TypeKind::Function: {
+            std::string result = type_to_string(*type.function_return) + "(";
+            for (size_t i = 0; i < type.function_params.size(); i++) {
+                if (i > 0) result += ", ";
+                result += type_to_string(type.function_params[i]);
+            }
+            result += ")";
+            return result;
+        }
         case scpp::TypeKind::FunctionPointer: {
             std::string result = type_to_string(*type.function_return) + " (*";
             if (type.is_unsafe_function_pointer) result += " [[scpp::unsafe]]";

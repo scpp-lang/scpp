@@ -550,8 +550,9 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
             return true;
         case TypeKind::Pointer:
             return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
+        case TypeKind::Function:
         case TypeKind::FunctionPointer:
-            if (a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
+            if ((a.kind == TypeKind::FunctionPointer && a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) ||
                 !types_equal(*a.function_return, *b.function_return) ||
                 a.function_params.size() != b.function_params.size()) {
                 return false;
@@ -3869,6 +3870,11 @@ StmtPtr clone_stmt(const Stmt& stmt) {
         }
         case TypeKind::Pointer:
             return mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
+        case TypeKind::Function: {
+            std::string result = mangle_type_for_clone_name(*type.function_return) + "_fntype";
+            for (const Type& param : type.function_params) result += "_" + mangle_type_for_clone_name(param);
+            return result;
+        }
         case TypeKind::FunctionPointer: {
             std::string result = mangle_type_for_clone_name(*type.function_return) +
                                  (type.is_unsafe_function_pointer ? "_ufnptr" : "_fnptr");
@@ -5736,6 +5742,7 @@ private:
                 // into the pointee, since a raw pointer's own structural
                 // shape carries no ownership/borrow information at all).
                 return false;
+            case TypeKind::Function:
             case TypeKind::FunctionPointer:
                 return true;
             case TypeKind::Array: return type.element && is_thread_movable(*type.element, visiting);
@@ -5800,6 +5807,7 @@ private:
                 return false;
             }
             case TypeKind::Pointer: return false;
+            case TypeKind::Function:
             case TypeKind::FunctionPointer: return true;
             case TypeKind::Array: return type.element && is_thread_shareable(*type.element, visiting);
             case TypeKind::Reference:
