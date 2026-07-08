@@ -24,6 +24,9 @@ import scpp.ast;
 #ifndef SCPP_TEST_SOURCE_DIR
 #error "SCPP_TEST_SOURCE_DIR must be defined by the build"
 #endif
+#ifndef SCPP_BINARY_PATH
+#error "SCPP_BINARY_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
 #endif
@@ -112,6 +115,25 @@ struct RunResult {
     std::string stdout_text;
 };
 
+RunResult run_command_capture(const std::string& command) {
+    FILE* pipe = popen(command.c_str(), "r");
+    std::string output;
+    if (pipe != nullptr) {
+        char buffer[256];
+        size_t n;
+        while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
+            output.append(buffer, n);
+        }
+    }
+    int status = pipe != nullptr ? pclose(pipe) : -1;
+    return RunResult{pipe != nullptr && WIFEXITED(status) ? WEXITSTATUS(status) : -1, output};
+}
+
+void write_text_file(const std::filesystem::path& path, std::string_view content) {
+    std::ofstream file(path);
+    file << content;
+}
+
 // Compiles `source` to a temporary executable, runs it, and captures both
 // its stdout and exit code (0-255, matching POSIX wait status semantics).
 RunResult compile_and_run(std::string_view source, const std::string& case_name) {
@@ -147,7 +169,7 @@ ExpectedResult parse_expected(const std::string& content) {
     return ExpectedResult{std::stoi(exit_code_line), stdout_text};
 }
 
-// Runs every `<name>.cpp` case file under SCPP_TEST_SOURCE_DIR against its
+// Runs every `<name>.scpp` case file under SCPP_TEST_SOURCE_DIR against its
 // paired `<name>.expected` file (see parse_expected). Adding a new test case
 // is just dropping in 2 new files -- no changes to this file or a rebuild of
 // the test harness are needed, just re-running the already-built binary.
@@ -155,13 +177,13 @@ void run_test_case_files() {
     std::filesystem::path dir(SCPP_TEST_SOURCE_DIR);
     std::vector<std::filesystem::path> source_files;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.path().extension() == ".cpp") {
+        if (entry.path().extension() == ".scpp") {
             source_files.push_back(entry.path());
         }
     }
     std::sort(source_files.begin(), source_files.end());
 
-    expect(!source_files.empty(), "expected at least one *.cpp test case in " + dir.string());
+    expect(!source_files.empty(), "expected at least one *.scpp test case in " + dir.string());
 
     for (const std::filesystem::path& source_path : source_files) {
         std::string case_name = source_path.stem().string();
@@ -273,7 +295,7 @@ void run_error_location_tests() {
 void run_module_system_tests() {
     auto write_temp_file = [](const std::string& case_name, const std::string& suffix, const std::string& content) {
         std::filesystem::path path =
-            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_" + suffix + ".cpp");
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_" + suffix + ".scpp");
         std::ofstream file(path);
         file << content;
         file.close();
@@ -802,6 +824,40 @@ void run_functional_tests() {
     expect(threw, case_name + ": expected std::function to reject a move-only callable target");
 }
 
+void run_cli_extension_tests() {
+    {
+        std::string case_name = "cli_rejects_cpp_input";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_rejects_cpp_input.cpp";
+        cases_run++;
+        write_text_file(source_path, "int main() { return 0; }\n");
+        RunResult result = run_command_capture(std::string(SCPP_BINARY_PATH) + " parse " + source_path.string() + " 2>&1");
+        std::filesystem::remove(source_path);
+        expect(result.exit_code != 0, case_name + ": expected non-zero exit");
+        expect(result.stdout_text.find("must use the .scpp extension") != std::string::npos,
+               case_name + ": expected extension error, got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "cli_rejects_cpp_import_path";
+        std::filesystem::path main_path = std::filesystem::current_path() / "cli_rejects_cpp_import_path.scpp";
+        std::filesystem::path module_path = std::filesystem::current_path() / "cli_rejects_cpp_import_path_helper.cpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_rejects_cpp_import_path_exe";
+        cases_run++;
+        write_text_file(main_path, "import helper;\nint main() { return helper::value(); }\n");
+        write_text_file(module_path, "export module helper;\nnamespace helper { export int value() { return 1; } }\n");
+        RunResult result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + main_path.string() + " -o " +
+                                exe_path.string() + " --import helper=" + module_path.string() + " 2>&1");
+        std::filesystem::remove(main_path);
+        std::filesystem::remove(module_path);
+        std::filesystem::remove(exe_path);
+        expect(result.exit_code != 0, case_name + ": expected non-zero exit");
+        expect(result.stdout_text.find("import path for module 'helper' must use the .scpp extension") !=
+                   std::string::npos,
+               case_name + ": expected import extension error, got '" + result.stdout_text + "'");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -811,6 +867,7 @@ int main() {
     run_concept_tests();
     run_generic_type_tests();
     run_functional_tests();
+    run_cli_extension_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

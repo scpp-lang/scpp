@@ -1,8 +1,8 @@
-// std_memory.cpp
+// std_memory.scpp
 //
 // The `:memory` interface partition of the "std" module: a pure-scpp
 // `std::unique_ptr<T>` and `std::make_unique<T>(...)`, consumed via
-// `import std;` through std.cpp's `export import :memory;` aggregation,
+// `import std;` through std.scpp's `export import :memory;` aggregation,
 // exactly like std::string's own `:string` partition.
 export module std:memory;
 

@@ -121,7 +121,7 @@ bool throws_move_error(std::string_view source) {
     return false;
 }
 
-// Runs every `<name>.cpp` case file under SCPP_MOVETEST_SOURCE_DIR against
+// Runs every `<name>.scpp` case file under SCPP_MOVETEST_SOURCE_DIR against
 // its paired `<name>.expected` file, which contains exactly "ok" (the move
 // checker must accept the program) or "error" (it must reject it with a
 // DataflowError). Adding a new case is just dropping in 2 new files -- no
@@ -131,13 +131,13 @@ void run_test_case_files() {
     std::filesystem::path dir(SCPP_MOVETEST_SOURCE_DIR);
     std::vector<std::filesystem::path> source_files;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.path().extension() == ".cpp") {
+        if (entry.path().extension() == ".scpp") {
             source_files.push_back(entry.path());
         }
     }
     std::sort(source_files.begin(), source_files.end());
 
-    expect(!source_files.empty(), "expected at least one *.cpp test case in " + dir.string());
+    expect(!source_files.empty(), "expected at least one *.scpp test case in " + dir.string());
 
     for (const std::filesystem::path& source_path : source_files) {
         std::string case_name = source_path.stem().string();

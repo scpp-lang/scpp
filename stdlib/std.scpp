@@ -1,8 +1,8 @@
-// std.cpp
+// std.scpp
 //
 // scpp's "std" module: the primary interface unit. The module's actual
 // content (`namespace std { export class string { ... }; }`) lives in a
-// separate partition, std_string.cpp (`export module std:string;`, ch11
+// separate partition, std_string.scpp (`export module std:string;`, ch11
 // §11.4) -- this file just aggregates it via `export import :string;`,
 // re-exporting std::string to anyone who writes `import std;`. This is
 // scpp's concrete demonstration of both calling into a real C/C++

@@ -194,7 +194,7 @@ void check_ir_assertion(const Assertion& assertion, const std::string& ir, const
     expect(false, case_name + ": malformed .expected line: '" + assertion.args[0] + "'");
 }
 
-// Runs every `<name>.cpp` case file under SCPP_CODEGEN_TEST_SOURCE_DIR
+// Runs every `<name>.scpp` case file under SCPP_CODEGEN_TEST_SOURCE_DIR
 // against its paired `<name>.expected` file. Each non-blank line of
 // `.expected` is one assertion against the generated IR (as text), except
 // `throws:`, which instead asserts that parsing/codegen never produces IR
@@ -218,13 +218,13 @@ void run_test_case_files() {
     std::filesystem::path dir(SCPP_CODEGEN_TEST_SOURCE_DIR);
     std::vector<std::filesystem::path> source_files;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.path().extension() == ".cpp") {
+        if (entry.path().extension() == ".scpp") {
             source_files.push_back(entry.path());
         }
     }
     std::sort(source_files.begin(), source_files.end());
 
-    expect(!source_files.empty(), "expected at least one *.cpp test case in " + dir.string());
+    expect(!source_files.empty(), "expected at least one *.scpp test case in " + dir.string());
 
     for (const std::filesystem::path& source_path : source_files) {
         std::string case_name = source_path.stem().string();
