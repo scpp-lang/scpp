@@ -92,7 +92,9 @@ cmake --build build
 | `21_generic_types` | 泛型 `struct`/`class` 类型（ch05 §5.14）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
 | `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免 |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`（ch05 §5.15）：结构化推导与手动覆盖 |
-| `24_function_pointers` | 函数指针（ch05 §5.16）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、取地址时的自动类型选择（普通函数 / `[[scpp::unsafe]]` / 无函数体 `extern "C"` / 有函数体 `extern "C"`）、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析——**照文档写的；解析器支持仍缺失，见"现状"** |
+| `24_function_pointers` | 函数指针（ch05 §5.16）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、取地址时的自动类型选择（普通函数 / `[[scpp::unsafe]]` / 无函数体 `extern "C"` / 有函数体 `extern "C"`）、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析 |
+| `25_function_wrappers` | `std::function` / `std::move_only_function`（ch05 §5.18）：可拷贝/仅可移动 target、cv/ref-qualified 签名、moved-from 行为 |
+| `26_threads` | `std::thread` / `std::jthread`：thread-movable 构造约束、join/detach/joinable 状态变化、`jthread` 析构时自动 join |
 
 ## 测试理念
 
@@ -153,8 +155,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 243 个用例**
-- 运行器原始统计 **243/243 通过**
+- **总共 259 个用例**
+- 运行器原始统计 **259/259 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -170,5 +172,8 @@ cmake --build build
 - **线程 trait override** 现在覆盖了重写后的 §5.15/§8 文档：
   内建 trait 谓词、泛型类上的条件 override、无条件泛型 override 的传播，以及
   `std::unique_ptr<T>` 的 trait 转发行为
+- **函数/线程 wrapper** 现在也有直接黑盒覆盖：
+  `std::function`、`std::move_only_function`、`std::thread`、`std::jthread`
+  都有各自专门的用例目录来验证当前 stdlib 行为
 
 在这个快照下，完整黑盒套件里**没有已知实现缺口**。

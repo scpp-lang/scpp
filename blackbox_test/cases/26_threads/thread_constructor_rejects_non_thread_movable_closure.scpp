@@ -1,0 +1,12 @@
+import std;
+// Thread constructors constrain their callable target with
+// `[[scpp::thread_movable]]`; a by-reference capture must therefore be
+// rejected.
+int main() {
+    int x = 0;
+    std::thread t([&x]() {
+        x = 1;
+        return;
+    });
+    return 0;
+}

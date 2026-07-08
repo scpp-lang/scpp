@@ -1,0 +1,23 @@
+import std;
+// ch05 §5.18: `std::move_only_function<Sig>` accepts move-only targets.
+class MoveOnlyAdder {
+private:
+    std::unique_ptr<int> delta;
+public:
+    MoveOnlyAdder(std::unique_ptr<int> p) {
+        this->delta = std::move(p);
+        return;
+    }
+    ~MoveOnlyAdder() {
+        return;
+    }
+    int call(int x) {
+        return *this->delta + x;
+    }
+};
+
+int main() {
+    MoveOnlyAdder add(std::make_unique<int>(2));
+    std::move_only_function<int(int)> f(std::move(add));
+    return f.call(3);
+}

@@ -1,0 +1,16 @@
+import std;
+// A thread is joinable after construction and not joinable after
+// detach().
+int main() {
+    std::thread t([]() {
+        return;
+    });
+    if (!t.joinable()) {
+        return 1;
+    }
+    t.detach();
+    if (t.joinable()) {
+        return 2;
+    }
+    return 0;
+}

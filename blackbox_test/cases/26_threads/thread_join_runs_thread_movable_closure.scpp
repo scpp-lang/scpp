@@ -1,0 +1,14 @@
+import std;
+extern "C" int puts(const char* s);
+// A thread-movable closure may be spawned in a std::thread; join()
+// ensures its side effect completes before process exit.
+int main() {
+    std::thread t([]() {
+        [[scpp::unsafe]] {
+            puts("worker");
+        }
+        return;
+    });
+    t.join();
+    return 0;
+}

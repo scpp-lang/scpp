@@ -103,7 +103,9 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access |
 | `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` (ch05 §5.15): structural derivation and manual override |
-| `24_function_pointers` | function pointers (ch05 §5.16): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, automatic address-type selection (ordinary / `[[scpp::unsafe]]` / bodyless `extern "C"` / with-body `extern "C"`), one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution -- **written from spec; parser support is still missing, see Status** |
+| `24_function_pointers` | function pointers (ch05 §5.16): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, automatic address-type selection (ordinary / `[[scpp::unsafe]]` / bodyless `extern "C"` / with-body `extern "C"`), one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution |
+| `25_function_wrappers` | `std::function` / `std::move_only_function` (ch05 §5.18): copyable vs move-only targets, cv/ref-qualified signatures, moved-from behavior |
+| `26_threads` | `std::thread` / `std::jthread`: thread-movable constructor constraint, join/detach/joinable transitions, `jthread` destructor auto-join |
 
 ## Testing philosophy
 
@@ -184,8 +186,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **243 cases total**
-- **243/243 passing**
+- **259 cases total**
+- **259/259 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -205,6 +207,10 @@ re-run via `./build/run_tests`:
   builtin trait predicates, conditional overrides on generic classes,
   unconditional generic override propagation, and `std::unique_ptr<T>`'s
   trait forwarding behavior
+- **Function/thread wrappers now have direct black-box coverage**:
+  `std::function`, `std::move_only_function`, `std::thread`, and
+  `std::jthread` each have dedicated case directories exercising their
+  current stdlib behavior
 
 No known implementation gaps remain in the full black-box suite at this
 snapshot.
