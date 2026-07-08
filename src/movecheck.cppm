@@ -4137,7 +4137,16 @@ public:
         // exclusion set (built per-lambda in resolve_lambda) doesn't
         // need to reconstruct these each time.
         for (const StructDef& s : program.structs) known_type_names_.insert(s.name);
-        for (const ClassDef& c : program.classes) known_type_names_.insert(c.name);
+        for (size_t i = 0; i < program.classes.size(); i++) {
+            const ClassDef& c = program.classes[i];
+            known_type_names_.insert(c.name);
+            if (!c.template_owner_id.empty()) {
+                class_template_indices_by_owner_id_[c.template_owner_id] = i;
+                if (!c.is_variadic_primary_template && !c.is_variadic_specialization) {
+                    ordinary_class_template_owner_ids_by_name_[c.name].push_back(c.template_owner_id);
+                }
+            }
+        }
         for (const ConceptDef& c : program.concepts) known_type_names_.insert(c.name);
         for (const Function& fn : program.functions) known_function_names_.insert(fn.name);
         // ch05 §5.14: every generic class/struct *template*'s own name --
@@ -4270,6 +4279,8 @@ private:
     Program& program_;
     std::unordered_map<std::string, const ConceptDef*> concepts_by_name_;
     std::unordered_map<std::string, size_t> generic_template_indices_;
+    std::unordered_map<std::string, size_t> class_template_indices_by_owner_id_;
+    std::unordered_map<std::string, std::vector<std::string>> ordinary_class_template_owner_ids_by_name_;
     std::unordered_map<std::string, std::string> clone_cache_;
     std::unordered_set<std::string> known_type_names_;
     std::unordered_set<std::string> known_function_names_;
@@ -4339,8 +4350,18 @@ private:
     // type anywhere in the program for these, so every other pass in
     // this file must skip them entirely (see run()'s own comment).
     [[nodiscard]] bool belongs_to_unresolved_generic_type_template(const Function& fn) const {
-        if (fn.params.empty() || fn.params[0].name != "this" || fn.params[0].type.pointee == nullptr) return false;
-        return generic_type_template_names_.contains(fn.params[0].type.pointee->name);
+        return !fn.generic_method_owner_id.empty();
+    }
+
+    struct TemplateInstantiationBindings {
+        std::vector<std::pair<std::string, Type>> type_replacements;
+        std::unordered_map<std::string, std::vector<Type>> type_pack_replacements;
+    };
+
+    [[nodiscard]] const ClassDef* class_template_by_owner_id(const std::string& owner_id) const {
+        auto it = class_template_indices_by_owner_id_.find(owner_id);
+        if (it == class_template_indices_by_owner_id_.end()) return nullptr;
+        return &program_.classes[it->second];
     }
 
     // ch04 §4.2/ch05 §5.9: the enclosing function's own `this` parameter
@@ -4518,25 +4539,245 @@ private:
         }
     }
 
-    // ch05 §5.14: every method (including a constructor/destructor) of
-    // the generic class/struct template named `template_name` -- found
-    // via each candidate's own `this` parameter type (reliable
-    // regardless of naming, unlike a name-prefix scan, which a class
-    // whose own name happens to prefix another's could fool). Returns
-    // *copies*, not references: both this method's own callers
-    // (resolve_generic_types/check_generic_type_methods_once)
-    // immediately push new Functions into `program_.functions`
-    // afterward, which could otherwise reallocate the vector out from
-    // under a held reference.
-    [[nodiscard]] std::vector<Function> method_templates_of(const std::string& template_name) const {
+    [[nodiscard]] std::vector<Function> methods_of_type_name(const std::string& type_name) const {
         std::vector<Function> result;
         for (const Function& fn : program_.functions) {
             if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
-                fn.params[0].type.pointee->name == template_name) {
+                fn.params[0].type.pointee->name == type_name) {
                 result.push_back(clone_function(fn));
             }
         }
         return result;
+    }
+
+    // ch05 §5.14: every method (including a constructor/destructor) still
+    // attached to exactly one unresolved generic class template definition
+    // or ordinary partial specialization pattern, identified by that
+    // template's own internal owner id rather than its exposed class name.
+    // This keeps distinct `function<...>` template definitions from
+    // colliding once more than one shares the same `this` pointee spelling.
+    [[nodiscard]] std::vector<Function> method_templates_of_owner(const std::string& owner_id) const {
+        std::vector<Function> result;
+        for (const Function& fn : program_.functions) {
+            if (fn.generic_method_owner_id == owner_id) result.push_back(clone_function(fn));
+        }
+        return result;
+    }
+
+    [[nodiscard]] static const Type* find_type_replacement(const std::vector<std::pair<std::string, Type>>& replacements,
+                                                           const std::string& name) {
+        for (const auto& [param_name, replacement] : replacements) {
+            if (param_name == name) return &replacement;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] static Type instantiate_type_pattern(
+        const Type& type, const std::vector<std::pair<std::string, Type>>& replacements,
+        const std::unordered_map<std::string, std::vector<Type>>& pack_replacements) {
+        if (!type.is_pack_expansion && type.kind == TypeKind::Named && type.template_args.empty() &&
+            type.non_type_args.empty()) {
+            if (const Type* replacement = find_type_replacement(replacements, type.name)) return *replacement;
+        }
+        Type result = type;
+        result.is_pack_expansion = false;
+        std::vector<Type> new_template_args;
+        new_template_args.reserve(result.template_args.size());
+        for (const Type& arg : result.template_args) {
+            if (arg.is_pack_expansion && arg.kind == TypeKind::Named && pack_replacements.contains(arg.name)) {
+                for (const Type& concrete : pack_replacements.at(arg.name)) new_template_args.push_back(concrete);
+                continue;
+            }
+            new_template_args.push_back(instantiate_type_pattern(arg, replacements, pack_replacements));
+        }
+        result.template_args = std::move(new_template_args);
+        if (result.pointee) {
+            result.pointee =
+                std::make_shared<Type>(instantiate_type_pattern(*result.pointee, replacements, pack_replacements));
+        }
+        if (result.element) {
+            result.element =
+                std::make_shared<Type>(instantiate_type_pattern(*result.element, replacements, pack_replacements));
+        }
+        if (result.function_return) {
+            result.function_return = std::make_shared<Type>(
+                instantiate_type_pattern(*result.function_return, replacements, pack_replacements));
+        }
+        std::vector<Type> new_function_params;
+        new_function_params.reserve(result.function_params.size());
+        for (const Type& param : result.function_params) {
+            if (param.is_pack_expansion && param.kind == TypeKind::Named && pack_replacements.contains(param.name)) {
+                for (const Type& concrete : pack_replacements.at(param.name)) new_function_params.push_back(concrete);
+                continue;
+            }
+            new_function_params.push_back(instantiate_type_pattern(param, replacements, pack_replacements));
+        }
+        result.function_params = std::move(new_function_params);
+        return result;
+    }
+
+    [[nodiscard]] static bool bind_type_pattern(
+        const std::string& name, const Type& concrete, TemplateInstantiationBindings& bindings) {
+        if (const Type* existing = find_type_replacement(bindings.type_replacements, name)) {
+            return types_equal(*existing, concrete);
+        }
+        bindings.type_replacements.emplace_back(name, concrete);
+        return true;
+    }
+
+    [[nodiscard]] static bool bind_type_pack_pattern(
+        const std::string& name, const std::vector<Type>& concretes, TemplateInstantiationBindings& bindings) {
+        auto it = bindings.type_pack_replacements.find(name);
+        if (it != bindings.type_pack_replacements.end()) {
+            if (it->second.size() != concretes.size()) return false;
+            for (size_t i = 0; i < concretes.size(); i++) {
+                if (!types_equal(it->second[i], concretes[i])) return false;
+            }
+            return true;
+        }
+        bindings.type_pack_replacements[name] = concretes;
+        return true;
+    }
+
+    [[nodiscard]] static bool match_type_pattern_list(
+        const std::vector<Type>& patterns, const std::vector<Type>& concretes, const std::vector<GenericTypeParam>& params,
+        TemplateInstantiationBindings& bindings) {
+        std::function<bool(const Type&, const Type&)> match_one;
+        std::function<bool(const std::vector<Type>&, const std::vector<Type>&)> match_list;
+        match_list = [&](const std::vector<Type>& inner_patterns, const std::vector<Type>& inner_concretes) -> bool {
+            if (!inner_patterns.empty()) {
+                const Type& last = inner_patterns.back();
+                if (last.is_pack_expansion && last.kind == TypeKind::Named) {
+                    for (const GenericTypeParam& param : params) {
+                        if (!param.is_pack || param.is_non_type || param.name != last.name) continue;
+                        if (inner_concretes.size() + 1 < inner_patterns.size()) return false;
+                        for (size_t i = 0; i + 1 < inner_patterns.size(); i++) {
+                            if (!match_one(inner_patterns[i], inner_concretes[i])) return false;
+                        }
+                        std::vector<Type> pack_slice(
+                            inner_concretes.begin() + static_cast<std::ptrdiff_t>(inner_patterns.size() - 1),
+                            inner_concretes.end());
+                        return bind_type_pack_pattern(param.name, pack_slice, bindings);
+                    }
+                }
+            }
+            if (inner_patterns.size() != inner_concretes.size()) return false;
+            for (size_t i = 0; i < inner_patterns.size(); i++) {
+                if (!match_one(inner_patterns[i], inner_concretes[i])) return false;
+            }
+            return true;
+        };
+        match_one = [&](const Type& pattern, const Type& concrete) -> bool {
+            if (!pattern.is_pack_expansion && pattern.kind == TypeKind::Named && pattern.template_args.empty() &&
+                pattern.non_type_args.empty()) {
+                for (const GenericTypeParam& param : params) {
+                    if (param.is_non_type || param.is_pack || param.name != pattern.name) continue;
+                    return bind_type_pattern(param.name, concrete, bindings);
+                }
+            }
+            if (pattern.kind != concrete.kind) return false;
+            switch (pattern.kind) {
+                case TypeKind::Named:
+                    if (pattern.name != concrete.name || pattern.non_type_args.size() != concrete.non_type_args.size()) {
+                        return false;
+                    }
+                    return match_list(pattern.template_args, concrete.template_args);
+                case TypeKind::Pointer:
+                    return pattern.is_mutable_pointee == concrete.is_mutable_pointee &&
+                           match_one(*pattern.pointee, *concrete.pointee);
+                case TypeKind::Reference:
+                    return pattern.is_mutable_ref == concrete.is_mutable_ref &&
+                           pattern.is_rvalue_ref == concrete.is_rvalue_ref &&
+                           match_one(*pattern.pointee, *concrete.pointee);
+                case TypeKind::Span:
+                    return pattern.is_mutable_ref == concrete.is_mutable_ref &&
+                           match_one(*pattern.pointee, *concrete.pointee);
+                case TypeKind::Array:
+                    return pattern.array_size == concrete.array_size &&
+                           match_one(*pattern.element, *concrete.element);
+                case TypeKind::FunctionPointer:
+                    if (pattern.is_unsafe_function_pointer != concrete.is_unsafe_function_pointer) return false;
+                    [[fallthrough]];
+                case TypeKind::Function:
+                    return match_one(*pattern.function_return, *concrete.function_return) &&
+                           match_list(pattern.function_params, concrete.function_params);
+            }
+            return false;
+        };
+        return match_list(patterns, concretes);
+    }
+
+    struct OrdinaryClassTemplateSelection {
+        const ClassDef* def = nullptr;
+        TemplateInstantiationBindings bindings;
+    };
+
+    [[nodiscard]] OrdinaryClassTemplateSelection select_ordinary_class_template(
+        const std::string& template_name, const std::vector<Type>& concrete_args, SourceLocation loc) const {
+        OrdinaryClassTemplateSelection primary_selection;
+        bool have_primary_definition = false;
+        bool have_primary_forward_decl = false;
+        std::vector<OrdinaryClassTemplateSelection> matching_specializations;
+
+        auto owner_it = ordinary_class_template_owner_ids_by_name_.find(template_name);
+        if (owner_it == ordinary_class_template_owner_ids_by_name_.end()) {
+            return primary_selection;
+        }
+
+        for (const std::string& owner_id : owner_it->second) {
+            const ClassDef* candidate = class_template_by_owner_id(owner_id);
+            if (candidate == nullptr || candidate->is_variadic_primary_template || candidate->is_variadic_specialization) {
+                continue;
+            }
+            if (candidate->is_partial_specialization) {
+                if (candidate->specialization_template_args.size() != concrete_args.size()) continue;
+                TemplateInstantiationBindings bindings;
+                if (!match_type_pattern_list(candidate->specialization_template_args, concrete_args, candidate->template_params,
+                                             bindings)) {
+                    continue;
+                }
+                matching_specializations.push_back(OrdinaryClassTemplateSelection{candidate, std::move(bindings)});
+                continue;
+            }
+            if (candidate->template_params.size() != concrete_args.size()) continue;
+            TemplateInstantiationBindings bindings;
+            bool valid = true;
+            for (size_t param_index = 0; param_index < candidate->template_params.size(); ++param_index) {
+                const GenericTypeParam& param = candidate->template_params[param_index];
+                if (param.is_non_type || param.is_pack) {
+                    valid = false;
+                    break;
+                }
+                bindings.type_replacements.emplace_back(param.name, concrete_args[param_index]);
+            }
+            if (!valid) continue;
+            OrdinaryClassTemplateSelection selection{candidate, std::move(bindings)};
+            if (candidate->is_forward_declaration) {
+                if (!have_primary_definition) {
+                    primary_selection = std::move(selection);
+                    have_primary_forward_decl = true;
+                }
+            } else {
+                primary_selection = std::move(selection);
+                have_primary_definition = true;
+            }
+        }
+
+        if (matching_specializations.size() > 1) {
+            throw DataflowError("multiple partial specializations of '" + template_name +
+                                    "' match this concrete argument list; this version requires an unambiguous "
+                                    "single best match",
+                                loc);
+        }
+        if (!matching_specializations.empty()) return matching_specializations.front();
+        if (have_primary_definition) return primary_selection;
+        if (have_primary_forward_decl) {
+            throw DataflowError("'" + template_name +
+                                    "' has no matching class-template definition for these concrete arguments "
+                                    "(the primary template is only forward-declared)",
+                                loc);
+        }
+        return primary_selection;
     }
 
     // ch05 §5.14: for every class with a base (ClassDef::base_class_name),
@@ -4585,7 +4826,7 @@ private:
             std::vector<std::string> namespace_path_copy = program_.classes[i].namespace_path;
             bool is_exported_copy = program_.classes[i].is_exported;
 
-            std::vector<Function> base_methods = method_templates_of(base_name);
+            std::vector<Function> base_methods = methods_of_type_name(base_name);
             for (const Function& base_method : base_methods) {
                 // e.g. "_foo" out of "Circle_foo" -- see
                 // method_templates_of's exact-name-match filter, which
@@ -4673,6 +4914,7 @@ private:
         size_t original_class_count = program_.classes.size();
         for (size_t i = 0; i < original_class_count; i++) {
             if (program_.classes[i].template_params.empty()) continue;
+            if (program_.classes[i].is_partial_specialization) continue;
             // ch05 §5.14: a variadic primary template's own bodyless
             // forward declaration, or one of its two fixed
             // specializations, is never itself witness-checked this
@@ -4689,7 +4931,8 @@ private:
             std::vector<GenericTypeParam> template_params = program_.classes[i].template_params;
             std::vector<ClassField> fields_copy = program_.classes[i].fields;
             std::string class_name_copy = program_.classes[i].name;
-            std::vector<Function> methods = method_templates_of(class_name_copy);
+            std::string owner_id_copy = program_.classes[i].template_owner_id;
+            std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             for (const Function& method_tmpl : methods) {
                 if (!method_tmpl.template_params.empty()) continue;
                 std::vector<std::pair<std::string, Type>> type_replacements;
@@ -5174,57 +5417,76 @@ private:
             return cache_key;
         }
 
-        for (const ClassDef& tmpl : program_.classes) {
-            if (tmpl.name != template_name || tmpl.template_params.empty()) continue;
-            if (tmpl.template_params.size() != named_concretes.size()) {
-                throw DataflowError("'" + template_name + "' takes exactly " +
-                                        std::to_string(tmpl.template_params.size()) + " template argument(s)",
-                                    loc);
-            }
-            std::vector<std::pair<std::string, Type>> type_replacements;
-            type_replacements.reserve(tmpl.template_params.size());
-            for (size_t param_index = 0; param_index < tmpl.template_params.size(); ++param_index) {
-                const GenericTypeParam& type_param = tmpl.template_params[param_index];
+        OrdinaryClassTemplateSelection class_selection = select_ordinary_class_template(template_name, named_concretes, loc);
+        if (class_selection.def != nullptr) {
+            const ClassDef& tmpl = *class_selection.def;
+            std::vector<GenericTypeParam> template_params_copy = tmpl.template_params;
+            std::vector<Function> methods = method_templates_of_owner(tmpl.template_owner_id);
+            for (const GenericTypeParam& type_param : template_params_copy) {
                 if (type_param.is_non_type) {
-                    throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct",
+                    throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct", loc);
+                }
+                if (type_param.is_pack) {
+                    auto pack_it = class_selection.bindings.type_pack_replacements.find(type_param.name);
+                    if (pack_it == class_selection.bindings.type_pack_replacements.end()) {
+                        throw DataflowError("partial specialization of '" + template_name +
+                                                "' did not bind required type pack parameter '" + type_param.name + "'",
+                                            loc);
+                    }
+                    for (const Type& concrete : pack_it->second) {
+                        check_type_param_constraint(type_param, concrete, template_name, loc);
+                    }
+                    continue;
+                }
+                const Type* bound = find_type_replacement(class_selection.bindings.type_replacements, type_param.name);
+                if (bound == nullptr) {
+                    throw DataflowError("partial specialization of '" + template_name +
+                                            "' did not bind required type parameter '" + type_param.name + "'",
                                         loc);
                 }
-                check_type_param_constraint(type_param, named_concretes[param_index], template_name, loc);
-                type_replacements.emplace_back(type_param.name, named_concretes[param_index]);
+                check_type_param_constraint(type_param, *bound, template_name, loc);
             }
+
             std::vector<ClassField> fields_copy = tmpl.fields;
             ClassDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
+            concrete.base_class_name = tmpl.base_class_name;
+            concrete.base_access = tmpl.base_access;
             concrete.thread_movable_override = tmpl.thread_movable_override;
             concrete.thread_shareable_override = tmpl.thread_shareable_override;
             if (tmpl.thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
-                substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr, type_replacements);
+                substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr,
+                                               class_selection.bindings.type_replacements);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
             }
             if (tmpl.thread_movable_if_shareable_expr) {
                 concrete.thread_movable_if_shareable_expr = clone_expr(*tmpl.thread_movable_if_shareable_expr);
-                substitute_type_params_in_expr(*concrete.thread_movable_if_shareable_expr, type_replacements);
+                substitute_type_params_in_expr(*concrete.thread_movable_if_shareable_expr,
+                                               class_selection.bindings.type_replacements);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
             }
             for (const ClassField& f : fields_copy) {
                 ClassField nf;
                 nf.name = f.name;
                 nf.access = f.access;
-                nf.type = substitute_type_params(f.type, type_replacements);
+                nf.type = instantiate_type_pattern(f.type, class_selection.bindings.type_replacements,
+                                                   class_selection.bindings.type_pack_replacements);
                 nf.type = resolve_generic_type(nf.type, loc);
                 concrete.fields.push_back(std::move(nf));
             }
             program_.classes.push_back(std::move(concrete));
 
-            std::vector<Function> methods = method_templates_of(template_name);
             for (const Function& method_tmpl : methods) {
                 if (!method_tmpl.method_requires_concept.empty()) {
                     auto concept_it = concepts_by_name_.find(method_tmpl.method_requires_concept);
-                    bool satisfied = concept_it != concepts_by_name_.end() &&
-                                      type_satisfies_concept(named_concretes[0], *concept_it->second, program_);
-                    if (!satisfied) continue; // omitted for this instantiation -- see this function's own comment
+                    const Type* constrained_type = class_selection.bindings.type_replacements.empty()
+                                                       ? nullptr
+                                                       : &class_selection.bindings.type_replacements.front().second;
+                    bool satisfied = constrained_type != nullptr && concept_it != concepts_by_name_.end() &&
+                                      type_satisfies_concept(*constrained_type, *concept_it->second, program_);
+                    if (!satisfied) continue;
                 }
                 Function clone;
                 clone.name = cache_key + method_tmpl.name.substr(template_name.size());
@@ -5235,27 +5497,58 @@ private:
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
-                clone.return_type = substitute_type_params(method_tmpl.return_type, type_replacements);
+                clone.return_type = instantiate_type_pattern(method_tmpl.return_type, class_selection.bindings.type_replacements,
+                                                             class_selection.bindings.type_pack_replacements);
                 clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
+                std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
                 clone.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
-                    Param np;
-                    np.name = p.name;
                     if (p.name == "this") {
+                        Param np;
+                        np.name = p.name;
                         Type this_type;
                         this_type.kind = TypeKind::Reference;
                         this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = cache_key});
                         this_type.is_mutable_ref = p.type.is_mutable_ref;
                         np.type = std::move(this_type);
-                    } else {
-                        np.type = substitute_type_params(p.type, type_replacements);
-                        np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                        clone.params.push_back(std::move(np));
+                        continue;
                     }
+                    if (p.is_parameter_pack) {
+                        std::optional<std::string> pack_name =
+                            referenced_type_pack_param_name(p.type, template_params_copy);
+                        auto pack_it = pack_name ? class_selection.bindings.type_pack_replacements.find(*pack_name)
+                                                 : class_selection.bindings.type_pack_replacements.end();
+                        if (pack_name && pack_it != class_selection.bindings.type_pack_replacements.end()) {
+                            pack_param_names[p.name] = {};
+                            for (size_t j = 0; j < pack_it->second.size(); j++) {
+                                Param np = p;
+                                np.is_parameter_pack = false;
+                                np.name = p.name + "$" + std::to_string(j);
+                                std::vector<std::pair<std::string, Type>> param_replacements =
+                                    class_selection.bindings.type_replacements;
+                                param_replacements.emplace_back(*pack_name, pack_it->second[j]);
+                                np.type = instantiate_type_pattern(p.type, param_replacements, {});
+                                np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                                clone.params.push_back(std::move(np));
+                                pack_param_names[p.name].push_back(clone.params.back().name);
+                            }
+                            continue;
+                        }
+                    }
+                    Param np = p;
+                    np.type = instantiate_type_pattern(p.type, class_selection.bindings.type_replacements,
+                                                       class_selection.bindings.type_pack_replacements);
+                    np.type = resolve_generic_type(np.type, method_tmpl.loc);
                     clone.params.push_back(std::move(np));
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
-                    substitute_type_params_in_stmt(*clone.body, type_replacements);
+                    substitute_type_params_in_stmt(*clone.body, class_selection.bindings.type_replacements);
+                    for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
+                        expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names);
+                        expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names);
+                    }
                     resolve_generic_types_in_stmt(*clone.body);
                 }
                 known_function_names_.insert(clone.name);
@@ -5298,6 +5591,7 @@ private:
                 continue;
             }
             std::vector<GenericTypeParam> params_copy = tmpl.template_params;
+            std::string owner_id_copy = tmpl.template_owner_id;
             std::vector<ClassField> fields_copy = tmpl.fields;
             ClassDef concrete;
             concrete.name = cache_key;
@@ -5315,7 +5609,7 @@ private:
             for (const ClassField& field : fields_copy) concrete.fields.push_back(field);
             program_.classes.push_back(std::move(concrete));
 
-            std::vector<Function> methods = method_templates_of(template_name);
+            std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             for (const Function& method_tmpl : methods) {
                 Function clone;
                 clone.name = cache_key + method_tmpl.name.substr(template_name.size());
@@ -7279,6 +7573,7 @@ void check_moves(const Program& program) {
         // any call site" guarantee, accepted given this form's added
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
+        if (!fn.generic_method_owner_id.empty()) continue;
         check_function(fn, program, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
                        classes_with_copy_assign, witness_class_names);
     }
