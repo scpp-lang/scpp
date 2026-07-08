@@ -252,3 +252,26 @@ jobs:
                   if not content_type.startswith("text/html"):
                       raise AssertionError(f"nested html link returned wrong type: {url} -> {content_type}")
           PY
+
+  publish-website-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs:
+      - build-and-test
+      - docker-website-smoke
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build website image
+        run: docker build --pull -f website/Dockerfile -t "${{ vars.DOCKER_USERNAME }}/website:latest" .
+
+      - name: Push website image
+        run: docker push "${{ vars.DOCKER_USERNAME }}/website:latest"
