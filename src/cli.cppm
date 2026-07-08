@@ -39,6 +39,8 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwIf: return "KwIf";
         case scpp::TokenKind::KwElse: return "KwElse";
         case scpp::TokenKind::KwWhile: return "KwWhile";
+        case scpp::TokenKind::KwBreak: return "KwBreak";
+        case scpp::TokenKind::KwContinue: return "KwContinue";
         case scpp::TokenKind::KwFor: return "KwFor";
         case scpp::TokenKind::KwExtern: return "KwExtern";
         case scpp::TokenKind::KwTrue: return "KwTrue";
@@ -90,6 +92,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Amp: return "Amp";
         case scpp::TokenKind::PipePipe: return "PipePipe";
         case scpp::TokenKind::Bang: return "Bang";
+        case scpp::TokenKind::Question: return "Question";
         case scpp::TokenKind::EndOfFile: return "EndOfFile";
         case scpp::TokenKind::Unknown: return "Unknown";
     }
@@ -304,6 +307,12 @@ void print_expr(const scpp::Expr& expr, int depth) {
             print_expr(*expr.lhs, depth + 1);
             print_expr(*expr.rhs, depth + 1);
             break;
+        case scpp::ExprKind::Conditional:
+            std::cout << "Conditional\n";
+            print_expr(*expr.lhs, depth + 1);
+            print_expr(*expr.rhs, depth + 1);
+            print_expr(*expr.third, depth + 1);
+            break;
         case scpp::ExprKind::Fold:
             std::cout << "Fold " << binary_op_name(expr.binary_op)
                       << (expr.fold_ellipsis_on_left ? " (left)" : " (right)") << "\n";
@@ -420,6 +429,12 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
             std::cout << "While\n";
             print_expr(*stmt.condition, depth + 1);
             print_stmt(*stmt.then_branch, depth + 1);
+            break;
+        case scpp::StmtKind::Break:
+            std::cout << "Break\n";
+            break;
+        case scpp::StmtKind::Continue:
+            std::cout << "Continue\n";
             break;
         case scpp::StmtKind::ExprStmt:
             std::cout << "ExprStmt\n";

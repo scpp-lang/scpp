@@ -251,6 +251,8 @@ enum class ExprKind {
                    // literal) it has no codegen_lvalue case.
     Identifier,
     Binary,
+    Conditional, // `cond ? then_expr : else_expr` -- `lhs` is the condition,
+                 // `rhs` the then-arm, `third` the else-arm.
     Unary,
     Call,
     Member,
@@ -376,6 +378,7 @@ struct Expr {
     BinaryOp binary_op{};
     ExprPtr lhs;
     ExprPtr rhs;
+    ExprPtr third;
     bool fold_ellipsis_on_left = false;
 
     // Unary (operand stored in `lhs`)
@@ -437,6 +440,8 @@ enum class StmtKind {
     Return,
     If,
     While,
+    Break,
+    Continue,
     ExprStmt,
     Block,
 };

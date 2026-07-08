@@ -2823,6 +2823,59 @@ void test_variadic_specialization_with_leading_non_type_param_parses() {
            "base_non_type_arg set, base_pack_arg_name='Tail'");
 }
 
+void test_break_and_continue_parse_inside_loop() {
+    scpp::Program program = scpp::parse(
+        "int main() {\n"
+        "    while (true) {\n"
+        "        continue;\n"
+        "        break;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function& main_fn = program.functions[0];
+    expect(main_fn.body->statements.size() == 2, "break_and_continue_parse_inside_loop: expected while + return");
+    const scpp::Stmt& while_stmt = *main_fn.body->statements[0];
+    expect(while_stmt.kind == scpp::StmtKind::While, "break_and_continue_parse_inside_loop: expected While");
+    expect(while_stmt.then_branch != nullptr && while_stmt.then_branch->statements.size() == 2,
+           "break_and_continue_parse_inside_loop: expected 2 loop-body statements");
+    expect(while_stmt.then_branch->statements[0]->kind == scpp::StmtKind::Continue,
+           "break_and_continue_parse_inside_loop: first loop-body stmt should be Continue");
+    expect(while_stmt.then_branch->statements[1]->kind == scpp::StmtKind::Break,
+           "break_and_continue_parse_inside_loop: second loop-body stmt should be Break");
+}
+
+void test_break_outside_loop_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int main() { break; return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "break_outside_loop_is_rejected: expected a ParseError");
+}
+
+void test_continue_outside_loop_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int main() { continue; return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "continue_outside_loop_is_rejected: expected a ParseError");
+}
+
+void test_conditional_expression_parses() {
+    scpp::Program program = scpp::parse("int main() { return true ? 1 : 2; }\n");
+    const scpp::Function& main_fn = program.functions[0];
+    expect(main_fn.body->statements.size() == 1, "conditional_expression_parses: expected 1 statement");
+    const scpp::Stmt& ret = *main_fn.body->statements[0];
+    expect(ret.kind == scpp::StmtKind::Return, "conditional_expression_parses: expected Return");
+    expect(ret.expr != nullptr && ret.expr->kind == scpp::ExprKind::Conditional,
+           "conditional_expression_parses: return expr should be Conditional");
+    expect(ret.expr->lhs != nullptr && ret.expr->rhs != nullptr && ret.expr->third != nullptr,
+           "conditional_expression_parses: expected condition, then, and else arms");
+}
+
 } // namespace
 
 int main() {
@@ -2830,6 +2883,9 @@ int main() {
     test_function_with_params();
     test_var_decl_and_if_else();
     test_while_loop();
+    test_break_and_continue_parse_inside_loop();
+    test_break_outside_loop_is_rejected();
+    test_continue_outside_loop_is_rejected();
     test_unsafe_block_sets_is_unsafe_flag();
     test_ordinary_block_is_not_unsafe();
     test_nested_unsafe_blocks_parse();
@@ -2847,6 +2903,7 @@ int main() {
     test_static_cast_parses();
     test_c_style_cast_parses();
     test_parenthesized_expression_is_not_misdetected_as_cast();
+    test_conditional_expression_parses();
     test_operator_precedence();
     test_unary_and_call();
     test_dereference_expression();

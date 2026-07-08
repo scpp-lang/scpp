@@ -1,0 +1,25 @@
+namespace demo {
+struct Pair {
+    int value;
+};
+
+class Holder {
+public:
+    Pair pair_;
+
+    Holder(int value) {
+        this->pair_.value = value;
+        return;
+    }
+
+    int get() {
+        return this->pair_.value;
+    }
+};
+}
+
+int main() {
+    demo::Holder holder(7);
+    print_int(holder.get());
+    return 0;
+}

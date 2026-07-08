@@ -99,6 +99,7 @@ public:
         parse_module_declaration(program);
         parse_import_declarations(program);
         parse_top_level_items(program);
+        reconcile_ordinary_forward_declarations(program);
         // ch05 §5.11: a reserved, globally-shared witness class for a
         // bare (unconstrained) `auto` parameter -- "the parameter's type
         // is treated as fully opaque... exactly as if it were
@@ -235,6 +236,7 @@ private:
     std::vector<GenericTypeParam> current_class_template_params_;
     size_t generic_template_owner_counter_ = 0;
     size_t parser_instance_id_ = 0;
+    int loop_depth_ = 0;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -289,7 +291,7 @@ private:
         // the fully-qualified form is what gets checked against
         // struct_names_ (which registers declarations under exactly that
         // form -- see parse_class_def/parse_struct_def).
-        return struct_names_.contains(peek_qualified_name());
+        return is_visible_type_name(peek_qualified_name());
     }
 
     // ch06 §6: a simplified, offset-based variant of looks_like_type_
@@ -307,7 +309,7 @@ private:
             tok.kind == TokenKind::KwUnsigned) {
             return true;
         }
-        return tok.kind == TokenKind::Identifier && struct_names_.contains(std::string(tok.text));
+        return tok.kind == TokenKind::Identifier && is_visible_type_name(std::string(tok.text));
     }
 
     // Bounds-safe lookahead: returns the token `offset` positions ahead of
@@ -392,6 +394,7 @@ private:
         clone->lambda_is_mutable = expr.lambda_is_mutable;
         if (expr.lhs) clone->lhs = clone_expr_tree(*expr.lhs);
         if (expr.rhs) clone->rhs = clone_expr_tree(*expr.rhs);
+        if (expr.third) clone->third = clone_expr_tree(*expr.third);
         clone->args.clear();
         for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr_tree(*arg));
         clone->explicit_template_args.clear();
@@ -578,6 +581,7 @@ private:
         clone->binary_op = expr.binary_op;
         if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
         if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
+        if (expr.third) clone->third = clone_expr(*expr.third);
         clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
         clone->unary_op = expr.unary_op;
         clone->args.clear();
@@ -654,6 +658,128 @@ private:
         }
         joined += bare_name;
         return joined;
+    }
+
+    [[nodiscard]] std::string resolve_visible_type_name(const std::string& spelled_name) const {
+        if (spelled_name.empty()) return {};
+        if (spelled_name.contains("::")) {
+            return struct_names_.contains(spelled_name) ? spelled_name : std::string();
+        }
+        if (struct_names_.contains(spelled_name)) return spelled_name;
+        if (!namespace_stack_.empty()) {
+            for (size_t depth = namespace_stack_.size(); depth > 0; depth--) {
+                std::string candidate;
+                for (size_t i = 0; i < depth; i++) {
+                    candidate += namespace_stack_[i];
+                    candidate += "::";
+                }
+                candidate += spelled_name;
+                if (struct_names_.contains(candidate)) return candidate;
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] bool is_visible_type_name(const std::string& spelled_name) const {
+        return !resolve_visible_type_name(spelled_name).empty();
+    }
+
+    [[nodiscard]] bool types_equal(const Type& a, const Type& b) const {
+        if (a.kind != b.kind) return false;
+        if (a.name != b.name || a.is_mutable_ref != b.is_mutable_ref ||
+            a.is_mutable_pointee != b.is_mutable_pointee || a.array_size != b.array_size ||
+            a.is_pack_expansion != b.is_pack_expansion || a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) {
+            return false;
+        }
+        if (a.template_args.size() != b.template_args.size() || a.non_type_args.size() != b.non_type_args.size() ||
+            a.function_params.size() != b.function_params.size()) {
+            return false;
+        }
+        if (static_cast<bool>(a.pointee) != static_cast<bool>(b.pointee) ||
+            static_cast<bool>(a.element) != static_cast<bool>(b.element) ||
+            static_cast<bool>(a.function_return) != static_cast<bool>(b.function_return)) {
+            return false;
+        }
+        if (a.pointee && !types_equal(*a.pointee, *b.pointee)) return false;
+        if (a.element && !types_equal(*a.element, *b.element)) return false;
+        if (a.function_return && !types_equal(*a.function_return, *b.function_return)) return false;
+        for (size_t i = 0; i < a.template_args.size(); i++) {
+            if (!types_equal(a.template_args[i], b.template_args[i])) return false;
+        }
+        for (size_t i = 0; i < a.function_params.size(); i++) {
+            if (!types_equal(a.function_params[i], b.function_params[i])) return false;
+        }
+        for (size_t i = 0; i < a.non_type_args.size(); i++) {
+            const Expr& lhs = *a.non_type_args[i];
+            const Expr& rhs = *b.non_type_args[i];
+            if (lhs.kind != rhs.kind || lhs.int_value != rhs.int_value || lhs.name != rhs.name) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool params_equal(const std::vector<Param>& a, const std::vector<Param>& b) const {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (a[i].name != b[i].name || a[i].generic_concept != b[i].generic_concept ||
+                a[i].is_parameter_pack != b[i].is_parameter_pack ||
+                a[i].require_thread_movable != b[i].require_thread_movable ||
+                a[i].require_thread_shareable != b[i].require_thread_shareable ||
+                !types_equal(a[i].type, b[i].type)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool same_function_signature(const Function& a, const Function& b) const {
+        return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
+               a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
+               a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
+               a.receiver_ref_qualifier == b.receiver_ref_qualifier;
+    }
+
+    [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Function& fn) const {
+        return fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c && !fn.is_module_extern && !fn.is_exported &&
+               (fn.params.empty() || fn.params[0].name != "this");
+    }
+
+    void reconcile_ordinary_forward_declarations(Program& program) {
+        std::vector<Function> reconciled;
+        reconciled.reserve(program.functions.size());
+        std::vector<bool> consumed(program.functions.size(), false);
+        for (size_t i = 0; i < program.functions.size(); i++) {
+            if (consumed[i]) continue;
+            Function& fn = program.functions[i];
+            if (!is_bodyless_free_function_forward_decl(fn)) {
+                reconciled.push_back(std::move(fn));
+                consumed[i] = true;
+                continue;
+            }
+            bool merged = false;
+            for (size_t j = i + 1; j < program.functions.size(); j++) {
+                Function& candidate = program.functions[j];
+                if (!same_function_signature(fn, candidate)) continue;
+                if (is_bodyless_free_function_forward_decl(candidate)) {
+                    consumed[j] = true;
+                    continue;
+                }
+                reconciled.push_back(std::move(candidate));
+                consumed[j] = true;
+                merged = true;
+                break;
+            }
+            if (!merged) {
+                throw ParseError(fn.loc.line, fn.loc.column,
+                                 "ordinary forward declaration of function '" + fn.name +
+                                     "' must be followed by a matching definition in the same translation unit");
+            }
+            consumed[i] = true;
+        }
+        for (size_t i = 0; i < program.functions.size(); i++) {
+            if (consumed[i]) continue;
+            reconciled.push_back(std::move(program.functions[i]));
+        }
+        program.functions = std::move(reconciled);
     }
 
     // Splits a dotted module name ("org.lotx.cmath") into its segments
@@ -787,7 +913,8 @@ private:
             // fine and needs no rejection anywhere.
             type.name = "void";
             advance();
-        } else if (tok.kind == TokenKind::Identifier && generic_type_names_.contains(peek_qualified_name())) {
+        } else if (tok.kind == TokenKind::Identifier &&
+                   generic_type_names_.contains(resolve_visible_type_name(peek_qualified_name()))) {
             // ch05 §5.14: `Name<Arg, Arg2, ...>` -- a generic class/
             // struct instantiation. `name` still names the *template*
             // here, not a real, concrete type -- left for the
@@ -823,7 +950,7 @@ private:
             // right here regardless of context since `...` is never a
             // valid continuation of an ordinary type otherwise.
             const Token& name_tok = peek();
-            type.name = parse_qualified_name();
+            type.name = resolve_visible_type_name(parse_qualified_name());
             bool is_variadic = variadic_primary_template_params_.contains(type.name);
             const std::vector<GenericTypeParam>* ordinary_params = nullptr;
             auto ordinary_it = ordinary_generic_type_template_params_.find(type.name);
@@ -871,8 +998,8 @@ private:
                                           " template argument(s) in this order (ch05 §5.14)");
                 }
             }
-        } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(peek_qualified_name())) {
-            type.name = parse_qualified_name();
+        } else if (tok.kind == TokenKind::Identifier && is_visible_type_name(peek_qualified_name())) {
+            type.name = resolve_visible_type_name(parse_qualified_name());
         } else {
             throw ParseError(tok.line, tok.column, "expected a type name");
         }
@@ -3238,6 +3365,7 @@ private:
     // preceded by its own `extern "C"` -- see that function).
     Function parse_function(bool is_extern_c, bool is_module_extern = false, bool is_unsafe = false) {
         Function fn;
+        fn.loc = current_loc();
         fn.is_extern_c = is_extern_c;
         fn.is_module_extern = is_module_extern;
         fn.is_unsafe = is_unsafe;
@@ -3308,15 +3436,6 @@ private:
         }
 
         if (match(TokenKind::Semicolon)) {
-            // Bodyless declaration: defined elsewhere, linked in
-            // externally.
-            if (!fn.is_extern_c && !fn.is_module_extern) {
-                const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                  "a function declaration without a body is only supported for "
-                                  "'extern \"C\"' (ch02 §2.1) or a bare 'extern' declaration (ch11 "
-                                  "§11.6); every other function must have a definition");
-            }
             return fn;
         }
 
@@ -3367,6 +3486,8 @@ private:
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
         if (check(TokenKind::KwWhile)) return parse_while();
+        if (check(TokenKind::KwBreak)) return parse_break();
+        if (check(TokenKind::KwContinue)) return parse_continue();
         return parse_expr_stmt();
     }
 
@@ -3478,7 +3599,37 @@ private:
         stmt->loc = loc;
         stmt->condition = parse_expr();
         expect(TokenKind::RParen, "')'");
+        loop_depth_++;
         stmt->then_branch = parse_statement();
+        loop_depth_--;
+        return stmt;
+    }
+
+    StmtPtr parse_break() {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwBreak, "'break'");
+        if (loop_depth_ == 0) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column, "'break' is only valid inside a loop");
+        }
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::Break;
+        stmt->loc = loc;
+        expect(TokenKind::Semicolon, "';'");
+        return stmt;
+    }
+
+    StmtPtr parse_continue() {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwContinue, "'continue'");
+        if (loop_depth_ == 0) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column, "'continue' is only valid inside a loop");
+        }
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::Continue;
+        stmt->loc = loc;
+        expect(TokenKind::Semicolon, "';'");
         return stmt;
     }
 
@@ -3493,13 +3644,13 @@ private:
     }
 
     // Precedence climbing, lowest to highest:
-    // assignment -> logic_or -> logic_and -> equality -> relational
+    // assignment -> conditional -> logic_or -> logic_and -> equality -> relational
     // -> additive -> multiplicative -> unary -> primary
 
     ExprPtr parse_expr() { return parse_assignment(); }
 
     ExprPtr parse_assignment() {
-        ExprPtr lhs = parse_logic_or();
+        ExprPtr lhs = parse_conditional();
         if (match(TokenKind::Assign)) {
             ExprPtr rhs = parse_assignment();
             auto node = std::make_unique<Expr>();
@@ -3511,6 +3662,21 @@ private:
             return node;
         }
         return lhs;
+    }
+
+    ExprPtr parse_conditional() {
+        ExprPtr condition = parse_logic_or();
+        if (!match(TokenKind::Question)) return condition;
+        ExprPtr then_expr = parse_expr();
+        expect(TokenKind::Colon, "':'");
+        ExprPtr else_expr = parse_conditional();
+        auto node = std::make_unique<Expr>();
+        node->kind = ExprKind::Conditional;
+        node->loc = condition->loc;
+        node->lhs = std::move(condition);
+        node->rhs = std::move(then_expr);
+        node->third = std::move(else_expr);
+        return node;
     }
 
     ExprPtr parse_logic_or() {

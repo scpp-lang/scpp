@@ -604,6 +604,40 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return source_is_void || target_is_void;
 }
 
+[[nodiscard]] bool is_scalar_named_type(const Type& type) {
+    return type.kind == TypeKind::Named &&
+           (type.name == "int" || type.name == "bool" || type.name == "char" || type.name == "long" ||
+            type.name == "float" || type.name == "double" || type.name == "unsigned int" ||
+            type.name == "unsigned long" || type.name == "size_t" || type.name == "ptrdiff_t" ||
+            type.name == "int8_t" || type.name == "int16_t" || type.name == "int32_t" || type.name == "int64_t" ||
+            type.name == "uint8_t" || type.name == "uint16_t" || type.name == "uint32_t" || type.name == "uint64_t" ||
+            type.name == "float32_t" || type.name == "float64_t");
+}
+
+[[nodiscard]] bool is_float_named_type(const Type& type) {
+    return type.kind == TypeKind::Named &&
+           (type.name == "float" || type.name == "double" || type.name == "float32_t" || type.name == "float64_t");
+}
+
+[[nodiscard]] bool integer_literal_compatible_with_type(const Type& type) {
+    return type.kind == TypeKind::Named && type.name != "bool" && type.name != "char" && is_scalar_named_type(type);
+}
+
+[[nodiscard]] const Type& binary_operand_type(const Type& type) {
+    return type.kind == TypeKind::Reference ? *type.pointee : type;
+}
+
+[[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type) {
+    const Type& operand_type = binary_operand_type(type);
+    switch (literal.kind) {
+        case ExprKind::IntegerLiteral: return integer_literal_compatible_with_type(operand_type);
+        case ExprKind::FloatLiteral: return is_float_named_type(operand_type);
+        case ExprKind::BoolLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "bool";
+        case ExprKind::CharLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "char";
+        default: return false;
+    }
+}
+
 // A Call expression's signature-lookup key, plus how many leading
 // `signatures[key].param_types` entries are already spoken for before
 // `expr.args[0]` (1 when an implicit `this` occupies param_types[0], 0
@@ -1472,6 +1506,13 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             }
             return std::nullopt;
 
+        case ExprKind::Conditional: {
+            std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
+            std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
+            if (!then_type.has_value() || !else_type.has_value()) return std::nullopt;
+            return types_equal(*then_type, *else_type) ? then_type : std::nullopt;
+        }
+
         case ExprKind::Fold:
             if (expr.rhs) return infer_expr_type(*expr.rhs, body, signatures);
             return infer_expr_type(*expr.lhs, body, signatures);
@@ -1537,6 +1578,38 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
 [[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
     auto it = state.find(name);
     return it == state.end() ? LocalState::Bottom : it->second;
+}
+
+[[nodiscard]] bool binary_expr_has_compatible_types(const Expr& expr, const Body& body, const Signatures& signatures) {
+    std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+    std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+    if (!lhs_type.has_value() || !rhs_type.has_value()) return true;
+    const Type& lhs_operand = binary_operand_type(*lhs_type);
+    const Type& rhs_operand = binary_operand_type(*rhs_type);
+    if (types_equal(lhs_operand, rhs_operand)) return true;
+    if (literal_compatible_with_type(*expr.lhs, rhs_operand) || literal_compatible_with_type(*expr.rhs, lhs_operand)) {
+        return true;
+    }
+    return false;
+}
+
+void check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
+                                     const SourceLocation& loc) {
+    if (expr.binary_op == BinaryOp::Assign) return;
+    if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) return;
+    if (expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne && expr.binary_op != BinaryOp::Lt &&
+        expr.binary_op != BinaryOp::Gt && expr.binary_op != BinaryOp::Le && expr.binary_op != BinaryOp::Ge) {
+        return;
+    }
+    if (binary_expr_has_compatible_types(expr, body, signatures)) return;
+    std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+    std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+    if (!lhs_type.has_value() || !rhs_type.has_value()) return;
+    const Type& lhs_operand = binary_operand_type(*lhs_type);
+    const Type& rhs_operand = binary_operand_type(*rhs_type);
+    throw DataflowError("binary operator requires operands of the same type; scpp has no implicit conversion between '" +
+                            lhs_operand.name + "' and '" + rhs_operand.name + "' (ch06)",
+                        loc);
 }
 
 // Resolves a `base.field` Member expression's own declared field type --
@@ -1793,6 +1866,11 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::Binary:
             collect_reference_uses(expr->lhs.get(), body, out);
             collect_reference_uses(expr->rhs.get(), body, out);
+            return;
+        case ExprKind::Conditional:
+            collect_reference_uses(expr->lhs.get(), body, out);
+            collect_reference_uses(expr->rhs.get(), body, out);
+            collect_reference_uses(expr->third.get(), body, out);
             return;
         case ExprKind::Unary:
         case ExprKind::Move:
@@ -2970,6 +3048,25 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             if (expr.rhs) apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
             return;
 
+        case ExprKind::Conditional:
+            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+            apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
+            apply_expr(*expr.third, false, state, body, signatures, report_errors);
+            if (report_errors) {
+                std::optional<Type> condition_type = infer_expr_type(*expr.lhs, body, signatures);
+                if (!condition_type.has_value() || condition_type->kind != TypeKind::Named ||
+                    condition_type->name != "bool") {
+                    throw DataflowError("conditional operator requires a 'bool' condition", state.current_loc);
+                }
+                std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
+                std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
+                if (then_type.has_value() && else_type.has_value() && !types_equal(*then_type, *else_type)) {
+                    throw DataflowError("conditional operator requires both arms to have the same type",
+                                        state.current_loc);
+                }
+            }
+            return;
+
         case ExprKind::Binary:
             if (expr.binary_op == BinaryOp::Assign) {
                 bool target_is_movable_class = false;
@@ -3077,6 +3174,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
+            if (report_errors) check_binary_expr_operand_types(expr, body, signatures, state.current_loc);
             return;
 
         case ExprKind::Call:
@@ -4101,6 +4199,7 @@ void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::st
     }
     if (expr.lhs) collect_free_identifiers(*expr.lhs, excluded, out);
     if (expr.rhs) collect_free_identifiers(*expr.rhs, excluded, out);
+    if (expr.third) collect_free_identifiers(*expr.third, excluded, out);
     for (const ExprPtr& arg : expr.args) collect_free_identifiers(*arg, excluded, out);
     if (expr.kind == ExprKind::Lambda && expr.lambda_body) {
         collect_free_identifiers(*expr.lambda_body, excluded, out);
@@ -4126,6 +4225,9 @@ void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::st
         case StmtKind::While:
             collect_free_identifiers(*stmt.condition, excluded, out);
             collect_free_identifiers(*stmt.then_branch, excluded, out);
+            return;
+        case StmtKind::Break:
+        case StmtKind::Continue:
             return;
         case StmtKind::Block:
             for (const StmtPtr& s : stmt.statements) collect_free_identifiers(*s, excluded, out);
@@ -4169,6 +4271,7 @@ void rewrite_captured_identifiers_as_field_access(Expr& expr, const std::unorder
     }
     if (expr.lhs) rewrite_captured_identifiers_as_field_access(*expr.lhs, captured_names);
     if (expr.rhs) rewrite_captured_identifiers_as_field_access(*expr.rhs, captured_names);
+    if (expr.third) rewrite_captured_identifiers_as_field_access(*expr.third, captured_names);
     for (ExprPtr& arg : expr.args) rewrite_captured_identifiers_as_field_access(*arg, captured_names);
     if (expr.kind == ExprKind::Lambda && expr.lambda_body) {
         rewrite_captured_identifiers_as_field_access(*expr.lambda_body, captured_names);
@@ -4193,6 +4296,9 @@ void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unorder
         case StmtKind::While:
             rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
             rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names);
+            return;
+        case StmtKind::Break:
+        case StmtKind::Continue:
             return;
         case StmtKind::Block:
             for (StmtPtr& s : stmt.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names);
@@ -4226,6 +4332,7 @@ void reject_write_to_nonmutable_by_value_capture(const Expr& expr, const std::un
     }
     if (expr.lhs) reject_write_to_nonmutable_by_value_capture(*expr.lhs, by_value_names);
     if (expr.rhs) reject_write_to_nonmutable_by_value_capture(*expr.rhs, by_value_names);
+    if (expr.third) reject_write_to_nonmutable_by_value_capture(*expr.third, by_value_names);
     for (const ExprPtr& arg : expr.args) reject_write_to_nonmutable_by_value_capture(*arg, by_value_names);
 }
 
@@ -4247,6 +4354,9 @@ void reject_write_to_nonmutable_by_value_capture(const Stmt& stmt, const std::un
         case StmtKind::While:
             reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
             reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names);
+            return;
+        case StmtKind::Break:
+        case StmtKind::Continue:
             return;
         case StmtKind::Block:
             for (const StmtPtr& s : stmt.statements) reject_write_to_nonmutable_by_value_capture(*s, by_value_names);
@@ -4662,6 +4772,9 @@ private:
                 substitute_type_param_in_expr(*stmt.condition, param_name, replacement);
                 substitute_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
                 return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_type_param_in_stmt(*s, param_name, replacement);
                 return;
@@ -4715,6 +4828,9 @@ private:
             case StmtKind::While:
                 substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
                 substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_non_type_param_in_stmt(*s, param_name, replacement);
@@ -5425,6 +5541,9 @@ private:
             case StmtKind::While:
                 resolve_generic_types_in_expr(*stmt.condition);
                 resolve_generic_types_in_stmt(*stmt.then_branch);
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) resolve_generic_types_in_stmt(*s);
@@ -6859,6 +6978,9 @@ private:
                 walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
                 walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization);
                 return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) {
                     walk_stmt(*s, body, enclosing_this_type, allow_generic_monomorphization);
@@ -7473,6 +7595,9 @@ private:
             case StmtKind::While:
                 return expr_mentions_identifier(*stmt.condition, name) ||
                        stmt_mentions_identifier(*stmt.then_branch, name);
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return false;
             case StmtKind::Block:
                 for (const StmtPtr& child : stmt.statements) {
                     if (stmt_mentions_identifier(*child, name)) return true;
@@ -7514,6 +7639,9 @@ private:
             case StmtKind::While:
                 substitute_identifier_in_expr(*stmt.condition, from, to);
                 substitute_identifier_in_stmt(*stmt.then_branch, from, to);
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_identifier_in_stmt(*s, from, to);
@@ -7685,6 +7813,9 @@ private:
                     case StmtKind::While:
                         expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_names);
                         break;
+                    case StmtKind::Break:
+                    case StmtKind::Continue:
+                        break;
                     case StmtKind::Block:
                         break;
                 }
@@ -7748,6 +7879,9 @@ private:
                 expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
                 expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_names);
                 return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_names);
                 return;
@@ -7789,6 +7923,9 @@ private:
                 expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names);
                 expand_pack_folds_in_stmt(*stmt.then_branch, pack_name, concrete_names);
                 return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) expand_pack_folds_in_stmt(*s, pack_name, concrete_names);
                 return;
@@ -7822,6 +7959,9 @@ private:
             case StmtKind::While:
                 expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
                 expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names);
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) expand_pack_expansions_in_stmt(*s, pack_name, concrete_names);
