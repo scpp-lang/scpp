@@ -1,0 +1,10 @@
+int helper();
+
+int helper() {
+    return 7;
+}
+
+int main() {
+    print_int(helper());
+    return 0;
+}

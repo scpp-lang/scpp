@@ -67,6 +67,8 @@ enum class TokenKind {
     KwIf,
     KwElse,
     KwWhile,
+    KwBreak,
+    KwContinue,
     KwFor,
     KwNew,
     KwDelete,
@@ -156,6 +158,7 @@ enum class TokenKind {
     Amp,
     PipePipe,
     Bang,
+    Question,
 
     EndOfFile,
     Unknown,
@@ -244,6 +247,8 @@ private:
         if (text == "if") return TokenKind::KwIf;
         if (text == "else") return TokenKind::KwElse;
         if (text == "while") return TokenKind::KwWhile;
+        if (text == "break") return TokenKind::KwBreak;
+        if (text == "continue") return TokenKind::KwContinue;
         if (text == "for") return TokenKind::KwFor;
         if (text == "new") return TokenKind::KwNew;
         if (text == "delete") return TokenKind::KwDelete;
@@ -373,6 +378,8 @@ private:
             case '!':
                 if (peek() == '=') { advance(); return make_token(TokenKind::NotEqual, start, start_line, start_col); }
                 return make_token(TokenKind::Bang, start, start_line, start_col);
+            case '?':
+                return make_token(TokenKind::Question, start, start_line, start_col);
             case '=':
                 if (peek() == '=') { advance(); return make_token(TokenKind::EqualEqual, start, start_line, start_col); }
                 return make_token(TokenKind::Assign, start, start_line, start_col);

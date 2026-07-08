@@ -310,6 +310,12 @@ private:
     // of any pushed scope; they live for the whole function and are only
     // freed at Return, same as before.
     std::vector<std::vector<std::string>> scope_stack_;
+    struct LoopFrame {
+        llvm::BasicBlock* cond_block;
+        llvm::BasicBlock* end_block;
+        size_t scope_depth;
+    };
+    std::vector<LoopFrame> loop_stack_;
 
     const StructDef* find_struct_def(const std::string& name) const {
         for (const StructDef& def : program_->structs) {
@@ -492,6 +498,13 @@ private:
                         return Type{.kind = TypeKind::Named, .name = "bool"};
                 }
                 return std::nullopt;
+
+            case ExprKind::Conditional: {
+                std::optional<Type> then_type = infer_type(*expr.rhs);
+                std::optional<Type> else_type = infer_type(*expr.third);
+                if (!then_type.has_value() || !else_type.has_value()) return std::nullopt;
+                return types_equal(*then_type, *else_type) ? then_type : std::nullopt;
+            }
 
             case ExprKind::Fold:
             case ExprKind::PackExpansion:
@@ -1172,6 +1185,7 @@ private:
                     a.function_params.size() != b.function_params.size()) {
                     return false;
                 }
+
                 for (size_t i = 0; i < a.function_params.size(); i++) {
                     if (!types_equal(a.function_params[i], b.function_params[i])) return false;
                 }
@@ -1184,6 +1198,10 @@ private:
             case TypeKind::Array: return a.array_size == b.array_size && types_equal(*a.element, *b.element);
         }
         return false;
+    }
+
+    [[nodiscard]] static const Type& binary_operand_type(const Type& type) {
+        return type.kind == TypeKind::Reference ? *type.pointee : type;
     }
 
     // A short, LLVM-identifier-safe (alphanumeric/underscore only, no
@@ -2037,8 +2055,10 @@ private:
                 // previous iteration's allocation.
                 builder_->SetInsertPoint(body_block);
                 push_scope();
+                loop_stack_.push_back(LoopFrame{cond_block, end_block, scope_stack_.size()});
                 codegen_stmt(*stmt.then_branch, current_function);
                 pop_scope();
+                loop_stack_.pop_back();
                 if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
                     builder_->CreateBr(cond_block);
                 }
@@ -2046,6 +2066,20 @@ private:
                 builder_->SetInsertPoint(end_block);
                 return;
             }
+
+            case StmtKind::Break:
+                if (!loop_stack_.empty()) {
+                    emit_scope_cleanup_to_depth(loop_stack_.back().scope_depth);
+                    builder_->CreateBr(loop_stack_.back().end_block);
+                }
+                return;
+
+            case StmtKind::Continue:
+                if (!loop_stack_.empty()) {
+                    emit_scope_cleanup_to_depth(loop_stack_.back().scope_depth);
+                    builder_->CreateBr(loop_stack_.back().cond_block);
+                }
+                return;
         }
     }
 
@@ -2565,6 +2599,34 @@ private:
                 // returns the pointer. Reuses the exact mechanism already
                 // used for print_bool's "true"/"false" constants.
                 return builder_->CreateGlobalString(expr.name, "str");
+
+            case ExprKind::Conditional: {
+                llvm::Value* cond = bool_to_i1(codegen_expr(*expr.lhs));
+                llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
+                llvm::BasicBlock* then_block = llvm::BasicBlock::Create(*context_, "cond.then", current_function);
+                llvm::BasicBlock* else_block = llvm::BasicBlock::Create(*context_, "cond.else", current_function);
+                llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(*context_, "cond.end", current_function);
+                builder_->CreateCondBr(cond, then_block, else_block);
+
+                builder_->SetInsertPoint(then_block);
+                llvm::Value* then_value = codegen_expr(*expr.rhs);
+                builder_->CreateBr(merge_block);
+                llvm::BasicBlock* then_end = builder_->GetInsertBlock();
+
+                builder_->SetInsertPoint(else_block);
+                llvm::Value* else_value = codegen_expr(*expr.third);
+                builder_->CreateBr(merge_block);
+                llvm::BasicBlock* else_end = builder_->GetInsertBlock();
+
+                builder_->SetInsertPoint(merge_block);
+                if (then_value->getType() != else_value->getType()) {
+                    throw CodegenError("conditional operator requires both arms to have the same type", current_loc_);
+                }
+                llvm::PHINode* phi = builder_->CreatePHI(then_value->getType(), 2, "condtmp");
+                phi->addIncoming(then_value, then_end);
+                phi->addIncoming(else_value, else_end);
+                return phi;
+            }
 
             case ExprKind::Cast: {
                 // ch06 §6 / spec §5.1(5.2): `static_cast<T>(expr)`/`(T)expr`
@@ -3178,6 +3240,21 @@ private:
         }
         for (const std::string& name : names) {
             locals_.erase(name);
+        }
+    }
+
+    void emit_scope_cleanup_to_depth(size_t target_depth) {
+        for (size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
+            const std::vector<std::string>& names = scope_stack_[depth - 1];
+            for (auto it = names.rbegin(); it != names.rend(); ++it) {
+                auto slot_it = locals_.find(*it);
+                if (slot_it == locals_.end()) continue;
+                if (slot_it->second.type.kind == TypeKind::Named) {
+                    if (llvm::Function* dtor = find_destructor(slot_it->second.type.name)) {
+                        codegen_call_destructor_unless_moved(dtor, slot_it->second.alloca, slot_it->second.moved_flag);
+                    }
+                }
+            }
         }
     }
 
@@ -3801,11 +3878,43 @@ private:
         // literal.
         bool lhs_is_literal = expr.lhs->kind == ExprKind::IntegerLiteral || expr.lhs->kind == ExprKind::FloatLiteral;
         bool rhs_is_literal = expr.rhs->kind == ExprKind::IntegerLiteral || expr.rhs->kind == ExprKind::FloatLiteral;
+        std::optional<Type> lhs_type = infer_type(*expr.lhs);
+        std::optional<Type> rhs_type = infer_type(*expr.rhs);
+        bool needs_strict_scalar_match = expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne ||
+                                         expr.binary_op == BinaryOp::Lt || expr.binary_op == BinaryOp::Gt ||
+                                         expr.binary_op == BinaryOp::Le || expr.binary_op == BinaryOp::Ge;
+        if (needs_strict_scalar_match && lhs_type.has_value() && rhs_type.has_value()) {
+            const Type& lhs_operand_type = binary_operand_type(*lhs_type);
+            const Type& rhs_operand_type = binary_operand_type(*rhs_type);
+            if (!types_equal(lhs_operand_type, rhs_operand_type) && !lhs_is_literal && !rhs_is_literal) {
+                throw CodegenError("binary operator requires operands of the same type; scpp has no implicit conversion "
+                                   "between distinct scalar types",
+                                   current_loc_);
+            }
+        }
         std::optional<Type> context_type;
         if (lhs_is_literal && !rhs_is_literal) {
-            context_type = infer_type(*expr.rhs);
+            context_type = lhs_type.has_value() && rhs_type.has_value() ? binary_operand_type(*rhs_type) : infer_type(*expr.rhs);
         } else if (rhs_is_literal && !lhs_is_literal) {
-            context_type = infer_type(*expr.lhs);
+            context_type = lhs_type.has_value() && rhs_type.has_value() ? binary_operand_type(*lhs_type) : infer_type(*expr.lhs);
+        }
+        if (needs_strict_scalar_match && lhs_type.has_value() && rhs_type.has_value() &&
+            !types_equal(binary_operand_type(*lhs_type), binary_operand_type(*rhs_type)) &&
+            context_type.has_value()) {
+            const Type& literal_target = *context_type;
+            bool lhs_matches = !lhs_is_literal || ((expr.lhs->kind == ExprKind::FloatLiteral && is_float_scalar_type_name(literal_target.name)) ||
+                                                   (expr.lhs->kind == ExprKind::IntegerLiteral &&
+                                                    literal_target.kind == TypeKind::Named &&
+                                                    literal_target.name != "bool" && literal_target.name != "char"));
+            bool rhs_matches = !rhs_is_literal || ((expr.rhs->kind == ExprKind::FloatLiteral && is_float_scalar_type_name(literal_target.name)) ||
+                                                   (expr.rhs->kind == ExprKind::IntegerLiteral &&
+                                                    literal_target.kind == TypeKind::Named &&
+                                                    literal_target.name != "bool" && literal_target.name != "char"));
+            if (!(lhs_matches && rhs_matches)) {
+                throw CodegenError("binary operator requires operands of the same type; scpp has no implicit conversion "
+                                   "between distinct scalar types",
+                                   current_loc_);
+            }
         }
         llvm::Value* lhs = context_type.has_value() ? codegen_value_for_target(*expr.lhs, *context_type)
                                                       : codegen_expr(*expr.lhs);
@@ -3821,7 +3930,8 @@ private:
         // `Eq`/`Ne` alone are signedness-independent (an icmp/fcmp
         // equality predicate is the same regardless) but still need
         // fcmp for a float operand.
-        std::optional<Type> operand_type = context_type.has_value() ? context_type : infer_type(*expr.lhs);
+        std::optional<Type> operand_type = context_type.has_value() ? context_type : lhs_type;
+        if (operand_type.has_value()) operand_type = binary_operand_type(*operand_type);
         bool is_float = operand_type.has_value() && is_float_scalar_type_name(operand_type->name);
         bool is_unsigned = operand_type.has_value() && is_unsigned_scalar_type_name(operand_type->name);
         bool is_checked = operand_type.has_value() && is_checked_arithmetic_scalar_type_name(operand_type->name);

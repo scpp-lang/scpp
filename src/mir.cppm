@@ -194,6 +194,12 @@ private:
     // (see build()), so they're never captured here: they live for the
     // whole function, same as in codegen.
     std::vector<std::vector<std::string>> scope_stack_;
+    struct LoopFrame {
+        size_t cond_block;
+        size_t end_block;
+        size_t scope_depth;
+    };
+    std::vector<LoopFrame> loop_stack_;
 
     void declare_local(const std::string& name, const Type& type) {
         if (!body_.local_types.contains(name)) {
@@ -219,6 +225,15 @@ private:
         if (current_has_terminator()) return;
         for (auto it = names.rbegin(); it != names.rend(); ++it) {
             current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{}});
+        }
+    }
+
+    void emit_scope_exits_to_depth(size_t target_depth) {
+        for (size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
+            const std::vector<std::string>& names = scope_stack_[depth - 1];
+            for (auto it = names.rbegin(); it != names.rend(); ++it) {
+                current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{}});
+            }
         }
     }
 
@@ -368,13 +383,31 @@ private:
 
                 current_block_ = body_block;
                 push_scope();
+                loop_stack_.push_back(LoopFrame{cond_block, end_block, scope_stack_.size()});
                 lower_stmt(*stmt.then_branch);
                 pop_scope();
+                loop_stack_.pop_back();
                 if (!current_has_terminator()) {
                     current().terminator = Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr, stmt.loc};
                 }
 
                 current_block_ = end_block;
+                return;
+            }
+
+            case StmtKind::Break: {
+                if (loop_stack_.empty()) return;
+                emit_scope_exits_to_depth(loop_stack_.back().scope_depth);
+                current().terminator =
+                    Terminator{TerminatorKind::Goto, loop_stack_.back().end_block, 0, 0, nullptr, nullptr, stmt.loc};
+                return;
+            }
+
+            case StmtKind::Continue: {
+                if (loop_stack_.empty()) return;
+                emit_scope_exits_to_depth(loop_stack_.back().scope_depth);
+                current().terminator =
+                    Terminator{TerminatorKind::Goto, loop_stack_.back().cond_block, 0, 0, nullptr, nullptr, stmt.loc};
                 return;
             }
         }
