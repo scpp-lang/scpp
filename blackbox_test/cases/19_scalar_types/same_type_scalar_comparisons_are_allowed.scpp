@@ -1,0 +1,12 @@
+// ch06: comparison operators work when both operands already have the
+// same scalar type.
+int main() {
+    if (3 < 5) {
+        if ('a' == 'a') {
+            if (true != false) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}

@@ -81,7 +81,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 
 | Directory | Covers |
 |---|---|
-| `01_basics` | M1: scalars, locals, `if`/`while`, functions, arithmetic, zero-init, unconditional-by-default checking |
+| `01_basics` | M1: scalars, locals, `if`/`while`, functions, arithmetic, zero-init, unconditional-by-default checking, basic `break`/`continue`, ternary `?:`, ordinary forward declarations |
 | `02_structs` | `struct` triviality rules, zero-init, bitwise copy, forbidden members |
 | `03_unique_ptr` | `std::make_unique`/`std::move`, move-out checking, arrow sugar |
 | `04_references_borrow` | `T&`/`const T&`, alias-XOR-mutability, NLL release, lifetime elision |
@@ -95,10 +95,10 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `13_unsupported_robustness` | unsupported/not-yet-implemented syntax fails cleanly, never crashes |
 | `14_classes` | constructors/destructors, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
-| `16_namespaces` | basic `namespace` declaration, qualified calls, nesting; `using namespace` rejected |
+| `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
 | `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
-| `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), and explicit scalar-to-scalar casts |
+| `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, and comparison rules for same-type vs mixed-type scalars |
 | `20_generic_functions` | ch05 §5.11 revisions: full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
 | `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access |
 | `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime |
@@ -186,8 +186,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **259 cases total**
-- **259/259 passing**
+- **268 cases total**
+- **268/268 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -211,6 +211,11 @@ re-run via `./build/run_tests`:
   `std::function`, `std::move_only_function`, `std::thread`, and
   `std::jthread` each have dedicated case directories exercising their
   current stdlib behavior
+- **Recent retrospective gap-filling now covers several "too basic to fail"
+  language corners that ordinary app code exposed first**:
+  `break`/`continue`, ternary `?:`, ordinary forward declarations,
+  same-namespace unqualified class lookup, and scalar-comparison
+  rejection for mixed scalar types
 
 No known implementation gaps remain in the full black-box suite at this
 snapshot.

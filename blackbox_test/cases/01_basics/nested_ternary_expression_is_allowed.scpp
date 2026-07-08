@@ -1,0 +1,9 @@
+// Nested ternary expressions behave as ordinary real-C++ expressions.
+int choose(bool a, bool b) {
+    return a ? (b ? 1 : 2) : 3;
+}
+
+int main() {
+    int x = false ? 9 : 4;
+    return choose(true, false) + x;
+}
