@@ -1,0 +1,22 @@
+// Nested `while` loops: inner-loop `continue` should re-check the inner
+// condition only, and inner-loop `break` should leave the outer loop
+// running.
+int main() {
+    int outer = 0;
+    int sum = 0;
+    while (outer < 3) {
+        int inner = 0;
+        outer = outer + 1;
+        while (inner < 4) {
+            inner = inner + 1;
+            if (inner == 2) {
+                continue;
+            }
+            if (inner == 4) {
+                break;
+            }
+            sum = sum + outer + inner;
+        }
+    }
+    return sum;
+}

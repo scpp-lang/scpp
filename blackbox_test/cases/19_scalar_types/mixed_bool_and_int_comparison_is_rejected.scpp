@@ -1,0 +1,8 @@
+// ch06's no-implicit-scalar-conversion rule likewise rejects `bool`/`int`
+// comparisons rather than implicitly promoting `bool` to `int`.
+int main() {
+    if (true == 1) {
+        return 1;
+    }
+    return 0;
+}

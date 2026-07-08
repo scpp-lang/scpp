@@ -1,0 +1,17 @@
+// Fundamental `while`-loop control flow: `continue` skips the rest of the
+// body and re-checks the condition, while `break` exits the loop.
+int main() {
+    int i = 0;
+    int sum = 0;
+    while (i < 6) {
+        i = i + 1;
+        if (i == 2) {
+            continue;
+        }
+        if (i == 5) {
+            break;
+        }
+        sum = sum + i;
+    }
+    return sum;
+}

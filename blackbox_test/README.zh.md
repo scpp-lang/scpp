@@ -70,7 +70,7 @@ cmake --build build
 
 | 目录 | 覆盖内容 |
 |---|---|
-| `01_basics` | M1：标量、局部变量、`if`/`while`、函数、算术、零初始化、默认无条件检查 |
+| `01_basics` | M1：标量、局部变量、`if`/`while`、函数、算术、零初始化、默认无条件检查，以及基础 `break`/`continue`、三目 `?:`、普通前向声明 |
 | `02_structs` | `struct` 平凡性规则、零初始化、按位拷贝、禁止的成员类型 |
 | `03_unique_ptr` | `std::make_unique`/`std::move`、移出检查、箭头语法糖 |
 | `04_references_borrow` | `T&`/`const T&`、alias-XOR-mutability、NLL 借用释放、生命周期省略 |
@@ -84,10 +84,10 @@ cmake --build build
 | `13_unsupported_robustness` | 不支持/尚未实现的语法能干净地报错，不会崩溃 |
 | `14_classes` | 构造/析构函数、私有成员访问控制、编译器提供/用户自定义的拷贝构造与拷贝赋值、只能由编译器提供的移动构造与移动赋值、方法调用的借用检查、`this` |
 | `15_function_overloading` | 按精确类型匹配解析重载、by-value/by-reference 独立轴、const/非-const 方法 |
-| `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套；`using namespace` 被拒绝 |
+| `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套、同一命名空间内类名的非限定查找；`using namespace` 被拒绝 |
 | `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition |
 | `18_closures` | lambda 表达式（ch05 §5.12）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
-| `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06），以及标量间的显式转换 |
+| `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
 | `20_generic_functions` | ch05 §5.11 的修订：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
 | `21_generic_types` | 泛型 `struct`/`class` 类型（ch05 §5.14）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
 | `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免 |
@@ -155,8 +155,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 259 个用例**
-- 运行器原始统计 **259/259 通过**
+- **总共 268 个用例**
+- 运行器原始统计 **268/268 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -175,5 +175,8 @@ cmake --build build
 - **函数/线程 wrapper** 现在也有直接黑盒覆盖：
   `std::function`、`std::move_only_function`、`std::thread`、`std::jthread`
   都有各自专门的用例目录来验证当前 stdlib 行为
+- **这轮还补上了几类此前"太基础以至于没人单独写测试"的语言角落**：
+  `break`/`continue`、三目 `?:`、普通前向声明、同一命名空间内未限定类名查找，
+  以及混合标量类型比较必须被拒绝而不是崩溃
 
 在这个快照下，完整黑盒套件里**没有已知实现缺口**。

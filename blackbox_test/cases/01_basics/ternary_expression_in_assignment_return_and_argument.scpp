@@ -1,0 +1,11 @@
+// Real-C++ ternary `?:` works as an expression in assignment, return, and
+// function-argument position.
+int choose(bool cond, int a, int b) {
+    return cond ? a : b;
+}
+
+int main() {
+    int x;
+    x = false ? 9 : 4;
+    return choose(true, x + 7, 0);
+}

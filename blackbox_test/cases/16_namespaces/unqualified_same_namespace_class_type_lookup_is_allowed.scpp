@@ -1,0 +1,22 @@
+// Real-C++ namespace lookup: one class in a namespace may refer to
+// another class in that same namespace by its unqualified name.
+namespace demo {
+class Helper {
+public:
+    int value;
+};
+
+class Holder {
+public:
+    Helper helper;
+    int read() {
+        return this->helper.value;
+    }
+};
+}
+
+int main() {
+    demo::Holder h;
+    h.helper.value = 6;
+    return h.read();
+}
