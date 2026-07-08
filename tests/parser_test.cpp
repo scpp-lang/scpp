@@ -2225,6 +2225,31 @@ void test_class_member_templates_parse() {
            "class_member_templates_parse: expected templated method 'Sink_call'");
 }
 
+void test_function_type_template_argument_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename Sig>\n"
+        "class Holder {\n"
+        "public:\n"
+        "    int value;\n"
+        "};\n"
+        "int main() { Holder<int(int, int)> h; return 0; }\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    expect(main_fn != nullptr && main_fn->body != nullptr, "function_type_template_argument_parses: expected main body");
+    const scpp::Stmt* decl = main_fn->body->statements[0].get();
+    expect(decl->kind == scpp::StmtKind::VarDecl, "function_type_template_argument_parses: expected first stmt var decl");
+    expect(decl->type.kind == scpp::TypeKind::Named && decl->type.name == "Holder" && decl->type.template_args.size() == 1,
+           "function_type_template_argument_parses: expected Holder<...> type");
+    expect(decl->type.template_args[0].kind == scpp::TypeKind::Function &&
+               decl->type.template_args[0].function_params.size() == 2 &&
+               decl->type.template_args[0].function_return &&
+               decl->type.template_args[0].function_return->kind == scpp::TypeKind::Named &&
+               decl->type.template_args[0].function_return->name == "int",
+           "function_type_template_argument_parses: expected int(int, int) function type argument");
+}
+
 // ch05 §5.14: a method may layer its own `requires Concept<T>` clause,
 // recorded on Function::method_requires_concept -- independent of
 // whether the class's own type parameter is itself bare or constrained.
@@ -2792,6 +2817,7 @@ int main() {
     test_generic_class_named_pack_method_params_parse();
     test_generic_class_named_pack_function_pointer_params_parse();
     test_class_member_templates_parse();
+    test_function_type_template_argument_parses();
     test_generic_class_method_requires_clause_parses();
     test_generic_struct_concept_constrained_type_param_parses();
     test_generic_struct_bare_type_param_is_rejected();

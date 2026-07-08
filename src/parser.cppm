@@ -837,7 +837,7 @@ private:
                         spread.is_pack_expansion = true;
                         type.template_args.push_back(std::move(spread));
                     } else {
-                        type.template_args.push_back(parse_type());
+                        type.template_args.push_back(parse_template_type_argument());
                     }
                     arg_index++;
                 } while (match(TokenKind::Comma));
@@ -1113,6 +1113,22 @@ private:
         }
         expect(TokenKind::RParen, "')'");
         return params;
+    }
+
+    Type parse_function_type_suffix(Type return_type) {
+        Type type;
+        type.kind = TypeKind::Function;
+        type.function_return = std::make_shared<Type>(std::move(return_type));
+        type.function_params = parse_function_pointer_param_types();
+        return type;
+    }
+
+    Type parse_template_type_argument() {
+        Type type = parse_type();
+        if (check(TokenKind::LParen)) {
+            type = parse_function_type_suffix(std::move(type));
+        }
+        return type;
     }
 
     Type parse_function_pointer_declarator(Type return_type, std::string& out_name) {
@@ -3851,7 +3867,7 @@ private:
                             arg.value = std::shared_ptr<Expr>(parse_additive().release());
                         } else {
                             arg.is_type = true;
-                            arg.type = parse_type();
+                            arg.type = parse_template_type_argument();
                         }
                         explicit_template_args.push_back(std::move(arg));
                         arg_index++;

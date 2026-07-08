@@ -33,6 +33,7 @@ struct SourceLocation {
 enum class TypeKind {
     Named,     // scalar (int/bool) or a user-declared struct name
     Pointer,   // T*
+    Function,  // Ret(Args...) as a symbolic type argument / specialization pattern
     FunctionPointer, // Ret (*p)(Args...) / Ret (* [[scpp::unsafe]] p)(Args...)
     Array,     // T[N]
     Reference, // T& (mutable borrow) / const T& (shared borrow) -- see ch05.2
@@ -58,7 +59,7 @@ struct Type {
     std::shared_ptr<Type> element;
     long long array_size = 0;
 
-    // FunctionPointer
+    // Function / FunctionPointer
     std::shared_ptr<Type> function_return;
     std::vector<Type> function_params;
     bool is_unsafe_function_pointer = false;

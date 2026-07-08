@@ -737,6 +737,8 @@ private:
             case TypeKind::Pointer:
             case TypeKind::FunctionPointer:
                 return;
+            case TypeKind::Function:
+                throw CodegenError("a bare function type cannot be a struct field in this version", current_loc_);
             case TypeKind::Reference:
                 throw CodegenError("a reference cannot be a struct field in this version",
                     current_loc_);
@@ -857,6 +859,9 @@ private:
 
     llvm::Type* to_llvm_type(const Type& type) {
         switch (type.kind) {
+            case TypeKind::Function:
+                throw CodegenError("a bare function type cannot be lowered directly; only function pointers are runtime values",
+                                   current_loc_);
             case TypeKind::Pointer:
             case TypeKind::Reference:
                 // A unique_ptr is just a possibly-null owning pointer at the
@@ -1066,6 +1071,10 @@ private:
     void validate_c_abi_compatible(const Type& type, const std::string& fn_name,
                                     const std::string& context_description) {
         switch (type.kind) {
+            case TypeKind::Function:
+                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                                    " cannot be a bare function type -- use a function pointer instead (spec ch02 §2.1)",
+                    current_loc_);
             case TypeKind::Named: {
                 if (find_class_def(type.name) != nullptr) {
                     throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
@@ -1111,8 +1120,9 @@ private:
                 }
                 return true;
             case TypeKind::Pointer: return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
+            case TypeKind::Function:
             case TypeKind::FunctionPointer:
-                if (a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
+                if ((a.kind == TypeKind::FunctionPointer && a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) ||
                     !types_equal(*a.function_return, *b.function_return) ||
                     a.function_params.size() != b.function_params.size()) {
                     return false;
@@ -1149,6 +1159,11 @@ private:
                     return result;
                 }
             case TypeKind::Pointer: return mangle_type(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
+            case TypeKind::Function: {
+                std::string result = mangle_type(*type.function_return) + "_fntype";
+                for (const Type& param : type.function_params) result += "_" + mangle_type(param);
+                return result;
+            }
             case TypeKind::FunctionPointer: {
                 std::string result = mangle_type(*type.function_return) +
                                      (type.is_unsafe_function_pointer ? "_ufnptr" : "_fnptr");
@@ -1256,6 +1271,15 @@ private:
             case TypeKind::Pointer:
                 return (type.is_mutable_pointee ? std::string() : std::string("const ")) +
                        verbatim_type_spelling(*type.pointee) + "*";
+            case TypeKind::Function: {
+                std::string result = verbatim_type_spelling(*type.function_return) + "(";
+                for (size_t i = 0; i < type.function_params.size(); i++) {
+                    if (i > 0) result += ", ";
+                    result += verbatim_type_spelling(type.function_params[i]);
+                }
+                result += ")";
+                return result;
+            }
             case TypeKind::FunctionPointer: {
                 std::string result = verbatim_type_spelling(*type.function_return) + " (*";
                 if (type.is_unsafe_function_pointer) result += " [[scpp::unsafe]]";
