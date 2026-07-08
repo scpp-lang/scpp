@@ -554,4 +554,4 @@ available fallback).
 
 ---
 
-[← Previous: Reference Implementations](ch10-reference-implementations.md) · [Table of Contents](README.md)
+[← Previous: Reference Implementations](ch10-reference-implementations.md) · [Table of Contents](README.md) · [Next: IDE Integration →](ch12-ide-integration.md)
