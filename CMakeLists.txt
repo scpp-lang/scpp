@@ -160,3 +160,4 @@ add_test(NAME driver_test COMMAND driver_test)
 # Builds stdlib helper libraries (e.g. the native wrapper behind
 # std::string). Library behavior itself is covered by tests/, not demos.
 add_subdirectory(stdlib)
+add_subdirectory(applications/httpserver)

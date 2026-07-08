@@ -1,0 +1,104 @@
+export module httpserver;
+
+extern "C" {
+    int scpp_httpserver_run(const char* root, int port, int max_connections, int allow_index_html,
+                            int deny_hidden_files);
+}
+
+namespace httpserver {
+
+export class ServerBuilder {
+private:
+    char root_[512];
+    int port_;
+    int max_connections_;
+    bool allow_index_html_;
+    bool deny_hidden_files_;
+    bool valid_;
+
+    bool copy_text(char* dst, int capacity, const char* src) {
+        int i = 0;
+        while (src[i] != '\0') {
+            if (i + 1 >= capacity) {
+                if (capacity > 0) {
+                    dst[0] = '\0';
+                }
+                return false;
+            }
+            dst[i] = src[i];
+            i = i + 1;
+        }
+        dst[i] = '\0';
+        return true;
+    }
+
+public:
+    ServerBuilder() {
+        this->root_[0] = '.';
+        this->root_[1] = '\0';
+        this->port_ = 18080;
+        this->max_connections_ = 32;
+        this->allow_index_html_ = true;
+        this->deny_hidden_files_ = true;
+        this->valid_ = true;
+        return;
+    }
+
+    void set_port(int port) {
+        if (port <= 0) {
+            this->valid_ = false;
+            return;
+        }
+        this->port_ = port;
+        return;
+    }
+
+    void set_max_connections(int max_connections) {
+        if (max_connections <= 0 || max_connections > 256) {
+            this->valid_ = false;
+            return;
+        }
+        this->max_connections_ = max_connections;
+        return;
+    }
+
+    void mount(const char* url_prefix, const char* filesystem_root) {
+        if (!(url_prefix[0] == '/' && url_prefix[1] == '\0')) {
+            this->valid_ = false;
+            return;
+        }
+        if (!this->copy_text(this->root_, 512, filesystem_root)) {
+            this->valid_ = false;
+        }
+        return;
+    }
+
+    void allow_index_html(bool allow) {
+        this->allow_index_html_ = allow;
+        return;
+    }
+
+    void deny_hidden_files(bool deny) {
+        this->deny_hidden_files_ = deny;
+        return;
+    }
+
+    int serve() {
+        int allow_index = 0;
+        int deny_hidden = 0;
+        if (this->allow_index_html_) {
+            allow_index = 1;
+        }
+        if (this->deny_hidden_files_) {
+            deny_hidden = 1;
+        }
+        if (!this->valid_) {
+            return 1;
+        }
+        [[scpp::unsafe]] {
+            return scpp_httpserver_run(this->root_, this->port_, this->max_connections_, allow_index, deny_hidden);
+        }
+    }
+};
+
+} // namespace httpserver

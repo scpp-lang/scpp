@@ -1,0 +1,18 @@
+import httpserver;
+
+extern "C" {
+    const char* scpp_httpserver_getenv_or(const char* name, const char* fallback);
+    int scpp_httpserver_getenv_int_or(const char* name, int fallback);
+    int scpp_httpserver_run(const char* root, int port, int max_connections, int allow_index_html,
+                            int deny_hidden_files);
+}
+
+int main() {
+    const char* root;
+    int port;
+    [[scpp::unsafe]] {
+        root = scpp_httpserver_getenv_or("SCPP_HTTPSERVER_ROOT", ".");
+        port = scpp_httpserver_getenv_int_or("SCPP_HTTPSERVER_PORT", 18080);
+        return scpp_httpserver_run(root, port, 32, 1, 1);
+    }
+}
