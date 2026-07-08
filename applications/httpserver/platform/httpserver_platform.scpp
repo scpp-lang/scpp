@@ -1,0 +1,279 @@
+export module httpserver:platform;
+
+extern "C" {
+    int scpp_httpserver_errno_eagain();
+    int scpp_httpserver_errno_eintr();
+    int scpp_httpserver_errno_enoent();
+    int scpp_httpserver_errno_eacces();
+    int scpp_httpserver_errno_eperm();
+    int scpp_httpserver_errno_einval();
+    int scpp_httpserver_errno_enotdir();
+    int scpp_httpserver_errno_eisdir();
+    int scpp_httpserver_errno_eloop();
+    int scpp_httpserver_errno_econnreset();
+    int scpp_httpserver_errno_epipe();
+
+    int scpp_httpserver_listen_any(int port, int backlog);
+    int scpp_httpserver_accept_nonblocking(int listener_fd);
+    int scpp_httpserver_close_fd(int fd);
+
+    int scpp_httpserver_epoll_create();
+    int scpp_httpserver_epoll_add(int epoll_fd, int fd, int token, int readable, int writable);
+    int scpp_httpserver_epoll_mod(int epoll_fd, int fd, int token, int readable, int writable);
+    int scpp_httpserver_epoll_delete(int epoll_fd, int fd);
+    int scpp_httpserver_epoll_wait(int epoll_fd, void* events, int max_events, int timeout_ms);
+
+    int scpp_httpserver_socket_read(int fd, char* buffer, int count);
+    int scpp_httpserver_socket_write(int fd, const char* buffer, int count);
+
+    int scpp_httpserver_open_root_directory(const char* path);
+    int scpp_httpserver_open_subdirectory(int dir_fd, const char* path);
+    int scpp_httpserver_open_file_readonly(int dir_fd, const char* path);
+    int scpp_httpserver_stat_fd(int fd, int* out_is_dir, int* out_is_reg, int* out_size);
+    int scpp_httpserver_sendfile(int socket_fd, int file_fd, int* offset, int count);
+    int scpp_httpserver_pread(int file_fd, char* buffer, int count, int offset);
+}
+
+namespace httpserver {
+
+export struct PlatformEvent {
+    int token;
+    int readable;
+    int writable;
+    int error;
+    int hangup;
+};
+
+export int errno_eagain() { [[scpp::unsafe]] { return scpp_httpserver_errno_eagain(); } }
+export int errno_eintr() { [[scpp::unsafe]] { return scpp_httpserver_errno_eintr(); } }
+export int errno_enoent() { [[scpp::unsafe]] { return scpp_httpserver_errno_enoent(); } }
+export int errno_eacces() { [[scpp::unsafe]] { return scpp_httpserver_errno_eacces(); } }
+export int errno_eperm() { [[scpp::unsafe]] { return scpp_httpserver_errno_eperm(); } }
+export int errno_einval() { [[scpp::unsafe]] { return scpp_httpserver_errno_einval(); } }
+export int errno_enotdir() { [[scpp::unsafe]] { return scpp_httpserver_errno_enotdir(); } }
+export int errno_eisdir() { [[scpp::unsafe]] { return scpp_httpserver_errno_eisdir(); } }
+export int errno_eloop() { [[scpp::unsafe]] { return scpp_httpserver_errno_eloop(); } }
+export int errno_econnreset() { [[scpp::unsafe]] { return scpp_httpserver_errno_econnreset(); } }
+export int errno_epipe() { [[scpp::unsafe]] { return scpp_httpserver_errno_epipe(); } }
+export int close_fd(int fd) { [[scpp::unsafe]] { return scpp_httpserver_close_fd(fd); } }
+
+export int text_length(const char* text) {
+    int i = 0;
+    while (text[i] != '\0') { i = i + 1; }
+    return i;
+}
+
+export bool copy_text(char* dst, int capacity, const char* src) {
+    int i = 0;
+    while (src[i] != '\0') {
+        if (i + 1 >= capacity) {
+            if (capacity > 0) dst[0] = '\0';
+            return false;
+        }
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    dst[i] = '\0';
+    return true;
+}
+
+export bool append_text(char* dst, int capacity, int& len, const char* src) {
+    int i = 0;
+    while (src[i] != '\0') {
+        if (len + 1 >= capacity) return false;
+        dst[len] = src[i];
+        len = len + 1;
+        i = i + 1;
+    }
+    dst[len] = '\0';
+    return true;
+}
+
+export bool append_char(char* dst, int capacity, int& len, char c) {
+    if (len + 1 >= capacity) return false;
+    dst[len] = c;
+    len = len + 1;
+    dst[len] = '\0';
+    return true;
+}
+
+export bool append_int(char* dst, int capacity, int& len, int value) {
+    char digits[32];
+    int digit_count = 0;
+    int n = value;
+    if (n == 0) return append_char(dst, capacity, len, '0');
+    if (n < 0) {
+        if (!append_char(dst, capacity, len, '-')) return false;
+        n = 0 - n;
+    }
+    while (n > 0) {
+        int quotient = n / 10;
+        int remainder = n - quotient * 10;
+        digits[digit_count] = static_cast<char>(48 + remainder);
+        digit_count = digit_count + 1;
+        n = quotient;
+    }
+    while (digit_count > 0) {
+        digit_count = digit_count - 1;
+        if (!append_char(dst, capacity, len, digits[digit_count])) return false;
+    }
+    return true;
+}
+
+export bool span_equals(const char* buffer, int start, int end, const char* text) {
+    int i = 0;
+    int index = start;
+    while (index < end && text[i] != '\0') {
+        if (buffer[index] != text[i]) return false;
+        index = index + 1;
+        i = i + 1;
+    }
+    return index == end && text[i] == '\0';
+}
+
+export bool ends_with(const char* text, const char* suffix) {
+    int text_len = text_length(text);
+    int suffix_len = text_length(suffix);
+    if (suffix_len > text_len) return false;
+    int i = 0;
+    while (i < suffix_len) {
+        if (text[text_len - suffix_len + i] != suffix[i]) return false;
+        i = i + 1;
+    }
+    return true;
+}
+
+export bool is_dot_segment(const char* text) {
+    return (text[0] == '.' && text[1] == '\0') || (text[0] == '.' && text[1] == '.' && text[2] == '\0');
+}
+
+export bool contains_forbidden_segment_char(const char* text) {
+    int i = 0;
+    while (text[i] != '\0') {
+        if (text[i] == '/' || text[i] == '\\') return true;
+        i = i + 1;
+    }
+    return false;
+}
+
+export int header_end_index(const char* buffer, int length) {
+    int i = 0;
+    while (i + 3 < length) {
+        if (buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+export int first_line_end_index(const char* buffer, int length) {
+    int i = 0;
+    while (i + 1 < length) {
+        if (buffer[i] == '\r' && buffer[i + 1] == '\n') return i;
+        i = i + 1;
+    }
+    return -1;
+}
+
+export int hex_value(char c) {
+    if (c >= '0' && c <= '9') return static_cast<int>(c) - static_cast<int>('0');
+    if (c >= 'a' && c <= 'f') return 10 + static_cast<int>(c) - static_cast<int>('a');
+    if (c >= 'A' && c <= 'F') return 10 + static_cast<int>(c) - static_cast<int>('A');
+    return -1;
+}
+
+export bool decode_request_path(const char* buffer, int start, int end, char* out, int capacity) {
+    if (start >= end || buffer[start] != '/') return false;
+    int out_len = 0;
+    int i = start + 1;
+    while (i < end) {
+        char c = buffer[i];
+        if (c == '?') break;
+        if (c == '%') {
+            if (i + 2 >= end) return false;
+            int hi = hex_value(buffer[i + 1]);
+            int lo = hex_value(buffer[i + 2]);
+            if (hi < 0 || lo < 0) return false;
+            char decoded = static_cast<char>(hi * 16 + lo);
+            if (decoded == '\0' || decoded == '/' || decoded == '\\') return false;
+            if (out_len + 1 >= capacity) return false;
+            out[out_len] = decoded;
+            out_len = out_len + 1;
+            i = i + 3;
+            continue;
+        }
+        if (c == '\\') return false;
+        if (out_len + 1 >= capacity) return false;
+        out[out_len] = c;
+        out_len = out_len + 1;
+        i = i + 1;
+    }
+    while (out_len > 0 && out[out_len - 1] == '/') { out_len = out_len - 1; }
+    out[out_len] = '\0';
+    return true;
+}
+
+export const char* content_type_for(const char* relative_path) {
+    if (text_length(relative_path) == 0 || ends_with(relative_path, ".html")) return "text/html";
+    if (ends_with(relative_path, ".txt")) return "text/plain";
+    if (ends_with(relative_path, ".css")) return "text/css";
+    if (ends_with(relative_path, ".js")) return "application/javascript";
+    if (ends_with(relative_path, ".json")) return "application/json";
+    if (ends_with(relative_path, ".png")) return "image/png";
+    if (ends_with(relative_path, ".jpg") || ends_with(relative_path, ".jpeg")) return "image/jpeg";
+    return "application/octet-stream";
+}
+
+export class Connection {
+public:
+    int fd_;
+    int request_len_;
+    char request_[8192];
+    int response_len_;
+    int response_sent_;
+    char response_[512];
+    int file_fd_;
+    int file_size_;
+    int file_offset_;
+    bool head_only_;
+    bool use_sendfile_;
+    char relative_path_[512];
+    const char* content_type_;
+    char file_buffer_[4096];
+    int file_buffer_len_;
+    int file_buffer_sent_;
+
+    void initialize_empty() {
+        this->fd_ = -1;
+        this->request_len_ = 0;
+        this->request_[0] = '\0';
+        this->response_len_ = 0;
+        this->response_sent_ = 0;
+        this->response_[0] = '\0';
+        this->file_fd_ = -1;
+        this->file_size_ = 0;
+        this->file_offset_ = 0;
+        this->head_only_ = false;
+        this->use_sendfile_ = true;
+        this->relative_path_[0] = '\0';
+        this->content_type_ = "application/octet-stream";
+        this->file_buffer_len_ = 0;
+        this->file_buffer_sent_ = 0;
+        return;
+    }
+
+    Connection() {
+        this->initialize_empty();
+        return;
+    }
+
+    void reset() {
+        if (this->fd_ >= 0) close_fd(this->fd_);
+        if (this->file_fd_ >= 0) close_fd(this->file_fd_);
+        this->initialize_empty();
+        return;
+    }
+};
+
+} // namespace httpserver

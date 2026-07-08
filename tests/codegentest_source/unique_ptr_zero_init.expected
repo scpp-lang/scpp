@@ -1,2 +1,2 @@
 contains: %a = alloca %"class.std::unique_ptr.int"
-contains: store %"class.std::unique_ptr.int" zeroinitializer, ptr %a
+contains: @llvm.memset

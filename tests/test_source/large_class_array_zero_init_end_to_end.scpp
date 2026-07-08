@@ -1,0 +1,12 @@
+class Buffer {
+public:
+    char bytes_[1024];
+    int value_;
+};
+
+int main() {
+    Buffer buffers[64];
+    buffers[0].bytes_[0] = 'a';
+    buffers[0].value_ = 7;
+    return buffers[0].value_;
+}

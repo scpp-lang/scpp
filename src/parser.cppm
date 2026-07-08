@@ -100,6 +100,7 @@ public:
         parse_import_declarations(program);
         parse_top_level_items(program);
         reconcile_ordinary_forward_declarations(program);
+        qualify_same_namespace_function_calls(program);
         // ch05 §5.11: a reserved, globally-shared witness class for a
         // bare (unconstrained) `auto` parameter -- "the parameter's type
         // is treated as fully opaque... exactly as if it were
@@ -738,6 +739,15 @@ private:
                a.receiver_ref_qualifier == b.receiver_ref_qualifier;
     }
 
+    [[nodiscard]] static std::string join_namespace_path(const std::vector<std::string>& namespace_path) {
+        std::string joined;
+        for (size_t i = 0; i < namespace_path.size(); i++) {
+            if (i != 0) joined += "::";
+            joined += namespace_path[i];
+        }
+        return joined;
+    }
+
     [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Function& fn) const {
         return fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c && !fn.is_module_extern && !fn.is_exported &&
                (fn.params.empty() || fn.params[0].name != "this");
@@ -780,6 +790,117 @@ private:
             reconciled.push_back(std::move(program.functions[i]));
         }
         program.functions = std::move(reconciled);
+    }
+
+    [[nodiscard]] static bool is_shadowed_local(
+        const std::string& name, const std::vector<std::unordered_set<std::string>>& scopes) {
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+            if (it->contains(name)) return true;
+        }
+        return false;
+    }
+
+    void qualify_same_namespace_function_calls(Program& program) {
+        std::unordered_set<std::string> known_function_names;
+        for (const Function& fn : program.functions) known_function_names.insert(fn.name);
+        for (Function& fn : program.functions) {
+            if (fn.body == nullptr || fn.namespace_path.empty()) continue;
+            std::vector<std::unordered_set<std::string>> scopes(1);
+            for (const Param& param : fn.params) scopes.back().insert(param.name);
+            qualify_same_namespace_function_calls_in_stmt(*fn.body, join_namespace_path(fn.namespace_path),
+                                                          known_function_names, scopes);
+        }
+    }
+
+    void qualify_same_namespace_function_calls_in_stmt(
+        Stmt& stmt, const std::string& namespace_prefix, const std::unordered_set<std::string>& known_function_names,
+        std::vector<std::unordered_set<std::string>>& scopes) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                if (stmt.init) {
+                    qualify_same_namespace_function_calls_in_expr(*stmt.init, namespace_prefix, known_function_names,
+                                                                  scopes);
+                }
+                for (ExprPtr& arg : stmt.ctor_args) {
+                    qualify_same_namespace_function_calls_in_expr(*arg, namespace_prefix, known_function_names, scopes);
+                }
+                scopes.back().insert(stmt.var_name);
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) {
+                    qualify_same_namespace_function_calls_in_expr(*stmt.expr, namespace_prefix, known_function_names,
+                                                                  scopes);
+                }
+                return;
+            case StmtKind::If:
+                qualify_same_namespace_function_calls_in_expr(*stmt.condition, namespace_prefix, known_function_names,
+                                                              scopes);
+                scopes.push_back({});
+                qualify_same_namespace_function_calls_in_stmt(*stmt.then_branch, namespace_prefix, known_function_names,
+                                                              scopes);
+                scopes.pop_back();
+                if (stmt.else_branch) {
+                    scopes.push_back({});
+                    qualify_same_namespace_function_calls_in_stmt(*stmt.else_branch, namespace_prefix,
+                                                                  known_function_names, scopes);
+                    scopes.pop_back();
+                }
+                return;
+            case StmtKind::While:
+                qualify_same_namespace_function_calls_in_expr(*stmt.condition, namespace_prefix, known_function_names,
+                                                              scopes);
+                scopes.push_back({});
+                qualify_same_namespace_function_calls_in_stmt(*stmt.then_branch, namespace_prefix, known_function_names,
+                                                              scopes);
+                scopes.pop_back();
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue: return;
+            case StmtKind::Block:
+                scopes.push_back({});
+                for (StmtPtr& child : stmt.statements) {
+                    qualify_same_namespace_function_calls_in_stmt(*child, namespace_prefix, known_function_names, scopes);
+                }
+                scopes.pop_back();
+                return;
+        }
+    }
+
+    void qualify_same_namespace_function_calls_in_expr(
+        Expr& expr, const std::string& namespace_prefix, const std::unordered_set<std::string>& known_function_names,
+        std::vector<std::unordered_set<std::string>>& scopes) {
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.name.empty() &&
+            expr.name.find("::") == std::string::npos && !is_shadowed_local(expr.name, scopes)) {
+            std::string candidate = namespace_prefix + "::" + expr.name;
+            if (known_function_names.contains(candidate)) expr.name = std::move(candidate);
+        }
+        if (expr.lhs) {
+            qualify_same_namespace_function_calls_in_expr(*expr.lhs, namespace_prefix, known_function_names, scopes);
+        }
+        if (expr.rhs) {
+            qualify_same_namespace_function_calls_in_expr(*expr.rhs, namespace_prefix, known_function_names, scopes);
+        }
+        if (expr.third) {
+            qualify_same_namespace_function_calls_in_expr(*expr.third, namespace_prefix, known_function_names, scopes);
+        }
+        for (ExprPtr& arg : expr.args) {
+            qualify_same_namespace_function_calls_in_expr(*arg, namespace_prefix, known_function_names, scopes);
+        }
+        for (LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init) {
+                qualify_same_namespace_function_calls_in_expr(*capture.init, namespace_prefix, known_function_names,
+                                                              scopes);
+            }
+        }
+        if (expr.lambda_body) {
+            scopes.push_back({});
+            for (const Param& param : expr.lambda_params) scopes.back().insert(param.name);
+            for (const LambdaCapture& capture : expr.lambda_captures) scopes.back().insert(capture.name);
+            qualify_same_namespace_function_calls_in_stmt(*expr.lambda_body, namespace_prefix, known_function_names,
+                                                          scopes);
+            scopes.pop_back();
+        }
     }
 
     // Splits a dotted module name ("org.lotx.cmath") into its segments

@@ -1,0 +1,206 @@
+#include <arpa/inet.h>
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <netinet/in.h>
+#include <sstream>
+#include <string>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <thread>
+#include <unistd.h>
+
+#ifndef SCPP_BINARY_PATH
+#error "SCPP_BINARY_PATH must be defined"
+#endif
+#ifndef SCPP_HTTPSERVER_MODULE_PATH
+#error "SCPP_HTTPSERVER_MODULE_PATH must be defined"
+#endif
+#ifndef SCPP_HTTPSERVER_PLATFORM_LIB_PATH
+#error "SCPP_HTTPSERVER_PLATFORM_LIB_PATH must be defined"
+#endif
+#ifndef SCPP_HTTPSERVER_TESTDATA_DIR
+#error "SCPP_HTTPSERVER_TESTDATA_DIR must be defined"
+#endif
+#ifndef SCPP_HTTPSERVER_WORK_DIR
+#error "SCPP_HTTPSERVER_WORK_DIR must be defined"
+#endif
+
+namespace {
+int failures = 0;
+
+void expect(bool condition, const std::string& message) {
+    if (!condition) {
+        std::cerr << "FAILED: " << message << "\n";
+        ++failures;
+    }
+}
+
+int reserve_port() {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return 19080;
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        close(fd);
+        return 19080;
+    }
+    int port = ntohs(addr.sin_port);
+    close(fd);
+    return port;
+}
+
+std::string escape_c_string(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        if (c == '\\' || c == '"') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
+std::filesystem::path prepare_docroot() {
+    std::filesystem::path work(SCPP_HTTPSERVER_WORK_DIR);
+    std::filesystem::remove_all(work);
+    std::filesystem::create_directories(work);
+    std::filesystem::copy(SCPP_HTTPSERVER_TESTDATA_DIR, work / "docroot",
+                          std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
+    std::ofstream(work / "docroot" / "secret.txt") << "secret\n";
+    std::error_code ec;
+    std::filesystem::create_symlink(work / "docroot" / "hello.txt", work / "docroot" / "link.txt", ec);
+    return work / "docroot";
+}
+
+std::filesystem::path build_server_binary(const std::filesystem::path& root, int port) {
+    std::filesystem::path work(SCPP_HTTPSERVER_WORK_DIR);
+    std::filesystem::create_directories(work);
+    std::filesystem::path source = work / "generated_main.scpp";
+    std::filesystem::path binary = work / "httpserver_test_bin";
+    std::ofstream out(source);
+    out << "import httpserver;\n\n"
+        << "int main() {\n"
+        << "    httpserver::ServerBuilder builder;\n"
+        << "    builder.mount(\"/\", \"" << escape_c_string(root.string()) << "\");\n"
+        << "    builder.set_port(" << port << ");\n"
+        << "    builder.set_max_connections(32);\n"
+        << "    builder.allow_index_html(true);\n"
+        << "    builder.deny_hidden_files(true);\n"
+        << "    return builder.serve();\n"
+        << "}\n";
+    out.close();
+
+    std::ostringstream cmd;
+    cmd << SCPP_BINARY_PATH << " build " << source.string()
+        << " -o " << binary.string()
+        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH
+        << " --link " << SCPP_HTTPSERVER_PLATFORM_LIB_PATH;
+    int rc = std::system(cmd.str().c_str());
+    expect(rc == 0, "generated httpserver app compiles");
+    return binary;
+}
+
+pid_t start_server(const std::filesystem::path& binary) {
+    pid_t pid = fork();
+    if (pid != 0) return pid;
+    execl(binary.c_str(), binary.c_str(), nullptr);
+    _exit(127);
+}
+
+bool wait_for_server(int port) {
+    for (int i = 0; i < 50; ++i) {
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(static_cast<uint16_t>(port));
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            close(fd);
+            return true;
+        }
+        close(fd);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
+std::string send_request(int port, const std::string& request) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        close(fd);
+        return {};
+    }
+    size_t sent = 0;
+    while (sent < request.size()) {
+        ssize_t n = ::send(fd, request.data() + sent, request.size() - sent, 0);
+        if (n <= 0) break;
+        sent += static_cast<size_t>(n);
+    }
+    std::string response;
+    char buffer[4096];
+    while (true) {
+        ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (n <= 0) break;
+        response.append(buffer, static_cast<size_t>(n));
+    }
+    close(fd);
+    return response;
+}
+
+void run_integration_test() {
+    const auto root = prepare_docroot();
+    const int port = reserve_port();
+    const auto binary = build_server_binary(root, port);
+    pid_t pid = start_server(binary);
+    expect(pid > 0, "server process spawned");
+    expect(wait_for_server(port), "server became reachable");
+
+    std::string get_root = send_request(port, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(get_root.find("HTTP/1.1 200 OK") == 0, "GET / returns 200");
+    expect(get_root.find("index from scpp httpserver\n") != std::string::npos, "GET / returns index body");
+
+    std::string get_file = send_request(port, "GET /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(get_file.find("Content-Type: text/plain") != std::string::npos, "GET /hello.txt has text/plain");
+    expect(get_file.find("hello from file\n") != std::string::npos, "GET /hello.txt returns body");
+
+    std::string head_file = send_request(port, "HEAD /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(head_file.find("HTTP/1.1 200 OK") == 0, "HEAD /hello.txt returns 200");
+    expect(head_file.find("hello from file\n") == std::string::npos, "HEAD omits body");
+
+    std::string missing = send_request(port, "GET /missing.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(missing.find("HTTP/1.1 404 Not Found") == 0, "missing file returns 404");
+
+    std::string traversal = send_request(port, "GET /../secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(traversal.find("HTTP/1.1 400 Bad Request") == 0, "traversal returns 400");
+
+    std::string encoded_slash = send_request(port, "GET /nested%2fchild.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(encoded_slash.find("HTTP/1.1 400 Bad Request") == 0, "encoded slash returns 400");
+
+    std::string symlink = send_request(port, "GET /link.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(symlink.find("HTTP/1.1 403 Forbidden") == 0 || symlink.find("HTTP/1.1 404 Not Found") == 0,
+           "symlink leaf is denied");
+
+    kill(pid, SIGTERM);
+    int status = 0;
+    waitpid(pid, &status, 0);
+}
+} // namespace
+
+int main() {
+    run_integration_test();
+    if (failures != 0) {
+        std::cerr << failures << " httpserver test(s) failed.\n";
+        return 1;
+    }
+    return 0;
+}
