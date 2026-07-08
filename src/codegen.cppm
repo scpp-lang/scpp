@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <memory>
@@ -13,6 +14,8 @@ module;
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DIBuilder.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
@@ -22,6 +25,7 @@ module;
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
 export module scpp.codegen;
@@ -48,10 +52,12 @@ struct CodegenError : std::runtime_error {
 // trivial structs, no borrow/move checks yet) directly to LLVM IR.
 class Codegen {
 public:
-    explicit Codegen(const std::string& module_name)
+    explicit Codegen(const std::string& module_name, std::string source_path = {}, bool emit_debug_info = false)
         : context_(std::make_unique<llvm::LLVMContext>()),
           module_(std::make_unique<llvm::Module>(module_name, *context_)),
-          builder_(std::make_unique<llvm::IRBuilder<>>(*context_)) {}
+          builder_(std::make_unique<llvm::IRBuilder<>>(*context_)),
+          source_path_(std::move(source_path)),
+          emit_debug_info_(emit_debug_info) {}
 
     // Sets the target triple and data layout on the module. Must be called
     // (if at all) before generate(), since generate() may need
@@ -80,6 +86,7 @@ public:
         // the single-pass parser already guarantees one class only ever
         // references an *earlier* class by value.
         program_ = &program;
+        initialize_debug_info();
         // ch05 §5.11: a concept's hidden witness class (ClassDef::
         // is_concept_witness) is never a real, instantiable type -- it
         // exists purely so a generic function's own body-check has
@@ -171,6 +178,7 @@ public:
             // §2.1) already got its LLVM `declare` from declare_function
             // above; there's no body to lower.
         }
+        finalize_debug_info();
         std::string error;
         llvm::raw_string_ostream error_stream(error);
         if (llvm::verifyModule(*module_, &error_stream)) {
@@ -289,6 +297,13 @@ private:
     std::unique_ptr<llvm::LLVMContext> context_;
     std::unique_ptr<llvm::Module> module_;
     std::unique_ptr<llvm::IRBuilder<>> builder_;
+    std::unique_ptr<llvm::DIBuilder> dibuilder_;
+    llvm::DICompileUnit* compile_unit_ = nullptr;
+    llvm::DIFile* compile_unit_file_ = nullptr;
+    llvm::DIScope* current_debug_scope_ = nullptr;
+    llvm::DISubprogram* current_subprogram_ = nullptr;
+    std::string source_path_;
+    bool emit_debug_info_ = false;
     std::map<std::string, LocalSlot> locals_;
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_set<std::string> declaring_aggregates_;
@@ -320,6 +335,181 @@ private:
         size_t scope_depth;
     };
     std::vector<LoopFrame> loop_stack_;
+    std::unordered_map<std::string, llvm::DIType*> debug_type_cache_;
+    std::unordered_map<std::string, llvm::DIFile*> debug_file_cache_;
+
+    [[nodiscard]] std::string default_debug_source_path() const {
+        return source_path_.empty() ? (std::filesystem::current_path() / "memory.scpp").string() : source_path_;
+    }
+
+    [[nodiscard]] llvm::DIFile* debug_file_for_path(const std::string& path) {
+        if (!emit_debug_info_) return nullptr;
+        auto it = debug_file_cache_.find(path);
+        if (it != debug_file_cache_.end()) return it->second;
+        std::filesystem::path source(path);
+        llvm::DIFile* file = dibuilder_->createFile(source.filename().string(), source.parent_path().string());
+        debug_file_cache_.emplace(path, file);
+        return file;
+    }
+
+    [[nodiscard]] llvm::DIFile* debug_file_for_program() {
+        if (!emit_debug_info_) return nullptr;
+        if (compile_unit_file_ != nullptr) return compile_unit_file_;
+        compile_unit_file_ = debug_file_for_path(default_debug_source_path());
+        return compile_unit_file_;
+    }
+
+    [[nodiscard]] llvm::DIFile* debug_file_for_loc(const SourceLocation& loc) {
+        return debug_file_for_path(loc.has_source_path() ? loc.source_path_text() : default_debug_source_path());
+    }
+
+    void initialize_debug_info() {
+        if (!emit_debug_info_) return;
+        dibuilder_ = std::make_unique<llvm::DIBuilder>(*module_);
+        llvm::DIFile* file = debug_file_for_program();
+        compile_unit_ = dibuilder_->createCompileUnit(llvm::dwarf::DW_LANG_C_plus_plus_17, file, "scpp", false, "", 0,
+                                                      "", llvm::DICompileUnit::FullDebug);
+        module_->addModuleFlag(llvm::Module::Warning, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
+        module_->addModuleFlag(llvm::Module::Warning, "Dwarf Version", 5);
+    }
+
+    void finalize_debug_info() {
+        if (!emit_debug_info_ || !dibuilder_) return;
+        dibuilder_->finalize();
+    }
+
+    [[nodiscard]] llvm::DIType* debug_type_for(const Type& type) {
+        if (!emit_debug_info_) return nullptr;
+        std::string key = mangle_type(type);
+        auto it = debug_type_cache_.find(key);
+        if (it != debug_type_cache_.end()) return it->second;
+        llvm::DIType* result = nullptr;
+        switch (type.kind) {
+            case TypeKind::Named: {
+                auto basic = [&](llvm::dwarf::TypeKind encoding) -> llvm::DIType* {
+                    return dibuilder_->createBasicType(type.name, module_->getDataLayout().getTypeSizeInBits(to_llvm_type(type)),
+                                                       encoding);
+                };
+                if (type.name == "bool") result = basic(llvm::dwarf::DW_ATE_boolean);
+                else if (type.name == "char") result = basic(llvm::dwarf::DW_ATE_signed_char);
+                else if (is_float_scalar_type_name(type.name)) result = basic(llvm::dwarf::DW_ATE_float);
+                else if (is_scalar_type_name(type.name)) {
+                    result = basic(is_unsigned_scalar_type_name(type.name) ? llvm::dwarf::DW_ATE_unsigned
+                                                                            : llvm::dwarf::DW_ATE_signed);
+                } else {
+                    result = dibuilder_->createUnspecifiedType(type.name);
+                }
+                break;
+            }
+            case TypeKind::Pointer:
+            case TypeKind::Reference: {
+                llvm::DIType* pointee = type.pointee ? debug_type_for(*type.pointee) : nullptr;
+                result = dibuilder_->createPointerType(
+                    pointee, module_->getDataLayout().getPointerSizeInBits(),
+                    module_->getDataLayout().getPointerABIAlignment(0).value() * 8);
+                break;
+            }
+            case TypeKind::Array: {
+                llvm::DIType* element = debug_type_for(*type.element);
+                auto subscripts = dibuilder_->getOrCreateArray(
+                    {dibuilder_->getOrCreateSubrange(0, type.array_size)});
+                llvm::Type* llvm_type = to_llvm_type(type);
+                result = dibuilder_->createArrayType(module_->getDataLayout().getTypeSizeInBits(llvm_type),
+                                                     module_->getDataLayout().getABITypeAlign(llvm_type).value() * 8,
+                                                     element, subscripts);
+                break;
+            }
+            case TypeKind::Span:
+                result = dibuilder_->createUnspecifiedType("std::span");
+                break;
+            case TypeKind::Function:
+            case TypeKind::FunctionPointer: {
+                std::vector<llvm::Metadata*> elems;
+                elems.push_back(type.function_return ? debug_type_for(*type.function_return) : nullptr);
+                for (const Type& param : type.function_params) elems.push_back(debug_type_for(param));
+                llvm::DISubroutineType* subroutine =
+                    dibuilder_->createSubroutineType(dibuilder_->getOrCreateTypeArray(elems));
+                result = type.kind == TypeKind::FunctionPointer
+                             ? dibuilder_->createPointerType(subroutine, module_->getDataLayout().getPointerSizeInBits(),
+                                                            module_->getDataLayout().getPointerABIAlignment(0).value() * 8)
+                             : static_cast<llvm::DIType*>(subroutine);
+                break;
+            }
+        }
+        debug_type_cache_[key] = result;
+        return result;
+    }
+
+    void refresh_debug_location(SourceLocation loc) {
+        current_loc_ = loc;
+        if (!emit_debug_info_ || current_debug_scope_ == nullptr || !loc.is_known()) {
+            builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+            return;
+        }
+        builder_->SetCurrentDebugLocation(llvm::DILocation::get(*context_, loc.line, std::max(loc.column, 1),
+                                                                current_debug_scope_));
+    }
+
+    void maybe_emit_parameter_debug_decl(const Param& param, llvm::AllocaInst* slot, unsigned index) {
+        if (!emit_debug_info_ || current_subprogram_ == nullptr) return;
+        llvm::DIType* type = debug_type_for(param.type);
+        if (type == nullptr) return;
+        llvm::DILocalVariable* var =
+            dibuilder_->createParameterVariable(current_subprogram_, param.name, index, debug_file_for_loc(current_function_def_->loc),
+                                                std::max(current_function_def_->loc.line, 1), type, true);
+        dibuilder_->insertDeclare(slot, var, dibuilder_->createExpression(),
+                                  llvm::DILocation::get(*context_, std::max(current_function_def_->loc.line, 1), 1,
+                                                        current_subprogram_),
+                                  builder_->GetInsertBlock());
+    }
+
+    void maybe_emit_local_debug_decl(const std::string& name, const Type& type, llvm::AllocaInst* slot, SourceLocation loc) {
+        if (!emit_debug_info_ || current_debug_scope_ == nullptr) return;
+        llvm::DIType* debug_type = debug_type_for(type);
+        if (debug_type == nullptr) return;
+        llvm::DILocalVariable* var =
+            dibuilder_->createAutoVariable(current_debug_scope_, name, debug_file_for_loc(loc), std::max(loc.line, 1),
+                                           debug_type, true);
+        dibuilder_->insertDeclare(slot, var, dibuilder_->createExpression(),
+                                  llvm::DILocation::get(*context_, std::max(loc.line, 1), std::max(loc.column, 1),
+                                                        current_debug_scope_),
+                                  builder_->GetInsertBlock());
+    }
+
+    // Hoists named local-variable storage to the function entry block so
+    // LLVM can describe it with one stable frame-base location even when
+    // the declaration itself lives in a nested scope whose initializer
+    // emits its own control flow (e.g. checked arithmetic overflow
+    // diamonds). Preserves declaration order among existing entry-block
+    // allocas for tests/IR readability.
+    llvm::AllocaInst* create_entry_block_alloca(llvm::Type* type, const std::string& name) {
+        llvm::BasicBlock* current_block = builder_->GetInsertBlock();
+        if (current_block == nullptr) return builder_->CreateAlloca(type, nullptr, name);
+        llvm::IRBuilderBase::InsertPoint saved_ip = builder_->saveIP();
+        llvm::BasicBlock& entry = current_block->getParent()->getEntryBlock();
+        llvm::BasicBlock::iterator insert_it = entry.getFirstInsertionPt();
+        while (insert_it != entry.end() && llvm::isa<llvm::AllocaInst>(*insert_it)) ++insert_it;
+        builder_->SetInsertPoint(&entry, insert_it);
+        llvm::AllocaInst* slot = builder_->CreateAlloca(type, nullptr, name);
+        builder_->restoreIP(saved_ip);
+        return slot;
+    }
+
+    void attach_debug_subprogram(llvm::Function* llvm_fn, const Function& fn) {
+        if (!emit_debug_info_) return;
+        std::vector<llvm::Metadata*> type_elems;
+        type_elems.push_back(debug_type_for(fn.return_type));
+        for (const Param& param : fn.params) type_elems.push_back(debug_type_for(param.type));
+        llvm::DISubroutineType* fn_type =
+            dibuilder_->createSubroutineType(dibuilder_->getOrCreateTypeArray(type_elems));
+        llvm::DISubprogram* subprogram = dibuilder_->createFunction(
+            debug_file_for_loc(fn.loc), fn.name, llvm_fn->getName(), debug_file_for_loc(fn.loc),
+            std::max(fn.loc.line, 1), fn_type, std::max(fn.loc.line, 1),
+            llvm::DINode::FlagPrototyped, llvm::DISubprogram::SPFlagDefinition);
+        llvm_fn->setSubprogram(subprogram);
+        current_subprogram_ = subprogram;
+        current_debug_scope_ = subprogram;
+    }
 
     const StructDef* find_struct_def(const std::string& name) const {
         for (const StructDef& def : program_->structs) {
@@ -1667,8 +1857,11 @@ private:
         // (the old "native function = implicitly unsafe everywhere"
         // concept is fully retired).
         unsafe_depth_ = fn.is_unsafe ? 1 : 0;
+        attach_debug_subprogram(llvm_fn, fn);
         llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
         builder_->SetInsertPoint(entry);
+        current_loc_ = fn.loc;
+        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
 
         locals_.clear();
         scope_stack_.clear();
@@ -1679,6 +1872,7 @@ private:
             llvm::AllocaInst* slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
             builder_->CreateStore(&arg, slot);
             locals_[param.name] = LocalSlot{slot, param.type};
+            maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index));
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
                 locals_[param.name].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
             }
@@ -1693,6 +1887,9 @@ private:
             throw CodegenError("function '" + fn.name + "' does not return on all paths",
                 current_loc_);
         }
+        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        current_debug_scope_ = nullptr;
+        current_subprogram_ = nullptr;
     }
 
     // ch05 §5.14: emits a thin, codegen-only wrapper body for a
@@ -1738,8 +1935,11 @@ private:
         }
         llvm::Function* target_llvm = module_->getFunction(overload_names_.at(target));
 
+        attach_debug_subprogram(llvm_fn, fn);
         llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
         builder_->SetInsertPoint(entry);
+        current_loc_ = fn.loc;
+        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
         std::vector<llvm::Value*> args;
         args.reserve(llvm_fn->arg_size());
         for (auto& arg : llvm_fn->args()) args.push_back(&arg);
@@ -1749,6 +1949,9 @@ private:
         } else {
             builder_->CreateRet(call_result);
         }
+        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        current_debug_scope_ = nullptr;
+        current_subprogram_ = nullptr;
     }
 
     void codegen_stmt(const Stmt& stmt, llvm::Function* current_function) {
@@ -1756,7 +1959,7 @@ private:
         // nested statement) so a CodegenError thrown while handling
         // `stmt` points at `stmt` itself -- see current_loc_ and
         // codegen_expr's identical opening comment.
-        current_loc_ = stmt.loc;
+        refresh_debug_location(stmt.loc);
         switch (stmt.kind) {
             case StmtKind::Block:
                 push_scope();
@@ -1808,9 +2011,10 @@ private:
                             ? codegen_materialize_rvalue_reference_source(*stmt.init)
                             : codegen_lvalue(*stmt.init).ptr;
                     llvm::AllocaInst* slot =
-                        builder_->CreateAlloca(llvm::PointerType::getUnqual(*context_), nullptr, stmt.var_name);
+                        create_entry_block_alloca(llvm::PointerType::getUnqual(*context_), stmt.var_name);
                     builder_->CreateStore(referent_addr, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
@@ -1844,9 +2048,10 @@ private:
                     llvm::Value* span_value = llvm::UndefValue::get(span_type);
                     span_value = builder_->CreateInsertValue(span_value, source.ptr, {0});
                     span_value = builder_->CreateInsertValue(span_value, size_value, {1});
-                    llvm::AllocaInst* slot = builder_->CreateAlloca(span_type, nullptr, stmt.var_name);
+                    llvm::AllocaInst* slot = create_entry_block_alloca(span_type, stmt.var_name);
                     builder_->CreateStore(span_value, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
@@ -1877,8 +2082,10 @@ private:
                 // every scalar/struct/array/pointer type the general
                 // path below handles).
                 if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
-                    llvm::AllocaInst* closure_ptr = codegen_construct_lambda(*stmt.init);
+                    llvm::AllocaInst* closure_ptr = create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name);
+                    codegen_construct_lambda(*stmt.init, closure_ptr);
                     locals_[stmt.var_name] = LocalSlot{closure_ptr, stmt.type};
+                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, closure_ptr, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
@@ -1886,7 +2093,7 @@ private:
                 }
 
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
-                llvm::AllocaInst* slot = builder_->CreateAlloca(llvm_type, nullptr, stmt.var_name);
+                llvm::AllocaInst* slot = create_entry_block_alloca(llvm_type, stmt.var_name);
                 if (stmt.has_ctor_args) {
                     // `ClassName name(args);` (ch04 §4.2): direct-
                     // initialization via an explicit constructor call.
@@ -1907,6 +2114,7 @@ private:
                     zero_initialize_storage(slot, stmt.type);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
@@ -1999,6 +2207,7 @@ private:
                         }
                         locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                         locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                        maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(stmt.var_name);
                         }
@@ -2011,7 +2220,7 @@ private:
                     // whichever sub-expression it last visited rather
                     // than the statement check_store_type is actually
                     // about.
-                    current_loc_ = stmt.loc;
+                    refresh_debug_location(stmt.loc);
                     check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'");
                     builder_->CreateStore(init_value, slot);
                 } else {
@@ -2026,6 +2235,7 @@ private:
                 if (stmt.type.kind == TypeKind::Named) {
                     locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                 }
+                maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                 if (!scope_stack_.empty()) {
                     scope_stack_.back().push_back(stmt.var_name);
                 }
@@ -2657,7 +2867,7 @@ private:
         // so a CodegenError thrown while examining `expr` itself (before
         // or after recursing into any children) reports `expr`'s own
         // position, not whichever child was most recently visited.
-        current_loc_ = expr.loc;
+        refresh_debug_location(expr.loc);
         switch (expr.kind) {
             case ExprKind::IntegerLiteral:
                 return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), expr.int_value, /*isSigned=*/true);
@@ -2918,9 +3128,10 @@ private:
     // value in this codebase -- see codegen_expr's Lambda case, and
     // codegen_lvalue's own Lambda case for an IIFE's receiver, ch05
     // §5.12's `[](...){...}()`).
-    llvm::AllocaInst* codegen_construct_lambda(const Expr& expr) {
+    llvm::AllocaInst* codegen_construct_lambda(const Expr& expr, llvm::AllocaInst* existing_storage = nullptr) {
         const StructInfo& info = structs_.at(expr.name);
-        llvm::AllocaInst* closure = builder_->CreateAlloca(info.llvm_type, nullptr, "lambdatmp");
+        llvm::AllocaInst* closure =
+            existing_storage != nullptr ? existing_storage : builder_->CreateAlloca(info.llvm_type, nullptr, "lambdatmp");
         for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
             const LambdaCapture& capture = expr.lambda_captures[i];
             const Type& field_type = info.field_types[i];
@@ -3009,7 +3220,7 @@ private:
                     current_loc_);
             }
             initial_value = codegen_expr(*expr.args[0]);
-            current_loc_ = expr.loc;
+            refresh_debug_location(expr.loc);
             check_store_type(initial_value, element_type, "'new " + expr.type.name + "(...)' argument");
         }
         builder_->CreateStore(initial_value, heap_ptr);
@@ -3621,7 +3832,7 @@ private:
     // by-value struct temporaries need addressable storage.
     LValue codegen_lvalue(const Expr& expr) {
         // Same refresh discipline as codegen_expr above.
-        current_loc_ = expr.loc;
+        refresh_debug_location(expr.loc);
         switch (expr.kind) {
             case ExprKind::Identifier: {
                 auto it = locals_.find(expr.name);
@@ -3921,7 +4132,7 @@ private:
             llvm::Value* value = codegen_value_for_target(*expr.rhs, lv.type);
             // Refresh to `expr`'s own position -- see the VarDecl case's
             // identical comment in codegen_stmt.
-            current_loc_ = expr.loc;
+            refresh_debug_location(expr.loc);
             check_store_type(value, to_llvm_type(lv.type), "'" + expr.lhs->name + "'");
             if (lv.type.kind == TypeKind::Named && structs_.contains(lv.type.name)) {
                 // spec §6.4(3)/(5): `y = std::move(x);` -- the compiler-
