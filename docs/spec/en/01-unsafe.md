@@ -89,10 +89,9 @@ requires independently of any nesting.
   neither of which is convertible to the other by an implicit
   conversion this document permits;
 
-  (5.3) access to a non-static data member of a union that is not a
-  tagged union (a future clause defines *tagged union* for SCPP26;
-  until such a clause is added to this document, every union is
-  untagged for this purpose) ([class.union]);
+  (5.3) access to a non-static data member of a union
+  ([class.union], as modified by
+  [§9.1](05-unions-and-packed-layout.md#91-union-types));
 
   (5.4) a *new-expression* or a *delete-expression* ([expr.new],
   [expr.delete]);

@@ -15,7 +15,8 @@ completely different semantics.
     not-unsafe-qualified pointer-to-function type, see
     [§5.16](ch05-static-checks.md#516-function-pointers)) -- likewise
     carry no compiler-tracked lifetime.
-  - Other `struct` types that themselves satisfy this rule (recursively).
+  - Other `struct` or `union` types that themselves satisfy this rule
+    (recursively).
   - Fixed-size arrays of trivial types.
 - The following are **forbidden** as `struct` members and must instead be
   wrapped in a `class`:
@@ -37,7 +38,10 @@ bitwise, and do not participate in the move/borrow checking described in
 [§5](ch05-static-checks.md) — they carry no lifetime or
 exclusive-ownership semantics at all. This is not an opt-in `Copy` trait
 (contrast Rust's explicit `#[derive(Copy)]`): declaring a type `struct` is
-itself the explicit declaration, and the compiler verifies triviality.
+itself the explicit declaration, and the compiler verifies triviality. A
+`union` lives in this same low-level, ABI-facing part of the language too,
+but uses overlapping storage rather than distinct member offsets; see
+[§5.19](ch05-static-checks.md#519-union-and-scpppacked).
 
 ## 4.2 `class`: types that own resources / participate in checking
 
@@ -270,17 +274,25 @@ Concretely:
 4. The first member is always at offset 0 (the struct's address equals its
    first member's address).
 
-Implementation: the compiler emits a non-packed, named LLVM struct type and
-lets the target's `DataLayout` compute the layout — the same `DataLayout`
-Clang uses for the same target triple — so Clang/C-compatible layout falls
-out automatically, with no separate alignment algorithm to maintain in scpp.
+Implementation: when no layout override is requested, the compiler emits a
+non-packed, named LLVM struct type and lets the target's `DataLayout`
+compute the layout — the same `DataLayout` Clang uses for the same target
+triple — so Clang/C-compatible layout falls out automatically, with no
+separate alignment algorithm to maintain in scpp.
 
-**Explicitly unsupported in v0.1**:
+A `struct` or `union` marked `[[scpp::packed]]`
+([§5.19](ch05-static-checks.md#519-union-and-scpppacked)) instead requests
+packed C-style layout: member order stays the same, but a `struct` gets no
+inter-member padding and the aggregate's overall alignment becomes 1. This
+is scpp's explicit spelling for the foreign-ABI niche that C/C++ toolchains
+usually expose as `__attribute__((packed))` or `#pragma pack`.
+
+**Still explicitly unsupported in v0.1**:
 - Bit-fields — layout varies too much across platforms/compiler versions to
   pin down confidently right now.
-- Packed layout (the equivalent of `#pragma pack(1)` /
-  `__attribute__((packed))`) — deferred to a later version via an explicit
-  attribute (e.g. `alignas` / `packed`) mapped to LLVM's packed struct type.
+- A separate `alignas`-style user layout-control feature. For now,
+  `[[scpp::packed]]` is the one explicit layout escape hatch, and it is
+  deliberately scoped to `struct`/`union` declarations.
 
 ---
 

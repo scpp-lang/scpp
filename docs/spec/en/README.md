@@ -19,3 +19,4 @@
 6. [Ownership, Initialization, and Move](02-ownership-and-move.md)
 7. [Dereference and Member Access](03-dereference-and-member-access.md)
 8. [Thread-Safety Properties](04-thread-safety-properties.md)
+9. [Union types and packed layout](05-unions-and-packed-layout.md)

@@ -56,6 +56,12 @@ distinct from an ordinary type/borrow-check error):
   [§5.9](ch05-static-checks.md)): readable/writable through a `const`
   `this`, but never referenceable, scpp's phase-1 (`Cell`-equivalent)
   answer to interior mutability ([§8](ch08-open-questions.md) Q4).
+- `union` for FFI / storage-overlay work (see
+  [§5.19](ch05-static-checks.md#519-union-and-scpppacked)): ordinary safe
+  code may declare and carry a union value, but accessing a member requires
+  `[[scpp::unsafe]]`, because SCPP26 currently treats every union as
+  untagged. `[[scpp::packed]]` may be applied to a `struct` or `union` to
+  request no inter-member padding and overall alignment 1.
 - `std::unique_ptr<T>` and `std::make_unique<T>(...)`, provided by the
   `std` module via `import std;` as ordinary library code, not as a
   compiler builtin. Its move-only behavior is just the ordinary
@@ -175,10 +181,10 @@ distinct from an ordinary type/borrow-check error):
   for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)).
 - `[[scpp::unsafe]] { }` blocks (see [§1.3](ch01-safety-context.md)): ordinary
   compound-statements carrying the `[[scpp::unsafe]]` attribute, a lexically-scoped escape hatch that locally
-  permits raw pointer dereference and calling an `extern "C"` function (the
-  operations from [§5.5](ch05-static-checks.md)'s prohibited list that
-  are in scope for v0.1; the rest of that list is deferred beyond v0.1,
-  see below), while every other check in
+  permits raw pointer dereference, union-member access, and calling an
+  `extern "C"` function (the operations from [§5.5](ch05-static-checks.md)'s
+  prohibited list that are in scope for v0.1; the rest of that list is
+  deferred beyond v0.1, see below), while every other check in
   [§5](ch05-static-checks.md) keeps running unconditionally.
 - The function-level `[[scpp::unsafe]]` marker (see
   [§1.2](ch01-safety-context.md)): the same attribute, applied instead to
@@ -215,7 +221,7 @@ distinct from an ordinary type/borrow-check error):
   `protected`) -- see [§4.2](ch04-struct-vs-class.md).
 - The full aliasing model for `shared_ptr`.
 - `for`/range-for, `std::vector`, `std::string`/`std::string_view`,
-  `reinterpret_cast`, `union`, raw `new`/`delete`, and global variables.
+  `reinterpret_cast`, raw `new`/`delete`, and global variables.
 
 ---
 

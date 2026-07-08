@@ -458,6 +458,32 @@
     "alive but empty". See
     [§5.18](ch05-static-checks.md#518-type-erased-call-wrappers-stdfunction-and-stdmove_only_function).
 
+
+20. **Should scpp support raw C-style `union` and packed layout at all, given
+    that safe code cannot prove which representation is active and ISO C++
+    still has no standard packed-layout attribute?** **Settled: yes for
+    FFI/storage-overlay work, with union-member access always unsafe and
+    `[[scpp::packed]]` as an explicit layout attribute on `struct`/`union`.**
+    Real-world OS and wire-format ABIs still use both patterns constantly;
+    refusing to express them would just force handwritten C shims for
+    ordinary boundaries such as `epoll`-style platform structs. But scpp
+    also should not pretend it can prove which union arm is live: SCPP26
+    currently has no tagged-union construct, so every `union` is treated as
+    untagged, and reading or writing `u.member` is gated by
+    `[[scpp::unsafe]]` for the same reason raw-pointer dereference is -- the
+    programmer is vouching that the bytes are being interpreted as the
+    intended representation. `[[scpp::packed]]` exists even though ISO
+    C++26 itself still offers no standard equivalent because "match this
+    foreign byte layout exactly" is a real boundary need, not a stylistic
+    layout preference; today's C/C++ compilers solve it with extensions such
+    as `__attribute__((packed))` or `#pragma pack`, and scpp chooses one
+    explicit spelling in its own namespace instead of pretending the need is
+    out of bounds. The attribute is intentionally narrow: `struct`/`union`
+    only, for layout/interop work, not a general-purpose knob for
+    ownership-tracked `class` types. See
+    [§5.19](ch05-static-checks.md#519-union-and-scpppacked) and
+    [§9](../spec/en/05-unions-and-packed-layout.md).
+
 ---
 
 [← Previous: Compilation Pipeline](ch07-compilation-pipeline.md) · [Table of Contents](README.md) · [Next: MVP Milestones →](ch09-milestones.md)

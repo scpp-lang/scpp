@@ -155,7 +155,7 @@ the following properties, unconditionally, everywhere:
 ## 5.5 Prohibited (unless in `[[scpp::unsafe]]`)
 - Raw pointer dereference, pointer arithmetic.
 - `reinterpret_cast`, C-style casts to incompatible types.
-- (Untagged) `union`.
+- Access to a `union` member (every current `union` is untagged).
 - Raw `new` / `delete`.
 - Access to mutable global/static variables.
 - Calling an `extern "C"` function.
@@ -358,8 +358,10 @@ the C++ standard itself evolves further in this area -- see
     borrow-source grammar it reuses.
   - Rust's `&raw const`/`&raw mut` (address-of *without* going through an
     intermediate reference at all, needed there for packed structs and
-    uninitialized memory) -- scpp has neither concept yet, so there's no
-    case this would need to cover that plain `&expr` doesn't already.
+    uninitialized memory). SCPP26 now has `[[scpp::packed]]`
+    ([§5.19](#519-union-and-scpppacked)), but this chapter still defines
+    only plain `&expr` as its address-of form; no second raw-address
+    operator is introduced here.
   - Removing const (`const T*` -> `T*`) -- no `const_cast`/Rust's
     `.cast_mut()` equivalent exists in v0.1. If a real C API's signature
     is honestly non-`const` where scpp's borrow-source is only reachable
@@ -1479,6 +1481,58 @@ different callable types behind one owning field, returning "some
 callable of this signature" without exposing its concrete type, or
 passing a callback across an ABI / architectural boundary where the
 static type must be hidden.
+
+
+## 5.19 `union` and `[[scpp::packed]]`
+
+SCPP26 supports ordinary C-style `union` declarations for low-level storage
+overlay and FFI layout work:
+
+```cpp
+union [[scpp::packed]] epoll_data_t {
+    void* ptr;
+    int fd;
+    uint32_t u32;
+    uint64_t u64;
+};
+
+struct [[scpp::packed]] epoll_event {
+    uint32_t events;
+    epoll_data_t data;
+};
+```
+
+The important rules are:
+
+- **A `union` overlays several member declarations onto the same bytes.**
+  Like `struct`, this is a layout-level aggregate feature, not a new
+  ownership-tracked `class` mechanism.
+- **Accessing a union member is always `[[scpp::unsafe]]` territory.**
+  SCPP26 currently has no tagged-union feature that would let the compiler
+  prove which member is the active representation, so ordinary safe code may
+  declare, pass, or store a union value, but reading or writing `u.member`
+  itself requires `[[scpp::unsafe]]`.
+- **That unsafe gate is about representation selection, not about turning
+  off the rest of [§5](#5-static-checks).** Once inside the unsafe block,
+  the selected member expression is still governed by its ordinary type, and
+  the surrounding ownership/lifetime checks continue to run exactly as
+  usual.
+- **`[[scpp::packed]]` may be applied to a `struct` or `union`
+  declaration.** It requests byte-exact packed layout: no inter-member
+  padding for a `struct`, and overall alignment 1 for the declared
+  aggregate. For a `union`, every member still starts at offset 0;
+  `[[scpp::packed]]` matters by lowering the union's alignment requirement
+  to 1, so embedding it inside another packed aggregate preserves the
+  foreign layout exactly.
+- **This is intentionally a narrow FFI/data-layout tool.** Real ISO C++26
+  still has no standard packed-layout attribute; existing toolchains expose
+  this niche with extensions such as `__attribute__((packed))` or
+  `#pragma pack`. SCPP26 chooses one explicit spelling in its own namespace
+  instead of pretending the need does not exist.
+- **`[[scpp::packed]]` is not a `class` feature.** `class` is where
+  constructors, destructors, and ownership-tracked invariants live;
+  byte-overlay storage and forced unaligned layout are layout/interop tools,
+  so the attribute is confined to `struct`/`union` declarations.
 
 ---
 
