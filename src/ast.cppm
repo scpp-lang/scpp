@@ -625,6 +625,17 @@ struct Function {
     // unchanged.
     std::vector<GenericTypeParam> template_params;
 
+    // ch05 §5.14: non-empty only on a method/constructor/destructor still
+    // attached to a generic class template definition (including an
+    // ordinary partial specialization pattern) rather than a concrete
+    // instantiation. Distinguishes otherwise same-named exposed template
+    // definitions that all synthesize methods against the same spelled
+    // class name (e.g. `function_...`) so movecheck can recover exactly
+    // which one owns this method without relying on that unstable name
+    // alone. Cleared again on every concrete clone and on every
+    // non-template class method.
+    std::string generic_method_owner_id;
+
     // ch05 §5.14: non-empty only for a synthesized *forwarding stub* --
     // a derived class inheriting a base method it doesn't itself
     // override (e.g. "Derived_foo" forwarding to "Base_foo") -- names
@@ -696,6 +707,11 @@ struct StructDef {
     // monomorphized struct injected into Program::structs by the
     // Monomorphizer, with its own distinct mangled name.
     std::vector<GenericTypeParam> template_params;
+    // Non-empty only for this template definition's own identity while it
+    // remains symbolic (generic). Lets later compiler passes distinguish
+    // multiple template definitions sharing the same exposed name. Empty on
+    // an ordinary concrete struct.
+    std::string template_owner_id;
     // ch05 §5.15: `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`
     // attached directly to this struct's own declaration (after the
     // `struct` keyword, before its name) -- manually asserts the
@@ -784,6 +800,19 @@ struct ClassDef {
     // instead gets a separate monomorphized class injected into
     // Program::classes by the Monomorphizer.
     std::vector<GenericTypeParam> template_params;
+    // Non-empty only for this template definition's own identity while it
+    // remains symbolic (generic). Methods parsed from the class body store
+    // the same id in Function::generic_method_owner_id so movecheck can
+    // recover their exact owning template definition even when multiple
+    // primary/specialized templates share this one exposed class name.
+    // Empty on every ordinary concrete class.
+    std::string template_owner_id;
+    // True for an ordinary class template forward declaration with no body
+    // (e.g. `template<typename Sig> class function;`). Such a declaration
+    // introduces the name and its primary template parameter list but is
+    // never itself directly instantiated unless some later definition or
+    // partial specialization supplies a body to match.
+    bool is_forward_declaration = false;
     // ch05 §5.14: true only for a *temporary, internal* witness-
     // substituted class synthesized purely to check one generic method's
     // body once, abstractly, at its own definition (mirrors a concept's
@@ -836,6 +865,13 @@ struct ClassDef {
     // is_variadic_specialization are mutually exclusive with an
     // ordinary generic type's own single ClassDef.
     bool is_variadic_specialization = false;
+    // True for an ordinary (non-variadic) partial specialization pattern,
+    // e.g. `template<typename R, typename... Args> class
+    // function<R(Args...)> { ... };`. `specialization_template_args` then
+    // holds the symbolic `<...>` pattern matched against a concrete
+    // instantiation's original template arguments.
+    bool is_partial_specialization = false;
+    std::vector<Type> specialization_template_args;
     // ch05 §5.14: meaningful only when is_variadic_specialization and
     // base_class_name is non-empty -- names *this* specialization's own
     // pack parameter (e.g. "Tail") when the base class is instantiated
