@@ -145,6 +145,13 @@ std::string read_module_source(const std::string& path) {
     return buffer.str();
 }
 
+[[nodiscard]] std::string absolute_source_path(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+    if (ec) return path;
+    return absolute.lexically_normal().string();
+}
+
 // ch11 §11.7/§11.8: resolves `import name;` declarations against a
 // `--import name=path` mapping, recursively parsing (and caching) each
 // imported module's source the first time it's needed -- multiple files
@@ -190,7 +197,8 @@ public:
         std::string source = read_module_source(path_it->second);
         Program imported = parse(
             source, [this](const std::string& name) -> const Program& { return resolve(name); },
-            [this](const std::string& key) -> Program { return resolve_partition(key); });
+            [this](const std::string& key) -> Program { return resolve_partition(key); }, absolute_source_path(path_it->second));
+        imported.source_path = absolute_source_path(path_it->second);
         resolving_.erase(module_name);
 
         if (imported.module_name != module_name) {
@@ -235,7 +243,9 @@ public:
         std::string source = read_module_source(path_it->second);
         Program partition = parse(
             source, [this](const std::string& name) -> const Program& { return resolve(name); },
-            [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); });
+            [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); },
+            absolute_source_path(path_it->second));
+        partition.source_path = absolute_source_path(path_it->second);
         partitions_resolving_.erase(key);
 
         std::string expected_key = partition.module_name + ":" + partition.partition_name;
@@ -305,7 +315,7 @@ private:
 // by compile_to_executable below -- exactly the same backend either way,
 // since by this point a Program is just a Program regardless of which
 // file it came from.
-void emit_object_file_for_program(Program& program, const std::string& object_path) {
+void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false) {
     // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
     // comment in movecheck.cppm for why call-site monomorphization has
     // to happen first (movecheck's ordinary exact-type-match call-
@@ -336,7 +346,7 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     // The data layout must be set *before* codegen runs: std::make_unique
     // needs a target-accurate sizeof(T) to call malloc with, which comes
     // from the module's DataLayout.
-    Codegen codegen("scpp_module");
+    Codegen codegen("scpp_module", program.source_path, emit_debug_info);
     codegen.set_target(target_triple, target_machine->createDataLayout());
     llvm::Module& module = codegen.generate(program);
 
@@ -369,12 +379,15 @@ export namespace scpp {
 // path to derive from.
 void emit_object_file(std::string_view source, const std::string& object_path,
                        const std::unordered_map<std::string, std::string>& import_paths = {},
-                       const std::vector<std::string>& import_search_dirs = {}) {
+                       const std::vector<std::string>& import_search_dirs = {},
+                       bool emit_debug_info = false,
+                       const std::string& source_path = {}) {
     ModuleCache cache(import_paths, import_search_dirs);
     Program program = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
-        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); });
-    emit_object_file_for_program(program, object_path);
+        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
+    program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
+    emit_object_file_for_program(program, object_path, emit_debug_info);
 }
 
 // Links a native object file into an executable using the system compiler
@@ -420,19 +433,22 @@ void compile_to_executable(std::string_view source, const std::string& executabl
                             const std::vector<std::string>& extra_link_inputs = {},
                             const std::unordered_map<std::string, std::string>& import_paths = {},
                             bool static_link = false,
-                            const std::vector<std::string>& import_search_dirs = {}) {
+                            const std::vector<std::string>& import_search_dirs = {},
+                            bool emit_debug_info = false,
+                            const std::string& source_path = {}) {
     ModuleCache cache(import_paths, import_search_dirs);
     Program program = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
-        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); });
+        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
+    program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
 
     std::string object_path = executable_path + ".o";
-    emit_object_file_for_program(program, object_path);
+    emit_object_file_for_program(program, object_path, emit_debug_info);
 
     std::vector<std::string> module_object_paths;
     for (const std::string& module_name : cache.resolution_order()) {
         std::string module_object_path = executable_path + "." + module_name + ".o";
-        emit_object_file_for_program(cache.program_for(module_name), module_object_path);
+        emit_object_file_for_program(cache.program_for(module_name), module_object_path, emit_debug_info);
         module_object_paths.push_back(module_object_path);
     }
 

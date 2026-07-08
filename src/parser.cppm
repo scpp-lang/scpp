@@ -71,9 +71,10 @@ using PartitionResolver = std::function<Program(const std::string&)>;
 class Parser {
 public:
     explicit Parser(std::vector<Token> tokens, ModuleResolver resolver = {},
-                     PartitionResolver partition_resolver = {})
+                     PartitionResolver partition_resolver = {}, std::string source_path = {})
         : tokens_(std::move(tokens)), resolver_(std::move(resolver)),
           partition_resolver_(std::move(partition_resolver)), parser_instance_id_(next_parser_instance_id()) {
+        if (!source_path.empty()) source_path_ = std::make_shared<std::string>(std::move(source_path));
         // ch06 §6: the numeric family's own non-keyword members -- real
         // C++ <cstdint>/<cstddef>/<stdfloat> typedef names, not keywords
         // at all (unlike int/bool/char/long/float/double/unsigned,
@@ -139,6 +140,7 @@ private:
     size_t pos_ = 0;
     ModuleResolver resolver_;
     PartitionResolver partition_resolver_;
+    std::shared_ptr<const std::string> source_path_;
     // ch11 §11.4: the namespace path currently being parsed into, e.g.
     // inside `namespace std { ... }` this is {"std"}; empty at file
     // scope (today's default -- every existing, non-namespaced file is
@@ -246,7 +248,7 @@ private:
     // start of parsing a new Expr/Stmt/Function, before any of its own
     // tokens are consumed, so the resulting node's `.loc` points at
     // wherever it syntactically begins (see SourceLocation, ast.cppm).
-    [[nodiscard]] SourceLocation current_loc() const { return SourceLocation{peek().line, peek().column}; }
+    [[nodiscard]] SourceLocation current_loc() const { return SourceLocation{peek().line, peek().column, source_path_}; }
 
     const Token& advance() {
         const Token& tok = tokens_[pos_];
@@ -4569,14 +4571,14 @@ private:
 };
 
 Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {},
-              const PartitionResolver& partition_resolver = {}) {
-    Parser parser(std::move(tokens), resolver, partition_resolver);
+              const PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
+    Parser parser(std::move(tokens), resolver, partition_resolver, std::move(source_path));
     return parser.parse_program();
 }
 
 Program parse(std::string_view source, const ModuleResolver& resolver = {},
-              const PartitionResolver& partition_resolver = {}) {
-    return parse(tokenize(source), resolver, partition_resolver);
+              const PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
+    return parse(tokenize(source), resolver, partition_resolver, std::move(source_path));
 }
 
 } // namespace scpp

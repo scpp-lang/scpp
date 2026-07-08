@@ -136,6 +136,57 @@ RunResult run_command_capture(const std::string& command) {
     return RunResult{pipe != nullptr && WIFEXITED(status) ? WEXITSTATUS(status) : -1, output};
 }
 
+void expect_dwarf_variable_has_location(const std::filesystem::path& binary_path, const std::string& variable_name,
+                                        const std::string& case_name) {
+    RunResult dwarfdump_result =
+        run_command_capture("llvm-dwarfdump-22 --debug-info \"" + binary_path.string() + "\" 2>&1");
+    expect(dwarfdump_result.exit_code == 0,
+           case_name + ": llvm-dwarfdump should succeed, got '" + dwarfdump_result.stdout_text + "'");
+    if (dwarfdump_result.exit_code != 0) return;
+    std::string needle = "DW_AT_name\t(\"" + variable_name + "\")";
+    size_t name_pos = dwarfdump_result.stdout_text.find(needle);
+    expect(name_pos != std::string::npos,
+           case_name + ": expected DWARF entry for variable '" + variable_name + "', got '" +
+               dwarfdump_result.stdout_text + "'");
+    if (name_pos == std::string::npos) return;
+    size_t entry_begin = dwarfdump_result.stdout_text.rfind("DW_TAG_variable", name_pos);
+    expect(entry_begin != std::string::npos,
+           case_name + ": expected DW_TAG_variable for '" + variable_name + "', got '" +
+               dwarfdump_result.stdout_text + "'");
+    if (entry_begin == std::string::npos) return;
+    size_t entry_end = dwarfdump_result.stdout_text.find("DW_TAG_", name_pos + needle.size());
+    std::string entry =
+        dwarfdump_result.stdout_text.substr(entry_begin, entry_end == std::string::npos ? std::string::npos
+                                                                                       : entry_end - entry_begin);
+    expect(entry.find("DW_AT_location") != std::string::npos,
+           case_name + ": expected DW_AT_location for variable '" + variable_name + "', got '" + entry + "'");
+}
+
+void expect_dwarf_named_entry_contains(const std::filesystem::path& binary_path, const std::string& tag_name,
+                                       const std::string& entry_name, const std::string& expected_text,
+                                       const std::string& case_name) {
+    RunResult dwarfdump_result =
+        run_command_capture("llvm-dwarfdump-22 --debug-info \"" + binary_path.string() + "\" 2>&1");
+    expect(dwarfdump_result.exit_code == 0,
+           case_name + ": llvm-dwarfdump should succeed, got '" + dwarfdump_result.stdout_text + "'");
+    if (dwarfdump_result.exit_code != 0) return;
+    std::string needle = "DW_AT_name\t(\"" + entry_name + "\")";
+    size_t name_pos = dwarfdump_result.stdout_text.find(needle);
+    expect(name_pos != std::string::npos,
+           case_name + ": expected DWARF entry named '" + entry_name + "', got '" + dwarfdump_result.stdout_text + "'");
+    if (name_pos == std::string::npos) return;
+    size_t entry_begin = dwarfdump_result.stdout_text.rfind(tag_name, name_pos);
+    expect(entry_begin != std::string::npos,
+           case_name + ": expected " + tag_name + " for '" + entry_name + "', got '" + dwarfdump_result.stdout_text + "'");
+    if (entry_begin == std::string::npos) return;
+    size_t entry_end = dwarfdump_result.stdout_text.find("DW_TAG_", name_pos + needle.size());
+    std::string entry =
+        dwarfdump_result.stdout_text.substr(entry_begin, entry_end == std::string::npos ? std::string::npos
+                                                                                       : entry_end - entry_begin);
+    expect(entry.find(expected_text) != std::string::npos,
+           case_name + ": expected DWARF entry for '" + entry_name + "' to contain '" + expected_text + "', got '" + entry + "'");
+}
+
 void write_text_file(const std::filesystem::path& path, std::string_view content) {
     std::ofstream file(path);
     file << content;
@@ -1028,6 +1079,133 @@ void run_cli_extension_tests() {
                case_name + ": expected relocated binary output exit code 9, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove_all(bundle_root);
+    }
+
+    {
+        std::string case_name = "cli_g_emits_debug_sections";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_g_emits_debug_sections.scpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_g_emits_debug_sections_exe";
+        cases_run++;
+        write_text_file(source_path,
+                        "int add(int x, int y) {\n"
+                        "    int sum = x + y;\n"
+                        "    return sum;\n"
+                        "}\n"
+                        "int main() {\n"
+                        "    return add(2, 5);\n"
+                        "}\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+                                                     " -o " + exe_path.string() + " -g 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
+        RunResult readelf_result = run_command_capture("readelf -S " + exe_path.string() + " 2>&1");
+        expect(readelf_result.exit_code == 0,
+               case_name + ": readelf should succeed, got '" + readelf_result.stdout_text + "'");
+        expect(readelf_result.stdout_text.find(".debug_info") != std::string::npos,
+               case_name + ": expected .debug_info section, got '" + readelf_result.stdout_text + "'");
+        expect(readelf_result.stdout_text.find(".debug_line") != std::string::npos,
+               case_name + ": expected .debug_line section, got '" + readelf_result.stdout_text + "'");
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "cli_g_nested_scope_local_has_dwarf_location";
+        std::filesystem::path source_path =
+            std::filesystem::current_path() / "cli_g_nested_scope_local_has_dwarf_location.scpp";
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "cli_g_nested_scope_local_has_dwarf_location_exe";
+        cases_run++;
+        write_text_file(source_path,
+                        "int identity(int n) {\n"
+                        "    if (n <= 1) {\n"
+                        "        return 1;\n"
+                        "    }\n"
+                        "    int copy = n + 1;\n"
+                        "    return copy;\n"
+                        "}\n"
+                        "int main() {\n"
+                        "    return identity(5) - 6;\n"
+                        "}\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+                                                     " -o " + exe_path.string() + " -g 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
+        if (build_result.exit_code == 0) expect_dwarf_variable_has_location(exe_path, "copy", case_name);
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "cli_g_partition_function_uses_partition_source_file";
+        std::filesystem::path source_root =
+            std::filesystem::current_path() / "cli_g_partition_function_uses_partition_source_file";
+        std::filesystem::path helper_dir = source_root / "helper";
+        std::filesystem::path module_path = source_root / "mymod.scpp";
+        std::filesystem::path helper_path = helper_dir / "mymod_helper.scpp";
+        std::filesystem::path main_path = source_root / "main.scpp";
+        std::filesystem::path exe_path = source_root / "mainbin";
+        cases_run++;
+        std::filesystem::remove_all(source_root);
+        std::filesystem::create_directories(helper_dir);
+        write_text_file(module_path, "export module mymod;\nexport import :helper;\n");
+        write_text_file(helper_path,
+                        "export module mymod:helper;\n"
+                        "namespace mymod {\n"
+                        "    export int compute(int x) {\n"
+                        "        int doubled = x * 2;\n"
+                        "        return doubled;\n"
+                        "    }\n"
+                        "}\n");
+        write_text_file(main_path,
+                        "import mymod;\n"
+                        "int main() {\n"
+                        "    int result = mymod::compute(21);\n"
+                        "    return result - 42;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + main_path.string() + " -o " +
+                                exe_path.string() + " -g --import mymod=" + module_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
+        if (build_result.exit_code == 0) {
+            expect_dwarf_named_entry_contains(exe_path, "DW_TAG_subprogram", "mymod::compute",
+                                              helper_path.string(), case_name);
+            expect_dwarf_named_entry_contains(exe_path, "DW_TAG_variable", "doubled",
+                                              helper_path.string(), case_name);
+        }
+        std::filesystem::remove_all(source_root);
+    }
+
+    {
+        std::string case_name = "cli_g_deeply_nested_local_has_dwarf_location";
+        std::filesystem::path source_path =
+            std::filesystem::current_path() / "cli_g_deeply_nested_local_has_dwarf_location.scpp";
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "cli_g_deeply_nested_local_has_dwarf_location_exe";
+        cases_run++;
+        write_text_file(source_path,
+                        "int sum_until(int n) {\n"
+                        "    int total = 0;\n"
+                        "    while (n > 0) {\n"
+                        "        if (n > 1) {\n"
+                        "            int copy = n + 1;\n"
+                        "            total = total + copy;\n"
+                        "        }\n"
+                        "        n = n - 1;\n"
+                        "    }\n"
+                        "    return total;\n"
+                        "}\n"
+                        "int main() {\n"
+                        "    return sum_until(3) - 7;\n"
+                        "}\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+                                                     " -o " + exe_path.string() + " -g 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
+        if (build_result.exit_code == 0) expect_dwarf_variable_has_location(exe_path, "copy", case_name);
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
     }
 
     {

@@ -495,7 +495,7 @@ int run_parse(std::string_view path) {
 int run_build(std::string_view input_path, std::string_view output_path,
               const std::vector<std::string>& extra_link_inputs,
               const std::unordered_map<std::string, std::string>& import_paths,
-              const std::vector<std::string>& import_search_dirs, bool static_link) {
+              const std::vector<std::string>& import_search_dirs, bool static_link, bool emit_debug_info) {
     if (!require_scpp_input_path(input_path, "input file")) return 1;
     for (const auto& [module_name, path] : import_paths) {
         std::string extension = std::filesystem::path(path).extension().string();
@@ -515,7 +515,7 @@ int run_build(std::string_view input_path, std::string_view output_path,
 
     try {
         scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs, import_paths, static_link,
-                                    import_search_dirs);
+                                    import_search_dirs, emit_debug_info, std::string(input_path));
     } catch (const scpp::ParseError& e) {
         print_diagnostic(input_path, source, e.loc, e.what());
         return 1;
@@ -551,12 +551,15 @@ int run(int argc, char** argv) {
         std::unordered_map<std::string, std::string> import_paths;
         std::vector<std::string> import_search_dirs;
         bool static_link = false;
+        bool emit_debug_info = false;
         for (int i = 3; i < argc; i++) {
             std::string_view arg = argv[i];
             if (arg == "-o" && i + 1 < argc) {
                 output_path = argv[++i];
             } else if (arg == "-I" && i + 1 < argc) {
                 import_search_dirs.emplace_back(argv[++i]);
+            } else if (arg == "-g") {
+                emit_debug_info = true;
             } else if (arg == "--static") {
                 static_link = true;
             } else if (arg == "--link" && i + 1 < argc) {
@@ -579,7 +582,8 @@ int run(int argc, char** argv) {
                 return 1;
             }
         }
-        return run_build(argv[2], output_path, extra_link_inputs, import_paths, import_search_dirs, static_link);
+        return run_build(argv[2], output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
+                         emit_debug_info);
     }
 
     std::string_view name = argc > 0 ? argv[0] : "scpp";
@@ -587,7 +591,7 @@ int run(int argc, char** argv) {
     std::cout << "Usage: " << name << " lex <file.scpp>\n";
     std::cout << "       " << name << " parse <file.scpp>\n";
     std::cout << "       " << name
-              << " build <file.scpp> [-o <output>] [-I <dir>]... [--static] [--link <path>]... [--import name=path]...\n";
+              << " build <file.scpp> [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
     return 0;
 }
 

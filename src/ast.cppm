@@ -26,8 +26,14 @@ using StmtPtr = std::unique_ptr<Stmt>;
 struct SourceLocation {
     int line = 0;
     int column = 0;
+    std::shared_ptr<const std::string> source_path;
 
     [[nodiscard]] bool is_known() const { return line > 0; }
+    [[nodiscard]] bool has_source_path() const { return source_path != nullptr && !source_path->empty(); }
+    [[nodiscard]] const std::string& source_path_text() const {
+        static const std::string empty;
+        return source_path ? *source_path : empty;
+    }
 };
 
 enum class ReceiverRefQualifier {
@@ -1038,6 +1044,10 @@ struct Program {
     // merged in from an imported module -- concepts participate in
     // export/import exactly like a struct/class declaration).
     std::vector<ConceptDef> concepts;
+    // Absolute path of the source file this Program was parsed from when
+    // one is known (e.g. a real CLI/driver build from disk); empty for
+    // in-memory/unit-test sources that have no backing file path.
+    std::string source_path;
 
     // ch11 §11.3: this file's own module name, e.g. "std" or
     // "org.lotx.cmath" -- empty for an ordinary, non-module file (every
