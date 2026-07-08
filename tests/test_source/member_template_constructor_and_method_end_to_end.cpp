@@ -1,0 +1,18 @@
+class Sink {
+public:
+    template<typename T>
+    Sink(T&& x) { return; }
+
+    template<typename T>
+    int call(T&& x) { return 7; }
+};
+
+int main() {
+    Sink s(1);
+    print_int(s.call(2));
+    [[scpp::unsafe]] {
+        Sink* p = new Sink(3);
+        delete p;
+    }
+    return 0;
+}

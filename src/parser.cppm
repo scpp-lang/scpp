@@ -2687,6 +2687,23 @@ private:
             fn.namespace_path = namespace_stack_;
             fn.is_exported = is_exported;
         };
+        auto enter_member_template_context = [&](const std::vector<GenericTypeParam>& member_template_params) {
+            for (const GenericTypeParam& p : member_template_params) {
+                if (p.is_non_type) continue;
+                struct_names_.insert(p.name);
+                class_names_.insert(p.name);
+            }
+            current_function_template_params_ = member_template_params;
+        };
+        auto leave_member_template_context = [&](const std::vector<GenericTypeParam>& member_template_params,
+                                                 std::vector<GenericTypeParam>& saved_function_template_params) {
+            current_function_template_params_ = std::move(saved_function_template_params);
+            for (const GenericTypeParam& p : member_template_params) {
+                if (p.is_non_type) continue;
+                struct_names_.erase(p.name);
+                class_names_.erase(p.name);
+            }
+        };
         std::vector<GenericTypeParam> saved_class_template_params = current_class_template_params_;
         current_class_template_params_ = template_params;
 
@@ -2708,6 +2725,14 @@ private:
             }
 
             SourceLocation member_loc = current_loc();
+            bool member_is_template = false;
+            std::vector<GenericTypeParam> member_template_params;
+            std::vector<GenericTypeParam> saved_function_template_params = current_function_template_params_;
+            if (check(TokenKind::KwTemplate)) {
+                member_template_params = parse_generic_type_header();
+                member_is_template = true;
+                enter_member_template_context(member_template_params);
+            }
             // ch01 §1.2/§1.3: `[[scpp::unsafe]]` on a method/constructor/
             // destructor's own declaration -- identical function-level
             // marker semantics as a free function (see parse_function's
@@ -2720,6 +2745,10 @@ private:
             ParsedAttributes member_attrs = parse_attribute_specifier_seq();
             bool member_requested_unsafe = member_attrs.has("unsafe");
             if (match(TokenKind::Tilde)) {
+                if (member_is_template) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a destructor cannot be a member template");
+                }
                 // Destructor: `~ClassName() { ... }` -- no parameters, no
                 // return type, and always a mutable (non-`const`) `this`
                 // (it always needs to tear the receiver down).
@@ -2741,6 +2770,7 @@ private:
                 fn.body = parse_block();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
+                if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
                 continue;
             }
 
@@ -2762,6 +2792,8 @@ private:
                 fn.name = qualified_class_name + "_new";
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a constructor");
+                fn.template_params = member_template_params;
+                fn.is_generic_template = member_is_template;
                 // spec §6.4(1): a program shall not declare a move
                 // constructor for a class type -- exactly one parameter,
                 // of type rvalue reference to the class's own type (real
@@ -2788,6 +2820,7 @@ private:
                 fn.body = parse_block();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
+                if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
                 continue;
             }
 
@@ -2814,6 +2847,10 @@ private:
             // unambiguous) by peeking one token ahead before committing.
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Star) {
+                if (member_is_template) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "an operator* cannot currently be a member template");
+                }
                 advance(); // 'operator'
                 advance(); // '*'
                 Function fn;
@@ -2832,6 +2869,10 @@ private:
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Assign) {
+                if (member_is_template) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "an operator= cannot currently be a member template");
+                }
                 advance(); // 'operator'
                 advance(); // '='
                 Function fn;
@@ -2873,6 +2914,10 @@ private:
                 continue;
             }
             if (starts_function_pointer_declarator()) {
+                if (member_is_template) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a member template declaration must declare a constructor or method, not a field");
+                }
                 if (member_requested_unsafe) {
                     throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
                                       "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
@@ -2892,6 +2937,8 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a method");
+                fn.template_params = member_template_params;
+                fn.is_generic_template = member_is_template;
                 // `const` trails the parameter list, exactly like real
                 // C++ (`int length() const { ... }`), so it's only
                 // knowable -- and `this`'s mutability with it -- after
@@ -2904,6 +2951,7 @@ private:
                 fn.body = parse_block();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
+                if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
                 continue;
             }
 
@@ -2919,6 +2967,10 @@ private:
                 throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
                                   "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
                                   "compound-statement or a function's own declaration (ch01 §1.3)");
+            }
+            if (member_is_template) {
+                throw ParseError(member_loc.line, member_loc.column,
+                                  "a member template declaration must declare a constructor or method, not a field");
             }
             ClassField field;
             field.type = parse_array_suffix(member_type);
