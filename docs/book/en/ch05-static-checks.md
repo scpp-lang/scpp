@@ -50,6 +50,14 @@ the following properties, unconditionally, everywhere:
   syntactic category (Rust's `'a`, Circle's `/a`), scpp groups reference
   *parameters* using one opt-out attribute, `[[scpp::lifetime(name)]]`,
   applied to ordinary C++ parameter/declarator syntax.
+  - **Current compiler status.** The general multi-group mechanism described
+    in this section is the intended design, but the current compiler does not
+    implement it yet. Today, reference-returning functions still use only the
+    old zero-annotation subset: exactly one eligible reference parameter, plus
+    the special `this`-elision rule for methods from [§5.9](#59-methods-and-this).
+    Parameter-side `[[scpp::lifetime(name)]]` attributes are parsed and ignored
+    for forward compatibility, and the return-group spelling described below is
+    not enforced yet.
   - **Default grouping.** Every reference-typed input parameter whose type
     is reference-compatible with the return type (see the mutable-licensing
     rule below) belongs, unless tagged otherwise, to one shared implicit
@@ -198,6 +206,11 @@ this chapter (§5.1-§5.4) keeps running unconditionally inside any
 the function-level marker.
 
 ## 5.6 Recoverable Errors: `std::expected<T, E>`
+
+**Current compiler status.** The recoverable-error design below is settled
+around `std::expected<T, E>`, but the current compiler/stdlib still do not
+provide that type. Attempting to name `std::expected` is still rejected today.
+The rest of this section records the intended design once it lands.
 
 scpp has **no exceptions** -- no `throw`/`try`/`catch` anywhere in the
 language (see [§8](ch08-open-questions.md) for the full

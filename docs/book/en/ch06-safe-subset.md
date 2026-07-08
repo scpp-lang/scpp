@@ -70,9 +70,6 @@ distinct from an ordinary type/borrow-check error):
 - `std::span<T>`/`std::span<const T>` (constructible from a fixed-size
   array only, see [§3](ch03-syntactic-sugar.md)). `std::vector<T>` is
   deferred (only fixed-size arrays `T[N]` are in scope for v0.1).
-- `std::expected<T, E>` (see [§5.6](ch05-static-checks.md)): scpp's only vehicle for recoverable
-  errors; a compiler builtin type, not a real libstdc++/libc++ template
-  instantiation.
 - **Generic `struct`/`class` types** (`template<typename T> class X { ... }`,
   real C++ syntax verbatim, including multiple type parameters and
   parameter packs -- see [§5.14](ch05-static-checks.md)): scpp's
@@ -177,8 +174,6 @@ distinct from an ordinary type/borrow-check error):
   method call, and `x->y` to `(*x).y`. There is no separate `operator->`
   feature, and other operator-name overloading (e.g. `operator+`) is out
   of scope here.
-- `[[scpp::lifetime(name)]]` attribute on reference parameters/declarators
-  for multi-group cross-function lifetimes (see [§5.3](ch05-static-checks.md)).
 - `[[scpp::unsafe]] { }` blocks (see [§1.3](ch01-safety-context.md)): ordinary
   compound-statements carrying the `[[scpp::unsafe]]` attribute, a lexically-scoped escape hatch that locally
   permits raw pointer dereference, union-member access, and calling an
@@ -199,14 +194,13 @@ distinct from an ordinary type/borrow-check error):
   and a pointer's pointee; array parameters
   (`T[N]`) decay to `T*`, matching ordinary C++.
 - **No exceptions** (`throw`/`try`/`catch`) -- deliberately excluded from
-  scpp entirely, not a backlog item: recoverable errors are
-  `std::expected<T, E>` values, propagated with ordinary `if`/`else` (see
-  [§5.6](ch05-static-checks.md)); its return value is **mandatorily
-  checked** -- silently discarding one is a compile error, not a lint, as
-  if every such function were implicitly declared `[[nodiscard]]`.
-  Unrecoverable failures (contract violations, bounds checks,
-  precondition violations in a constructor/destructor) `abort()` instead
-  (see [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)).
+  scpp entirely, not a backlog item. The intended recoverable-error model is
+  `std::expected<T, E>` with mandatory checking (see
+  [§5.6](ch05-static-checks.md)), but `std::expected` is not yet part of the
+  current compiler's supported subset. Unrecoverable failures (contract
+  violations, bounds checks, precondition violations in a
+  constructor/destructor) `abort()` instead (see
+  [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)).
 
 **Out of scope for v0.1**
 - General/arbitrary template specialization (beyond the one fixed
@@ -220,6 +214,13 @@ distinct from an ordinary type/borrow-check error):
 - Inheritance and virtual functions for `class` types (and therefore
   `protected`) -- see [§4.2](ch04-struct-vs-class.md).
 - The full aliasing model for `shared_ptr`.
+- `std::expected<T, E>` recoverable errors (design in
+  [§5.6](ch05-static-checks.md)) -- the type is not yet provided by the
+  current compiler/stdlib.
+- The general `[[scpp::lifetime(name)]]` multi-group cross-function lifetime
+  mechanism from [§5.3](ch05-static-checks.md). Today the compiler still only
+  implements the old single-reference-parameter / `this`-elision subset, and
+  parses `[[scpp::lifetime(name)]]` only for forward compatibility.
 - `for`/range-for, `std::vector`, `std::string`/`std::string_view`,
   `reinterpret_cast`, raw `new`/`delete`, and global variables.
 
