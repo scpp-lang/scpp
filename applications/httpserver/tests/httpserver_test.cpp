@@ -20,27 +20,6 @@
 #ifndef SCPP_HTTPSERVER_MODULE_PATH
 #error "SCPP_HTTPSERVER_MODULE_PATH must be defined"
 #endif
-#ifndef SCPP_STDLIB_STD_MODULE_PATH
-#error "SCPP_STDLIB_STD_MODULE_PATH must be defined"
-#endif
-#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
-#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined"
-#endif
-#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
-#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined"
-#endif
-#ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
-#error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined"
-#endif
-#ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
-#error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined"
-#endif
-#ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined"
-#endif
-#ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined"
-#endif
 #ifndef SCPP_HTTPSERVER_TESTDATA_DIR
 #error "SCPP_HTTPSERVER_TESTDATA_DIR must be defined"
 #endif
@@ -116,16 +95,9 @@ std::filesystem::path build_server_binary(const std::filesystem::path& root, int
     out.close();
 
     std::ostringstream cmd;
-    cmd << SCPP_BINARY_PATH << " build " << source.string()
+    cmd << SCPP_BINARY_PATH << " " << source.string()
         << " -o " << binary.string()
-        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH
-        << " --import std=" << SCPP_STDLIB_STD_MODULE_PATH
-        << " --import std:string=" << SCPP_STDLIB_STD_STRING_MODULE_PATH
-        << " --import std:memory=" << SCPP_STDLIB_STD_MEMORY_MODULE_PATH
-        << " --import std:functional=" << SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
-        << " --import std:thread=" << SCPP_STDLIB_STD_THREAD_MODULE_PATH
-        << " --link " << SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
-        << " --link " << SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH;
+        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH;
     int rc = std::system(cmd.str().c_str());
     expect(rc == 0, "generated httpserver app compiles");
     return binary;

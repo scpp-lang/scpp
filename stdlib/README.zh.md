@@ -31,7 +31,7 @@ import std;
 构建时显式传入模块映射，例如：
 
 ```sh
-scpp build app.scpp -o app \
+scpp app.scpp -o app \
   --import std=stdlib/std.scpp \
   --import std:string=stdlib/string/std_string.scpp \
   --import std:memory=stdlib/memory/std_memory.scpp \

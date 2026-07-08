@@ -34,7 +34,7 @@ import std;
 and the build passes the module mappings explicitly, for example:
 
 ```sh
-scpp build app.scpp -o app \
+scpp app.scpp -o app \
   --import std=stdlib/std.scpp \
   --import std:string=stdlib/string/std_string.scpp \
   --import std:memory=stdlib/memory/std_memory.scpp \
