@@ -61,9 +61,6 @@
 - `std::span<T>`/`std::span<const T>`（只能从定长数组构造，见
   [§3](ch03-syntactic-sugar.md)）。`std::vector<T>` 已推迟（v0.1 范围内
   只有定长数组 `T[N]`）。
-- `std::expected<T, E>`（见 [§5.6](ch05-static-checks.md)）：scpp 唯一的
-  可恢复错误载体；是编译器内置类型，不是真实 libstdc++/libc++ 模板的
-  实例化。
 - **泛型 `struct`/`class` 类型**（`template<typename T> class X { ... }`，
   原样复用真实 C++ 语法，支持多个类型参数和参数包——见
   [§5.14](ch05-static-checks.md)）：scpp 的编译期多态机制
@@ -146,8 +143,6 @@
   和 `->`（见 [§5.17](ch05-static-checks.md)）：`*x` 脱糖成一次普通方法
   调用，`x->y` 脱糖成 `(*x).y`。没有单独的 `operator->` 特性，其它
   运算符名字的重载（比如 `operator+`）也不在这一轮范围内。
-- `[[scpp::lifetime(name)]]` attribute，标在引用型形参/声明符上，用于
-  跨函数的多组生命周期机制（见 [§5.3](ch05-static-checks.md)）。
 - 带 `[[scpp::unsafe]]` attribute 的语句块（见 [§1.3](ch01-safety-context.md)）：
   一个词法作用域的逃生窗口，局部放行裸指针解引用、union 成员访问，以及
   调用一个 `extern "C"` 函数（这是 [§5.5](ch05-static-checks.md)
@@ -164,12 +159,11 @@
   指向类型）；数组形参（`T[N]`）会退化成 `T*`，跟普通
   C++ 一样。
 - **没有异常**（`throw`/`try`/`catch`）——从 scpp 里彻底排除，不是
-  backlog 项：可恢复错误是 `std::expected<T, E>` 值，用普通 `if`/`else`
-  传播（见 [§5.6](ch05-static-checks.md)）；它的返回值**强制要求检查**
-  ——悄悄丢弃是编译错误，不是 lint，就好像每个这样的函数都隐式带了
-  `[[nodiscard]]`。不可恢复的失败（违反约定、边界检查、构造/析构函数
-  里的前置条件违反）改用 `abort()`（见 [§5.6](ch05-static-checks.md)/
-  [§8](ch08-open-questions.md)）。
+  backlog 项。语言设计里，可恢复错误的答案是带强制检查的
+  `std::expected<T, E>`（见 [§5.6](ch05-static-checks.md)），但
+  `std::expected` 还不属于当前编译器已经支持的子集。不可恢复的失败
+  （违反约定、边界检查、构造/析构函数里的前置条件违反）改用 `abort()`
+  （见 [§5.6](ch05-static-checks.md)/[§8](ch08-open-questions.md)）。
 
 **不在 v0.1 范围内**
 - 任意/通用的模板特化（超出变参泛型类型能用的那种固定空
@@ -181,6 +175,12 @@
 - `class` 类型的继承和虚函数（因此也包括 `protected`）——见
   [§4.2](ch04-struct-vs-class.md)。
 - `shared_ptr` 的完整别名模型。
+- `std::expected<T, E>` 可恢复错误（设计见
+  [§5.6](ch05-static-checks.md)）——当前编译器/stdlib 还没有提供这个类型。
+- [§5.3](ch05-static-checks.md) 的通用
+  `[[scpp::lifetime(name)]]` 多组跨函数生命周期机制。今天编译器真正实现的，
+  仍只是旧的"单个引用形参 / `this`-elision"子集；
+  `[[scpp::lifetime(name)]]` 目前只为前向兼容而被解析。
 - `for`/range-for、`std::vector`、`std::string`/`std::string_view`、
   `reinterpret_cast`、裸 `new`/`delete`、全局变量。
 
