@@ -572,6 +572,19 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return false;
 }
 
+[[nodiscard]] bool raw_pointer_implicitly_convertible(const Type& source, const Type& target) {
+    if (source.kind != TypeKind::Pointer || target.kind != TypeKind::Pointer) return false;
+    if (!source.is_mutable_pointee && target.is_mutable_pointee) return false;
+    const Type& source_pointee =
+        source.pointee->kind == TypeKind::Reference && source.pointee->pointee ? *source.pointee->pointee : *source.pointee;
+    const Type& target_pointee =
+        target.pointee->kind == TypeKind::Reference && target.pointee->pointee ? *target.pointee->pointee : *target.pointee;
+    if (types_equal(source_pointee, target_pointee)) return true;
+    bool source_is_void = source_pointee.kind == TypeKind::Named && source_pointee.name == "void";
+    bool target_is_void = target_pointee.kind == TypeKind::Named && target_pointee.name == "void";
+    return source_is_void || target_is_void;
+}
+
 // A Call expression's signature-lookup key, plus how many leading
 // `signatures[key].param_types` entries are already spoken for before
 // `expr.args[0]` (1 when an implicit `this` occupies param_types[0], 0
@@ -954,6 +967,18 @@ void check_function_pointer_assignment(const Type& target_type, const Expr& expr
                                  target_name + "'",
             loc);
     }
+}
+
+void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
+                                   const Signatures& signatures, SourceLocation loc, const std::string& target_name,
+                                   bool report_errors) {
+    if (!report_errors || target_type.kind != TypeKind::Pointer) return;
+    std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
+    if (!source_type || source_type->kind != TypeKind::Pointer) return;
+    if (raw_pointer_implicitly_convertible(*source_type, target_type)) return;
+    throw DataflowError("cannot initialize or assign raw pointer '" + target_name +
+                            "' from an incompatible pointer type without an explicit cast",
+                        loc);
     throw DataflowError("function pointer '" + target_name + "' has a different signature than this source expression", loc);
 }
 
@@ -2770,19 +2795,33 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         // sub-expression (never itself a move-target-context -- a cast
         // reads its operand's value, it doesn't take ownership of it),
         // then validates the (source, target) pair is actually a legal
-        // scalar-to-scalar conversion -- codegen has no meaningful
-        // instruction to emit for anything else (a class, struct,
-        // unique_ptr, reference, span, or pointer type).
+        // conversion in this version: scalar-to-scalar (always) or
+        // raw-pointer-to-raw-pointer only inside an unsafe context
+        // (spec §5.1(5.2)).
         case ExprKind::Cast: {
             apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             if (report_errors) {
                 std::optional<Type> source_type = infer_expr_type(*expr.lhs, body, signatures);
-                bool source_ok = source_type.has_value() && source_type->kind == TypeKind::Named &&
-                                  is_scalar_type_name(source_type->name);
-                bool target_ok = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
-                if (!source_ok || !target_ok) {
+                bool scalar_source = source_type.has_value() && source_type->kind == TypeKind::Named &&
+                                     is_scalar_type_name(source_type->name);
+                bool scalar_target = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
+                if (scalar_source && scalar_target) return;
+
+                bool raw_pointer_source = source_type.has_value() && source_type->kind == TypeKind::Pointer;
+                bool raw_pointer_target = expr.type.kind == TypeKind::Pointer;
+                if (raw_pointer_source && raw_pointer_target) {
+                    if (state.unsafe_depth == 0) {
+                        throw DataflowError("cannot cast between raw pointer types outside '[[scpp::unsafe]] { }' "
+                                                "(spec §5.1(5.2))",
+                                            state.current_loc);
+                    }
+                    return;
+                }
+
+                {
                     throw DataflowError(
-                        "a cast is only supported between two scalar types in this version (spec ch06)",
+                        "a cast is only supported between two scalar types, or between two raw pointer types "
+                        "inside '[[scpp::unsafe]] { }', in this version",
                         state.current_loc);
                 }
             }
@@ -3439,6 +3478,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             if (type_it != body.local_types.end()) {
                 check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
                                                   stmt.local, report_errors);
+                check_raw_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
+                                             stmt.local, report_errors);
             }
 
             // `T* p = &expr;` (ch05 §5.7): if `p`'s declared type wants a
