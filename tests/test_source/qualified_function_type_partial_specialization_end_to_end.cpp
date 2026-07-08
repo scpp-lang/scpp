@@ -1,0 +1,14 @@
+template<typename Sig>
+class Holder;
+
+template<typename R, typename... Args>
+class Holder<R(Args...) const &&> {
+public:
+    int arity() const { return 1; }
+};
+
+int main() {
+    Holder<int(int) const &&> h;
+    print_int(h.arity());
+    return 0;
+}
