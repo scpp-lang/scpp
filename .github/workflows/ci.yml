@@ -108,3 +108,147 @@ jobs:
       - name: Run blackbox suite
         if: steps.change-scope.outputs.docs_only != 'true'
         run: ./blackbox_test/build/run_tests
+
+  docker-website-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: build-and-test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Verify Docker availability
+        run: |
+          set -euxo pipefail
+          docker --version
+          docker info
+
+      - name: Build website image
+        run: docker build --pull -f website/Dockerfile -t scpp-website-ci .
+
+      - name: Smoke test website container
+        run: |
+          set -euxo pipefail
+          container_name=scpp-website-smoke
+          docker rm -f "${container_name}" >/dev/null 2>&1 || true
+          cleanup() {
+            docker logs "${container_name}" || true
+            docker stop "${container_name}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --rm --name "${container_name}" -p 18080:8080 scpp-website-ci
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/ >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          python3 - <<'PY'
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from html.parser import HTMLParser
+
+          BASE = "http://127.0.0.1:18080/"
+          MAX_SECOND_HOP_LINKS = 40
+
+          class LinkParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.hrefs = []
+                  self.stylesheets = []
+                  self.title = None
+                  self._in_title = False
+                  self._title_parts = []
+
+              def handle_starttag(self, tag, attrs):
+                  attrs = dict(attrs)
+                  if tag == "a" and "href" in attrs:
+                      self.hrefs.append(attrs["href"])
+                  if tag == "link" and attrs.get("rel") == "stylesheet" and "href" in attrs:
+                      self.stylesheets.append(attrs["href"])
+                  if tag == "title":
+                      self._in_title = True
+                      self._title_parts = []
+
+              def handle_endtag(self, tag):
+                  if tag == "title" and self._in_title:
+                      self._in_title = False
+                      self.title = "".join(self._title_parts).strip()
+
+              def handle_data(self, data):
+                  if self._in_title:
+                      self._title_parts.append(data)
+
+          def fetch(url):
+              with urllib.request.urlopen(url) as response:
+                  return response.status, response.headers.get("Content-Type", ""), response.read().decode("utf-8")
+
+          def internal_links(page_url, html):
+              parser = LinkParser()
+              parser.feed(html)
+              links = []
+              for href in parser.hrefs:
+                  if href.startswith("#"):
+                      continue
+                  url = urllib.parse.urljoin(page_url, href)
+                  parsed = urllib.parse.urlparse(url)
+                  if parsed.scheme not in ("http", "https"):
+                      continue
+                  if parsed.netloc != urllib.parse.urlparse(BASE).netloc:
+                      continue
+                  links.append(url)
+              return parser, links
+
+          root_status, root_type, root_html = fetch(BASE)
+          assert root_status == 200, root_status
+          assert root_type.startswith("text/html"), root_type
+
+          root_parser, root_links = internal_links(BASE, root_html)
+          if root_parser.title != "SCPP Documentation Site":
+              raise AssertionError(f"unexpected homepage title: {root_parser.title!r}")
+          if not root_links:
+              raise AssertionError("homepage exposed no links")
+          if not root_parser.stylesheets:
+              raise AssertionError("homepage exposed no stylesheet links")
+
+          for stylesheet_href in root_parser.stylesheets:
+              stylesheet_url = urllib.parse.urljoin(BASE, stylesheet_href)
+              status, content_type, _ = fetch(stylesheet_url)
+              if status != 200 or not content_type.startswith("text/css"):
+                  raise AssertionError(f"stylesheet fetch failed: {stylesheet_url} -> {status} {content_type}")
+
+          seen = set()
+          homepage_targets = []
+          for url in root_links:
+              if url not in seen:
+                  seen.add(url)
+                  homepage_targets.append(url)
+
+          second_hop = []
+          for url in homepage_targets:
+              status, content_type, html = fetch(url)
+              if status != 200:
+                  raise AssertionError(f"homepage link failed: {url} -> {status}")
+              if not content_type.startswith("text/html"):
+                  raise AssertionError(f"homepage link returned non-html: {url} -> {content_type}")
+              parser, links = internal_links(url, html)
+              for nested in links:
+                  if nested not in seen:
+                      seen.add(nested)
+                      second_hop.append(nested)
+              if len(second_hop) >= MAX_SECOND_HOP_LINKS:
+                  break
+
+          for url in second_hop[:MAX_SECOND_HOP_LINKS]:
+              status, content_type, _ = fetch(url)
+              if status != 200:
+                  raise AssertionError(f"nested link failed: {url} -> {status}")
+              if url.endswith(".css"):
+                  if not content_type.startswith("text/css"):
+                      raise AssertionError(f"nested stylesheet returned wrong type: {url} -> {content_type}")
+              else:
+                  if not content_type.startswith("text/html"):
+                      raise AssertionError(f"nested html link returned wrong type: {url} -> {content_type}")
+          PY
