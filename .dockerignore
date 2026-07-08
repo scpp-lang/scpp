@@ -1,0 +1,4 @@
+.git
+build
+blackbox_test/build
+**/.DS_Store

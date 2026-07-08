@@ -60,7 +60,7 @@ bool open_index_from_directory(int dir_fd, int& out_file_fd, int& out_size, int&
 }
 
 bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidden_files, const char* relative_path,
-                        int& out_file_fd, int& out_size, int& out_status_code) {
+                        int& out_file_fd, int& out_size, int& out_status_code, bool& out_served_directory_index) {
     int root_fd;
     [[scpp::unsafe]] { root_fd = scpp_httpserver_open_root_directory(root); }
     if (root_fd < 0) {
@@ -84,6 +84,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
         }
         out_file_fd = index_fd;
         out_size = index_size;
+        out_served_directory_index = true;
         return true;
     }
 
@@ -137,6 +138,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
                 }
                 out_file_fd = index_fd;
                 out_size = index_size;
+                out_served_directory_index = true;
                 return true;
             }
             int dir_err = 0 - final_dir_fd;
@@ -165,6 +167,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
             close_fd(current_fd);
             out_file_fd = file_fd;
             out_size = size;
+            out_served_directory_index = false;
             return true;
         }
         int next_fd;
@@ -195,6 +198,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
             }
             out_file_fd = index_fd;
             out_size = index_size;
+            out_served_directory_index = true;
             return true;
         }
     }
@@ -243,7 +247,9 @@ bool parse_request(Connection& conn, const char* root, bool allow_index_html, bo
     int file_fd = -1;
     int file_size = 0;
     int status_code = 0;
-    if (!open_resolved_file(root, allow_index_html, deny_hidden_files, conn.relative_path_, file_fd, file_size, status_code)) {
+    bool served_directory_index = false;
+    if (!open_resolved_file(root, allow_index_html, deny_hidden_files, conn.relative_path_, file_fd, file_size,
+                            status_code, served_directory_index)) {
         if (status_code == 400) build_empty_response(conn, "HTTP/1.1 400 Bad Request");
         else if (status_code == 404) build_empty_response(conn, "HTTP/1.1 404 Not Found");
         else build_empty_response(conn, "HTTP/1.1 403 Forbidden");
@@ -255,7 +261,8 @@ bool parse_request(Connection& conn, const char* root, bool allow_index_html, bo
     conn.use_sendfile_ = true;
     conn.file_buffer_len_ = 0;
     conn.file_buffer_sent_ = 0;
-    conn.content_type_ = content_type_for(conn.relative_path_);
+    if (served_directory_index) conn.content_type_ = "text/html";
+    else conn.content_type_ = content_type_for(conn.relative_path_);
     build_ok_response(conn);
     return true;
 }
