@@ -7,3 +7,6 @@
 
 add_library(scpp_string_wrapper STATIC string/scpp_string_wrapper.cpp)
 target_compile_features(scpp_string_wrapper PRIVATE cxx_std_23)
+
+add_library(scpp_thread_wrapper STATIC thread/scpp_thread_wrapper.cpp)
+target_compile_features(scpp_thread_wrapper PRIVATE cxx_std_23)

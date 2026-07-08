@@ -21,6 +21,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
 #error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
+#error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined by the build"
+#endif
 
 namespace {
 
@@ -83,6 +86,8 @@ private:
         static const std::string std_functional_module = SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH;
         if (name == "std:memory") return &std_memory_module;
         if (name == "std:functional") return &std_functional_module;
+        static const std::string std_thread_module = SCPP_STDLIB_STD_THREAD_MODULE_PATH;
+        if (name == "std:thread") return &std_thread_module;
         return nullptr;
     }
 
@@ -958,6 +963,32 @@ void test_extern_c_varargs_declaration() {
     const scpp::Function& fn = program.functions[0];
     expect(fn.has_varargs, "extern_c_varargs_declaration: has_varargs should be true");
     expect(fn.params.size() == 1, "extern_c_varargs_declaration: expected exactly 1 named parameter");
+}
+
+void test_extern_c_function_pointer_parameter_declaration() {
+    scpp::Program program = scpp::parse(
+        "extern \"C\" void* scpp_thread_spawn(void (*trampoline)(void*), void* arg);"
+        "int main() { return 0; }");
+    expect(program.functions.size() == 2,
+           "extern_c_function_pointer_parameter_declaration: expected 2 functions");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.is_extern_c, "extern_c_function_pointer_parameter_declaration: should be extern C");
+    expect(fn.params.size() == 2,
+           "extern_c_function_pointer_parameter_declaration: expected 2 parameters");
+    expect(fn.params[0].name == "trampoline",
+           "extern_c_function_pointer_parameter_declaration: first param name should be trampoline");
+    expect(fn.params[0].type.kind == scpp::TypeKind::FunctionPointer,
+           "extern_c_function_pointer_parameter_declaration: first param should be a function pointer");
+    expect(fn.params[0].type.function_return != nullptr && is_named_type(*fn.params[0].type.function_return, "void"),
+           "extern_c_function_pointer_parameter_declaration: trampoline should return void");
+    expect(fn.params[0].type.function_params.size() == 1 &&
+               fn.params[0].type.function_params[0].kind == scpp::TypeKind::Pointer &&
+               fn.params[0].type.function_params[0].pointee != nullptr &&
+               is_named_type(*fn.params[0].type.function_params[0].pointee, "void"),
+           "extern_c_function_pointer_parameter_declaration: trampoline should take a void*");
+    expect(fn.params[1].type.kind == scpp::TypeKind::Pointer && fn.params[1].type.pointee != nullptr &&
+               is_named_type(*fn.params[1].type.pointee, "void"),
+           "extern_c_function_pointer_parameter_declaration: second param should be void*");
 }
 
 void test_varargs_on_definition_is_rejected() {
@@ -2850,6 +2881,7 @@ int main() {
     test_extern_c_definition_is_checked_like_any_function();
     test_extern_cpp_linkage_is_rejected();
     test_extern_c_varargs_declaration();
+    test_extern_c_function_pointer_parameter_declaration();
     test_varargs_on_definition_is_rejected();
     test_varargs_on_non_extern_function_is_rejected();
     test_void_return_and_void_pointer_types();

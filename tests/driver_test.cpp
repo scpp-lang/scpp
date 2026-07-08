@@ -39,8 +39,14 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
 #error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
+#error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined by the build"
 #endif
 
 namespace {
@@ -66,11 +72,12 @@ std::unordered_map<std::string, std::string> std_import_paths() {
     return {{"std", SCPP_STDLIB_STD_MODULE_PATH},
             {"std:string", SCPP_STDLIB_STD_STRING_MODULE_PATH},
             {"std:memory", SCPP_STDLIB_STD_MEMORY_MODULE_PATH},
-            {"std:functional", SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH}};
+            {"std:functional", SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH},
+            {"std:thread", SCPP_STDLIB_STD_THREAD_MODULE_PATH}};
 }
 
 std::vector<std::string> std_link_inputs() {
-    return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH};
+    return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -824,6 +831,33 @@ void run_functional_tests() {
     expect(threw, case_name + ": expected std::function to reject a move-only callable target");
 }
 
+void run_thread_tests() {
+    std::string case_name = "std_jthread_rejects_reference_capturing_closure";
+    cases_run++;
+    std::string source =
+        "import std;\n"
+        "int main() {\n"
+        "    int x = 42;\n"
+        "    std::jthread t([&x]() { print_int(x); });\n"
+        "    return 0;\n"
+        "}\n";
+    bool threw = false;
+    try {
+        scpp::Program program = parse_with_std_imports(source);
+        scpp::monomorphize_generics(program);
+        scpp::check_moves(program);
+        scpp::Codegen codegen("test_module");
+        codegen.generate(program);
+    } catch (const scpp::DataflowError&) {
+        threw = true;
+    } catch (const scpp::CodegenError&) {
+        threw = true;
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, case_name + ": expected std::jthread to reject a reference-capturing closure target");
+}
+
 void run_cli_extension_tests() {
     {
         std::string case_name = "cli_rejects_cpp_input";
@@ -867,6 +901,7 @@ int main() {
     run_concept_tests();
     run_generic_type_tests();
     run_functional_tests();
+    run_thread_tests();
     run_cli_extension_tests();
 
     if (failures > 0) {

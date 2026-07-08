@@ -1167,6 +1167,21 @@ private:
         return type;
     }
 
+    Type parse_named_declarator(Type base_type, std::string& out_name, const char* name_what) {
+        if (starts_function_pointer_declarator()) {
+            return parse_function_pointer_declarator(std::move(base_type), out_name);
+        }
+        out_name = std::string(expect(TokenKind::Identifier, name_what).text);
+        Type declared_type = parse_array_suffix(base_type);
+        if (declared_type.kind == TypeKind::Array) {
+            Type decayed;
+            decayed.kind = TypeKind::Pointer;
+            decayed.pointee = declared_type.element;
+            return decayed;
+        }
+        return declared_type;
+    }
+
     // ch11 §11.3/§11.4: parses an optional module declaration at the very
     // start of the file -- `export module <dotted.name>[:<partition>];`
     // (a primary interface unit, or -- with the `:partition` suffix -- an
@@ -1921,21 +1936,11 @@ private:
                                       "parameter packs are only supported for the abbreviated generic form "
                                       "('Concept auto&... args') in this version (ch05 §5.11)");
                 }
-                param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
+                Type param_type = parse_named_declarator(std::move(base_type), param.name, "parameter name");
                 if (param.is_parameter_pack && !check(TokenKind::RParen)) {
                     const Token& tok = peek();
                     throw ParseError(tok.line, tok.column,
                                       "a parameter pack must be the last parameter in the list (ch05 §5.11)");
-                }
-                // Same C-style declarator order (array suffix after the
-                // name, decaying to pointer) as parse_function's own
-                // parameter loop.
-                Type param_type = parse_array_suffix(base_type);
-                if (param_type.kind == TypeKind::Array) {
-                    Type decayed;
-                    decayed.kind = TypeKind::Pointer;
-                    decayed.pointee = param_type.element;
-                    param_type = std::move(decayed);
                 }
                 param.type = std::move(param_type);
                 // ch05 §5.15: `T&& f [[scpp::thread_movable]]` -- a
@@ -3260,29 +3265,11 @@ private:
                                       "parameter packs are only supported for the abbreviated generic form "
                                       "('Concept auto&... args') in this version (ch05 §5.11)");
                 }
-                param.name = std::string(expect(TokenKind::Identifier, "parameter name").text);
+                Type param_type = parse_named_declarator(std::move(base_type), param.name, "parameter name");
                 if (param.is_parameter_pack && !check(TokenKind::RParen)) {
                     const Token& tok = peek();
                     throw ParseError(tok.line, tok.column,
                                       "a parameter pack must be the last parameter in the list (ch05 §5.11)");
-                }
-                // The array suffix (if any) follows the *declared name*,
-                // not the type -- same C-style declarator order as
-                // parse_var_decl/parse_struct_def (e.g. `int arr[4]`).
-                Type param_type = parse_array_suffix(base_type);
-                if (param_type.kind == TypeKind::Array) {
-                    // A fixed-size array parameter decays to a pointer to
-                    // its element type, exactly as in ordinary C++ (ch02
-                    // §2.1's signature-type rules explicitly require this
-                    // for `extern "C"`, and there's no reason for it to
-                    // behave differently for an ordinary function): the
-                    // array's *size* isn't part of the decayed type, only
-                    // its element type is -- `int arr[4]` and `int* arr`
-                    // are the same parameter type.
-                    Type decayed;
-                    decayed.kind = TypeKind::Pointer;
-                    decayed.pointee = param_type.element;
-                    param_type = std::move(decayed);
                 }
                 param.type = std::move(param_type);
                 // ch05 §5.15: see parse_param_list's identical trailing-

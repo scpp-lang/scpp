@@ -14,4 +14,5 @@ export module std;
 
 export import :functional;
 export import :memory;
+export import :thread;
 export import :string;

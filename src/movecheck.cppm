@@ -239,6 +239,9 @@ struct FunctionSignature {
 // longer.
 using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
 
+[[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {});
+[[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {});
+
 LocalState join(LocalState a, LocalState b) {
     if (a == b) return a;
     if (a == LocalState::Bottom) return b;
@@ -389,9 +392,13 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 // uses; a mutable-reference-parameter copy constructor, while legal
 // real C++, is out of scope for this recognition).
 [[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
-    std::string ctor_name = class_name + "_new";
     for (const Function& fn : program.functions) {
-        if (fn.name != ctor_name || fn.params.size() != 2) continue;
+        if (!fn.name.ends_with("_new") || fn.params.size() != 2) continue;
+        const Type& this_param = fn.params[0].type;
+        if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+            this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+            continue;
+        }
         const Type& p = fn.params[1].type;
         if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
             p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
@@ -409,9 +416,13 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 // ordinary, unrelated overload of the name -- not *the* copy assignment
 // operator this recognizes).
 [[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program) {
-    std::string op_name = class_name + "_operator_assign";
     for (const Function& fn : program.functions) {
-        if (fn.name != op_name || fn.params.size() != 2) continue;
+        if (!fn.name.ends_with("_operator_assign") || fn.params.size() != 2) continue;
+        const Type& this_param = fn.params[0].type;
+        if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+            this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+            continue;
+        }
         const Type& p = fn.params[1].type;
         if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
             p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
@@ -422,9 +433,13 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 }
 
 [[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program) {
-    std::string dtor_name = class_name + "_delete";
     for (const Function& fn : program.functions) {
-        if (fn.name == dtor_name) return true;
+        if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
+        const Type& this_param = fn.params[0].type;
+        if (this_param.kind == TypeKind::Reference && this_param.is_mutable_ref && this_param.pointee &&
+            this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == class_name) {
+            return true;
+        }
     }
     return false;
 }
@@ -6411,6 +6426,10 @@ private:
                     if (!bound) throw DataflowError("constructor template parameter not deduced", loc);
                 }
 
+                Expr fake_call;
+                fake_call.loc = loc;
+                check_thread_safety_constraints(fake_call, tmpl, type_bindings);
+
                 std::string cache_key = tmpl.name;
                 for (const GenericTypeParam& tp : tmpl.template_params) {
                     if (tp.is_pack) continue;
@@ -6447,6 +6466,8 @@ private:
                             Param p;
                             p.name = tmpl.params[i].name + "$" + std::to_string(j);
                             p.type = concrete_pack_param_types[i][j];
+                            p.require_thread_movable = tmpl.params[i].require_thread_movable;
+                            p.require_thread_shareable = tmpl.params[i].require_thread_shareable;
                             clone.params.push_back(std::move(p));
                             pack_param_names[tmpl.params[i].name].push_back(tmpl.params[i].name + "$" +
                                                                             std::to_string(j));
@@ -6456,6 +6477,8 @@ private:
                     Param p;
                     p.name = tmpl.params[i].name;
                     p.type = tmpl.params[i].type;
+                    p.require_thread_movable = tmpl.params[i].require_thread_movable;
+                    p.require_thread_shareable = tmpl.params[i].require_thread_shareable;
                     bool upcasted = false;
                     for (const auto& [idx, target] : upcasts) {
                         if (idx != i) continue;
@@ -6535,6 +6558,8 @@ private:
                     Param p;
                     p.name = tmpl.params[i].name + "$" + std::to_string(j);
                     p.type = concrete_pack_param_types[i][j];
+                    p.require_thread_movable = tmpl.params[i].require_thread_movable;
+                    p.require_thread_shareable = tmpl.params[i].require_thread_shareable;
                     clone.params.push_back(std::move(p));
                     pack_param_names[tmpl.params[i].name].push_back(tmpl.params[i].name + "$" + std::to_string(j));
                 }
@@ -6543,6 +6568,8 @@ private:
             Param p;
             p.name = tmpl.params[i].name;
             p.type = tmpl.params[i].type;
+            p.require_thread_movable = tmpl.params[i].require_thread_movable;
+            p.require_thread_shareable = tmpl.params[i].require_thread_shareable;
             bool upcasted = false;
             for (const auto& [idx, target] : upcasts) {
                 if (idx != i) continue;
