@@ -1,0 +1,18 @@
+import std;
+extern "C" int puts(const char* s);
+// std::jthread's destructor joins an outstanding thread. The worker's
+// side effect must therefore complete before code after the scope runs.
+int main() {
+    {
+        std::jthread t([]() {
+            [[scpp::unsafe]] {
+                puts("worker");
+            }
+            return;
+        });
+    }
+    [[scpp::unsafe]] {
+        puts("after");
+    }
+    return 0;
+}

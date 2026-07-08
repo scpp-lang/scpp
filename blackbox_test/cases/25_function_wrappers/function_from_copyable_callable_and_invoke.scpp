@@ -1,0 +1,22 @@
+import std;
+// ch05 §5.18: `std::function<Sig>` stores a copy-constructible target.
+// A plainly copyable callable class should therefore be constructible and
+// invocable through the wrapper.
+class Adder {
+private:
+    int delta;
+public:
+    Adder(int n) {
+        this->delta = n;
+        return;
+    }
+    int call(int x) {
+        return x + this->delta;
+    }
+};
+
+int main() {
+    Adder add(2);
+    std::function<int(int)> f(add);
+    return f.call(3);
+}

@@ -1,0 +1,20 @@
+import std;
+// ch05 §5.18: cv-qualified signatures are part of the stored callable
+// contract; `Sig const` should call a `const` target.
+class Adder {
+private:
+    int delta;
+public:
+    Adder(int n) {
+        this->delta = n;
+        return;
+    }
+    int call(int x) const {
+        return x + this->delta;
+    }
+};
+
+int main() {
+    const std::move_only_function<int(int) const> f(Adder(2));
+    return f.call(3);
+}

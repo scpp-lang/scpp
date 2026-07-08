@@ -1,0 +1,21 @@
+import std;
+// ch05 §5.18: after moving a wrapper, the source wrapper is an ordinary
+// moved-out object, not a special still-usable empty state.
+class Adder {
+private:
+    int delta;
+public:
+    Adder(int n) {
+        this->delta = n;
+        return;
+    }
+    int call(int x) {
+        return x + this->delta;
+    }
+};
+
+int main() {
+    std::move_only_function<int(int)> f(Adder(2));
+    std::move_only_function<int(int)> g(std::move(f));
+    return f.call(3);
+}

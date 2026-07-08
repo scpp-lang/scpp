@@ -1,0 +1,19 @@
+import std;
+// ch05 §5.18: an `Sig &&` wrapper promises an rvalue-callable target.
+class Adder {
+private:
+    int delta;
+public:
+    Adder(int n) {
+        this->delta = n;
+        return;
+    }
+    int call(int x) && {
+        return x + this->delta;
+    }
+};
+
+int main() {
+    std::move_only_function<int(int) &&> f(Adder(2));
+    return std::move(f).call(3);
+}
