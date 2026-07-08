@@ -81,6 +81,7 @@ hr {
   padding: 0.85rem 1rem;
   display: flex;
   gap: 1rem;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
 }
@@ -102,6 +103,11 @@ hr {
 .top-nav a.current, .lang-switcher .current {
   color: var(--text);
   font-weight: 600;
+}
+.site-note {
+  width: 100%;
+  color: var(--muted);
+  font-size: 0.92rem;
 }
 .page-shell {
   max-width: var(--max-width);

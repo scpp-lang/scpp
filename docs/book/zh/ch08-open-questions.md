@@ -372,7 +372,7 @@
     `struct`/`union`，只服务布局/互操作，不作为受所有权跟踪的 `class` 类型
     的通用调参旋钮。见
     [§5.19](ch05-static-checks.md#519-union-与-scpppacked) 和
-    [§9](../spec/zh/05-unions-and-packed-layout.md)。
+    [§9](../../spec/zh/05-unions-and-packed-layout.md)。
 
 ---
 

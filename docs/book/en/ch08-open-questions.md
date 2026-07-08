@@ -482,7 +482,7 @@
     only, for layout/interop work, not a general-purpose knob for
     ownership-tracked `class` types. See
     [§5.19](ch05-static-checks.md#519-union-and-scpppacked) and
-    [§9](../spec/en/05-unions-and-packed-layout.md).
+    [§9](../../spec/en/05-unions-and-packed-layout.md).
 
 ---
 

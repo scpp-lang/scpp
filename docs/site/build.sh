@@ -8,7 +8,10 @@ OUT_DIR="$SCRIPT_DIR/dist"
 TMP_DIR="$SCRIPT_DIR/.build"
 FILTER="$SCRIPT_DIR/filters/rewrite-links.lua"
 CSS_SRC="$SCRIPT_DIR/assets/site.css"
+LOGO_SVG_SRC="$ROOT_DIR/assets/logo/scpp-logo.svg"
+LOGO_PNG_SRC="$ROOT_DIR/assets/logo/scpp-logo.png"
 SITE_TITLE="SCPP Documentation"
+GITHUB_REPO_URL="https://github.com/scpp-lang/scpp"
 
 command -v pandoc >/dev/null 2>&1 || {
   echo "error: pandoc not found on PATH" >&2
@@ -18,6 +21,8 @@ command -v pandoc >/dev/null 2>&1 || {
 rm -rf "$OUT_DIR" "$TMP_DIR"
 mkdir -p "$OUT_DIR/assets" "$TMP_DIR"
 cp "$CSS_SRC" "$OUT_DIR/assets/site.css"
+cp "$LOGO_SVG_SRC" "$OUT_DIR/assets/scpp-logo.svg"
+cp "$LOGO_PNG_SRC" "$OUT_DIR/assets/scpp-logo.png"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -58,6 +63,14 @@ lang_label() {
     en) printf 'English' ;;
     zh) printf '中文' ;;
     *) printf '%s' "$1" ;;
+  esac
+}
+
+site_note_text() {
+  case "$1" in
+    zh) printf '本网站由使用 scpp 编写的 HTTP server 提供服务。' ;;
+    en) printf 'This site is served by an HTTP server written in scpp.' ;;
+    *) printf 'This site is served by an HTTP server written in scpp. / 本网站由使用 scpp 编写的 HTTP server 提供服务。' ;;
   esac
 }
 
@@ -171,6 +184,7 @@ build_top_nav() {
       fi
       printf '  <a%s href="%s">%s</a>\n' "$class_name" "$href" "$(section_label "$section" "$current_lang")"
     done
+    printf '  <a href="%s">GitHub</a>\n' "$GITHUB_REPO_URL"
     printf '</nav>\n'
   } > "$file"
 }
@@ -223,6 +237,7 @@ write_before_body() {
     printf '    <a class="site-title" href="%sindex.html">%s</a>\n' "$prefix" "$SITE_TITLE"
     cat "$top_nav"
     cat "$switcher"
+    printf '    <div class="site-note">%s</div>\n' "$(html_escape "$(site_note_text "$lang")")"
     printf '  </div>\n'
     printf '</header>\n'
     printf '<div class="page-shell with-sidebar">\n'
@@ -248,6 +263,17 @@ write_after_body() {
   } > "$out_file"
 }
 
+write_head_includes() {
+  local rel_out="$1"
+  local out_file="$2"
+  local prefix
+  prefix="$(root_prefix_for "$rel_out")"
+  {
+    printf '<link rel="icon" type="image/svg+xml" href="%sassets/scpp-logo.svg">\n' "$prefix"
+    printf '<link rel="icon" type="image/png" href="%sassets/scpp-logo.png">\n' "$prefix"
+  } > "$out_file"
+}
+
 render_markdown_page() {
   local source_path="$1"
   local rel_out="$2"
@@ -256,18 +282,21 @@ render_markdown_page() {
   local source_name="$5"
   local title="$6"
   local out_path="$OUT_DIR/$rel_out"
-  local out_dir before after css_rel
+  local out_dir before after head css_rel
   out_dir="$(dirname "$out_path")"
   mkdir -p "$out_dir"
   before="$TMP_DIR/before-${section}-${lang}-${source_name}.html"
   after="$TMP_DIR/after-${section}-${lang}-${source_name}.html"
+  head="$TMP_DIR/head-${section}-${lang}-${source_name}.html"
   css_rel="$(root_prefix_for "$rel_out")assets/site.css"
   write_before_body "$rel_out" "$section" "$lang" "$source_name" "$title" "$title" "$before"
   write_after_body "$after"
+  write_head_includes "$rel_out" "$head"
   pandoc "$source_path" \
     --standalone \
     --lua-filter="$FILTER" \
     --css="$css_rel" \
+    --include-in-header="$head" \
     --include-before-body="$before" \
     --include-after-body="$after" \
     --metadata pagetitle="$title" \
@@ -361,6 +390,7 @@ Browse the language book, formal spec, and wire/package format standards.
 LANDING
   local before="$TMP_DIR/before-home.html"
   local after="$TMP_DIR/after-home.html"
+  local head="$TMP_DIR/head-home.html"
   cat > "$before" <<'EOF2'
 <header class="site-header">
   <div class="site-header-inner">
@@ -370,11 +400,13 @@ LANDING
       <a href="book/en/index.html">Book</a>
       <a href="spec/en/index.html">Spec</a>
       <a href="standards/en/index.html">Standards</a>
+      <a href="https://github.com/scpp-lang/scpp">GitHub</a>
     </nav>
     <div class="lang-switcher">
       <a href="book/en/index.html">EN</a>
       <a href="book/zh/index.html">中文</a>
     </div>
+    <div class="site-note">This site is served by an HTTP server written in scpp. / 本网站由使用 scpp 编写的 HTTP server 提供服务。</div>
   </div>
 </header>
 <div class="page-shell">
@@ -385,10 +417,12 @@ EOF2
   </main>
 </div>
 EOF2
+  write_head_includes "index.html" "$head"
   pandoc "$md" \
     --standalone \
     --lua-filter="$FILTER" \
     --css="assets/site.css" \
+    --include-in-header="$head" \
     --include-before-body="$before" \
     --include-after-body="$after" \
     --metadata pagetitle="SCPP Documentation Site" \
