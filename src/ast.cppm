@@ -30,6 +30,12 @@ struct SourceLocation {
     [[nodiscard]] bool is_known() const { return line > 0; }
 };
 
+enum class ReceiverRefQualifier {
+    None,
+    LValue,
+    RValue,
+};
+
 enum class TypeKind {
     Named,     // scalar (int/bool) or a user-declared struct name
     Pointer,   // T*
@@ -63,6 +69,11 @@ struct Type {
     std::shared_ptr<Type> function_return;
     std::vector<Type> function_params;
     bool is_unsafe_function_pointer = false;
+    // Function only: cv/ref-qualifiers on a symbolic function type
+    // template argument / partial-specialization pattern, e.g.
+    // `void() const`, `void() &`, `void() &&`.
+    bool is_const_function = false;
+    ReceiverRefQualifier function_ref_qualifier = ReceiverRefQualifier::None;
 
     // Reference: true for `T&` (mutable/exclusive borrow), false for
     // `const T&` (shared borrow). Span: true for `std::span<T>` (mutable
@@ -635,6 +646,11 @@ struct Function {
     // alone. Cleared again on every concrete clone and on every
     // non-template class method.
     std::string generic_method_owner_id;
+    // Member functions only: trailing ref-qualifier after the parameter
+    // list (`&` / `&&`). `None` means unqualified, so the method is
+    // callable on either an lvalue or rvalue receiver. `const` remains
+    // represented by params[0]'s own `this` type.
+    ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
 
     // ch05 §5.14: non-empty only for a synthesized *forwarding stub* --
     // a derived class inheriting a base method it doesn't itself

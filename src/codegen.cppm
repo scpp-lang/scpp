@@ -452,7 +452,7 @@ private:
                             bool receiver_is_mutable = !(operand->kind == TypeKind::Reference && !operand->is_mutable_ref);
                             if (const Function* callee =
                                     resolve_overload_by_type(underlying.name + "_operator_deref", no_args, 1,
-                                                             receiver_is_mutable)) {
+                                                         receiver_is_mutable, expr.lhs.get())) {
                                 return callee->return_type.kind == TypeKind::Reference
                                            ? std::optional<Type>(*callee->return_type.pointee)
                                            : std::optional<Type>(callee->return_type);
@@ -530,7 +530,8 @@ private:
                     param_offset = 1;
                     receiver_is_mutable = !is_read_only_place(*expr.lhs);
                 }
-                const Function* callee = resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable);
+                const Function* callee =
+                    resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get());
                 return callee == nullptr ? std::nullopt : std::optional<Type>(callee->return_type);
             }
         }
@@ -642,6 +643,19 @@ private:
         }
     }
 
+    bool receiver_matches_method_qualifier(const Expr& receiver_expr, const Function& fn) {
+        if (fn.params.empty() || fn.params[0].type.kind != TypeKind::Reference || fn.params[0].type.pointee == nullptr) {
+            return true;
+        }
+        bool receiver_is_rvalue = produces_rvalue_of_type(receiver_expr, *fn.params[0].type.pointee);
+        switch (fn.receiver_ref_qualifier) {
+            case ReceiverRefQualifier::None: return true;
+            case ReceiverRefQualifier::LValue: return !receiver_is_rvalue;
+            case ReceiverRefQualifier::RValue: return receiver_is_rvalue;
+        }
+        return true;
+    }
+
     // Resolves a call/constructor-call's callee among the (possibly
     // several) Functions sharing `callee_name`'s exact name -- ch05
     // §5.10, mirroring movecheck's own resolve_overload (see its much
@@ -665,13 +679,19 @@ private:
     // `true` for a constructor call (there's no *existing* object yet
     // for read-only-reachability to apply to).
     const Function* resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
-                                              size_t param_offset, bool receiver_is_mutable = true) {
+                                              size_t param_offset, bool receiver_is_mutable = true,
+                                              const Expr* receiver_expr = nullptr) {
         std::vector<const Function*> candidates;
         for (const Function& fn : program_->functions) {
             if (fn.name == callee_name) candidates.push_back(&fn);
         }
         if (candidates.empty()) return nullptr;
-        if (candidates.size() == 1) return candidates[0];
+        if (candidates.size() == 1) {
+            if (param_offset == 1 && receiver_expr != nullptr) {
+                if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) return nullptr;
+            }
+            return candidates[0];
+        }
 
         std::vector<const Function*> matches;
         for (const Function* fn : candidates) {
@@ -680,6 +700,10 @@ private:
             // `this` mutability doesn't demand more than the receiver
             // place can actually provide.
             if (param_offset == 1 && fn->params[0].type.is_mutable_ref && !receiver_is_mutable) continue;
+            if (param_offset == 1 && receiver_expr != nullptr &&
+                !receiver_matches_method_qualifier(*receiver_expr, *fn)) {
+                continue;
+            }
             bool all_match = true;
             for (size_t i = 0; all_match && i < args.size(); i++) {
                 all_match = argument_matches_parameter(*args[i], fn->params[i + param_offset].type);
@@ -701,6 +725,13 @@ private:
         auto mutable_ref_score = [&](const Function* fn) {
             int score = 0;
             if (param_offset == 1 && fn->params[0].type.is_mutable_ref && receiver_is_mutable) score++;
+            if (param_offset == 1 && receiver_expr != nullptr && fn->params[0].type.pointee != nullptr) {
+                bool receiver_is_rvalue = produces_rvalue_of_type(*receiver_expr, *fn->params[0].type.pointee);
+                if ((receiver_is_rvalue && fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue) ||
+                    (!receiver_is_rvalue && fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue)) {
+                    score += 2;
+                }
+            }
             for (size_t i = 0; i < args.size(); i++) {
                 const Type& param_type = fn->params[i + param_offset].type;
                 if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref &&
@@ -1123,6 +1154,9 @@ private:
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
                 if ((a.kind == TypeKind::FunctionPointer && a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) ||
+                    (a.kind == TypeKind::Function &&
+                     (a.is_const_function != b.is_const_function ||
+                      a.function_ref_qualifier != b.function_ref_qualifier)) ||
                     !types_equal(*a.function_return, *b.function_return) ||
                     a.function_params.size() != b.function_params.size()) {
                     return false;
@@ -1162,6 +1196,9 @@ private:
             case TypeKind::Function: {
                 std::string result = mangle_type(*type.function_return) + "_fntype";
                 for (const Type& param : type.function_params) result += "_" + mangle_type(param);
+                if (type.is_const_function) result += "_const";
+                if (type.function_ref_qualifier == ReceiverRefQualifier::LValue) result += "_lrefq";
+                if (type.function_ref_qualifier == ReceiverRefQualifier::RValue) result += "_rrefq";
                 return result;
             }
             case TypeKind::FunctionPointer: {
@@ -1278,6 +1315,9 @@ private:
                     result += verbatim_type_spelling(type.function_params[i]);
                 }
                 result += ")";
+                if (type.is_const_function) result += " const";
+                if (type.function_ref_qualifier == ReceiverRefQualifier::LValue) result += " &";
+                if (type.function_ref_qualifier == ReceiverRefQualifier::RValue) result += " &&";
                 return result;
             }
             case TypeKind::FunctionPointer: {
@@ -1355,6 +1395,7 @@ private:
         size_t last_separator = bare_name.rfind("::");
         if (last_separator != std::string::npos) bare_name = bare_name.substr(last_separator + 2);
         mangled += "F" + std::to_string(bare_name.size()) + "_" + bare_name;
+        mangled += "Q" + std::to_string(static_cast<int>(fn.receiver_ref_qualifier)) + "_";
         mangled += "P" + std::to_string(fn.params.size()) + "_";
         for (const Param& param : fn.params) {
             std::string spelling = verbatim_type_spelling(param.type);
@@ -1420,6 +1461,8 @@ private:
             }
             for (const Function* fn : fns) {
                 std::string mangled = name;
+                if (fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue) mangled += ".lrefq";
+                if (fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue) mangled += ".rrefq";
                 for (const Param& param : fn->params) {
                     mangled += "." + mangle_type(param.type);
                 }
@@ -2126,7 +2169,8 @@ private:
         // this call's own arguments below: codegen_call_args needs
         // `callee_def` already in hand to decide value-vs-address per
         // parameter.
-        const Function* callee_def = resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable);
+        const Function* callee_def =
+            resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get());
         if (callee_def == nullptr) {
             throw CodegenError("call to unknown function '" + callee_name + "'",
                 current_loc_);
@@ -3456,6 +3500,9 @@ private:
                 return LValue{ptr, Type{.kind = TypeKind::Named, .name = expr.name}};
             }
 
+            case ExprKind::Move:
+                return codegen_lvalue(*expr.lhs);
+
             case ExprKind::Unary: {
                 // Only `*p` (Deref) is addressable; Neg/Not produce a
                 // plain value with no backing storage.
@@ -3478,7 +3525,7 @@ private:
                     bool receiver_is_mutable = !is_read_only_place(*expr.lhs);
                     if (const Function* callee_def =
                             resolve_overload_by_type(operand.type.name + "_operator_deref", no_args, 1,
-                                                     receiver_is_mutable)) {
+                                                     receiver_is_mutable, expr.lhs.get())) {
                         llvm::Function* callee = module_->getFunction(overload_names_.at(callee_def));
                         if (callee == nullptr) {
                             throw CodegenError("call to unknown function '" + operand.type.name + "_operator_deref'",
