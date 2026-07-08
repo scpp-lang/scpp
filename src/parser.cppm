@@ -63,12 +63,17 @@ using ModuleResolver = std::function<const Program&(const std::string&)>;
 // constructed for any caller with no partitions to resolve.
 using PartitionResolver = std::function<Program(const std::string&)>;
 
+[[nodiscard]] size_t next_parser_instance_id() {
+    static size_t counter = 0;
+    return ++counter;
+}
+
 class Parser {
 public:
     explicit Parser(std::vector<Token> tokens, ModuleResolver resolver = {},
                      PartitionResolver partition_resolver = {})
         : tokens_(std::move(tokens)), resolver_(std::move(resolver)),
-          partition_resolver_(std::move(partition_resolver)) {
+          partition_resolver_(std::move(partition_resolver)), parser_instance_id_(next_parser_instance_id()) {
         // ch06 §6: the numeric family's own non-keyword members -- real
         // C++ <cstdint>/<cstddef>/<stdfloat> typedef names, not keywords
         // at all (unlike int/bool/char/long/float/double/unsigned,
@@ -229,6 +234,7 @@ private:
     // the enclosing type template as real pack expansions.
     std::vector<GenericTypeParam> current_class_template_params_;
     size_t generic_template_owner_counter_ = 0;
+    size_t parser_instance_id_ = 0;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -1314,7 +1320,7 @@ private:
     }
 
     [[nodiscard]] std::string next_generic_template_owner_id() {
-        return "__gtpl" + std::to_string(++generic_template_owner_counter_);
+        return "__gtpl" + std::to_string(parser_instance_id_) + "_" + std::to_string(++generic_template_owner_counter_);
     }
 
     // Merges `imported`'s exported surface into the Program currently
@@ -2900,6 +2906,10 @@ private:
     void parse_class_body_into(Program& program, ClassDef& def, const std::string& class_name,
                                 const std::vector<GenericTypeParam>& template_params) {
         std::string qualified_class_name = def.name;
+        std::string synthesized_member_owner_name = qualified_class_name;
+        if (def.is_partial_specialization && !def.template_owner_id.empty()) {
+            synthesized_member_owner_name += "__" + def.template_owner_id;
+        }
         bool is_exported = def.is_exported;
         // Every method/constructor/destructor synthesized below shares
         // this same namespace_path/is_exported (ch11 §11.3: exporting a
@@ -2989,7 +2999,7 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
-                fn.name = qualified_class_name + "_delete";
+                fn.name = synthesized_member_owner_name + "_delete";
                 fn.params.push_back(make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.body = parse_block();
                 finish_member_fn(fn);
@@ -3013,7 +3023,7 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
-                fn.name = qualified_class_name + "_new";
+                fn.name = synthesized_member_owner_name + "_new";
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a constructor");
                 fn.template_params = member_template_params;
@@ -4076,6 +4086,13 @@ private:
                         if (is_non_type) {
                             arg.is_type = false;
                             arg.value = std::shared_ptr<Expr>(parse_additive().release());
+                        } else if (arg_index < fn_template_params.size() && fn_template_params[arg_index].is_pack &&
+                                   check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
+                            arg.is_type = true;
+                            arg.type.kind = TypeKind::Named;
+                            arg.type.name = std::string(advance().text);
+                            advance(); // '...'
+                            arg.type.is_pack_expansion = true;
                         } else {
                             arg.is_type = true;
                             arg.type = parse_template_type_argument();
