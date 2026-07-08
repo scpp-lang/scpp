@@ -1,0 +1,10 @@
+class Callable {
+public:
+    int call() & { return 1; }
+    int call() && { return 2; }
+};
+
+int main() {
+    Callable c;
+    return c() + std::move(c)() - 3;
+}

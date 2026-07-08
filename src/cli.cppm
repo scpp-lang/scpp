@@ -119,6 +119,9 @@ std::string type_to_string(const scpp::Type& type) {
                 result += type_to_string(type.function_params[i]);
             }
             result += ")";
+            if (type.is_const_function) result += " const";
+            if (type.function_ref_qualifier == scpp::ReceiverRefQualifier::LValue) result += " &";
+            if (type.function_ref_qualifier == scpp::ReceiverRefQualifier::RValue) result += " &&";
             return result;
         }
         case scpp::TypeKind::FunctionPointer: {

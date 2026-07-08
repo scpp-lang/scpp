@@ -1130,6 +1130,12 @@ private:
         type.kind = TypeKind::Function;
         type.function_return = std::make_shared<Type>(std::move(return_type));
         type.function_params = parse_function_pointer_param_types();
+        type.is_const_function = match(TokenKind::KwConst);
+        if (match(TokenKind::AmpAmp)) {
+            type.function_ref_qualifier = ReceiverRefQualifier::RValue;
+        } else if (match(TokenKind::Amp)) {
+            type.function_ref_qualifier = ReceiverRefQualifier::LValue;
+        }
         return type;
     }
 
@@ -1299,6 +1305,7 @@ private:
         clone.is_generic_template = fn.is_generic_template;
         clone.template_params = fn.template_params;
         clone.generic_method_owner_id = fn.generic_method_owner_id;
+        clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
         clone.is_exported = is_reexport && fn.is_exported;
@@ -1968,6 +1975,12 @@ private:
         this_type.is_mutable_ref = !is_const;
         this_param.type = std::move(this_type);
         return this_param;
+    }
+
+    ReceiverRefQualifier parse_optional_ref_qualifier() {
+        if (match(TokenKind::AmpAmp)) return ReceiverRefQualifier::RValue;
+        if (match(TokenKind::Amp)) return ReceiverRefQualifier::LValue;
+        return ReceiverRefQualifier::None;
     }
 
     // ch05 §5.11: generic (concept-constrained) *methods* aren't
@@ -3070,6 +3083,7 @@ private:
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator*");
                 bool is_const = match(TokenKind::KwConst);
+                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_operator_deref";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
@@ -3116,6 +3130,7 @@ private:
                                           "§6.4(1)/(2), ch04 §4.2)");
                 }
                 bool is_const = match(TokenKind::KwConst);
+                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_operator_assign";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
@@ -3155,6 +3170,7 @@ private:
                 // knowable -- and `this`'s mutability with it -- after
                 // parsing the params above.
                 bool is_const = match(TokenKind::KwConst);
+                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_" + member_name;
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
@@ -4088,6 +4104,7 @@ private:
             node->kind = ExprKind::Identifier;
             node->loc = loc;
             node->name = name;
+            node->explicit_template_args = std::move(explicit_template_args);
             return node;
         }
         if (match(TokenKind::LParen)) {
