@@ -7,6 +7,7 @@ import scpp.ast;
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -22,18 +23,6 @@ import scpp.ast;
 #endif
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
-#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
-#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
-#error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
-#error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined by the build"
 #endif
 
 namespace {
@@ -70,25 +59,31 @@ public:
     }
 
     scpp::Program resolve_partition(const std::string& key) {
-        const std::string* path = module_path(key);
-        if (path == nullptr) throw std::runtime_error("unknown test partition '" + key + "'");
+        std::optional<std::string> path = infer_partition_path(key);
+        if (!path.has_value()) throw std::runtime_error("unknown test partition '" + key + "'");
         return scpp::parse(
             read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
     }
 
 private:
+    std::optional<std::string> infer_partition_path(const std::string& key) const {
+        size_t colon = key.find(':');
+        if (colon == std::string::npos) return std::nullopt;
+        std::string module_name = key.substr(0, colon);
+        if (module_name != "std") return std::nullopt;
+        std::string partition_name = key.substr(colon + 1);
+        std::filesystem::path module_path(SCPP_STDLIB_STD_MODULE_PATH);
+        std::filesystem::path candidate =
+            module_path.parent_path() / partition_name /
+            (module_path.stem().string() + "_" + partition_name + module_path.extension().string());
+        if (!std::filesystem::exists(candidate)) return std::nullopt;
+        return candidate.string();
+    }
+
     const std::string* module_path(const std::string& name) const {
         static const std::string std_module = SCPP_STDLIB_STD_MODULE_PATH;
-        static const std::string std_string_module = SCPP_STDLIB_STD_STRING_MODULE_PATH;
-        static const std::string std_memory_module = SCPP_STDLIB_STD_MEMORY_MODULE_PATH;
         if (name == "std") return &std_module;
-        if (name == "std:string") return &std_string_module;
-        static const std::string std_functional_module = SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH;
-        if (name == "std:memory") return &std_memory_module;
-        if (name == "std:functional") return &std_functional_module;
-        static const std::string std_thread_module = SCPP_STDLIB_STD_THREAD_MODULE_PATH;
-        if (name == "std:thread") return &std_thread_module;
         return nullptr;
     }
 

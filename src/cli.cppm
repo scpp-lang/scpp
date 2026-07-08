@@ -532,6 +532,53 @@ int run_build(std::string_view input_path, std::string_view output_path,
     return 0;
 }
 
+int run_build_module(std::string_view input_path, std::string_view interface_path, std::string_view archive_path,
+                     const std::unordered_map<std::string, std::string>& import_paths,
+                     const std::vector<std::string>& import_search_dirs) {
+    if (!require_scpp_input_path(input_path, "input file")) return 1;
+    if (std::filesystem::path(std::string(interface_path)).extension() != ".scppm") {
+        std::cerr << "error: module interface output must use the .scppm extension, got '" << interface_path << "'\n";
+        return 1;
+    }
+    if (std::filesystem::path(std::string(archive_path)).extension() != ".scppa") {
+        std::cerr << "error: module archive output must use the .scppa extension, got '" << archive_path << "'\n";
+        return 1;
+    }
+    for (const auto& [module_name, path] : import_paths) {
+        std::string extension = std::filesystem::path(path).extension().string();
+        if (extension != ".scpp" && extension != ".scppm") {
+            std::cerr << "error: import path for module '" << module_name
+                      << "' must use the .scpp or .scppm extension, got '" << path << "'\n";
+            return 1;
+        }
+    }
+    std::string source;
+    try {
+        source = read_file(input_path);
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+
+    try {
+        scpp::emit_module_artifacts(source, std::string(interface_path), std::string(archive_path), import_paths,
+                                    import_search_dirs, std::string(input_path));
+    } catch (const scpp::ParseError& e) {
+        print_diagnostic(input_path, source, e.loc, e.what());
+        return 1;
+    } catch (const scpp::DataflowError& e) {
+        print_diagnostic(input_path, source, e.loc, e.what());
+        return 1;
+    } catch (const scpp::CodegenError& e) {
+        print_diagnostic(input_path, source, e.loc, e.what());
+        return 1;
+    } catch (const scpp::DriverError& e) {
+        print_diagnostic(input_path, source, scpp::SourceLocation{}, e.what());
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 export namespace scpp {
@@ -539,20 +586,68 @@ export namespace scpp {
 constexpr std::string_view version = "0.1.0";
 
 int run(int argc, char** argv) {
-    if (argc >= 3 && std::string_view(argv[1]) == "lex") {
+    if (argc >= 2 && std::string_view(argv[1]) == "lex") {
+        if (argc != 3) {
+            std::cerr << "error: lex requires <file.scpp>\n";
+            return 1;
+        }
         return run_lex(argv[2]);
     }
-    if (argc >= 3 && std::string_view(argv[1]) == "parse") {
+    if (argc >= 2 && std::string_view(argv[1]) == "parse") {
+        if (argc != 3) {
+            std::cerr << "error: parse requires <file.scpp>\n";
+            return 1;
+        }
         return run_parse(argv[2]);
     }
-    if (argc >= 3 && std::string_view(argv[1]) == "build") {
+    if (argc >= 2 && std::string_view(argv[1]) == "build-module") {
+        if (argc < 3) {
+            std::cerr << "error: build-module requires <file.scpp>\n";
+            return 1;
+        }
+        std::string_view interface_path;
+        std::string_view archive_path;
+        std::unordered_map<std::string, std::string> import_paths;
+        std::vector<std::string> import_search_dirs;
+        for (int i = 3; i < argc; i++) {
+            std::string_view arg = argv[i];
+            if (arg == "-I" && i + 1 < argc) {
+                import_search_dirs.emplace_back(argv[++i]);
+            } else if (arg == "--interface-out" && i + 1 < argc) {
+                interface_path = argv[++i];
+            } else if (arg == "--archive-out" && i + 1 < argc) {
+                archive_path = argv[++i];
+            } else if (arg == "--import" && i + 1 < argc) {
+                std::string_view mapping = argv[++i];
+                size_t eq = mapping.find('=');
+                if (eq == std::string_view::npos) {
+                    std::cerr << "error: --import expects 'name=path', got '" << mapping << "'\n";
+                    return 1;
+                }
+                import_paths.emplace(std::string(mapping.substr(0, eq)), std::string(mapping.substr(eq + 1)));
+            } else {
+                std::cerr << "error: unknown build-module option '" << arg << "'\n";
+                return 1;
+            }
+        }
+        if (interface_path.empty()) {
+            std::cerr << "error: build-module requires --interface-out <file.scppm>\n";
+            return 1;
+        }
+        if (archive_path.empty()) {
+            std::cerr << "error: build-module requires --archive-out <file.scppa>\n";
+            return 1;
+        }
+        return run_build_module(argv[2], interface_path, archive_path, import_paths, import_search_dirs);
+    }
+    if (argc >= 2) {
         std::string_view output_path = "a.out";
         std::vector<std::string> extra_link_inputs;
         std::unordered_map<std::string, std::string> import_paths;
         std::vector<std::string> import_search_dirs;
         bool static_link = false;
         bool emit_debug_info = false;
-        for (int i = 3; i < argc; i++) {
+        for (int i = 2; i < argc; i++) {
             std::string_view arg = argv[i];
             if (arg == "-o" && i + 1 < argc) {
                 output_path = argv[++i];
@@ -578,11 +673,11 @@ int run(int argc, char** argv) {
                 }
                 import_paths.emplace(std::string(mapping.substr(0, eq)), std::string(mapping.substr(eq + 1)));
             } else {
-                std::cerr << "error: unknown build option '" << arg << "'\n";
+                std::cerr << "error: unknown option '" << arg << "'\n";
                 return 1;
             }
         }
-        return run_build(argv[2], output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
+        return run_build(argv[1], output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
                          emit_debug_info);
     }
 
@@ -591,7 +686,9 @@ int run(int argc, char** argv) {
     std::cout << "Usage: " << name << " lex <file.scpp>\n";
     std::cout << "       " << name << " parse <file.scpp>\n";
     std::cout << "       " << name
-              << " build <file.scpp> [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
+              << " <file.scpp> [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
+    std::cout << "       " << name
+              << " build-module <file.scpp> --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
     return 0;
 }
 

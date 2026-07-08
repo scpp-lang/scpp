@@ -757,9 +757,9 @@ private:
         return joined;
     }
 
-    [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Function& fn) const {
-        return fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c && !fn.is_module_extern && !fn.is_exported &&
-               (fn.params.empty() || fn.params[0].name != "this");
+    [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Program& program, const Function& fn) const {
+        return program.module_name.empty() && fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c &&
+               !fn.is_module_extern && !fn.is_exported && (fn.params.empty() || fn.params[0].name != "this");
     }
 
     void reconcile_ordinary_forward_declarations(Program& program) {
@@ -769,7 +769,7 @@ private:
         for (size_t i = 0; i < program.functions.size(); i++) {
             if (consumed[i]) continue;
             Function& fn = program.functions[i];
-            if (!is_bodyless_free_function_forward_decl(fn)) {
+            if (!is_bodyless_free_function_forward_decl(program, fn)) {
                 reconciled.push_back(std::move(fn));
                 consumed[i] = true;
                 continue;
@@ -778,7 +778,7 @@ private:
             for (size_t j = i + 1; j < program.functions.size(); j++) {
                 Function& candidate = program.functions[j];
                 if (!same_function_signature(fn, candidate)) continue;
-                if (is_bodyless_free_function_forward_decl(candidate)) {
+                if (is_bodyless_free_function_forward_decl(program, candidate)) {
                     consumed[j] = true;
                     continue;
                 }
@@ -3281,6 +3281,10 @@ private:
                 class_names_.erase(p.name);
             }
         };
+        auto parse_member_body_or_declaration = [&]() -> StmtPtr {
+            if (match(TokenKind::Semicolon)) return nullptr;
+            return parse_block();
+        };
         std::vector<GenericTypeParam> saved_class_template_params = current_class_template_params_;
         current_class_template_params_ = template_params;
 
@@ -3345,7 +3349,7 @@ private:
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_delete";
                 fn.params.push_back(make_this_param(qualified_class_name, /*is_const=*/false));
-                fn.body = parse_block();
+                fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -3395,7 +3399,7 @@ private:
                 }
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                fn.body = parse_block();
+                fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -3441,7 +3445,7 @@ private:
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_operator_deref";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
-                fn.body = parse_block();
+                fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
@@ -3488,7 +3492,7 @@ private:
                 fn.return_type = std::move(member_type);
                 fn.name = qualified_class_name + "_operator_assign";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
-                fn.body = parse_block();
+                fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
@@ -3529,7 +3533,7 @@ private:
                 fn.name = qualified_class_name + "_" + member_name;
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                fn.body = parse_block();
+                fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);

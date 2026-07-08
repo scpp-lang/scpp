@@ -5,11 +5,13 @@ import scpp.codegen;
 import scpp.ast;
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -29,18 +31,6 @@ import scpp.ast;
 #endif
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
-#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
-#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
-#error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
-#error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined by the build"
 #endif
 #ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
@@ -68,12 +58,20 @@ std::string read_file(const std::filesystem::path& path) {
     return buffer.str();
 }
 
+std::vector<unsigned char> read_binary_file(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::vector<unsigned char>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
+
+std::uint32_t read_u32_le(const std::vector<unsigned char>& bytes, size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+}
+
 std::unordered_map<std::string, std::string> std_import_paths() {
-    return {{"std", SCPP_STDLIB_STD_MODULE_PATH},
-            {"std:string", SCPP_STDLIB_STD_STRING_MODULE_PATH},
-            {"std:memory", SCPP_STDLIB_STD_MEMORY_MODULE_PATH},
-            {"std:functional", SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH},
-            {"std:thread", SCPP_STDLIB_STD_THREAD_MODULE_PATH}};
+    return {{"std", SCPP_STDLIB_STD_MODULE_PATH}};
 }
 
 std::vector<std::string> std_link_inputs() {
@@ -98,14 +96,29 @@ public:
     }
 
     scpp::Program resolve_partition(const std::string& key) {
-        auto path_it = import_paths_.find(key);
-        if (path_it == import_paths_.end()) throw std::runtime_error("unknown test partition '" + key + "'");
+        std::optional<std::string> path = infer_partition_path(key);
+        if (!path.has_value()) throw std::runtime_error("unknown test partition '" + key + "'");
         return scpp::parse(
-            read_file(path_it->second), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
     }
 
 private:
+    std::optional<std::string> infer_partition_path(const std::string& key) const {
+        size_t colon = key.find(':');
+        if (colon == std::string::npos) return std::nullopt;
+        std::string module_name = key.substr(0, colon);
+        auto module_it = import_paths_.find(module_name);
+        if (module_it == import_paths_.end()) return std::nullopt;
+        std::string partition_name = key.substr(colon + 1);
+        std::filesystem::path module_path(module_it->second);
+        std::filesystem::path candidate =
+            module_path.parent_path() / partition_name /
+            (module_path.stem().string() + "_" + partition_name + module_path.extension().string());
+        if (!std::filesystem::exists(candidate)) return std::nullopt;
+        return candidate.string();
+    }
+
     std::unordered_map<std::string, std::string> import_paths_;
     std::unordered_map<std::string, scpp::Program> cache_;
 };
@@ -966,6 +979,130 @@ void run_thread_tests() {
 
 void run_cli_extension_tests() {
     {
+        std::string case_name = "cli_build_module_emits_roundtrip_artifacts";
+        std::filesystem::path root = std::filesystem::current_path() / "cli_build_module_emits_roundtrip_artifacts";
+        std::filesystem::path module_source = root / "mymod.scpp";
+        std::filesystem::path interface_path = root / "mymod.scppm";
+        std::filesystem::path archive_path = root / "libmymod.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module mymod;\n"
+                        "namespace mymod {\n"
+                        "    export int answer() { return 42; }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::vector<unsigned char> interface_bytes = read_binary_file(interface_path);
+        expect(interface_bytes.size() >= 12, case_name + ": expected non-trivial .scppm output");
+        if (interface_bytes.size() >= 12) {
+            expect(std::string(interface_bytes.begin(), interface_bytes.begin() + 5) == "SCPPM",
+                   case_name + ": expected SCPPM magic");
+            expect(interface_bytes[5] == 1, case_name + ": expected major version 1");
+            expect(interface_bytes[6] == 0, case_name + ": expected patch version 0");
+            expect(interface_bytes[7] == 0, case_name + ": expected no generics flag for concrete module");
+            std::uint32_t interface_length = read_u32_le(interface_bytes, 8);
+            std::string embedded_source(interface_bytes.begin() + 12, interface_bytes.begin() + 12 + interface_length);
+            expect(embedded_source.find("return 42;") == std::string::npos,
+                   case_name + ": concrete function body should be stripped from interface source");
+            expect(embedded_source.find("export int answer()") != std::string::npos &&
+                       embedded_source.find("export int answer() ;") != std::string::npos,
+                   case_name + ": concrete function should remain declared in interface source");
+        }
+        expect(std::filesystem::exists(archive_path), case_name + ": expected .scppa archive to be created");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import mymod;\n"
+                        "int main() {\n"
+                        "    return mymod::answer() - 42;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                               exe_path.string() + " --import mymod=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": artifact-only consumer build should auto-link the companion libmymod.scppa, got '" +
+                  build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected artifact-linked binary to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(archive_path);
+        RunResult missing_link_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                               (root / "nolink_app").string() + " --import mymod=" + interface_path.string() + " 2>&1");
+        expect(missing_link_result.exit_code != 0,
+               case_name + ": build without an available companion libmymod.scppa should fail for a stripped concrete body");
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_build_module_with_partition_roundtrips_without_sources";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_with_partition_roundtrips_without_sources";
+        std::filesystem::path helper_dir = root / "helper";
+        std::filesystem::path module_source = root / "partmod.scpp";
+        std::filesystem::path partition_source = helper_dir / "partmod_helper.scpp";
+        std::filesystem::path interface_path = root / "partmod.scppm";
+        std::filesystem::path archive_path = root / "libpartmod.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(helper_dir);
+        write_text_file(module_source,
+                        "export module partmod;\n"
+                        "export import :helper;\n"
+                        "namespace partmod {\n"
+                        "    export int primary_fn() { return helper_fn() + 1; }\n"
+                        "}\n");
+        write_text_file(partition_source,
+                        "export module partmod:helper;\n"
+                        "namespace partmod {\n"
+                        "    export int helper_fn() { return 41; }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": partitioned build-module should succeed without self-import workaround, got '" +
+                   emit_result.stdout_text + "'");
+        std::vector<unsigned char> interface_bytes = read_binary_file(interface_path);
+        if (interface_bytes.size() >= 12) {
+            std::uint32_t interface_length = read_u32_le(interface_bytes, 8);
+            std::string embedded_source(interface_bytes.begin() + 12, interface_bytes.begin() + 12 + interface_length);
+            expect(embedded_source.find("export import :helper;") == std::string::npos,
+                   case_name + ": merged interface source should not retain partition import directives");
+            expect(embedded_source.find("helper_fn") != std::string::npos,
+                   case_name + ": merged interface source should include partition declarations");
+        }
+        std::filesystem::remove(module_source);
+        std::filesystem::remove(partition_source);
+        write_text_file(consumer_source,
+                        "import partmod;\n"
+                        "int main() {\n"
+                        "    return partmod::primary_fn() + partmod::helper_fn() - 83;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                               exe_path.string() + " --import partmod=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": source-free partition consumer build should auto-link the companion libpartmod.scppa, got '" +
+                  build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected partition artifact-linked binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_rejects_cpp_input";
         std::filesystem::path source_path = std::filesystem::current_path() / "cli_rejects_cpp_input.cpp";
         cases_run++;
@@ -986,7 +1123,7 @@ void run_cli_extension_tests() {
         write_text_file(main_path, "import helper;\nint main() { return helper::value(); }\n");
         write_text_file(module_path, "export module helper;\nnamespace helper { export int value() { return 1; } }\n");
         RunResult result =
-            run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + main_path.string() + " -o " +
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + main_path.string() + " -o " +
                                 exe_path.string() + " --import helper=" + module_path.string() + " 2>&1");
         std::filesystem::remove(main_path);
         std::filesystem::remove(module_path);
@@ -1007,7 +1144,7 @@ void run_cli_extension_tests() {
         std::filesystem::create_directories(module_dir);
         write_text_file(source_path, "import helper;\nint main() { return helper::value(); }\n");
         write_text_file(module_path, "export module helper;\nnamespace helper { export int value() { return 9; } }\n");
-        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
                                                     " -o " + exe_path.string() + " -I " + module_dir.string() +
                                                     " 2>&1");
         expect(build_result.exit_code == 0,
@@ -1022,6 +1159,42 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_build_prefers_prebuilt_module_over_source";
+        std::filesystem::path root = std::filesystem::current_path() / "cli_build_prefers_prebuilt_module_over_source";
+        std::filesystem::path module_path = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path source_path = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_path,
+                        "export module helper;\n"
+                        "namespace helper { export int value() { return 41; } }\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_path.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        write_text_file(module_path,
+                        "export module helper;\n"
+                        "namespace helper { export int value() { return 99; } }\n");
+        write_text_file(source_path, "import helper;\nint main() { return helper::value() - 41; }\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
+                                                     " -o " + exe_path.string() + " -I " + root.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": build should prefer helper.scppm and auto-link libhelper.scppa, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected .scppm/.scppa to win over helper.scpp, got exit code " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_import_std_works_without_flags";
         std::filesystem::path source_path = std::filesystem::current_path() / "cli_import_std_works_without_flags.scpp";
         std::filesystem::path exe_path = std::filesystem::current_path() / "cli_import_std_works_without_flags_exe";
@@ -1033,7 +1206,7 @@ void run_cli_extension_tests() {
                        "    return s.length();\n"
                        "}\n");
         RunResult build_result =
-            run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() + " -o " +
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() + " -o " +
                                exe_path.string() + " 2>&1");
         expect(build_result.exit_code == 0,
                case_name + ": build should succeed without import flags, got '" + build_result.stdout_text + "'");
@@ -1048,22 +1221,16 @@ void run_cli_extension_tests() {
         std::string case_name = "cli_import_std_works_after_relocation";
         std::filesystem::path bundle_root = std::filesystem::current_path() / "cli_import_std_works_after_relocation_bundle";
         std::filesystem::path bundle_build_dir = bundle_root / "build";
-        std::filesystem::path bundle_stdlib_dir = bundle_root / "stdlib";
+        std::filesystem::path bundle_build_stdlib_dir = bundle_build_dir / "stdlib";
         std::filesystem::path relocated_scpp = bundle_build_dir / "scpp";
         std::filesystem::path source_path = bundle_root / "main.scpp";
         std::filesystem::path exe_path = bundle_root / "app";
         cases_run++;
         std::filesystem::remove_all(bundle_root);
-        std::filesystem::create_directories(bundle_build_dir / "stdlib");
-        std::filesystem::copy(std::filesystem::path(SCPP_STDLIB_STD_MODULE_PATH).parent_path(), bundle_stdlib_dir,
-                              std::filesystem::copy_options::recursive);
+        std::filesystem::create_directories(bundle_build_dir);
         std::filesystem::copy_file(SCPP_BINARY_PATH, relocated_scpp, std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::copy_file(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
-                                   bundle_build_dir / "stdlib" / "libscpp_string_wrapper.a",
-                                   std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::copy_file(SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
-                                   bundle_build_dir / "stdlib" / "libscpp_thread_wrapper.a",
-                                   std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::copy(std::filesystem::path(SCPP_BINARY_PATH).parent_path() / "stdlib", bundle_build_stdlib_dir,
+                              std::filesystem::copy_options::recursive);
         write_text_file(source_path,
                         "import std;\n"
                         "int main() {\n"
@@ -1071,7 +1238,7 @@ void run_cli_extension_tests() {
                         "    return s.length();\n"
                         "}\n");
         RunResult build_result =
-            run_command_capture(relocated_scpp.string() + " build " + source_path.string() + " -o " + exe_path.string() + " 2>&1");
+            run_command_capture(relocated_scpp.string() + " " + source_path.string() + " -o " + exe_path.string() + " 2>&1");
         expect(build_result.exit_code == 0,
                case_name + ": relocated build should succeed, got '" + build_result.stdout_text + "'");
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
@@ -1094,7 +1261,7 @@ void run_cli_extension_tests() {
                         "int main() {\n"
                         "    return add(2, 5);\n"
                         "}\n");
-        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
                                                      " -o " + exe_path.string() + " -g 2>&1");
         expect(build_result.exit_code == 0,
                case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
@@ -1127,7 +1294,7 @@ void run_cli_extension_tests() {
                         "int main() {\n"
                         "    return identity(5) - 6;\n"
                         "}\n");
-        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
                                                      " -o " + exe_path.string() + " -g 2>&1");
         expect(build_result.exit_code == 0,
                case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
@@ -1164,7 +1331,7 @@ void run_cli_extension_tests() {
                         "    return result - 42;\n"
                         "}\n");
         RunResult build_result =
-            run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + main_path.string() + " -o " +
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + main_path.string() + " -o " +
                                 exe_path.string() + " -g --import mymod=" + module_path.string() + " 2>&1");
         expect(build_result.exit_code == 0,
                case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
@@ -1199,7 +1366,7 @@ void run_cli_extension_tests() {
                         "int main() {\n"
                         "    return sum_until(3) - 7;\n"
                         "}\n");
-        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
                                                      " -o " + exe_path.string() + " -g 2>&1");
         expect(build_result.exit_code == 0,
                case_name + ": debug build should succeed, got '" + build_result.stdout_text + "'");
@@ -1216,7 +1383,7 @@ void run_cli_extension_tests() {
             std::filesystem::current_path() / "cli_static_build_produces_self_contained_binary_exe";
         cases_run++;
         write_text_file(source_path, "int main() { return 7; }\n");
-        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
                                                      " -o " + exe_path.string() + " --static 2>&1");
         expect(build_result.exit_code == 0, case_name + ": static build should succeed, got '" +
                                                 build_result.stdout_text + "'");
