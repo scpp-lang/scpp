@@ -2203,6 +2203,28 @@ void test_generic_class_named_pack_function_pointer_params_parse() {
            "generic_class_named_pack_function_pointer_params_parse: function pointer should carry an Args... pack expansion");
 }
 
+void test_class_member_templates_parse() {
+    scpp::Program program = scpp::parse(
+        "class Sink {\n"
+        "public:\n"
+        "    template<typename T>\n"
+        "    Sink(T&& x) { return; }\n"
+        "    template<typename T>\n"
+        "    int call(T&& x) { return 0; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* ctor = nullptr;
+    const scpp::Function* call = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Sink_new") ctor = &fn;
+        if (fn.name == "Sink_call") call = &fn;
+    }
+    expect(ctor != nullptr && !ctor->template_params.empty() && ctor->template_params[0].name == "T",
+           "class_member_templates_parse: expected templated constructor 'Sink_new'");
+    expect(call != nullptr && !call->template_params.empty() && call->template_params[0].name == "T",
+           "class_member_templates_parse: expected templated method 'Sink_call'");
+}
+
 // ch05 §5.14: a method may layer its own `requires Concept<T>` clause,
 // recorded on Function::method_requires_concept -- independent of
 // whether the class's own type parameter is itself bare or constrained.
@@ -2769,6 +2791,7 @@ int main() {
     test_generic_class_multiple_type_params_parse();
     test_generic_class_named_pack_method_params_parse();
     test_generic_class_named_pack_function_pointer_params_parse();
+    test_class_member_templates_parse();
     test_generic_class_method_requires_clause_parses();
     test_generic_struct_concept_constrained_type_param_parses();
     test_generic_struct_bare_type_param_is_rejected();
