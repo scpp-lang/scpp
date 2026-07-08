@@ -80,10 +80,8 @@ section_label() {
   case "$section:$lang" in
     book:zh) printf 'Book' ;;
     spec:zh) printf 'Spec' ;;
-    standards:zh) printf 'Standards' ;;
     book:*) printf 'Book' ;;
     spec:*) printf 'Spec' ;;
-    standards:*) printf 'Standards' ;;
     *) printf '%s' "$section" ;;
   esac
 }
@@ -108,9 +106,7 @@ section_files() {
     spec)
       printf 'README.md\n'
       find "$DOCS_DIR/spec/$lang" -maxdepth 1 -name '[0-9][0-9]-*.md' -printf '%f\n' | sort
-      ;;
-    standards)
-      find "$DOCS_DIR/standards/$lang" -maxdepth 1 -name '*.md' -printf '%f\n' | sort
+      find "$DOCS_DIR/spec/$lang" -maxdepth 1 \( -name 'scppm-format.md' -o -name 'scppkg-format.md' \) -printf '%f\n' | sort
       ;;
   esac
 }
@@ -149,18 +145,10 @@ build_sidebar() {
       if [ -f "$source_path" ]; then
         title="$(page_title_for "$source_path")"
       else
-        if [ "$section" = 'standards' ]; then
-          if [ "$lang" = 'zh' ]; then
-            title='格式标准总览'
-          else
-            title='Format Standards'
-          fi
-        else
-          title="$file"
-        fi
+        title="$file"
       fi
       printf '    <li><a%s href="%s">%s</a></li>\n' "$class_name" "$href" "$(html_escape "$title")"
-    done < <(if [ "$section" = 'standards' ]; then printf 'README.md\n'; fi; section_files "$section" "$lang")
+    done < <(section_files "$section" "$lang")
     printf '  </ul>\n'
     printf '</div>\n'
   } > "$sidebar_file"
@@ -176,7 +164,7 @@ build_top_nav() {
     local href class_name section
     href="${prefix}index.html"
     printf '  <a href="%s">Home</a>\n' "$href"
-    for section in book spec standards; do
+    for section in book spec; do
       href="${prefix}${section}/${current_lang}/index.html"
       class_name=''
       if [ "$section" = "$current_section" ]; then
@@ -319,50 +307,12 @@ build_book_or_spec() {
   done < <(section_files "$section" "$lang")
 }
 
-standards_index_markdown() {
-  local lang="$1"
-  local out_file="$2"
-  if [ "$lang" = 'zh' ]; then
-    printf '# 格式标准\n\n' > "$out_file"
-    printf 'SCPP 的二进制/打包格式规范。\n\n' >> "$out_file"
-  else
-    printf '# Format Standards\n\n' > "$out_file"
-    printf 'Binary and packaging format specifications for SCPP.\n\n' >> "$out_file"
-  fi
-  printf '## Documents\n\n' >> "$out_file"
-  while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    local source="$DOCS_DIR/standards/$lang/$file"
-    local title out_name
-    title="$(page_title_for "$source")"
-    out_name="$(output_name_for "$file")"
-    printf -- '- [%s](%s)\n' "$title" "$out_name" >> "$out_file"
-  done < <(section_files standards "$lang")
-}
-
-build_standards() {
-  local lang="$1"
-  local section='standards'
-  local source_dir="$DOCS_DIR/$section/$lang"
-  local index_md="$TMP_DIR/standards-$lang-index.md"
-  standards_index_markdown "$lang" "$index_md"
-  render_markdown_page "$index_md" "$section/$lang/index.html" "$section" "$lang" 'README.md' "$(page_title_for "$index_md")"
-  while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    local source="$source_dir/$file"
-    local title rel_out
-    title="$(page_title_for "$source")"
-    rel_out="$section/$lang/$(output_name_for "$file")"
-    render_markdown_page "$source" "$rel_out" "$section" "$lang" "$file" "$title"
-  done < <(section_files standards "$lang")
-}
-
 build_landing() {
   local md="$TMP_DIR/index.md"
   cat > "$md" <<'LANDING'
 # SCPP Documentation Site
 
-Browse the language book, formal spec, and wire/package format standards.
+Browse the language book and the formal specifications, including the language standard and the `.scppm` / `.scppkg` format specs.
 
 <div class="landing-grid">
   <section class="card">
@@ -379,13 +329,6 @@ Browse the language book, formal spec, and wire/package format standards.
       <li><a href="spec/zh/index.html">中文</a></li>
     </ul>
   </section>
-  <section class="card">
-    <h2>Standards</h2>
-    <ul>
-      <li><a href="standards/en/index.html">English</a></li>
-      <li><a href="standards/zh/index.html">中文</a></li>
-    </ul>
-  </section>
 </div>
 LANDING
   local before="$TMP_DIR/before-home.html"
@@ -399,7 +342,6 @@ LANDING
       <a class="current" href="index.html">Home</a>
       <a href="book/en/index.html">Book</a>
       <a href="spec/en/index.html">Spec</a>
-      <a href="standards/en/index.html">Standards</a>
       <a href="https://github.com/scpp-lang/scpp">GitHub</a>
     </nav>
     <div class="lang-switcher">
@@ -434,7 +376,6 @@ build_landing
 for lang in en zh; do
   build_book_or_spec book "$lang"
   build_book_or_spec spec "$lang"
-  build_standards "$lang"
 done
 
 echo "Done. Output in $OUT_DIR/"
