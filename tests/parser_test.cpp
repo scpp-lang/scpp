@@ -2134,6 +2134,32 @@ void test_generic_class_bare_type_param_parses() {
            "generic_class_bare_type_param_parses: field 'item' should be Named('T')");
 }
 
+void test_generic_class_multiple_type_params_parse() {
+    scpp::Program program = scpp::parse(
+        "template<typename First, typename Second>\n"
+        "class Pair {\n"
+        "    First first;\n"
+        "    Second second;\n"
+        "public:\n"
+        "    const First& left() const { return this.first; }\n"
+        "    const Second& right() const { return this.second; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* pair = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Pair") pair = &c;
+    }
+    expect(pair != nullptr, "generic_class_multiple_type_params_parse: expected a ClassDef named 'Pair'");
+    expect(pair->template_params.size() == 2,
+           "generic_class_multiple_type_params_parse: expected exactly 2 template params");
+    expect(pair->template_params[0].name == "First" && pair->template_params[1].name == "Second",
+           "generic_class_multiple_type_params_parse: param names should be 'First' and 'Second'");
+    expect(pair->fields.size() == 2 && pair->fields[0].type.kind == scpp::TypeKind::Named &&
+               pair->fields[0].type.name == "First" && pair->fields[1].type.kind == scpp::TypeKind::Named &&
+               pair->fields[1].type.name == "Second",
+           "generic_class_multiple_type_params_parse: fields should preserve both template parameter types");
+}
+
 // ch05 §5.14: a method may layer its own `requires Concept<T>` clause,
 // recorded on Function::method_requires_concept -- independent of
 // whether the class's own type parameter is itself bare or constrained.
@@ -2697,6 +2723,7 @@ int main() {
     test_lambda_generic_parameter_is_rejected();
     test_lambda_mutable_keyword_parses();
     test_generic_class_bare_type_param_parses();
+    test_generic_class_multiple_type_params_parse();
     test_generic_class_method_requires_clause_parses();
     test_generic_struct_concept_constrained_type_param_parses();
     test_generic_struct_bare_type_param_is_rejected();

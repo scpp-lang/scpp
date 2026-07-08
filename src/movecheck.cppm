@@ -4376,6 +4376,15 @@ private:
         return result;
     }
 
+    [[nodiscard]] static Type substitute_type_params(
+        const Type& type, const std::vector<std::pair<std::string, Type>>& replacements) {
+        Type result = type;
+        for (const auto& [param_name, replacement] : replacements) {
+            result = substitute_type_param(result, param_name, replacement);
+        }
+        return result;
+    }
+
     [[nodiscard]] static std::optional<std::string>
     referenced_type_pack_param_name(const Type& type, const std::vector<GenericTypeParam>& template_params) {
         if (type.kind == TypeKind::Named) {
@@ -4420,6 +4429,12 @@ private:
         if (expr.lambda_body) substitute_type_param_in_stmt(*expr.lambda_body, param_name, replacement);
     }
 
+    void substitute_type_params_in_expr(Expr& expr, const std::vector<std::pair<std::string, Type>>& replacements) {
+        for (const auto& [param_name, replacement] : replacements) {
+            substitute_type_param_in_expr(expr, param_name, replacement);
+        }
+    }
+
     void substitute_type_param_in_stmt(Stmt& stmt, const std::string& param_name, const Type& replacement) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
@@ -4443,6 +4458,12 @@ private:
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_type_param_in_stmt(*s, param_name, replacement);
                 return;
+        }
+    }
+
+    void substitute_type_params_in_stmt(Stmt& stmt, const std::vector<std::pair<std::string, Type>>& replacements) {
+        for (const auto& [param_name, replacement] : replacements) {
+            substitute_type_param_in_stmt(stmt, param_name, replacement);
         }
     }
 
@@ -4659,15 +4680,26 @@ private:
             if (program_.classes[i].is_variadic_primary_template || program_.classes[i].is_variadic_specialization) {
                 continue;
             }
-            std::string type_param_name = program_.classes[i].template_params[0].name;
+            std::vector<GenericTypeParam> template_params = program_.classes[i].template_params;
             std::vector<ClassField> fields_copy = program_.classes[i].fields;
             std::string class_name_copy = program_.classes[i].name;
             std::vector<Function> methods = method_templates_of(class_name_copy);
             for (const Function& method_tmpl : methods) {
-                std::string witness_name = method_tmpl.method_requires_concept.empty()
-                                                ? bare_witness_struct_name()
-                                                : method_tmpl.method_requires_concept;
-                Type witness_type{.kind = TypeKind::Named, .name = witness_name};
+                std::vector<std::pair<std::string, Type>> type_replacements;
+                type_replacements.reserve(template_params.size());
+                for (size_t param_index = 0; param_index < template_params.size(); ++param_index) {
+                    const GenericTypeParam& param = template_params[param_index];
+                    if (param.is_non_type) continue;
+                    std::string witness_name;
+                    if (param_index == 0 && !method_tmpl.method_requires_concept.empty()) {
+                        witness_name = method_tmpl.method_requires_concept;
+                    } else if (!param.concept_name.empty()) {
+                        witness_name = param.concept_name;
+                    } else {
+                        witness_name = bare_witness_struct_name();
+                    }
+                    type_replacements.emplace_back(param.name, Type{.kind = TypeKind::Named, .name = witness_name});
+                }
 
                 std::string check_class_name = "__genchk" + std::to_string(generic_check_counter_++);
                 ClassDef check_class;
@@ -4677,12 +4709,12 @@ private:
                 check_class.thread_shareable_override = program_.classes[i].thread_shareable_override;
                 if (program_.classes[i].thread_movable_if_movable_expr) {
                     check_class.thread_movable_if_movable_expr = clone_expr(*program_.classes[i].thread_movable_if_movable_expr);
-                    substitute_type_param_in_expr(*check_class.thread_movable_if_movable_expr, type_param_name, witness_type);
+                    substitute_type_params_in_expr(*check_class.thread_movable_if_movable_expr, type_replacements);
                     resolve_generic_types_in_expr(*check_class.thread_movable_if_movable_expr);
                 }
                 if (program_.classes[i].thread_movable_if_shareable_expr) {
                     check_class.thread_movable_if_shareable_expr = clone_expr(*program_.classes[i].thread_movable_if_shareable_expr);
-                    substitute_type_param_in_expr(*check_class.thread_movable_if_shareable_expr, type_param_name, witness_type);
+                    substitute_type_params_in_expr(*check_class.thread_movable_if_shareable_expr, type_replacements);
                     resolve_generic_types_in_expr(*check_class.thread_movable_if_shareable_expr);
                 }
                 std::unordered_map<std::string, Type> field_types;
@@ -4690,7 +4722,7 @@ private:
                     ClassField nf;
                     nf.name = f.name;
                     nf.access = f.access;
-                    nf.type = substitute_type_param(f.type, type_param_name, witness_type);
+                    nf.type = substitute_type_params(f.type, type_replacements);
                     field_types[nf.name] = nf.type;
                     check_class.fields.push_back(std::move(nf));
                 }
@@ -4704,7 +4736,7 @@ private:
                 check_fn.name = check_class_name + method_tmpl.name.substr(class_name_copy.size());
                 check_fn.loc = method_tmpl.loc;
                 check_fn.is_generic_template = true;
-                check_fn.return_type = substitute_type_param(method_tmpl.return_type, type_param_name, witness_type);
+                check_fn.return_type = substitute_type_params(method_tmpl.return_type, type_replacements);
                 check_fn.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
                     Param np;
@@ -4716,12 +4748,12 @@ private:
                         this_type.is_mutable_ref = p.type.is_mutable_ref;
                         np.type = std::move(this_type);
                     } else {
-                        np.type = substitute_type_param(p.type, type_param_name, witness_type);
+                        np.type = substitute_type_params(p.type, type_replacements);
                     }
                     check_fn.params.push_back(std::move(np));
                 }
                 check_fn.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
-                if (check_fn.body) substitute_type_param_in_stmt(*check_fn.body, type_param_name, witness_type);
+                if (check_fn.body) substitute_type_params_in_stmt(*check_fn.body, type_replacements);
                 // ch05 §5.11/§5.14: "calling any method on it or applying
                 // any operator to it is a compile error" -- for the
                 // *bare* (unconstrained) case specifically (never the
@@ -4735,8 +4767,16 @@ private:
                 // positive -- see reject_calls_on_bare_witness_type's
                 // own comment for why check_moves's ordinary call-
                 // argument-checking can't already catch this on its own.
-                if (check_fn.body && method_tmpl.method_requires_concept.empty()) {
-                    reject_calls_on_bare_witness_type(*check_fn.body, check_class_name, witness_name, field_types);
+                bool uses_bare_witness = false;
+                for (const auto& [_, replacement] : type_replacements) {
+                    if (replacement.kind == TypeKind::Named && replacement.name == bare_witness_struct_name()) {
+                        uses_bare_witness = true;
+                        break;
+                    }
+                }
+                if (check_fn.body && uses_bare_witness) {
+                    reject_calls_on_bare_witness_type(*check_fn.body, check_class_name, bare_witness_struct_name(),
+                                                      field_types);
                 }
                 program_.functions.push_back(std::move(check_fn));
             }
@@ -5048,13 +5088,10 @@ private:
             if (type.element) type.element = std::make_shared<Type>(resolve_generic_type(*type.element, loc));
             return type;
         }
-        // Resolve the (single, v0.1-only) type argument first, in case
-        // it is itself a generic-type instantiation -- not actually
-        // reachable yet (parse_type doesn't recognize a generic type
-        // name in argument position without this), but resolving
-        // depth-first is harmless and future-proof.
-        Type arg = resolve_generic_type(type.template_args[0], loc);
-        std::string concrete_name = instantiate_generic_type(type.name, arg, loc);
+        std::vector<Type> resolved_args;
+        resolved_args.reserve(type.template_args.size());
+        for (const Type& arg : type.template_args) resolved_args.push_back(resolve_generic_type(arg, loc));
+        std::string concrete_name = instantiate_generic_type(type.name, resolved_args, loc);
         type.name = concrete_name;
         type.template_args.clear();
         return type;
@@ -5063,13 +5100,13 @@ private:
 
     // ch05 §5.14: synthesizes (or reuses an already-cached) concrete
     // instantiation of the generic class/struct template named
-    // `template_name` for the concrete argument `concrete_arg`, and
+    // `template_name` for the concrete arguments `concrete_args`, and
     // returns its own mangled name. Validates the template's own
-    // class/struct-level concept constraint (if any) against the
+    // class/struct-level concept constraint(s) (if any) against each
     // concrete argument first -- a precise, immediate rejection here,
     // exactly like a generic function's own call-site concept check.
     // For a class template, clones every method whose own
-    // `requires Concept<T>` clause (if any) the concrete argument also
+    // `requires Concept<T>` clause (if any) the first concrete argument also
     // satisfies; a method whose own constraint *isn't* satisfied is
     // simply not cloned for this instantiation at all -- calling it
     // surfaces as an ordinary "unknown function" downstream, mirroring
@@ -5077,14 +5114,22 @@ private:
     // an ordinary generic function's own body (ch05 §5.11) rather than
     // a bespoke "precise diagnostic" message this version doesn't
     // implement.
-    [[nodiscard]] std::string instantiate_generic_type(const std::string& template_name, const Type& concrete_arg,
+    [[nodiscard]] std::string instantiate_generic_type(const std::string& template_name,
+                                                        const std::vector<Type>& concrete_args,
                                                         SourceLocation loc) {
-        std::string cache_key = template_name + "." + mangle_type_for_clone_name(concrete_arg);
+        std::string cache_key = template_name;
+        for (const Type& concrete_arg : concrete_args) {
+            cache_key += "." + mangle_type_for_clone_name(concrete_arg);
+        }
         auto cached = generic_type_instance_cache_.find(cache_key);
         if (cached != generic_type_instance_cache_.end()) return cached->second;
         generic_type_instance_cache_[cache_key] = cache_key;
 
-        Type named_concrete = concrete_arg.kind == TypeKind::Reference ? *concrete_arg.pointee : concrete_arg;
+        std::vector<Type> named_concretes;
+        named_concretes.reserve(concrete_args.size());
+        for (const Type& concrete_arg : concrete_args) {
+            named_concretes.push_back(concrete_arg.kind == TypeKind::Reference ? *concrete_arg.pointee : concrete_arg);
+        }
 
         // Structs and classes share the same instantiation shape except
         // for AccessSpecifier/method-cloning, so the two are handled
@@ -5092,15 +5137,29 @@ private:
         // conditional block.
         for (const StructDef& tmpl : program_.structs) {
             if (tmpl.name != template_name || tmpl.template_params.empty()) continue;
-            const GenericTypeParam& type_param = tmpl.template_params[0];
-            check_type_param_constraint(type_param, named_concrete, template_name, loc);
+            if (tmpl.template_params.size() != named_concretes.size()) {
+                throw DataflowError("'" + template_name + "' takes exactly " +
+                                        std::to_string(tmpl.template_params.size()) + " template argument(s)",
+                                    loc);
+            }
+            std::vector<std::pair<std::string, Type>> type_replacements;
+            type_replacements.reserve(tmpl.template_params.size());
+            for (size_t param_index = 0; param_index < tmpl.template_params.size(); ++param_index) {
+                const GenericTypeParam& type_param = tmpl.template_params[param_index];
+                if (type_param.is_non_type) {
+                    throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct",
+                                        loc);
+                }
+                check_type_param_constraint(type_param, named_concretes[param_index], template_name, loc);
+                type_replacements.emplace_back(type_param.name, named_concretes[param_index]);
+            }
             StructDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
             for (const StructField& f : tmpl.fields) {
                 StructField nf;
                 nf.name = f.name;
-                nf.type = substitute_type_param(f.type, type_param.name, named_concrete);
+                nf.type = substitute_type_params(f.type, type_replacements);
                 nf.type = resolve_generic_type(nf.type, loc);
                 concrete.fields.push_back(std::move(nf));
             }
@@ -5110,15 +5169,22 @@ private:
 
         for (const ClassDef& tmpl : program_.classes) {
             if (tmpl.name != template_name || tmpl.template_params.empty()) continue;
-            check_type_param_constraint(tmpl.template_params[0], named_concrete, template_name, loc);
-            // Copy the type parameter's own name out *before* any
-            // push_back below: `tmpl` (and anything referencing into
-            // it, like a GenericTypeParam&) is a reference into
-            // program_.classes' own backing storage, which push_back
-            // may reallocate, invalidating it -- unlike `fields_copy`/
-            // `methods` (already independent copies), a bare reference
-            // held across that point would dangle.
-            std::string type_param_name = tmpl.template_params[0].name;
+            if (tmpl.template_params.size() != named_concretes.size()) {
+                throw DataflowError("'" + template_name + "' takes exactly " +
+                                        std::to_string(tmpl.template_params.size()) + " template argument(s)",
+                                    loc);
+            }
+            std::vector<std::pair<std::string, Type>> type_replacements;
+            type_replacements.reserve(tmpl.template_params.size());
+            for (size_t param_index = 0; param_index < tmpl.template_params.size(); ++param_index) {
+                const GenericTypeParam& type_param = tmpl.template_params[param_index];
+                if (type_param.is_non_type) {
+                    throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct",
+                                        loc);
+                }
+                check_type_param_constraint(type_param, named_concretes[param_index], template_name, loc);
+                type_replacements.emplace_back(type_param.name, named_concretes[param_index]);
+            }
             std::vector<ClassField> fields_copy = tmpl.fields;
             ClassDef concrete;
             concrete.name = cache_key;
@@ -5127,19 +5193,19 @@ private:
             concrete.thread_shareable_override = tmpl.thread_shareable_override;
             if (tmpl.thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
-                substitute_type_param_in_expr(*concrete.thread_movable_if_movable_expr, type_param_name, named_concrete);
+                substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr, type_replacements);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
             }
             if (tmpl.thread_movable_if_shareable_expr) {
                 concrete.thread_movable_if_shareable_expr = clone_expr(*tmpl.thread_movable_if_shareable_expr);
-                substitute_type_param_in_expr(*concrete.thread_movable_if_shareable_expr, type_param_name, named_concrete);
+                substitute_type_params_in_expr(*concrete.thread_movable_if_shareable_expr, type_replacements);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
             }
             for (const ClassField& f : fields_copy) {
                 ClassField nf;
                 nf.name = f.name;
                 nf.access = f.access;
-                nf.type = substitute_type_param(f.type, type_param_name, named_concrete);
+                nf.type = substitute_type_params(f.type, type_replacements);
                 nf.type = resolve_generic_type(nf.type, loc);
                 concrete.fields.push_back(std::move(nf));
             }
@@ -5150,7 +5216,7 @@ private:
                 if (!method_tmpl.method_requires_concept.empty()) {
                     auto concept_it = concepts_by_name_.find(method_tmpl.method_requires_concept);
                     bool satisfied = concept_it != concepts_by_name_.end() &&
-                                      type_satisfies_concept(named_concrete, *concept_it->second, program_);
+                                      type_satisfies_concept(named_concretes[0], *concept_it->second, program_);
                     if (!satisfied) continue; // omitted for this instantiation -- see this function's own comment
                 }
                 Function clone;
@@ -5159,7 +5225,7 @@ private:
                 clone.namespace_path = method_tmpl.namespace_path;
                 clone.is_exported = false;
                 clone.is_unsafe = method_tmpl.is_unsafe;
-                clone.return_type = substitute_type_param(method_tmpl.return_type, type_param_name, named_concrete);
+                clone.return_type = substitute_type_params(method_tmpl.return_type, type_replacements);
                 clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
                 clone.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
@@ -5172,14 +5238,14 @@ private:
                         this_type.is_mutable_ref = p.type.is_mutable_ref;
                         np.type = std::move(this_type);
                     } else {
-                        np.type = substitute_type_param(p.type, type_param_name, named_concrete);
+                        np.type = substitute_type_params(p.type, type_replacements);
                         np.type = resolve_generic_type(np.type, method_tmpl.loc);
                     }
                     clone.params.push_back(std::move(np));
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
-                    substitute_type_param_in_stmt(*clone.body, type_param_name, named_concrete);
+                    substitute_type_params_in_stmt(*clone.body, type_replacements);
                     resolve_generic_types_in_stmt(*clone.body);
                 }
                 program_.functions.push_back(std::move(clone));
