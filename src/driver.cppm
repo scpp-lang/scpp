@@ -1,5 +1,7 @@
 module;
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -45,6 +47,84 @@ struct DriverError : std::runtime_error {
 // compile_to_executable below.
 namespace scpp {
 
+[[nodiscard]] std::optional<std::filesystem::path> current_executable_path() {
+    std::error_code ec;
+    std::filesystem::path path = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) return std::nullopt;
+    return path;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> runtime_default_stdlib_dir() {
+    std::optional<std::filesystem::path> exe = current_executable_path();
+    if (!exe.has_value()) return std::nullopt;
+    return (exe->parent_path() / ".." / "stdlib").lexically_normal();
+}
+
+[[nodiscard]] std::vector<std::string> build_default_import_search_dirs(const std::vector<std::string>& explicit_dirs) {
+    std::vector<std::string> dirs = explicit_dirs;
+    auto append_if_missing = [&](std::string path) {
+        if (path.empty()) return;
+        if (std::find(dirs.begin(), dirs.end(), path) == dirs.end()) dirs.push_back(std::move(path));
+    };
+    if (const char* env = std::getenv("SCPP_STDLIB_PATH"); env != nullptr && env[0] != '\0') {
+        append_if_missing(env);
+    } else if (std::optional<std::filesystem::path> runtime_dir = runtime_default_stdlib_dir(); runtime_dir.has_value()) {
+        append_if_missing(runtime_dir->string());
+    }
+    return dirs;
+}
+
+[[nodiscard]] std::vector<std::string> default_stdlib_link_inputs() {
+    std::vector<std::string> result;
+    std::optional<std::filesystem::path> exe = current_executable_path();
+    if (!exe.has_value()) return result;
+    std::filesystem::path lib_dir = (exe->parent_path() / "stdlib").lexically_normal();
+    std::filesystem::path string_wrapper = lib_dir / "libscpp_string_wrapper.a";
+    if (std::filesystem::exists(string_wrapper)) {
+        result.push_back(string_wrapper.string());
+    }
+    std::filesystem::path thread_wrapper = lib_dir / "libscpp_thread_wrapper.a";
+    if (std::filesystem::exists(thread_wrapper)) {
+        result.push_back(thread_wrapper.string());
+    }
+    return result;
+}
+
+std::string read_scppm_interface_source(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        throw DriverError("cannot open imported module interface '" + path + "'");
+    }
+    char header[8];
+    file.read(header, sizeof(header));
+    if (file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+        throw DriverError("invalid .scppm file '" + path + "': truncated header");
+    }
+    if (std::memcmp(header, "SCPPM", 5) != 0) {
+        throw DriverError("invalid .scppm file '" + path + "': bad magic");
+    }
+    unsigned char major_version = static_cast<unsigned char>(header[5]);
+    if (major_version != 1) {
+        throw DriverError("unsupported .scppm major version " + std::to_string(major_version) + " in '" + path + "'");
+    }
+    unsigned char flags = static_cast<unsigned char>(header[7]);
+    std::uint32_t interface_length = 0;
+    file.read(reinterpret_cast<char*>(&interface_length), sizeof(interface_length));
+    if (file.gcount() != static_cast<std::streamsize>(sizeof(interface_length))) {
+        throw DriverError("invalid .scppm file '" + path + "': missing interface length");
+    }
+    std::string source(interface_length, '\0');
+    file.read(source.data(), static_cast<std::streamsize>(interface_length));
+    if (file.gcount() != static_cast<std::streamsize>(interface_length)) {
+        throw DriverError("invalid .scppm file '" + path + "': truncated interface source");
+    }
+    if ((flags & 0x01u) != 0u) {
+        // v1 only consumes the embedded interface source. Generic bodies
+        // serialized into the optional generics block are not read yet.
+    }
+    return source;
+}
+
 // Reads an imported module's source file from disk -- the parser itself
 // never touches the filesystem (see scpp.parser's ModuleResolver); this
 // is the driver's own responsibility, mirroring cli.cppm's own read_file
@@ -53,6 +133,9 @@ namespace scpp {
 // precedent, e.g. movecheck.cppm/codegen.cppm's independently-duplicated
 // types_equal).
 std::string read_module_source(const std::string& path) {
+    if (std::filesystem::path(path).extension() == ".scppm") {
+        return read_scppm_interface_source(path);
+    }
     std::ifstream file(path);
     if (!file) {
         throw DriverError("cannot open imported module source '" + path + "'");
@@ -79,8 +162,10 @@ std::string read_module_source(const std::string& path) {
 // like resolve() does for ordinary cross-module imports.
 class ModuleCache {
 public:
-    explicit ModuleCache(std::unordered_map<std::string, std::string> import_paths)
-        : import_paths_(std::move(import_paths)) {}
+    explicit ModuleCache(std::unordered_map<std::string, std::string> import_paths,
+                         std::vector<std::string> import_search_dirs = {})
+        : import_paths_(std::move(import_paths)),
+          import_search_dirs_(build_default_import_search_dirs(import_search_dirs)) {}
 
     const Program& resolve(const std::string& module_name) {
         auto cached = cache_.find(module_name);
@@ -92,8 +177,13 @@ public:
         }
         auto path_it = import_paths_.find(module_name);
         if (path_it == import_paths_.end()) {
-            throw DriverError("cannot find module '" + module_name + "' (use --import " + module_name +
-                               "=path/to/file)");
+            std::optional<std::string> inferred = infer_module_path(module_name);
+            if (inferred.has_value()) {
+                path_it = import_paths_.emplace(module_name, *inferred).first;
+            } else {
+                throw DriverError("cannot find module '" + module_name + "' (use --import " + module_name +
+                                   "=path/to/file or -I <dir>)");
+            }
         }
 
         resolving_.insert(module_name);
@@ -136,7 +226,8 @@ public:
             if (inferred.has_value()) {
                 path_it = import_paths_.emplace(key, *inferred).first;
             } else {
-                throw DriverError("cannot find partition '" + key + "' (use --import " + key + "=path/to/file)");
+                throw DriverError("cannot find partition '" + key + "' (use --import " + key +
+                                   "=path/to/file or import its parent module via -I <dir>)");
             }
         }
 
@@ -173,6 +264,17 @@ public:
     [[nodiscard]] Program& program_for(const std::string& module_name) { return cache_.at(module_name); }
 
 private:
+    [[nodiscard]] std::optional<std::string> infer_module_path(const std::string& module_name) const {
+        for (const std::string& dir : import_search_dirs_) {
+            std::filesystem::path base(dir);
+            std::filesystem::path source_candidate = base / (module_name + ".scpp");
+            if (std::filesystem::exists(source_candidate)) return source_candidate.string();
+            std::filesystem::path interface_candidate = base / (module_name + ".scppm");
+            if (std::filesystem::exists(interface_candidate)) return interface_candidate.string();
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] std::optional<std::string> infer_partition_path(const std::string& key) const {
         size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
@@ -189,6 +291,7 @@ private:
     }
 
     std::unordered_map<std::string, std::string> import_paths_;
+    std::vector<std::string> import_search_dirs_;
     std::unordered_map<std::string, Program> cache_;
     std::unordered_set<std::string> resolving_;
     std::unordered_set<std::string> partitions_resolving_;
@@ -265,8 +368,9 @@ export namespace scpp {
 // job below, since deciding where to put it needs an executable-level
 // path to derive from.
 void emit_object_file(std::string_view source, const std::string& object_path,
-                       const std::unordered_map<std::string, std::string>& import_paths = {}) {
-    ModuleCache cache(import_paths);
+                       const std::unordered_map<std::string, std::string>& import_paths = {},
+                       const std::vector<std::string>& import_search_dirs = {}) {
+    ModuleCache cache(import_paths, import_search_dirs);
     Program program = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); });
@@ -315,8 +419,9 @@ void link_executable(const std::string& object_path, const std::string& executab
 void compile_to_executable(std::string_view source, const std::string& executable_path,
                             const std::vector<std::string>& extra_link_inputs = {},
                             const std::unordered_map<std::string, std::string>& import_paths = {},
-                            bool static_link = false) {
-    ModuleCache cache(import_paths);
+                            bool static_link = false,
+                            const std::vector<std::string>& import_search_dirs = {}) {
+    ModuleCache cache(import_paths, import_search_dirs);
     Program program = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); });
@@ -340,6 +445,15 @@ void compile_to_executable(std::string_view source, const std::string& executabl
     // relies on.
     std::vector<std::string> link_inputs = module_object_paths;
     link_inputs.insert(link_inputs.end(), extra_link_inputs.begin(), extra_link_inputs.end());
+    bool uses_stdlib = std::find(cache.resolution_order().begin(), cache.resolution_order().end(), "std") !=
+                       cache.resolution_order().end();
+    if (uses_stdlib) {
+        for (const std::string& input : default_stdlib_link_inputs()) {
+            if (std::find(link_inputs.begin(), link_inputs.end(), input) == link_inputs.end()) {
+                link_inputs.push_back(input);
+            }
+        }
+    }
     link_executable(object_path, executable_path, link_inputs, static_link);
 
     llvm::sys::fs::remove(object_path);

@@ -428,6 +428,61 @@ void run_module_system_tests() {
         expect(threw, case_name + ": expected a DriverError for a missing --import mapping");
     }
 
+    {
+        std::string case_name = "import_search_dir_resolves_module";
+        cases_run++;
+        std::filesystem::path module_dir = std::filesystem::current_path() / "driver_import_search_dir_case";
+        std::filesystem::create_directories(module_dir);
+        std::filesystem::path module_path = module_dir / "mathlib.scpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "driver_import_search_dir_case_exe";
+        write_text_file(module_path,
+                        "export module mathlib;\n"
+                        "namespace mathlib { export int value() { return 17; } }\n");
+        try {
+            scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
+                                        {}, /*static_link=*/false, {module_dir.string()});
+            RunResult run = run_command_capture(exe_path.string() + " 2>&1");
+            expect(run.exit_code == 17,
+                   case_name + ": expected exit code 17, got " + std::to_string(run.exit_code));
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(module_path);
+        std::filesystem::remove(exe_path);
+        std::filesystem::remove(module_dir);
+    }
+
+    {
+        std::string case_name = "import_search_dir_first_match_wins";
+        cases_run++;
+        std::filesystem::path first_dir = std::filesystem::current_path() / "driver_import_search_dir_first";
+        std::filesystem::path second_dir = std::filesystem::current_path() / "driver_import_search_dir_second";
+        std::filesystem::create_directories(first_dir);
+        std::filesystem::create_directories(second_dir);
+        write_text_file(first_dir / "mathlib.scpp",
+                        "export module mathlib;\n"
+                        "namespace mathlib { export int value() { return 11; } }\n");
+        write_text_file(second_dir / "mathlib.scpp",
+                        "export module mathlib;\n"
+                        "namespace mathlib { export int value() { return 22; } }\n");
+        std::filesystem::path exe_path = std::filesystem::current_path() / "driver_import_search_dir_first_match_exe";
+        try {
+            scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
+                                        {}, /*static_link=*/false, {first_dir.string(), second_dir.string()});
+            RunResult run = run_command_capture(exe_path.string() + " 2>&1");
+            expect(run.exit_code == 11,
+                   case_name + ": expected first -I directory to win, got exit code " +
+                       std::to_string(run.exit_code));
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(first_dir / "mathlib.scpp");
+        std::filesystem::remove(second_dir / "mathlib.scpp");
+        std::filesystem::remove(exe_path);
+        std::filesystem::remove(first_dir);
+        std::filesystem::remove(second_dir);
+    }
+
     // A direct circular import (A imports B, B imports A) is rejected
     // rather than infinite-recursing.
     {
@@ -886,9 +941,93 @@ void run_cli_extension_tests() {
         std::filesystem::remove(module_path);
         std::filesystem::remove(exe_path);
         expect(result.exit_code != 0, case_name + ": expected non-zero exit");
-        expect(result.stdout_text.find("import path for module 'helper' must use the .scpp extension") !=
+        expect(result.stdout_text.find("import path for module 'helper' must use the .scpp or .scppm extension") !=
                    std::string::npos,
                case_name + ": expected import extension error, got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "cli_build_with_I_resolves_module";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_build_with_I_resolves_module.scpp";
+        std::filesystem::path module_dir = std::filesystem::current_path() / "cli_build_with_I_resolves_module_dir";
+        std::filesystem::path module_path = module_dir / "helper.scpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_build_with_I_resolves_module_exe";
+        cases_run++;
+        std::filesystem::create_directories(module_dir);
+        write_text_file(source_path, "import helper;\nint main() { return helper::value(); }\n");
+        write_text_file(module_path, "export module helper;\nnamespace helper { export int value() { return 9; } }\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() +
+                                                    " -o " + exe_path.string() + " -I " + module_dir.string() +
+                                                    " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": build should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 9,
+               case_name + ": expected exit code 9, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(module_path);
+        std::filesystem::remove(exe_path);
+        std::filesystem::remove(module_dir);
+    }
+
+    {
+        std::string case_name = "cli_import_std_works_without_flags";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_import_std_works_without_flags.scpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_import_std_works_without_flags_exe";
+        cases_run++;
+        write_text_file(source_path,
+                       "import std;\n"
+                       "int main() {\n"
+                       "    std::string s(\"hi\");\n"
+                       "    return s.length();\n"
+                       "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build " + source_path.string() + " -o " +
+                               exe_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": build should succeed without import flags, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 2,
+               case_name + ": expected exit code 2, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "cli_import_std_works_after_relocation";
+        std::filesystem::path bundle_root = std::filesystem::current_path() / "cli_import_std_works_after_relocation_bundle";
+        std::filesystem::path bundle_build_dir = bundle_root / "build";
+        std::filesystem::path bundle_stdlib_dir = bundle_root / "stdlib";
+        std::filesystem::path relocated_scpp = bundle_build_dir / "scpp";
+        std::filesystem::path source_path = bundle_root / "main.scpp";
+        std::filesystem::path exe_path = bundle_root / "app";
+        cases_run++;
+        std::filesystem::remove_all(bundle_root);
+        std::filesystem::create_directories(bundle_build_dir / "stdlib");
+        std::filesystem::copy(std::filesystem::path(SCPP_STDLIB_STD_MODULE_PATH).parent_path(), bundle_stdlib_dir,
+                              std::filesystem::copy_options::recursive);
+        std::filesystem::copy_file(SCPP_BINARY_PATH, relocated_scpp, std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::copy_file(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
+                                   bundle_build_dir / "stdlib" / "libscpp_string_wrapper.a",
+                                   std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::copy_file(SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
+                                   bundle_build_dir / "stdlib" / "libscpp_thread_wrapper.a",
+                                   std::filesystem::copy_options::overwrite_existing);
+        write_text_file(source_path,
+                        "import std;\n"
+                        "int main() {\n"
+                        "    std::string s(\"relocated\");\n"
+                        "    return s.length();\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(relocated_scpp.string() + " build " + source_path.string() + " -o " + exe_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": relocated build should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 9,
+               case_name + ": expected relocated binary output exit code 9, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(bundle_root);
     }
 
     {
