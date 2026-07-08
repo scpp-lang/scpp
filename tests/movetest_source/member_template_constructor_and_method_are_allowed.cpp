@@ -1,0 +1,13 @@
+class Sink {
+public:
+    template<typename T>
+    Sink(T&& x) { return; }
+
+    template<typename T>
+    int call(T&& x) { return 7; }
+};
+
+int main() {
+    Sink s(1);
+    return s.call(2);
+}
