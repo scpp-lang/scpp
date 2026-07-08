@@ -1,0 +1,21 @@
+template<typename Sig>
+class Holder;
+
+template<typename R, typename... Args>
+class Holder<R(Args...)> {
+public:
+    R (*fn_)(Args...);
+
+    R call(Args... args) {
+        return this.fn_(args...);
+    }
+};
+
+int add(int a, int b) { return a + b; }
+
+int main() {
+    Holder<int(int, int)> h;
+    h.fn_ = add;
+    print_int(h.call(2, 3));
+    return 0;
+}

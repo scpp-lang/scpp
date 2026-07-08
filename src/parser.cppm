@@ -189,19 +189,24 @@ private:
     // specialization's `: private Tuple<Tail...>` base-clause, see
     // ClassDef::base_pack_arg_name).
     std::unordered_map<std::string, std::vector<GenericTypeParam>> variadic_primary_template_params_;
-    // ch05 §5.14: every ordinary (non-variadic) generic class/struct's
-    // own declared template parameter list, keyed by its qualified name
-    // -- consulted at an instantiation site (parse_unqualified_type's
-    // generic-type-argument loop below) to know how many arguments are
-    // expected and, for each position, whether it is a type argument or
-    // a non-type one parsed as an expression into Type::non_type_args.
-    // Mixed ordinary templates interleaving type and non-type
-    // parameters would need the Type AST to preserve argument order
-    // rather than today's split template_args/non_type_args storage, so
-    // ordinary generic classes/structs are currently limited to an
-    // all-type or all-non-type parameter list; variadic_primary_
-    // template_params_ above already handles the separate recursive-
-    // inheritance variadic family.
+    // ch05 §5.14: every ordinary (non-variadic) generic class/struct
+    // *primary template*'s own declared parameter list, keyed by its
+    // qualified name -- consulted at an instantiation site
+    // (parse_unqualified_type's generic-type-argument loop below) to know
+    // how many arguments are expected and, for each position, whether it
+    // is a type argument or a non-type one parsed as an expression into
+    // Type::non_type_args. Ordinary partial specializations deliberately
+    // do NOT overwrite this: use sites still parse against the primary
+    // template's surface syntax, with later specialization selection left
+    // to movecheck.
+    //
+    // Mixed ordinary templates interleaving type and non-type parameters
+    // would need the Type AST to preserve argument order rather than
+    // today's split template_args/non_type_args storage, so ordinary
+    // generic classes/structs are currently limited to an all-type or
+    // all-non-type parameter list; variadic_primary_template_params_
+    // above already handles the separate recursive-inheritance variadic
+    // family.
     std::unordered_map<std::string, std::vector<GenericTypeParam>> ordinary_generic_type_template_params_;
     // ch05 §5.11: every full-header-form generic function's own declared
     // template parameter list (`template<size_t I, typename Head,
@@ -223,6 +228,7 @@ private:
     // function-pointer declarators recognize named pack parameters from
     // the enclosing type template as real pack expansions.
     std::vector<GenericTypeParam> current_class_template_params_;
+    size_t generic_template_owner_counter_ = 0;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -409,11 +415,15 @@ private:
         clone.owning_module = def.owning_module;
         clone.is_concept_witness = def.is_concept_witness;
         clone.template_params = def.template_params;
+        clone.template_owner_id = def.template_owner_id;
+        clone.is_forward_declaration = def.is_forward_declaration;
         clone.is_synthetic_check_only = def.is_synthetic_check_only;
         clone.base_class_name = def.base_class_name;
         clone.base_access = def.base_access;
         clone.is_variadic_primary_template = def.is_variadic_primary_template;
         clone.is_variadic_specialization = def.is_variadic_specialization;
+        clone.is_partial_specialization = def.is_partial_specialization;
+        clone.specialization_template_args = def.specialization_template_args;
         clone.base_pack_arg_name = def.base_pack_arg_name;
         if (def.base_non_type_arg) clone.base_non_type_arg = std::shared_ptr<Expr>(clone_expr_tree(*def.base_non_type_arg).release());
         clone.thread_movable_override = def.thread_movable_override;
@@ -1288,11 +1298,16 @@ private:
         clone.method_requires_concept = fn.method_requires_concept;
         clone.is_generic_template = fn.is_generic_template;
         clone.template_params = fn.template_params;
+        clone.generic_method_owner_id = fn.generic_method_owner_id;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
         clone.is_exported = is_reexport && fn.is_exported;
         clone.owning_module = fn.owning_module.empty() ? fallback_owning_module : fn.owning_module;
         return clone;
+    }
+
+    [[nodiscard]] std::string next_generic_template_owner_id() {
+        return "__gtpl" + std::to_string(++generic_template_owner_counter_);
     }
 
     // Merges `imported`'s exported surface into the Program currently
@@ -1343,7 +1358,7 @@ private:
                 generic_type_names_.insert(def.name);
                 if (def.is_variadic_primary_template) {
                     variadic_primary_template_params_[def.name] = def.template_params;
-                } else {
+                } else if (!def.is_partial_specialization) {
                     ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
             }
@@ -1416,7 +1431,7 @@ private:
                 generic_type_names_.insert(def.name);
                 if (def.is_variadic_primary_template) {
                     variadic_primary_template_params_[def.name] = def.template_params;
-                } else {
+                } else if (!def.is_partial_specialization) {
                     ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
             }
@@ -1517,9 +1532,30 @@ private:
                 // ch05 §5.14's phase-1 shape).
                 TokenKind after_name = peek_at(after_header + 2).kind;
                 if (after_name == TokenKind::Semicolon) {
-                    parse_variadic_primary_template_decl(program, is_exported);
+                    std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+                    size_t leading_non_type_count = 0;
+                    while (leading_non_type_count < template_params.size() &&
+                           template_params[leading_non_type_count].is_non_type) {
+                        leading_non_type_count++;
+                    }
+                    bool is_variadic_primary =
+                        template_params.size() == leading_non_type_count + 1 &&
+                        template_params.back().is_pack && !template_params.back().is_non_type;
+                    if (is_variadic_primary) {
+                        parse_variadic_primary_template_decl(program, is_exported, std::move(template_params));
+                    } else {
+                        parse_ordinary_class_template_forward_decl(program, is_exported, std::move(template_params));
+                    }
                 } else if (after_name == TokenKind::Less) {
-                    parse_variadic_specialization(program, is_exported);
+                    size_t name_offset = after_header + 1;
+                    std::string class_name = std::string(peek_at(name_offset).text);
+                    std::string qualified_class_name = qualify_name(class_name);
+                    if (variadic_primary_template_params_.contains(qualified_class_name)) {
+                        parse_variadic_specialization(program, is_exported);
+                    } else {
+                        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+                        parse_ordinary_class_partial_specialization(program, is_exported, std::move(template_params));
+                    }
                 } else {
                     std::vector<GenericTypeParam> template_params = parse_generic_type_header();
                     parse_class_def(program, is_exported, std::move(template_params));
@@ -1819,6 +1855,7 @@ private:
             ordinary_generic_type_template_params_[def.name] = template_params;
         }
         def.template_params = template_params;
+        if (is_generic) def.template_owner_id = next_generic_template_owner_id();
 
         expect(TokenKind::LBrace, "'{'");
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
@@ -2350,9 +2387,10 @@ private:
     // nothing to instantiate directly (only a specialization, ever, is
     // -- see parse_variadic_specialization/the Monomorphizer's own
     // variadic-instantiation logic).
-    void parse_variadic_primary_template_decl(Program& program, bool is_exported) {
+    void parse_variadic_primary_template_decl(Program& program, bool is_exported,
+                                              std::vector<GenericTypeParam> template_params = {}) {
         SourceLocation loc = current_loc();
-        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+        if (template_params.empty()) template_params = parse_generic_type_header();
         expect(TokenKind::KwClass, "'class'");
         std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
         std::string qualified_class_name = qualify_name(class_name);
@@ -2368,6 +2406,7 @@ private:
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
         def.template_params = template_params;
+        def.template_owner_id = next_generic_template_owner_id();
         def.is_variadic_primary_template = true;
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
         program.classes.push_back(std::move(def));
@@ -2485,6 +2524,7 @@ private:
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
         def.template_params = template_params;
+        def.template_owner_id = next_generic_template_owner_id();
         def.is_variadic_specialization = true;
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
@@ -2544,6 +2584,159 @@ private:
             if (p.is_non_type) continue;
             struct_names_.erase(p.name);
             class_names_.erase(p.name);
+        }
+    }
+
+    void parse_ordinary_class_template_forward_decl(Program& program, bool is_exported,
+                                                    std::vector<GenericTypeParam> template_params) {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwClass, "'class'");
+        ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        if (!class_attrs.scpp_tokens.empty() || class_attrs.thread_movable_if_movable_expr ||
+            class_attrs.thread_movable_if_shareable_expr) {
+            throw ParseError(loc.line, loc.column,
+                             "scpp class attributes are not supported on a bodyless template forward declaration");
+        }
+        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        std::string qualified_class_name = qualify_name(class_name);
+        expect(TokenKind::Semicolon, "';'");
+        bool saw_type = false;
+        bool saw_non_type = false;
+        for (const GenericTypeParam& param : template_params) {
+            saw_type = saw_type || !param.is_non_type;
+            saw_non_type = saw_non_type || param.is_non_type;
+        }
+        if (saw_type && saw_non_type) {
+            throw ParseError(loc.line, loc.column,
+                             "ordinary generic classes cannot yet mix type and non-type template "
+                             "parameters in one parameter list");
+        }
+        struct_names_.insert(qualified_class_name);
+        class_names_.insert(qualified_class_name);
+        generic_type_names_.insert(qualified_class_name);
+        ordinary_generic_type_template_params_[qualified_class_name] = template_params;
+
+        ClassDef def;
+        def.name = qualified_class_name;
+        def.namespace_path = namespace_stack_;
+        def.is_exported = is_exported;
+        def.template_params = std::move(template_params);
+        def.template_owner_id = next_generic_template_owner_id();
+        def.is_forward_declaration = true;
+        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        program.classes.push_back(std::move(def));
+    }
+
+    void parse_ordinary_class_partial_specialization(Program& program, bool is_exported,
+                                                     std::vector<GenericTypeParam> template_params) {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwClass, "'class'");
+        bool is_generic = !template_params.empty();
+        if (is_generic) {
+            for (const GenericTypeParam& param : template_params) {
+                if (!param.is_non_type) {
+                    struct_names_.insert(param.name);
+                    class_names_.insert(param.name);
+                }
+            }
+        }
+        ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        std::string qualified_class_name = qualify_name(class_name);
+        auto primary_it = ordinary_generic_type_template_params_.find(qualified_class_name);
+        if (primary_it == ordinary_generic_type_template_params_.end()) {
+            throw ParseError(loc.line, loc.column,
+                             "'" + qualified_class_name +
+                                 "' is not a declared ordinary generic class template -- a partial "
+                                 "specialization requires a preceding primary template declaration");
+        }
+        for (const GenericTypeParam& param : primary_it->second) {
+            if (param.is_non_type) {
+                throw ParseError(loc.line, loc.column,
+                                 "ordinary partial specialization is currently only supported for class "
+                                 "templates whose primary parameter list is all-type");
+            }
+        }
+        bool saw_non_type = false;
+        for (const GenericTypeParam& param : template_params) saw_non_type = saw_non_type || param.is_non_type;
+        if (saw_non_type) {
+            throw ParseError(loc.line, loc.column,
+                             "ordinary partial specialization is currently only supported with type template "
+                             "parameters");
+        }
+
+        std::vector<Type> specialization_args;
+        std::vector<GenericTypeParam> saved_class_template_params = current_class_template_params_;
+        current_class_template_params_ = template_params;
+        expect(TokenKind::Less, "'<'");
+        if (!check(TokenKind::Greater)) {
+            do {
+                specialization_args.push_back(parse_template_type_argument());
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::Greater, "'>'");
+        current_class_template_params_ = std::move(saved_class_template_params);
+        if (specialization_args.size() != primary_it->second.size()) {
+            throw ParseError(loc.line, loc.column,
+                             "this partial specialization must provide exactly " +
+                                 std::to_string(primary_it->second.size()) + " specialization argument(s)");
+        }
+
+        struct_names_.insert(qualified_class_name);
+        class_names_.insert(qualified_class_name);
+
+        ClassDef def;
+        def.name = qualified_class_name;
+        def.thread_movable_override = class_attrs.has("thread_movable");
+        def.thread_shareable_override = class_attrs.has("thread_shareable");
+        if (class_attrs.thread_movable_if_movable_expr || class_attrs.thread_movable_if_shareable_expr) {
+            if (!(class_attrs.thread_movable_if_movable_expr && class_attrs.thread_movable_if_shareable_expr)) {
+                throw ParseError(loc.line, loc.column,
+                                 "'[[scpp::thread_movable_if(a, b)]]' requires exactly two boolean arguments");
+            }
+            if (def.thread_movable_override || def.thread_shareable_override) {
+                throw ParseError(loc.line, loc.column,
+                                 "'[[scpp::thread_movable_if(a, b)]]' cannot be combined with bare "
+                                 "'[[scpp::thread_movable]]' or '[[scpp::thread_shareable]]' on the same class");
+            }
+            def.thread_movable_if_movable_expr = std::move(class_attrs.thread_movable_if_movable_expr);
+            def.thread_movable_if_shareable_expr = std::move(class_attrs.thread_movable_if_shareable_expr);
+        }
+        def.namespace_path = namespace_stack_;
+        def.is_exported = is_exported;
+        def.template_params = std::move(template_params);
+        def.template_owner_id = next_generic_template_owner_id();
+        def.is_partial_specialization = true;
+        def.specialization_template_args = std::move(specialization_args);
+        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+
+        if (match(TokenKind::Colon)) {
+            if (match(TokenKind::KwPublic)) {
+                def.base_access = AccessSpecifier::Public;
+            } else {
+                match(TokenKind::KwPrivate);
+                def.base_access = AccessSpecifier::Private;
+            }
+            const Token& base_tok = peek();
+            std::string base_name = parse_qualified_name();
+            if (!class_names_.contains(base_name)) {
+                throw ParseError(base_tok.line, base_tok.column,
+                                 "'" + base_name +
+                                     "' is not a declared class -- a base class must be declared before use "
+                                     "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
+            }
+            def.base_class_name = base_name;
+        }
+
+        parse_class_body_into(program, def, class_name, def.template_params);
+
+        if (is_generic) {
+            for (const GenericTypeParam& param : def.template_params) {
+                if (!param.is_non_type) {
+                    struct_names_.erase(param.name);
+                    class_names_.erase(param.name);
+                }
+            }
         }
     }
 
@@ -2633,6 +2826,7 @@ private:
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
         def.template_params = template_params;
+        if (is_generic) def.template_owner_id = next_generic_template_owner_id();
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
         // ch05 §5.14: `class Derived : public/private Base { ... };` --
@@ -2702,6 +2896,7 @@ private:
         auto finish_member_fn = [&](Function& fn) {
             fn.namespace_path = namespace_stack_;
             fn.is_exported = is_exported;
+            if (!def.template_owner_id.empty()) fn.generic_method_owner_id = def.template_owner_id;
         };
         auto enter_member_template_context = [&](const std::vector<GenericTypeParam>& member_template_params) {
             for (const GenericTypeParam& p : member_template_params) {

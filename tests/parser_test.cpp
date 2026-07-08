@@ -2250,6 +2250,43 @@ void test_function_type_template_argument_parses() {
            "function_type_template_argument_parses: expected int(int, int) function type argument");
 }
 
+void test_class_partial_specialization_on_function_type_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename Sig>\n"
+        "class Holder;\n"
+        "template<typename R, typename... Args>\n"
+        "class Holder<R(Args...)> {\n"
+        "public:\n"
+        "    R (*fn_)(Args...);\n"
+        "    R call(Args... args) { return this.fn_(args...); }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* forward = nullptr;
+    const scpp::ClassDef* partial = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name != "Holder") continue;
+        if (c.is_forward_declaration) forward = &c;
+        if (c.is_partial_specialization) partial = &c;
+    }
+    expect(forward != nullptr,
+           "class_partial_specialization_on_function_type_parses: expected primary forward declaration");
+    expect(partial != nullptr, "class_partial_specialization_on_function_type_parses: expected partial specialization");
+    expect(partial->specialization_template_args.size() == 1 &&
+               partial->specialization_template_args[0].kind == scpp::TypeKind::Function,
+           "class_partial_specialization_on_function_type_parses: expected one function-type specialization arg");
+    expect(partial->specialization_template_args[0].function_params.size() == 1 &&
+               partial->specialization_template_args[0].function_params[0].is_pack_expansion &&
+               partial->specialization_template_args[0].function_params[0].name == "Args",
+           "class_partial_specialization_on_function_type_parses: expected trailing Args... pack in function pattern");
+    const scpp::Function* call_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Holder_call" && fn.generic_method_owner_id == partial->template_owner_id) call_fn = &fn;
+    }
+    expect(call_fn != nullptr, "class_partial_specialization_on_function_type_parses: expected Holder_call");
+    expect(call_fn->params.size() == 2 && call_fn->params[1].is_parameter_pack,
+           "class_partial_specialization_on_function_type_parses: expected call's Args... parameter pack");
+}
+
 // ch05 §5.14: a method may layer its own `requires Concept<T>` clause,
 // recorded on Function::method_requires_concept -- independent of
 // whether the class's own type parameter is itself bare or constrained.
@@ -2818,6 +2855,7 @@ int main() {
     test_generic_class_named_pack_function_pointer_params_parse();
     test_class_member_templates_parse();
     test_function_type_template_argument_parses();
+    test_class_partial_specialization_on_function_type_parses();
     test_generic_class_method_requires_clause_parses();
     test_generic_struct_concept_constrained_type_param_parses();
     test_generic_struct_bare_type_param_is_rejected();
