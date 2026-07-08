@@ -1,0 +1,23 @@
+class Box {
+private:
+    int value;
+
+public:
+    Box() {
+        this->value = 7;
+        return;
+    }
+
+    int first() const {
+        return this->value;
+    }
+};
+
+int main() {
+    Box seed();
+    Box boxes[2];
+    boxes[1] = seed;
+    Box copy(boxes[1]);
+    print_int(copy.first());
+    return 0;
+}

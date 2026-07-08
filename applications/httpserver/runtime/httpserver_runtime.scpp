@@ -1,8 +1,38 @@
 export module httpserver:runtime;
 
+import std;
 import :platform;
 
 namespace httpserver {
+
+class [[scpp::thread_movable]] WorkerConfig {
+public:
+    char root_[512];
+    int port_;
+    int max_connections_;
+    bool allow_index_html_;
+    bool deny_hidden_files_;
+
+    WorkerConfig() {
+        this->root_[0] = '\0';
+        this->port_ = 0;
+        this->max_connections_ = 0;
+        this->allow_index_html_ = false;
+        this->deny_hidden_files_ = false;
+        return;
+    }
+};
+
+bool assign_worker_root(WorkerConfig& config, const char* root) {
+    int i = 0;
+    while (root[i] != '\0') {
+        if (i >= 511) return false;
+        config.root_[i] = root[i];
+        i = i + 1;
+    }
+    config.root_[i] = '\0';
+    return true;
+}
 
 void build_empty_response(Connection& conn, const char* status_line) {
     conn.response_len_ = 0;
@@ -411,7 +441,7 @@ void handle_writable(int epoll_fd, Connection connections[64], int slot) {
     return;
 }
 
-export int run_server(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files) {
+int run_worker_loop(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files) {
     PlatformEvent events[64];
     Connection connections[64];
     if (max_connections > 64) max_connections = 64;
@@ -463,6 +493,39 @@ export int run_server(const char* root, int port, int max_connections, bool allo
         }
     }
     return 0;
+}
+
+export int run_server(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files,
+                      int worker_count) {
+    if (worker_count <= 1) {
+        return run_worker_loop(root, port, max_connections, allow_index_html, deny_hidden_files);
+    }
+    if (worker_count > 8) worker_count = 8;
+
+    WorkerConfig worker_configs[8];
+    int worker_i = 0;
+    while (worker_i < worker_count) {
+        if (!assign_worker_root(worker_configs[worker_i], root)) return 1;
+        worker_configs[worker_i].port_ = port;
+        worker_configs[worker_i].max_connections_ = max_connections;
+        worker_configs[worker_i].allow_index_html_ = allow_index_html;
+        worker_configs[worker_i].deny_hidden_files_ = deny_hidden_files;
+        worker_i = worker_i + 1;
+    }
+
+    int spawn_i = 1;
+    while (spawn_i < worker_count) {
+        WorkerConfig config(worker_configs[spawn_i]);
+        std::thread worker([config]() {
+            run_worker_loop(config.root_, config.port_, config.max_connections_, config.allow_index_html_,
+                            config.deny_hidden_files_);
+        });
+        worker.detach();
+        spawn_i = spawn_i + 1;
+    }
+
+    return run_worker_loop(worker_configs[0].root_, worker_configs[0].port_, worker_configs[0].max_connections_,
+                           worker_configs[0].allow_index_html_, worker_configs[0].deny_hidden_files_);
 }
 
 } // namespace httpserver

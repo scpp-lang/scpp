@@ -513,6 +513,13 @@ private:
         return result;
     }
 
+    void reject_packed_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
+        if (!attrs.has("packed")) return;
+        throw ParseError(attr_start_tok.line, attr_start_tok.column,
+                         "'[[scpp::packed]]' cannot appertain to " + std::string(what) +
+                             " -- only to a struct or union declaration (spec §9.2)");
+    }
+
     // Checks (without consuming) for the 3-token sequence `std :: <member>`.
     // Only the still-builtin spellings (`std::move`, plus the parser-only
     // `std::span` type form) use this helper; ordinary library names now
@@ -1404,7 +1411,9 @@ private:
     Type parse_function_pointer_declarator(Type return_type, std::string& out_name) {
         expect(TokenKind::LParen, "'('");
         expect(TokenKind::Star, "'*'");
+        const Token& attr_start_tok = peek();
         ParsedAttributes ptr_attrs = parse_attribute_specifier_seq();
+        reject_packed_attribute(ptr_attrs, attr_start_tok, "a function-pointer declarator");
         out_name = std::string(expect(TokenKind::Identifier, "function pointer name").text);
         expect(TokenKind::RParen, "')'");
         Type type;
@@ -1663,12 +1672,13 @@ private:
     // StructDef/ClassDef/Function -- bodies included -- out of
     // `partition`, since a partition compiles *together* with whatever
     // imports it, as one combined unit (ch11 §11.4's own framing).
-    // `owning_module` is left empty on every merged declaration (they
-    // become this Program's own local declarations, not a foreign
-    // module's), which is also exactly why codegen's mangling (keyed off
-    // owning_module, falling back to Program::module_name) still produces
-    // the right module-qualified symbol for anything the whole merged
-    // Program eventually exports.
+    // A partition's own local declarations keep their default-empty
+    // `owning_module` (so once merged they become this Program's own
+    // local declarations), but anything the partition itself imported
+    // from some *other* module must keep that pre-existing
+    // `owning_module` exactly as-is -- otherwise codegen would later
+    // "forget" those declarations are foreign and emit plain local symbol
+    // references instead of the imported module's real mangled names.
     //
     // `is_reexport` (true for `export import :part;`, false for a plain
     // `import :part;`) controls whether the partition's own individual
@@ -1697,7 +1707,6 @@ private:
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
             }
             def.is_exported = is_reexport && def.is_exported;
-            def.owning_module.clear();
             program.structs.push_back(std::move(def));
         }
         for (ClassDef& def : partition.classes) {
@@ -1712,12 +1721,10 @@ private:
                 }
             }
             def.is_exported = is_reexport && def.is_exported;
-            def.owning_module.clear();
             program.classes.push_back(std::move(def));
         }
         for (Function& fn : partition.functions) {
             fn.is_exported = is_reexport && fn.is_exported;
-            fn.owning_module.clear();
             program.functions.push_back(std::move(fn));
         }
     }
@@ -1769,6 +1776,7 @@ private:
         const Token& attr_start_tok = peek();
         ParsedAttributes leading_attrs = parse_attribute_specifier_seq();
         bool requested_unsafe = leading_attrs.has("unsafe");
+        bool requested_packed = leading_attrs.has("packed");
         auto reject_unsafe_if_requested = [&](const char* what) {
             if (requested_unsafe) {
                 throw ParseError(attr_start_tok.line, attr_start_tok.column,
@@ -1793,6 +1801,10 @@ private:
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwClass)) {
             reject_unsafe_if_requested("a 'class' declaration");
+            if (requested_packed) {
+                throw ParseError(attr_start_tok.line, attr_start_tok.column,
+                                 "'[[scpp::packed]]' is only supported on struct/union declarations");
+            }
             parse_class_def(program, is_exported);
         } else if (check(TokenKind::KwTemplate)) {
             // ch05 §5.11/§5.14: `template<...>` introduces either a
@@ -1805,6 +1817,7 @@ private:
             TokenKind after_header_kind = peek_at(after_header).kind;
             if (after_header_kind == TokenKind::KwClass) {
                 reject_unsafe_if_requested("a 'class' declaration");
+                reject_packed_attribute(leading_attrs, attr_start_tok, "a 'class' declaration");
                 // A class name is immediately followed by `;` (a
                 // variadic primary template's own bodyless forward
                 // declaration, e.g. `template<typename... Ts> class
@@ -1875,8 +1888,10 @@ private:
                                   "generic unions are not supported in this version");
             } else if (after_header_kind == TokenKind::KwConcept) {
                 reject_unsafe_if_requested("a 'concept' declaration");
+                reject_packed_attribute(leading_attrs, attr_start_tok, "a 'concept' declaration");
                 parse_concept_def(program, is_exported);
             } else {
+                reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
                 // ch05 §5.11: neither `class`/`struct` (a generic type,
                 // handled above) nor `concept` -- the only remaining
                 // legal shape is a full-header-form generic *function*
@@ -1886,6 +1901,7 @@ private:
                 parse_generic_function_def(program, is_exported, requested_unsafe);
             }
         } else {
+            reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
             parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe);
         }
     }
@@ -2260,7 +2276,9 @@ private:
                 // check_thread_safety_constraint), only meaningful when
                 // this parameter's own type actually depends on one of
                 // the enclosing function's own template parameters.
+                const Token& param_attr_start_tok = peek();
                 ParsedAttributes param_attrs = parse_attribute_specifier_seq();
+                reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration");
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 params.push_back(std::move(param));
@@ -3300,6 +3318,7 @@ private:
             // §1.3 (1)).
             const Token& member_attr_start_tok = peek();
             ParsedAttributes member_attrs = parse_attribute_specifier_seq();
+            reject_packed_attribute(member_attrs, member_attr_start_tok, "a class member declaration");
             bool member_requested_unsafe = member_attrs.has("unsafe");
             if (match(TokenKind::Tilde)) {
                 if (member_is_template) {
@@ -3596,7 +3615,9 @@ private:
                 // parsing loop parse_function itself uses (top-level
                 // ordinary/generic/extern functions), not shared with
                 // parse_param_list (class methods/lambdas).
+                const Token& param_attr_start_tok = peek();
                 ParsedAttributes param_attrs = parse_attribute_specifier_seq();
+                reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration");
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 fn.params.push_back(std::move(param));
@@ -3667,7 +3688,9 @@ private:
         // effect at all, since only a compound-statement is a
         // recognized placement for `scpp::unsafe` (ch01 §1.3).
         if (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
+            const Token& attr_start_tok = peek();
             ParsedAttributes attrs = parse_attribute_specifier_seq();
+            reject_packed_attribute(attrs, attr_start_tok, "a statement");
             StmtPtr stmt = parse_statement();
             if (attrs.has("unsafe") && stmt->kind == StmtKind::Block) stmt->is_unsafe = true;
             return stmt;

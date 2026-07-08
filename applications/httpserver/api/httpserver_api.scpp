@@ -9,6 +9,7 @@ private:
     char root_[512];
     int port_;
     int max_connections_;
+    int worker_count_;
     bool allow_index_html_;
     bool deny_hidden_files_;
     bool has_error_;
@@ -32,6 +33,7 @@ public:
         this->root_[1] = '\0';
         this->port_ = 18080;
         this->max_connections_ = 32;
+        this->worker_count_ = 1;
         this->allow_index_html_ = true;
         this->deny_hidden_files_ = true;
         this->has_error_ = false;
@@ -53,6 +55,15 @@ public:
             return;
         }
         this->max_connections_ = max_connections;
+        return;
+    }
+
+    void set_worker_count(int worker_count) {
+        if (worker_count <= 0 || worker_count > 8) {
+            this->has_error_ = true;
+            return;
+        }
+        this->worker_count_ = worker_count;
         return;
     }
 
@@ -90,8 +101,11 @@ public:
         if (this->max_connections_ <= 0 || this->max_connections_ > 64) {
             return 1;
         }
+        if (this->worker_count_ <= 0 || this->worker_count_ > 8) {
+            return 1;
+        }
         return run_server(this->root_, this->port_, this->max_connections_, this->allow_index_html_,
-                          this->deny_hidden_files_);
+                          this->deny_hidden_files_, this->worker_count_);
     }
 };
 

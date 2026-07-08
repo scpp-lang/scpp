@@ -627,6 +627,19 @@ void test_packed_struct_and_union_attributes_parse() {
     expect(program.structs[1].is_union, "packed_struct_and_union_attributes_parse: Bits should be a union");
 }
 
+void test_packed_attribute_on_function_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("[[scpp::packed]]\n"
+                    "int main() { return 0; }\n");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(std::string(e.what()).find("only to a struct or union declaration") != std::string::npos,
+               "packed_attribute_on_function_is_rejected: diagnostic should mention struct/union-only support");
+    }
+    expect(threw, "packed_attribute_on_function_is_rejected: expected a ParseError");
+}
+
 void test_struct_variable_and_member_access() {
     scpp::Program program = scpp::parse(
         "struct Point { int x; int y; };"
@@ -2948,6 +2961,7 @@ int main() {
     test_struct_declaration();
     test_union_declaration();
     test_packed_struct_and_union_attributes_parse();
+    test_packed_attribute_on_function_is_rejected();
     test_struct_variable_and_member_access();
     test_nested_member_access();
     test_pointer_field_type();

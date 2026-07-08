@@ -804,7 +804,8 @@ void maybe_instantiate_generic_constructor_overloads(const std::string& class_na
 // (defined well before is_bare_same_type_copy_source's own definition,
 // near is_move_construction_shape) needs it for the Member-target copy-
 // assignment eligibility check.
-[[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body);
+[[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body,
+                                                 const Signatures& signatures);
 [[nodiscard]] bool is_named_class_type(const Type& type, const Body& body) {
     if (type.kind != TypeKind::Named || body.program == nullptr) return false;
     for (const ClassDef& def : body.program->classes) {
@@ -813,9 +814,10 @@ void maybe_instantiate_generic_constructor_overloads(const std::string& class_na
     return false;
 }
 
-[[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type, const Body& body) {
+[[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type, const Body& body,
+                                                            const Signatures& signatures) {
     return body.program != nullptr && is_named_class_type(target_type, body) &&
-           is_bare_same_type_copy_source(expr, target_type, body) &&
+           is_bare_same_type_copy_source(expr, target_type, body, signatures) &&
            is_copy_constructible(target_type.name, *body.program);
 }
 
@@ -859,7 +861,7 @@ void maybe_instantiate_generic_constructor_overloads(const std::string& class_na
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
     if (!arg_type.has_value() || !types_equal(*arg_type, param_type)) return false;
     if (is_named_class_type(param_type, body)) {
-        return is_copyable_class_lvalue_boundary_source(arg, param_type, body) ||
+        return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
                produces_rvalue_of_type(arg, param_type, body, signatures);
     }
     return true;
@@ -2592,7 +2594,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             bool class_value_param =
                 sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
-                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body);
+                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             if (report_errors && class_value_param && !copyable_lvalue_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
@@ -2708,7 +2710,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             bool class_value_param =
                 sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
-                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body);
+                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             if (report_errors && class_value_param && !copyable_lvalue_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
@@ -2755,7 +2757,7 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
     auto apply_by_value_capture_source = [&](const Expr& source, const Type& source_type,
                                              const std::string& capture_display) {
         if (is_named_class_type(source_type, body)) {
-            bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body);
+            bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body, signatures);
             bool is_rvalue_source = produces_rvalue_of_type(source, source_type, body, signatures);
             if (report_errors) {
                 if (is_copy_source) {
@@ -3016,7 +3018,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     apply_expr(*expr.args[0], /*is_move_target_context=*/true, state, body, signatures, report_errors);
                 } else if (expr.args.size() == 1 &&
                            body.program != nullptr && !has_user_declared_copy_ctor(expr.type.name, *body.program) &&
-                           is_copyable_class_lvalue_boundary_source(*expr.args[0], expr.type, body)) {
+                           is_copyable_class_lvalue_boundary_source(*expr.args[0], expr.type, body, signatures)) {
                     apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors);
                 } else {
                     check_constructor_arguments(expr.type.name, expr.args, state, body, signatures, report_errors);
@@ -3119,7 +3121,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 // specifically, previously a real, unchecked gap -- see
                 // is_bare_same_type_copy_source's own comment).
                 if (report_errors && target_class_type.has_value() &&
-                    is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body) &&
+                    is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body, signatures) &&
                     (state.classes_with_copy_assign == nullptr ||
                      !state.classes_with_copy_assign->contains(target_class_type->name))) {
                     throw DataflowError("class '" + target_class_type->name +
@@ -3416,20 +3418,31 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
     return type_it != body.local_types.end() && types_equal(type_it->second, constructed_type);
 }
 
-// spec §6.5: true exactly when `expr` is a bare (non-move) plain
-// variable of the exact same class type as `target_type` -- the shape
-// spec §6.5's own worked example uses for both copy construction
-// (`Foo b = a;`) and copy assignment (`b = a;`). Scoped to exactly this
-// one shape (a plain Identifier, not a Member/Subscript/Call chain) --
-// the same narrow, deliberate scoping is_move_construction_shape above
-// uses for its own single-argument std::move recognition.
-[[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body) {
-    if (expr.kind != ExprKind::Identifier) return false;
-    auto type_it = body.local_types.find(expr.name);
-    if (type_it == body.local_types.end()) return false;
-    if (types_equal(type_it->second, target_type)) return true;
-    return type_it->second.kind == TypeKind::Reference && !type_it->second.is_rvalue_ref && type_it->second.pointee &&
-           types_equal(*type_it->second.pointee, target_type);
+[[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr) {
+    switch (expr.kind) {
+        case ExprKind::Identifier:
+            return true;
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            return expr.lhs != nullptr && is_lvalue_copy_source_shape(*expr.lhs);
+        default:
+            return false;
+    }
+}
+
+// spec §6.5: true exactly when `expr` is a bare (non-move) lvalue of the
+// exact same class type as `target_type`. This includes the simple
+// variable form from the spec's own examples (`Foo b = a;`) plus other
+// addressable lvalues like `array[i]` and `obj.member`, all of which can
+// feed a copy constructor / by-value class boundary without first moving.
+[[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body,
+                                                 const Signatures& signatures) {
+    if (!is_lvalue_copy_source_shape(expr)) return false;
+    std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
+    if (!source_type.has_value()) return false;
+    if (types_equal(*source_type, target_type)) return true;
+    return source_type->kind == TypeKind::Reference && !source_type->is_rvalue_ref && source_type->pointee &&
+           types_equal(*source_type->pointee, target_type);
 }
 
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
@@ -3453,7 +3466,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                                report_errors);
                 } else if (stmt.ctor_args->size() == 1 &&
                            body.program != nullptr && !has_user_declared_copy_ctor(stmt.type.name, *body.program) &&
-                           is_copyable_class_lvalue_boundary_source(*(*stmt.ctor_args)[0], stmt.type, body)) {
+                           is_copyable_class_lvalue_boundary_source(*(*stmt.ctor_args)[0], stmt.type, body, signatures)) {
                     apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
                                report_errors);
                 } else {
@@ -3603,7 +3616,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // (spec §6.5's own note) -- no MovedOut transition for
                 // it, so apply_expr is called with is_move_target_context
                 // irrelevant here (there is no std::move to license).
-                if (is_bare_same_type_copy_source(*stmt.expr, type_it->second, body) &&
+                if (is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures) &&
                     state.locals.contains(stmt.local)) {
                     if (report_errors) {
                         if (state.classes_with_copy_assign == nullptr ||
@@ -3670,7 +3683,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     // *any* expression shape at all (a real gap, closed
                     // as part of implementing this feature).
                     if (report_errors) {
-                        if (!is_bare_same_type_copy_source(*stmt.expr, type_it->second, body)) {
+                        if (!is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures)) {
                             throw DataflowError(
                                 "class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                     "' can only be initialized via constructor-call syntax ('" +
@@ -3819,7 +3832,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             }
             bool return_is_class_value = is_named_class_type(fn.return_type, body);
             bool copyable_lvalue_source =
-                return_is_class_value && is_copyable_class_lvalue_boundary_source(*term.return_value, fn.return_type, body);
+                return_is_class_value && is_copyable_class_lvalue_boundary_source(*term.return_value, fn.return_type, body, signatures);
             apply_expr(*term.return_value, return_is_class_value && !copyable_lvalue_source, state, body, signatures,
                        /*report_errors=*/true);
             if (return_is_class_value && !copyable_lvalue_source &&
