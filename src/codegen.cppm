@@ -593,13 +593,25 @@ private:
         return false;
     }
 
-    [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type) const {
-        if (expr.kind != ExprKind::Identifier) return false;
-        auto it = locals_.find(expr.name);
-        if (it == locals_.end()) return false;
-        if (types_equal(it->second.type, target_type)) return true;
-        return it->second.type.kind == TypeKind::Reference && !it->second.type.is_rvalue_ref &&
-               it->second.type.pointee != nullptr && types_equal(*it->second.type.pointee, target_type);
+    [[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr) {
+        switch (expr.kind) {
+            case ExprKind::Identifier:
+                return true;
+            case ExprKind::Member:
+            case ExprKind::Subscript:
+                return expr.lhs != nullptr && is_lvalue_copy_source_shape(*expr.lhs);
+            default:
+                return false;
+        }
+    }
+
+    [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type) {
+        if (!is_lvalue_copy_source_shape(expr)) return false;
+        std::optional<Type> expr_type = infer_type(expr);
+        if (!expr_type.has_value()) return false;
+        if (types_equal(*expr_type, target_type)) return true;
+        return expr_type->kind == TypeKind::Reference && !expr_type->is_rvalue_ref &&
+               expr_type->pointee != nullptr && types_equal(*expr_type->pointee, target_type);
     }
 
     // Whether `arg` is a legitimate argument for a candidate overload's

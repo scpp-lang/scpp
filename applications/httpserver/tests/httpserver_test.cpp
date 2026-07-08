@@ -20,6 +20,27 @@
 #ifndef SCPP_HTTPSERVER_MODULE_PATH
 #error "SCPP_HTTPSERVER_MODULE_PATH must be defined"
 #endif
+#ifndef SCPP_STDLIB_STD_MODULE_PATH
+#error "SCPP_STDLIB_STD_MODULE_PATH must be defined"
+#endif
+#ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
+#error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined"
+#endif
+#ifndef SCPP_STDLIB_STD_MEMORY_MODULE_PATH
+#error "SCPP_STDLIB_STD_MEMORY_MODULE_PATH must be defined"
+#endif
+#ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
+#error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined"
+#endif
+#ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
+#error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined"
+#endif
+#ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined"
+#endif
+#ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined"
+#endif
 #ifndef SCPP_HTTPSERVER_TESTDATA_DIR
 #error "SCPP_HTTPSERVER_TESTDATA_DIR must be defined"
 #endif
@@ -87,6 +108,7 @@ std::filesystem::path build_server_binary(const std::filesystem::path& root, int
         << "    builder.mount(\"/\", \"" << escape_c_string(root.string()) << "\");\n"
         << "    builder.set_port(" << port << ");\n"
         << "    builder.set_max_connections(32);\n"
+        << "    builder.set_worker_count(2);\n"
         << "    builder.allow_index_html(true);\n"
         << "    builder.deny_hidden_files(true);\n"
         << "    return builder.serve();\n"
@@ -96,7 +118,14 @@ std::filesystem::path build_server_binary(const std::filesystem::path& root, int
     std::ostringstream cmd;
     cmd << SCPP_BINARY_PATH << " build " << source.string()
         << " -o " << binary.string()
-        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH;
+        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH
+        << " --import std=" << SCPP_STDLIB_STD_MODULE_PATH
+        << " --import std:string=" << SCPP_STDLIB_STD_STRING_MODULE_PATH
+        << " --import std:memory=" << SCPP_STDLIB_STD_MEMORY_MODULE_PATH
+        << " --import std:functional=" << SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
+        << " --import std:thread=" << SCPP_STDLIB_STD_THREAD_MODULE_PATH
+        << " --link " << SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
+        << " --link " << SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH;
     int rc = std::system(cmd.str().c_str());
     expect(rc == 0, "generated httpserver app compiles");
     return binary;
