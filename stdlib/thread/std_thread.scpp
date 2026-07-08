@@ -1,0 +1,142 @@
+export module std:thread;
+
+extern "C" {
+    void* scpp_thread_spawn(void (*trampoline)(void*), void* arg);
+    void scpp_thread_join_and_delete(void* handle);
+    void scpp_thread_detach_and_delete(void* handle);
+}
+
+namespace std {
+
+void* __thread_spawn(void (*trampoline)(void*), void* arg) {
+    [[scpp::unsafe]] {
+        return scpp_thread_spawn(trampoline, arg);
+    }
+}
+
+void __thread_join_and_delete(void* handle) {
+    [[scpp::unsafe]] {
+        scpp_thread_join_and_delete(handle);
+    }
+    return;
+}
+
+void __thread_detach_and_delete(void* handle) {
+    [[scpp::unsafe]] {
+        scpp_thread_detach_and_delete(handle);
+    }
+    return;
+}
+
+export template<typename F>
+void __thread_run_callable(void* erased) {
+    [[scpp::unsafe]] {
+        F* typed = static_cast<F*>(erased);
+        F& callable = *typed;
+        callable();
+        delete typed;
+    }
+    return;
+}
+
+export class [[scpp::thread_movable]] thread {
+private:
+    void* handle_;
+    bool joinable_;
+
+    void spawn_erased(void (*trampoline)(void*), void* arg) {
+        [[scpp::unsafe]] {
+            this->handle_ = std::__thread_spawn(trampoline, arg);
+        }
+        return;
+    }
+
+public:
+    template<typename F>
+    thread(F target [[scpp::thread_movable]]) {
+        [[scpp::unsafe]] {
+            this->spawn_erased(&std::__thread_run_callable<F>, static_cast<void*>(new F(std::move(target))));
+        }
+        this->joinable_ = true;
+        return;
+    }
+
+    ~thread() {
+        if (this->joinable_) {
+            std::__thread_detach_and_delete(this->handle_);
+        }
+        return;
+    }
+
+    void join() {
+        if (this->joinable_) {
+            std::__thread_join_and_delete(this->handle_);
+            this->joinable_ = false;
+        }
+        return;
+    }
+
+    void detach() {
+        if (this->joinable_) {
+            std::__thread_detach_and_delete(this->handle_);
+            this->joinable_ = false;
+        }
+        return;
+    }
+
+    bool joinable() const {
+        return this->joinable_;
+    }
+};
+
+export class [[scpp::thread_movable]] jthread {
+private:
+    void* handle_;
+    bool joinable_;
+
+    void spawn_erased(void (*trampoline)(void*), void* arg) {
+        [[scpp::unsafe]] {
+            this->handle_ = std::__thread_spawn(trampoline, arg);
+        }
+        return;
+    }
+
+public:
+    template<typename F>
+    jthread(F target [[scpp::thread_movable]]) {
+        [[scpp::unsafe]] {
+            this->spawn_erased(&std::__thread_run_callable<F>, static_cast<void*>(new F(std::move(target))));
+        }
+        this->joinable_ = true;
+        return;
+    }
+
+    ~jthread() {
+        if (this->joinable_) {
+            std::__thread_join_and_delete(this->handle_);
+        }
+        return;
+    }
+
+    void join() {
+        if (this->joinable_) {
+            std::__thread_join_and_delete(this->handle_);
+            this->joinable_ = false;
+        }
+        return;
+    }
+
+    void detach() {
+        if (this->joinable_) {
+            std::__thread_detach_and_delete(this->handle_);
+            this->joinable_ = false;
+        }
+        return;
+    }
+
+    bool joinable() const {
+        return this->joinable_;
+    }
+};
+
+} // namespace std

@@ -2877,7 +2877,16 @@ private:
     // (VarDecl's own check) -- a destructor is optional, a constructor
     // call always names one explicitly.
     llvm::Function* find_destructor(const std::string& class_name) {
-        return module_->getFunction(class_name + "_delete");
+        for (const Function& fn : program_->functions) {
+            if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
+            const Type& this_param = fn.params[0].type;
+            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+                continue;
+            }
+            return module_->getFunction(overload_names_.at(&fn));
+        }
+        return nullptr;
     }
 
     // spec §6.5: codegen's own counterpart to movecheck's identically-
@@ -2888,9 +2897,13 @@ private:
     // cross-module utility), since codegen has direct Program access
     // (`program_`) rather than movecheck's Body-only architecture.
     [[nodiscard]] const Function* find_user_declared_copy_ctor_ast(const std::string& class_name) {
-        std::string ctor_name = class_name + "_new";
         for (const Function& fn : program_->functions) {
-            if (fn.name != ctor_name || fn.params.size() != 2) continue;
+            if (!fn.name.ends_with("_new") || fn.params.size() != 2) continue;
+            const Type& this_param = fn.params[0].type;
+            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+                continue;
+            }
             const Type& p = fn.params[1].type;
             if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
                 p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
@@ -2901,9 +2914,13 @@ private:
     }
 
     [[nodiscard]] const Function* find_user_declared_copy_assign_ast(const std::string& class_name) {
-        std::string op_name = class_name + "_operator_assign";
         for (const Function& fn : program_->functions) {
-            if (fn.name != op_name || fn.params.size() != 2) continue;
+            if (!fn.name.ends_with("_operator_assign") || fn.params.size() != 2) continue;
+            const Type& this_param = fn.params[0].type;
+            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+                continue;
+            }
             const Type& p = fn.params[1].type;
             if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
                 p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {

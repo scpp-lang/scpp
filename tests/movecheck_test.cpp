@@ -30,6 +30,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH
 #error "SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
+#error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined by the build"
+#endif
 
 namespace {
 
@@ -90,6 +93,8 @@ private:
         static const std::string std_functional_module = SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH;
         if (name == "std:memory") return &std_memory_module;
         if (name == "std:functional") return &std_functional_module;
+        static const std::string std_thread_module = SCPP_STDLIB_STD_THREAD_MODULE_PATH;
+        if (name == "std:thread") return &std_thread_module;
         return nullptr;
     }
 
