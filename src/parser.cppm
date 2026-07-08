@@ -189,18 +189,20 @@ private:
     // specialization's `: private Tuple<Tail...>` base-clause, see
     // ClassDef::base_pack_arg_name).
     std::unordered_map<std::string, std::vector<GenericTypeParam>> variadic_primary_template_params_;
-    // ch05 §5.14: an ordinary (non-variadic, "phase-1") generic class/
-    // struct's own single template parameter, keyed by its qualified
-    // name -- consulted at an instantiation site (parse_unqualified_
-    // type's identical generic-type-argument loop below) to know
-    // whether that one argument is a type (the overwhelmingly common
-    // case, parsed via parse_type as always) or a non-type one (`Name<42>`,
-    // parsed as an expression into Type::non_type_args instead) --
-    // variadic_primary_template_params_ above already tracks this same
-    // fact for a variadic primary template's own (possibly multiple,
-    // always-leading) non-type parameters; this is the phase-1
-    // counterpart; for a phase-1 generic, at most one entry.
-    std::unordered_map<std::string, GenericTypeParam> phase1_generic_type_single_param_;
+    // ch05 §5.14: every ordinary (non-variadic) generic class/struct's
+    // own declared template parameter list, keyed by its qualified name
+    // -- consulted at an instantiation site (parse_unqualified_type's
+    // generic-type-argument loop below) to know how many arguments are
+    // expected and, for each position, whether it is a type argument or
+    // a non-type one parsed as an expression into Type::non_type_args.
+    // Mixed ordinary templates interleaving type and non-type
+    // parameters would need the Type AST to preserve argument order
+    // rather than today's split template_args/non_type_args storage, so
+    // ordinary generic classes/structs are currently limited to an
+    // all-type or all-non-type parameter list; variadic_primary_
+    // template_params_ above already handles the separate recursive-
+    // inheritance variadic family.
+    std::unordered_map<std::string, std::vector<GenericTypeParam>> ordinary_generic_type_template_params_;
     // ch05 §5.11: every full-header-form generic function's own declared
     // template parameter list (`template<size_t I, typename Head,
     // typename... Tail> Head& get(...)`), keyed by its qualified name --
@@ -798,6 +800,9 @@ private:
             const Token& name_tok = peek();
             type.name = parse_qualified_name();
             bool is_variadic = variadic_primary_template_params_.contains(type.name);
+            const std::vector<GenericTypeParam>* ordinary_params = nullptr;
+            auto ordinary_it = ordinary_generic_type_template_params_.find(type.name);
+            if (ordinary_it != ordinary_generic_type_template_params_.end()) ordinary_params = &ordinary_it->second;
             size_t leading_non_type_count = 0;
             if (is_variadic) {
                 for (const GenericTypeParam& p : variadic_primary_template_params_[type.name]) {
@@ -805,27 +810,17 @@ private:
                     leading_non_type_count++;
                 }
             }
-            // ch05 §5.14: a phase-1 (non-variadic) generic type whose
-            // sole parameter is itself a non-type one (`template<int N>
-            // class FixedValue { ... };`, real C++ syntax verbatim) --
-            // `leading_non_type_count` (checked identically to the
-            // variadic case just above) becomes 1 instead of the
-            // ordinary 0, so the single-argument loop below parses `42`
-            // in `FixedValue<42>` as a non-type expression instead of
-            // unconditionally attempting parse_type() on it (which would
-            // otherwise fail outright -- a non-type argument is never a
-            // type name).
-            auto phase1_it = phase1_generic_type_single_param_.find(type.name);
-            if (phase1_it != phase1_generic_type_single_param_.end() && phase1_it->second.is_non_type) {
-                leading_non_type_count = 1;
-            }
             expect(TokenKind::Less, "'<'");
             size_t arg_index = 0;
             if (!check(TokenKind::Greater)) {
                 do {
-                    if (arg_index < leading_non_type_count) {
+                    bool parse_non_type_arg =
+                        is_variadic ? arg_index < leading_non_type_count
+                                    : (ordinary_params != nullptr && arg_index < ordinary_params->size() &&
+                                       (*ordinary_params)[arg_index].is_non_type);
+                    if (parse_non_type_arg) {
                         type.non_type_args.push_back(std::shared_ptr<Expr>(parse_additive().release()));
-                    } else if (check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
+                    } else if (is_variadic && check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
                         Type spread;
                         spread.kind = TypeKind::Named;
                         spread.name = std::string(advance().text);
@@ -839,20 +834,17 @@ private:
                 } while (match(TokenKind::Comma));
             }
             expect(TokenKind::Greater, "'>'");
-            // A phase-1 generic type's sole argument lands in exactly
-            // one of template_args/non_type_args, never split across
-            // both -- check whichever one this instantiation actually
-            // used.
-            bool phase1_non_type = phase1_it != phase1_generic_type_single_param_.end() && phase1_it->second.is_non_type;
-            if (!is_variadic && !phase1_non_type && type.template_args.size() != 1) {
-                throw ParseError(name_tok.line, name_tok.column,
-                                  "'" + type.name + "' is an ordinary generic type and takes exactly one type "
-                                  "argument (ch05 §5.14)");
-            }
-            if (phase1_non_type && type.non_type_args.size() != 1) {
-                throw ParseError(name_tok.line, name_tok.column,
-                                  "'" + type.name + "' is an ordinary generic type and takes exactly one "
-                                  "non-type argument (ch05 §5.14)");
+            if (!is_variadic && ordinary_params != nullptr) {
+                size_t expected_non_type_args = 0;
+                for (const GenericTypeParam& p : *ordinary_params) {
+                    if (p.is_non_type) expected_non_type_args++;
+                }
+                size_t expected_type_args = ordinary_params->size() - expected_non_type_args;
+                if (type.template_args.size() != expected_type_args || type.non_type_args.size() != expected_non_type_args) {
+                    throw ParseError(name_tok.line, name_tok.column,
+                                      "'" + type.name + "' takes exactly " + std::to_string(ordinary_params->size()) +
+                                          " template argument(s) in this order (ch05 §5.14)");
+                }
             }
         } else if (tok.kind == TokenKind::Identifier && struct_names_.contains(peek_qualified_name())) {
             type.name = parse_qualified_name();
@@ -1295,9 +1287,7 @@ private:
             struct_names_.insert(def.name);
             if (!def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
-                if (def.template_params.size() == 1) {
-                    phase1_generic_type_single_param_[def.name] = def.template_params[0];
-                }
+                ordinary_generic_type_template_params_[def.name] = def.template_params;
             }
             StructDef clone = def;
             if (clone.owning_module.empty()) clone.owning_module = imported_name;
@@ -1312,8 +1302,8 @@ private:
                 generic_type_names_.insert(def.name);
                 if (def.is_variadic_primary_template) {
                     variadic_primary_template_params_[def.name] = def.template_params;
-                } else if (def.template_params.size() == 1) {
-                    phase1_generic_type_single_param_[def.name] = def.template_params[0];
+                } else {
+                    ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
             }
             ClassDef clone = clone_class_def(def);
@@ -1370,6 +1360,10 @@ private:
         }
         for (StructDef& def : partition.structs) {
             struct_names_.insert(def.name);
+            if (!def.template_params.empty()) {
+                generic_type_names_.insert(def.name);
+                ordinary_generic_type_template_params_[def.name] = def.template_params;
+            }
             def.is_exported = is_reexport && def.is_exported;
             def.owning_module.clear();
             program.structs.push_back(std::move(def));
@@ -1377,6 +1371,14 @@ private:
         for (ClassDef& def : partition.classes) {
             struct_names_.insert(def.name);
             class_names_.insert(def.name);
+            if (!def.template_params.empty() || def.is_variadic_primary_template) {
+                generic_type_names_.insert(def.name);
+                if (def.is_variadic_primary_template) {
+                    variadic_primary_template_params_[def.name] = def.template_params;
+                } else {
+                    ordinary_generic_type_template_params_[def.name] = def.template_params;
+                }
+            }
             def.is_exported = is_reexport && def.is_exported;
             def.owning_module.clear();
             program.classes.push_back(std::move(def));
@@ -1746,19 +1748,34 @@ private:
         struct_names_.insert(def.name);
         bool is_generic = !template_params.empty();
         if (is_generic) {
-            if (template_params[0].concept_name.empty()) {
+            bool saw_type = false;
+            bool saw_non_type = false;
+            for (const GenericTypeParam& param : template_params) {
+                saw_type = saw_type || !param.is_non_type;
+                saw_non_type = saw_non_type || param.is_non_type;
+                if (!param.is_non_type && param.concept_name.empty()) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                      "a generic struct's own type parameter '" + param.name +
+                                          "' cannot be bare -- struct field triviality (ch04 §4.1) is a "
+                                          "whole-type property, so it must be constrained by a concept at the "
+                                          "struct itself (ch05 §5.14): write 'template<Concept " + param.name +
+                                          "> struct " + bare_name +
+                                          "' instead, or use 'class' if per-method constraints are enough");
+                }
+                if (!param.is_non_type) {
+                    struct_names_.insert(param.name);
+                    class_names_.insert(param.name);
+                }
+            }
+            if (saw_type && saw_non_type) {
                 const Token& tok = peek();
                 throw ParseError(tok.line, tok.column,
-                                  "a generic struct's own type parameter '" + template_params[0].name +
-                                      "' cannot be bare -- struct field triviality (ch04 §4.1) is a "
-                                      "whole-type property, so it must be constrained by a concept at the "
-                                      "struct itself (ch05 §5.14): write 'template<Concept " +
-                                      template_params[0].name + "> struct " + bare_name +
-                                      "' instead, or use 'class' if per-method constraints are enough");
+                                  "ordinary generic structs cannot yet mix type and non-type template "
+                                  "parameters in one parameter list");
             }
             generic_type_names_.insert(def.name);
-            struct_names_.insert(template_params[0].name);
-            class_names_.insert(template_params[0].name);
+            ordinary_generic_type_template_params_[def.name] = template_params;
         }
         def.template_params = template_params;
 
@@ -1779,8 +1796,12 @@ private:
         expect(TokenKind::Semicolon, "';'");
 
         if (is_generic) {
-            struct_names_.erase(template_params[0].name);
-            class_names_.erase(template_params[0].name);
+            for (const GenericTypeParam& param : template_params) {
+                if (!param.is_non_type) {
+                    struct_names_.erase(param.name);
+                    class_names_.erase(param.name);
+                }
+            }
         }
         return def;
     }
@@ -2505,9 +2526,13 @@ private:
         SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
         bool is_generic = !template_params.empty();
-        if (is_generic && !template_params[0].is_non_type) {
-            struct_names_.insert(template_params[0].name);
-            class_names_.insert(template_params[0].name);
+        if (is_generic) {
+            for (const GenericTypeParam& param : template_params) {
+                if (!param.is_non_type) {
+                    struct_names_.insert(param.name);
+                    class_names_.insert(param.name);
+                }
+            }
         }
         // ch05 §5.15: `class [[scpp::thread_movable]] Name { ... };` --
         // see parse_struct_def's identical handling.
@@ -2531,19 +2556,20 @@ private:
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
         if (is_generic) {
-            generic_type_names_.insert(qualified_class_name);
-            phase1_generic_type_single_param_[qualified_class_name] = template_params[0];
-            // ch05 §5.14: a non-type parameter's own name (e.g. "N") is
-            // never itself a type -- registering it here (as every
-            // earlier version of this code unconditionally did) would
-            // wrongly let `N` parse as a bogus type name inside this
-            // class's own body, matching parse_variadic_specialization's
-            // identical exclusion for its own (possibly-leading)
-            // non-type parameters.
-            if (!template_params[0].is_non_type) {
-                struct_names_.insert(template_params[0].name);
-                class_names_.insert(template_params[0].name);
+            bool saw_type = false;
+            bool saw_non_type = false;
+            for (const GenericTypeParam& param : template_params) {
+                saw_type = saw_type || !param.is_non_type;
+                saw_non_type = saw_non_type || param.is_non_type;
             }
+            if (saw_type && saw_non_type) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "ordinary generic classes cannot yet mix type and non-type template "
+                                  "parameters in one parameter list");
+            }
+            generic_type_names_.insert(qualified_class_name);
+            ordinary_generic_type_template_params_[qualified_class_name] = template_params;
         }
 
         ClassDef def;
@@ -2603,8 +2629,12 @@ private:
             // Un-register the temporary type-parameter name -- scoped
             // only to this one class's own declaration (see this
             // function's own comment).
-            struct_names_.erase(template_params[0].name);
-            class_names_.erase(template_params[0].name);
+            for (const GenericTypeParam& param : template_params) {
+                if (!param.is_non_type) {
+                    struct_names_.erase(param.name);
+                    class_names_.erase(param.name);
+                }
+            }
         }
     }
 

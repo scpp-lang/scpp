@@ -1,0 +1,21 @@
+template<typename First, typename Second>
+class Pair {
+    First first;
+    Second second;
+public:
+    Pair(const First& a, const Second& b) {
+        this.first = a;
+        this.second = b;
+        return;
+    }
+
+    const First& left() const { return this.first; }
+    const Second& right() const { return this.second; }
+};
+
+int main() {
+    int n = 3;
+    bool flag = false;
+    Pair<int, bool> pair(n, flag);
+    return 0;
+}
