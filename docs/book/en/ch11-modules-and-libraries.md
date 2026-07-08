@@ -171,7 +171,7 @@ namespace mylib::math {
   distributed `.scppm` file remains exactly one file per module, holding
   the fully merged interface -- partition names never appear inside a
   `.scppm` file or a `.scppkg` manifest (see
-  [The `.scppm` Module Interface Format](../../standards/en/scppm-format.md)).
+  [The `.scppm` Module Interface Format](../../spec/en/scppm-format.md)).
 
 ## 11.5 Namespaces
 
@@ -456,10 +456,10 @@ into one `.scppa` file per target triple -- a real static library
 `.scpp` interface source, or as `.scppm` interfaces paired with their
 `.scppa` archives, or a mix -- package together as one `.scppkg` file for
 distribution as a whole library. `.scppm`'s byte layout is specified in
-[The `.scppm` Module Interface Format](../../standards/en/scppm-format.md);
+[The `.scppm` Module Interface Format](../../spec/en/scppm-format.md);
 `.scppkg`'s byte layout and manifest schema (versioning, dependency
 records, and the per-module source/binary split) are specified in
-[The `.scppkg` Package Format](../../standards/en/scppkg-format.md).
+[The `.scppkg` Package Format](../../spec/en/scppkg-format.md).
 
 ## 11.13 Linking: which objects get linked
 
@@ -524,11 +524,11 @@ available fallback).
 ## 11.15 Out of scope for v1 (backlog)
 
 - **Archive signing** -- not specified yet;
-  [the `.scppkg` format](../../standards/en/scppkg-format.md) is designed
+  [the `.scppkg` format](../../spec/en/scppkg-format.md) is designed
   so this can be added later as a trailing block, with no version break.
   `.scppm` itself carries no signature by design -- it is a language-level
   format, not a distribution format (see
-  [The `.scppm` Module Interface Format §3](../../standards/en/scppm-format.md)).
+  [The `.scppm` Module Interface Format §3](../../spec/en/scppm-format.md)).
 - **Automatic C-header ingestion** (a `bindgen`-style tool, or
   `import <cheader>;`) -- v1's entire FFI story is hand-written
   `extern "C"` ([§2.1](ch02-boundary-rules.md)); automating that needs a
