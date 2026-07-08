@@ -1,0 +1,6 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.2:
+// [[scpp::packed]] is only valid on struct/union declarations.
+[[scpp::packed]]
+int main() {
+    return 0;
+}

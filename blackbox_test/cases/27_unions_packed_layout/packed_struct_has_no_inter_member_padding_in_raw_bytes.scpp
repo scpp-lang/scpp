@@ -1,0 +1,39 @@
+// docs/book/en/ch04-struct-vs-class.md §4.3 and docs/spec/en/05-unions-and-packed-layout.md §9.2:
+// [[scpp::packed]] removes inter-member padding, so the int begins immediately
+// after the leading char in the raw byte representation.
+extern "C" {
+    int pipe(int* fds);
+    long write(int fd, const void* buffer, unsigned long count);
+    long read(int fd, void* buffer, unsigned long count);
+    int close(int fd);
+}
+
+struct [[scpp::packed]] Packet {
+    char tag;
+    int value;
+};
+
+int main() {
+    Packet packet;
+    int fds[2];
+    char bytes[5];
+    int i = 0;
+    packet.tag = 'A';
+    packet.value = 2;
+
+    [[scpp::unsafe]] {
+        if (pipe(&fds[0]) != 0) return 1;
+        if (write(fds[1], &packet, 5) != 5) return 2;
+        if (read(fds[0], &bytes[0], 5) != 5) return 3;
+        close(fds[0]);
+        close(fds[1]);
+    }
+
+    if (bytes[0] != 'A') return 4;
+    if (static_cast<int>(bytes[1]) != 2) return 5;
+    while (i < 3) {
+        if (bytes[i + 2] != '\0') return 6;
+        i = i + 1;
+    }
+    return 0;
+}
