@@ -33,3 +33,4 @@
 10. [Reference Implementations (required reading)](ch10-reference-implementations.md)
 11. [Modules & Libraries](ch11-modules-and-libraries.md)
 12. [IDE Integration](ch12-ide-integration.md)
+13. [Compiler Invocation and CLI](ch13-compiler-invocation.md)

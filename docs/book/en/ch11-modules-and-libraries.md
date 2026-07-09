@@ -468,7 +468,7 @@ Linking is decoupled from `import` resolution
 where `import` supplies declarations for compilation only and has no
 bearing on what the linker sees (a real C++ build still needs its own
 `target_link_libraries` line, or equivalent, regardless of which modules
-a file `import`s). At link time, the scpp build tool links:
+a file `import`s). At link time, the scpp CLI links:
 
 - every `.scppo` object produced by building the current project's own
   modules (compiled directly, same as any ordinary same-project
@@ -498,13 +498,13 @@ available fallback).
 
 ## 11.14 Import/library search path
 
-- `scpp build <file> --import name=path` -- explicit,
+- `scpp <file> --import name=path` -- explicit,
   unambiguous, always works (mirrors Clang's `-fmodule-file=name=path`
   and Rust's `--extern name=path`): `path` names either a `.scppm` file
   providing module `name` directly, or a `.scppkg` file whose own manifest
   lists a module named `name` (nested as a `.scppm` file or as raw
   `.scpp` source).
-- `scpp build <file> -I <dir>` -- convenience search: to resolve
+- `scpp <file> -I <dir>` -- convenience search: to resolve
   `import mylib.math;`, look in each `-I` directory (in order) for a file
   named `mylib.math.scppm` (§11.12), or a `.scppkg` file whose own manifest
   lists a module named `mylib.math`. First directory (in the order given)
