@@ -1479,6 +1479,163 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_workspace_build_enforces_direct_visibility_and_links_transitively";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_workspace_build_enforces_direct_visibility_and_links_transitively";
+        std::filesystem::path tls_dir = root / "tls";
+        std::filesystem::path net_dir = root / "net";
+        std::filesystem::path app_dir = root / "app";
+        std::filesystem::path app_exe =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "app";
+        std::filesystem::path tls_archive =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "tls" / "archives" / "libtls.scppa";
+        std::filesystem::path net_archive =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "net" / "archives" / "libnet.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(tls_dir / "src");
+        std::filesystem::create_directories(net_dir / "src");
+        std::filesystem::create_directories(app_dir / "src");
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[workspace]\n"
+                        "members = [\"tls\", \"net\", \"app\"]\n"
+                        "default-members = [\"app\"]\n");
+        write_text_file(tls_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"tls\"\n"
+                        "\n"
+                        "[lib]\n"
+                        "root = \"src/tls.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n");
+        write_text_file(tls_dir / "src" / "tls.scpp",
+                        "export module tls;\n"
+                        "namespace tls { export int seed() { return 40; } }\n");
+        write_text_file(net_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"net\"\n"
+                        "\n"
+                        "[lib]\n"
+                        "root = \"src/net.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[dependencies]\n"
+                        "tls = { path = \"../tls\" }\n");
+        write_text_file(net_dir / "src" / "net.scpp",
+                        "export module net;\n"
+                        "import tls;\n"
+                        "namespace net { export int value() { return tls::seed() + 2; } }\n");
+        write_text_file(app_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"app\"\n"
+                        "\n"
+                        "[[bin]]\n"
+                        "name = \"app\"\n"
+                        "root = \"src/main.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[dependencies]\n"
+                        "net = { path = \"../net\" }\n");
+        write_text_file(app_dir / "src" / "main.scpp",
+                        "import net;\n"
+                        "int main() { return net::value() - 42; }\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": workspace default build should succeed, got '" + build_result.stdout_text + "'");
+        expect(std::filesystem::exists(app_exe), case_name + ": expected workspace app executable");
+        expect(std::filesystem::exists(tls_archive), case_name + ": expected tls archive at workspace root output");
+        expect(std::filesystem::exists(net_archive), case_name + ": expected net archive at workspace root output");
+        expect(!std::filesystem::exists(app_dir / ".scpp"),
+               case_name + ": member packages should not write outputs under their own directories");
+        RunResult run_result = run_command_capture(shell_quote(app_exe.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected app executable exit code 0, got " + std::to_string(run_result.exit_code));
+        RunResult package_build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                             shell_quote(SCPP_BINARY_PATH) + " build -p net --lib 2>&1");
+        expect(package_build_result.exit_code == 0,
+               case_name + ": package-selected lib build should succeed, got '" + package_build_result.stdout_text + "'");
+        RunResult workspace_build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                               shell_quote(SCPP_BINARY_PATH) + " build --workspace 2>&1");
+        expect(workspace_build_result.exit_code == 0,
+               case_name + ": --workspace build should succeed, got '" + workspace_build_result.stdout_text + "'");
+        write_text_file(app_dir / "src" / "main.scpp",
+                        "import tls;\n"
+                        "int main() { return tls::seed(); }\n");
+        RunResult direct_visibility_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                                 shell_quote(SCPP_BINARY_PATH) + " build -p app 2>&1");
+        expect(direct_visibility_result.exit_code != 0,
+               case_name + ": importing a transitive-only dependency should fail");
+        expect(direct_visibility_result.stdout_text.find(
+                   "module 'tls' is exported only by transitive dependency package 'tls'") != std::string::npos,
+               case_name + ": expected direct-visibility error, got '" + direct_visibility_result.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_root_package_workspace_builds_root_package_by_default";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_root_package_workspace_builds_root_package_by_default";
+        std::filesystem::path dep_dir = root / "libs" / "tls";
+        std::filesystem::path exe_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "rootapp" / "rootapp";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(dep_dir / "src");
+        std::filesystem::create_directories(root / "src");
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[workspace]\n"
+                        "members = [\"libs/tls\"]\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"rootapp\"\n"
+                        "\n"
+                        "[[bin]]\n"
+                        "name = \"rootapp\"\n"
+                        "root = \"src/main.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[dependencies]\n"
+                        "tls = { path = \"libs/tls\" }\n");
+        write_text_file(dep_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"tls\"\n"
+                        "\n"
+                        "[lib]\n"
+                        "root = \"src/tls.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n");
+        write_text_file(dep_dir / "src" / "tls.scpp",
+                        "export module tls;\n"
+                        "namespace tls { export int seed() { return 5; } }\n");
+        write_text_file(root / "src" / "main.scpp",
+                        "import tls;\n"
+                        "int main() { return tls::seed() - 5; }\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": root package workspace build should succeed, got '" + build_result.stdout_text + "'");
+        expect(std::filesystem::exists(exe_path), case_name + ": expected root package executable at workspace root");
+        expect(!std::filesystem::exists(dep_dir / ".scpp"),
+               case_name + ": workspace member outputs should remain under the workspace root");
+        RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected root package executable exit code 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_static_build_produces_self_contained_binary";
         std::filesystem::path source_path =
             std::filesystem::current_path() / "cli_static_build_produces_self_contained_binary.scpp";

@@ -650,13 +650,14 @@ int run(int argc, char** argv) {
                 options.build_lib_only = true;
             } else if (arg == "--bin" && i + 1 < argc) {
                 options.selected_bin = argv[++i];
+            } else if ((arg == "-p" || arg == "--package") && i + 1 < argc) {
+                options.selected_package = argv[++i];
             } else if (arg == "--profile" && i + 1 < argc) {
                 options.selected_profile = argv[++i];
             } else if (arg == "--release") {
                 options.release = true;
-            } else if (arg == "--workspace" || arg == "-p") {
-                std::cerr << "error: workspace/package selection is designed but not implemented yet\n";
-                return 1;
+            } else if (arg == "--workspace") {
+                options.build_workspace = true;
             } else {
                 std::cerr << "error: unknown build option '" << arg << "'\n";
                 return 1;
@@ -719,7 +720,7 @@ int run(int argc, char** argv) {
     std::cout << "       " << name
               << " <file.scpp> [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
     std::cout << "       " << name
-              << " build [--lib] [--bin <name>] [--profile <name>] [--release]\n";
+              << " build [--workspace] [-p <package>] [--lib] [--bin <name>] [--profile <name>] [--release]\n";
     std::cout << "       " << name
               << " build-module <file.scpp> --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
     return 0;
