@@ -442,6 +442,22 @@ std::optional<std::string> compare_expected_stderr(const InvocationSpec& invocat
     }
     std::string expected_stderr = read_file(*invocation.stderr_expected_file);
     expected_stderr = replace_all(std::move(expected_stderr), "$TEMP", temp_dir.string());
+    constexpr std::string_view kRegexPrefix = "REGEX:";
+    if (expected_stderr.rfind(kRegexPrefix, 0) == 0) {
+        while (!expected_stderr.empty() &&
+               (expected_stderr.back() == '\n' || expected_stderr.back() == '\r')) {
+            expected_stderr.pop_back();
+        }
+        try {
+            std::regex pattern(expected_stderr.substr(kRegexPrefix.size()));
+            if (std::regex_match(actual_stderr, pattern)) {
+                return std::nullopt;
+            }
+        } catch (const std::regex_error& e) {
+            return std::string("invalid stderr regex: ") + e.what();
+        }
+        return "expected stderr regex '" + expected_stderr.substr(kRegexPrefix.size()) + "', got '" + actual_stderr + "'";
+    }
     if (actual_stderr == expected_stderr) {
         return std::nullopt;
     }
