@@ -1,4 +1,4 @@
-# 8. 未决问题（Open Questions，需后续拍板）
+# 未决问题（Open Questions，需后续拍板）
 
 1. **下标越界**：`vector[i]` / `span[i]` 是插入运行时边界检查
    （像 Rust），还是要求用带检查的 API？**已定**：`span[i]`

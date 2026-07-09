@@ -1,4 +1,4 @@
-# 10. Reference Implementations (required reading)
+# Reference Implementations (required reading)
 
 - **Circle** (Sean Baxter): a C++ superset with a borrow checker — almost the
   same path as this design.

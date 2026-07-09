@@ -1,4 +1,4 @@
-# 7. Compilation Pipeline (architecture)
+# Compilation Pipeline (architecture)
 
 ```
 source

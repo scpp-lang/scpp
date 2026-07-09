@@ -1,4 +1,4 @@
-# 12. IDE Integration
+# IDE Integration
 
 This chapter covers the practical side of debugging scpp programs at the
 **source level**: breakpoints, stepping, backtraces, and variable inspection

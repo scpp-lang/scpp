@@ -1,4 +1,4 @@
-# 11. Modules & Libraries
+# Modules & Libraries
 
 scpp programs can span multiple files: there's a notion of one scpp file
 calling into another, and a way to distribute a scpp API for other scpp

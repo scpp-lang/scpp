@@ -1,4 +1,4 @@
-# 4. Struct vs Class Semantics (Fixed Memory Layout / ABI)
+# Struct vs Class Semantics (Fixed Memory Layout / ABI)
 
 In ordinary C++, `struct` and `class` are almost the same tool with different
 visibility defaults. In scpp, they communicate a much bigger design decision:

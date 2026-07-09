@@ -1,4 +1,4 @@
-# 6. The v0.1 Supported Subset
+# The v0.1 Supported Subset
 
 **Only** the following syntax is supported; everything
 else reports `E-UNSUPPORTED` (a construct outside this subset --

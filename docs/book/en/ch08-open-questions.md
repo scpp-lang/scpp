@@ -1,4 +1,4 @@
-# 8. Open Questions (to be decided later)
+# Open Questions (to be decided later)
 
 1. **Out-of-bounds subscript**: does `vector[i]` / `span[i]`
    insert a runtime bounds check (like Rust), or require a checked API?

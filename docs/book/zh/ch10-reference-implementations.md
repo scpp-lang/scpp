@@ -1,4 +1,4 @@
-# 10. 参考实现（务必先研读）
+# 参考实现（务必先研读）
 
 - **Circle**（Sean Baxter）：C++ 超集 + borrow checker，与本设计几乎同路。
 - **Hylo / Val**：mutable value semantics，规避借用检查复杂度的另一思路。

@@ -1,4 +1,4 @@
-# 3. Syntactic Sugar / Re-semantification of Existing Syntax
+# Syntactic Sugar / Re-semantification of Existing Syntax
 
 The following C++ spellings acquire strong static semantics, in force
 **unconditionally, everywhere** -- including inside a `[[scpp::unsafe]] { }` block

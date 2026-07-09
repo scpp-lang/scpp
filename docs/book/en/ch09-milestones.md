@@ -1,4 +1,4 @@
-# 9. MVP Milestones (implementation order, end-to-end first)
+# MVP Milestones (implementation order, end-to-end first)
 
 - **M0**: Freeze this spec + choose the implementation language and LLVM
   bindings.

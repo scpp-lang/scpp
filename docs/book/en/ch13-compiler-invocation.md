@@ -1,4 +1,4 @@
-# 13. Compiler Invocation and CLI
+# Compiler Invocation and CLI
 
 This chapter covers the practical command-line interface of the scpp compiler:
 how to compile a program into a native executable, what the common flags do,

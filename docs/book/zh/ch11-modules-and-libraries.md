@@ -1,4 +1,4 @@
-# 11. 模块与库（Modules & Libraries）
+# 模块与库（Modules & Libraries）
 
 scpp 程序可以跨多个文件组织："一个
 scpp 文件调用另一个"是有的，也有办法把一份 scpp API 分发给别的

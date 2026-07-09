@@ -170,7 +170,65 @@ build_sidebar() {
   {
     printf '<div class="sidebar">\n'
     printf '  <h2>%s · %s</h2>\n' "$(html_escape "$(section_label "$section" "$lang")")" "$(html_escape "$(lang_label "$lang")")"
-    if [ "$section" = 'spec' ]; then
+    if [ "$section" = 'book' ]; then
+      local tutorial_group_label reference_group_label
+      if [ "$lang" = 'zh' ]; then
+        tutorial_group_label='教程主线'
+        reference_group_label='参考附录'
+      else
+        tutorial_group_label='Tutorial path'
+        reference_group_label='Reference appendix'
+      fi
+      local toc_label toc_class_name=''
+      if [ "$lang" = 'zh' ]; then
+        toc_label='目录'
+      else
+        toc_label='Table of Contents'
+      fi
+      if [ "$current_out" = 'index.html' ]; then
+        toc_class_name=' class="current"'
+      fi
+      printf '  <ul class="sidebar-root">\n'
+      printf '    <li><a%s href="%s">%s</a></li>\n' \
+        "$toc_class_name" \
+        "${prefix}${section}/${lang}/index.html" \
+        "$(html_escape "$toc_label")"
+      printf '    <li class="sidebar-group">\n'
+      printf '      <div class="sidebar-group-title">%s</div>\n' "$(html_escape "$tutorial_group_label")"
+      printf '      <ul class="sidebar-sublist">\n'
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        sidebar_entry "$file"
+      done <<EOF
+ch00-design-philosophy.md
+ch01-safety-context.md
+ch02-boundary-rules.md
+EOF
+      printf '      </ul>\n'
+      printf '    </li>\n'
+      printf '    <li class="sidebar-group">\n'
+      printf '      <div class="sidebar-group-title">%s</div>\n' "$(html_escape "$reference_group_label")"
+      printf '      <ul class="sidebar-sublist">\n'
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        sidebar_entry "$file"
+      done <<EOF
+ch03-syntactic-sugar.md
+ch04-struct-vs-class.md
+ch05-static-checks.md
+ch06-safe-subset.md
+ch07-compilation-pipeline.md
+ch08-open-questions.md
+ch09-milestones.md
+ch10-reference-implementations.md
+ch11-modules-and-libraries.md
+ch12-ide-integration.md
+ch13-compiler-invocation.md
+EOF
+      printf '      </ul>\n'
+      printf '    </li>\n'
+      printf '  </ul>\n'
+    elif [ "$section" = 'spec' ]; then
       local standard_group_label format_group_label
       if [ "$lang" = 'zh' ]; then
         standard_group_label='语言标准'

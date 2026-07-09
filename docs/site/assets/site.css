@@ -202,7 +202,9 @@ hr {
 }
 .sidebar .sidebar-root > li + li { margin-top: 0.6rem; }
 .sidebar .sidebar-group {
-  margin-top: 0.75rem;
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
 }
 .sidebar .sidebar-group-title {
   margin: 0 0 0.35rem;
@@ -214,9 +216,9 @@ hr {
   text-transform: uppercase;
 }
 .sidebar .sidebar-sublist {
-  padding-left: 0.5rem;
-  border-left: 1px solid var(--border);
-  margin-left: 0.45rem;
+  padding-left: 0.7rem;
+  border-left: 2px solid var(--border);
+  margin-left: 0.5rem;
 }
 .sidebar li + li { margin-top: 0.35rem; }
 .sidebar a {

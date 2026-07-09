@@ -1,4 +1,4 @@
-# 5. Static Checks (the soundness core)
+# Static Checks (the soundness core)
 
 Chapter 4 explained *which kinds of values* scpp distinguishes. This chapter is
 about the other half of the language: **what the compiler proves about those
