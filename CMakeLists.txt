@@ -100,7 +100,8 @@ target_sources(scpp
         src/main.cpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/cli.cppm)
+            src/cli.cppm
+            src/cli/tools/installself.cppm)
 target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver scpp_project)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
