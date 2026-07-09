@@ -153,6 +153,12 @@ void create_archive(const std::string& object_path, const std::string& archive_p
     return (exe->parent_path() / "stdlib").lexically_normal();
 }
 
+[[nodiscard]] std::optional<std::filesystem::path> runtime_installed_stdlib_dir() {
+    std::optional<std::filesystem::path> exe = current_executable_path();
+    if (!exe.has_value()) return std::nullopt;
+    return (exe->parent_path() / ".." / "share" / "scpp" / "stdlib").lexically_normal();
+}
+
 [[nodiscard]] std::optional<std::filesystem::path> runtime_default_source_stdlib_dir() {
     std::optional<std::filesystem::path> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
@@ -171,6 +177,9 @@ void create_archive(const std::string& object_path, const std::string& archive_p
         if (std::optional<std::filesystem::path> runtime_dir = runtime_default_prebuilt_stdlib_dir(); runtime_dir.has_value()) {
             append_if_missing(runtime_dir->string());
         }
+        if (std::optional<std::filesystem::path> runtime_dir = runtime_installed_stdlib_dir(); runtime_dir.has_value()) {
+            append_if_missing(runtime_dir->string());
+        }
         if (std::optional<std::filesystem::path> runtime_dir = runtime_default_source_stdlib_dir(); runtime_dir.has_value()) {
             append_if_missing(runtime_dir->string());
         }
@@ -180,16 +189,21 @@ void create_archive(const std::string& object_path, const std::string& archive_p
 
 [[nodiscard]] std::vector<std::string> default_stdlib_link_inputs() {
     std::vector<std::string> result;
-    std::optional<std::filesystem::path> exe = current_executable_path();
-    if (!exe.has_value()) return result;
-    std::filesystem::path lib_dir = (exe->parent_path() / "stdlib").lexically_normal();
-    std::filesystem::path string_wrapper = lib_dir / "libscpp_string_wrapper.a";
-    if (std::filesystem::exists(string_wrapper)) {
-        result.push_back(string_wrapper.string());
-    }
-    std::filesystem::path thread_wrapper = lib_dir / "libscpp_thread_wrapper.a";
-    if (std::filesystem::exists(thread_wrapper)) {
-        result.push_back(thread_wrapper.string());
+    auto append_if_exists = [&](const std::filesystem::path& lib_path) {
+        if (!std::filesystem::exists(lib_path)) return;
+        std::string path = lib_path.string();
+        if (std::find(result.begin(), result.end(), path) == result.end()) {
+            result.push_back(std::move(path));
+        }
+    };
+    std::vector<std::optional<std::filesystem::path>> candidate_dirs = {
+        runtime_default_prebuilt_stdlib_dir(),
+        runtime_installed_stdlib_dir(),
+    };
+    for (const std::optional<std::filesystem::path>& lib_dir : candidate_dirs) {
+        if (!lib_dir.has_value()) continue;
+        append_if_exists(*lib_dir / "libscpp_string_wrapper.a");
+        append_if_exists(*lib_dir / "libscpp_thread_wrapper.a");
     }
     return result;
 }
@@ -720,6 +734,18 @@ export namespace scpp {
 std::string host_target_triple() { return llvm::sys::getDefaultTargetTriple(); }
 
 std::vector<std::string> project_default_stdlib_link_inputs() { return default_stdlib_link_inputs(); }
+
+std::optional<std::filesystem::path> driver_runtime_current_executable_path() { return current_executable_path(); }
+
+std::optional<std::filesystem::path> driver_runtime_default_prebuilt_stdlib_dir() {
+    return scpp::runtime_default_prebuilt_stdlib_dir();
+}
+
+std::optional<std::filesystem::path> driver_runtime_installed_stdlib_dir() { return scpp::runtime_installed_stdlib_dir(); }
+
+std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() {
+    return scpp::runtime_default_source_stdlib_dir();
+}
 
 // Compiles scpp source text down to a native object file at `object_path`.
 // This is the M1/M2/M3 backend: AST -> [move check] -> LLVM IR -> native

@@ -83,6 +83,39 @@ cmake --build build
 ctest --test-dir build
 ```
 
+To stage a self-contained toolchain root for packagers/CI, install into a
+dedicated prefix such as `~/.scpp/toolchains/scpp26`:
+
+```sh
+cmake --install build --prefix ~/.scpp/toolchains/scpp26
+```
+
+That install layout stays fully under one prefix:
+
+```text
+~/.scpp/toolchains/scpp26/
+├── bin/scpp
+└── share/scpp/stdlib/
+```
+
+For an end-user install driven by the compiler itself, run the built binary:
+
+```sh
+./build/scpp installself
+```
+
+`installself` copies the current compiler into `~/.scpp/toolchains/scpp26/`,
+updates `~/.scpp/bin/scpp26` and `~/.scpp/bin/scpp`, and prints the exact PATH
+line you should add manually in your own shell config:
+
+```sh
+export PATH="$HOME/.scpp/bin:$PATH"
+```
+
+`installself` only writes under `~/.scpp/`. It does not modify shell rc files
+for you, and it cannot mutate the current parent shell's live `PATH`, so
+re-open your shell or run that `export` manually in the current session.
+
 The `scpp` CLI supports:
 
 ```sh

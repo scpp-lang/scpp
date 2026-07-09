@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(scpp
-    VERSION 0.1.0
+    VERSION 26.0.0
     DESCRIPTION "A compiler frontend for a C++-looking language with safe regions"
     LANGUAGES C CXX)
 
@@ -104,6 +104,17 @@ target_sources(scpp
 target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver scpp_project)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
+target_compile_definitions(scpp PRIVATE
+    SCPP_VERSION="${PROJECT_VERSION}"
+    SCPP_VERSION_MAJOR="${PROJECT_VERSION_MAJOR}")
+
+install(TARGETS scpp
+    RUNTIME DESTINATION bin)
+
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
+    DESTINATION "share/scpp/stdlib"
+    FILES_MATCHING
+        PATTERN "*.scpp")
 
 enable_testing()
 
