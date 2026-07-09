@@ -485,11 +485,19 @@ public:
     [[nodiscard]] std::optional<std::string> archive_for(const std::string& module_name) const {
         auto path_it = resolved_paths_.find(module_name);
         if (path_it == resolved_paths_.end()) return std::nullopt;
-        std::filesystem::path archive_path(path_it->second);
-        if (archive_path.extension() != ".scppm") return std::nullopt;
-        archive_path = archive_path.parent_path() / ("lib" + module_name + ".scppa");
-        if (!std::filesystem::exists(archive_path)) return std::nullopt;
-        return archive_path.string();
+        std::filesystem::path interface_path(path_it->second);
+        if (interface_path.extension() != ".scppm") return std::nullopt;
+        std::vector<std::filesystem::path> candidates = {
+            interface_path.parent_path() / ("lib" + module_name + ".scppa"),
+        };
+        if (interface_path.parent_path().filename() == "modules") {
+            candidates.push_back(interface_path.parent_path().parent_path() / "archives" /
+                                 ("lib" + module_name + ".scppa"));
+        }
+        for (const std::filesystem::path& archive_path : candidates) {
+            if (std::filesystem::exists(archive_path)) return archive_path.string();
+        }
+        return std::nullopt;
     }
 
 private:
@@ -628,6 +636,13 @@ std::string build_merged_interface_source(const Program& program, const std::str
                                         /*keep_module_declaration=*/true, expanded_partition_paths);
 }
 
+llvm::CodeGenOptLevel codegen_opt_level_for(int opt_level) {
+    if (opt_level <= 0) return llvm::CodeGenOptLevel::None;
+    if (opt_level == 1) return llvm::CodeGenOptLevel::Less;
+    if (opt_level == 2) return llvm::CodeGenOptLevel::Default;
+    return llvm::CodeGenOptLevel::Aggressive;
+}
+
 // Move-checks an already-parsed (and, if it has imports of its own,
 // already import-merged -- see scpp.parser's merge_imported_module)
 // Program and lowers it to a native object file at `object_path`. Shared
@@ -635,7 +650,8 @@ std::string build_merged_interface_source(const Program& program, const std::str
 // by compile_to_executable below -- exactly the same backend either way,
 // since by this point a Program is just a Program regardless of which
 // file it came from.
-void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false) {
+void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
+                                  int opt_level = 2) {
     // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
     // comment in movecheck.cppm for why call-site monomorphization has
     // to happen first (movecheck's ordinary exact-type-match call-
@@ -658,7 +674,7 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
 
     llvm::TargetOptions options;
     std::unique_ptr<llvm::TargetMachine> target_machine(target->createTargetMachine(
-        target_triple, "generic", "", options, llvm::Reloc::PIC_));
+        target_triple, "generic", "", options, llvm::Reloc::PIC_, std::nullopt, codegen_opt_level_for(opt_level)));
     if (!target_machine) {
         throw DriverError("failed to create target machine for '" + triple + "'");
     }
@@ -684,10 +700,10 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     dest.flush();
 }
 
-void emit_module_archive_for_program(Program& program, const std::string& archive_path) {
+void emit_module_archive_for_program(Program& program, const std::string& archive_path, int opt_level = 2) {
     std::filesystem::path object_path(archive_path);
     object_path.replace_extension(".scppo");
-    emit_object_file_for_program(program, object_path.string());
+    emit_object_file_for_program(program, object_path.string(), /*emit_debug_info=*/false, opt_level);
     try {
         create_archive(object_path.string(), archive_path);
     } catch (...) {
@@ -700,6 +716,8 @@ void emit_module_archive_for_program(Program& program, const std::string& archiv
 } // namespace scpp
 
 export namespace scpp {
+
+std::string host_target_triple() { return llvm::sys::getDefaultTargetTriple(); }
 
 // Compiles scpp source text down to a native object file at `object_path`.
 // This is the M1/M2/M3 backend: AST -> [move check] -> LLVM IR -> native
@@ -714,19 +732,21 @@ void emit_object_file(std::string_view source, const std::string& object_path,
                        const std::unordered_map<std::string, std::string>& import_paths = {},
                        const std::vector<std::string>& import_search_dirs = {},
                        bool emit_debug_info = false,
-                       const std::string& source_path = {}) {
+                       const std::string& source_path = {},
+                       int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
     Program program = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
-    emit_object_file_for_program(program, object_path, emit_debug_info);
+    emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
 }
 
 void emit_module_artifacts(std::string_view source, const std::string& interface_path, const std::string& archive_path,
                            const std::unordered_map<std::string, std::string>& import_paths = {},
                            const std::vector<std::string>& import_search_dirs = {},
-                           const std::string& source_path = {}) {
+                           const std::string& source_path = {},
+                           int opt_level = 2) {
     std::unordered_map<std::string, std::string> effective_import_paths = import_paths;
     if (!source_path.empty()) {
         if (std::optional<std::string> module_name = declared_module_name_from_source(source); module_name.has_value()) {
@@ -747,7 +767,7 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     std::string merged_generic_source =
         build_merged_interface_source(program, absolute_source_path(source_path), /*keep_concrete_bodies=*/true);
     write_scppm_file(program, merged_interface_source, merged_generic_source, interface_path);
-    emit_module_archive_for_program(program, archive_path);
+    emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
 // Links a native object file into an executable using the system compiler
@@ -792,7 +812,8 @@ void compile_to_executable(std::string_view source, const std::string& executabl
                             bool static_link = false,
                             const std::vector<std::string>& import_search_dirs = {},
                             bool emit_debug_info = false,
-                            const std::string& source_path = {}) {
+                            const std::string& source_path = {},
+                            int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
     Program program = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
@@ -800,7 +821,7 @@ void compile_to_executable(std::string_view source, const std::string& executabl
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
 
     std::string object_path = executable_path + ".o";
-    emit_object_file_for_program(program, object_path, emit_debug_info);
+    emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
 
     std::vector<std::string> module_object_paths;
     std::vector<std::string> module_archive_paths;
@@ -810,7 +831,7 @@ void compile_to_executable(std::string_view source, const std::string& executabl
             continue;
         }
         std::string module_object_path = executable_path + "." + module_name + ".o";
-        emit_object_file_for_program(cache.program_for(module_name), module_object_path, emit_debug_info);
+        emit_object_file_for_program(cache.program_for(module_name), module_object_path, emit_debug_info, opt_level);
         module_object_paths.push_back(module_object_path);
     }
 

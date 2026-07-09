@@ -205,6 +205,19 @@ void write_text_file(const std::filesystem::path& path, std::string_view content
     file << content;
 }
 
+std::string shell_quote(const std::string& text) {
+    std::string quoted = "'";
+    for (char ch : text) {
+        if (ch == '\'') {
+            quoted += "'\"'\"'";
+        } else {
+            quoted.push_back(ch);
+        }
+    }
+    quoted.push_back('\'');
+    return quoted;
+}
+
 // Compiles `source` to a temporary executable, runs it, and captures both
 // its stdout and exit code (0-255, matching POSIX wait status semantics).
 RunResult compile_and_run(std::string_view source, const std::string& case_name) {
@@ -1373,6 +1386,96 @@ void run_cli_extension_tests() {
         if (build_result.exit_code == 0) expect_dwarf_variable_has_location(exe_path, "copy", case_name);
         std::filesystem::remove(source_path);
         std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "cli_project_build_builds_manifest_bin";
+        std::filesystem::path root = std::filesystem::current_path() / "cli_project_build_builds_manifest_bin";
+        std::filesystem::path src_dir = root / "src";
+        std::filesystem::path exe_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "hello";
+        std::filesystem::path helper_iface =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "modules" / "helper.scppm";
+        std::filesystem::path helper_archive =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "archives" / "libhelper.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(src_dir);
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"hello\"\n"
+                        "\n"
+                        "[[bin]]\n"
+                        "name = \"hello\"\n"
+                        "root = \"src/main.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n");
+        write_text_file(src_dir / "helper.scpp",
+                        "export module helper;\n"
+                        "namespace helper { export int value() { return 42; } }\n");
+        write_text_file(src_dir / "main.scpp",
+                        "import helper;\n"
+                        "int main() { return helper::value() - 42; }\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": scpp build should succeed, got '" + build_result.stdout_text + "'");
+        expect(std::filesystem::exists(exe_path), case_name + ": expected manifest-built executable");
+        expect(std::filesystem::exists(helper_iface), case_name + ": expected helper .scppm output");
+        expect(std::filesystem::exists(helper_archive), case_name + ": expected helper .scppa output");
+        RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected manifest-built executable to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_project_build_bare_scpp_aliases_build";
+        std::filesystem::path root = std::filesystem::current_path() / "cli_project_build_bare_scpp_aliases_build";
+        std::filesystem::path src_dir = root / "src";
+        std::filesystem::path exe_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "app";
+        std::filesystem::path lib_iface =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "modules" / "mylib.scppm";
+        std::filesystem::path lib_archive =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "archives" / "libmylib.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(src_dir);
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"app\"\n"
+                        "\n"
+                        "[lib]\n"
+                        "root = \"src/mylib.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[[bin]]\n"
+                        "name = \"app\"\n"
+                        "root = \"src/main.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n");
+        write_text_file(src_dir / "mylib.scpp",
+                        "export module mylib;\n"
+                        "namespace mylib { export int answer() { return 42; } }\n");
+        write_text_file(src_dir / "main.scpp",
+                        "import mylib;\n"
+                        "int main() { return mylib::answer() - 42; }\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": bare scpp should build the manifest project, got '" + build_result.stdout_text + "'");
+        expect(std::filesystem::exists(exe_path), case_name + ": expected package executable output");
+        expect(std::filesystem::exists(lib_iface), case_name + ": expected library interface output");
+        expect(std::filesystem::exists(lib_archive), case_name + ": expected library archive output");
+        RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected bare-scpp project executable to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
     }
 
     {

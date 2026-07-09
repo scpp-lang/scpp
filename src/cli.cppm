@@ -17,6 +17,7 @@ import scpp.ast;
 import scpp.codegen;
 import scpp.movecheck;
 import scpp.driver;
+import scpp.project;
 
 namespace {
 
@@ -586,6 +587,7 @@ export namespace scpp {
 constexpr std::string_view version = "0.1.0";
 
 int run(int argc, char** argv) {
+    std::string_view name = argc > 0 ? argv[0] : "scpp";
     if (argc >= 2 && std::string_view(argv[1]) == "lex") {
         if (argc != 3) {
             std::cerr << "error: lex requires <file.scpp>\n";
@@ -640,6 +642,32 @@ int run(int argc, char** argv) {
         }
         return run_build_module(argv[2], interface_path, archive_path, import_paths, import_search_dirs);
     }
+    if (argc >= 2 && std::string_view(argv[1]) == "build") {
+        scpp::ProjectBuildOptions options;
+        for (int i = 2; i < argc; i++) {
+            std::string_view arg = argv[i];
+            if (arg == "--lib") {
+                options.build_lib_only = true;
+            } else if (arg == "--bin" && i + 1 < argc) {
+                options.selected_bin = argv[++i];
+            } else if (arg == "--profile" && i + 1 < argc) {
+                options.selected_profile = argv[++i];
+            } else if (arg == "--release") {
+                options.release = true;
+            } else if (arg == "--workspace" || arg == "-p") {
+                std::cerr << "error: workspace/package selection is designed but not implemented yet\n";
+                return 1;
+            } else {
+                std::cerr << "error: unknown build option '" << arg << "'\n";
+                return 1;
+            }
+        }
+        if (options.release && options.selected_profile.has_value()) {
+            std::cerr << "error: --release and --profile cannot be used together\n";
+            return 1;
+        }
+        return scpp::build_manifest_project(std::filesystem::current_path(), options);
+    }
     if (argc >= 2) {
         std::string_view output_path = "a.out";
         std::vector<std::string> extra_link_inputs;
@@ -681,12 +709,17 @@ int run(int argc, char** argv) {
                          emit_debug_info);
     }
 
-    std::string_view name = argc > 0 ? argv[0] : "scpp";
+    if (scpp::find_project_manifest(std::filesystem::current_path()).has_value()) {
+        return scpp::build_manifest_project(std::filesystem::current_path(), scpp::ProjectBuildOptions{});
+    }
+
     std::cout << "Hello from " << name << " " << version << "!\n";
     std::cout << "Usage: " << name << " lex <file.scpp>\n";
     std::cout << "       " << name << " parse <file.scpp>\n";
     std::cout << "       " << name
               << " <file.scpp> [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
+    std::cout << "       " << name
+              << " build [--lib] [--bin <name>] [--profile <name>] [--release]\n";
     std::cout << "       " << name
               << " build-module <file.scpp> --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
     return 0;
