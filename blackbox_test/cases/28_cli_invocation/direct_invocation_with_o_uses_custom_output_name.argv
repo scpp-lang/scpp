@@ -1,0 +1,3 @@
+$INPUT_FILE
+-o
+$OUTPUT

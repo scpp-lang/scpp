@@ -1,0 +1,5 @@
+// CLI coverage: invoking `scpp file.scpp` with no `-o` should build a
+// runnable default `a.out` in the current directory.
+int main() {
+    return 7;
+}

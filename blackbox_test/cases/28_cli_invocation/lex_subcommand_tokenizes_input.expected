@@ -1,0 +1,11 @@
+0
+1:1	KwInt	'int'
+1:5	Identifier	'main'
+1:9	LParen	'('
+1:10	RParen	')'
+1:12	LBrace	'{'
+2:5	KwReturn	'return'
+2:12	IntegerLiteral	'7'
+2:13	Semicolon	';'
+3:1	RBrace	'}'
+3:2	EndOfFile

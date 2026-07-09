@@ -1,0 +1,6 @@
+build-module
+$INPUT_FILE
+--interface-out
+demo.scppm
+--archive-out
+libdemo.scppa
