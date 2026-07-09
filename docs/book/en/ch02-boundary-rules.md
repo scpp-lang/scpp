@@ -1,4 +1,121 @@
-# 2. Boundary Rules (Interaction with `[[scpp::unsafe]]` and `extern "C"`)
+# Basic Building Blocks
+
+Now that you have seen a whole program, we can slow down and name its pieces.
+scpp deliberately starts from familiar C++-shaped building blocks: scalar
+values, variables, functions, and ordinary control flow.
+
+## Variables store values
+
+A variable gives a name to a value so you can use it again later:
+
+- `int total = 0;` creates an integer variable and gives it an initial value.
+- `total = total + 1;` updates that variable.
+- Each variable has one type for its whole lifetime.
+
+## Three scalar types to start with
+
+For your first programs, these three scalar types take you a long way:
+
+- `int` for whole numbers such as `0`, `7`, or `-42`;
+- `bool` for `true` and `false`;
+- `char` for single characters such as `'A'` or `'x'`.
+
+Conditions in `if` and `while` should be real `bool` values. In other words,
+write a comparison like `score >= 20`, not just a raw integer and hope the
+compiler treats it as truthy.
+
+## Functions name reusable work
+
+A function lets you package a calculation and call it more than once. The shape
+will look familiar if you know C++ already:
+
+- write the return type first;
+- then the function name;
+- then the parameter list in parentheses;
+- then the body in braces.
+
+## One complete example
+
+Here is a complete file that uses all of those pieces together:
+
+```cpp
+extern "C" int printf(const char* fmt, ...);
+extern "C" int puts(const char* s);
+
+int double_value(int x) {
+    return x * 2;
+}
+
+int abs_diff(int left, int right) {
+    if (left >= right) {
+        return left - right;
+    }
+    return right - left;
+}
+
+bool passed(int score) {
+    return score >= 20;
+}
+
+int main() {
+    int total = 0;
+    int i = 1;
+
+    while (i <= 4) {
+        total = total + double_value(i);
+        i = i + 1;
+    }
+
+    char grade = 'A';
+
+    [[scpp::unsafe]] {
+        printf("total = %d\n", total);
+        printf("grade = %c\n", grade);
+        if (passed(total)) {
+            puts("passed");
+        } else {
+            puts("keep practicing");
+        }
+    }
+
+    return abs_diff(total, 20);
+}
+```
+
+Build and run it:
+
+```sh
+./build/scpp basics.scpp
+./a.out
+```
+
+Expected output:
+
+```text
+total = 20
+grade = A
+passed
+```
+
+A few things to notice:
+
+- `double_value` takes one `int` and returns one `int`.
+- `abs_diff` uses `if` to choose between two code paths.
+- `passed` returns a `bool`, and that `bool` is used directly as an `if`
+  condition.
+- `while` repeats until its condition becomes false.
+- `char grade = 'A';` uses single quotes because it stores one character, not a
+  string.
+
+At this point you can read and write small scpp programs with ordinary scalar
+state and control flow. The next batch of chapters will build on that base
+instead of starting with the language's hardest rules first.
+
+## Reference appendix preserved during the rewrite
+
+The material below is older, reference-oriented content that later chapters
+still link to. It remains here temporarily so those links keep working while
+the tutorial rewrite is landing in batches.
 
 This is critical for soundness and must be strict.
 
@@ -105,4 +222,4 @@ below.
 
 ---
 
-[← Previous: Safety Context](ch01-safety-context.md) · [Table of Contents](README.md) · [Next: Syntactic Sugar →](ch03-syntactic-sugar.md)
+[← Previous: A Small Complete Program](ch01-safety-context.md) · [Table of Contents](README.md) · [Continue to the existing reference chapters →](ch03-syntactic-sugar.md)

@@ -31,4 +31,4 @@ block bugs, by default, everywhere.
 
 ---
 
-[← Previous: Boundary Rules](ch02-boundary-rules.md) · [Table of Contents](README.md) · [Next: Struct vs Class Semantics →](ch04-struct-vs-class.md)
+[← Previous: Basic Building Blocks](ch02-boundary-rules.md) · [Table of Contents](README.md) · [Next: Struct vs Class Semantics →](ch04-struct-vs-class.md)

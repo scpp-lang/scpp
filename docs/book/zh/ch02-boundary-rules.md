@@ -1,4 +1,117 @@
-# 2. 边界规则（跟 `[[scpp::unsafe]]` 与 `extern "C"` 的交互）
+# 基本构件
+
+既然你已经见过一个完整程序，现在可以放慢一点，给其中的部件正式命名了。scpp
+ 是刻意从熟悉的、C++ 形状的基础积木开始的：标量值、变量、函数，以及普通的
+控制流。
+
+## 变量会记住值
+
+变量会给一个值起名字，让你稍后还能再次使用它：
+
+- `int total = 0;` 创建一个整数变量，并给它一个初始值；
+- `total = total + 1;` 会更新这个变量；
+- 一个变量在它的整个生命周期里都只有一个类型。
+
+## 一开始先掌握三种标量类型
+
+写前几个程序时，这三种标量类型就已经很够用了：
+
+- `int`：整数，比如 `0`、`7`、`-42`；
+- `bool`：`true` 和 `false`；
+- `char`：单个字符，比如 `'A'` 或 `'x'`。
+
+`if` 和 `while` 的条件应当是真正的 `bool` 值。也就是说，写 `score >= 20` 这
+样的比较，而不是扔一个原始整数进去，指望编译器把它当成“真值”。
+
+## 函数把可复用的工作起个名字
+
+函数可以把一段计算包装起来，让你在多个地方调用它。它的形状对熟悉 C++ 的读
+者来说会非常自然：
+
+- 先写返回类型；
+- 再写函数名；
+- 然后是圆括号里的参数列表；
+- 最后是花括号里的函数体。
+
+## 一个把这些东西串起来的完整例子
+
+下面这个完整文件把这些积木放到了一起：
+
+```cpp
+extern "C" int printf(const char* fmt, ...);
+extern "C" int puts(const char* s);
+
+int double_value(int x) {
+    return x * 2;
+}
+
+int abs_diff(int left, int right) {
+    if (left >= right) {
+        return left - right;
+    }
+    return right - left;
+}
+
+bool passed(int score) {
+    return score >= 20;
+}
+
+int main() {
+    int total = 0;
+    int i = 1;
+
+    while (i <= 4) {
+        total = total + double_value(i);
+        i = i + 1;
+    }
+
+    char grade = 'A';
+
+    [[scpp::unsafe]] {
+        printf("total = %d\n", total);
+        printf("grade = %c\n", grade);
+        if (passed(total)) {
+            puts("passed");
+        } else {
+            puts("keep practicing");
+        }
+    }
+
+    return abs_diff(total, 20);
+}
+```
+
+编译并运行：
+
+```sh
+./build/scpp basics.scpp
+./a.out
+```
+
+预期输出：
+
+```text
+total = 20
+grade = A
+passed
+```
+
+这里有几件事值得特别留意：
+
+- `double_value` 接收一个 `int`，返回一个 `int`；
+- `abs_diff` 用 `if` 在两条路径之间做选择；
+- `passed` 返回 `bool`，这个 `bool` 又被直接拿来当 `if` 条件；
+- `while` 会一直重复，直到条件变成 `false`；
+- `char grade = 'A';` 用的是单引号，因为它存的是一个字符，而不是一个字符串。
+
+到这里，你已经可以读写带有普通标量状态和控制流的小型 scpp 程序了。接下来
+的章节会在这个基础上继续往上搭，而不是一开始就把语言里最难的规则压到读者
+面前。
+
+## 改写期间暂时保留的参考附录
+
+下面保留的是较早写成、偏参考手册风格的内容。后面的章节目前仍然会链接到这些
+材料，所以在教程化改写分批落地期间，它们暂时继续留在这里。
 
 这是健全性的关键，必须严格。
 
@@ -82,4 +195,4 @@
 
 ---
 
-[← 上一章：安全上下文](ch01-safety-context.md) · [目录](README.md) · [下一章：语法糖 →](ch03-syntactic-sugar.md)
+[← 上一章：第一个完整的小程序](ch01-safety-context.md) · [目录](README.md) · [继续阅读现有参考章节 →](ch03-syntactic-sugar.md)

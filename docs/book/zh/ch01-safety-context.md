@@ -1,4 +1,86 @@
-# 1. 安全上下文（Safety Context）
+# 第一个完整的小程序
+
+想真正熟悉一门语言，最快的方式之一就是尽早写出一个“像完整程序”的东西，而
+不是只看零散片段。本章我们来写一个很小的倒计时程序：它仍然足够短，你可以一
+口气看懂；但它已经足够完整，能让你接触变量、循环和分支。
+
+## 程序全文
+
+创建 `countdown.scpp`：
+
+```cpp
+extern "C" int printf(const char* fmt, ...);
+extern "C" int puts(const char* s);
+
+int main() {
+    int n = 5;
+
+    while (n > 0) {
+        if (n == 1) {
+            [[scpp::unsafe]] {
+                puts("Ignition!");
+            }
+        } else {
+            [[scpp::unsafe]] {
+                printf("T-minus %d\n", n);
+            }
+        }
+        n = n - 1;
+    }
+
+    [[scpp::unsafe]] {
+        puts("Liftoff!");
+    }
+    return 0;
+}
+```
+
+编译并运行：
+
+```sh
+./build/scpp countdown.scpp
+./a.out
+```
+
+预期输出：
+
+```text
+T-minus 5
+T-minus 4
+T-minus 3
+T-minus 2
+Ignition!
+Liftoff!
+```
+
+## 按执行顺序读一遍
+
+这个程序已经让你养成几种核心习惯：
+
+- 从 `main` 开始。程序就是从这里执行的。
+- 用变量保存状态。这里的 `n` 记住当前的倒计时数字。
+- 需要重复时，用 `while`。
+- 某一步是否执行，要看当前值时，用 `if` / `else`。
+- 变量要自己更新。`n = n - 1;` 让循环继续向前推进。
+
+虽然这仍然是个玩具程序，但它已经很像真正的代码了：有状态、有分支、有重复、
+也有肉眼可见的输出。
+
+## 关于这里的打印调用
+
+我们现在仍然借用了两个 C 库函数 `printf` 和 `puts` 来让例子有可见输出。也正
+因为如此，这些调用要放在 `[[scpp::unsafe]]` 代码块里。本章的重点是先让你建
+立“一个完整程序长什么样”的感觉，而不是现在就把 FFI 和安全边界完整拆开讲。
+
+## 下一步
+
+下一章会把这次已经用到的积木重新命名、重新整理：标量值、变量、函数以及控制
+流。
+
+## 改写期间暂时保留的参考附录
+
+下面保留的是较早写成、偏参考手册风格的内容。后面的章节目前仍然会链接到这些
+材料，所以在教程化改写分批落地期间，它们暂时继续留在这里。
 
 每个函数都**默认、无条件**受检查（见 [§5](ch05-static-checks.md)）——不
 存在任何按函数、按文件的标注来开启这件事。语言里唯一的安全上下文构造是
@@ -183,4 +265,4 @@ int caller(int* arr) {
 
 ---
 
-[← 上一章：设计理念](ch00-design-philosophy.md) · [目录](README.md) · [下一章：边界规则 →](ch02-boundary-rules.md)
+[← 上一章：开始上手](ch00-design-philosophy.md) · [目录](README.md) · [下一章：基本构件 →](ch02-boundary-rules.md)
