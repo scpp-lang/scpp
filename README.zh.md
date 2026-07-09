@@ -52,15 +52,17 @@ int legacy(int* p) {
 
 ## 构建
 
-需要支持 C++23 modules 的 Clang、CMake 3.28+、Ninja，以及 LLVM 开发包。
+需要支持 C++23 modules 的 Clang、CMake 3.28+、Ninja、LLVM 开发包，
+以及 SQLite 开发头文件/库。
 在 Debian/Ubuntu 上：
 
 ```sh
-sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev
+sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev libsqlite3-dev
 ```
 
 （需要 `libzstd-dev` 是因为 LLVM 的 CMake config 会链接它；不装的话
-`find_package(LLVM)` 会报缺少 `zstd::libzstd_shared` target。）
+`find_package(LLVM)` 会报缺少 `zstd::libzstd_shared` target。`libsqlite3-dev`
+则提供 SCPP 全量源码构建现在会链接到的 `sqlite3.h` 头文件和 SQLite 库。）
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=<LLVM 的 lib/cmake/llvm 路径>

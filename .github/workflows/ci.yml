@@ -77,7 +77,7 @@ jobs:
               -o APT::Get::List-Cleanup="0"
           }
           scoped_update "${ubuntu_sources}"
-          sudo apt-get install -y ca-certificates curl cmake ninja-build libzstd-dev clang-22 llvm-22-dev
+          sudo apt-get install -y ca-certificates curl cmake ninja-build libzstd-dev libsqlite3-dev clang-22 llvm-22-dev
 
       - name: Configure main project
         if: steps.change-scope.outputs.docs_only != 'true'
