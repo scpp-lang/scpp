@@ -66,6 +66,27 @@ lang_label() {
   esac
 }
 
+theme_prefix_label() {
+  case "$1" in
+    zh) printf '主题' ;;
+    *) printf 'Theme' ;;
+  esac
+}
+
+theme_state_label() {
+  local state="$1"
+  local lang="$2"
+  case "$state:$lang" in
+    auto:zh) printf '跟随系统' ;;
+    light:zh) printf '浅色' ;;
+    dark:zh) printf '深色' ;;
+    auto:*) printf 'Auto' ;;
+    light:*) printf 'Light' ;;
+    dark:*) printf 'Dark' ;;
+    *) printf '%s' "$state" ;;
+  esac
+}
+
 site_note_text() {
   case "$1" in
     zh) printf '本网站由使用 scpp 编写的 HTTP server 提供服务。' ;;
@@ -240,6 +261,23 @@ build_lang_switcher() {
   } > "$file"
 }
 
+build_theme_toggle() {
+  local lang="$1"
+  local file="$2"
+  {
+    printf '<button class="theme-toggle" type="button" data-theme-toggle data-theme-prefix="%s" data-theme-auto="%s" data-theme-light="%s" data-theme-dark="%s" aria-label="%s">\n' \
+      "$(html_escape "$(theme_prefix_label "$lang")")" \
+      "$(html_escape "$(theme_state_label auto "$lang")")" \
+      "$(html_escape "$(theme_state_label light "$lang")")" \
+      "$(html_escape "$(theme_state_label dark "$lang")")" \
+      "$(html_escape "$(theme_prefix_label "$lang")")"
+    printf '  <span class="theme-toggle-label">◐ <span data-theme-toggle-text>%s: %s</span></span>\n' \
+      "$(html_escape "$(theme_prefix_label "$lang")")" \
+      "$(html_escape "$(theme_state_label auto "$lang")")"
+    printf '</button>\n'
+  } > "$file"
+}
+
 write_before_body() {
   local rel_out="$1"
   local section="$2"
@@ -248,20 +286,23 @@ write_before_body() {
   local source_title="$5"
   local page_title="$6"
   local out_file="$7"
-  local prefix top_nav sidebar switcher
+  local prefix top_nav sidebar switcher theme_toggle
   prefix="$(root_prefix_for "$rel_out")"
   top_nav="$TMP_DIR/top-nav-${section}-${lang}-${source_name}.html"
   sidebar="$TMP_DIR/sidebar-${section}-${lang}-${source_name}.html"
   switcher="$TMP_DIR/lang-${section}-${lang}-${source_name}.html"
+  theme_toggle="$TMP_DIR/theme-toggle-${section}-${lang}-${source_name}.html"
   build_top_nav "$section" "$lang" "$prefix" "$top_nav"
   build_sidebar "$section" "$lang" "$(output_name_for "$source_name")" "$prefix" "$sidebar"
   build_lang_switcher "$section" "$lang" "$source_name" "$prefix" "$switcher"
+  build_theme_toggle "$lang" "$theme_toggle"
   {
     printf '<header class="site-header">\n'
     printf '  <div class="site-header-inner">\n'
     printf '    <a class="site-title" href="%sindex.html">%s</a>\n' "$prefix" "$SITE_TITLE"
     cat "$top_nav"
     cat "$switcher"
+    cat "$theme_toggle"
     printf '    <div class="site-note">%s</div>\n' "$(html_escape "$(site_note_text "$lang")")"
     printf '  </div>\n'
     printf '</header>\n'
@@ -296,6 +337,89 @@ write_head_includes() {
   {
     printf '<link rel="icon" type="image/svg+xml" href="%sassets/scpp-logo.svg">\n' "$prefix"
     printf '<link rel="icon" type="image/png" href="%sassets/scpp-logo.png">\n' "$prefix"
+    cat <<'EOF2'
+<script>
+(() => {
+  const key = 'scpp-docs-theme';
+  const root = document.documentElement;
+
+  function apply(theme) {
+    if (theme === 'light' || theme === 'dark') {
+      root.dataset.theme = theme;
+    } else {
+      root.removeAttribute('data-theme');
+    }
+  }
+
+  function readTheme() {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored === 'light' || stored === 'dark' ? stored : 'auto';
+    } catch {
+      return 'auto';
+    }
+  }
+
+  function persist(theme) {
+    try {
+      if (theme === 'auto') {
+        localStorage.removeItem(key);
+      } else {
+        localStorage.setItem(key, theme);
+      }
+    } catch {
+    }
+  }
+
+  function iconFor(theme) {
+    if (theme === 'light') return '☀';
+    if (theme === 'dark') return '🌙';
+    return '◐';
+  }
+
+  function labelFor(button, theme) {
+    const prefix = button.dataset.themePrefix || 'Theme';
+    const state = button.dataset['theme' + theme.charAt(0).toUpperCase() + theme.slice(1)] || theme;
+    return `${prefix}: ${state}`;
+  }
+
+  function renderButton(button, theme) {
+    const textNode = button.querySelector('[data-theme-toggle-text]');
+    if (textNode) {
+      textNode.textContent = labelFor(button, theme);
+      const icon = iconFor(theme);
+      const wrapper = button.querySelector('.theme-toggle-label');
+      if (wrapper) {
+        wrapper.firstChild.textContent = `${icon} `;
+      }
+    }
+    button.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+  }
+
+  function cycle(theme) {
+    if (theme === 'auto') return 'dark';
+    if (theme === 'dark') return 'light';
+    return 'auto';
+  }
+
+  const initialTheme = readTheme();
+  apply(initialTheme);
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const buttons = document.querySelectorAll('[data-theme-toggle]');
+    buttons.forEach((button) => {
+      renderButton(button, readTheme());
+      button.addEventListener('click', () => {
+        const next = cycle(readTheme());
+        persist(next);
+        apply(next);
+        buttons.forEach((b) => renderButton(b, next));
+      });
+    });
+  });
+})();
+</script>
+EOF2
   } > "$out_file"
 }
 
@@ -371,6 +495,8 @@ LANDING
   local before="$TMP_DIR/before-home.html"
   local after="$TMP_DIR/after-home.html"
   local head="$TMP_DIR/head-home.html"
+  local theme_toggle="$TMP_DIR/theme-toggle-home.html"
+  build_theme_toggle en "$theme_toggle"
   cat > "$before" <<'EOF2'
 <header class="site-header">
   <div class="site-header-inner">
@@ -385,6 +511,9 @@ LANDING
       <a href="book/en/index.html">EN</a>
       <a href="book/zh/index.html">中文</a>
     </div>
+EOF2
+  cat "$theme_toggle" >> "$before"
+  cat >> "$before" <<'EOF2'
     <div class="site-note">This site is served by an HTTP server written in scpp. / 本网站由使用 scpp 编写的 HTTP server 提供服务。</div>
   </div>
 </header>
