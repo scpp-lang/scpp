@@ -1,4 +1,89 @@
-# 1. Safety Context
+# A Small Complete Program
+
+The fastest way to get comfortable with a language is to build something that
+feels like a whole program, not just a disconnected fragment. In this chapter
+we will write a tiny countdown program. It is still small enough to understand
+in one sitting, but big enough to introduce variables, a loop, and a branch.
+
+## The program
+
+Create `countdown.scpp`:
+
+```cpp
+extern "C" int printf(const char* fmt, ...);
+extern "C" int puts(const char* s);
+
+int main() {
+    int n = 5;
+
+    while (n > 0) {
+        if (n == 1) {
+            [[scpp::unsafe]] {
+                puts("Ignition!");
+            }
+        } else {
+            [[scpp::unsafe]] {
+                printf("T-minus %d\n", n);
+            }
+        }
+        n = n - 1;
+    }
+
+    [[scpp::unsafe]] {
+        puts("Liftoff!");
+    }
+    return 0;
+}
+```
+
+Build and run it:
+
+```sh
+./build/scpp countdown.scpp
+./a.out
+```
+
+Expected output:
+
+```text
+T-minus 5
+T-minus 4
+T-minus 3
+T-minus 2
+Ignition!
+Liftoff!
+```
+
+## Read it top to bottom
+
+This program introduces a few core habits:
+
+- Start with `main`. Execution begins there.
+- Store state in a variable. Here, `n` remembers the current countdown value.
+- Use `while` when you want to repeat work.
+- Use `if` / `else` when one step depends on the current value.
+- Update the variable yourself. `n = n - 1;` makes the loop move forward.
+
+Even though this is still a toy program, it already feels like real code:
+there is state, a decision, repetition, and visible output.
+
+## A note about the printing calls
+
+We are still borrowing two C-library functions, `printf` and `puts`, to make
+our examples visible. That is why the calls sit inside `[[scpp::unsafe]]`
+blocks. This chapter is about learning the shape of a whole program, not about
+fully unpacking FFI and safety boundaries yet.
+
+## Next
+
+The next chapter slows down and names the building blocks we just used: scalar
+values, variables, functions, and control flow.
+
+## Reference appendix preserved during the rewrite
+
+The material below is older, reference-oriented content that later chapters
+still link to. It remains here temporarily so those links keep working while
+the tutorial rewrite is landing in batches.
 
 Every function is checked ([§5](ch05-static-checks.md)) **by default,
 unconditionally** -- there is no per-function or per-file annotation that
@@ -220,4 +305,4 @@ unsafe context directly, with no re-wrapping required.
 
 ---
 
-[← Previous: Design Philosophy](ch00-design-philosophy.md) · [Table of Contents](README.md) · [Next: Boundary Rules →](ch02-boundary-rules.md)
+[← Previous: Getting Started](ch00-design-philosophy.md) · [Table of Contents](README.md) · [Next: Basic Building Blocks →](ch02-boundary-rules.md)

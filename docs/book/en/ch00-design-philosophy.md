@@ -1,4 +1,85 @@
-# 0. Design Philosophy (the immovable North Star)
+# Getting Started
+
+scpp is a compiled language. In this chapter you will build the compiler, write
+a tiny program, compile it, and run it. The goal is not to explain every rule
+yet. The goal is to get something real working on your screen first.
+
+## What you need
+
+To follow along from a source checkout, you need:
+
+- a clone of the `scpp` repository;
+- CMake and Ninja;
+- a recent Clang/LLVM toolchain.
+
+## Build the compiler
+
+From the repository root:
+
+```sh
+cmake -S . -B build -G Ninja
+cmake --build build
+```
+
+After that, the compiler is available as `./build/scpp`. If you later install
+`scpp` somewhere on your `PATH`, the same commands in this book work without the
+leading `./build/`.
+
+## Your first program
+
+Create a file named `hello.scpp`:
+
+```cpp
+extern "C" int puts(const char* s);
+
+int main() {
+    [[scpp::unsafe]] {
+        puts("Hello, world!");
+    }
+    return 0;
+}
+```
+
+Build and run it:
+
+```sh
+./build/scpp hello.scpp
+./a.out
+```
+
+You should see:
+
+```text
+Hello, world!
+```
+
+## What you just saw
+
+A few important pieces are already visible here:
+
+- `int main()` is the program's entry point.
+- String literals use the same double-quoted spelling you already know from
+  C++.
+- `extern "C" int puts(const char* s);` declares a function from the C library.
+- `[[scpp::unsafe]]` is required here because calling an unchecked external
+  function is an explicit boundary in scpp. We will come back to that idea in a
+  later chapter; for now, it is enough to treat it as a clearly marked
+  “here be dragons” block around the one operation the compiler cannot verify.
+- `return 0;` reports success to the operating system.
+
+That is enough for chapter one: you have already built the compiler and run a
+real scpp program.
+
+## Next
+
+The next chapter keeps the same “write it, build it, run it” rhythm, but moves
+from one line of output to a slightly larger complete program.
+
+## Reference appendix preserved during the rewrite
+
+The material below is older, reference-oriented content that later chapters
+still link to. It remains here temporarily so those links keep working while
+the tutorial rewrite is landing in batches.
 
 1. **It looks like C++**: anyone familiar with modern C++ should, at a glance,
    believe this is C++.
@@ -96,4 +177,4 @@
 
 ---
 
-[Table of Contents](README.md) · [Next: Safety Context →](ch01-safety-context.md)
+[Table of Contents](README.md) · [Next: A Small Complete Program →](ch01-safety-context.md)

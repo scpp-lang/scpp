@@ -29,4 +29,4 @@
 
 ---
 
-[← 上一章：边界规则](ch02-boundary-rules.md) · [目录](README.md) · [下一章：struct 与 class 的语义区分 →](ch04-struct-vs-class.md)
+[← 上一章：基本构件](ch02-boundary-rules.md) · [目录](README.md) · [下一章：struct 与 class 的语义区分 →](ch04-struct-vs-class.md)
