@@ -9,8 +9,49 @@
   --link: #0969da;
   --link-hover: #0550ae;
   --code-bg: #f6f8fa;
+  --header-bg: rgba(255,255,255,0.92);
+  --accent-bg: #dbeafe;
+  --accent-text: #0b3d91;
   --max-width: 78rem;
   --sidebar-width: 18rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #21262d;
+    --text: #e6edf3;
+    --muted: #9da7b3;
+    --border: #30363d;
+    --link: #58a6ff;
+    --link-hover: #79c0ff;
+    --code-bg: #161b22;
+    --header-bg: rgba(13,17,23,0.92);
+    --accent-bg: rgba(31, 111, 235, 0.22);
+    --accent-text: #c9d1d9;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #21262d;
+  --text: #e6edf3;
+  --muted: #9da7b3;
+  --border: #30363d;
+  --link: #58a6ff;
+  --link-hover: #79c0ff;
+  --code-bg: #161b22;
+  --header-bg: rgba(13,17,23,0.92);
+  --accent-bg: rgba(31, 111, 235, 0.22);
+  --accent-text: #c9d1d9;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -69,7 +110,7 @@ hr {
 }
 .site-header {
   border-bottom: 1px solid var(--border);
-  background: rgba(255,255,255,0.92);
+  background: var(--header-bg);
   backdrop-filter: blur(8px);
   position: sticky;
   top: 0;
@@ -95,6 +136,26 @@ hr {
   gap: 0.85rem;
   align-items: center;
   flex-wrap: wrap;
+}
+.theme-toggle {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.theme-toggle:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.theme-toggle-label {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
 }
 .top-nav a, .lang-switcher a, .lang-switcher span {
   color: var(--muted);
@@ -170,8 +231,8 @@ hr {
   color: var(--text);
 }
 .sidebar a.current {
-  background: #dbeafe;
-  color: #0b3d91;
+  background: var(--accent-bg);
+  color: var(--accent-text);
   font-weight: 600;
 }
 .content {
