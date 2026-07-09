@@ -101,6 +101,7 @@ target_sources(scpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/cli.cppm
+            src/cli/tools.cppm
             src/cli/tools/installself.cppm)
 target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver scpp_project)
 

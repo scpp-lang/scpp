@@ -16,7 +16,7 @@ import scpp.parser;
 import scpp.ast;
 import scpp.codegen;
 import scpp.movecheck;
-import scpp.cli.tools.installself;
+import scpp.cli.tools;
 import scpp.driver;
 import scpp.project;
 
