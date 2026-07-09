@@ -10,7 +10,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module scpp.cli.tools.installself;
+export module scpp.cli.tools:installself;
 
 import scpp.driver;
 
