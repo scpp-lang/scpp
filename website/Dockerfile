@@ -1,6 +1,7 @@
 FROM ubuntu:24.04 AS build
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
     CC=clang-22 \
     CXX=clang++-22 \
     LLVM_CMAKE_DIR=/usr/lib/llvm-22/lib/cmake/llvm
