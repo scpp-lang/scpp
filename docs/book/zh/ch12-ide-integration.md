@@ -3,8 +3,8 @@
 本章讲的是 scpp 程序**源码级调试**的实用做法：如何在 VS Code 里把断点、
 单步、回溯和局部变量查看真正跑起来。
 
-关键前提是：`scpp build` 可以给生成出来的本地二进制带上**真实的 DWARF
-调试信息**。只要这份调试信息在，基于 LLDB 的常规工具链就能像调试任何其
+关键前提是：直接用 `scpp` 调用一个源码文件时，只要带上 `-g`，就可以给生成出来的本地二进制带上**真实的 DWARF
+调试信息**（完整调用方式见 [ch13](ch13-compiler-invocation.md)）。只要这份调试信息在，基于 LLDB 的常规工具链就能像调试任何其
 它 LLVM 产出的可执行文件一样，去调试 scpp 程序。
 
 ## 12.1 用 `-g` 生成调试信息
@@ -12,7 +12,7 @@
 构建要调试的程序时，加上 `-g`：
 
 ```sh
-scpp build foo.scpp -o foo -g
+scpp foo.scpp -o foo -g
 ```
 
 `-g` 的作用，是让 `scpp` 在输出二进制里发出调试元数据。实际效果就是，
@@ -121,7 +121,7 @@ VS Code 只有在某个语言模式，被某个已安装的调试扩展声明为
 1. 安装 **CodeLLDB**（`vadimcn.vscode-lldb`）。
 2. 带调试信息构建：
    ```sh
-   scpp build myprogram.scpp -o myprogram -g
+   scpp myprogram.scpp -o myprogram -g
    ```
 3. 添加 `.vscode/launch.json`，写入一条 `lldb` 启动配置。
 4. 添加 `.vscode/settings.json`，内容如下：
@@ -139,4 +139,4 @@ VS Code 只有在某个语言模式，被某个已安装的调试扩展声明为
 
 ---
 
-[← 上一章：模块与库](ch11-modules-and-libraries.md) · [目录](README.md)
+[← 上一章：模块与库](ch11-modules-and-libraries.md) · [目录](README.md) · [下一章：编译器调用与 CLI →](ch13-compiler-invocation.md)

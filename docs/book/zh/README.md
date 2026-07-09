@@ -26,3 +26,4 @@
 10. [参考实现（务必先研读）](ch10-reference-implementations.md)
 11. [模块与库（Modules & Libraries）](ch11-modules-and-libraries.md)
 12. [IDE 集成](ch12-ide-integration.md)
+13. [编译器调用与 CLI](ch13-compiler-invocation.md)

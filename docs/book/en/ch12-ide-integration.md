@@ -4,8 +4,8 @@ This chapter covers the practical side of debugging scpp programs at the
 **source level**: breakpoints, stepping, backtraces, and variable inspection
 inside VS Code.
 
-The key enabling piece is that `scpp build` can emit **real DWARF debug
-information** for the generated native binary. Once that information is
+The key enabling piece is that invoking `scpp` on a source file with `-g` can emit **real DWARF debug
+information** for the generated native binary (see [ch13](ch13-compiler-invocation.md)). Once that information is
 present, ordinary LLDB-based tooling can debug a scpp program the same way it
 debugs any other LLVM-produced executable.
 
@@ -14,7 +14,7 @@ debugs any other LLVM-produced executable.
 Use `-g` when building the program you want to debug:
 
 ```sh
-scpp build foo.scpp -o foo -g
+scpp foo.scpp -o foo -g
 ```
 
 `-g` tells `scpp` to emit debug metadata into the output binary. In practical
@@ -127,7 +127,7 @@ A practical minimal setup looks like this:
 1. Install **CodeLLDB** (`vadimcn.vscode-lldb`).
 2. Build with debug info:
    ```sh
-   scpp build myprogram.scpp -o myprogram -g
+   scpp myprogram.scpp -o myprogram -g
    ```
 3. Add `.vscode/launch.json` with an `lldb` launch configuration.
 4. Add `.vscode/settings.json` with:
@@ -145,4 +145,4 @@ scpp programs: breakpoints, stepping, variable inspection, and backtraces.
 
 ---
 
-[← Previous: Modules & Libraries](ch11-modules-and-libraries.md) · [Table of Contents](README.md)
+[← Previous: Modules & Libraries](ch11-modules-and-libraries.md) · [Table of Contents](README.md) · [Next: Compiler Invocation and CLI →](ch13-compiler-invocation.md)
