@@ -20,6 +20,13 @@ endif()
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 llvm_map_components_to_libnames(LLVM_LIBS core support target native)
+if(EXISTS "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0")
+    set(SQLITE3_LIB "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0")
+elseif(EXISTS "/lib/x86_64-linux-gnu/libsqlite3.so.0")
+    set(SQLITE3_LIB "/lib/x86_64-linux-gnu/libsqlite3.so.0")
+else()
+    find_library(SQLITE3_LIB NAMES sqlite3 REQUIRED)
+endif()
 
 add_library(scpp_lexer)
 target_sources(scpp_lexer
@@ -84,7 +91,7 @@ target_sources(scpp_project
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/project.cppm)
-target_link_libraries(scpp_project PUBLIC scpp_lexer scpp_driver)
+target_link_libraries(scpp_project PUBLIC scpp_lexer scpp_driver ${SQLITE3_LIB})
 target_compile_features(scpp_project PRIVATE cxx_std_23)
 
 add_executable(scpp)

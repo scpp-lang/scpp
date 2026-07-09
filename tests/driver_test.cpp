@@ -5,6 +5,7 @@ import scpp.codegen;
 import scpp.ast;
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +17,7 @@ import scpp.ast;
 #include <string>
 #include <string_view>
 #include <sys/wait.h>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -1631,6 +1633,200 @@ void run_cli_extension_tests() {
         RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected root package executable exit code 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_incremental_build_skips_recompile_on_impl_change_and_recompiles_on_interface_change";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_incremental_build_skips_recompile_on_impl_change_and_recompiles_on_interface_change";
+        std::filesystem::path dep_dir = root / "dep";
+        std::filesystem::path app_dir = root / "app";
+        std::filesystem::path build_root = root / ".scpp" / "build" / scpp::host_target_triple() / "dev";
+        std::filesystem::path dep_archive = build_root / "dep" / "archives" / "libdep.scppa";
+        std::filesystem::path dep_interface = build_root / "dep" / "modules" / "dep.scppm";
+        std::filesystem::path app_object = build_root / "app" / "objects" / "app" / "root.o";
+        std::filesystem::path app_exe = build_root / "app" / "app";
+        std::filesystem::path build_db = root / ".scpp" / "cache" / "build.db";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(dep_dir / "src");
+        std::filesystem::create_directories(app_dir / "src");
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[workspace]\n"
+                        "members = [\"dep\", \"app\"]\n"
+                        "default-members = [\"app\"]\n");
+        write_text_file(dep_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"dep\"\n"
+                        "\n"
+                        "[lib]\n"
+                        "root = \"src/dep.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n");
+        write_text_file(dep_dir / "src" / "dep.scpp",
+                        "export module dep;\n"
+                        "namespace dep {\n"
+                        "    int internal_value() {\n"
+                        "        int base = 39;\n"
+                        "        return base + 1;\n"
+                        "    }\n"
+                        "    export int value() { return internal_value(); }\n"
+                        "}\n");
+        write_text_file(app_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"app\"\n"
+                        "\n"
+                        "[[bin]]\n"
+                        "name = \"app\"\n"
+                        "root = \"src/main.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[dependencies]\n"
+                        "dep = { path = \"../dep\" }\n");
+        write_text_file(app_dir / "src" / "main.scpp",
+                        "import dep;\n"
+                        "int main() { return dep::value() - 40; }\n");
+        RunResult first_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                    shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(first_build.exit_code == 0, case_name + ": initial build should succeed, got '" + first_build.stdout_text + "'");
+        expect(std::filesystem::exists(build_db), case_name + ": expected .scpp/cache/build.db");
+        auto first_dep_archive_time = std::filesystem::last_write_time(dep_archive);
+        std::string first_dep_interface_text = read_file(dep_interface);
+        auto first_app_object_time = std::filesystem::last_write_time(app_object);
+        auto first_app_exe_time = std::filesystem::last_write_time(app_exe);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        write_text_file(dep_dir / "src" / "dep.scpp",
+                        "export module dep;\n"
+                        "namespace dep {\n"
+                        "    int internal_value() {\n"
+                        "        int base = 38;\n"
+                        "        return base + 2;\n"
+                        "    }\n"
+                        "    export int value() { return internal_value(); }\n"
+                        "}\n");
+        RunResult impl_only_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                        shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(impl_only_build.exit_code == 0,
+               case_name + ": impl-only rebuild should succeed, got '" + impl_only_build.stdout_text + "'");
+        expect(std::filesystem::last_write_time(dep_archive) > first_dep_archive_time,
+               case_name + ": dependency archive should rebuild after implementation change");
+        expect(read_file(dep_interface) == first_dep_interface_text,
+               case_name + ": dependency interface should remain unchanged after implementation-only change");
+        expect(std::filesystem::last_write_time(app_object) == first_app_object_time,
+               case_name + ": downstream object should be reused when dependency interface is unchanged");
+        expect(std::filesystem::last_write_time(app_exe) > first_app_exe_time,
+               case_name + ": final executable should relink after dependency archive changes");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        write_text_file(dep_dir / "src" / "dep.scpp",
+                        "export module dep;\n"
+                        "namespace dep {\n"
+                        "    export int extra() { return 0; }\n"
+                        "    int internal_value() {\n"
+                        "        int base = 38;\n"
+                        "        return base + 2;\n"
+                        "    }\n"
+                        "    export int value() { return internal_value(); }\n"
+                        "}\n");
+        RunResult interface_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                        shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(interface_build.exit_code == 0,
+               case_name + ": interface rebuild should succeed, got '" + interface_build.stdout_text + "'");
+        expect(read_file(dep_interface) != first_dep_interface_text,
+               case_name + ": dependency interface should rebuild after exported interface change");
+        expect(std::filesystem::last_write_time(app_object) > first_app_object_time,
+               case_name + ": downstream object should recompile after dependency interface change");
+        RunResult run_result = run_command_capture(shell_quote(app_exe.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": executable should still run after incremental rebuilds, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_native_links_propagate_transitively";
+        std::filesystem::path root = std::filesystem::current_path() / "cli_native_links_propagate_transitively";
+        std::filesystem::path trig_dir = root / "trig";
+        std::filesystem::path net_dir = root / "net";
+        std::filesystem::path app_dir = root / "app";
+        std::filesystem::path app_exe =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(trig_dir / "src");
+        std::filesystem::create_directories(net_dir / "src");
+        std::filesystem::create_directories(app_dir / "src");
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[workspace]\n"
+                        "members = [\"trig\", \"net\", \"app\"]\n"
+                        "default-members = [\"app\"]\n");
+        write_text_file(trig_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"trig\"\n"
+                        "\n"
+                        "[lib]\n"
+                        "root = \"src/trig.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[native]\n"
+                        "links = [\"m\"]\n");
+        write_text_file(trig_dir / "src" / "trig.scpp",
+                        "export module trig;\n"
+                        "extern \"C\" double cos(double x);\n"
+                        "namespace trig {\n"
+                        "    export int one() {\n"
+                        "        [[scpp::unsafe]] { return (int)cos(0.0); }\n"
+                        "    }\n"
+                        "}\n");
+        write_text_file(net_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"net\"\n"
+                        "\n"
+                        "[lib]\n"
+                        "root = \"src/net.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[dependencies]\n"
+                        "trig = { path = \"../trig\" }\n");
+        write_text_file(net_dir / "src" / "net.scpp",
+                        "export module net;\n"
+                        "import trig;\n"
+                        "namespace net { export int forward() { return trig::one(); } }\n");
+        write_text_file(app_dir / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"app\"\n"
+                        "\n"
+                        "[[bin]]\n"
+                        "name = \"app\"\n"
+                        "root = \"src/main.scpp\"\n"
+                        "sources = [\"src/**/*.scpp\"]\n"
+                        "\n"
+                        "[dependencies]\n"
+                        "net = { path = \"../net\" }\n");
+        write_text_file(app_dir / "src" / "main.scpp",
+                        "import net;\n"
+                        "int main() { return net::forward() - 1; }\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": transitive native-link build should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(shell_quote(app_exe.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": executable should run successfully with propagated native links, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove_all(root);
     }
