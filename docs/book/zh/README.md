@@ -1,29 +1,116 @@
-# The SCPP Programming Language（scpp 语言教程）
+# The SCPP Programming Language
 
-本书把 scpp 当作一门今天就能上手编写的语言来讲解。需要精确、规范化表述时，
-请查看 `docs/spec/` 下的形式化规范。
+- [开始上手]
+  - [构建编译器]
+  - [Hello, World!]
+  - [第一个 project build]
 
-> English version: [en/README.md](../en/README.md)
+- [做一个猜数字小游戏]
 
-## 建议先读这里
+- [常见编程概念]
+  - [变量、初始化与默认清零]
+  - [数据类型]
+  - [函数]
+  - [注释]
+  - [控制流]
 
-1. [开始上手](ch00-design-philosophy.md)
-2. [第一个完整的小程序](ch01-safety-context.md)
-3. [基本构件](ch02-boundary-rules.md)
+- [理解所有权]
+  - [什么是所有权]
+  - [引用与借用]
+  - [`std::span` 与其它非拥有视图]
 
-## 现有参考章节
+- [用 struct 与 class 组织相关数据]
+  - [定义与实例化 `struct` / `class`]
+  - [一个使用受检查 class 的示例程序]
+  - [方法与 `this`]
 
-下面这些章节仍然保留了大量偏参考手册风格的内容；在书的前半部分逐步改写为教
-程体例的同时，它们依然是有价值的补充材料。
+- [安全边界与 `[[scpp::unsafe]]`]
+  - [`[[scpp::unsafe]]` 会做什么、不会做什么]
+  - [调用 `extern "C"` 与使用裸指针]
+  - [如何把“信任”局部化到真实程序里]
 
-- [语法糖 / 既有语法的重新语义化](ch03-syntactic-sugar.md)
-- [struct 与 class 的语义区分（内存布局 / ABI 固定）](ch04-struct-vs-class.md)
-- [静态检查（健全性核心）](ch05-static-checks.md)
-- [v0.1 支持的子集](ch06-safe-subset.md)
-- [编译管线（架构）](ch07-compilation-pipeline.md)
-- [未决问题（Open Questions，需后续拍板）](ch08-open-questions.md)
-- [MVP 里程碑（实现顺序，端到端优先）](ch09-milestones.md)
-- [参考实现（务必先研读）](ch10-reference-implementations.md)
-- [模块与库（Modules & Libraries）](ch11-modules-and-libraries.md)
-- [IDE 集成](ch12-ide-integration.md)
-- [编译器调用与 CLI](ch13-compiler-invocation.md)
+- [包、模块与项目布局]
+  - [包与项目清单]
+  - [用模块控制作用域与可见性]
+  - [在模块树中引用条目的路径]
+  - [使用 `import` 与限定名]
+  - [把模块拆到不同文件中]
+
+- [数组、缓冲区与视图]
+  - [定长数组]
+  - [把文本当作 `char` 与 C 兼容缓冲区处理]
+  - [用 `std::span` 借用视图]
+
+- [错误处理]
+  - [不可恢复错误与编译器插入的检查]
+  - [今天可用的可恢复错误写法]
+  - [为 `std::expected` 做准备]
+
+- [泛型代码、concept 与生命周期]
+  - [泛型数据类型]
+  - [用 concept 描述共享要求]
+  - [用生命周期验证引用]
+
+- [编写自动化测试]
+  - [编译并运行式测试]
+  - [控制测试命令]
+  - [测试组织方式]
+
+- [一个 I/O 项目：构建命令行程序]
+  - [接收命令行参数]
+  - [读取文件]
+  - [重构成模块]
+  - [用测试增加功能]
+  - [处理环境变量]
+  - [把诊断信息写到标准错误]
+
+- [闭包与显式迭代]
+  - [闭包]
+  - [用循环和视图处理一串数据]
+  - [继续改进命令行项目]
+  - [显式循环的性能]
+
+- [进一步理解 project build 与可复用包]
+  - [编译器模式与项目构建模式]
+  - [构建可复用的模块制品]
+  - [workspace]
+  - [安装与运行二进制程序]
+  - [扩展工具链]
+
+- [智能指针与拥有型句柄]
+  - [使用 `std::unique_ptr<T>`]
+  - [像用引用一样使用拥有型指针]
+  - [用析构函数执行清理代码]
+  - [`std::shared_ptr<T>`]
+  - [用 `mutable` 做内部可变性]
+  - [避免引用环与所有权混乱]
+
+- [无畏并发]
+  - [用线程同时运行代码]
+  - [安全地跨线程移动数据]
+  - [共享状态并发]
+  - [线程 trait：`thread_movable` 与 `thread_shareable`]
+
+- [互操作与固定布局数据]
+  - [固定布局的 `struct` 值]
+  - [C ABI 边界]
+  - [packed 布局与 `union` 逃生舱]
+
+- [高级特性]
+  - [高级 concept 与约束]
+  - [高级类型与函数指针]
+  - [高级函数与闭包]
+  - [没有宏时如何做元编程]
+
+- [最终项目：构建一个多线程 Web 服务器]
+  - [先做单线程 Web 服务器]
+  - [从单线程走向多线程]
+  - [优雅关闭与清理]
+
+- [附录]
+  - [A - Attribute 与保留写法]
+  - [B - 运算符与符号]
+  - [C - 标准库基础构件]
+  - [D - 常用开发工具]
+  - [E - SCPP26 与 C++26 基线]
+  - [F - 本书翻译版本]
