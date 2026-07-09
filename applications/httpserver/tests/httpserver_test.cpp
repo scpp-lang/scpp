@@ -96,7 +96,7 @@ std::filesystem::path prepare_docroot() {
     return work / "docroot";
 }
 
-std::filesystem::path build_server_binary(const std::filesystem::path& root, int port) {
+std::filesystem::path build_server_binary(const std::filesystem::path& root, int port, bool enable_default_charset) {
     std::filesystem::path work(SCPP_HTTPSERVER_WORK_DIR);
     std::filesystem::create_directories(work);
     std::filesystem::path source = work / "generated_main.scpp";
@@ -109,6 +109,7 @@ std::filesystem::path build_server_binary(const std::filesystem::path& root, int
         << "    builder.set_port(" << port << ");\n"
         << "    builder.set_max_connections(32);\n"
         << "    builder.set_worker_count(2);\n"
+        << (enable_default_charset ? "    builder.set_default_charset(\"utf-8\");\n" : "")
         << "    builder.allow_index_html(true);\n"
         << "    builder.deny_hidden_files(true);\n"
         << "    return builder.serve();\n"
@@ -182,30 +183,49 @@ std::string send_request(int port, const std::string& request) {
     return response;
 }
 
-void run_integration_test() {
-    const auto root = prepare_docroot();
-    const int port = reserve_port();
-    const auto binary = build_server_binary(root, port);
+void expect_content_type(const std::string& response, const std::string& media_type, bool expect_charset,
+                         const std::string& message) {
+    std::string expected_header = "Content-Type: " + media_type;
+    if (expect_charset) {
+        expected_header += "; charset=utf-8";
+        expect(response.find(expected_header) != std::string::npos, message + " with charset");
+        return;
+    }
+    expected_header += "\r\n";
+    expect(response.find(expected_header) != std::string::npos, message + " without charset");
+    expect(response.find("Content-Type: " + media_type + "; charset=") == std::string::npos,
+           message + " should not include a charset");
+}
+
+void stop_server(pid_t pid) {
+    kill(pid, SIGTERM);
+    int status = 0;
+    waitpid(pid, &status, 0);
+}
+
+void run_server_case(const std::filesystem::path& root, int port, bool expect_charset) {
+    const auto binary = build_server_binary(root, port, expect_charset);
     pid_t pid = start_server(binary);
     expect(pid > 0, "server process spawned");
     expect(wait_for_server(port), "server became reachable");
 
     std::string get_root = send_request(port, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(get_root.find("HTTP/1.1 200 OK") == 0, "GET / returns 200");
+    expect_content_type(get_root, "text/html", expect_charset, "GET / has text/html");
     expect(get_root.find("index from scpp httpserver\n") != std::string::npos, "GET / returns index body");
 
     std::string get_file = send_request(port, "GET /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(get_file.find("Content-Type: text/plain") != std::string::npos, "GET /hello.txt has text/plain");
+    expect_content_type(get_file, "text/plain", expect_charset, "GET /hello.txt has text/plain");
     expect(get_file.find("hello from file\n") != std::string::npos, "GET /hello.txt returns body");
 
     std::string get_css = send_request(port, "GET /assets/site.css HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(get_css.find("HTTP/1.1 200 OK") == 0, "GET /assets/site.css returns 200");
-    expect(get_css.find("Content-Type: text/css") != std::string::npos, "GET /assets/site.css has text/css");
+    expect_content_type(get_css, "text/css", expect_charset, "GET /assets/site.css has text/css");
     expect(get_css.find("font-family: sans-serif;") != std::string::npos, "GET /assets/site.css returns CSS body");
 
     std::string nested_index = send_request(port, "GET /book/en/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(nested_index.find("HTTP/1.1 200 OK") == 0, "GET /book/en/ returns 200");
-    expect(nested_index.find("Content-Type: text/html") != std::string::npos, "GET /book/en/ has text/html");
+    expect_content_type(nested_index, "text/html", expect_charset, "GET /book/en/ has text/html");
     expect(nested_index.find("<title>SCPP book EN</title>") != std::string::npos, "GET /book/en/ serves nested index");
 
     std::string nested_index_without_slash = send_request(port, "GET /book/en HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -215,7 +235,7 @@ void run_integration_test() {
 
     std::string nested_page = send_request(port, "GET /book/en/getting-started.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(nested_page.find("HTTP/1.1 200 OK") == 0, "GET nested html page returns 200");
-    expect(nested_page.find("Content-Type: text/html") != std::string::npos, "GET nested html page has text/html");
+    expect_content_type(nested_page, "text/html", expect_charset, "GET nested html page has text/html");
     expect(nested_page.find("Getting started from generated site") != std::string::npos,
            "GET nested html page returns nested body");
 
@@ -236,9 +256,13 @@ void run_integration_test() {
     expect(symlink.find("HTTP/1.1 403 Forbidden") == 0 || symlink.find("HTTP/1.1 404 Not Found") == 0,
            "symlink leaf is denied");
 
-    kill(pid, SIGTERM);
-    int status = 0;
-    waitpid(pid, &status, 0);
+    stop_server(pid);
+}
+
+void run_integration_test() {
+    const auto root = prepare_docroot();
+    run_server_case(root, reserve_port(), false);
+    run_server_case(root, reserve_port(), true);
 }
 } // namespace
 
