@@ -719,6 +719,8 @@ export namespace scpp {
 
 std::string host_target_triple() { return llvm::sys::getDefaultTargetTriple(); }
 
+std::vector<std::string> project_default_stdlib_link_inputs() { return default_stdlib_link_inputs(); }
+
 // Compiles scpp source text down to a native object file at `object_path`.
 // This is the M1/M2/M3 backend: AST -> [move check] -> LLVM IR -> native
 // object code. `import_paths` (ch11 §11.7, `--import name=path`) resolves

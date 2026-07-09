@@ -1,11 +1,18 @@
 module;
 
 #include <algorithm>
+#include <condition_variable>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <regex>
 #include <set>
@@ -13,9 +20,27 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+extern "C" {
+struct sqlite3;
+struct sqlite3_stmt;
+int sqlite3_open(const char* filename, sqlite3** ppDb);
+int sqlite3_close(sqlite3*);
+const char* sqlite3_errmsg(sqlite3*);
+int sqlite3_exec(sqlite3*, const char*, int (*)(void*, int, char**, char**), void*, char**);
+void sqlite3_free(void*);
+int sqlite3_prepare_v2(sqlite3*, const char*, int, sqlite3_stmt**, const char**);
+int sqlite3_step(sqlite3_stmt*);
+int sqlite3_finalize(sqlite3_stmt*);
+int sqlite3_reset(sqlite3_stmt*);
+int sqlite3_clear_bindings(sqlite3_stmt*);
+int sqlite3_bind_text(sqlite3_stmt*, int, const char*, int, void (*)(void*));
+const unsigned char* sqlite3_column_text(sqlite3_stmt*, int);
+}
 
 export module scpp.project;
 
@@ -51,6 +76,28 @@ struct ManifestError : std::runtime_error {
 struct BuildError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+
+constexpr int sqlite_ok = 0;
+constexpr int sqlite_row = 100;
+constexpr int sqlite_done = 101;
+auto sqlite_transient = reinterpret_cast<void (*)(void*)>(-1);
+
+bool trace_enabled() {
+    static bool enabled = []() {
+        const char* env = std::getenv("SCPP_BUILD_TRACE");
+        return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
+    }();
+    return enabled;
+}
+
+void trace_build(const std::string& message) {
+    if (!trace_enabled()) return;
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time);
+    std::cerr << "[scpp-build " << std::put_time(&tm, "%H:%M:%S") << " tid "
+              << std::this_thread::get_id() << "] " << message << "\n";
+}
 
 std::string trim(std::string_view text) {
     size_t start = 0;
@@ -255,6 +302,181 @@ void write_file(const std::filesystem::path& path, std::string_view content) {
     file << content;
 }
 
+std::string fnv1a64_hex(std::string_view text) {
+    constexpr uint64_t offset_basis = 14695981039346656037ull;
+    constexpr uint64_t prime = 1099511628211ull;
+    uint64_t value = offset_basis;
+    for (unsigned char ch : text) {
+        value ^= static_cast<uint64_t>(ch);
+        value *= prime;
+    }
+    std::ostringstream out;
+    out << std::hex << std::setfill('0') << std::setw(16) << value;
+    return out.str();
+}
+
+std::string digest_file(const std::filesystem::path& path) {
+    return fnv1a64_hex(read_file(path));
+}
+
+std::string join_for_digest(const std::vector<std::string>& values) {
+    std::ostringstream out;
+    for (const std::string& value : values) {
+        out << value.size() << ":" << value << ";";
+    }
+    return out.str();
+}
+
+std::string path_digest_or_empty(const std::filesystem::path& path) {
+    return std::filesystem::exists(path) ? digest_file(path) : std::string();
+}
+
+struct ManifestData;
+
+struct BuildRecord {
+    std::string key;
+    std::string kind;
+    std::string signature;
+    std::string interface_digest;
+    std::string archive_digest;
+    std::string output_digest;
+    std::string output_path;
+    std::string manifest_digest;
+    std::string compiler_version;
+    std::string triple;
+};
+
+class BuildDatabase {
+public:
+    explicit BuildDatabase(const std::filesystem::path& db_path)
+        : db_path_(normalized_path(db_path)) {
+        std::filesystem::create_directories(db_path_.parent_path());
+        if (sqlite3_open(db_path_.string().c_str(), &db_) != sqlite_ok || db_ == nullptr) {
+            std::string message = "cannot open build database '" + db_path_.string() + "'";
+            if (db_ != nullptr) message += ": " + std::string(sqlite3_errmsg(db_));
+            throw BuildError(message);
+        }
+        exec("PRAGMA journal_mode=WAL;");
+        exec("CREATE TABLE IF NOT EXISTS build_records ("
+             "key TEXT PRIMARY KEY,"
+             "kind TEXT NOT NULL,"
+             "signature TEXT NOT NULL,"
+             "interface_digest TEXT,"
+             "archive_digest TEXT,"
+             "output_digest TEXT,"
+             "output_path TEXT,"
+             "manifest_digest TEXT,"
+             "compiler_version TEXT,"
+             "triple TEXT"
+             ");");
+    }
+
+    BuildDatabase(const BuildDatabase&) = delete;
+    BuildDatabase& operator=(const BuildDatabase&) = delete;
+
+    ~BuildDatabase() {
+        if (db_ != nullptr) sqlite3_close(db_);
+    }
+
+    std::optional<BuildRecord> get(const std::string& key) {
+        std::lock_guard lock(mutex_);
+        sqlite3_stmt* stmt = prepare(
+            "SELECT key, kind, signature, interface_digest, archive_digest, output_digest, output_path, "
+            "manifest_digest, compiler_version, triple FROM build_records WHERE key = ?1");
+        bind_text(stmt, 1, key);
+        int rc = sqlite3_step(stmt);
+        if (rc == sqlite_row) {
+            BuildRecord record{
+                column_text(stmt, 0), column_text(stmt, 1), column_text(stmt, 2), column_text(stmt, 3),
+                column_text(stmt, 4), column_text(stmt, 5), column_text(stmt, 6), column_text(stmt, 7),
+                column_text(stmt, 8), column_text(stmt, 9),
+            };
+
+            sqlite3_finalize(stmt);
+            return record;
+        }
+        if (rc != sqlite_done) {
+            std::string message = "build database query failed: " + std::string(sqlite3_errmsg(db_));
+            sqlite3_finalize(stmt);
+            throw BuildError(message);
+        }
+        sqlite3_finalize(stmt);
+        return std::nullopt;
+    }
+
+    void put(const BuildRecord& record) {
+        std::lock_guard lock(mutex_);
+        sqlite3_stmt* stmt = prepare(
+            "INSERT INTO build_records "
+            "(key, kind, signature, interface_digest, archive_digest, output_digest, output_path, "
+            "manifest_digest, compiler_version, triple) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "kind=excluded.kind, signature=excluded.signature, interface_digest=excluded.interface_digest, "
+            "archive_digest=excluded.archive_digest, output_digest=excluded.output_digest, "
+            "output_path=excluded.output_path, manifest_digest=excluded.manifest_digest, "
+            "compiler_version=excluded.compiler_version, triple=excluded.triple");
+        bind_text(stmt, 1, record.key);
+        bind_text(stmt, 2, record.kind);
+        bind_text(stmt, 3, record.signature);
+        bind_text(stmt, 4, record.interface_digest);
+        bind_text(stmt, 5, record.archive_digest);
+        bind_text(stmt, 6, record.output_digest);
+        bind_text(stmt, 7, record.output_path);
+        bind_text(stmt, 8, record.manifest_digest);
+        bind_text(stmt, 9, record.compiler_version);
+        bind_text(stmt, 10, record.triple);
+        int rc = sqlite3_step(stmt);
+        if (rc != sqlite_done) {
+            std::string message = "build database write failed: " + std::string(sqlite3_errmsg(db_));
+            sqlite3_finalize(stmt);
+            throw BuildError(message);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+private:
+    void exec(const char* sql) {
+        std::lock_guard lock(mutex_);
+        char* error = nullptr;
+        if (sqlite3_exec(db_, sql, nullptr, nullptr, &error) != sqlite_ok) {
+            std::string message = "build database initialization failed";
+            if (error != nullptr) {
+                message += ": ";
+                message += error;
+                sqlite3_free(error);
+            }
+            throw BuildError(message);
+        }
+    }
+
+    sqlite3_stmt* prepare(const char* sql) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != sqlite_ok || stmt == nullptr) {
+            throw BuildError("build database statement preparation failed: " + std::string(sqlite3_errmsg(db_)));
+        }
+        return stmt;
+    }
+
+    void bind_text(sqlite3_stmt* stmt, int index, const std::string& value) {
+        if (sqlite3_bind_text(stmt, index, value.c_str(), -1, sqlite_transient) != sqlite_ok) {
+            throw BuildError("build database bind failed: " + std::string(sqlite3_errmsg(db_)));
+        }
+    }
+
+    std::string column_text(sqlite3_stmt* stmt, int index) const {
+        const unsigned char* text = sqlite3_column_text(stmt, index);
+        return text == nullptr ? std::string() : std::string(reinterpret_cast<const char*>(text));
+    }
+
+    std::filesystem::path db_path_;
+    sqlite3* db_ = nullptr;
+    std::mutex mutex_;
+};
+
+std::string manifest_digest(const ManifestData& manifest);
+std::string compiler_version_key();
+
 void print_diagnostic(std::string_view path, const std::string& source, scpp::SourceLocation loc,
                       const std::string& message) {
     std::cerr << path << ":";
@@ -300,6 +522,11 @@ struct WorkspaceConfig {
     bool has_workspace_dependencies = false;
 };
 
+struct NativeRequirements {
+    std::vector<std::string> links;
+    std::vector<std::filesystem::path> search_paths;
+};
+
 struct ManifestTarget {
     std::string name;
     std::filesystem::path root;
@@ -317,7 +544,7 @@ struct ManifestData {
     std::filesystem::path manifest_path;
     std::optional<WorkspaceConfig> workspace;
     std::vector<DependencySpec> dependencies;
-    bool has_native = false;
+    NativeRequirements native;
 };
 
 struct SourceInfo {
@@ -341,6 +568,8 @@ struct BuiltModule {
     std::filesystem::path source_path;
     std::filesystem::path interface_path;
     std::filesystem::path archive_path;
+    std::string interface_digest;
+    std::string archive_digest;
 };
 
 struct BuildOutputs {
@@ -363,6 +592,8 @@ struct PackageBuildResult {
     std::unordered_map<std::string, std::string> closure_import_paths;
     std::unordered_map<std::string, std::string> closure_module_owners;
     std::vector<std::filesystem::path> archive_closure;
+    std::vector<std::string> native_link_inputs;
+    bool uses_stdlib = false;
 };
 
 struct ProjectDiscovery {
@@ -540,7 +771,16 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                 break;
             }
             case Section::Native:
-                manifest.has_native = true;
+                if (key == "links") {
+                    manifest.native.links = parse_string_array(value, context);
+                } else if (key == "search") {
+                    manifest.native.search_paths.clear();
+                    for (const std::string& path : parse_string_array(value, context)) {
+                        manifest.native.search_paths.emplace_back(path);
+                    }
+                } else {
+                    throw ManifestError(context + " is not supported in [native]");
+                }
                 break;
             case Section::Workspace:
                 if (key == "members") {
@@ -569,9 +809,6 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
 
     if (manifest.manifest_version != 1) {
         throw ManifestError("manifest-version = 1 is required in '" + manifest.manifest_path.string() + "'");
-    }
-    if (manifest.has_native) {
-        throw ManifestError("[native] is designed but not implemented yet");
     }
     if (manifest.workspace.has_value() && manifest.workspace->has_workspace_dependencies) {
         throw ManifestError("[workspace.dependencies] is designed but not implemented yet");
@@ -788,6 +1025,14 @@ std::unordered_set<std::string> local_primary_module_names(const std::vector<Sou
     return names;
 }
 
+bool source_uses_stdlib(const SourceInfo& source) {
+    return std::find(source.imported_modules.begin(), source.imported_modules.end(), "std") != source.imported_modules.end();
+}
+
+bool sources_use_stdlib(const std::vector<SourceInfo>& sources) {
+    return std::any_of(sources.begin(), sources.end(), [](const SourceInfo& source) { return source_uses_stdlib(source); });
+}
+
 void validate_direct_visibility(const std::vector<SourceInfo>& sources,
                                 const std::unordered_set<std::string>& local_modules,
                                 const std::unordered_map<std::string, std::string>& direct_modules,
@@ -810,7 +1055,10 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
                                                   const std::filesystem::path& module_dir,
                                                   const std::filesystem::path& archive_dir,
                                                   const std::unordered_map<std::string, std::string>& base_import_paths,
-                                                  int opt_level) {
+                                                  int opt_level,
+                                                  const ManifestData& manifest,
+                                                  std::string_view profile_name,
+                                                  BuildDatabase& database) {
     std::map<std::string, SourceInfo> primary_modules;
     for (const SourceInfo& source : sources) {
         switch (source.kind) {
@@ -842,30 +1090,116 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
 
     std::vector<std::string> build_order = topo_sort_modules(primary_modules);
     std::unordered_map<std::string, std::string> import_paths = base_import_paths;
-    std::vector<BuiltModule> outputs;
-    for (const std::string& module_name : build_order) {
-        const SourceInfo& source = primary_modules.at(module_name);
-        std::filesystem::path interface_path = module_dir / (module_name + ".scppm");
-        std::filesystem::path archive_path = archive_dir / ("lib" + module_name + ".scppa");
-        std::string module_source = read_file(source.path);
-        try {
-            scpp::emit_module_artifacts(module_source, interface_path.string(), archive_path.string(), import_paths, {},
-                                        source.path.string(), opt_level);
-        } catch (const scpp::ParseError& e) {
-            print_diagnostic(source.path.string(), module_source, e.loc, e.what());
-            throw;
-        } catch (const scpp::DataflowError& e) {
-            print_diagnostic(source.path.string(), module_source, e.loc, e.what());
-            throw;
-        } catch (const scpp::CodegenError& e) {
-            print_diagnostic(source.path.string(), module_source, e.loc, e.what());
-            throw;
-        } catch (const scpp::DriverError& e) {
-            print_diagnostic(source.path.string(), module_source, scpp::SourceLocation{}, e.what());
-            throw;
+    std::unordered_map<std::string, int> indegree;
+    std::unordered_map<std::string, std::vector<std::string>> dependents;
+    for (const auto& [name, _] : primary_modules) indegree[name] = 0;
+    for (const auto& [name, source] : primary_modules) {
+        std::unordered_set<std::string> local_deps;
+        for (const std::string& imported : source.imported_modules) {
+            if (primary_modules.contains(imported) && imported != name) local_deps.insert(imported);
         }
-        import_paths[module_name] = interface_path.string();
-        outputs.push_back(BuiltModule{module_name, source.path, interface_path, archive_path});
+        for (const std::string& dep : local_deps) {
+            dependents[dep].push_back(name);
+            indegree[name]++;
+        }
+    }
+    std::vector<BuiltModule> outputs;
+    std::vector<std::string> ready;
+    for (const auto& [name, degree] : indegree) {
+        if (degree == 0) ready.push_back(name);
+    }
+    std::sort(ready.begin(), ready.end());
+    const std::string manifest_key = manifest_digest(manifest);
+    const std::string compiler_key = compiler_version_key();
+    while (!ready.empty()) {
+        std::vector<std::string> batch = ready;
+        ready.clear();
+        std::vector<std::future<BuiltModule>> futures;
+        for (const std::string& module_name : batch) {
+            futures.push_back(std::async(std::launch::async, [&, module_name]() -> BuiltModule {
+                const SourceInfo& source = primary_modules.at(module_name);
+                std::filesystem::path interface_path = module_dir / (module_name + ".scppm");
+                std::filesystem::path archive_path = archive_dir / ("lib" + module_name + ".scppa");
+                std::string module_source = read_file(source.path);
+                std::vector<std::string> dep_keys;
+                for (const std::string& imported : source.imported_modules) {
+                    auto it = import_paths.find(imported);
+                    if (it == import_paths.end()) continue;
+                    dep_keys.push_back(imported + "=" + it->second + "#" + path_digest_or_empty(it->second));
+                }
+                std::sort(dep_keys.begin(), dep_keys.end());
+                std::string signature = fnv1a64_hex(join_for_digest({
+                    "kind=module",
+                    "source=" + digest_file(source.path),
+                    "profile=" + std::string(profile_name),
+                    "triple=" + scpp::host_target_triple(),
+                    "compiler=" + compiler_key,
+                    "manifest=" + manifest_key,
+                    "opt=" + std::to_string(opt_level),
+                    "deps=" + join_for_digest(dep_keys),
+                }));
+                std::string record_key =
+                    "module|" + manifest.manifest_path.string() + "|" + std::string(profile_name) + "|" + module_name;
+                if (std::optional<BuildRecord> cached = database.get(record_key); cached.has_value() &&
+                    cached->signature == signature && std::filesystem::exists(interface_path) &&
+                    std::filesystem::exists(archive_path)) {
+                    trace_build("cache hit module " + module_name);
+                    return BuiltModule{module_name, source.path, interface_path, archive_path,
+                                       path_digest_or_empty(interface_path), path_digest_or_empty(archive_path)};
+                }
+                trace_build("build module " + module_name);
+                try {
+                    scpp::emit_module_artifacts(module_source, interface_path.string(), archive_path.string(), import_paths, {},
+                                                source.path.string(), opt_level);
+                } catch (const scpp::ParseError& e) {
+                    print_diagnostic(source.path.string(), module_source, e.loc, e.what());
+                    throw;
+                } catch (const scpp::DataflowError& e) {
+                    print_diagnostic(source.path.string(), module_source, e.loc, e.what());
+                    throw;
+                } catch (const scpp::CodegenError& e) {
+                    print_diagnostic(source.path.string(), module_source, e.loc, e.what());
+                    throw;
+                } catch (const scpp::DriverError& e) {
+                    print_diagnostic(source.path.string(), module_source, scpp::SourceLocation{}, e.what());
+                    throw;
+                }
+                BuiltModule built{module_name, source.path, interface_path, archive_path,
+                                  path_digest_or_empty(interface_path), path_digest_or_empty(archive_path)};
+                database.put(BuildRecord{
+                    record_key,
+                    "module",
+                    signature,
+                    built.interface_digest,
+                    built.archive_digest,
+                    built.archive_digest,
+                    archive_path.string(),
+                    manifest_key,
+                    compiler_key,
+                    scpp::host_target_triple(),
+                });
+                return built;
+            }));
+        }
+        for (auto& future : futures) {
+            BuiltModule built = future.get();
+            import_paths[built.name] = built.interface_path.string();
+            outputs.push_back(std::move(built));
+        }
+        std::sort(outputs.begin(), outputs.end(), [&](const BuiltModule& lhs, const BuiltModule& rhs) {
+            auto lhs_it = std::find(build_order.begin(), build_order.end(), lhs.name);
+            auto rhs_it = std::find(build_order.begin(), build_order.end(), rhs.name);
+            return lhs_it < rhs_it;
+        });
+        std::vector<std::string> newly_ready;
+        for (const std::string& module_name : batch) {
+            for (const std::string& dependent : dependents[module_name]) {
+                indegree[dependent]--;
+                if (indegree[dependent] == 0) newly_ready.push_back(dependent);
+            }
+        }
+        std::sort(newly_ready.begin(), newly_ready.end());
+        ready = std::move(newly_ready);
     }
     return outputs;
 }
@@ -896,6 +1230,43 @@ void append_unique_paths(std::vector<std::filesystem::path>& into, const std::ve
     for (const std::filesystem::path& path : extra) {
         if (std::find(into.begin(), into.end(), path) == into.end()) into.push_back(path);
     }
+}
+
+void append_unique_strings(std::vector<std::string>& into, const std::vector<std::string>& extra) {
+    for (const std::string& value : extra) {
+        if (std::find(into.begin(), into.end(), value) == into.end()) into.push_back(value);
+    }
+}
+
+std::vector<std::string> expand_native_link_inputs(const ManifestData& manifest) {
+    std::vector<std::string> inputs;
+    std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
+    for (const std::filesystem::path& path : manifest.native.search_paths) {
+        std::filesystem::path resolved = path.is_absolute() ? path : normalized_path(manifest_dir / path);
+        inputs.push_back("-L" + resolved.string());
+    }
+    for (const std::string& link : manifest.native.links) {
+        inputs.push_back("-l" + link);
+    }
+    return inputs;
+}
+
+std::string manifest_digest(const ManifestData& manifest) {
+    return digest_file(manifest.manifest_path);
+}
+
+std::optional<std::filesystem::path> current_executable_path_local() {
+    std::error_code ec;
+    std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) return std::nullopt;
+    return normalized_path(exe);
+}
+
+std::string compiler_version_key() {
+    if (std::optional<std::filesystem::path> exe = current_executable_path_local(); exe.has_value()) {
+        return digest_file(*exe);
+    }
+    return "unknown-compiler";
 }
 
 std::vector<std::filesystem::path> manifests_upward(const std::filesystem::path& start_dir) {
@@ -1053,115 +1424,218 @@ public:
         : shared_root_dir_(normalized_path(shared_root_dir)),
           profile_name_(std::move(profile_name)),
           workspace_manifest_(std::move(workspace_manifest)),
-          workspace_info_(std::move(workspace_info)) {}
+          workspace_info_(std::move(workspace_info)),
+          database_(shared_root_dir_ / ".scpp" / "cache" / "build.db") {}
 
     PackageBuildResult& build_package(const std::filesystem::path& manifest_path, bool build_binaries,
                                       const scpp::ProjectBuildOptions& options) {
         std::filesystem::path normalized_manifest = normalized_path(manifest_path);
         std::string key = normalized_manifest.string() + "|" + profile_name_;
-        if (cache_.contains(key)) {
-            if (build_binaries && !cache_.at(key).binaries.empty()) return cache_.at(key);
-            if (!build_binaries) return cache_.at(key);
-        }
-        if (!active_builds_.insert(key).second) {
+        thread_local std::unordered_set<std::string> recursion_stack;
+        if (!recursion_stack.insert(key).second) {
             throw BuildError("cyclic package dependency involving '" + normalized_manifest.string() + "'");
         }
+        auto erase_from_stack = [&]() { recursion_stack.erase(key); };
 
-        ManifestData manifest = load_package_manifest(normalized_manifest);
-        ProfileSettings profile = resolve_profile(manifest, workspace_manifest_, profile_name_);
-        PackageBuildResult result;
-        result.manifest = manifest;
-        result.package_output_root = package_output_root(shared_root_dir_, profile_name_, *manifest.package_name);
-        std::filesystem::create_directories(result.package_output_root / "modules");
-        std::filesystem::create_directories(result.package_output_root / "archives");
-        std::filesystem::create_directories(result.package_output_root / "objects");
-
-        std::unordered_map<std::string, std::string> direct_import_paths;
-        std::unordered_map<std::string, std::string> full_dependency_import_paths;
-        std::unordered_map<std::string, std::string> direct_module_owners;
-        std::unordered_map<std::string, std::string> transitive_only_modules;
-
-        for (const DependencySpec& dep : manifest.dependencies) {
-            std::filesystem::path dep_manifest_path = normalized_path(manifest.manifest_path.parent_path() / dep.path / "scpp.toml");
-            if (!std::filesystem::exists(dep_manifest_path)) {
-                throw BuildError("dependency '" + dep.alias + "' path '" +
-                                 (manifest.manifest_path.parent_path() / dep.path).string() + "' has no scpp.toml");
-            }
-            PackageBuildResult& dep_result = build_package(dep_manifest_path, /*build_binaries=*/false,
-                                                           scpp::ProjectBuildOptions{});
-            if (dep_result.library_modules.empty()) {
-                throw BuildError("dependency package '" + *dep_result.manifest.package_name + "' does not provide a [lib] target");
-            }
-            for (const auto& [module_name, interface_path] : dep_result.exported_modules) {
-                auto [it, inserted] = direct_import_paths.emplace(module_name, interface_path);
-                if (!inserted && it->second != interface_path) {
-                    throw BuildError("module '" + module_name + "' is exported by multiple direct dependencies");
+        while (true) {
+            std::unique_lock lock(mutex_);
+            auto cached = cache_.find(key);
+            if (cached != cache_.end()) {
+                if (!build_binaries) {
+                    erase_from_stack();
+                    return cached->second;
                 }
-                direct_module_owners.emplace(module_name, *dep_result.manifest.package_name);
-            }
-            append_import_maps(full_dependency_import_paths, dep_result.exported_modules);
-            append_import_maps(full_dependency_import_paths, dep_result.closure_import_paths);
-            for (const auto& [module_name, owner] : dep_result.closure_module_owners) {
-                if (!direct_import_paths.contains(module_name) && !transitive_only_modules.contains(module_name)) {
-                    transitive_only_modules.emplace(module_name, owner);
+                std::filesystem::path selected_binary_path;
+                if (options.selected_bin.has_value()) {
+                    selected_binary_path = cached->second.package_output_root / *options.selected_bin;
+                }
+                bool has_requested_binary = options.selected_bin.has_value()
+                    ? std::find(cached->second.binaries.begin(), cached->second.binaries.end(), selected_binary_path) !=
+                          cached->second.binaries.end()
+                    : (!cached->second.binaries.empty() || cached->second.manifest.bin_targets.empty());
+                if (has_requested_binary) {
+                    erase_from_stack();
+                    return cached->second;
                 }
             }
-            for (const BuiltModule& module : dep_result.library_modules) {
-                result.archive_closure.push_back(module.archive_path);
+            auto state = states_.find(key);
+            if (state == states_.end()) {
+                states_[key] = PackageState::Building;
+                break;
             }
-            append_unique_paths(result.archive_closure, dep_result.archive_closure);
+            if (state->second == PackageState::Built) {
+                states_[key] = PackageState::Building;
+                break;
+            }
+            if (state->second == PackageState::Failed) {
+                std::string failure = failures_.contains(key) ? failures_.at(key) : "package build failed";
+                erase_from_stack();
+                throw BuildError(failure);
+            }
+            cv_.wait(lock, [&] {
+                return !states_.contains(key) || states_.at(key) != PackageState::Building;
+            });
         }
 
-        std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
-        std::unordered_set<std::string> own_library_module_names;
-        if (manifest.lib_target.has_value()) {
-            std::vector<SourceInfo> lib_sources = classify_target_sources(manifest_dir, *manifest.lib_target);
-            own_library_module_names = local_primary_module_names(lib_sources);
-            validate_direct_visibility(lib_sources, own_library_module_names, direct_import_paths, transitive_only_modules);
-            result.library_modules = build_modules_for_target(lib_sources, result.package_output_root / "modules",
-                                                             result.package_output_root / "archives", full_dependency_import_paths,
-                                                             profile.opt_level);
-        } else if (options.build_lib_only) {
-            throw ManifestError("manifest has no [lib] target");
-        }
+        try {
+            trace_build("build package " + normalized_manifest.string());
+            ManifestData manifest = load_package_manifest(normalized_manifest);
+            ProfileSettings profile = resolve_profile(manifest, workspace_manifest_, profile_name_);
+            PackageBuildResult result;
+            result.manifest = manifest;
+            result.package_output_root = package_output_root(shared_root_dir_, profile_name_, *manifest.package_name);
+            result.native_link_inputs = expand_native_link_inputs(manifest);
+            std::filesystem::create_directories(result.package_output_root / "modules");
+            std::filesystem::create_directories(result.package_output_root / "archives");
+            std::filesystem::create_directories(result.package_output_root / "objects");
 
-        result.exported_modules = to_import_map(result.library_modules);
-        result.closure_import_paths = result.exported_modules;
-        append_import_maps(result.closure_import_paths, full_dependency_import_paths);
-        for (const BuiltModule& module : result.library_modules) {
-            result.closure_module_owners.emplace(module.name, *manifest.package_name);
-        }
-        for (const auto& [module_name, owner] : direct_module_owners) {
-            if (!result.closure_module_owners.contains(module_name)) result.closure_module_owners.emplace(module_name, owner);
-        }
-        for (const auto& [module_name, owner] : transitive_only_modules) {
-            if (!result.closure_module_owners.contains(module_name)) result.closure_module_owners.emplace(module_name, owner);
-        }
+            std::unordered_map<std::string, std::string> direct_import_paths;
+            std::unordered_map<std::string, std::string> full_dependency_import_paths;
+            std::unordered_map<std::string, std::string> direct_module_owners;
+            std::unordered_map<std::string, std::string> transitive_only_modules;
 
-        if (build_binaries) {
-            if (options.selected_bin.has_value()) {
-                auto it = std::find_if(manifest.bin_targets.begin(), manifest.bin_targets.end(),
-                                       [&](const ManifestTarget& target) { return target.name == *options.selected_bin; });
-                if (it == manifest.bin_targets.end()) {
-                    throw ManifestError("unknown [[bin]] target '" + *options.selected_bin + "'");
+            for (const DependencySpec& dep : manifest.dependencies) {
+                std::filesystem::path dep_manifest_path =
+                    normalized_path(manifest.manifest_path.parent_path() / dep.path / "scpp.toml");
+                if (!std::filesystem::exists(dep_manifest_path)) {
+                    throw BuildError("dependency '" + dep.alias + "' path '" +
+                                     (manifest.manifest_path.parent_path() / dep.path).string() + "' has no scpp.toml");
                 }
-                build_binary_target(manifest, *it, direct_import_paths, full_dependency_import_paths,
-                                    transitive_only_modules, result, profile);
-            } else {
-                for (const ManifestTarget& bin_target : manifest.bin_targets) {
-                    build_binary_target(manifest, bin_target, direct_import_paths, full_dependency_import_paths,
+                PackageBuildResult& dep_result =
+                    build_package(dep_manifest_path, /*build_binaries=*/false, scpp::ProjectBuildOptions{});
+                if (dep_result.library_modules.empty()) {
+                    throw BuildError("dependency package '" + *dep_result.manifest.package_name +
+                                     "' does not provide a [lib] target");
+                }
+                for (const auto& [module_name, interface_path] : dep_result.exported_modules) {
+                    auto [it, inserted] = direct_import_paths.emplace(module_name, interface_path);
+                    if (!inserted && it->second != interface_path) {
+                        throw BuildError("module '" + module_name + "' is exported by multiple direct dependencies");
+                    }
+                    direct_module_owners.emplace(module_name, *dep_result.manifest.package_name);
+                }
+                append_import_maps(full_dependency_import_paths, dep_result.exported_modules);
+                append_import_maps(full_dependency_import_paths, dep_result.closure_import_paths);
+                for (const auto& [module_name, owner] : dep_result.closure_module_owners) {
+                    if (!direct_import_paths.contains(module_name) && !transitive_only_modules.contains(module_name)) {
+                        transitive_only_modules.emplace(module_name, owner);
+                    }
+                }
+                for (const BuiltModule& module : dep_result.library_modules) {
+                    result.archive_closure.push_back(module.archive_path);
+                }
+                append_unique_paths(result.archive_closure, dep_result.archive_closure);
+                append_unique_strings(result.native_link_inputs, dep_result.native_link_inputs);
+                result.uses_stdlib = result.uses_stdlib || dep_result.uses_stdlib;
+            }
+
+            std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
+            std::unordered_set<std::string> own_library_module_names;
+            if (manifest.lib_target.has_value()) {
+                std::vector<SourceInfo> lib_sources = classify_target_sources(manifest_dir, *manifest.lib_target);
+                own_library_module_names = local_primary_module_names(lib_sources);
+                validate_direct_visibility(lib_sources, own_library_module_names, direct_import_paths, transitive_only_modules);
+                result.uses_stdlib = result.uses_stdlib || sources_use_stdlib(lib_sources);
+                result.library_modules = build_modules_for_target(lib_sources, result.package_output_root / "modules",
+                                                                 result.package_output_root / "archives",
+                                                                 full_dependency_import_paths, profile.opt_level,
+                                                                 manifest, profile_name_, database_);
+            } else if (options.build_lib_only) {
+                throw ManifestError("manifest has no [lib] target");
+            }
+
+            result.exported_modules = to_import_map(result.library_modules);
+            result.closure_import_paths = result.exported_modules;
+            append_import_maps(result.closure_import_paths, full_dependency_import_paths);
+            for (const BuiltModule& module : result.library_modules) {
+                result.closure_module_owners.emplace(module.name, *manifest.package_name);
+            }
+            for (const auto& [module_name, owner] : direct_module_owners) {
+                if (!result.closure_module_owners.contains(module_name)) result.closure_module_owners.emplace(module_name, owner);
+            }
+            for (const auto& [module_name, owner] : transitive_only_modules) {
+                if (!result.closure_module_owners.contains(module_name)) result.closure_module_owners.emplace(module_name, owner);
+            }
+
+            if (build_binaries) {
+                if (options.selected_bin.has_value()) {
+                    auto it = std::find_if(manifest.bin_targets.begin(), manifest.bin_targets.end(),
+                                           [&](const ManifestTarget& target) { return target.name == *options.selected_bin; });
+                    if (it == manifest.bin_targets.end()) {
+                        throw ManifestError("unknown [[bin]] target '" + *options.selected_bin + "'");
+                    }
+                    build_binary_target(manifest, *it, direct_import_paths, full_dependency_import_paths,
                                         transitive_only_modules, result, profile);
+                } else {
+                    std::vector<std::future<void>> futures;
+                    for (const ManifestTarget& bin_target : manifest.bin_targets) {
+                        futures.push_back(std::async(std::launch::async, [&, bin_target] {
+                            build_binary_target(manifest, bin_target, direct_import_paths, full_dependency_import_paths,
+                                                transitive_only_modules, result, profile);
+                        }));
+                    }
+                    for (auto& future : futures) future.get();
                 }
             }
-        }
 
-        write_metadata_file(result, profile_name_, result.package_output_root / "package-metadata.json");
-        active_builds_.erase(key);
-        auto [it, _] = cache_.insert_or_assign(key, std::move(result));
-        return it->second;
+            std::filesystem::path metadata_path = result.package_output_root / "package-metadata.json";
+            write_metadata_file(result, profile_name_, metadata_path);
+            database_.put(BuildRecord{
+                "package|" + manifest.manifest_path.string() + "|" + profile_name_,
+                "package",
+                fnv1a64_hex(join_for_digest({
+                    "manifest=" + manifest_digest(manifest),
+                    "profile=" + profile_name_,
+                    "triple=" + scpp::host_target_triple(),
+                    "metadata=" + digest_file(metadata_path),
+                })),
+                {},
+                {},
+                digest_file(metadata_path),
+                metadata_path.string(),
+                manifest_digest(manifest),
+                compiler_version_key(),
+                scpp::host_target_triple(),
+            });
+
+            {
+                std::lock_guard lock(mutex_);
+                states_[key] = PackageState::Built;
+                failures_.erase(key);
+                auto [it, _] = cache_.insert_or_assign(key, std::move(result));
+                cv_.notify_all();
+                erase_from_stack();
+                return it->second;
+            }
+        } catch (...) {
+            {
+                std::lock_guard lock(mutex_);
+                states_[key] = PackageState::Failed;
+                failures_[key] = std::current_exception()
+                    ? ([&]() -> std::string {
+                          try {
+                              std::rethrow_exception(std::current_exception());
+                          } catch (const std::exception& e) {
+                              return e.what();
+                          } catch (...) {
+                              return "package build failed";
+                          }
+                      }())
+                    : "package build failed";
+                cv_.notify_all();
+            }
+            erase_from_stack();
+            throw;
+        }
     }
 
 private:
+    enum class PackageState {
+        Building,
+        Built,
+        Failed,
+    };
+
     void build_binary_target(const ManifestData& manifest,
                              const ManifestTarget& bin_target,
                              const std::unordered_map<std::string, std::string>& direct_dep_import_paths,
@@ -1200,59 +1674,154 @@ private:
         std::filesystem::create_directories(object_dir);
 
         std::vector<BuiltModule> local_modules_built =
-            build_modules_for_target(local_module_sources, module_dir, archive_dir, base_import_paths, profile.opt_level);
+            build_modules_for_target(local_module_sources, module_dir, archive_dir, base_import_paths, profile.opt_level,
+                                     manifest, profile_name_, database_);
         std::unordered_map<std::string, std::string> compile_import_paths = base_import_paths;
         append_import_maps(compile_import_paths, to_import_map(local_modules_built));
 
-        std::vector<std::filesystem::path> extra_objects;
+        bool binary_uses_stdlib = result.uses_stdlib || sources_use_stdlib(sources);
+
+        std::vector<std::filesystem::path> plain_objects;
         size_t plain_index = 0;
         for (const SourceInfo& source : sources) {
             if (source.path == root || source.kind != SourceInfo::Kind::Plain) continue;
             std::filesystem::path object_path = object_dir / (std::to_string(plain_index++) + "_" +
                                                               sanitize_filename(source.path.filename().string()) + ".o");
-            std::string source_text = read_file(source.path);
-            try {
-                scpp::emit_object_file(source_text, object_path.string(), compile_import_paths, {}, profile.debug,
-                                       source.path.string(), profile.opt_level);
-            } catch (const scpp::ParseError& e) {
-                print_diagnostic(source.path.string(), source_text, e.loc, e.what());
-                throw;
-            } catch (const scpp::DataflowError& e) {
-                print_diagnostic(source.path.string(), source_text, e.loc, e.what());
-                throw;
-            } catch (const scpp::CodegenError& e) {
-                print_diagnostic(source.path.string(), source_text, e.loc, e.what());
-                throw;
-            } catch (const scpp::DriverError& e) {
-                print_diagnostic(source.path.string(), source_text, scpp::SourceLocation{}, e.what());
-                throw;
-            }
-            extra_objects.push_back(object_path);
+            build_object_with_cache("plain:" + bin_target.name + ":" + std::to_string(plain_index - 1), manifest, source,
+                                    object_path, compile_import_paths, profile);
+            plain_objects.push_back(object_path);
         }
+
+        std::filesystem::path root_object = object_dir / "root.o";
+        build_object_with_cache("root:" + bin_target.name, manifest, find_source_info(sources, root), root_object,
+                                compile_import_paths, profile);
 
         std::vector<std::string> extra_link_inputs;
-        for (const std::filesystem::path& object_path : extra_objects) extra_link_inputs.push_back(object_path.string());
+        for (const std::filesystem::path& object_path : plain_objects) extra_link_inputs.push_back(object_path.string());
+        for (auto it = local_modules_built.rbegin(); it != local_modules_built.rend(); ++it) {
+            extra_link_inputs.push_back(it->archive_path.string());
+        }
+        for (auto it = result.library_modules.rbegin(); it != result.library_modules.rend(); ++it) {
+            extra_link_inputs.push_back(it->archive_path.string());
+        }
         for (const std::filesystem::path& archive_path : result.archive_closure) extra_link_inputs.push_back(archive_path.string());
+        if (binary_uses_stdlib) append_unique_strings(extra_link_inputs, scpp::project_default_stdlib_link_inputs());
+        append_unique_strings(extra_link_inputs, result.native_link_inputs);
 
         std::filesystem::path executable_path = result.package_output_root / bin_target.name;
-        std::string root_source = read_file(root);
+        std::string binary_key = "binary|" + manifest.manifest_path.string() + "|" + profile_name_ + "|" + bin_target.name;
+        std::vector<std::string> binary_inputs{
+            "root=" + path_digest_or_empty(root_object),
+            "manifest=" + manifest_digest(manifest),
+            "profile=" + profile_name_,
+            "triple=" + scpp::host_target_triple(),
+            "compiler=" + compiler_version_key(),
+            "static=" + std::string(profile.static_link ? "1" : "0"),
+        };
+        for (const std::filesystem::path& object_path : plain_objects) {
+            binary_inputs.push_back("obj=" + object_path.string() + "#" + path_digest_or_empty(object_path));
+        }
+        for (const std::string& input : extra_link_inputs) {
+            if (!input.empty() && input[0] == '-') {
+                binary_inputs.push_back("flag=" + input);
+            } else {
+                binary_inputs.push_back("link=" + input + "#" + path_digest_or_empty(input));
+            }
+        }
+        std::sort(binary_inputs.begin(), binary_inputs.end());
+        std::string link_signature = fnv1a64_hex(join_for_digest(binary_inputs));
+        if (std::optional<BuildRecord> cached = database_.get(binary_key); cached.has_value() &&
+            cached->signature == link_signature && std::filesystem::exists(executable_path)) {
+            trace_build("cache hit link " + executable_path.string());
+        } else {
+            trace_build("link binary " + executable_path.string());
+            scpp::link_executable(root_object.string(), executable_path.string(), extra_link_inputs, profile.static_link);
+            database_.put(BuildRecord{
+                binary_key,
+                "binary",
+                link_signature,
+                {},
+                {},
+                path_digest_or_empty(executable_path),
+                executable_path.string(),
+                manifest_digest(manifest),
+                compiler_version_key(),
+                scpp::host_target_triple(),
+            });
+        }
+        std::lock_guard lock(mutex_);
+        if (std::find(result.binaries.begin(), result.binaries.end(), executable_path) == result.binaries.end()) {
+            result.binaries.push_back(executable_path);
+        }
+    }
+
+    SourceInfo find_source_info(const std::vector<SourceInfo>& sources, const std::filesystem::path& path) const {
+        auto it = std::find_if(sources.begin(), sources.end(),
+                               [&](const SourceInfo& source) { return source.path == path; });
+        if (it == sources.end()) throw BuildError("target root source '" + path.string() + "' was not classified");
+        return *it;
+    }
+
+    void build_object_with_cache(const std::string& key_suffix,
+                                 const ManifestData& manifest,
+                                 const SourceInfo& source,
+                                 const std::filesystem::path& object_path,
+                                 const std::unordered_map<std::string, std::string>& import_paths,
+                                 const ProfileSettings& profile) {
+        std::vector<std::string> dep_keys;
+        for (const std::string& imported : source.imported_modules) {
+            auto it = import_paths.find(imported);
+            if (it == import_paths.end()) continue;
+            dep_keys.push_back(imported + "=" + it->second + "#" + path_digest_or_empty(it->second));
+        }
+        std::sort(dep_keys.begin(), dep_keys.end());
+        std::string signature = fnv1a64_hex(join_for_digest({
+            "kind=object",
+            "source=" + digest_file(source.path),
+            "profile=" + profile_name_,
+            "triple=" + scpp::host_target_triple(),
+            "compiler=" + compiler_version_key(),
+            "manifest=" + manifest_digest(manifest),
+            "opt=" + std::to_string(profile.opt_level),
+            "debug=" + std::string(profile.debug ? "1" : "0"),
+            "deps=" + join_for_digest(dep_keys),
+        }));
+        std::string record_key = "object|" + manifest.manifest_path.string() + "|" + profile_name_ + "|" + key_suffix;
+        if (std::optional<BuildRecord> cached = database_.get(record_key); cached.has_value() &&
+            cached->signature == signature && std::filesystem::exists(object_path)) {
+            trace_build("cache hit object " + object_path.string());
+            return;
+        }
+        trace_build("build object " + object_path.string());
+        std::string source_text = read_file(source.path);
         try {
-            scpp::compile_to_executable(root_source, executable_path.string(), extra_link_inputs, compile_import_paths,
-                                        profile.static_link, {}, profile.debug, root.string(), profile.opt_level);
+            scpp::emit_object_file(source_text, object_path.string(), import_paths, {}, profile.debug, source.path.string(),
+                                   profile.opt_level);
         } catch (const scpp::ParseError& e) {
-            print_diagnostic(root.string(), root_source, e.loc, e.what());
+            print_diagnostic(source.path.string(), source_text, e.loc, e.what());
             throw;
         } catch (const scpp::DataflowError& e) {
-            print_diagnostic(root.string(), root_source, e.loc, e.what());
+            print_diagnostic(source.path.string(), source_text, e.loc, e.what());
             throw;
         } catch (const scpp::CodegenError& e) {
-            print_diagnostic(root.string(), root_source, e.loc, e.what());
+            print_diagnostic(source.path.string(), source_text, e.loc, e.what());
             throw;
         } catch (const scpp::DriverError& e) {
-            print_diagnostic(root.string(), root_source, scpp::SourceLocation{}, e.what());
+            print_diagnostic(source.path.string(), source_text, scpp::SourceLocation{}, e.what());
             throw;
         }
-        result.binaries.push_back(executable_path);
+        database_.put(BuildRecord{
+            record_key,
+            "object",
+            signature,
+            {},
+            {},
+            path_digest_or_empty(object_path),
+            object_path.string(),
+            manifest_digest(manifest),
+            compiler_version_key(),
+            scpp::host_target_triple(),
+        });
     }
 
     std::unordered_set<std::string> own_module_names(const std::vector<BuiltModule>& modules) const {
@@ -1266,7 +1835,11 @@ private:
     std::optional<ManifestData> workspace_manifest_;
     std::optional<WorkspaceInfo> workspace_info_;
     std::unordered_map<std::string, PackageBuildResult> cache_;
-    std::unordered_set<std::string> active_builds_;
+    std::unordered_map<std::string, PackageState> states_;
+    std::unordered_map<std::string, std::string> failures_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    BuildDatabase database_;
 };
 
 std::vector<ManifestData> select_workspace_packages(const WorkspaceInfo& workspace,
@@ -1365,9 +1938,14 @@ int build_manifest_project(const std::filesystem::path& start_dir, const Project
         }
 
         PackageBuilder builder(shared_output_root, profile_name, discovery.workspace_manifest, workspace_info);
+        std::vector<std::future<void>> futures;
         for (const ManifestData& manifest : packages_to_build) {
-            builder.build_package(manifest.manifest_path, /*build_binaries=*/!options.build_lib_only, options);
+            std::filesystem::path manifest_path = manifest.manifest_path;
+            futures.push_back(std::async(std::launch::async, [&builder, manifest_path, &options] {
+                builder.build_package(manifest_path, /*build_binaries=*/!options.build_lib_only, options);
+            }));
         }
+        for (auto& future : futures) future.get();
         return 0;
     } catch (const ManifestError& e) {
         std::cerr << "error: " << e.what() << "\n";
