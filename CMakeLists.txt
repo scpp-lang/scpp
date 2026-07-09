@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(scpp
     VERSION 0.1.0
     DESCRIPTION "A compiler frontend for a C++-looking language with safe regions"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/std.scpp")
 set(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_string_wrapper.a")
@@ -12,6 +12,8 @@ set(SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libs
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+add_compile_options(-Wall -Wextra -Wpedantic)
+set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)

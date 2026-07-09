@@ -3,6 +3,7 @@ module;
 #include <memory>
 #include <string>
 #include <vector>
+#include <utility>
 
 export module scpp.ast;
 
@@ -35,6 +36,11 @@ struct SourceLocation {
         return source_path ? *source_path : empty;
     }
 };
+
+[[nodiscard]] inline SourceLocation make_source_location(int line, int column,
+                                                        std::shared_ptr<const std::string> source_path = {}) {
+    return SourceLocation{line, column, std::move(source_path)};
+}
 
 enum class ReceiverRefQualifier {
     None,
@@ -166,6 +172,13 @@ struct Type {
     // enclosing function template's own concrete Tail binding in place.
     bool is_pack_expansion = false;
 };
+
+[[nodiscard]] inline Type named_type(std::string name) {
+    Type type;
+    type.kind = TypeKind::Named;
+    type.name = std::move(name);
+    return type;
+}
 
 struct Param {
     Type type;

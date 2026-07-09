@@ -18,7 +18,7 @@ export namespace scpp {
 
 struct ParseError : std::runtime_error {
     ParseError(int line, int column, const std::string& message)
-        : std::runtime_error(message), line(line), column(column), loc{line, column} {}
+        : std::runtime_error(message), line(line), column(column), loc(make_source_location(line, column)) {}
     int line;
     int column;
     // Same position as line/column above, just packaged as a
@@ -119,7 +119,10 @@ public:
         // concept's own witness, parse_concept_def) -- there is nothing
         // to add to Program::functions for it.
         if (bare_auto_used_) {
-            program.classes.push_back(ClassDef{.name = "$auto", .is_concept_witness = true});
+            ClassDef auto_class;
+            auto_class.name = "$auto";
+            auto_class.is_concept_witness = true;
+            program.classes.push_back(std::move(auto_class));
             // Paired with the witness class above: an empty-requirements
             // ConceptDef under the same reserved name, so monomorphize_
             // generics' own concept-satisfaction lookup (concepts_by_name_,
@@ -130,7 +133,9 @@ public:
             // throughout that logic. type_satisfies_concept vacuously
             // returns true for any Named-kind argument type when
             // `requirements` is empty.
-            program.concepts.push_back(ConceptDef{.name = "$auto"});
+            ConceptDef auto_concept;
+            auto_concept.name = "$auto";
+            program.concepts.push_back(std::move(auto_concept));
         }
         return program;
     }
@@ -2699,7 +2704,7 @@ private:
             fn.namespace_path = namespace_stack_;
             fn.is_exported = is_exported;
             fn.return_type =
-                req.has_return_constraint ? req.return_type : Type{.kind = TypeKind::Named, .name = "void"};
+                req.has_return_constraint ? req.return_type : named_type("void");
             fn.params.push_back(make_this_param(def.name, placeholder_is_const));
             for (size_t i = 0; i < req.arg_types.size(); i++) {
                 Param p;
@@ -3728,7 +3733,7 @@ private:
             // pre-check_moves phase that resolves a Lambda literal's own
             // synthesized class -- see its VarDecl case. Never reaches
             // check_moves/codegen unresolved.
-            stmt->type = Type{.kind = TypeKind::Named, .name = "auto"};
+            stmt->type = named_type("auto");
             stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
             const Token& tok = peek();
             if (!match(TokenKind::Assign)) {
@@ -4290,7 +4295,7 @@ private:
 
     ExprPtr parse_primary() {
         const Token& tok = peek();
-        SourceLocation loc{tok.line, tok.column};
+        SourceLocation loc = make_source_location(tok.line, tok.column);
 
         if (check(TokenKind::LBracket)) {
             return parse_lambda_expression();

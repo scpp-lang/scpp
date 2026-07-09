@@ -547,15 +547,15 @@ private:
     // parameter).
     std::optional<Type> infer_type(const Expr& expr) {
         switch (expr.kind) {
-            case ExprKind::IntegerLiteral: return Type{.kind = TypeKind::Named, .name = "int"};
-            case ExprKind::FloatLiteral: return Type{.kind = TypeKind::Named, .name = "double"};
-            case ExprKind::BoolLiteral: return Type{.kind = TypeKind::Named, .name = "bool"};
-            case ExprKind::TypeTrait: return Type{.kind = TypeKind::Named, .name = "bool"};
-            case ExprKind::CharLiteral: return Type{.kind = TypeKind::Named, .name = "char"};
+            case ExprKind::IntegerLiteral: return named_type("int");
+            case ExprKind::FloatLiteral: return named_type("double");
+            case ExprKind::BoolLiteral: return named_type("bool");
+            case ExprKind::TypeTrait: return named_type("bool");
+            case ExprKind::CharLiteral: return named_type("char");
             case ExprKind::StringLiteral: {
                 Type result;
                 result.kind = TypeKind::Pointer;
-                result.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = "char"});
+                result.pointee = std::make_shared<Type>(named_type("char"));
                 result.is_mutable_pointee = false;
                 return result;
             }
@@ -581,7 +581,7 @@ private:
             }
 
             case ExprKind::Delete:
-                return Type{.kind = TypeKind::Named, .name = "void"};
+                return named_type("void");
 
             case ExprKind::Lambda: {
                 // ch05 §5.12: once resolved (movecheck's closure-
@@ -590,7 +590,7 @@ private:
                 // class, by value (matching MakeUnique's identical shape
                 // just above: a fresh, concretely-typed value).
                 if (expr.name.empty()) return std::nullopt;
-                return Type{.kind = TypeKind::Named, .name = expr.name};
+                return named_type(expr.name);
             }
 
             case ExprKind::Member: {
@@ -625,7 +625,7 @@ private:
 
             case ExprKind::Unary:
                 switch (expr.unary_op) {
-                    case UnaryOp::Not: return Type{.kind = TypeKind::Named, .name = "bool"};
+                    case UnaryOp::Not: return named_type("bool");
                     case UnaryOp::Neg: return infer_type(*expr.lhs);
                     case UnaryOp::AddressOf: {
                         if (std::optional<Type> fn_ptr = resolve_function_designator_type(expr)) return fn_ptr;
@@ -689,7 +689,7 @@ private:
                     case BinaryOp::Ge:
                     case BinaryOp::And:
                     case BinaryOp::Or:
-                        return Type{.kind = TypeKind::Named, .name = "bool"};
+                        return named_type("bool");
                 }
                 return std::nullopt;
 
@@ -709,7 +709,7 @@ private:
 
             case ExprKind::Call: {
                 if (expr.lhs == nullptr) {
-                    if (structs_.contains(expr.name)) return Type{.kind = TypeKind::Named, .name = expr.name};
+                    if (structs_.contains(expr.name)) return named_type(expr.name);
                 }
                 if (expr.lhs != nullptr && expr.name.empty()) {
                     const Expr* callee_expr = expr.lhs.get();
@@ -2420,7 +2420,9 @@ private:
                     const Type& member_type = info.field_types[*field_index_opt];
                     llvm::Value* field_ptr = info.is_union
                                                  ? builder_->CreateBitCast(base.ptr,
-                                                                           llvm::PointerType::getUnqual(to_llvm_type(member_type)),
+                                                                           llvm::PointerType::get(
+                                                                               to_llvm_type(member_type)->getContext(),
+                                                                               0),
                                                                            expr.name + ".fnptr")
                                                  : builder_->CreateStructGEP(info.llvm_type, base.ptr, *field_index_opt,
                                                                              expr.name + ".fnptr");
@@ -2489,10 +2491,10 @@ private:
             return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
         }
         if (expr.lhs == nullptr) {
-            if (const ClassDef* class_def = find_class_def(expr.name)) {
-                llvm::Type* llvm_type = to_llvm_type(Type{.kind = TypeKind::Named, .name = expr.name});
+            if (find_class_def(expr.name) != nullptr) {
+                llvm::Type* llvm_type = to_llvm_type(named_type(expr.name));
                 llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtmp");
-                zero_initialize_storage(temp, Type{.kind = TypeKind::Named, .name = expr.name});
+                zero_initialize_storage(temp, named_type(expr.name));
                 if (!expr.args.empty() || expr.has_paren_init) {
                     std::string ctor_name = expr.name + "_new";
                     const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
@@ -3481,7 +3483,7 @@ private:
         auto struct_it = structs_.find(class_name);
         if (struct_it == structs_.end()) return;
         const StructInfo& info = struct_it->second;
-        llvm::Function* free_fn = get_or_declare_free();
+        (void)get_or_declare_free();
         for (size_t i = 0; i < info.field_types.size(); i++) {
             const Type& field_type = info.field_types[i];
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
@@ -3875,7 +3877,9 @@ private:
                                   : (info.is_packed ? std::optional<llvm::Align>(llvm::Align(1))
                                                     : alignment_for_type(field_type));
                 llvm::Value* field_ptr = info.is_union
-                                             ? builder_->CreateBitCast(base.ptr, llvm::PointerType::getUnqual(to_llvm_type(field_type)),
+                                             ? builder_->CreateBitCast(base.ptr, llvm::PointerType::get(
+                                                                                          to_llvm_type(field_type)->getContext(),
+                                                                                          0),
                                                                        expr.name + ".unionfield")
                                              : builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
                 if (field_type.kind == TypeKind::Reference) {
@@ -3967,8 +3971,8 @@ private:
                 // branch calls codegen_lvalue on it uniformly, regardless
                 // of receiver shape).
                 llvm::Value* ptr = codegen_construct_lambda(expr);
-                return LValue{ptr, Type{.kind = TypeKind::Named, .name = expr.name},
-                              alignment_for_type(Type{.kind = TypeKind::Named, .name = expr.name})};
+                return LValue{ptr, named_type(expr.name),
+                              alignment_for_type(named_type(expr.name))};
             }
 
             case ExprKind::Move:
