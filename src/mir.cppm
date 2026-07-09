@@ -224,7 +224,8 @@ private:
         scope_stack_.pop_back();
         if (current_has_terminator()) return;
         for (auto it = names.rbegin(); it != names.rend(); ++it) {
-            current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{}});
+            current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{},
+                                                        SourceLocation{}});
         }
     }
 
@@ -232,7 +233,8 @@ private:
         for (size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
             const std::vector<std::string>& names = scope_stack_[depth - 1];
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
-                current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{}});
+                current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{},
+                                                            SourceLocation{}});
             }
         }
     }
@@ -438,7 +440,8 @@ private:
         for (BasicBlock& block : body_.blocks) {
             if (block.terminator.kind != TerminatorKind::Return) continue;
             for (auto it = unique_ptr_locals.rbegin(); it != unique_ptr_locals.rend(); ++it) {
-                block.statements.push_back(MirStatement{MirStatementKind::Drop, *it, nullptr, Type{}});
+                block.statements.push_back(MirStatement{MirStatementKind::Drop, *it, nullptr, Type{},
+                                                        SourceLocation{}});
             }
         }
     }

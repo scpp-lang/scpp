@@ -239,8 +239,8 @@ struct FunctionSignature {
 // longer.
 using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
 
-[[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {});
-[[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {});
+[[maybe_unused]] [[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {});
+[[maybe_unused]] [[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {});
 
 LocalState join(LocalState a, LocalState b) {
     if (a == b) return a;
@@ -682,9 +682,9 @@ struct CalleeSignature {
 void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors);
-void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
-                                                      const std::vector<ExprPtr>& args, Body& body,
-                                                      SourceLocation loc);
+[[maybe_unused]] void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
+                                                                       const std::vector<ExprPtr>& args, Body& body,
+                                                                       SourceLocation loc);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
                                                         const ClassFieldTypes* class_field_types = nullptr) {
     if (call_expr.lhs && call_expr.name.empty()) {
@@ -777,9 +777,9 @@ void maybe_instantiate_generic_constructor_overloads(const std::string& class_na
             std::optional<Type> receiver_type = infer_expr_type(*call_expr.lhs, body, {});
             if (receiver_type.has_value()) class_name = named_type_name(*receiver_type);
         }
-        if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1};
+        if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1, std::nullopt};
     }
-    return CalleeSignature{call_expr.name, 0};
+    return CalleeSignature{call_expr.name, 0, std::nullopt};
 }
 
 
@@ -1367,14 +1367,14 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
 // a clear diagnostic rather than silently guessing an overload.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
-        case ExprKind::IntegerLiteral: return Type{.kind = TypeKind::Named, .name = "int"};
-        case ExprKind::FloatLiteral: return Type{.kind = TypeKind::Named, .name = "double"};
-        case ExprKind::BoolLiteral: return Type{.kind = TypeKind::Named, .name = "bool"};
-        case ExprKind::CharLiteral: return Type{.kind = TypeKind::Named, .name = "char"};
+        case ExprKind::IntegerLiteral: return named_type("int");
+        case ExprKind::FloatLiteral: return named_type("double");
+        case ExprKind::BoolLiteral: return named_type("bool");
+        case ExprKind::CharLiteral: return named_type("char");
         case ExprKind::StringLiteral: {
             Type result;
             result.kind = TypeKind::Pointer;
-            result.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = "char"});
+            result.pointee = std::make_shared<Type>(named_type("char"));
             result.is_mutable_pointee = false;
             return result;
         }
@@ -1412,10 +1412,10 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         }
 
         case ExprKind::Delete:
-            return Type{.kind = TypeKind::Named, .name = "void"};
+            return named_type("void");
 
         case ExprKind::TypeTrait:
-            return Type{.kind = TypeKind::Named, .name = "bool"};
+            return named_type("bool");
 
         // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): the cast's own
         // declared target type, unconditionally -- see codegen's
@@ -1430,12 +1430,12 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             // by value (matching MakeUnique's identical shape just
             // above: a fresh, concretely-typed value, not a reference).
             if (expr.name.empty()) return std::nullopt;
-            return Type{.kind = TypeKind::Named, .name = expr.name};
+            return named_type(expr.name);
         }
 
         case ExprKind::Unary:
             switch (expr.unary_op) {
-                case UnaryOp::Not: return Type{.kind = TypeKind::Named, .name = "bool"};
+                case UnaryOp::Not: return named_type("bool");
                 case UnaryOp::Neg: return infer_expr_type(*expr.lhs, body, signatures);
                 case UnaryOp::AddressOf: {
                     if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name)) {
@@ -1504,7 +1504,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                 case BinaryOp::Ge:
                 case BinaryOp::And:
                 case BinaryOp::Or:
-                    return Type{.kind = TypeKind::Named, .name = "bool"};
+                    return named_type("bool");
             }
             return std::nullopt;
 
@@ -1525,10 +1525,10 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             if (sig != nullptr) return sig->return_type;
             if (expr.lhs == nullptr && body.program != nullptr) {
                 for (const ClassDef& def : body.program->classes) {
-                    if (def.name == expr.name) return Type{.kind = TypeKind::Named, .name = expr.name};
+                    if (def.name == expr.name) return named_type(expr.name);
                 }
                 for (const StructDef& def : body.program->structs) {
-                    if (def.name == expr.name) return Type{.kind = TypeKind::Named, .name = expr.name};
+                    if (def.name == expr.name) return named_type(expr.name);
                 }
             }
             return std::nullopt;
@@ -3863,7 +3863,7 @@ void check_function(const Function& fn, const Program& program, const Signatures
                      const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access,
                      const std::unordered_set<std::string>& classes_with_copy_ctor,
                      const std::unordered_set<std::string>& classes_with_copy_assign,
-                     const std::unordered_set<std::string>& witness_class_names) {
+                     [[maybe_unused]] const std::unordered_set<std::string>& witness_class_names) {
     Body body = build_mir(fn);
     body.program = &program;
 
@@ -5184,7 +5184,7 @@ private:
                 this_param.name = "this";
                 Type this_type;
                 this_type.kind = TypeKind::Reference;
-                this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = derived_name});
+                this_type.pointee = std::make_shared<Type>(named_type(derived_name));
                 this_type.is_mutable_ref = base_method.params[0].type.is_mutable_ref;
                 this_param.type = std::move(this_type);
                 forward.params.push_back(std::move(this_param));
@@ -5277,7 +5277,7 @@ private:
                     } else {
                         witness_name = bare_witness_struct_name();
                     }
-                    type_replacements.emplace_back(param.name, Type{.kind = TypeKind::Named, .name = witness_name});
+                    type_replacements.emplace_back(param.name, named_type(witness_name));
                 }
 
                 std::string check_class_name = "__genchk" + std::to_string(generic_check_counter_++);
@@ -5323,7 +5323,7 @@ private:
                     if (p.name == "this") {
                         Type this_type;
                         this_type.kind = TypeKind::Reference;
-                        this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = check_class_name});
+                        this_type.pointee = std::make_shared<Type>(named_type(check_class_name));
                         this_type.is_mutable_ref = p.type.is_mutable_ref;
                         np.type = std::move(this_type);
                     } else {
@@ -5849,7 +5849,7 @@ private:
                         np.name = p.name;
                         Type this_type;
                         this_type.kind = TypeKind::Reference;
-                        this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = cache_key});
+                        this_type.pointee = std::make_shared<Type>(named_type(cache_key));
                         this_type.is_mutable_ref = p.type.is_mutable_ref;
                         np.type = std::move(this_type);
                         clone.params.push_back(std::move(np));
@@ -5976,7 +5976,7 @@ private:
                     if (param.name == "this") {
                         Type this_type;
                         this_type.kind = TypeKind::Reference;
-                        this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = cache_key});
+                        this_type.pointee = std::make_shared<Type>(named_type(cache_key));
                         this_type.is_mutable_ref = param.type.is_mutable_ref;
                         new_param.type = std::move(this_type);
                     } else {
@@ -6512,9 +6512,9 @@ private:
         }
     }
 
-    void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
-                                                          const std::vector<ExprPtr>& args, Body& body,
-                                                          SourceLocation loc) {
+    [[maybe_unused]] void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
+                                                                           const std::vector<ExprPtr>& args,
+                                                                           Body& body, SourceLocation loc) {
         std::string ctor_name = class_name + "_new";
         for (const Function& tmpl : program_.functions) {
             if (tmpl.name != ctor_name || tmpl.template_params.empty()) continue;
@@ -7402,7 +7402,7 @@ private:
         this_param.name = "this";
         Type this_type;
         this_type.kind = TypeKind::Reference;
-        this_type.pointee = std::make_shared<Type>(Type{.kind = TypeKind::Named, .name = class_name});
+        this_type.pointee = std::make_shared<Type>(named_type(class_name));
         // The "call" method's own receiver is unconditionally mutable --
         // *not* gated by `mutable` (unlike a real C++ closure's
         // internally-const `operator()`): the general const-`this`-
@@ -7451,7 +7451,7 @@ private:
             }
             call_method.return_type = infer_lambda_return_type(*call_method.body, call_method.params, capture_types);
         } else {
-            call_method.return_type = Type{.kind = TypeKind::Named, .name = "void"};
+            call_method.return_type = named_type("void");
         }
         if (call_method.body) rewrite_captured_identifiers_as_field_access(*call_method.body, captured_names);
 
@@ -7533,7 +7533,7 @@ private:
     // Function exists yet to build_mir from).
     [[nodiscard]] Type infer_lambda_return_type(const Stmt& body, const std::vector<Param>& call_params,
                                                  const std::unordered_map<std::string, Type>& capture_types) {
-        if (body.kind != StmtKind::Block) return Type{.kind = TypeKind::Named, .name = "void"};
+        if (body.kind != StmtKind::Block) return named_type("void");
         Body param_only_body;
         for (const Param& p : call_params) {
             param_only_body.local_types[p.name] = p.type;
@@ -7562,9 +7562,9 @@ private:
             }
             std::optional<Type> t = infer_expr_type(*stmt->expr, param_only_body, signatures_);
             if (t.has_value()) return *t;
-            return Type{.kind = TypeKind::Named, .name = "void"};
+            return named_type("void");
         }
-        return Type{.kind = TypeKind::Named, .name = "void"};
+        return named_type("void");
     }
 
     // Looks up `class_or_struct_name`'s own declared field `field_name`'s
