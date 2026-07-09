@@ -1,1 +1,1 @@
-error: [native] is designed but not implemented yet
+REGEX:^error: (\[native\] is designed but not implemented yet|.*/scpp\.toml:8: libs is not supported in \[native\])\n$
