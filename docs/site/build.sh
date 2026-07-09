@@ -128,28 +128,65 @@ build_sidebar() {
   local sidebar_file="$5"
   local source_dir="$DOCS_DIR/$section/$lang"
 
+  sidebar_entry() {
+    local file="$1"
+    local out_name title href class_name source_path
+    out_name="$(output_name_for "$file")"
+    href="$prefix$section/$lang/$out_name"
+    class_name=''
+    if [ "$out_name" = "$current_out" ]; then
+      class_name=' class="current"'
+    fi
+    source_path="$source_dir/$file"
+    if [ -f "$source_path" ]; then
+      title="$(page_title_for "$source_path")"
+    else
+      title="$file"
+    fi
+    printf '    <li><a%s href="%s">%s</a></li>\n' "$class_name" "$href" "$(html_escape "$title")"
+  }
+
   {
     printf '<div class="sidebar">\n'
     printf '  <h2>%s · %s</h2>\n' "$(html_escape "$(section_label "$section" "$lang")")" "$(html_escape "$(lang_label "$lang")")"
-    printf '  <ul>\n'
-    while IFS= read -r file; do
-      [ -n "$file" ] || continue
-      local out_name title href class_name source_path
-      out_name="$(output_name_for "$file")"
-      href="$prefix$section/$lang/$out_name"
-      class_name=''
-      if [ "$out_name" = "$current_out" ]; then
-        class_name=' class="current"'
-      fi
-      source_path="$source_dir/$file"
-      if [ -f "$source_path" ]; then
-        title="$(page_title_for "$source_path")"
+    if [ "$section" = 'spec' ]; then
+      local standard_group_label format_group_label
+      if [ "$lang" = 'zh' ]; then
+        standard_group_label='语言标准'
+        format_group_label='文件格式规范'
       else
-        title="$file"
+        standard_group_label='Language Standard'
+        format_group_label='File-Format Specifications'
       fi
-      printf '    <li><a%s href="%s">%s</a></li>\n' "$class_name" "$href" "$(html_escape "$title")"
-    done < <(section_files "$section" "$lang")
-    printf '  </ul>\n'
+      printf '  <ul class="sidebar-root">\n'
+      sidebar_entry 'README.md'
+      printf '    <li class="sidebar-group">\n'
+      printf '      <div class="sidebar-group-title">%s</div>\n' "$(html_escape "$standard_group_label")"
+      printf '      <ul class="sidebar-sublist">\n'
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        sidebar_entry "$file"
+      done < <(find "$source_dir" -maxdepth 1 -name '[0-9][0-9]-*.md' -printf '%f\n' | sort)
+      printf '      </ul>\n'
+      printf '    </li>\n'
+      printf '    <li class="sidebar-group">\n'
+      printf '      <div class="sidebar-group-title">%s</div>\n' "$(html_escape "$format_group_label")"
+      printf '      <ul class="sidebar-sublist">\n'
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        sidebar_entry "$file"
+      done < <(find "$source_dir" -maxdepth 1 \( -name 'scppm-format.md' -o -name 'scppkg-format.md' \) -printf '%f\n' | sort)
+      printf '      </ul>\n'
+      printf '    </li>\n'
+      printf '  </ul>\n'
+    else
+      printf '  <ul>\n'
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        sidebar_entry "$file"
+      done < <(section_files "$section" "$lang")
+      printf '  </ul>\n'
+    fi
     printf '</div>\n'
   } > "$sidebar_file"
 }
