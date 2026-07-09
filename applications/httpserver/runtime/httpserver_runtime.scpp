@@ -8,7 +8,6 @@ namespace httpserver {
 class [[scpp::thread_movable]] WorkerConfig {
 public:
     char root_[512];
-    char default_charset_[64];
     int port_;
     int max_connections_;
     bool allow_index_html_;
@@ -16,7 +15,6 @@ public:
 
     WorkerConfig() {
         this->root_[0] = '\0';
-        this->default_charset_[0] = '\0';
         this->port_ = 0;
         this->max_connections_ = 0;
         this->allow_index_html_ = false;
@@ -34,33 +32,6 @@ bool assign_worker_root(WorkerConfig& config, const char* root) {
     }
     config.root_[i] = '\0';
     return true;
-}
-
-bool assign_worker_default_charset(WorkerConfig& config, const char* default_charset) {
-    return copy_text(config.default_charset_, 64, default_charset);
-}
-
-bool content_type_supports_charset(const char* content_type) {
-    return text_equals(content_type, "text/html") || text_equals(content_type, "text/plain") ||
-           text_equals(content_type, "text/css") || text_equals(content_type, "application/javascript") ||
-           text_equals(content_type, "application/json");
-}
-
-void assign_response_content_type(Connection& conn, const char* content_type, const char* default_charset) {
-    if (text_length(default_charset) == 0 || !content_type_supports_charset(content_type)) {
-        conn.content_type_ = content_type;
-        return;
-    }
-    int len = 0;
-    conn.content_type_buffer_[0] = '\0';
-    if (!append_text(conn.content_type_buffer_, 128, len, content_type) ||
-        !append_text(conn.content_type_buffer_, 128, len, "; charset=") ||
-        !append_text(conn.content_type_buffer_, 128, len, default_charset)) {
-        conn.content_type_ = content_type;
-        return;
-    }
-    conn.content_type_ = conn.content_type_buffer_;
-    return;
 }
 
 void build_empty_response(Connection& conn, const char* status_line) {
@@ -264,8 +235,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
     return false;
 }
 
-bool parse_request(Connection& conn, const char* root, const char* default_charset, bool allow_index_html,
-                   bool deny_hidden_files) {
+bool parse_request(Connection& conn, const char* root, bool allow_index_html, bool deny_hidden_files) {
     int header_end = header_end_index(conn.request_, conn.request_len_);
     if (header_end < 0) return false;
     int line_end = first_line_end_index(conn.request_, conn.request_len_);
@@ -321,8 +291,8 @@ bool parse_request(Connection& conn, const char* root, const char* default_chars
     conn.use_sendfile_ = true;
     conn.file_buffer_len_ = 0;
     conn.file_buffer_sent_ = 0;
-    if (served_directory_index) assign_response_content_type(conn, "text/html", default_charset);
-    else assign_response_content_type(conn, content_type_for(conn.relative_path_), default_charset);
+    if (served_directory_index) conn.content_type_ = "text/html";
+    else conn.content_type_ = content_type_for(conn.relative_path_);
     build_ok_response(conn);
     return true;
 }
@@ -357,8 +327,8 @@ void accept_ready_connections(int epoll_fd, int listener_fd, Connection connecti
     return;
 }
 
-void handle_readable(int epoll_fd, Connection connections[64], int slot, const char* root, const char* default_charset,
-                     bool allow_index_html, bool deny_hidden_files) {
+void handle_readable(int epoll_fd, Connection connections[64], int slot, const char* root, bool allow_index_html,
+                     bool deny_hidden_files) {
     char buffer[2048];
     while (true) {
         int n;
@@ -388,7 +358,7 @@ void handle_readable(int epoll_fd, Connection connections[64], int slot, const c
         }
         connections[slot].request_[connections[slot].request_len_] = '\0';
         if (header_end_index(connections[slot].request_, connections[slot].request_len_) >= 0) {
-            parse_request(connections[slot], root, default_charset, allow_index_html, deny_hidden_files);
+            parse_request(connections[slot], root, allow_index_html, deny_hidden_files);
             [[scpp::unsafe]] { scpp_httpserver_epoll_mod(epoll_fd, connections[slot].fd_, slot + 1, 0, 1); }
             return;
         }
@@ -471,8 +441,7 @@ void handle_writable(int epoll_fd, Connection connections[64], int slot) {
     return;
 }
 
-int run_worker_loop(const char* root, const char* default_charset, int port, int max_connections, bool allow_index_html,
-                    bool deny_hidden_files) {
+int run_worker_loop(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files) {
     PlatformEvent events[64];
     Connection connections[64];
     if (max_connections > 64) max_connections = 64;
@@ -516,9 +485,7 @@ int run_worker_loop(const char* root, const char* default_charset, int port, int
                 i = i + 1;
                 continue;
             }
-            if (events[i].readable != 0) {
-                handle_readable(epoll_fd, connections, slot, root, default_charset, allow_index_html, deny_hidden_files);
-            }
+            if (events[i].readable != 0) handle_readable(epoll_fd, connections, slot, root, allow_index_html, deny_hidden_files);
             if (slot >= 0 && slot < max_connections && connections[slot].fd_ >= 0 && events[i].writable != 0) {
                 handle_writable(epoll_fd, connections, slot);
             }
@@ -528,10 +495,10 @@ int run_worker_loop(const char* root, const char* default_charset, int port, int
     return 0;
 }
 
-export int run_server(const char* root, const char* default_charset, int port, int max_connections,
-                      bool allow_index_html, bool deny_hidden_files, int worker_count) {
+export int run_server(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files,
+                      int worker_count) {
     if (worker_count <= 1) {
-        return run_worker_loop(root, default_charset, port, max_connections, allow_index_html, deny_hidden_files);
+        return run_worker_loop(root, port, max_connections, allow_index_html, deny_hidden_files);
     }
     if (worker_count > 8) worker_count = 8;
 
@@ -539,7 +506,6 @@ export int run_server(const char* root, const char* default_charset, int port, i
     int worker_i = 0;
     while (worker_i < worker_count) {
         if (!assign_worker_root(worker_configs[worker_i], root)) return 1;
-        if (!assign_worker_default_charset(worker_configs[worker_i], default_charset)) return 1;
         worker_configs[worker_i].port_ = port;
         worker_configs[worker_i].max_connections_ = max_connections;
         worker_configs[worker_i].allow_index_html_ = allow_index_html;
@@ -551,16 +517,15 @@ export int run_server(const char* root, const char* default_charset, int port, i
     while (spawn_i < worker_count) {
         WorkerConfig config(worker_configs[spawn_i]);
         std::thread worker([config]() {
-            run_worker_loop(config.root_, config.default_charset_, config.port_, config.max_connections_, config.allow_index_html_,
+            run_worker_loop(config.root_, config.port_, config.max_connections_, config.allow_index_html_,
                             config.deny_hidden_files_);
         });
         worker.detach();
         spawn_i = spawn_i + 1;
     }
 
-    return run_worker_loop(worker_configs[0].root_, worker_configs[0].default_charset_, worker_configs[0].port_,
-                           worker_configs[0].max_connections_, worker_configs[0].allow_index_html_,
-                           worker_configs[0].deny_hidden_files_);
+    return run_worker_loop(worker_configs[0].root_, worker_configs[0].port_, worker_configs[0].max_connections_,
+                           worker_configs[0].allow_index_html_, worker_configs[0].deny_hidden_files_);
 }
 
 } // namespace httpserver

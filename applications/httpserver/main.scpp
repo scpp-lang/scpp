@@ -6,7 +6,6 @@ int main() {
     builder.set_port(8080);
     builder.set_max_connections(32);
     builder.set_worker_count(4);
-    builder.set_default_charset("utf-8");
     builder.allow_index_html(true);
     builder.deny_hidden_files(true);
     return builder.serve();
