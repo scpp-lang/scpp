@@ -291,7 +291,7 @@ bool parse_request(Connection& conn, const char* root, bool allow_index_html, bo
     conn.use_sendfile_ = true;
     conn.file_buffer_len_ = 0;
     conn.file_buffer_sent_ = 0;
-    if (served_directory_index) conn.content_type_ = "text/html";
+    if (served_directory_index) conn.content_type_ = "text/html; charset=utf-8";
     else conn.content_type_ = content_type_for(conn.relative_path_);
     build_ok_response(conn);
     return true;
