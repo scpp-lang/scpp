@@ -1,0 +1,5 @@
+// CLI coverage: the old `scpp build file.scpp` spelling is removed; only
+// bare `scpp file.scpp` remains for executable builds.
+int main() {
+    return 0;
+}

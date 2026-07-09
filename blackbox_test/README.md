@@ -20,12 +20,12 @@ on, or knowledge of, scpp's internal compiler modules.
   its author asking for that.
 - `cases/<NN_category>/<name>.expected` -- the outcome that program *should*
   produce if `scpp` correctly implements the spec. Three forms:
-  1. **A number on the first line**: `scpp build` must succeed, and running
+  1. **A number on the first line**: `scpp` must succeed, and running
      the resulting executable must exit with this code (0-255, POSIX
      `WEXITSTATUS`/shell `$?` semantics -- a process killed by a signal is
      normalized to `128+signum`, e.g. SIGABRT -> 134). Anything after the
      first line is the expected stdout, compared byte-for-byte.
-  2. **`COMPILE_ERROR`**: `scpp build` must fail with a clean, positive exit
+  2. **`COMPILE_ERROR`**: `scpp` must fail with a clean, positive exit
      status (a real diagnostic, not a crash). The exact message text is
      never checked -- the spec doesn't pin down wording.
   3. **`NO_ABORT`**: used only for the handful of cases where a
@@ -34,6 +34,18 @@ on, or knowledge of, scpp's internal compiler modules.
      value is genuine, unspecified garbage that can't be pinned down --
      but the process must still terminate normally, not be killed by a
      signal.
+- **Optional CLI-case sidecars** for black-boxing the CLI surface itself:
+  - `<name>.argv` / `main.argv` -- one argv token per non-blank line,
+    passed to `scpp` after placeholder substitution (`$INPUT`, `$OUTPUT`,
+    `$TEMP`)
+  - `<name>.mode` / `main.mode` -- `command-only` means assert on the CLI
+    command's own exit/stdout instead of running a produced executable
+  - `<name>.output` / `main.output` -- output file path relative to the
+    per-case temp directory (default: `case.bin`)
+  - `<name>.artifacts` / `main.artifacts` -- relative paths that must exist
+    after the CLI command succeeds
+  - `<name>.stderr` / `main.stderr` -- exact expected stderr from the CLI
+    command
 - **Multi-file (ch11 module) cases**: some rules (import/export across
   files, partitions, ...) genuinely need more than one source file. A
   directory containing a `main.scpp` file is instead treated as one
@@ -42,7 +54,7 @@ on, or knowledge of, scpp's internal compiler modules.
     ordinary single-file case; `main.expected` is its outcome (same three
     forms as above).
   - `main.imports` (optional) -- one `module_name=relative_path` mapping
-    per non-blank, non-`#`-comment line, passed to `scpp build` as
+    per non-blank, non-`#`-comment line, passed to `scpp` as
     `--import module_name=path` (ch11 §11.14) -- list every module
     `main.scpp` needs, direct or transitive, since `main.scpp` is the only
     file actually compiled as the entry point.
@@ -107,6 +119,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `25_function_wrappers` | `std::function` / `std::move_only_function` (ch05 §5.18): copyable vs move-only targets, cv/ref-qualified signatures, moved-from behavior |
 | `26_threads` | `std::thread` / `std::jthread`: thread-movable constructor constraint, join/detach/joinable transitions, `jthread` destructor auto-join |
 | `27_unions_packed_layout` | union member unsafe-gating and `[[scpp::packed]]` layout/FFI behavior, including the Linux `epoll_event` / `epoll_data_t` pattern |
+| `28_cli_invocation` | CLI surface: direct `scpp file.scpp` builds, default/custom output names, removed `build` keyword, and surviving `lex`/`parse`/`build-module` subcommands |
 
 ## Testing philosophy
 
@@ -168,7 +181,8 @@ Pass `--scpp-bin <path>` to point at a different build.
   independently) -- a chapter note saying a feature is "not yet
   implemented" is not always still accurate (confirmed again this round:
   basic `namespace` declaration/qualified-lookup/nesting already work).
-  When in doubt, a quick probe with `scpp build` settles it empirically.
+  When in doubt, a quick probe with `scpp file.scpp` or another direct CLI
+  invocation settles it empirically.
 - **`18_closures` assumed `auto` local-variable and return-type deduction
   already work like real C++**, even though it's never explicitly called
   out as supported anywhere in `docs/book/` -- **confirmed correct** on
@@ -187,8 +201,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **273 cases total**
-- **272/273 passing**
+- **279 cases total**
+- **279/279 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -220,9 +234,7 @@ re-run via `./build/run_tests`:
 - **Union / packed-layout coverage now exists in direct black-box form**:
   unsafe-gated union member access, raw-byte packed-struct layout, and the
   real Linux `epoll_event` / `epoll_data_t` FFI declaration shape
-
-Current known implementation gap exposed by the new coverage:
-
-- **`27_unions_packed_layout`** (1 failure): `packed_attribute_on_function_is_rejected.scpp`
-  is currently accepted, but spec §9.2 says `[[scpp::packed]]` is only
-  valid on `struct`/`union` declarations.
+- **CLI invocation now has direct black-box coverage too**:
+  bare `scpp file.scpp`, `-o custom_name`, rejection of the removed
+  `build` keyword, and spot-checks that `lex`, `parse`, and
+  `build-module` still work explicitly

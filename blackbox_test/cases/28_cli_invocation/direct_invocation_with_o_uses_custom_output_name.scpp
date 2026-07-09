@@ -1,0 +1,5 @@
+// CLI coverage: `scpp file.scpp -o custom_name` should honor the custom
+// output path instead of defaulting to `a.out`.
+int main() {
+    return 9;
+}
