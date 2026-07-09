@@ -1,0 +1,4 @@
+// CLI coverage: the explicit `parse` subcommand still works unchanged.
+int main() {
+    return 7;
+}

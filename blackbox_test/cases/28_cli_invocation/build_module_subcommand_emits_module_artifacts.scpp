@@ -1,0 +1,9 @@
+// CLI coverage: the explicit `build-module` subcommand still emits both
+// the `.scppm` interface and `.scppa` archive artifacts.
+export module demo;
+
+namespace demo {
+export int answer() {
+    return 4;
+}
+}

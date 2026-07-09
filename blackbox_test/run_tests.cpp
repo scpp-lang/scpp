@@ -17,7 +17,7 @@
 //    Everything after the first newline is the expected stdout, compared
 //    byte-for-byte.
 // 2. Compile-time rejection: the file contains exactly the sentinel
-//    `COMPILE_ERROR` on its first line. The test passes if `scpp build`
+//    `COMPILE_ERROR` on its first line. The test passes if `scpp`
 //    exits with a positive (non-signal) status -- i.e. a clean, controlled
 //    error, not a crash -- regardless of the exact diagnostic wording (the
 //    spec does not pin down message text).
@@ -35,6 +35,19 @@
 // organization and are walked recursively) -- no changes to this file are
 // needed.
 //
+// Optional CLI-case sidecars:
+//   - `<name>.argv` / `main.argv`: one argv token per non-blank line,
+//     passed to `scpp` after placeholder substitution (`$INPUT`,
+//     `$OUTPUT`, `$TEMP`).
+//   - `<name>.mode` / `main.mode`: `command-only` means compare the CLI
+//     command's own exit code/stdout instead of running a produced binary.
+//   - `<name>.output` / `main.output`: output file path relative to the
+//     case temp directory (default: `case.bin`).
+//   - `<name>.artifacts` / `main.artifacts`: relative paths that must exist
+//     after the CLI command succeeds.
+//   - `<name>.stderr` / `main.stderr`: exact expected stderr from the CLI
+//     command (used for cases like rejecting a removed subcommand).
+//
 // Multi-file (ch11 module) cases: some language rules (import/export
 // across files, partitions, ...) genuinely need more than one source
 // file. A directory containing a `main.scpp` file is instead treated as
@@ -44,7 +57,7 @@
 //     three forms as above).
 //   - `main.imports` (optional) -- one `module_name=relative_path` mapping
 //     per non-blank, non-`#`-comment line, resolved relative to the test
-//     case directory and passed to `scpp build` as
+//     case directory and passed to `scpp` as
 //     `--import module_name=path` (ch11 §11.14) -- list every module
 //     `main.scpp` needs, direct or transitive (re-exported), since only
 //     `main.scpp` itself is ever the compiled entry point.
@@ -143,12 +156,12 @@ struct RunResult {
     std::string err;
 };
 
-// Runs `argv` as a child process, redirecting its stdout/stderr to temp
+// Runs `argv` as a child process in `cwd`, redirecting its stdout/stderr to temp
 // files under `temp_dir` -- reading them back only after the child exits
 // avoids the pipe-buffer deadlock risk that concurrently reading two live
 // pipes would carry -- and waits up to `timeout` before killing it.
 RunResult run_process(const std::vector<std::string>& argv, const fs::path& temp_dir,
-                       std::chrono::seconds timeout) {
+                       std::chrono::seconds timeout, const fs::path& cwd = fs::current_path()) {
     fs::path out_path = temp_dir / "stdout.txt";
     fs::path err_path = temp_dir / "stderr.txt";
     RunResult result;
@@ -160,6 +173,10 @@ RunResult run_process(const std::vector<std::string>& argv, const fs::path& temp
     }
 
     if (pid == 0) {
+        if (chdir(cwd.c_str()) != 0) {
+            std::perror("chdir");
+            _exit(127);
+        }
         // Child: redirect stdout/stderr to the temp files, then exec.
         int out_fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
         int err_fd = open(err_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -257,6 +274,16 @@ struct Outcome {
     std::string detail;
 };
 
+enum class RunnerMode { RunOutput, CommandOnly };
+
+struct InvocationSpec {
+    RunnerMode mode = RunnerMode::RunOutput;
+    std::vector<std::string> argv_tokens;
+    std::string output_relpath = "case.bin";
+    std::vector<std::string> artifact_relpaths;
+    std::optional<fs::path> stderr_expected_file;
+};
+
 std::vector<std::string> default_std_build_args() {
     return {"--import", std::string("std=") + SCPP_STDLIB_STD_MODULE_PATH,
             "--import", std::string("std:string=") + SCPP_STDLIB_STD_STRING_MODULE_PATH,
@@ -267,10 +294,87 @@ std::vector<std::string> default_std_build_args() {
             "--link", SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH};
 }
 
+std::vector<std::string> parse_token_file(const fs::path& path) {
+    std::vector<std::string> tokens;
+    if (!fs::exists(path)) {
+        return tokens;
+    }
+
+    std::istringstream stream(read_file(path));
+    std::string line;
+    while (std::getline(stream, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        size_t start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) {
+            continue;
+        }
+        line = line.substr(start);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        tokens.push_back(line);
+    }
+    return tokens;
+}
+
+std::string read_trimmed_file(const fs::path& path) {
+    std::string text = read_file(path);
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' ')) {
+        text.pop_back();
+    }
+    return text;
+}
+
+std::string replace_all(std::string text, std::string_view needle, const std::string& replacement) {
+    size_t pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        text.replace(pos, needle.size(), replacement);
+        pos += replacement.size();
+    }
+    return text;
+}
+
+std::vector<std::string> resolve_invocation_tokens(const std::vector<std::string>& raw_tokens, const fs::path& input_path,
+                                                   const fs::path& temp_input_path, const fs::path& output_path,
+                                                   const fs::path& temp_dir) {
+    std::vector<std::string> resolved;
+    resolved.reserve(raw_tokens.size());
+    for (std::string token : raw_tokens) {
+        token = replace_all(std::move(token), "$INPUT_FILE", temp_input_path.filename().string());
+        token = replace_all(std::move(token), "$INPUT", input_path.string());
+        token = replace_all(std::move(token), "$OUTPUT", output_path.string());
+        token = replace_all(std::move(token), "$TEMP", temp_dir.string());
+        resolved.push_back(std::move(token));
+    }
+    return resolved;
+}
+
+std::optional<std::string> compare_expected_stderr(const InvocationSpec& invocation, const std::string& actual_stderr) {
+    if (!invocation.stderr_expected_file) {
+        return std::nullopt;
+    }
+    std::string expected_stderr = read_file(*invocation.stderr_expected_file);
+    if (actual_stderr == expected_stderr) {
+        return std::nullopt;
+    }
+    return "expected stderr '" + expected_stderr + "', got '" + actual_stderr + "'";
+}
+
+std::optional<std::string> check_expected_artifacts(const InvocationSpec& invocation, const fs::path& temp_dir) {
+    for (const std::string& relpath : invocation.artifact_relpaths) {
+        if (!fs::exists(temp_dir / relpath)) {
+            return "expected artifact '" + relpath + "' was not produced";
+        }
+    }
+    return std::nullopt;
+}
+
 // Parses a module test case directory's `main.imports`, if present: each
 // non-blank, non-`#`-comment line is `module_name=relative_path`,
 // resolved relative to `dir`, and turned into a `--import
-// module_name=absolute_path` pair of arguments for `scpp build` (ch11
+// module_name=absolute_path` pair of arguments for `scpp` (ch11
 // §11.14).
 std::vector<std::string> parse_imports_file(const fs::path& dir) {
     std::vector<std::string> args;
@@ -307,40 +411,83 @@ std::vector<std::string> parse_imports_file(const fs::path& dir) {
 }
 
 Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const fs::path& expected_path,
-                      const fs::path& temp_dir, const std::vector<std::string>& extra_build_args) {
+                      const fs::path& temp_dir, const std::vector<std::string>& extra_build_args,
+                      const InvocationSpec& invocation) {
     Expected expected = parse_expected(read_file(expected_path));
-    fs::path out_binary = temp_dir / "case.bin";
+    fs::path out_binary = temp_dir / invocation.output_relpath;
+    fs::path temp_input_path = temp_dir / scpp_path.filename();
     std::error_code ec;
     fs::remove(out_binary, ec);
+    for (const std::string& relpath : invocation.artifact_relpaths) {
+        fs::remove_all(temp_dir / relpath, ec);
+    }
 
-    std::vector<std::string> build_argv = {scpp_bin.string(), "build", scpp_path.string(), "-o",
-                                           out_binary.string()};
-    std::vector<std::string> default_build_args = default_std_build_args();
-    build_argv.insert(build_argv.end(), default_build_args.begin(), default_build_args.end());
-    build_argv.insert(build_argv.end(), extra_build_args.begin(), extra_build_args.end());
-    RunResult compile_result = run_process(build_argv, temp_dir, std::chrono::seconds(kTimeoutSeconds));
+    std::vector<std::string> build_argv;
+    if (invocation.argv_tokens.empty()) {
+        build_argv = {scpp_bin.string(), scpp_path.string(), "-o", out_binary.string()};
+        std::vector<std::string> default_build_args = default_std_build_args();
+        build_argv.insert(build_argv.end(), default_build_args.begin(), default_build_args.end());
+        build_argv.insert(build_argv.end(), extra_build_args.begin(), extra_build_args.end());
+    } else {
+        fs::copy_file(scpp_path, temp_input_path, fs::copy_options::overwrite_existing, ec);
+        build_argv.push_back(scpp_bin.string());
+        std::vector<std::string> resolved =
+            resolve_invocation_tokens(invocation.argv_tokens, scpp_path, temp_input_path, out_binary, temp_dir);
+        build_argv.insert(build_argv.end(), resolved.begin(), resolved.end());
+    }
+    RunResult compile_result =
+        run_process(build_argv, temp_dir, std::chrono::seconds(kTimeoutSeconds), temp_dir);
 
     if (compile_result.timed_out) {
-        return {false, "scpp build timed out"};
+        return {false, "scpp invocation timed out"};
     }
 
     if (expected.kind == ExpectedKind::CompileError) {
         if (compile_result.exited_normally && compile_result.exit_code > 0) {
+            if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err)) {
+                return {false, *stderr_problem};
+            }
             return {true, ""};
         }
         if (compile_result.exited_normally && compile_result.exit_code == 0) {
-            return {false, "expected a compile error, but `scpp build` succeeded"};
+            return {false, "expected a compile error, but `scpp` succeeded"};
         }
         return {false, "expected a clean compile error (positive exit code), but the compiler crashed; stderr:\n" +
                             compile_result.err};
     }
 
-    // ExpectedKind::Run or NoAbort: compilation itself must succeed.
-    if (!(compile_result.exited_normally && compile_result.exit_code == 0)) {
-        return {false, "expected successful compilation, but `scpp build` failed; stderr:\n" + compile_result.err};
+    if (invocation.mode == RunnerMode::CommandOnly) {
+        if (!(compile_result.exited_normally && compile_result.exit_code == expected.exit_code)) {
+            return {false, "expected command exit code " + std::to_string(expected.exit_code) + ", got " +
+                                std::to_string(normalized_exit_code(compile_result))};
+        }
+        if (compile_result.out != expected.stdout_text) {
+            return {false, "expected stdout '" + expected.stdout_text + "', got '" + compile_result.out + "'"};
+        }
+        if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err)) {
+            return {false, *stderr_problem};
+        }
+        if (auto artifact_problem = check_expected_artifacts(invocation, temp_dir)) {
+            return {false, *artifact_problem};
+        }
+        return {true, ""};
     }
 
-    RunResult run_result = run_process({out_binary.string()}, temp_dir, std::chrono::seconds(kTimeoutSeconds));
+    // ExpectedKind::Run or NoAbort: compilation itself must succeed.
+    if (!(compile_result.exited_normally && compile_result.exit_code == 0)) {
+        return {false, "expected successful compilation, but `scpp` failed; stderr:\n" + compile_result.err};
+    }
+    if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err)) {
+        return {false, *stderr_problem};
+    }
+    if (auto artifact_problem = check_expected_artifacts(invocation, temp_dir)) {
+        return {false, *artifact_problem};
+    }
+    if (!fs::exists(out_binary)) {
+        return {false, "expected output binary '" + invocation.output_relpath + "' was not produced"};
+    }
+
+    RunResult run_result = run_process({out_binary.string()}, temp_dir, std::chrono::seconds(kTimeoutSeconds), temp_dir);
     fs::remove(out_binary, ec);
 
     if (run_result.timed_out) {
@@ -408,7 +555,40 @@ struct TestUnit {
     fs::path expected_file;
     std::string rel_name;
     std::vector<std::string> extra_build_args;
+    InvocationSpec invocation;
 };
+
+InvocationSpec load_invocation_spec(const fs::path& stem_path) {
+    InvocationSpec spec;
+
+    fs::path argv_path = stem_path;
+    argv_path += ".argv";
+    spec.argv_tokens = parse_token_file(argv_path);
+
+    fs::path mode_path = stem_path;
+    mode_path += ".mode";
+    if (fs::exists(mode_path) && read_trimmed_file(mode_path) == "command-only") {
+        spec.mode = RunnerMode::CommandOnly;
+    }
+
+    fs::path output_path = stem_path;
+    output_path += ".output";
+    if (fs::exists(output_path)) {
+        spec.output_relpath = read_trimmed_file(output_path);
+    }
+
+    fs::path artifacts_path = stem_path;
+    artifacts_path += ".artifacts";
+    spec.artifact_relpaths = parse_token_file(artifacts_path);
+
+    fs::path stderr_path = stem_path;
+    stderr_path += ".stderr";
+    if (fs::exists(stderr_path)) {
+        spec.stderr_expected_file = stderr_path;
+    }
+
+    return spec;
+}
 
 } // namespace
 
@@ -456,7 +636,7 @@ int main(int argc, char** argv) {
         if (rel_name.find(filter) == std::string::npos) {
             continue;
         }
-        units.push_back(TestUnit{entry, expected, rel_name, parse_imports_file(dir)});
+        units.push_back(TestUnit{entry, expected, rel_name, parse_imports_file(dir), load_invocation_spec(dir / "main")});
     }
 
     // Pass 2: every other `.scpp` file is a standalone single-file case,
@@ -477,7 +657,10 @@ int main(int argc, char** argv) {
         }
         fs::path expected_path = entry.path();
         expected_path.replace_extension(".expected");
-        units.push_back(TestUnit{entry.path(), expected_path, fs::relative(entry.path(), cases_dir).string(), {}});
+        fs::path stem_path = entry.path();
+        stem_path.replace_extension("");
+        units.push_back(
+            TestUnit{entry.path(), expected_path, fs::relative(entry.path(), cases_dir).string(), {}, load_invocation_spec(stem_path)});
     }
     std::sort(units.begin(), units.end(),
               [](const TestUnit& a, const TestUnit& b) { return a.rel_name < b.rel_name; });
@@ -487,7 +670,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    fs::path temp_dir = fs::temp_directory_path() / ("scpp_blackbox_test_" + std::to_string(getpid()));
+    fs::path temp_dir = cases_dir.parent_path() / (".scpp_blackbox_test_" + std::to_string(getpid()));
     fs::create_directories(temp_dir);
     std::error_code ec;
 
@@ -501,8 +684,8 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        Outcome outcome =
-            run_one_case(*scpp_bin, unit.entry_file, unit.expected_file, temp_dir, unit.extra_build_args);
+        Outcome outcome = run_one_case(*scpp_bin, unit.entry_file, unit.expected_file, temp_dir, unit.extra_build_args,
+                                       unit.invocation);
         if (outcome.passed) {
             passed++;
             std::cout << "ok   " << unit.rel_name << "\n";

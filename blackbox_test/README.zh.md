@@ -16,24 +16,33 @@
   作者没有要求的情况下被检查。
 - `cases/<NN_category>/<name>.expected` —— 如果 `scpp` 正确实现了规范，这段
   程序*应该*产生的结果。有三种形式：
-  1. **第一行是一个数字**：`scpp build` 必须编译成功，运行生成的可执行文件
+  1. **第一行是一个数字**：`scpp` 必须编译成功，运行生成的可执行文件
      必须以这个退出码结束（0-255，遵循 POSIX `WEXITSTATUS`/shell `$?` 的语义
      ——被信号杀死的进程会被归一化为 `128+信号数`，例如 SIGABRT -> 134）。
      第一行之后的内容是期望的 stdout，逐字节比对。
-  2. **`COMPILE_ERROR`**：`scpp build` 必须以一个干净、为正数的退出码失败
+  2. **`COMPILE_ERROR`**：`scpp` 必须以一个干净、为正数的退出码失败
      （一个真正的诊断信息，而不是崩溃）。具体的错误文案不做检查——规范并未
      锁定措辞。
   3. **`NO_ABORT`**：仅用于极少数场景——某个 scpp 插入的运行时检查（span
      边界检查、溢出检查）在一个 `[[scpp::unsafe]] { }` 块内被有意地*跳过*了（见
      ch01 §1.1），因此读到/算出的值本身就是不确定的垃圾值，没法固定下来
      断言——但进程仍必须正常终止（return/exit），而不是被信号杀死。
+- **可选 CLI 用例辅助文件**：用于黑盒验证 CLI 表面本身：
+  - `<name>.argv` / `main.argv` —— 每个非空行一个 argv token，支持
+    `$INPUT`、`$OUTPUT`、`$TEMP` 占位符
+  - `<name>.mode` / `main.mode` —— `command-only` 表示断言 CLI 命令
+    自身的退出码/stdout，而不是去运行生成的可执行文件
+  - `<name>.output` / `main.output` —— 输出文件在每个用例临时目录里的相对路径
+    （默认 `case.bin`）
+  - `<name>.artifacts` / `main.artifacts` —— CLI 成功后必须存在的相对路径
+  - `<name>.stderr` / `main.stderr` —— CLI 命令期望的精确 stderr
 - **多文件（ch11 模块）用例**：有些规则（跨文件的 import/export、
   partition……）确实需要不止一个源文件。一个包含 `main.scpp` 文件的目录会被
   当成*一个*模块测试用例，以该目录名命名：
   - `main.scpp` —— 入口文件，编译并运行方式和普通单文件用例完全一样；
     `main.expected` 是它的期望结果（形式同上面三种）。
   - `main.imports`（可选）——每个非空、非 `#` 注释行是一条
-    `module_name=relative_path` 映射，会被转成 `scpp build` 的
+    `module_name=relative_path` 映射，会被转成 `scpp` 的
     `--import module_name=path`（ch11 §11.14）——把 `main.scpp` 需要的每个
     模块都列出来，不管是直接依赖还是间接依赖，因为只有 `main.scpp` 本身会
     被当作入口编译。
@@ -96,6 +105,7 @@ cmake --build build
 | `25_function_wrappers` | `std::function` / `std::move_only_function`（ch05 §5.18）：可拷贝/仅可移动 target、cv/ref-qualified 签名、moved-from 行为 |
 | `26_threads` | `std::thread` / `std::jthread`：thread-movable 构造约束、join/detach/joinable 状态变化、`jthread` 析构时自动 join |
 | `27_unions_packed_layout` | union 成员的 unsafe 门控，以及 `[[scpp::packed]]` 的布局/FFI 行为，包括 Linux `epoll_event` / `epoll_data_t` 形态 |
+| `28_cli_invocation` | CLI 表面：直接 `scpp file.scpp` 构建、默认/自定义输出名、移除的 `build` 关键字，以及仍保留的 `lex`/`parse`/`build-module` 子命令 |
 
 ## 测试理念
 
@@ -140,8 +150,8 @@ cmake --build build
   此标注。
 - `docs/book/` 有时会落后于 `src/`（两者是独立维护的）——某个章节写着"尚未
   实现"，不代表现在依然如此（这一轮又证实了一次：基本的 `namespace` 声明/
-  限定查找/嵌套其实已经能用了）。拿不准的时候，用 `scpp build` 快速探测一下
-  就能确认。
+  限定查找/嵌套其实已经能用了）。拿不准的时候，用 `scpp file.scpp` 之类的
+  直接 CLI 调用快速探测一下就能确认。
 - **`18_closures` 曾假设 `auto` 局部变量/返回类型推导已经能像真实 C++
   一样工作**，尽管 `docs/book/` 里从没有明确写过这一点已支持——**验证时
   确认这个假设是对的**，没有用例因为这个失败。
@@ -156,8 +166,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 273 个用例**
-- 运行器原始统计 **272/273 通过**
+- **总共 279 个用例**
+- 运行器原始统计 **279/279 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -182,9 +192,6 @@ cmake --build build
 - **union / packed 布局现在也有直接黑盒覆盖**：
   union 成员访问的 unsafe 门控、packed struct 的原始字节布局，以及
   Linux `epoll_event` / `epoll_data_t` 的真实 FFI 声明形态
-
-新覆盖暴露出的当前实现缺口：
-
-- **`27_unions_packed_layout`**（1 个失败）：
-  `packed_attribute_on_function_is_rejected.scpp` 目前会被接受，
-  但 spec §9.2 明确规定 `[[scpp::packed]]` 只能用于 `struct`/`union` 声明。
+- **CLI 调用方式现在也有直接黑盒覆盖**：
+  裸 `scpp file.scpp`、`-o custom_name`、被移除的 `build` 关键字拒绝路径，
+  以及 `lex`、`parse`、`build-module` 子命令仍然可用
