@@ -1,4 +1,4 @@
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -10,11 +10,7 @@ WORKDIR /work
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg cmake ninja-build build-essential libzstd-dev zlib1g-dev pandoc; \
-    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg; \
-    echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" > /etc/apt/sources.list.d/llvm.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends clang-22 llvm-22-dev; \
+    apt-get install -y --no-install-recommends ca-certificates curl cmake ninja-build build-essential libzstd-dev zlib1g-dev pandoc clang-22 llvm-22-dev; \
     rm -rf /var/lib/apt/lists/*
 
 COPY . .

@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       CC: clang-22
@@ -77,13 +77,7 @@ jobs:
               -o APT::Get::List-Cleanup="0"
           }
           scoped_update "${ubuntu_sources}"
-          sudo apt-get install -y ca-certificates curl gnupg cmake ninja-build libzstd-dev
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor > llvm-archive-keyring.gpg
-          sudo install -o root -g root -m 644 llvm-archive-keyring.gpg /usr/share/keyrings/llvm-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
-          rm llvm-archive-keyring.gpg
-          scoped_update /etc/apt/sources.list.d/llvm.list
-          sudo apt-get install -y clang-22 llvm-22-dev
+          sudo apt-get install -y ca-certificates curl cmake ninja-build libzstd-dev clang-22 llvm-22-dev
 
       - name: Configure main project
         if: steps.change-scope.outputs.docs_only != 'true'
@@ -110,7 +104,7 @@ jobs:
         run: ./blackbox_test/build/run_tests
 
   docker-website-smoke:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     needs: build-and-test
     steps:
@@ -255,7 +249,7 @@ jobs:
 
   publish-website-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
       id-token: write
