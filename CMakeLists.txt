@@ -79,6 +79,14 @@ target_sources(scpp_driver
 target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck ${LLVM_LIBS})
 target_compile_features(scpp_driver PRIVATE cxx_std_23)
 
+add_library(scpp_project)
+target_sources(scpp_project
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/project.cppm)
+target_link_libraries(scpp_project PUBLIC scpp_lexer scpp_driver)
+target_compile_features(scpp_project PRIVATE cxx_std_23)
+
 add_executable(scpp)
 
 target_sources(scpp
@@ -87,7 +95,7 @@ target_sources(scpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/cli.cppm)
-target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver)
+target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver scpp_project)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
 
