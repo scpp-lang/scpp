@@ -10,7 +10,7 @@ WORKDIR /work
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl cmake ninja-build build-essential libzstd-dev zlib1g-dev pandoc clang-22 llvm-22-dev; \
+    apt-get install -y --no-install-recommends ca-certificates curl cmake ninja-build build-essential libzstd-dev libsqlite3-dev zlib1g-dev pandoc clang-22 llvm-22-dev; \
     rm -rf /var/lib/apt/lists/*
 
 COPY . .

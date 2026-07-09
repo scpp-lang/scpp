@@ -24,23 +24,7 @@ module;
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-extern "C" {
-struct sqlite3;
-struct sqlite3_stmt;
-int sqlite3_open(const char* filename, sqlite3** ppDb);
-int sqlite3_close(sqlite3*);
-const char* sqlite3_errmsg(sqlite3*);
-int sqlite3_exec(sqlite3*, const char*, int (*)(void*, int, char**, char**), void*, char**);
-void sqlite3_free(void*);
-int sqlite3_prepare_v2(sqlite3*, const char*, int, sqlite3_stmt**, const char**);
-int sqlite3_step(sqlite3_stmt*);
-int sqlite3_finalize(sqlite3_stmt*);
-int sqlite3_reset(sqlite3_stmt*);
-int sqlite3_clear_bindings(sqlite3_stmt*);
-int sqlite3_bind_text(sqlite3_stmt*, int, const char*, int, void (*)(void*));
-const unsigned char* sqlite3_column_text(sqlite3_stmt*, int);
-}
+#include <sqlite3.h>
 
 export module scpp.project;
 
@@ -76,11 +60,6 @@ struct ManifestError : std::runtime_error {
 struct BuildError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
-
-constexpr int sqlite_ok = 0;
-constexpr int sqlite_row = 100;
-constexpr int sqlite_done = 101;
-auto sqlite_transient = reinterpret_cast<void (*)(void*)>(-1);
 
 bool trace_enabled() {
     static bool enabled = []() {
@@ -351,7 +330,7 @@ public:
     explicit BuildDatabase(const std::filesystem::path& db_path)
         : db_path_(normalized_path(db_path)) {
         std::filesystem::create_directories(db_path_.parent_path());
-        if (sqlite3_open(db_path_.string().c_str(), &db_) != sqlite_ok || db_ == nullptr) {
+        if (sqlite3_open(db_path_.string().c_str(), &db_) != SQLITE_OK || db_ == nullptr) {
             std::string message = "cannot open build database '" + db_path_.string() + "'";
             if (db_ != nullptr) message += ": " + std::string(sqlite3_errmsg(db_));
             throw BuildError(message);
@@ -385,7 +364,7 @@ public:
             "manifest_digest, compiler_version, triple FROM build_records WHERE key = ?1");
         bind_text(stmt, 1, key);
         int rc = sqlite3_step(stmt);
-        if (rc == sqlite_row) {
+        if (rc == SQLITE_ROW) {
             BuildRecord record{
                 column_text(stmt, 0), column_text(stmt, 1), column_text(stmt, 2), column_text(stmt, 3),
                 column_text(stmt, 4), column_text(stmt, 5), column_text(stmt, 6), column_text(stmt, 7),
@@ -395,7 +374,7 @@ public:
             sqlite3_finalize(stmt);
             return record;
         }
-        if (rc != sqlite_done) {
+        if (rc != SQLITE_DONE) {
             std::string message = "build database query failed: " + std::string(sqlite3_errmsg(db_));
             sqlite3_finalize(stmt);
             throw BuildError(message);
@@ -427,7 +406,7 @@ public:
         bind_text(stmt, 9, record.compiler_version);
         bind_text(stmt, 10, record.triple);
         int rc = sqlite3_step(stmt);
-        if (rc != sqlite_done) {
+        if (rc != SQLITE_DONE) {
             std::string message = "build database write failed: " + std::string(sqlite3_errmsg(db_));
             sqlite3_finalize(stmt);
             throw BuildError(message);
@@ -439,7 +418,7 @@ private:
     void exec(const char* sql) {
         std::lock_guard lock(mutex_);
         char* error = nullptr;
-        if (sqlite3_exec(db_, sql, nullptr, nullptr, &error) != sqlite_ok) {
+        if (sqlite3_exec(db_, sql, nullptr, nullptr, &error) != SQLITE_OK) {
             std::string message = "build database initialization failed";
             if (error != nullptr) {
                 message += ": ";
@@ -452,14 +431,14 @@ private:
 
     sqlite3_stmt* prepare(const char* sql) {
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != sqlite_ok || stmt == nullptr) {
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK || stmt == nullptr) {
             throw BuildError("build database statement preparation failed: " + std::string(sqlite3_errmsg(db_)));
         }
         return stmt;
     }
 
     void bind_text(sqlite3_stmt* stmt, int index, const std::string& value) {
-        if (sqlite3_bind_text(stmt, index, value.c_str(), -1, sqlite_transient) != sqlite_ok) {
+        if (sqlite3_bind_text(stmt, index, value.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK) {
             throw BuildError("build database bind failed: " + std::string(sqlite3_errmsg(db_)));
         }
     }

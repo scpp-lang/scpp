@@ -65,16 +65,17 @@ maintained in both languages:
 
 ## Building
 
-Requires Clang with C++23 modules support, CMake 3.28+, Ninja, and an LLVM
-development package. On Debian/Ubuntu:
+Requires Clang with C++23 modules support, CMake 3.28+, Ninja, an LLVM
+development package, and SQLite development headers/libs. On Debian/Ubuntu:
 
 ```sh
-sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev
+sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev libsqlite3-dev
 ```
 
 (`libzstd-dev` is needed because LLVM's CMake config links against it;
 without it, `find_package(LLVM)` fails with a missing `zstd::libzstd_shared`
-target.)
+target. `libsqlite3-dev` provides the `sqlite3.h` header and static/shared
+SQLite library that SCPP now links during full source builds.)
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=<path to LLVM's lib/cmake/llvm>
