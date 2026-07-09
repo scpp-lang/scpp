@@ -1,0 +1,5 @@
+.scpp/build/*/dev/libmath/modules/libmath.scppm
+.scpp/build/*/dev/libmath/archives/liblibmath.scppa
+.scpp/build/*/dev/libutil/modules/libutil.scppm
+.scpp/build/*/dev/libutil/archives/liblibutil.scppa
+.scpp/build/*/dev/app/package-metadata.json

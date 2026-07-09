@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "nativepkg"
+version = "0.1.0"
+
+[native]
+libs = ["sqlite3"]
+
+[[bin]]
+name = "nativepkg"
+root = "main.scpp"
+sources = ["*.scpp"]

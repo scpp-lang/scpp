@@ -33,9 +33,11 @@
   - `<name>.mode` / `main.mode` —— `command-only` 表示断言 CLI 命令
     自身的退出码/stdout，而不是去运行生成的可执行文件
   - `<name>.output` / `main.output` —— 输出文件在每个用例临时目录里的相对路径
-    （默认 `case.bin`）
-  - `<name>.artifacts` / `main.artifacts` —— CLI 成功后必须存在的相对路径
-  - `<name>.stderr` / `main.stderr` —— CLI 命令期望的精确 stderr
+    （默认 `case.bin`）；可用 `*`/`**` 通配目标 triple 相关的构建产物路径
+  - `<name>.artifacts` / `main.artifacts` —— CLI 成功后必须存在的相对路径；
+    若以前缀 `!` 开头，则表示该路径必须*不存在*
+  - `<name>.stderr` / `main.stderr` —— CLI 命令期望的精确 stderr；`$TEMP`
+    会展开成该用例的临时目录
 - **多文件（ch11 模块）用例**：有些规则（跨文件的 import/export、
   partition……）确实需要不止一个源文件。一个包含 `main.scpp` 文件的目录会被
   当成*一个*模块测试用例，以该目录名命名：
@@ -48,6 +50,9 @@
     被当作入口编译。
   - 目录里其它的 `.scpp` 文件——就是 `main.imports` 里引用的那些模块，不会
     被当成独立的用例扫描。
+  - 若存在 `main.argv`，运行器会先把整个用例目录复制到临时工作区，再在那里
+    调用 `scpp`；因此 project-build 类夹具可以安全地包含 `scpp.toml`、
+    子包和嵌套源码树，而不会污染仓库里的已提交 fixture。
 
 测试运行器本身（`run_tests.cpp`）是一个小巧、无外部依赖的 C++ 程序——只用了
 POSIX `fork`/`exec` + `<filesystem>`，没有第三方库，也没有链接任何 scpp 模块。
@@ -106,6 +111,7 @@ cmake --build build
 | `26_threads` | `std::thread` / `std::jthread`：thread-movable 构造约束、join/detach/joinable 状态变化、`jthread` 析构时自动 join |
 | `27_unions_packed_layout` | union 成员的 unsafe 门控，以及 `[[scpp::packed]]` 的布局/FFI 行为，包括 Linux `epoll_event` / `epoll_data_t` 形态 |
 | `28_cli_invocation` | CLI 表面：直接 `scpp file.scpp` 构建、默认/自定义输出名、移除的 `build` 关键字，以及仍保留的 `lex`/`parse`/`build-module` 子命令 |
+| `29_project_build` | manifest 驱动的项目构建：单包 `build`、workspace/path dependency、直接依赖可见性、`-p` 选包，以及对尚未实现 manifest 特性的拒绝路径 |
 
 ## 测试理念
 
@@ -166,8 +172,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 279 个用例**
-- 运行器原始统计 **279/279 通过**
+- **总共 287 个用例**
+- 运行器原始统计 **287/287 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -195,3 +201,7 @@ cmake --build build
 - **CLI 调用方式现在也有直接黑盒覆盖**：
   裸 `scpp file.scpp`、`-o custom_name`、被移除的 `build` 关键字拒绝路径，
   以及 `lex`、`parse`、`build-module` 子命令仍然可用
+- **manifest 项目构建现在也有直接黑盒覆盖**：
+  单包 lib/bin 构建、workspace/path dependency 构建、`-p` 选包、
+  仅直接依赖可见的编译期规则，以及对 registry 依赖、
+  `[workspace.dependencies]`、`[native]` 等延期特性的拒绝路径

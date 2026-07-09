@@ -1,0 +1,12 @@
+manifest-version = 1
+
+[package]
+name = "libutil"
+version = "0.1.0"
+
+[dependencies]
+libmath = { path = "../libmath" }
+
+[lib]
+root = "src/libutil.scpp"
+sources = ["src/**/*.scpp"]

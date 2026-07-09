@@ -1,0 +1,5 @@
+import libutil;
+
+int main() {
+    return libutil::add_two(5);
+}

@@ -1,0 +1,10 @@
+manifest-version = 1
+
+[package]
+name = "tool"
+version = "0.1.0"
+
+[[bin]]
+name = "tool"
+root = "src/tool.scpp"
+sources = ["src/**/*.scpp"]
