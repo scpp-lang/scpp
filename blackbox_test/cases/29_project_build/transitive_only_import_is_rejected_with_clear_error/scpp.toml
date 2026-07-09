@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+libutil = { path = "libutil" }
+
+[[bin]]
+name = "app"
+root = "main.scpp"
+sources = ["*.scpp"]

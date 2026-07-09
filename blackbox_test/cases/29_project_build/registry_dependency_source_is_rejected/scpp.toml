@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "badpkg"
+version = "0.1.0"
+
+[dependencies]
+json = { version = "1.2.3" }
+
+[[bin]]
+name = "badpkg"
+root = "main.scpp"
+sources = ["*.scpp"]

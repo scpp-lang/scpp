@@ -41,11 +41,13 @@ on, or knowledge of, scpp's internal compiler modules.
   - `<name>.mode` / `main.mode` -- `command-only` means assert on the CLI
     command's own exit/stdout instead of running a produced executable
   - `<name>.output` / `main.output` -- output file path relative to the
-    per-case temp directory (default: `case.bin`)
+    per-case temp directory (default: `case.bin`); `*`/`**` globs are
+    allowed for target-triple-dependent build outputs
   - `<name>.artifacts` / `main.artifacts` -- relative paths that must exist
-    after the CLI command succeeds
+    after the CLI command succeeds; prefix a path with `!` to assert that
+    it must *not* exist
   - `<name>.stderr` / `main.stderr` -- exact expected stderr from the CLI
-    command
+    command; `$TEMP` expands to the per-case temp directory
 - **Multi-file (ch11 module) cases**: some rules (import/export across
   files, partitions, ...) genuinely need more than one source file. A
   directory containing a `main.scpp` file is instead treated as one
@@ -60,6 +62,9 @@ on, or knowledge of, scpp's internal compiler modules.
     file actually compiled as the entry point.
   - any other `.scpp` files in the directory -- the modules referenced by
     `main.imports`; never scanned as their own standalone case.
+  - if `main.argv` is present, the entire case directory is copied into the
+    temp workspace before invoking `scpp`, so project-build fixtures can
+    safely include `scpp.toml`, subpackages, and nested source trees.
 
 The runner itself (`run_tests.cpp`) is a small, dependency-free C++
 program -- POSIX `fork`/`exec` + `<filesystem>` only, no third-party
@@ -120,6 +125,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `26_threads` | `std::thread` / `std::jthread`: thread-movable constructor constraint, join/detach/joinable transitions, `jthread` destructor auto-join |
 | `27_unions_packed_layout` | union member unsafe-gating and `[[scpp::packed]]` layout/FFI behavior, including the Linux `epoll_event` / `epoll_data_t` pattern |
 | `28_cli_invocation` | CLI surface: direct `scpp file.scpp` builds, default/custom output names, removed `build` keyword, and surviving `lex`/`parse`/`build-module` subcommands |
+| `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
 
 ## Testing philosophy
 
@@ -201,8 +207,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **279 cases total**
-- **279/279 passing**
+- **287 cases total**
+- **287/287 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -238,3 +244,8 @@ re-run via `./build/run_tests`:
   bare `scpp file.scpp`, `-o custom_name`, rejection of the removed
   `build` keyword, and spot-checks that `lex`, `parse`, and
   `build-module` still work explicitly
+- **Manifest-based project builds now have direct black-box coverage too**:
+  single-package lib/bin builds, workspace/path-dependency builds,
+  `-p` package selection, direct-only compile-time visibility, and
+  rejection of still-deferred manifest features like registry deps,
+  `[workspace.dependencies]`, and `[native]`

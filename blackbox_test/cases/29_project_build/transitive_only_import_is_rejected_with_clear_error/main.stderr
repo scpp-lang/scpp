@@ -1,0 +1,1 @@
+error: module 'libmath' is exported only by transitive dependency package 'libmath'; add it as a direct dependency to import it

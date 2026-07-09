@@ -1,0 +1,9 @@
+manifest-version = 1
+
+[package]
+name = "minlib"
+version = "0.1.0"
+
+[lib]
+root = "src/minlib.scpp"
+sources = ["src/**/*.scpp"]

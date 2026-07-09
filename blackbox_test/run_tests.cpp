@@ -42,11 +42,14 @@
 //   - `<name>.mode` / `main.mode`: `command-only` means compare the CLI
 //     command's own exit code/stdout instead of running a produced binary.
 //   - `<name>.output` / `main.output`: output file path relative to the
-//     case temp directory (default: `case.bin`).
+//     case temp directory (default: `case.bin`); `*`/`**` globs are allowed
+//     for paths such as target-triple-dependent build outputs.
 //   - `<name>.artifacts` / `main.artifacts`: relative paths that must exist
-//     after the CLI command succeeds.
+//     after the CLI command succeeds; prefix a path with `!` to assert that
+//     it was *not* produced.
 //   - `<name>.stderr` / `main.stderr`: exact expected stderr from the CLI
-//     command (used for cases like rejecting a removed subcommand).
+//     command; `$TEMP` expands to the per-case temp directory so diagnostics
+//     mentioning copied fixture paths can still be asserted exactly.
 //
 // Multi-file (ch11 module) cases: some language rules (import/export
 // across files, partitions, ...) genuinely need more than one source
@@ -63,6 +66,10 @@
 //     `main.scpp` itself is ever the compiled entry point.
 //   - any other `.scpp` files in the directory -- the modules referenced
 //     by `main.imports`; never scanned as their own standalone case.
+//   - when `main.argv` is present, the whole case directory is copied into
+//     the temp workspace before invoking `scpp`, so manifest/project-mode
+//     cases can safely include `scpp.toml`, subpackages, and nested sources
+//     without polluting the checked-in fixtures.
 // **Verified**: `--import name=path`'s `path` does point directly at that
 // module's raw `.scpp` interface source, compiled on the fly -- there is
 // no separate "compile a module to `.scppm` first" step. Confirmed
@@ -120,6 +127,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -336,6 +344,82 @@ std::string replace_all(std::string text, std::string_view needle, const std::st
     return text;
 }
 
+bool contains_glob(std::string_view text) {
+    return text.find('*') != std::string_view::npos || text.find('?') != std::string_view::npos;
+}
+
+std::regex glob_to_regex(std::string_view pattern) {
+    std::string regex = "^";
+    for (size_t i = 0; i < pattern.size(); i++) {
+        char ch = pattern[i];
+        if (ch == '*') {
+            if (i + 1 < pattern.size() && pattern[i + 1] == '*') {
+                regex += ".*";
+                i++;
+            } else {
+                regex += "[^/]*";
+            }
+            continue;
+        }
+        if (ch == '?') {
+            regex += "[^/]";
+            continue;
+        }
+        switch (ch) {
+            case '.':
+            case '^':
+            case '$':
+            case '+':
+            case '(':
+            case ')':
+            case '[':
+            case ']':
+            case '{':
+            case '}':
+            case '|':
+            case '\\':
+                regex.push_back('\\');
+                break;
+            default:
+                break;
+        }
+        regex.push_back(ch);
+    }
+    regex += "$";
+    return std::regex(regex);
+}
+
+std::vector<fs::path> match_relpaths(const fs::path& root, std::string_view relpath_pattern) {
+    std::vector<fs::path> matches;
+    if (!contains_glob(relpath_pattern)) {
+        fs::path candidate = root / fs::path(relpath_pattern);
+        if (fs::exists(candidate)) matches.push_back(candidate);
+        return matches;
+    }
+
+    std::regex pattern = glob_to_regex(relpath_pattern);
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        if (!entry.is_regular_file()) continue;
+        std::string rel = fs::relative(entry.path(), root).generic_string();
+        if (std::regex_match(rel, pattern)) matches.push_back(entry.path());
+    }
+    std::sort(matches.begin(), matches.end());
+    return matches;
+}
+
+std::optional<std::string> resolve_single_path(const fs::path& root, std::string_view relpath_pattern,
+                                               fs::path& resolved) {
+    std::vector<fs::path> matches = match_relpaths(root, relpath_pattern);
+    if (matches.empty()) {
+        return "expected path '" + std::string(relpath_pattern) + "' was not produced";
+    }
+    if (matches.size() > 1) {
+        return "path pattern '" + std::string(relpath_pattern) + "' matched multiple outputs";
+    }
+    resolved = matches.front();
+    return std::nullopt;
+}
+
 std::vector<std::string> resolve_invocation_tokens(const std::vector<std::string>& raw_tokens, const fs::path& input_path,
                                                    const fs::path& temp_input_path, const fs::path& output_path,
                                                    const fs::path& temp_dir) {
@@ -351,11 +435,13 @@ std::vector<std::string> resolve_invocation_tokens(const std::vector<std::string
     return resolved;
 }
 
-std::optional<std::string> compare_expected_stderr(const InvocationSpec& invocation, const std::string& actual_stderr) {
+std::optional<std::string> compare_expected_stderr(const InvocationSpec& invocation, const std::string& actual_stderr,
+                                                   const fs::path& temp_dir) {
     if (!invocation.stderr_expected_file) {
         return std::nullopt;
     }
     std::string expected_stderr = read_file(*invocation.stderr_expected_file);
+    expected_stderr = replace_all(std::move(expected_stderr), "$TEMP", temp_dir.string());
     if (actual_stderr == expected_stderr) {
         return std::nullopt;
     }
@@ -363,12 +449,50 @@ std::optional<std::string> compare_expected_stderr(const InvocationSpec& invocat
 }
 
 std::optional<std::string> check_expected_artifacts(const InvocationSpec& invocation, const fs::path& temp_dir) {
-    for (const std::string& relpath : invocation.artifact_relpaths) {
-        if (!fs::exists(temp_dir / relpath)) {
+    for (const std::string& raw_relpath : invocation.artifact_relpaths) {
+        bool should_be_absent = !raw_relpath.empty() && raw_relpath[0] == '!';
+        std::string relpath = should_be_absent ? raw_relpath.substr(1) : raw_relpath;
+        std::vector<fs::path> matches = match_relpaths(temp_dir, relpath);
+        if (should_be_absent) {
+            if (!matches.empty()) {
+                return "artifact '" + relpath + "' should not exist";
+            }
+            continue;
+        }
+        if (matches.empty()) {
             return "expected artifact '" + relpath + "' was not produced";
+        }
+        if (matches.size() > 1) {
+            return "artifact pattern '" + relpath + "' matched multiple outputs";
         }
     }
     return std::nullopt;
+}
+
+void copy_tree_contents(const fs::path& from_dir, const fs::path& to_dir) {
+    std::error_code ec;
+    fs::create_directories(to_dir, ec);
+    for (const auto& entry : fs::recursive_directory_iterator(from_dir)) {
+        fs::path rel = fs::relative(entry.path(), from_dir);
+        fs::path dest = to_dir / rel;
+        if (entry.is_directory()) {
+            fs::create_directories(dest, ec);
+            continue;
+        }
+        fs::create_directories(dest.parent_path(), ec);
+        fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing, ec);
+    }
+}
+
+bool path_is_within(const fs::path& path, const fs::path& ancestor) {
+    fs::path normalized_path = path.lexically_normal();
+    fs::path normalized_ancestor = ancestor.lexically_normal();
+    auto path_it = normalized_path.begin();
+    auto ancestor_it = normalized_ancestor.begin();
+    for (; ancestor_it != normalized_ancestor.end(); ++ancestor_it, ++path_it) {
+        if (path_it == normalized_path.end() || *path_it != *ancestor_it) return false;
+    }
+    return true;
 }
 
 // Parses a module test case directory's `main.imports`, if present: each
@@ -414,12 +538,16 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
                       const fs::path& temp_dir, const std::vector<std::string>& extra_build_args,
                       const InvocationSpec& invocation) {
     Expected expected = parse_expected(read_file(expected_path));
-    fs::path out_binary = temp_dir / invocation.output_relpath;
-    fs::path temp_input_path = temp_dir / scpp_path.filename();
+    fs::path case_temp_dir = temp_dir / "case";
+    fs::path out_binary = case_temp_dir / invocation.output_relpath;
+    fs::path temp_input_path = case_temp_dir / scpp_path.filename();
+    fs::path compile_cwd = case_temp_dir;
     std::error_code ec;
-    fs::remove(out_binary, ec);
+    fs::remove_all(case_temp_dir, ec);
+    fs::create_directories(case_temp_dir, ec);
     for (const std::string& relpath : invocation.artifact_relpaths) {
-        fs::remove_all(temp_dir / relpath, ec);
+        std::string trimmed = (!relpath.empty() && relpath[0] == '!') ? relpath.substr(1) : relpath;
+        fs::remove_all(case_temp_dir / trimmed, ec);
     }
 
     std::vector<std::string> build_argv;
@@ -429,14 +557,19 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
         build_argv.insert(build_argv.end(), default_build_args.begin(), default_build_args.end());
         build_argv.insert(build_argv.end(), extra_build_args.begin(), extra_build_args.end());
     } else {
-        fs::copy_file(scpp_path, temp_input_path, fs::copy_options::overwrite_existing, ec);
+        if (scpp_path.filename() == "main.scpp") {
+            copy_tree_contents(scpp_path.parent_path(), case_temp_dir);
+            temp_input_path = case_temp_dir / "main.scpp";
+        } else {
+            fs::copy_file(scpp_path, temp_input_path, fs::copy_options::overwrite_existing, ec);
+        }
         build_argv.push_back(scpp_bin.string());
         std::vector<std::string> resolved =
-            resolve_invocation_tokens(invocation.argv_tokens, scpp_path, temp_input_path, out_binary, temp_dir);
+            resolve_invocation_tokens(invocation.argv_tokens, scpp_path, temp_input_path, out_binary, case_temp_dir);
         build_argv.insert(build_argv.end(), resolved.begin(), resolved.end());
     }
     RunResult compile_result =
-        run_process(build_argv, temp_dir, std::chrono::seconds(kTimeoutSeconds), temp_dir);
+        run_process(build_argv, case_temp_dir, std::chrono::seconds(kTimeoutSeconds), compile_cwd);
 
     if (compile_result.timed_out) {
         return {false, "scpp invocation timed out"};
@@ -444,7 +577,7 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
 
     if (expected.kind == ExpectedKind::CompileError) {
         if (compile_result.exited_normally && compile_result.exit_code > 0) {
-            if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err)) {
+            if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err, case_temp_dir)) {
                 return {false, *stderr_problem};
             }
             return {true, ""};
@@ -464,10 +597,10 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
         if (compile_result.out != expected.stdout_text) {
             return {false, "expected stdout '" + expected.stdout_text + "', got '" + compile_result.out + "'"};
         }
-        if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err)) {
+        if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err, case_temp_dir)) {
             return {false, *stderr_problem};
         }
-        if (auto artifact_problem = check_expected_artifacts(invocation, temp_dir)) {
+        if (auto artifact_problem = check_expected_artifacts(invocation, case_temp_dir)) {
             return {false, *artifact_problem};
         }
         return {true, ""};
@@ -477,17 +610,18 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
     if (!(compile_result.exited_normally && compile_result.exit_code == 0)) {
         return {false, "expected successful compilation, but `scpp` failed; stderr:\n" + compile_result.err};
     }
-    if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err)) {
+    if (auto stderr_problem = compare_expected_stderr(invocation, compile_result.err, case_temp_dir)) {
         return {false, *stderr_problem};
     }
-    if (auto artifact_problem = check_expected_artifacts(invocation, temp_dir)) {
+    if (auto artifact_problem = check_expected_artifacts(invocation, case_temp_dir)) {
         return {false, *artifact_problem};
     }
-    if (!fs::exists(out_binary)) {
-        return {false, "expected output binary '" + invocation.output_relpath + "' was not produced"};
+    if (auto output_problem = resolve_single_path(case_temp_dir, invocation.output_relpath, out_binary)) {
+        return {false, *output_problem};
     }
 
-    RunResult run_result = run_process({out_binary.string()}, temp_dir, std::chrono::seconds(kTimeoutSeconds), temp_dir);
+    RunResult run_result =
+        run_process({out_binary.string()}, case_temp_dir, std::chrono::seconds(kTimeoutSeconds), case_temp_dir);
     fs::remove(out_binary, ec);
 
     if (run_result.timed_out) {
@@ -646,9 +780,8 @@ int main(int argc, char** argv) {
         if (entry.path().extension() != ".scpp" || entry.path().filename() == "main.scpp") {
             continue;
         }
-        fs::path parent = entry.path().parent_path();
-        bool inside_module_test_dir =
-            std::find(module_test_dirs.begin(), module_test_dirs.end(), parent) != module_test_dirs.end();
+        bool inside_module_test_dir = std::any_of(module_test_dirs.begin(), module_test_dirs.end(),
+                                                  [&](const fs::path& dir) { return path_is_within(entry.path(), dir); });
         if (inside_module_test_dir) {
             continue;
         }

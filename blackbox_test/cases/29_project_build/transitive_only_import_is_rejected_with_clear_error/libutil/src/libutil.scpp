@@ -1,0 +1,9 @@
+export module libutil;
+
+import libmath;
+
+namespace libutil {
+    export int add_two(int x) {
+        return libmath::add_one(x) + 1;
+    }
+}

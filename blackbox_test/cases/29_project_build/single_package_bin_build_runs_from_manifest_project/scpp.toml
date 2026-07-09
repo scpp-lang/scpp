@@ -1,0 +1,10 @@
+manifest-version = 1
+
+[package]
+name = "minbin"
+version = "0.1.0"
+
+[[bin]]
+name = "hello"
+root = "main.scpp"
+sources = ["*.scpp"]
