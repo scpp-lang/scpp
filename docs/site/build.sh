@@ -101,10 +101,78 @@ section_label() {
   case "$section:$lang" in
     book:zh) printf 'Book' ;;
     spec:zh) printf 'Spec' ;;
+    design:zh) printf '设计文档' ;;
     book:*) printf 'Book' ;;
     spec:*) printf 'Spec' ;;
+    design:*) printf 'Design Docs' ;;
     *) printf '%s' "$section" ;;
   esac
+}
+
+design_source_root() {
+  printf '%s' "$DOCS_DIR/design"
+}
+
+has_section() {
+  case "$1" in
+    book|spec) return 0 ;;
+    design) design_source_root >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+section_source_dir() {
+  local section="$1"
+  local lang="$2"
+  case "$section" in
+    design)
+      printf '%s/%s' "$(design_source_root)" "$lang"
+      ;;
+    *)
+      printf '%s/%s/%s' "$DOCS_DIR" "$section" "$lang"
+      ;;
+  esac
+}
+
+ensure_design_index() {
+  local lang="$1"
+  local index="$TMP_DIR/design-$lang-README.md"
+  local source_dir
+  source_dir="$(section_source_dir design "$lang")"
+  {
+    if [ "$lang" = 'zh' ]; then
+      printf '# %s\n\n' "$(section_label design "$lang")"
+      printf '浏览当前已公开的 SCPP 设计文档。\n\n'
+    else
+      printf '# %s\n\n' "$(section_label design "$lang")"
+      printf 'Browse the currently published SCPP design documents.\n\n'
+    fi
+    printf '## '
+    if [ "$lang" = 'zh' ]; then
+      printf '文档列表\n\n'
+    else
+      printf 'Available documents\n\n'
+    fi
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      local title
+      title="$(page_title_for "$source_dir/$file")"
+      printf -- '- [%s](%s)\n' "$title" "$file"
+    done < <(find "$source_dir" -maxdepth 1 -name '*.md' -printf '%f\n' | sort)
+    printf '\n'
+  } > "$index"
+  printf '%s' "$index"
+}
+
+source_path_for() {
+  local section="$1"
+  local lang="$2"
+  local file="$3"
+  if [ "$section" = 'design' ] && [ "$file" = 'README.md' ]; then
+    ensure_design_index "$lang"
+    return
+  fi
+  printf '%s/%s' "$(section_source_dir "$section" "$lang")" "$file"
 }
 
 page_title_for() {
@@ -119,6 +187,7 @@ page_title_for() {
 section_files() {
   local section="$1"
   local lang="$2"
+  local source_dir
   case "$section" in
     book)
       printf 'README.md\n'
@@ -128,6 +197,11 @@ section_files() {
       printf 'README.md\n'
       find "$DOCS_DIR/spec/$lang" -maxdepth 1 -name '[0-9][0-9]-*.md' -printf '%f\n' | sort
       find "$DOCS_DIR/spec/$lang" -maxdepth 1 \( -name 'scppm-format.md' -o -name 'scppkg-format.md' \) -printf '%f\n' | sort
+      ;;
+    design)
+      printf 'README.md\n'
+      source_dir="$(section_source_dir "$section" "$lang")"
+      find "$source_dir" -maxdepth 1 -name '*.md' -printf '%f\n' | sort
       ;;
   esac
 }
@@ -147,7 +221,8 @@ build_sidebar() {
   local current_out="$3"
   local prefix="$4"
   local sidebar_file="$5"
-  local source_dir="$DOCS_DIR/$section/$lang"
+  local source_dir
+  source_dir="$(section_source_dir "$section" "$lang")"
 
   sidebar_entry() {
     local file="$1"
@@ -158,7 +233,7 @@ build_sidebar() {
     if [ "$out_name" = "$current_out" ]; then
       class_name=' class="current"'
     fi
-    source_path="$source_dir/$file"
+    source_path="$(source_path_for "$section" "$lang" "$file")"
     if [ -f "$source_path" ]; then
       title="$(page_title_for "$source_path")"
     else
@@ -200,6 +275,25 @@ build_sidebar() {
       printf '      </ul>\n'
       printf '    </li>\n'
       printf '  </ul>\n'
+    elif [ "$section" = 'design' ]; then
+      local group_label
+      if [ "$lang" = 'zh' ]; then
+        group_label='设计文档'
+      else
+        group_label='Design Documents'
+      fi
+      printf '  <ul class="sidebar-root">\n'
+      sidebar_entry 'README.md'
+      printf '    <li class="sidebar-group">\n'
+      printf '      <div class="sidebar-group-title">%s</div>\n' "$(html_escape "$group_label")"
+      printf '      <ul class="sidebar-sublist">\n'
+      while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        sidebar_entry "$file"
+      done < <(find "$source_dir" -maxdepth 1 -name '*.md' -printf '%f\n' | sort)
+      printf '      </ul>\n'
+      printf '    </li>\n'
+      printf '  </ul>\n'
     else
       printf '  <ul>\n'
       while IFS= read -r file; do
@@ -222,7 +316,10 @@ build_top_nav() {
     local href class_name section
     href="${prefix}index.html"
     printf '  <a href="%s">Home</a>\n' "$href"
-    for section in book spec; do
+    for section in book spec design; do
+      if ! has_section "$section"; then
+        continue
+      fi
       href="${prefix}${section}/${current_lang}/index.html"
       class_name=''
       if [ "$section" = "$current_section" ]; then
@@ -243,7 +340,8 @@ build_lang_switcher() {
   local file="$5"
   local other_lang='en'
   [ "$lang" = 'en' ] && other_lang='zh'
-  local other_source="$DOCS_DIR/$section/$other_lang/$current_source_name"
+  local other_source
+  other_source="$(source_path_for "$section" "$other_lang" "$current_source_name")"
   local other_target="$prefix$section/$other_lang/$(output_name_for "$current_source_name")"
   if [ ! -f "$other_source" ]; then
     other_target="$prefix$section/$other_lang/index.html"
@@ -453,13 +551,13 @@ render_markdown_page() {
     -o "$out_path"
 }
 
-build_book_or_spec() {
+build_section() {
   local section="$1"
   local lang="$2"
-  local source_dir="$DOCS_DIR/$section/$lang"
   while IFS= read -r file; do
     [ -n "$file" ] || continue
-    local source="$source_dir/$file"
+    local source
+    source="$(source_path_for "$section" "$lang" "$file")"
     local out_name title rel_out
     out_name="$(output_name_for "$file")"
     rel_out="$section/$lang/$out_name"
@@ -473,7 +571,7 @@ build_landing() {
   cat > "$md" <<'LANDING'
 # SCPP Documentation Site
 
-Browse the language book and the formal specifications, including the language standard and the `.scppm` / `.scppkg` format specs.
+Browse the language book, the formal specifications, and the published design documents under <code>docs/design/</code>.
 
 <div class="landing-grid">
   <section class="card">
@@ -488,6 +586,13 @@ Browse the language book and the formal specifications, including the language s
     <ul>
       <li><a href="spec/en/index.html">English</a></li>
       <li><a href="spec/zh/index.html">中文</a></li>
+    </ul>
+  </section>
+  <section class="card">
+    <h2>Design Docs</h2>
+    <ul>
+      <li><a href="design/en/index.html">English</a></li>
+      <li><a href="design/zh/index.html">中文</a></li>
     </ul>
   </section>
 </div>
@@ -505,6 +610,7 @@ LANDING
       <a class="current" href="index.html">Home</a>
       <a href="book/en/index.html">Book</a>
       <a href="spec/en/index.html">Spec</a>
+      <a href="design/en/index.html">Design Docs</a>
       <a href="https://github.com/scpp-lang/scpp">GitHub</a>
     </nav>
     <div class="lang-switcher">
@@ -540,8 +646,11 @@ EOF2
 
 build_landing
 for lang in en zh; do
-  build_book_or_spec book "$lang"
-  build_book_or_spec spec "$lang"
+  build_section book "$lang"
+  build_section spec "$lang"
+  if has_section design; then
+    build_section design "$lang"
+  fi
 done
 
 echo "Done. Output in $OUT_DIR/"
