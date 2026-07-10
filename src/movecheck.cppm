@@ -4718,11 +4718,59 @@ private:
         return result;
     }
 
+    [[nodiscard]] static Type substitute_type_pack(const Type& type, std::string_view pack_name,
+                                                   const std::vector<Type>& pack_elems) {
+        if (type.is_pack_expansion && type.kind == TypeKind::Named && type.name == pack_name) {
+            if (pack_elems.size() == 1) return pack_elems.front();
+            return type;
+        }
+        Type result = type;
+        result.is_pack_expansion = false;
+        std::vector<Type> expanded_template_args;
+        for (const Type& arg : result.template_args) {
+            if (arg.is_pack_expansion && arg.kind == TypeKind::Named && arg.name == pack_name) {
+                for (const Type& concrete : pack_elems) expanded_template_args.push_back(concrete);
+                continue;
+            }
+            expanded_template_args.push_back(substitute_type_pack(arg, pack_name, pack_elems));
+        }
+        result.template_args = std::move(expanded_template_args);
+        if (result.pointee) {
+            result.pointee = std::make_shared<Type>(substitute_type_pack(*result.pointee, pack_name, pack_elems));
+        }
+        if (result.element) {
+            result.element = std::make_shared<Type>(substitute_type_pack(*result.element, pack_name, pack_elems));
+        }
+        if (result.function_return) {
+            result.function_return =
+                std::make_shared<Type>(substitute_type_pack(*result.function_return, pack_name, pack_elems));
+        }
+        std::vector<Type> expanded_function_params;
+        for (const Type& param : result.function_params) {
+            if (param.is_pack_expansion && param.kind == TypeKind::Named && param.name == pack_name) {
+                for (const Type& concrete : pack_elems) expanded_function_params.push_back(concrete);
+                continue;
+            }
+            expanded_function_params.push_back(substitute_type_pack(param, pack_name, pack_elems));
+        }
+        result.function_params = std::move(expanded_function_params);
+        return result;
+    }
+
     [[nodiscard]] static Type substitute_type_params(
         const Type& type, const std::vector<std::pair<std::string, Type>>& replacements) {
         Type result = type;
         for (const auto& [param_name, replacement] : replacements) {
             result = substitute_type_param(result, param_name, replacement);
+        }
+        return result;
+    }
+
+    [[nodiscard]] static Type substitute_type_packs(
+        const Type& type, const std::unordered_map<std::string, std::vector<Type>>& replacements) {
+        Type result = type;
+        for (const auto& [pack_name, pack_elems] : replacements) {
+            result = substitute_type_pack(result, pack_name, pack_elems);
         }
         return result;
     }
@@ -4784,6 +4832,33 @@ private:
         }
     }
 
+    void substitute_type_pack_in_expr(Expr& expr, std::string_view pack_name, const std::vector<Type>& pack_elems) {
+        expr.type = substitute_type_pack(expr.type, pack_name, pack_elems);
+        for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            if (arg.is_type) {
+                arg.type = substitute_type_pack(arg.type, pack_name, pack_elems);
+            } else if (arg.value) {
+                substitute_type_pack_in_expr(*arg.value, pack_name, pack_elems);
+            }
+        }
+        if (expr.lhs) substitute_type_pack_in_expr(*expr.lhs, pack_name, pack_elems);
+        if (expr.rhs) substitute_type_pack_in_expr(*expr.rhs, pack_name, pack_elems);
+        if (expr.third) substitute_type_pack_in_expr(*expr.third, pack_name, pack_elems);
+        for (ExprPtr& arg : expr.args) substitute_type_pack_in_expr(*arg, pack_name, pack_elems);
+        for (Param& p : expr.lambda_params) p.type = substitute_type_pack(p.type, pack_name, pack_elems);
+        for (LambdaCapture& c : expr.lambda_captures) {
+            if (c.init) substitute_type_pack_in_expr(*c.init, pack_name, pack_elems);
+        }
+        if (expr.lambda_body) substitute_type_pack_in_stmt(*expr.lambda_body, pack_name, pack_elems);
+    }
+
+    void substitute_type_packs_in_expr(Expr& expr,
+                                       const std::unordered_map<std::string, std::vector<Type>>& replacements) {
+        for (const auto& [pack_name, pack_elems] : replacements) {
+            substitute_type_pack_in_expr(expr, pack_name, pack_elems);
+        }
+    }
+
     void substitute_type_param_in_stmt(Stmt& stmt, const std::string& param_name, const Type& replacement) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
@@ -4816,6 +4891,45 @@ private:
     void substitute_type_params_in_stmt(Stmt& stmt, const std::vector<std::pair<std::string, Type>>& replacements) {
         for (const auto& [param_name, replacement] : replacements) {
             substitute_type_param_in_stmt(stmt, param_name, replacement);
+        }
+    }
+
+    void substitute_type_bindings_in_stmt(Stmt& stmt, const std::unordered_map<std::string, Type>& replacements) {
+        for (const auto& [param_name, replacement] : replacements) {
+            substitute_type_param_in_stmt(stmt, param_name, replacement);
+        }
+    }
+
+    void substitute_type_pack_in_stmt(Stmt& stmt, std::string_view pack_name, const std::vector<Type>& pack_elems) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                stmt.type = substitute_type_pack(stmt.type, pack_name, pack_elems);
+                if (stmt.init) substitute_type_pack_in_expr(*stmt.init, pack_name, pack_elems);
+                for (ExprPtr& arg : stmt.ctor_args) substitute_type_pack_in_expr(*arg, pack_name, pack_elems);
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) substitute_type_pack_in_expr(*stmt.expr, pack_name, pack_elems);
+                return;
+            case StmtKind::If:
+            case StmtKind::While:
+                substitute_type_pack_in_expr(*stmt.condition, pack_name, pack_elems);
+                substitute_type_pack_in_stmt(*stmt.then_branch, pack_name, pack_elems);
+                if (stmt.else_branch) substitute_type_pack_in_stmt(*stmt.else_branch, pack_name, pack_elems);
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return;
+            case StmtKind::Block:
+                for (StmtPtr& s : stmt.statements) substitute_type_pack_in_stmt(*s, pack_name, pack_elems);
+                return;
+        }
+    }
+
+    void substitute_type_packs_in_stmt(Stmt& stmt,
+                                       const std::unordered_map<std::string, std::vector<Type>>& replacements) {
+        for (const auto& [pack_name, pack_elems] : replacements) {
+            substitute_type_pack_in_stmt(stmt, pack_name, pack_elems);
         }
     }
 
@@ -6494,15 +6608,68 @@ private:
     // (possibly template-deduced) concrete type is known, rejects the
     // call with a precise diagnostic if the concrete type doesn't
     // actually satisfy the required property.
+    [[nodiscard]] static bool bind_type_binding(std::unordered_map<std::string, Type>& bindings, const std::string& name,
+                                               const Type& concrete) {
+        auto it = bindings.find(name);
+        if (it != bindings.end()) return types_equal(it->second, concrete);
+        bindings[name] = concrete;
+        return true;
+    }
+
+    [[nodiscard]] static bool bind_type_pack_binding(std::unordered_map<std::string, std::vector<Type>>& bindings,
+                                                    const std::string& name, const std::vector<Type>& concretes) {
+        auto it = bindings.find(name);
+        if (it != bindings.end()) {
+            if (it->second.size() != concretes.size()) return false;
+            for (size_t i = 0; i < concretes.size(); i++) {
+                if (!types_equal(it->second[i], concretes[i])) return false;
+            }
+            return true;
+        }
+        bindings[name] = concretes;
+        return true;
+    }
+
+    [[nodiscard]] static bool type_depends_on_template_params(const Type& type,
+                                                             const std::vector<GenericTypeParam>& template_params) {
+        if (type.kind == TypeKind::Named) {
+            for (const GenericTypeParam& tp : template_params) {
+                if (tp.name == type.name) return true;
+            }
+        }
+        for (const Type& arg : type.template_args) {
+            if (type_depends_on_template_params(arg, template_params)) return true;
+        }
+        if (type.pointee && type_depends_on_template_params(*type.pointee, template_params)) return true;
+        if (type.element && type_depends_on_template_params(*type.element, template_params)) return true;
+        if (type.function_return && type_depends_on_template_params(*type.function_return, template_params)) return true;
+        for (const Type& param : type.function_params) {
+            if (type_depends_on_template_params(param, template_params)) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] Type apply_template_bindings_to_type(
+        Type type, const std::unordered_map<std::string, Type>& type_bindings,
+        const std::unordered_map<std::string, std::vector<Type>>& pack_bindings, SourceLocation loc) {
+        for (const auto& [name, replacement] : type_bindings) type = substitute_type_param(type, name, replacement);
+        type = substitute_type_packs(type, pack_bindings);
+        return resolve_generic_type(std::move(type), loc);
+    }
+
+    struct DeferredTemplateObligation {
+        size_t param_index = 0;
+        size_t arg_index = 0;
+        Type parameter_type_pattern;
+    };
+
     void check_thread_safety_constraints(const Expr& expr, const Function& tmpl,
-                                          const std::unordered_map<std::string, Type>& type_bindings) {
+                                         const std::unordered_map<std::string, Type>& type_bindings,
+                                         const std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
         for (size_t i = 0; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
-            Type concrete = param.type;
-            for (const auto& [name, replacement] : type_bindings) {
-                concrete = substitute_type_param(concrete, name, replacement);
-            }
+            Type concrete = apply_template_bindings_to_type(param.type, type_bindings, pack_bindings, expr.loc);
             if (param.require_thread_movable && !is_thread_movable(concrete)) {
                 throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
                                          tmpl.name +
@@ -6581,7 +6748,7 @@ private:
 
                 Expr fake_call;
                 fake_call.loc = loc;
-                check_thread_safety_constraints(fake_call, tmpl, type_bindings);
+                check_thread_safety_constraints(fake_call, tmpl, type_bindings, {});
 
                 std::string cache_key = tmpl.name;
                 for (const GenericTypeParam& tp : tmpl.template_params) {
@@ -6674,11 +6841,18 @@ private:
     std::string instantiate_full_header_generic_clone(const Function& tmpl,
                                                       const std::unordered_map<std::string, Type>& type_bindings,
                                                       const std::unordered_map<std::string, int>& value_bindings,
+                                                      const std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
                                                       const std::vector<std::vector<Type>>& concrete_pack_param_types,
                                                       const std::vector<std::pair<size_t, Type>>& upcasts = {}) {
         std::string cache_key = tmpl.name;
         for (const GenericTypeParam& tp : tmpl.template_params) {
-            if (tp.is_pack) continue;
+            if (tp.is_pack) {
+                auto pack_it = pack_bindings.find(tp.name);
+                if (pack_it != pack_bindings.end()) {
+                    for (const Type& t : pack_it->second) cache_key += "." + mangle_type_for_clone_name(t);
+                }
+                continue;
+            }
             cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings.at(tp.name)))
                                         : ("." + mangle_type_for_clone_name(type_bindings.at(tp.name)));
         }
@@ -6699,11 +6873,7 @@ private:
         clone.owning_module = tmpl.owning_module;
         clone.eval_mode = tmpl.eval_mode;
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
-        clone.return_type = tmpl.return_type;
-        for (const auto& [name, replacement] : type_bindings) {
-            clone.return_type = substitute_type_param(clone.return_type, name, replacement);
-        }
-        clone.return_type = resolve_generic_type(clone.return_type, tmpl.loc);
+        clone.return_type = apply_template_bindings_to_type(tmpl.return_type, type_bindings, pack_bindings, tmpl.loc);
         clone.params.reserve(tmpl.params.size());
         std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
         for (size_t i = 0; i < tmpl.params.size(); i++) {
@@ -6737,18 +6907,14 @@ private:
                 break;
             }
             if (!upcasted) {
-                for (const auto& [name, replacement] : type_bindings) {
-                    p.type = substitute_type_param(p.type, name, replacement);
-                }
+                p.type = apply_template_bindings_to_type(p.type, type_bindings, pack_bindings, tmpl.loc);
             }
-            p.type = resolve_generic_type(p.type, tmpl.loc);
             clone.params.push_back(std::move(p));
         }
         clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
         if (clone.body) {
-            for (const auto& [name, replacement] : type_bindings) {
-                substitute_type_param_in_stmt(*clone.body, name, replacement);
-            }
+            substitute_type_bindings_in_stmt(*clone.body, type_bindings);
+            substitute_type_packs_in_stmt(*clone.body, pack_bindings);
             for (const auto& [pack_name, concrete_names] : pack_param_names) {
                 expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names);
                 expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
@@ -6761,17 +6927,15 @@ private:
         return cache_key;
     }
 
-    void monomorphize_generic_function_designator(Expr& expr, const Function& tmpl) {
-        std::unordered_map<std::string, Type> type_bindings;
-        std::unordered_map<std::string, int> value_bindings;
-        std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
-        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
-
+    void seed_explicit_template_arguments(const Expr& expr, const Function& tmpl,
+                                          std::unordered_map<std::string, Type>& type_bindings,
+                                          std::unordered_map<std::string, int>& value_bindings,
+                                          std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
         size_t explicit_index = 0;
         for (size_t p = 0; p < tmpl.template_params.size(); p++) {
             const GenericTypeParam& tp = tmpl.template_params[p];
             if (tp.is_pack) {
-                std::vector<Type>& pack = explicit_pack_bindings[tp.name];
+                std::vector<Type> pack;
                 while (explicit_index < expr.explicit_template_args.size()) {
                     const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
                     if (!arg.is_type) {
@@ -6781,6 +6945,7 @@ private:
                     }
                     pack.push_back(arg.type);
                 }
+                if (!pack.empty()) pack_bindings[tp.name] = std::move(pack);
                 continue;
             }
             if (explicit_index >= expr.explicit_template_args.size()) break;
@@ -6801,23 +6966,36 @@ private:
                 type_bindings[tp.name] = arg.type;
             }
         }
-
         if (explicit_index != expr.explicit_template_args.size()) {
             throw DataflowError("too many explicit template arguments for generic function '" + tmpl.name + "'",
                 expr.loc);
         }
+    }
 
+    void populate_concrete_pack_param_types(
+        const Function& tmpl, const std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
+        std::vector<std::vector<Type>>& concrete_pack_param_types) {
         for (size_t i = 0; i < tmpl.params.size(); i++) {
             if (!tmpl.params[i].is_parameter_pack) continue;
             std::optional<std::string> pack_type_name =
                 referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
             if (!pack_type_name.has_value()) continue;
-            auto pack_it = explicit_pack_bindings.find(*pack_type_name);
-            if (pack_it == explicit_pack_bindings.end()) continue;
+            auto pack_it = pack_bindings.find(*pack_type_name);
+            if (pack_it == pack_bindings.end()) continue;
             for (const Type& concrete : pack_it->second) {
                 concrete_pack_param_types[i].push_back(substitute_type_param(tmpl.params[i].type, *pack_type_name, concrete));
             }
         }
+    }
+
+    void monomorphize_generic_function_designator(Expr& expr, const Function& tmpl) {
+        std::unordered_map<std::string, Type> type_bindings;
+        std::unordered_map<std::string, int> value_bindings;
+        std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
+        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+
+        seed_explicit_template_arguments(expr, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
+        populate_concrete_pack_param_types(tmpl, explicit_pack_bindings, concrete_pack_param_types);
 
         for (const GenericTypeParam& tp : tmpl.template_params) {
             if (tp.is_pack) continue;
@@ -6829,7 +7007,8 @@ private:
             }
         }
 
-        expr.name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, concrete_pack_param_types);
+        expr.name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, explicit_pack_bindings,
+                                                          concrete_pack_param_types);
         expr.explicit_template_args.clear();
     }
 
@@ -6848,48 +7027,41 @@ private:
                                             const std::string& member_name_prefix = "") {
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
+        std::unordered_map<std::string, std::vector<Type>> pack_bindings;
         std::vector<std::pair<size_t, Type>> upcasts;
+        std::vector<DeferredTemplateObligation> deferred_obligations;
         std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
 
-        for (size_t p = 0; p < expr.explicit_template_args.size() && p < tmpl.template_params.size(); p++) {
-            const GenericTypeParam& tp = tmpl.template_params[p];
-            const ExplicitTemplateArg& arg = expr.explicit_template_args[p];
-            if (tp.is_non_type) {
-                if (arg.is_type || !arg.value) {
-                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
-                                             "' is a non-type parameter, but a type argument was given (ch05 §5.11)",
-                        expr.loc);
-                }
-                value_bindings[tp.name] = evaluate_non_type_arg(*arg.value, value_bindings);
-            } else {
-                if (!arg.is_type) {
-                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
-                                             "' is a type parameter, but a non-type argument was given (ch05 §5.11)",
-                        expr.loc);
-                }
-                type_bindings[tp.name] = arg.type;
-            }
-        }
+        seed_explicit_template_arguments(expr, tmpl, type_bindings, value_bindings, pack_bindings);
 
         size_t arg_cursor = 0;
         for (size_t i = param_offset; i < tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
             if (tmpl.params[i].is_parameter_pack) {
                 std::optional<std::string> pack_type_name =
                     referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
+                std::vector<Type> deduced_pack_types;
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) continue;
-                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-                    Type substituted = pack_type_name.has_value()
-                                           ? substitute_type_param(tmpl.params[i].type, *pack_type_name, named)
-                                           : tmpl.params[i].type;
-                    concrete_pack_param_types[i].push_back(std::move(substituted));
+                    deduced_pack_types.push_back(arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
+                }
+                if (pack_type_name.has_value() &&
+                    !bind_type_pack_binding(pack_bindings, *pack_type_name, deduced_pack_types)) {
+                    throw DataflowError("deduced types for template parameter pack '" + *pack_type_name +
+                                            "' of generic function '" + tmpl.name + "' disagree across arguments",
+                        expr.loc);
                 }
                 continue;
             }
             const Type& param_type = tmpl.params[i].type;
             const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
-            if (underlying.kind != TypeKind::Named) continue;
+            if (underlying.kind != TypeKind::Named) {
+                if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+                    deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                }
+                arg_cursor++;
+                continue;
+            }
 
             if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
                 // Case A: a bare parameter directly named after one of
@@ -6899,7 +7071,11 @@ private:
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) continue;
                     Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-                    type_bindings[tp.name] = named;
+                    if (!bind_type_binding(type_bindings, tp.name, named)) {
+                        throw DataflowError("deduced type for template parameter '" + tp.name + "' of generic function '" +
+                                                tmpl.name + "' disagrees across arguments",
+                            expr.loc);
+                    }
                 }
                 arg_cursor++;
                 continue;
@@ -6908,9 +7084,16 @@ private:
             // "TupleImpl<I, Head, Tail...>& t").
             if (variadic_generic_type_names_.contains(underlying.name)) {
                 deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings, upcasts);
+                arg_cursor++;
+                continue;
+            }
+            if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+                deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
             }
             arg_cursor++;
         }
+
+        populate_concrete_pack_param_types(tmpl, pack_bindings, concrete_pack_param_types);
 
         for (const GenericTypeParam& tp : tmpl.template_params) {
             // ch05 §5.14: a *pack* template parameter (e.g. "Tail") can
@@ -6929,16 +7112,33 @@ private:
             }
         }
 
+        for (const DeferredTemplateObligation& obligation : deferred_obligations) {
+            Type concrete_pattern =
+                apply_template_bindings_to_type(obligation.parameter_type_pattern, type_bindings, pack_bindings, expr.loc);
+            if (type_depends_on_template_params(concrete_pattern, tmpl.template_params)) {
+                throw DataflowError("cannot deduce every template argument needed by parameter '" +
+                                        tmpl.params[obligation.param_index].name + "' of generic function '" + tmpl.name +
+                                        "' after scanning the whole call",
+                    expr.loc);
+            }
+            if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
+                throw DataflowError("argument for parameter '" + tmpl.params[obligation.param_index].name +
+                                        "' of generic function '" + tmpl.name +
+                                        "' is incompatible after substituting deduced template arguments",
+                    expr.args[obligation.arg_index]->loc);
+            }
+        }
+
         // ch05 §5.15: once every template parameter is bound to a
         // concrete type, check any `[[scpp::thread_movable]]`/
         // `[[scpp::thread_shareable]]`-tagged parameter's own concrete
         // (post-substitution) type actually satisfies what it requires
         // -- before synthesizing/caching a clone, so a violation is
         // reported at the call site that triggered it.
-        check_thread_safety_constraints(expr, tmpl, type_bindings);
+        check_thread_safety_constraints(expr, tmpl, type_bindings, pack_bindings);
 
-        std::string clone_name =
-            instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, concrete_pack_param_types, upcasts);
+        std::string clone_name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, pack_bindings,
+                                                                       concrete_pack_param_types, upcasts);
         expr.name = member_name_prefix.empty() ? clone_name : clone_name.substr(member_name_prefix.size());
         expr.explicit_template_args.clear();
     }
