@@ -1,0 +1,10 @@
+// spec §9.1(4): every potentially-evaluated call to a `consteval`
+// function must itself produce a constant expression.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+int main() {
+    int value = 21;
+    return twice(value);
+}

@@ -1,0 +1,18 @@
+// spec §7.2(1.4): a trivial `struct` whose non-static data members are
+// constexpr-compatible is itself constexpr-compatible.
+struct Pair {
+    int left;
+    int right;
+};
+
+constexpr Pair make_pair() {
+    Pair p;
+    p.left = 20;
+    p.right = 22;
+    return p;
+}
+
+int main() {
+    constexpr Pair p = make_pair();
+    return p.left + p.right;
+}

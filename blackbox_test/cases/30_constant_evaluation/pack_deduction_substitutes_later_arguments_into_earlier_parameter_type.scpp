@@ -1,0 +1,17 @@
+// spec §13.1(3)-(4): a pack first deduced from later call arguments is
+// substituted back into an earlier dependent parameter type before that
+// earlier argument is checked. Here `Args...` comes from `(7, 'x')`, then the
+// earlier `void (*)(Args...)` parameter becomes `void (*)(int, char)`.
+void accept_int_char(int x, char y) {
+    return;
+}
+
+template<typename... Args>
+int call_with(void (*f)(Args...), Args... args) {
+    f(args...);
+    return 42;
+}
+
+int main() {
+    return call_with(accept_int_char, 7, 'x');
+}

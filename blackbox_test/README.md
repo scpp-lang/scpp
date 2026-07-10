@@ -3,21 +3,22 @@
 > 中文版: [README.zh.md](README.zh.md)
 
 This directory is a **black-box** test suite for the `scpp` compiler. It is
-maintained independently from `src/` (the implementation) and `docs/book/`
-(the language specification): tests here are written purely by reading
-`docs/book/` and invoking the built `scpp` CLI binary as an external tool,
-exactly the way any user of the language would -- there is no dependency
-on, or knowledge of, scpp's internal compiler modules.
+maintained independently from `src/` (the implementation), `docs/book/` (the
+reader-facing guide), and `docs/spec/` (the formal language specification):
+tests here are written purely by reading the published language docs and
+invoking the built `scpp` CLI binary as an external tool, exactly the way any
+user of the language would -- there is no dependency on, or knowledge of,
+scpp's internal compiler modules.
 
 ## How it works
 
 - `cases/<NN_category>/<name>.scpp` -- a small scpp program illustrating one
   documented language rule (cited in a comment at the top of the file,
-  pointing at the relevant `docs/book/en/chXX-*.md` section). scpp source
-  files use the `.scpp` extension, not `.cpp` (ch08 Q7/Q13): since every
-  function is checked unconditionally by default now, an ordinary `.cpp`
-  file must never be silently fed to the scpp compiler and checked without
-  its author asking for that.
+  pointing at the relevant `docs/book/` or `docs/spec/` section). scpp
+  source files use the `.scpp` extension, not `.cpp` (ch08 Q7/Q13): since
+  every function is checked unconditionally by default now, an ordinary
+  `.cpp` file must never be silently fed to the scpp compiler and checked
+  without its author asking for that.
 - `cases/<NN_category>/<name>.expected` -- the outcome that program *should*
   produce if `scpp` correctly implements the spec. Three forms:
   1. **A number on the first line**: `scpp` must succeed, and running
@@ -126,15 +127,17 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `27_unions_packed_layout` | union member unsafe-gating and `[[scpp::packed]]` layout/FFI behavior, including the Linux `epoll_event` / `epoll_data_t` pattern |
 | `28_cli_invocation` | CLI surface: direct `scpp file.scpp` builds, default/custom output names, removed `build` keyword, and surviving `lex`/`parse`/`build-module` subcommands |
 | `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
+| `30_constant_evaluation` | formal-spec-driven `constexpr`/`consteval` coverage: required constant evaluation, `if consteval` / `if !consteval`, unsupported v1 operations, and the later-pack-to-earlier-parameter deduction rule |
 
 ## Testing philosophy
 
-- Every `.scpp` file is written to be **valid per `docs/book/`** -- if a
-  test fails, check the cited doc section first. If the test itself turns
-  out to violate the spec, fix the test. If it's genuinely spec-conformant
-  and still fails, that's an implementation bug, logged here for the
-  `src/` maintainer to fix -- this suite does not modify `src/` to work
-  around failures.
+- Every `.scpp` file is written to be **valid per the published language
+  docs** (`docs/book/` and, where newer work has only landed formally so
+  far, `docs/spec/`) -- if a test fails, check the cited doc section first.
+  If the test itself turns out to violate the spec, fix the test. If it's
+  genuinely spec-conformant and still fails, that's an implementation bug,
+  logged here for the `src/` maintainer to fix -- this suite does not modify
+  `src/` to work around failures.
 - Programs favor observing behavior through the **process exit code**
   (`main`'s return value) and, where real C interop is being exercised,
   real libc calls (`puts`, `printf`) declared via `extern "C"` -- both are

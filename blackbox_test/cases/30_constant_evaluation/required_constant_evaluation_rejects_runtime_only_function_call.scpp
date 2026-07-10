@@ -1,0 +1,10 @@
+// spec §7.4(1): required constant evaluation is ill-formed if it would
+// call a function that is neither `constexpr` nor `consteval`.
+int runtime_only(int x) {
+    return x + 1;
+}
+
+int main() {
+    constexpr int value = runtime_only(41);
+    return value;
+}

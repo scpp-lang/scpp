@@ -1,0 +1,21 @@
+// spec §9.1(4) and §9.1(6): a `consteval` constructor is an immediate
+// constructor and may initialize a class object when the call produces
+// a constant expression.
+class ImmediateBox {
+public:
+    int value;
+
+    consteval ImmediateBox(int x) {
+        this->value = x * 2;
+        return;
+    }
+};
+
+consteval int compute_box_value() {
+    ImmediateBox box(21);
+    return box.value;
+}
+
+int main() {
+    return compute_box_value();
+}

@@ -1,0 +1,15 @@
+// spec §7.2(4.3) and §7.4(2.3): `std::span<const T>` is part of the v1
+// supported subset, but out-of-bounds access during required constant
+// evaluation is still ill-formed.
+constexpr int read_oob() {
+    int arr[2];
+    arr[0] = 10;
+    arr[1] = 32;
+    std::span<const int> s = arr;
+    return s[2];
+}
+
+int main() {
+    constexpr int value = read_oob();
+    return value;
+}
