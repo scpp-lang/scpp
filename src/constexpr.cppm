@@ -889,15 +889,16 @@ private:
         return make_default_cell(fn.return_type, loc);
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> call_with_expr_args(const Function& fn, const std::vector<ExprPtr>& args,
-                                                            const SourceLocation& loc) {
+    [[nodiscard]] std::shared_ptr<Cell> call_with_expr_arg_views(const Function& fn, const std::vector<const Expr*>& args,
+                                                                 const SourceLocation& loc) {
         std::vector<Binding> bindings;
         bindings.reserve(fn.params.size());
         for (size_t i = 0; i < fn.params.size(); ++i) {
             const Param& param = fn.params[i];
+            const Expr& arg_expr = *args[i];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
-                    std::shared_ptr<Cell> value = evaluate_expr(*args[i]);
+                    std::shared_ptr<Cell> value = evaluate_expr(arg_expr);
                     if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
                         !types_equal(*param.type.pointee, value->type)) {
                         value = clone_cell_as_type(value, *param.type.pointee, loc);
@@ -906,7 +907,11 @@ private:
                     continue;
                 }
                 if (param.type.is_mutable_ref) {
-                    LValue arg = resolve_lvalue(*args[i]);
+                    LValue arg = resolve_lvalue(arg_expr);
+                    if (arg.read_only) {
+                        throw ConstexprError(loc, "cannot bind a const/constexpr value to mutable reference parameter '" +
+                                                      param.name + "'");
+                    }
                     if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, arg.cell->type) &&
                         !types_equal(*param.type.pointee, arg.cell->type)) {
                         bindings.push_back(Binding{alias_cell_as_type(arg.cell, *param.type.pointee, loc), false});
@@ -916,7 +921,7 @@ private:
                 } else {
                     bool can_bind_lvalue = false;
                     try {
-                        LValue arg = resolve_lvalue(*args[i]);
+                        LValue arg = resolve_lvalue(arg_expr);
                         if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, arg.cell->type) &&
                             !types_equal(*param.type.pointee, arg.cell->type)) {
                             bindings.push_back(Binding{alias_cell_as_type(arg.cell, *param.type.pointee, loc), true});
@@ -927,7 +932,7 @@ private:
                     } catch (const ConstexprError&) {
                     }
                     if (!can_bind_lvalue) {
-                        std::shared_ptr<Cell> value = evaluate_expr(*args[i]);
+                        std::shared_ptr<Cell> value = evaluate_expr(arg_expr);
                         if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
                             !types_equal(*param.type.pointee, value->type)) {
                             value = clone_cell_as_type(value, *param.type.pointee, loc);
@@ -936,7 +941,7 @@ private:
                     }
                 }
             } else {
-                std::shared_ptr<Cell> value = evaluate_expr(*args[i]);
+                std::shared_ptr<Cell> value = evaluate_expr(arg_expr);
                 if (is_same_or_base_class_type(param.type, value->type) && !types_equal(param.type, value->type)) {
                     bindings.push_back(Binding{clone_cell_as_type(value, param.type, loc), false});
                 } else if (!types_equal(param.type, value->type) &&
@@ -959,6 +964,59 @@ private:
             }
         }
         return call_function(fn, std::move(bindings), loc);
+    }
+
+    [[nodiscard]] std::shared_ptr<Cell> call_with_expr_args(const Function& fn, const std::vector<ExprPtr>& args,
+                                                            const SourceLocation& loc) {
+        std::vector<const Expr*> arg_views;
+        arg_views.reserve(args.size());
+        for (const ExprPtr& arg : args) arg_views.push_back(arg.get());
+        return call_with_expr_arg_views(fn, arg_views, loc);
+    }
+
+    [[nodiscard]] const Function* find_method_callable(const Expr& receiver_expr, std::string_view method_name,
+                                                       const std::vector<std::shared_ptr<Cell>>& arg_values,
+                                                       bool require_constexpr) {
+        std::shared_ptr<Cell> receiver_value;
+        bool receiver_is_lvalue = false;
+        bool receiver_read_only = false;
+        try {
+            LValue receiver = resolve_lvalue(receiver_expr);
+            receiver_value = receiver.cell;
+            receiver_is_lvalue = true;
+            receiver_read_only = receiver.read_only;
+        } catch (const ConstexprError&) {
+            receiver_value = evaluate_expr(receiver_expr);
+        }
+        if (receiver_value->type.kind != TypeKind::Named || !is_class_name(receiver_value->type.name)) return nullptr;
+
+        std::string full_name = receiver_value->type.name + "_" + std::string(method_name);
+        auto it = functions_by_name_.find(full_name);
+        if (it == functions_by_name_.end()) return nullptr;
+        for (size_t fn_index : it->second) {
+            const Function* fn = &program_.functions[fn_index];
+            if (!fn->body) continue;
+            if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
+            if (fn->params.size() != arg_values.size() + 1 || fn->params.empty()) continue;
+
+            const Type& this_type = fn->params[0].type;
+            if (this_type.kind == TypeKind::Reference) {
+                if (!this_type.pointee || !is_same_or_base_class_type(*this_type.pointee, receiver_value->type)) continue;
+                if (this_type.is_mutable_ref && (!receiver_is_lvalue || receiver_read_only)) continue;
+            } else if (!is_same_or_base_class_type(this_type, receiver_value->type)) {
+                continue;
+            }
+
+            bool params_match = true;
+            for (size_t i = 0; i < arg_values.size(); ++i) {
+                if (!constexpr_argument_matches_parameter(fn->params[i + 1].type, arg_values[i], require_constexpr)) {
+                    params_match = false;
+                    break;
+                }
+            }
+            if (params_match) return fn;
+        }
+        return nullptr;
     }
 
     [[nodiscard]] std::shared_ptr<Cell> evaluate_constructor_expr(const Expr& expr) {
@@ -1007,7 +1065,21 @@ private:
     }
 
     [[nodiscard]] std::shared_ptr<Cell> evaluate_call_expr(const Expr& expr) {
-        if (expr.lhs) throw ConstexprError(expr.loc, "constexpr method calls are not yet implemented in Phase D1");
+        if (expr.lhs) {
+            std::vector<std::shared_ptr<Cell>> arg_values;
+            arg_values.reserve(expr.args.size());
+            for (const ExprPtr& arg : expr.args) arg_values.push_back(evaluate_expr(*arg));
+            const Function* fn = find_method_callable(*expr.lhs, expr.name, arg_values, /*require_constexpr=*/true);
+            if (!fn) {
+                throw ConstexprError(expr.loc,
+                                     "no constexpr/consteval overload of method '" + expr.name + "' matches this immediate call");
+            }
+            std::vector<const Expr*> all_args;
+            all_args.reserve(expr.args.size() + 1);
+            all_args.push_back(expr.lhs.get());
+            for (const ExprPtr& arg : expr.args) all_args.push_back(arg.get());
+            return call_with_expr_arg_views(*fn, all_args, expr.loc);
+        }
         if (is_class_name(expr.name)) return evaluate_constructor_expr(expr);
         std::vector<std::shared_ptr<Cell>> arg_values;
         arg_values.reserve(expr.args.size());
