@@ -623,6 +623,12 @@ struct Function {
     // parses one declaration at a time and has no cross-declaration
     // view).
     bool is_unsafe = false;
+    // True only for a non-exported definition recovered from a compiled
+    // module's structured compile-time payload. Lets the importer keep
+    // reachable private helper bodies available for generic/constexpr use
+    // without pretending they were part of the module's ordinary exported
+    // surface.
+    bool is_compile_time_dependency = false;
     // Records whether this declaration was spelled `constexpr` or
     // `consteval`. RuntimeOnly is the ordinary pre-existing case.
     FunctionEvalMode eval_mode = FunctionEvalMode::RuntimeOnly;
@@ -766,6 +772,12 @@ struct StructDef {
     // "struct definitions" are part of v0.1's exportable surface).
     std::vector<std::string> namespace_path;
     bool is_exported = false;
+    // True only for a non-exported definition recovered from a compiled
+    // module's structured compile-time payload. Such a declaration remains
+    // invisible to ordinary import surface rendering, but still needs to be
+    // carried into an importer so exported generic/constexpr bodies can
+    // reference their reachable private helpers/types.
+    bool is_compile_time_dependency = false;
     std::string owning_module;
     // ch05 §5.14: non-empty for a generic struct's own *template*
     // definition (`template<Concept T> struct Name { ... };`) -- its
@@ -842,6 +854,7 @@ struct ClassDef {
     // a class is one declaration, not one per member (ch11 §11.3).
     std::vector<std::string> namespace_path;
     bool is_exported = false;
+    bool is_compile_time_dependency = false;
     std::string owning_module;
     // ch05 §5.11: true for a hidden class synthesized from a `concept`
     // declaration's own requirement list (one bodyless method per

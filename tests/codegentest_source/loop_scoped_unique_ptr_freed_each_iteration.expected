@@ -1,1 +1,1 @@
-sequence: while.body: | call void @"std::unique_ptr.int_delete"(ptr %a) | br label %while.cond
+sequence: while.body: | call void @"_scppM3_stdF21_unique_ptr.int_deleteQ0_P1_20_std::unique_ptr.int&"(ptr %a) | br label %while.cond

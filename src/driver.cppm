@@ -254,53 +254,782 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     return plan;
 }
 
-[[nodiscard]] std::string serialize_generics_block(const Program& program, std::string_view source) {
-    std::vector<std::string> exported_generic_names;
-    for (const Function& fn : program.functions) {
-        if (!fn.is_exported) continue;
-        if (!(fn.is_generic_template || !fn.template_params.empty())) continue;
-        exported_generic_names.push_back(fn.name);
-    }
-    if (exported_generic_names.empty()) return {};
+struct StructuredCompileTimePayload {
+    std::vector<std::string> root_function_names;
+    std::vector<StructDef> structs;
+    std::vector<ClassDef> classes;
+    std::vector<Function> functions;
+};
 
-    std::string block;
-    block.append("SGEN", 4);
-    auto append_u32 = [&](std::uint32_t value) {
-        block.push_back(static_cast<char>(value & 0xffu));
-        block.push_back(static_cast<char>((value >> 8) & 0xffu));
-        block.push_back(static_cast<char>((value >> 16) & 0xffu));
-        block.push_back(static_cast<char>((value >> 24) & 0xffu));
-    };
-    append_u32(1); // generics block format version
-    append_u32(static_cast<std::uint32_t>(exported_generic_names.size()));
-    for (const std::string& name : exported_generic_names) {
-        append_u32(static_cast<std::uint32_t>(name.size()));
-        block.append(name);
-    }
-    append_u32(static_cast<std::uint32_t>(source.size()));
-    block.append(source.data(), source.size());
-    return block;
+struct LoadedModuleFile {
+    std::string interface_source;
+    bool is_scppm = false;
+    bool has_compile_time_payload = false;
+    std::string compile_time_payload_bytes;
+};
+
+void write_u8(std::ostream& out, std::uint8_t value) { out.put(static_cast<char>(value)); }
+
+[[nodiscard]] std::uint8_t read_u8(std::istream& in, const std::string& context) {
+    char byte = '\0';
+    in.read(&byte, 1);
+    if (!in) throw DriverError("invalid " + context + ": truncated byte");
+    return static_cast<std::uint8_t>(static_cast<unsigned char>(byte));
 }
 
-void write_scppm_file(const Program& program, std::string_view interface_source, std::string_view generic_source_snapshot,
-                      const std::string& path) {
+void write_i64_le(std::ostream& out, std::int64_t value) {
+    std::array<char, 8> bytes = {};
+    std::uint64_t raw = static_cast<std::uint64_t>(value);
+    for (size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((raw >> (8 * i)) & 0xffu);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+[[nodiscard]] std::uint32_t read_u32_le(std::istream& in, const std::string& context) {
+    std::array<unsigned char, 4> bytes = {};
+    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!in) throw DriverError("invalid " + context + ": truncated u32");
+    return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+[[nodiscard]] std::int64_t read_i64_le(std::istream& in, const std::string& context) {
+    std::array<unsigned char, 8> bytes = {};
+    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!in) throw DriverError("invalid " + context + ": truncated i64");
+    std::uint64_t raw = 0;
+    for (size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+    return static_cast<std::int64_t>(raw);
+}
+
+void write_double_le(std::ostream& out, double value) {
+    static_assert(sizeof(double) == sizeof(std::uint64_t));
+    std::uint64_t raw = 0;
+    std::memcpy(&raw, &value, sizeof(raw));
+    write_i64_le(out, static_cast<std::int64_t>(raw));
+}
+
+[[nodiscard]] double read_double_le(std::istream& in, const std::string& context) {
+    std::uint64_t raw = static_cast<std::uint64_t>(read_i64_le(in, context));
+    double value = 0.0;
+    std::memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
+void write_string(std::ostream& out, std::string_view text) {
+    write_u32_le(out, static_cast<std::uint32_t>(text.size()));
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+}
+
+[[nodiscard]] std::string read_string(std::istream& in, const std::string& context) {
+    std::uint32_t size = read_u32_le(in, context + " string length");
+    std::string text(size, '\0');
+    in.read(text.data(), static_cast<std::streamsize>(size));
+    if (!in) throw DriverError("invalid " + context + ": truncated string");
+    return text;
+}
+
+void write_source_location(std::ostream& out, const SourceLocation& loc) {
+    write_i64_le(out, loc.line);
+    write_i64_le(out, loc.column);
+    write_string(out, loc.source_path_text());
+}
+
+[[nodiscard]] SourceLocation read_source_location(std::istream& in, const std::string& context) {
+    SourceLocation loc;
+    loc.line = static_cast<int>(read_i64_le(in, context + " line"));
+    loc.column = static_cast<int>(read_i64_le(in, context + " column"));
+    std::string source_path = read_string(in, context + " source path");
+    if (!source_path.empty()) loc.source_path = std::make_shared<const std::string>(std::move(source_path));
+    return loc;
+}
+
+template<typename Enum>
+void write_enum(std::ostream& out, Enum value) {
+    write_u8(out, static_cast<std::uint8_t>(value));
+}
+
+template<typename Enum>
+[[nodiscard]] Enum read_enum(std::istream& in, const std::string& context) {
+    return static_cast<Enum>(read_u8(in, context));
+}
+
+void write_type(std::ostream& out, const Type& type);
+ExprPtr read_expr(std::istream& in, const std::string& context);
+void write_expr(std::ostream& out, const Expr& expr);
+StmtPtr read_stmt(std::istream& in, const std::string& context);
+void write_stmt(std::ostream& out, const Stmt& stmt);
+
+void write_type(std::ostream& out, const Type& type) {
+    write_enum(out, type.kind);
+    write_string(out, type.name);
+    write_u8(out, type.pointee ? 1u : 0u);
+    if (type.pointee) write_type(out, *type.pointee);
+    write_u8(out, type.element ? 1u : 0u);
+    if (type.element) write_type(out, *type.element);
+    write_i64_le(out, type.array_size);
+    write_u8(out, type.function_return ? 1u : 0u);
+    if (type.function_return) write_type(out, *type.function_return);
+    write_u32_le(out, static_cast<std::uint32_t>(type.function_params.size()));
+    for (const Type& param : type.function_params) write_type(out, param);
+    write_u8(out, type.is_unsafe_function_pointer ? 1u : 0u);
+    write_u8(out, type.is_const_function ? 1u : 0u);
+    write_enum(out, type.function_ref_qualifier);
+    write_u8(out, type.is_mutable_ref ? 1u : 0u);
+    write_u8(out, type.is_rvalue_ref ? 1u : 0u);
+    write_u8(out, type.is_mutable_pointee ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(type.template_args.size()));
+    for (const Type& arg : type.template_args) write_type(out, arg);
+    write_u32_le(out, static_cast<std::uint32_t>(type.non_type_args.size()));
+    for (const auto& arg : type.non_type_args) {
+        write_u8(out, arg ? 1u : 0u);
+        if (arg) write_expr(out, *arg);
+    }
+    write_u8(out, type.is_pack_expansion ? 1u : 0u);
+}
+
+[[nodiscard]] Type read_type(std::istream& in, const std::string& context) {
+    Type type;
+    type.kind = read_enum<TypeKind>(in, context + " kind");
+    type.name = read_string(in, context + " name");
+    if (read_u8(in, context + " pointee present") != 0u) type.pointee = std::make_shared<Type>(read_type(in, context + " pointee"));
+    if (read_u8(in, context + " element present") != 0u) type.element = std::make_shared<Type>(read_type(in, context + " element"));
+    type.array_size = read_i64_le(in, context + " array size");
+    if (read_u8(in, context + " function return present") != 0u) {
+        type.function_return = std::make_shared<Type>(read_type(in, context + " function return"));
+    }
+    std::uint32_t param_count = read_u32_le(in, context + " function param count");
+    type.function_params.reserve(param_count);
+    for (std::uint32_t i = 0; i < param_count; i++) type.function_params.push_back(read_type(in, context + " function param"));
+    type.is_unsafe_function_pointer = read_u8(in, context + " unsafe fn ptr") != 0u;
+    type.is_const_function = read_u8(in, context + " const fn") != 0u;
+    type.function_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " fn ref qualifier");
+    type.is_mutable_ref = read_u8(in, context + " mutable ref") != 0u;
+    type.is_rvalue_ref = read_u8(in, context + " rvalue ref") != 0u;
+    type.is_mutable_pointee = read_u8(in, context + " mutable pointee") != 0u;
+    std::uint32_t template_arg_count = read_u32_le(in, context + " template arg count");
+    type.template_args.reserve(template_arg_count);
+    for (std::uint32_t i = 0; i < template_arg_count; i++) type.template_args.push_back(read_type(in, context + " template arg"));
+    std::uint32_t non_type_arg_count = read_u32_le(in, context + " non-type arg count");
+    type.non_type_args.reserve(non_type_arg_count);
+    for (std::uint32_t i = 0; i < non_type_arg_count; i++) {
+        if (read_u8(in, context + " non-type arg present") != 0u) {
+            type.non_type_args.push_back(std::shared_ptr<Expr>(read_expr(in, context + " non-type arg").release()));
+        } else {
+            type.non_type_args.push_back(nullptr);
+        }
+    }
+    type.is_pack_expansion = read_u8(in, context + " pack expansion") != 0u;
+    return type;
+}
+
+void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) {
+    write_string(out, param.name);
+    write_string(out, param.concept_name);
+    write_u8(out, param.is_pack ? 1u : 0u);
+    write_u8(out, param.is_non_type ? 1u : 0u);
+    write_type(out, param.non_type_type);
+}
+
+[[nodiscard]] GenericTypeParam read_generic_type_param(std::istream& in, const std::string& context) {
+    GenericTypeParam param;
+    param.name = read_string(in, context + " name");
+    param.concept_name = read_string(in, context + " concept");
+    param.is_pack = read_u8(in, context + " is_pack") != 0u;
+    param.is_non_type = read_u8(in, context + " is_non_type") != 0u;
+    param.non_type_type = read_type(in, context + " non-type type");
+    return param;
+}
+
+void write_param(std::ostream& out, const Param& param) {
+    write_type(out, param.type);
+    write_string(out, param.name);
+    write_string(out, param.generic_concept);
+    write_u8(out, param.require_thread_movable ? 1u : 0u);
+    write_u8(out, param.require_thread_shareable ? 1u : 0u);
+    write_u8(out, param.is_parameter_pack ? 1u : 0u);
+}
+
+[[nodiscard]] Param read_param(std::istream& in, const std::string& context) {
+    Param param;
+    param.type = read_type(in, context + " type");
+    param.name = read_string(in, context + " name");
+    param.generic_concept = read_string(in, context + " generic concept");
+    param.require_thread_movable = read_u8(in, context + " thread_movable") != 0u;
+    param.require_thread_shareable = read_u8(in, context + " thread_shareable") != 0u;
+    param.is_parameter_pack = read_u8(in, context + " parameter pack") != 0u;
+    return param;
+}
+
+void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
+    write_string(out, capture.name);
+    write_u8(out, capture.by_reference ? 1u : 0u);
+    write_u8(out, capture.init ? 1u : 0u);
+    if (capture.init) write_expr(out, *capture.init);
+}
+
+[[nodiscard]] LambdaCapture read_lambda_capture(std::istream& in, const std::string& context) {
+    LambdaCapture capture;
+    capture.name = read_string(in, context + " name");
+    capture.by_reference = read_u8(in, context + " by_reference") != 0u;
+    if (read_u8(in, context + " init present") != 0u) capture.init = read_expr(in, context + " init");
+    return capture;
+}
+
+void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& arg) {
+    write_u8(out, arg.is_type ? 1u : 0u);
+    write_type(out, arg.type);
+    write_u8(out, arg.value ? 1u : 0u);
+    if (arg.value) write_expr(out, *arg.value);
+}
+
+[[nodiscard]] ExplicitTemplateArg read_explicit_template_arg(std::istream& in, const std::string& context) {
+    ExplicitTemplateArg arg;
+    arg.is_type = read_u8(in, context + " is_type") != 0u;
+    arg.type = read_type(in, context + " type");
+    if (read_u8(in, context + " value present") != 0u) arg.value = std::shared_ptr<Expr>(read_expr(in, context + " value").release());
+    return arg;
+}
+
+void write_expr(std::ostream& out, const Expr& expr) {
+    write_enum(out, expr.kind);
+    write_source_location(out, expr.loc);
+    write_i64_le(out, expr.int_value);
+    write_double_le(out, expr.float_value);
+    write_u8(out, expr.bool_value ? 1u : 0u);
+    write_string(out, expr.name);
+    write_enum(out, expr.binary_op);
+    write_u8(out, expr.lhs ? 1u : 0u);
+    if (expr.lhs) write_expr(out, *expr.lhs);
+    write_u8(out, expr.rhs ? 1u : 0u);
+    if (expr.rhs) write_expr(out, *expr.rhs);
+    write_u8(out, expr.third ? 1u : 0u);
+    if (expr.third) write_expr(out, *expr.third);
+    write_u8(out, expr.fold_ellipsis_on_left ? 1u : 0u);
+    write_enum(out, expr.unary_op);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.args.size()));
+    for (const auto& arg : expr.args) write_expr(out, *arg);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.explicit_template_args.size()));
+    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) write_explicit_template_arg(out, arg);
+    write_type(out, expr.type);
+    write_u8(out, expr.has_paren_init ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_captures.size()));
+    for (const LambdaCapture& capture : expr.lambda_captures) write_lambda_capture(out, capture);
+    write_enum(out, expr.lambda_blanket_mode);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_params.size()));
+    for (const Param& param : expr.lambda_params) write_param(out, param);
+    write_u8(out, expr.has_lambda_explicit_return_type ? 1u : 0u);
+    write_u8(out, expr.lambda_is_mutable ? 1u : 0u);
+    write_u8(out, expr.lambda_body ? 1u : 0u);
+    if (expr.lambda_body) write_stmt(out, *expr.lambda_body);
+}
+
+ExprPtr read_expr(std::istream& in, const std::string& context) {
+    auto expr = std::make_unique<Expr>();
+    expr->kind = read_enum<ExprKind>(in, context + " kind");
+    expr->loc = read_source_location(in, context + " loc");
+    expr->int_value = read_i64_le(in, context + " int");
+    expr->float_value = read_double_le(in, context + " double");
+    expr->bool_value = read_u8(in, context + " bool") != 0u;
+    expr->name = read_string(in, context + " name");
+    expr->binary_op = read_enum<BinaryOp>(in, context + " binary op");
+    if (read_u8(in, context + " lhs present") != 0u) expr->lhs = read_expr(in, context + " lhs");
+    if (read_u8(in, context + " rhs present") != 0u) expr->rhs = read_expr(in, context + " rhs");
+    if (read_u8(in, context + " third present") != 0u) expr->third = read_expr(in, context + " third");
+    expr->fold_ellipsis_on_left = read_u8(in, context + " fold left") != 0u;
+    expr->unary_op = read_enum<UnaryOp>(in, context + " unary op");
+    std::uint32_t arg_count = read_u32_le(in, context + " arg count");
+    expr->args.reserve(arg_count);
+    for (std::uint32_t i = 0; i < arg_count; i++) expr->args.push_back(read_expr(in, context + " arg"));
+    std::uint32_t explicit_arg_count = read_u32_le(in, context + " explicit arg count");
+    expr->explicit_template_args.reserve(explicit_arg_count);
+    for (std::uint32_t i = 0; i < explicit_arg_count; i++) expr->explicit_template_args.push_back(read_explicit_template_arg(in, context + " explicit arg"));
+    expr->type = read_type(in, context + " type");
+    expr->has_paren_init = read_u8(in, context + " has paren init") != 0u;
+    std::uint32_t capture_count = read_u32_le(in, context + " capture count");
+    expr->lambda_captures.reserve(capture_count);
+    for (std::uint32_t i = 0; i < capture_count; i++) expr->lambda_captures.push_back(read_lambda_capture(in, context + " capture"));
+    expr->lambda_blanket_mode = read_enum<LambdaCaptureMode>(in, context + " blanket mode");
+    std::uint32_t lambda_param_count = read_u32_le(in, context + " lambda param count");
+    expr->lambda_params.reserve(lambda_param_count);
+    for (std::uint32_t i = 0; i < lambda_param_count; i++) expr->lambda_params.push_back(read_param(in, context + " lambda param"));
+    expr->has_lambda_explicit_return_type = read_u8(in, context + " explicit return") != 0u;
+    expr->lambda_is_mutable = read_u8(in, context + " lambda mutable") != 0u;
+    if (read_u8(in, context + " lambda body present") != 0u) expr->lambda_body = read_stmt(in, context + " lambda body");
+    return expr;
+}
+
+void write_stmt(std::ostream& out, const Stmt& stmt) {
+    write_enum(out, stmt.kind);
+    write_source_location(out, stmt.loc);
+    write_type(out, stmt.type);
+    write_string(out, stmt.var_name);
+    write_u8(out, stmt.init ? 1u : 0u);
+    if (stmt.init) write_expr(out, *stmt.init);
+    write_u8(out, stmt.is_const ? 1u : 0u);
+    write_u8(out, stmt.is_constexpr ? 1u : 0u);
+    write_u8(out, stmt.has_ctor_args ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.ctor_args.size()));
+    for (const auto& arg : stmt.ctor_args) write_expr(out, *arg);
+    write_u8(out, stmt.expr ? 1u : 0u);
+    if (stmt.expr) write_expr(out, *stmt.expr);
+    write_u8(out, stmt.condition ? 1u : 0u);
+    if (stmt.condition) write_expr(out, *stmt.condition);
+    write_enum(out, stmt.if_mode);
+    write_u8(out, stmt.then_branch ? 1u : 0u);
+    if (stmt.then_branch) write_stmt(out, *stmt.then_branch);
+    write_u8(out, stmt.else_branch ? 1u : 0u);
+    if (stmt.else_branch) write_stmt(out, *stmt.else_branch);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.statements.size()));
+    for (const auto& nested : stmt.statements) write_stmt(out, *nested);
+    write_u8(out, stmt.is_unsafe ? 1u : 0u);
+}
+
+StmtPtr read_stmt(std::istream& in, const std::string& context) {
+    auto stmt = std::make_unique<Stmt>();
+    stmt->kind = read_enum<StmtKind>(in, context + " kind");
+    stmt->loc = read_source_location(in, context + " loc");
+    stmt->type = read_type(in, context + " type");
+    stmt->var_name = read_string(in, context + " var name");
+    if (read_u8(in, context + " init present") != 0u) stmt->init = read_expr(in, context + " init");
+    stmt->is_const = read_u8(in, context + " is_const") != 0u;
+    stmt->is_constexpr = read_u8(in, context + " is_constexpr") != 0u;
+    stmt->has_ctor_args = read_u8(in, context + " has ctor args") != 0u;
+    std::uint32_t ctor_arg_count = read_u32_le(in, context + " ctor arg count");
+    stmt->ctor_args.reserve(ctor_arg_count);
+    for (std::uint32_t i = 0; i < ctor_arg_count; i++) stmt->ctor_args.push_back(read_expr(in, context + " ctor arg"));
+    if (read_u8(in, context + " expr present") != 0u) stmt->expr = read_expr(in, context + " expr");
+    if (read_u8(in, context + " condition present") != 0u) stmt->condition = read_expr(in, context + " condition");
+    stmt->if_mode = read_enum<IfMode>(in, context + " if mode");
+    if (read_u8(in, context + " then present") != 0u) stmt->then_branch = read_stmt(in, context + " then");
+    if (read_u8(in, context + " else present") != 0u) stmt->else_branch = read_stmt(in, context + " else");
+    std::uint32_t nested_count = read_u32_le(in, context + " nested count");
+    stmt->statements.reserve(nested_count);
+    for (std::uint32_t i = 0; i < nested_count; i++) stmt->statements.push_back(read_stmt(in, context + " nested"));
+    stmt->is_unsafe = read_u8(in, context + " unsafe") != 0u;
+    return stmt;
+}
+
+void write_struct_field(std::ostream& out, const StructField& field) {
+    write_type(out, field.type);
+    write_string(out, field.name);
+}
+
+[[nodiscard]] StructField read_struct_field(std::istream& in, const std::string& context) {
+    StructField field;
+    field.type = read_type(in, context + " type");
+    field.name = read_string(in, context + " name");
+    return field;
+}
+
+void write_class_field(std::ostream& out, const ClassField& field) {
+    write_type(out, field.type);
+    write_string(out, field.name);
+    write_enum(out, field.access);
+}
+
+[[nodiscard]] ClassField read_class_field(std::istream& in, const std::string& context) {
+    ClassField field;
+    field.type = read_type(in, context + " type");
+    field.name = read_string(in, context + " name");
+    field.access = read_enum<AccessSpecifier>(in, context + " access");
+    return field;
+}
+
+void write_struct_def(std::ostream& out, const StructDef& def) {
+    write_string(out, def.name);
+    write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
+    for (const StructField& field : def.fields) write_struct_field(out, field);
+    write_u8(out, def.is_union ? 1u : 0u);
+    write_u8(out, def.is_packed ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(def.namespace_path.size()));
+    for (const std::string& segment : def.namespace_path) write_string(out, segment);
+    write_u8(out, def.is_exported ? 1u : 0u);
+    write_u8(out, def.is_compile_time_dependency ? 1u : 0u);
+    write_string(out, def.owning_module);
+    write_u32_le(out, static_cast<std::uint32_t>(def.template_params.size()));
+    for (const GenericTypeParam& param : def.template_params) write_generic_type_param(out, param);
+    write_string(out, def.template_owner_id);
+    write_u8(out, def.thread_movable_override ? 1u : 0u);
+    write_u8(out, def.thread_shareable_override ? 1u : 0u);
+}
+
+[[nodiscard]] StructDef read_struct_def(std::istream& in, const std::string& context) {
+    StructDef def;
+    def.name = read_string(in, context + " name");
+    std::uint32_t field_count = read_u32_le(in, context + " field count");
+    def.fields.reserve(field_count);
+    for (std::uint32_t i = 0; i < field_count; i++) def.fields.push_back(read_struct_field(in, context + " field"));
+    def.is_union = read_u8(in, context + " is_union") != 0u;
+    def.is_packed = read_u8(in, context + " is_packed") != 0u;
+    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    def.namespace_path.reserve(ns_count);
+    for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));
+    def.is_exported = read_u8(in, context + " is_exported") != 0u;
+    def.is_compile_time_dependency = read_u8(in, context + " is_compile_time_dependency") != 0u;
+    def.owning_module = read_string(in, context + " owning_module");
+    std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
+    def.template_params.reserve(template_param_count);
+    for (std::uint32_t i = 0; i < template_param_count; i++) def.template_params.push_back(read_generic_type_param(in, context + " template param"));
+    def.template_owner_id = read_string(in, context + " template owner id");
+    def.thread_movable_override = read_u8(in, context + " thread movable override") != 0u;
+    def.thread_shareable_override = read_u8(in, context + " thread shareable override") != 0u;
+    return def;
+}
+
+void write_class_def(std::ostream& out, const ClassDef& def) {
+    write_string(out, def.name);
+    write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
+    for (const ClassField& field : def.fields) write_class_field(out, field);
+    write_u32_le(out, static_cast<std::uint32_t>(def.namespace_path.size()));
+    for (const std::string& segment : def.namespace_path) write_string(out, segment);
+    write_u8(out, def.is_exported ? 1u : 0u);
+    write_u8(out, def.is_compile_time_dependency ? 1u : 0u);
+    write_string(out, def.owning_module);
+    write_u8(out, def.is_concept_witness ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(def.template_params.size()));
+    for (const GenericTypeParam& param : def.template_params) write_generic_type_param(out, param);
+    write_string(out, def.template_owner_id);
+    write_u8(out, def.is_forward_declaration ? 1u : 0u);
+    write_u8(out, def.is_synthetic_check_only ? 1u : 0u);
+    write_string(out, def.base_class_name);
+    write_enum(out, def.base_access);
+    write_u8(out, def.is_variadic_primary_template ? 1u : 0u);
+    write_u8(out, def.is_variadic_specialization ? 1u : 0u);
+    write_u8(out, def.is_partial_specialization ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(def.specialization_template_args.size()));
+    for (const Type& arg : def.specialization_template_args) write_type(out, arg);
+    write_string(out, def.base_pack_arg_name);
+    write_u8(out, def.base_non_type_arg ? 1u : 0u);
+    if (def.base_non_type_arg) write_expr(out, *def.base_non_type_arg);
+    write_u8(out, def.thread_movable_override ? 1u : 0u);
+    write_u8(out, def.thread_shareable_override ? 1u : 0u);
+    write_u8(out, def.thread_movable_if_movable_expr ? 1u : 0u);
+    if (def.thread_movable_if_movable_expr) write_expr(out, *def.thread_movable_if_movable_expr);
+    write_u8(out, def.thread_movable_if_shareable_expr ? 1u : 0u);
+    if (def.thread_movable_if_shareable_expr) write_expr(out, *def.thread_movable_if_shareable_expr);
+}
+
+[[nodiscard]] ClassDef read_class_def(std::istream& in, const std::string& context) {
+    ClassDef def;
+    def.name = read_string(in, context + " name");
+    std::uint32_t field_count = read_u32_le(in, context + " field count");
+    def.fields.reserve(field_count);
+    for (std::uint32_t i = 0; i < field_count; i++) def.fields.push_back(read_class_field(in, context + " field"));
+    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    def.namespace_path.reserve(ns_count);
+    for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));
+    def.is_exported = read_u8(in, context + " is_exported") != 0u;
+    def.is_compile_time_dependency = read_u8(in, context + " is_compile_time_dependency") != 0u;
+    def.owning_module = read_string(in, context + " owning_module");
+    def.is_concept_witness = read_u8(in, context + " is_concept_witness") != 0u;
+    std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
+    def.template_params.reserve(template_param_count);
+    for (std::uint32_t i = 0; i < template_param_count; i++) def.template_params.push_back(read_generic_type_param(in, context + " template param"));
+    def.template_owner_id = read_string(in, context + " template owner id");
+    def.is_forward_declaration = read_u8(in, context + " is_forward_declaration") != 0u;
+    def.is_synthetic_check_only = read_u8(in, context + " is_synthetic_check_only") != 0u;
+    def.base_class_name = read_string(in, context + " base class");
+    def.base_access = read_enum<AccessSpecifier>(in, context + " base access");
+    def.is_variadic_primary_template = read_u8(in, context + " is_variadic_primary") != 0u;
+    def.is_variadic_specialization = read_u8(in, context + " is_variadic_specialization") != 0u;
+    def.is_partial_specialization = read_u8(in, context + " is_partial_specialization") != 0u;
+    std::uint32_t spec_arg_count = read_u32_le(in, context + " specialization arg count");
+    def.specialization_template_args.reserve(spec_arg_count);
+    for (std::uint32_t i = 0; i < spec_arg_count; i++) def.specialization_template_args.push_back(read_type(in, context + " specialization arg"));
+    def.base_pack_arg_name = read_string(in, context + " base pack arg");
+    if (read_u8(in, context + " base non-type present") != 0u) def.base_non_type_arg = std::shared_ptr<Expr>(read_expr(in, context + " base non-type").release());
+    def.thread_movable_override = read_u8(in, context + " thread movable override") != 0u;
+    def.thread_shareable_override = read_u8(in, context + " thread shareable override") != 0u;
+    if (read_u8(in, context + " movable_if expr present") != 0u) {
+        def.thread_movable_if_movable_expr = read_expr(in, context + " movable_if expr");
+    }
+    if (read_u8(in, context + " shareable_if expr present") != 0u) {
+        def.thread_movable_if_shareable_expr = read_expr(in, context + " shareable_if expr");
+    }
+    return def;
+}
+
+void write_function(std::ostream& out, const Function& fn) {
+    write_type(out, fn.return_type);
+    write_string(out, fn.name);
+    write_source_location(out, fn.loc);
+    write_u32_le(out, static_cast<std::uint32_t>(fn.params.size()));
+    for (const Param& param : fn.params) write_param(out, param);
+    write_u8(out, fn.body ? 1u : 0u);
+    if (fn.body) write_stmt(out, *fn.body);
+    write_u8(out, fn.is_extern_c ? 1u : 0u);
+    write_u8(out, fn.is_module_extern ? 1u : 0u);
+    write_u8(out, fn.is_unsafe ? 1u : 0u);
+    write_u8(out, fn.is_compile_time_dependency ? 1u : 0u);
+    write_enum(out, fn.eval_mode);
+    write_u8(out, fn.has_varargs ? 1u : 0u);
+    write_string(out, fn.method_requires_concept);
+    write_u8(out, fn.is_generic_template ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(fn.template_params.size()));
+    for (const GenericTypeParam& param : fn.template_params) write_generic_type_param(out, param);
+    write_string(out, fn.generic_method_owner_id);
+    write_enum(out, fn.receiver_ref_qualifier);
+    write_string(out, fn.forwards_to);
+    write_u32_le(out, static_cast<std::uint32_t>(fn.namespace_path.size()));
+    for (const std::string& segment : fn.namespace_path) write_string(out, segment);
+    write_u8(out, fn.is_exported ? 1u : 0u);
+    write_string(out, fn.owning_module);
+}
+
+[[nodiscard]] Function read_function(std::istream& in, const std::string& context) {
+    Function fn;
+    fn.return_type = read_type(in, context + " return type");
+    fn.name = read_string(in, context + " name");
+    fn.loc = read_source_location(in, context + " loc");
+    std::uint32_t param_count = read_u32_le(in, context + " param count");
+    fn.params.reserve(param_count);
+    for (std::uint32_t i = 0; i < param_count; i++) fn.params.push_back(read_param(in, context + " param"));
+    if (read_u8(in, context + " body present") != 0u) fn.body = read_stmt(in, context + " body");
+    fn.is_extern_c = read_u8(in, context + " extern_c") != 0u;
+    fn.is_module_extern = read_u8(in, context + " module_extern") != 0u;
+    fn.is_unsafe = read_u8(in, context + " unsafe") != 0u;
+    fn.is_compile_time_dependency = read_u8(in, context + " compile_time_dependency") != 0u;
+    fn.eval_mode = read_enum<FunctionEvalMode>(in, context + " eval mode");
+    fn.has_varargs = read_u8(in, context + " has_varargs") != 0u;
+    fn.method_requires_concept = read_string(in, context + " method_requires_concept");
+    fn.is_generic_template = read_u8(in, context + " is_generic_template") != 0u;
+    std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
+    fn.template_params.reserve(template_param_count);
+    for (std::uint32_t i = 0; i < template_param_count; i++) fn.template_params.push_back(read_generic_type_param(in, context + " template param"));
+    fn.generic_method_owner_id = read_string(in, context + " generic method owner");
+    fn.receiver_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
+    fn.forwards_to = read_string(in, context + " forwards_to");
+    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    fn.namespace_path.reserve(ns_count);
+    for (std::uint32_t i = 0; i < ns_count; i++) fn.namespace_path.push_back(read_string(in, context + " namespace"));
+    fn.is_exported = read_u8(in, context + " is_exported") != 0u;
+    fn.owning_module = read_string(in, context + " owning_module");
+    return fn;
+}
+
+[[nodiscard]] bool types_equal_for_payload_merge(const Type& a, const Type& b) {
+    if (a.kind != b.kind || a.name != b.name || a.array_size != b.array_size ||
+        a.is_unsafe_function_pointer != b.is_unsafe_function_pointer || a.is_const_function != b.is_const_function ||
+        a.function_ref_qualifier != b.function_ref_qualifier || a.is_mutable_ref != b.is_mutable_ref ||
+        a.is_rvalue_ref != b.is_rvalue_ref || a.is_mutable_pointee != b.is_mutable_pointee ||
+        a.is_pack_expansion != b.is_pack_expansion || a.template_args.size() != b.template_args.size() ||
+        a.non_type_args.size() != b.non_type_args.size() || a.function_params.size() != b.function_params.size()) {
+        return false;
+    }
+    auto ptr_equal = [&](const std::shared_ptr<Type>& lhs, const std::shared_ptr<Type>& rhs) {
+        if (static_cast<bool>(lhs) != static_cast<bool>(rhs)) return false;
+        return !lhs || types_equal_for_payload_merge(*lhs, *rhs);
+    };
+    if (!ptr_equal(a.pointee, b.pointee) || !ptr_equal(a.element, b.element) || !ptr_equal(a.function_return, b.function_return)) {
+        return false;
+    }
+    for (size_t i = 0; i < a.template_args.size(); i++) if (!types_equal_for_payload_merge(a.template_args[i], b.template_args[i])) return false;
+    for (size_t i = 0; i < a.function_params.size(); i++) if (!types_equal_for_payload_merge(a.function_params[i], b.function_params[i])) return false;
+    for (size_t i = 0; i < a.non_type_args.size(); i++) {
+        const auto& lhs = a.non_type_args[i];
+        const auto& rhs = b.non_type_args[i];
+        if (static_cast<bool>(lhs) != static_cast<bool>(rhs)) return false;
+        if (!lhs) continue;
+        if (lhs->kind != rhs->kind || lhs->int_value != rhs->int_value || lhs->name != rhs->name) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool params_equal_for_payload_merge(const std::vector<Param>& a, const std::vector<Param>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i].name != b[i].name || a[i].generic_concept != b[i].generic_concept ||
+            a[i].require_thread_movable != b[i].require_thread_movable ||
+            a[i].require_thread_shareable != b[i].require_thread_shareable ||
+            a[i].is_parameter_pack != b[i].is_parameter_pack ||
+            !types_equal_for_payload_merge(a[i].type, b[i].type)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool same_function_identity_for_payload_merge(const Function& a, const Function& b) {
+    return a.name == b.name && types_equal_for_payload_merge(a.return_type, b.return_type) &&
+           params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier;
+}
+
+[[nodiscard]] bool same_struct_identity_for_payload_merge(const StructDef& a, const StructDef& b) {
+    return a.name == b.name && a.is_union == b.is_union && a.template_owner_id == b.template_owner_id;
+}
+
+[[nodiscard]] bool same_class_identity_for_payload_merge(const ClassDef& a, const ClassDef& b) {
+    return a.name == b.name && a.template_owner_id == b.template_owner_id &&
+           a.is_variadic_primary_template == b.is_variadic_primary_template &&
+           a.is_variadic_specialization == b.is_variadic_specialization &&
+           a.is_partial_specialization == b.is_partial_specialization;
+}
+
+[[nodiscard]] bool is_local_module_struct(const StructDef& def) { return def.owning_module.empty(); }
+[[nodiscard]] bool is_local_module_class(const ClassDef& def) { return def.owning_module.empty(); }
+[[nodiscard]] bool is_local_module_function(const Function& fn) { return fn.owning_module.empty(); }
+
+[[nodiscard]] std::string serialize_compile_time_payload(const Program& program) {
+    CompileTimePayloadPlan plan = plan_compile_time_payload(program);
+    if (plan.root_function_names.empty()) return {};
+
+    std::unordered_set<std::string> reachable_function_names(plan.reachable_function_names.begin(),
+                                                             plan.reachable_function_names.end());
+    std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
+    std::vector<const StructDef*> structs;
+    std::vector<const ClassDef*> classes;
+    std::vector<const Function*> functions;
+    for (const StructDef& def : program.structs) {
+        if (is_local_module_struct(def) && reachable_type_names.contains(def.name)) structs.push_back(&def);
+    }
+    for (const ClassDef& def : program.classes) {
+        if (is_local_module_class(def) && reachable_type_names.contains(def.name)) classes.push_back(&def);
+    }
+    for (const Function& fn : program.functions) {
+        if (!is_local_module_function(fn)) continue;
+        if (reachable_function_names.contains(fn.name)) functions.push_back(&fn);
+    }
+
+    std::ostringstream payload(std::ios::binary);
+    payload.write(SCPPM_COMPILE_TIME_AST_MAGIC.data(), static_cast<std::streamsize>(SCPPM_COMPILE_TIME_AST_MAGIC.size()));
+    write_u32_le(payload, SCPPM_COMPILE_TIME_AST_VERSION);
+    write_u32_le(payload, static_cast<std::uint32_t>(plan.root_function_names.size()));
+    for (const std::string& name : plan.root_function_names) write_string(payload, name);
+    write_u32_le(payload, static_cast<std::uint32_t>(structs.size()));
+    for (const StructDef* def : structs) write_struct_def(payload, *def);
+    write_u32_le(payload, static_cast<std::uint32_t>(classes.size()));
+    for (const ClassDef* def : classes) write_class_def(payload, *def);
+    write_u32_le(payload, static_cast<std::uint32_t>(functions.size()));
+    for (const Function* fn : functions) write_function(payload, *fn);
+    return payload.str();
+}
+
+[[nodiscard]] StructuredCompileTimePayload deserialize_compile_time_payload(std::string_view bytes, const std::string& path) {
+    std::istringstream in(std::string(bytes), std::ios::binary);
+    char magic[4] = {};
+    in.read(magic, sizeof(magic));
+    if (!in || std::string_view(magic, 4) != SCPPM_COMPILE_TIME_AST_MAGIC) {
+        throw DriverError("invalid .scppm file '" + path + "': bad structured compile-time payload magic");
+    }
+    std::uint32_t version = read_u32_le(in, path + " payload version");
+    if (version != SCPPM_COMPILE_TIME_AST_VERSION) {
+        throw DriverError("unsupported structured compile-time payload version " + std::to_string(version) +
+                          " in '" + path + "'");
+    }
+    StructuredCompileTimePayload payload;
+    std::uint32_t root_count = read_u32_le(in, path + " root count");
+    payload.root_function_names.reserve(root_count);
+    for (std::uint32_t i = 0; i < root_count; i++) payload.root_function_names.push_back(read_string(in, path + " root"));
+    std::uint32_t struct_count = read_u32_le(in, path + " struct count");
+    payload.structs.reserve(struct_count);
+    for (std::uint32_t i = 0; i < struct_count; i++) payload.structs.push_back(read_struct_def(in, path + " struct"));
+    std::uint32_t class_count = read_u32_le(in, path + " class count");
+    payload.classes.reserve(class_count);
+    for (std::uint32_t i = 0; i < class_count; i++) payload.classes.push_back(read_class_def(in, path + " class"));
+    std::uint32_t function_count = read_u32_le(in, path + " function count");
+    payload.functions.reserve(function_count);
+    for (std::uint32_t i = 0; i < function_count; i++) payload.functions.push_back(read_function(in, path + " function"));
+    return payload;
+}
+
+[[nodiscard]] bool program_requires_structured_payload(const Program& program) {
+    CompileTimePayloadPlan plan = plan_compile_time_payload(program);
+    return !plan.root_function_names.empty();
+}
+
+void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&& payload) {
+    for (StructDef& def : payload.structs) {
+        if (!def.is_exported) def.is_compile_time_dependency = true;
+        auto existing = std::find_if(imported.structs.begin(), imported.structs.end(),
+                                     [&](const StructDef& current) { return same_struct_identity_for_payload_merge(current, def); });
+        if (existing != imported.structs.end()) {
+            *existing = std::move(def);
+        } else {
+            imported.structs.push_back(std::move(def));
+        }
+    }
+    for (ClassDef& def : payload.classes) {
+        if (!def.is_exported) def.is_compile_time_dependency = true;
+        auto existing = std::find_if(imported.classes.begin(), imported.classes.end(),
+                                     [&](const ClassDef& current) { return same_class_identity_for_payload_merge(current, def); });
+        if (existing != imported.classes.end()) {
+            *existing = std::move(def);
+        } else {
+            imported.classes.push_back(std::move(def));
+        }
+    }
+    for (Function& fn : payload.functions) {
+        if (!fn.is_exported) fn.is_compile_time_dependency = true;
+        auto existing = std::find_if(imported.functions.begin(), imported.functions.end(),
+                                     [&](const Function& current) { return same_function_identity_for_payload_merge(current, fn); });
+        if (existing != imported.functions.end()) {
+            *existing = std::move(fn);
+        } else {
+            imported.functions.push_back(std::move(fn));
+        }
+    }
+}
+
+void write_scppm_file(const Program& program, std::string_view interface_source, const std::string& path) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
         throw DriverError("cannot write module interface '" + path + "'");
     }
-    std::string generics_block = serialize_generics_block(program, generic_source_snapshot);
-    unsigned char flags = generics_block.empty() ? 0u : 0x01u;
+    std::string payload = serialize_compile_time_payload(program);
+    unsigned char flags = payload.empty() ? 0u : 0x01u;
     const std::array<char, 8> header = {'S', 'C', 'P', 'P', 'M', 1, 0, static_cast<char>(flags)};
     out.write(header.data(), static_cast<std::streamsize>(header.size()));
     write_u32_le(out, static_cast<std::uint32_t>(interface_source.size()));
     out.write(interface_source.data(), static_cast<std::streamsize>(interface_source.size()));
     if ((flags & 0x01u) != 0u) {
-        write_u32_le(out, static_cast<std::uint32_t>(generics_block.size()));
-        out.write(generics_block.data(), static_cast<std::streamsize>(generics_block.size()));
+        write_u32_le(out, static_cast<std::uint32_t>(payload.size()));
+        out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
     }
     if (!out) {
         throw DriverError("failed while writing module interface '" + path + "'");
     }
+}
+
+LoadedModuleFile read_module_file(const std::string& path) {
+    LoadedModuleFile loaded;
+    std::filesystem::path file_path(path);
+    if (file_path.extension() != ".scppm") {
+        std::ifstream file(path);
+        if (!file) throw DriverError("cannot open imported module source '" + path + "'");
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        loaded.interface_source = buffer.str();
+        return loaded;
+    }
+
+    loaded.is_scppm = true;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw DriverError("cannot open imported module interface '" + path + "'");
+    char header[8];
+    file.read(header, sizeof(header));
+    if (file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+        throw DriverError("invalid .scppm file '" + path + "': truncated header");
+    }
+    if (std::memcmp(header, "SCPPM", 5) != 0) {
+        throw DriverError("invalid .scppm file '" + path + "': bad magic");
+    }
+    unsigned char major_version = static_cast<unsigned char>(header[5]);
+    if (major_version != 1) {
+        throw DriverError("unsupported .scppm major version " + std::to_string(major_version) + " in '" + path + "'");
+    }
+    unsigned char flags = static_cast<unsigned char>(header[7]);
+    std::uint32_t interface_length = read_u32_le(file, path + " interface length");
+    loaded.interface_source.resize(interface_length);
+    file.read(loaded.interface_source.data(), static_cast<std::streamsize>(interface_length));
+    if (!file) throw DriverError("invalid .scppm file '" + path + "': truncated interface source");
+    if ((flags & 0x01u) != 0u) {
+        loaded.has_compile_time_payload = true;
+        std::uint32_t payload_length = read_u32_le(file, path + " payload length");
+        loaded.compile_time_payload_bytes.resize(payload_length);
+        file.read(loaded.compile_time_payload_bytes.data(), static_cast<std::streamsize>(payload_length));
+        if (!file) throw DriverError("invalid .scppm file '" + path + "': truncated structured payload");
+    }
+    return loaded;
 }
 
 void create_archive(const std::string& object_path, const std::string& archive_path) {
@@ -379,70 +1108,11 @@ void create_archive(const std::string& object_path, const std::string& archive_p
     return result;
 }
 
-std::string read_scppm_interface_source(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        throw DriverError("cannot open imported module interface '" + path + "'");
-    }
-    char header[8];
-    file.read(header, sizeof(header));
-    if (file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
-        throw DriverError("invalid .scppm file '" + path + "': truncated header");
-    }
-    if (std::memcmp(header, "SCPPM", 5) != 0) {
-        throw DriverError("invalid .scppm file '" + path + "': bad magic");
-    }
-    unsigned char major_version = static_cast<unsigned char>(header[5]);
-    if (major_version != 1) {
-        throw DriverError("unsupported .scppm major version " + std::to_string(major_version) + " in '" + path + "'");
-    }
-    unsigned char flags = static_cast<unsigned char>(header[7]);
-    std::uint32_t interface_length = 0;
-    file.read(reinterpret_cast<char*>(&interface_length), sizeof(interface_length));
-    if (file.gcount() != static_cast<std::streamsize>(sizeof(interface_length))) {
-        throw DriverError("invalid .scppm file '" + path + "': missing interface length");
-    }
-    std::string source(interface_length, '\0');
-    file.read(source.data(), static_cast<std::streamsize>(interface_length));
-    if (file.gcount() != static_cast<std::streamsize>(interface_length)) {
-        throw DriverError("invalid .scppm file '" + path + "': truncated interface source");
-    }
-    if ((flags & 0x01u) != 0u) {
-        // v1 only consumes the embedded interface source. Generic bodies
-        // serialized into the optional generics block are not read yet.
-    }
-    return source;
-}
-
-// Reads an imported module's source file from disk -- the parser itself
-// never touches the filesystem (see scpp.parser's ModuleResolver); this
-// is the driver's own responsibility, mirroring cli.cppm's own read_file
-// for the main input file (a small, separate duplicate rather than a
-// shared cross-module helper -- consistent with this codebase's existing
-// precedent, e.g. movecheck.cppm/codegen.cppm's independently-duplicated
-// types_equal).
-std::string read_module_source(const std::string& path) {
-    if (std::filesystem::path(path).extension() == ".scppm") {
-        return read_scppm_interface_source(path);
-    }
-    std::ifstream file(path);
-    if (!file) {
-        throw DriverError("cannot open imported module source '" + path + "'");
-    }
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
-
 [[nodiscard]] std::string absolute_source_path(const std::string& path) {
     std::error_code ec;
     std::filesystem::path absolute = std::filesystem::absolute(path, ec);
     if (ec) return path;
     return absolute.lexically_normal().string();
-}
-
-[[nodiscard]] bool should_keep_function_body_in_interface(const Function& fn) {
-    return fn.is_generic_template || !fn.template_params.empty() || !fn.generic_method_owner_id.empty();
 }
 
 [[nodiscard]] std::vector<size_t> line_offsets(std::string_view source) {
@@ -530,7 +1200,7 @@ std::string strip_concrete_function_bodies(const Program& program, const std::st
     };
     std::vector<BodyRange> ranges;
     for (const Function& fn : program.functions) {
-        if (!fn.body || should_keep_function_body_in_interface(fn) || !fn.loc.has_source_path()) continue;
+        if (!fn.body || !fn.loc.has_source_path()) continue;
         if (absolute_source_path(fn.loc.source_path_text()) != file_path) continue;
         size_t begin = offset_for_loc(source, fn.body->loc);
         if (begin >= source.size() || source[begin] != '{') continue;
@@ -588,11 +1258,19 @@ public:
 
         resolving_.insert(module_name);
         std::string resolved_path = absolute_source_path(path_it->second);
-        std::string source = read_module_source(resolved_path);
+        LoadedModuleFile loaded = read_module_file(resolved_path);
         Program imported = parse(
-            source, [this](const std::string& name) -> const Program& { return resolve(name); },
+            loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
             [this](const std::string& key) -> Program { return resolve_partition(key); }, resolved_path);
         imported.source_path = resolved_path;
+        if (loaded.has_compile_time_payload) {
+            merge_compile_time_payload(imported,
+                                       deserialize_compile_time_payload(loaded.compile_time_payload_bytes, resolved_path));
+        } else if (loaded.is_scppm && program_requires_structured_payload(imported)) {
+            throw DriverError("module interface '" + resolved_path +
+                              "' lacks the required structured compile-time payload; rebuild it with a newer scpp "
+                              "'build-module' output");
+        }
         resolving_.erase(module_name);
 
         if (imported.module_name != module_name) {
@@ -635,9 +1313,13 @@ public:
         }
 
         partitions_resolving_.insert(key);
-        std::string source = read_module_source(path_it->second);
+        LoadedModuleFile loaded = read_module_file(path_it->second);
+        if (loaded.is_scppm) {
+            throw DriverError("partition import path '" + path_it->second +
+                              "' must use a source .scpp file, not a compiled .scppm artifact");
+        }
         Program partition = parse(
-            source, [this](const std::string& name) -> const Program& { return resolve(name); },
+            loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
             [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); },
             absolute_source_path(path_it->second));
         partition.source_path = absolute_source_path(path_it->second);
@@ -784,7 +1466,8 @@ std::string render_module_interface_file(const Program& program, const std::stri
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
                                          std::unordered_set<std::string>& expanded_partition_paths) {
-    std::string source = read_module_source(file_path);
+    LoadedModuleFile loaded = read_module_file(file_path);
+    std::string source = std::move(loaded.interface_source);
     if (!keep_concrete_bodies) {
         source = strip_concrete_function_bodies(program, absolute_source_path(file_path), std::move(source));
     }
@@ -965,9 +1648,7 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     }
     std::string merged_interface_source =
         build_merged_interface_source(program, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
-    std::string merged_generic_source =
-        build_merged_interface_source(program, absolute_source_path(source_path), /*keep_concrete_bodies=*/true);
-    write_scppm_file(program, merged_interface_source, merged_generic_source, interface_path);
+    write_scppm_file(program, merged_interface_source, interface_path);
     emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
