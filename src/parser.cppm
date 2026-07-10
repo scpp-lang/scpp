@@ -3286,7 +3286,7 @@ private:
                                 const std::vector<GenericTypeParam>& template_params) {
         std::string qualified_class_name = def.name;
         std::string synthesized_member_owner_name = qualified_class_name;
-        if (def.is_partial_specialization && !def.template_owner_id.empty()) {
+        if ((def.is_partial_specialization || def.is_variadic_specialization) && !def.template_owner_id.empty()) {
             synthesized_member_owner_name += "__" + def.template_owner_id;
         }
         bool is_exported = def.is_exported;
@@ -3485,7 +3485,7 @@ private:
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
-                fn.name = qualified_class_name + "_operator_deref";
+                fn.name = synthesized_member_owner_name + "_operator_deref";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
                 fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
@@ -3533,7 +3533,7 @@ private:
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
-                fn.name = qualified_class_name + "_operator_assign";
+                fn.name = synthesized_member_owner_name + "_operator_assign";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
                 fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
@@ -3578,7 +3578,7 @@ private:
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
-                fn.name = qualified_class_name + "_" + member_name;
+                fn.name = synthesized_member_owner_name + "_" + member_name;
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_member_body_or_declaration();

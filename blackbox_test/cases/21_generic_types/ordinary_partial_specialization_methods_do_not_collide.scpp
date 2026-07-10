@@ -1,0 +1,20 @@
+template<typename Sig>
+class Holder;
+
+template<>
+class Holder<void()> {
+public:
+    int size() const { return 1; }
+};
+
+template<typename Head, typename... Tail>
+class Holder<void(Head, Tail...)> {
+public:
+    int size() const { return 2; }
+};
+
+int main() {
+    Holder<void()> empty;
+    Holder<void(int)> unary;
+    return empty.size() + unary.size();
+}

@@ -2478,11 +2478,59 @@ void test_class_partial_specialization_on_function_type_parses() {
            "class_partial_specialization_on_function_type_parses: expected trailing Args... pack in function pattern");
     const scpp::Function* call_fn = nullptr;
     for (const scpp::Function& fn : program.functions) {
-        if (fn.name == "Holder_call" && fn.generic_method_owner_id == partial->template_owner_id) call_fn = &fn;
+        if (fn.name == "Holder__" + partial->template_owner_id + "_call" &&
+            fn.generic_method_owner_id == partial->template_owner_id) {
+            call_fn = &fn;
+        }
     }
-    expect(call_fn != nullptr, "class_partial_specialization_on_function_type_parses: expected Holder_call");
+    expect(call_fn != nullptr,
+           "class_partial_specialization_on_function_type_parses: expected owner-id-qualified Holder call");
     expect(call_fn->params.size() == 2 && call_fn->params[1].is_parameter_pack,
            "class_partial_specialization_on_function_type_parses: expected call's Args... parameter pack");
+}
+
+void test_variadic_specialization_member_names_include_owner_id() {
+    scpp::Program program = scpp::parse("template<typename... Ts> class Box;\n"
+                                         "template<> class Box<> {\n"
+                                         "public:\n"
+                                         "    Box(const char* s) { return; }\n"
+                                         "    int size() const { return 0; }\n"
+                                         "};\n"
+                                         "template<typename Head, typename... Tail>\n"
+                                         "class Box<Head, Tail...> {\n"
+                                         "public:\n"
+                                         "    Box(const char* s) { return; }\n"
+                                         "    int size() const { return 0; }\n"
+                                         "};\n"
+                                         "int main() { return 0; }\n");
+    const scpp::ClassDef* base_case = nullptr;
+    const scpp::ClassDef* recursive_case = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name != "Box" || !c.is_variadic_specialization) continue;
+        if (c.template_params.empty()) {
+            base_case = &c;
+        } else {
+            recursive_case = &c;
+        }
+    }
+    expect(base_case != nullptr && recursive_case != nullptr,
+           "variadic_specialization_member_names_include_owner_id: expected both variadic specializations");
+    bool found_base_ctor = false;
+    bool found_base_method = false;
+    bool found_recursive_ctor = false;
+    bool found_recursive_method = false;
+    for (const scpp::Function& fn : program.functions) {
+        if (base_case != nullptr && fn.name == "Box__" + base_case->template_owner_id + "_new") found_base_ctor = true;
+        if (base_case != nullptr && fn.name == "Box__" + base_case->template_owner_id + "_size") found_base_method = true;
+        if (recursive_case != nullptr && fn.name == "Box__" + recursive_case->template_owner_id + "_new") {
+            found_recursive_ctor = true;
+        }
+        if (recursive_case != nullptr && fn.name == "Box__" + recursive_case->template_owner_id + "_size") {
+            found_recursive_method = true;
+        }
+    }
+    expect(found_base_ctor && found_base_method && found_recursive_ctor && found_recursive_method,
+           "variadic_specialization_member_names_include_owner_id: expected owner-id-qualified ctor/method names");
 }
 
 // ch05 §5.14: a method may layer its own `requires Concept<T>` clause,
@@ -3135,6 +3183,7 @@ int main() {
     test_variadic_primary_template_decl_parses();
     test_variadic_empty_pack_specialization_parses();
     test_variadic_recursive_specialization_parses();
+    test_variadic_specialization_member_names_include_owner_id();
     test_variadic_instantiation_with_multiple_args_parses();
     test_variadic_struct_is_rejected();
     test_variadic_specialization_without_primary_is_rejected();
