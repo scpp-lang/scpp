@@ -7235,22 +7235,24 @@ private:
                                                                      size_t param_offset,
                                                                      FullHeaderGenericCallResolution& resolution) {
         try {
+            Function tmpl_snapshot = clone_function(tmpl);
+            const Function& stable_tmpl = tmpl_snapshot;
             resolution.type_bindings.clear();
             resolution.value_bindings.clear();
             resolution.pack_bindings.clear();
             resolution.upcasts.clear();
             resolution.deferred_obligations.clear();
-            resolution.concrete_pack_param_types.assign(tmpl.params.size(), {});
+            resolution.concrete_pack_param_types.assign(stable_tmpl.params.size(), {});
 
             ExprPtr expr_copy = clone_expr(expr);
-            seed_explicit_template_arguments(*expr_copy, tmpl, resolution.type_bindings, resolution.value_bindings,
+            seed_explicit_template_arguments(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.value_bindings,
                                              resolution.pack_bindings);
 
             size_t arg_cursor = 0;
-            for (size_t i = param_offset; i < tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
-                if (tmpl.params[i].is_parameter_pack) {
+            for (size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
+                if (stable_tmpl.params[i].is_parameter_pack) {
                     std::optional<std::string> pack_type_name =
-                        referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
+                        referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
                     std::vector<Type> deduced_pack_types;
                     for (; arg_cursor < expr.args.size(); arg_cursor++) {
                         std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
@@ -7263,10 +7265,10 @@ private:
                     }
                     continue;
                 }
-                const Type& param_type = tmpl.params[i].type;
+                const Type& param_type = stable_tmpl.params[i].type;
                 const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
                 if (underlying.kind != TypeKind::Named) {
-                    if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+                    if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                         resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
                     }
                     arg_cursor++;
@@ -7274,7 +7276,7 @@ private:
                 }
 
                 if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
-                    for (const GenericTypeParam& tp : tmpl.template_params) {
+                    for (const GenericTypeParam& tp : stable_tmpl.template_params) {
                         if (tp.is_non_type || tp.name != underlying.name || resolution.type_bindings.contains(tp.name)) {
                             continue;
                         }
@@ -7294,7 +7296,7 @@ private:
                                                     resolution.type_bindings, resolution.value_bindings,
                                                     resolution.pack_bindings, resolution.upcasts);
                     }
-                    if (type_still_depends_on_unbound_template_params(param_type, tmpl.template_params,
+                    if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
                                                                       resolution.type_bindings,
                                                                       resolution.pack_bindings)) {
                         resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
@@ -7302,16 +7304,16 @@ private:
                     arg_cursor++;
                     continue;
                 }
-                if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+                if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                     resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
                 }
                 arg_cursor++;
             }
             if (arg_cursor != expr.args.size()) return false;
 
-            populate_concrete_pack_param_types(tmpl, resolution.pack_bindings, resolution.concrete_pack_param_types);
+            populate_concrete_pack_param_types(stable_tmpl, resolution.pack_bindings, resolution.concrete_pack_param_types);
 
-            for (const GenericTypeParam& tp : tmpl.template_params) {
+            for (const GenericTypeParam& tp : stable_tmpl.template_params) {
                 if (tp.is_pack) continue;
                 bool bound =
                     tp.is_non_type ? resolution.value_bindings.contains(tp.name) : resolution.type_bindings.contains(tp.name);
@@ -7321,13 +7323,13 @@ private:
             for (const DeferredTemplateObligation& obligation : resolution.deferred_obligations) {
                 Type concrete_pattern = apply_template_bindings_to_type(
                     obligation.parameter_type_pattern, resolution.type_bindings, resolution.pack_bindings, expr.loc);
-                if (type_depends_on_template_params(concrete_pattern, tmpl.template_params)) return false;
+                if (type_depends_on_template_params(concrete_pattern, stable_tmpl.template_params)) return false;
                 if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
                     return false;
                 }
             }
 
-            check_thread_safety_constraints(*expr_copy, tmpl, resolution.type_bindings, resolution.pack_bindings);
+            check_thread_safety_constraints(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.pack_bindings);
             return true;
         } catch (const DataflowError&) {
             return false;
@@ -7567,23 +7569,27 @@ private:
     // parameter, or ch05 §5.14's own base-class-deduction accessor
     // pattern, see deduce_via_base_class_chain), then synthesizes (or
     // reuses an already-cached) concrete clone and rewrites `expr.name`
-    // to it.
+    // to it. The template definition itself lives in `program_.functions`,
+    // so recursive generic instantiation can reallocate that vector; take
+    // a deep snapshot first and read everything from it.
     void monomorphize_generic_function_call(Expr& expr, const Function& tmpl, Body& body, size_t param_offset = 0,
                                             const std::string& member_name_prefix = "") {
+        Function tmpl_snapshot = clone_function(tmpl);
+        const Function& stable_tmpl = tmpl_snapshot;
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
         std::unordered_map<std::string, std::vector<Type>> pack_bindings;
         std::vector<std::pair<size_t, Type>> upcasts;
         std::vector<DeferredTemplateObligation> deferred_obligations;
-        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+        std::vector<std::vector<Type>> concrete_pack_param_types(stable_tmpl.params.size());
 
-        seed_explicit_template_arguments(expr, tmpl, type_bindings, value_bindings, pack_bindings);
+        seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
 
         size_t arg_cursor = 0;
-        for (size_t i = param_offset; i < tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
-            if (tmpl.params[i].is_parameter_pack) {
+        for (size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
+            if (stable_tmpl.params[i].is_parameter_pack) {
                 std::optional<std::string> pack_type_name =
-                    referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
+                    referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
                 std::vector<Type> deduced_pack_types;
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
@@ -7593,15 +7599,15 @@ private:
                 if (pack_type_name.has_value() &&
                     !bind_type_pack_binding(pack_bindings, *pack_type_name, deduced_pack_types)) {
                     throw DataflowError("deduced types for template parameter pack '" + *pack_type_name +
-                                            "' of generic function '" + tmpl.name + "' disagree across arguments",
+                                            "' of generic function '" + stable_tmpl.name + "' disagree across arguments",
                         expr.loc);
                 }
                 continue;
             }
-            const Type& param_type = tmpl.params[i].type;
+            const Type& param_type = stable_tmpl.params[i].type;
             const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
             if (underlying.kind != TypeKind::Named) {
-                if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+                if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                     deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
                 }
                 arg_cursor++;
@@ -7611,14 +7617,14 @@ private:
             if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
                 // Case A: a bare parameter directly named after one of
                 // this template's own type parameters (e.g. "T x").
-                for (const GenericTypeParam& tp : tmpl.template_params) {
+                for (const GenericTypeParam& tp : stable_tmpl.template_params) {
                     if (tp.is_non_type || tp.name != underlying.name || type_bindings.contains(tp.name)) continue;
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) continue;
                     Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
                     if (!bind_type_binding(type_bindings, tp.name, named)) {
                         throw DataflowError("deduced type for template parameter '" + tp.name + "' of generic function '" +
-                                                tmpl.name + "' disagrees across arguments",
+                                                stable_tmpl.name + "' disagrees across arguments",
                             expr.loc);
                     }
                 }
@@ -7632,22 +7638,22 @@ private:
                     deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings,
                                                 pack_bindings, upcasts);
                 }
-                if (type_still_depends_on_unbound_template_params(param_type, tmpl.template_params, type_bindings,
+                if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params, type_bindings,
                                                                   pack_bindings)) {
                     deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
                 }
                 arg_cursor++;
                 continue;
             }
-            if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+            if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                 deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
             }
             arg_cursor++;
         }
 
-        populate_concrete_pack_param_types(tmpl, pack_bindings, concrete_pack_param_types);
+        populate_concrete_pack_param_types(stable_tmpl, pack_bindings, concrete_pack_param_types);
 
-        for (const GenericTypeParam& tp : tmpl.template_params) {
+        for (const GenericTypeParam& tp : stable_tmpl.template_params) {
             // ch05 §5.14: a *pack* template parameter (e.g. "Tail") can
             // only ever appear spread inside a base-class-deduction
             // pattern in this language's current scope -- never bound
@@ -7659,7 +7665,7 @@ private:
             bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
             if (!bound) {
                 throw DataflowError("cannot deduce template parameter '" + tp.name + "' of generic function '" +
-                                         tmpl.name + "', and no explicit argument was given for it (ch05 §5.11)",
+                                         stable_tmpl.name + "', and no explicit argument was given for it (ch05 §5.11)",
                     expr.loc);
             }
         }
@@ -7667,15 +7673,16 @@ private:
         for (const DeferredTemplateObligation& obligation : deferred_obligations) {
             Type concrete_pattern =
                 apply_template_bindings_to_type(obligation.parameter_type_pattern, type_bindings, pack_bindings, expr.loc);
-            if (type_depends_on_template_params(concrete_pattern, tmpl.template_params)) {
+            if (type_depends_on_template_params(concrete_pattern, stable_tmpl.template_params)) {
                 throw DataflowError("cannot deduce every template argument needed by parameter '" +
-                                        tmpl.params[obligation.param_index].name + "' of generic function '" + tmpl.name +
+                                        stable_tmpl.params[obligation.param_index].name + "' of generic function '" +
+                                        stable_tmpl.name +
                                         "' after scanning the whole call",
                     expr.loc);
             }
             if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
-                throw DataflowError("argument for parameter '" + tmpl.params[obligation.param_index].name +
-                                        "' of generic function '" + tmpl.name +
+                throw DataflowError("argument for parameter '" + stable_tmpl.params[obligation.param_index].name +
+                                        "' of generic function '" + stable_tmpl.name +
                                         "' is incompatible after substituting deduced template arguments",
                     expr.args[obligation.arg_index]->loc);
             }
@@ -7687,10 +7694,10 @@ private:
         // (post-substitution) type actually satisfies what it requires
         // -- before synthesizing/caching a clone, so a violation is
         // reported at the call site that triggered it.
-        check_thread_safety_constraints(expr, tmpl, type_bindings, pack_bindings);
+        check_thread_safety_constraints(expr, stable_tmpl, type_bindings, pack_bindings);
 
-        std::string clone_name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, pack_bindings,
-                                                                       concrete_pack_param_types, upcasts);
+        std::string clone_name = instantiate_full_header_generic_clone(
+            stable_tmpl, type_bindings, value_bindings, pack_bindings, concrete_pack_param_types, upcasts);
         expr.name = member_name_prefix.empty() ? clone_name : clone_name.substr(member_name_prefix.size());
         expr.explicit_template_args.clear();
     }

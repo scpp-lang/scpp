@@ -1224,6 +1224,50 @@ void run_generic_pack_deduction_tests() {
         expect(threw, case_name + ": expected Box<int, bool> plus one later arg to be rejected as incompatible with "
                                   "Box<Args...> after Args... deduces to <int>");
     }
+
+    {
+        std::string case_name = "variadic_generic_value_parameter_with_converting_ctor_survives_recursive_instantiation";
+        cases_run++;
+        std::string source =
+            "template<typename... Args> class Box;\n"
+            "\n"
+            "template<>\n"
+            "class Box<> {\n"
+            "public:\n"
+            "    consteval Box(const char* s) { return; }\n"
+            "};\n"
+            "\n"
+            "template<typename Head, typename... Tail>\n"
+            "class Box<Head, Tail...> : private Box<Tail...> {\n"
+            "public:\n"
+            "    consteval Box(const char* s) { return; }\n"
+            "};\n"
+            "\n"
+            "template<typename... Args>\n"
+            "int use(Box<Args...> fmt, Args&&... args) {\n"
+            "    return 42;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    return use(\"hi\", 1, true) - 42;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected recursive variadic instantiation to avoid invalidating the active "
+                                    "generic function template definition");
+    }
 }
 
 void run_generic_function_overload_tests() {
@@ -1520,6 +1564,38 @@ void run_consteval_tests() {
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected nested consteval helper call to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "consteval_constructor_helper_call_accepts_const_char_pointer_parameter";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() /
+                                         "consteval_constructor_helper_call_accepts_const_char_pointer_parameter_exe";
+        scpp::compile_to_executable(
+            "constexpr int size1(const char* s) {\n"
+            "    return 7;\n"
+            "}\n"
+            "class Box {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Box(const char* s) {\n"
+            "        this->value = size1(s);\n"
+            "        return;\n"
+            "    }\n"
+            "};\n"
+            "consteval int answer() {\n"
+            "    Box b(\"hi\");\n"
+            "    return b.value;\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 7;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected consteval constructor helper call to exit 0, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove(exe_path);
     }

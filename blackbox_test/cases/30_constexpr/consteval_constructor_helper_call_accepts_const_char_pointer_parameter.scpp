@@ -1,0 +1,22 @@
+constexpr int size1(const char* s) {
+    return 7;
+}
+
+class Box {
+public:
+    int value;
+
+    consteval Box(const char* s) {
+        this->value = size1(s);
+        return;
+    }
+};
+
+consteval int answer() {
+    Box b("hi");
+    return b.value;
+}
+
+int main() {
+    return answer() - 7;
+}
