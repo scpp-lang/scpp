@@ -1159,6 +1159,86 @@ void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
            case_name + ": expected helper type to be reachable");
 }
 
+void run_consteval_tests() {
+    {
+        std::string case_name = "consteval_folds_recursive_constexpr_helper";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_folds_recursive_constexpr_helper_exe";
+        scpp::compile_to_executable(
+            "constexpr int sum_to(int n) {\n"
+            "    if (n == 0) {\n"
+            "        return 0;\n"
+            "    }\n"
+            "    return n + sum_to(n - 1);\n"
+            "}\n"
+            "consteval int answer() {\n"
+            "    return sum_to(6);\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 21;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected folded immediate call to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "consteval_constructor_builds_class_object";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_constructor_builds_class_object_exe";
+        scpp::compile_to_executable(
+            "class Box {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Box(int v) {\n"
+            "        this->value = v;\n"
+            "        return;\n"
+            "    }\n"
+            "};\n"
+            "consteval int answer() {\n"
+            "    Box b(42);\n"
+            "    return b.value;\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 42;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected consteval constructor path to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "consteval_rejects_runtime_only_call";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "int runtime_only(int x) {\n"
+                "    return x + 1;\n"
+                "}\n"
+                "consteval int answer() {\n"
+                "    return runtime_only(41);\n"
+                "}\n"
+                "int main() {\n"
+                "    return answer();\n"
+                "}\n",
+                (std::filesystem::current_path() / "consteval_rejects_runtime_only_call_exe").string(),
+                std_link_inputs(), std_import_paths());
+        } catch (const scpp::DriverError& error) {
+            threw = std::string(error.what()).find("immediate evaluation may only call constexpr/consteval functions") !=
+                    std::string::npos;
+        }
+        expect(threw, case_name + ": expected clear runtime-only immediate-call rejection");
+    }
+}
+
 void run_cli_extension_tests() {
     {
         std::string case_name = "cli_build_module_emits_roundtrip_artifacts";
@@ -2175,6 +2255,7 @@ int main() {
     run_functional_tests();
     run_thread_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
+    run_consteval_tests();
     run_cli_extension_tests();
 
     if (failures > 0) {

@@ -1,0 +1,11 @@
+int runtime_only(int x) {
+    return x + 1;
+}
+
+consteval int answer() {
+    return runtime_only(41);
+}
+
+int main() {
+    return answer();
+}

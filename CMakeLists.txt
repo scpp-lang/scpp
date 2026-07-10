@@ -78,12 +78,20 @@ target_sources(scpp_movecheck
 target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir)
 target_compile_features(scpp_movecheck PRIVATE cxx_std_23)
 
+add_library(scpp_constexpr)
+target_sources(scpp_constexpr
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            src/constexpr.cppm)
+target_link_libraries(scpp_constexpr PUBLIC scpp_ast)
+target_compile_features(scpp_constexpr PRIVATE cxx_std_23)
+
 add_library(scpp_driver)
 target_sources(scpp_driver
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/driver.cppm)
-target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck ${LLVM_LIBS})
+target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_constexpr ${LLVM_LIBS})
 target_compile_features(scpp_driver PRIVATE cxx_std_23)
 
 add_library(scpp_project)

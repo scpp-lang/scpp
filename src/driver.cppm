@@ -32,6 +32,7 @@ export module scpp.driver;
 
 import scpp.ast;
 import scpp.codegen;
+import scpp.constexpr_engine;
 import scpp.lexer;
 import scpp.movecheck;
 import scpp.parser;
@@ -169,11 +170,6 @@ void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
         for (const StmtPtr& nested : stmt.statements) walk_stmt(*nested);
     };
     for (const Function& fn : program.functions) {
-        if (fn.eval_mode != FunctionEvalMode::RuntimeOnly) {
-            throw_phase_a_constexpr_not_yet_lowerable(fn.loc, fn.eval_mode == FunctionEvalMode::Consteval
-                                                                  ? "consteval functions"
-                                                                  : "constexpr functions");
-        }
         if (fn.body) walk_stmt(*fn.body);
     }
 }
@@ -1527,6 +1523,11 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     // argument checking can only work once every call site targets an
     // already-concrete function).
     monomorphize_generics(program);
+    try {
+        fold_immediate_calls(program);
+    } catch (const ConstexprError& error) {
+        throw DriverError(error.what());
+    }
     check_moves(program);
 
     llvm::InitializeNativeTarget();
