@@ -135,6 +135,11 @@ public:
         }
         build_overload_names();
         auto is_never_compiled = [&](const Function& fn) {
+            // consteval functions/constructors are compile-time-only by
+            // definition; every surviving use site is lowered through the
+            // constexpr engine (or rejected earlier), never by calling an
+            // emitted runtime symbol.
+            if (fn.eval_mode == FunctionEvalMode::Consteval) return true;
             // A generic template is checked once, abstractly, by
             // movecheck (ch05 §5.11) -- only its concrete monomorphized
             // clones (ordinary Functions by the time codegen sees them,

@@ -1731,6 +1731,35 @@ void run_consteval_tests() {
     }
 
     {
+        std::string case_name = "consteval_constructor_local_ctor_call_uses_outer_parameter_bindings";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_constructor_local_ctor_call_uses_outer_parameter_bindings_exe";
+        scpp::compile_to_executable(
+            "class Helper {\n"
+            "public:\n"
+            "    consteval Helper(const char* s, int i) { return; }\n"
+            "};\n"
+            "class Outer {\n"
+            "public:\n"
+            "    consteval Outer(const char* s) {\n"
+            "        Helper h(s, 0);\n"
+            "        return;\n"
+            "    }\n"
+            "};\n"
+            "int main() {\n"
+            "    Outer o(\"x\");\n"
+            "    return 0;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected local consteval constructor call to use outer ctor bindings, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
         std::string case_name = "consteval_helper_call_accepts_derived_object_for_base_parameter";
         cases_run++;
         std::filesystem::path exe_path =
