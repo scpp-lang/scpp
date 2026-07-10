@@ -76,7 +76,7 @@ void print(std::format_string<Args...> fmt, Args&&... args);
 
 现在的 `.scppm` 只会为“导出的泛型定义”额外保留源代码体（`SGEN` 块），而导入 `.scppm` 时，编译器又明确**完全不读取这个块**。[^driver-sgen][^driver-scppm-read]
 
-这对 imported `constexpr` / `consteval` 代码显然不够。如果用户导入了 `std::format_string`，那么导入方必须能够在语义检查阶段执行它的导出构造函数体，以及它在同一模块里调用到的私有 helper。也就是说，编译期可执行函数体必须从“只有泛型才保留”的附属信息，提升为**模块接口的一等载荷**。
+这对 imported `constexpr` / `consteval` 代码显然不够，而且从模块长期架构看也不正确。如果用户导入了 `std::format_string`，那么导入方必须能够在语义检查阶段执行它的导出构造函数体，以及它在同一模块里调用到的私有 helper。本文最终定稿的方向因此是：编译期相关定义应通过 `.scppm` 里的**结构化 AST 序列化**跨模块传递，而不是继续依赖源代码快照后续再解析。
 
 ## 2. 来自成熟语言/编译器的研究结论
 
@@ -214,6 +214,7 @@ enum class FunctionEvalMode {
 
 - 标量字面量与标量局部变量：
   - `bool`、`char`、`int`、`long`，以及前端已经建模过的 unsigned 整数；
+  - `float`、`double`，以及项目现有前端 / codegen 已建模的浮点标量族；
 - 字符串字面量：内部表示为只读静态字节数组，但对现有 scpp 类型系统仍表现为 `const char*`；[^movecheck-string][^codegen-string]
 - 空指针、以及指向字符串字面量 / constexpr 全局对象静态存储区内部的指针；
 - 元素类型可 constexpr 的定长数组；
@@ -234,6 +235,7 @@ enum class FunctionEvalMode {
   - `return`
   - 递归
 - 对 `constexpr` / `consteval` 函数的普通调用；
+- 在检查型常量表达式上下文中支持浮点算术与比较；对解释器可见的非法操作（例如除零）在编译期直接拒绝，整体方向与普通 constant-expression failure 保持一致；[^cpp-constant-expression]
 - 对已经完成单态化后的 fold / pack-expansion helper 代码做编译期执行。
 
 这已经足以覆盖：
@@ -465,16 +467,35 @@ enum class ConstValueKind {
 
 ## 4.4.4 对模块接口格式的影响
 
-当前 `.scppm` 的附加源代码块只服务泛型，而且导入时完全不读。[^driver-sgen][^driver-scppm-read]
+当前 `.scppm` 的附加能力仍然只服务泛型，而且导入时完全不读。[^driver-sgen][^driver-scppm-read]
 
-这里建议这样扩展：
+这里的最终定稿设计，是从一开始就改为**结构化 AST 序列化**，不再沿着“源码快照”方向扩展。
 
-1. 把这个附加块从“泛型函数体”扩展为**编译期函数体块**；
-2. 保留当前“整份源码快照 + 导出入口名列表”的思路，因为导入方执行导出 constexpr 函数时，往往还需要同文件内的私有 helper；
-3. 对导出的 `constexpr`、`consteval`、generic 定义一视同仁；
-4. 导入时真正去解析并保留这个块，而不是像现在一样忽略。
+### 结构化 AST 载荷
 
-至于块名仍叫 `SGEN`，还是改成更宽泛的新名字，那只是实现细节；语义上它已经是**compile-time body block**。
+`.scppm` 应增加一个结构化的“编译期 AST”区段，里面存放的是序列化后的 AST 节点，而不是源代码文本。这个区段应至少携带：
+
+1. 导出的 `constexpr` / `consteval` 定义；
+2. 导出的 generic 定义；
+3. 从这些导出的编译期相关定义可达的私有 helper 定义、类型定义、常量初始化器；
+4. 足以让导入方在不重新解析源代码的前提下，把这些节点重新挂接回语义环境的符号 / 类型元数据。
+
+### 为什么现在就做结构化 AST
+
+这条路更激进，但它是正确的 v1 路线。
+
+- 它更符合成熟模块实现的收敛方向：导入模板与可 constexpr 求值实体，应该以编译器可直接消费的结构化前端状态存在，而不是以原始源码快照形式让每个 importer 再解析一遍。
+- 它避免把“头文件时代、每个消费方都重新 parse 一次源码”的模型，再次固化进 scpp 的模块系统；而 scpp 正是在加入真正的跨模块编译期执行能力。
+- 它让 generics 与 constexpr body 从一开始就共用同一类长期表示边界。
+
+### 关于“并存还是统一”的建议
+
+本文明确建议**统一，不建议长期并存**：
+
+- 新的结构化序列化机制应同时承担 constexpr-evaluable body 与 scpp 现有 exported generic body 的跨模块表示；
+- 当前 `SGEN` 源码快照路径应被视为 reference compiler 的过渡实现细节，而不是第二套永久模块接口机制。
+
+原因是架构层面的，而不是样式层面的。Imported generic monomorphization 与 imported constexpr evaluation，本质上都是“跨模块消费前端 body graph”。如果为 generics 保留一套 source-snapshot 路径、为 constexpr 再引入一套 structured-AST 路径，那么可达性规则、版本化、反序列化、语义重新挂接逻辑都会被重复维护两次，但它们承载的其实是同一种 payload。
 
 ## 4.5 诊断与错误分类
 
@@ -621,21 +642,36 @@ note: format string expects 3 arguments, but call supplies 2
 
 ## 6. 分阶段实现计划
 
-## Phase A — 语法、AST、接口保留管线
+## Phase A — 语法、AST 与序列化模式
 
 1. 为 `constexpr` / `consteval` 增加 lexer token
 2. 增加 `FunctionEvalMode`、变量 `is_constexpr`、以及 `if consteval` 的 AST 标记
 3. 解析带这些说明符的函数 / 构造函数声明
-4. 把 `should_keep_function_body_in_interface` 从“只保留 generic body”扩展到“保留导出的 constexpr/consteval compile-time body”[^driver-keep-body]
-5. 让 `.scppm` 导入真正恢复 compile-time body block，而不是像现在一样忽略[^driver-scppm-read]
+4. 定义一个带版本号的结构化 `.scppm` AST 载荷格式，用于承载编译期相关定义
+5. 标记 exported generic / `constexpr` / `consteval` 根节点，并计算必须随之序列化的可达 helper/type 图
 
 可独立合并 / 测试：
 
 - parser 测试
-- AST round-trip / module-interface 测试
+- AST 序列化模式测试
+- 导出编译期定义的可达性测试
 - 暂不需要解释器
 
-## Phase B — 参数包推导重构
+## Phase B — 结构化 `.scppm` 序列化 / 反序列化
+
+1. 对 exported generic 与 constexpr 相关定义序列化真实 AST 节点，而不是源码快照
+2. 导入时反序列化这些 AST 节点，并在 importing compiler session 中重新挂接符号 / 类型身份
+3. 用结构化表示取代当前 generics-only 的 source snapshot 路径
+4. 对不携带所需结构化载荷的旧 `.scppm` 文件给出清晰拒绝诊断
+5. 增加聚焦的跨模块测试，覆盖 imported generic body 与 imported `consteval` helper
+
+可独立合并 / 测试：
+
+- module-interface round-trip 测试
+- imported generic body 测试
+- imported constexpr body 可用性测试
+
+## Phase C — 参数包推导重构
 
 1. 把 full-header generic-call monomorphization 重构为“收集约束 + 求解”
 2. 加入 deferred compatibility obligation
@@ -651,21 +687,22 @@ note: format string expects 3 arguments, but call supplies 2
 - 还不依赖 constexpr 引擎
 - 单独这一阶段就应该让 `format_string<Args...>` 这种参数形状“能被推导到位”
 
-## Phase C — 最小可用 consteval 引擎
+## Phase D — 最小可用 constexpr / consteval 引擎
 
 1. 加入 `ConstexprError`、`ConstValue`、`ConstexprEngine`
-2. 支持标量局部、字符串字面量、数组、只读 span、`if`、`while`、`return`、递归
-3. 对 unsafe / FFI / 动态分配路径显式拒绝
-4. 把 `consteval` 调用接进语义检查
-5. 加入预算超限诊断
+2. 支持标量局部（包括浮点值）、字符串字面量、数组、只读 span、`if`、`while`、`return`、递归
+3. 在常量表达式上下文里同时支持检查型浮点算术 / 比较与整数算术
+4. 对 unsafe / FFI / 动态分配路径显式拒绝
+5. 把 `consteval` 调用接进语义检查
+6. 加入预算超限诊断
 
 可独立合并 / 测试：
 
-- 整数 / 字符 / 字符串上的 immediate function
+- 整数 / 字符 / 浮点 / 字符串上的 immediate function
 - 编译期字符串解析器微型测试
 - imported module consteval helper 测试
 
-## Phase D — 真正的 `constexpr` 与 required constant-expression context
+## Phase E — 真正的 `constexpr` 与 required constant-expression context
 
 1. 允许 `constexpr` 函数与构造函数
 2. 为以下位置加入“这里要求常量表达式”的检查：
@@ -679,8 +716,9 @@ note: format string expects 3 arguments, but call supplies 2
 
 - 同一个函数既可编译期调用也可运行期调用
 - `if consteval` 的分支选择测试
+- 浮点 constexpr 变量 / helper 测试
 
-## Phase E — 与 `<format>` / `<print>` 标准库整合
+## Phase F — 与 `<format>` / `<print>` 标准库整合
 
 1. 加入 `std::format_string<Args...>`
 2. 把当前 runtime validator 改写成 constexpr-friendly helper
@@ -693,7 +731,7 @@ note: format string expects 3 arguments, but call supplies 2
 - `std::print` / `std::println` 的正反向 blackbox tests
 - imported `std` module tests
 
-## Phase F — 扩展 constexpr 子集
+## Phase G — 扩展 constexpr 子集
 
 后续如果需要，再逐步加入：
 
@@ -703,24 +741,22 @@ note: format string expects 3 arguments, but call supplies 2
 - 更丰富的指针语义
 - 如果性能分析显示 AST-walk 成瓶颈，再考虑 bytecode/MIR 层
 
-## 7. 需要评审确认的开放问题
+## 7. 最终定稿设计决议
 
-1. **v1 的 class 支持边界究竟画在哪里？**
-   本文建议“constexpr-compatible 字段 + constexpr/consteval 构造函数，但不执行用户自定义析构代码”。这已经足够覆盖 `format_string` 与许多值包装器，但仍建议在实现前由人工评审确认这个截断点是否合适。
+用户评审已经把最后几个分叉全部定下来了。最终设计决议如下：
 
-2. **compile-time body block 继续保持“源码快照”形式，还是一开始就做结构化格式？**
-   复用现有“整份源码快照”的方式风险最低，因为 generic 已经这么做了。[^driver-sgen] 但从长远看，结构化序列化 AST 片段会更干净，只是第一版实现成本更高。
-
-3. **浮点 constexpr 算术应进入第一版，还是进入第一轮扩展？**
-   `format_string` 这个 worked example 并不需要它。本文把“整数/字符/字符串子集”作为硬性 v1 目标，而把浮点支持留给更后面的 widening phase。
+1. **v1 的 class 支持边界保持原推荐方案：** constexpr-compatible 字段，加上 `constexpr` / `consteval` 构造函数，但 v1 不执行用户自定义析构逻辑。
+2. **`.scppm` 的编译期载荷从一开始就采用结构化 AST 序列化，而不是继续复用源码快照。**
+3. **generic body 与 constexpr body 的跨模块传输统一走这一套结构化序列化机制，不长期维护两套永久机制。**
+4. **浮点 constexpr 算术进入 v1，而不是放到后续 widening phase。**
 
 ## 8. 最终建议
 
 最务实的落地顺序是：
 
-1. **先落参数包推导重构**；
-2. **再落一个前端 AST immediate-function 解释器**；
-3. **把 constexpr/consteval/generic 相关函数体穿过 `.scppm`**，让 imported module 也能做编译期求值；
+1. **先落 `.scppm` 的结构化 AST 序列化 / 反序列化能力，用来承载编译期相关载荷**；
+2. **再落参数包推导重构**；
+3. **第三步落前端 AST 解释器，直接把浮点支持也纳入 v1**；
 4. **用 `std::format_string<Args...>` 作为第一证明用例**；
 5. **先交付一个文档明确的子集，而不是等到“完整 C++ constexpr 对等”再发。**
 
@@ -734,7 +770,6 @@ note: format string expects 3 arguments, but call supplies 2
 [^driver-pipeline]: `scpp-reference/src/driver.cppm:660-701`.
 [^driver-sgen]: `scpp-reference/src/driver.cppm:86-121`.
 [^driver-scppm-read]: `scpp-reference/src/driver.cppm:211-243`.
-[^driver-keep-body]: `scpp-reference/src/driver.cppm:273-275`.
 [^lexer-keywords]: `scpp-reference/src/lexer.cppm:40-126,240-276`.
 [^ast-function]: `scpp-reference/src/ast.cppm:553-724`.
 [^ast-stmt]: `scpp-reference/src/ast.cppm:468-525`.

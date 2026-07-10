@@ -76,7 +76,7 @@ That existing helper is still valuable: it shows the codebase is already comfort
 
 Current `.scppm` writing keeps full source bodies only for exported generic definitions, via the optional `SGEN` block, and current `.scppm` reading explicitly ignores that block entirely.[^driver-sgen][^driver-scppm-read]
 
-That is insufficient for imported `constexpr` / `consteval` code. If user code imports `std::format_string`, the importer must be able to evaluate the exported constructor body and its private helper functions during semantic checking. So compile-time bodies must become a **first-class module-interface payload**, not generic-only baggage.
+That is insufficient for imported `constexpr` / `consteval` code, and it is also not the right long-term architecture for modules. If user code imports `std::format_string`, the importer must be able to evaluate the exported constructor body and its private helper functions during semantic checking. The settled direction of this design is therefore: compile-time-relevant definitions should travel through `.scppm` as **structured serialized AST**, not as source snapshots to be reparsed later.
 
 ## 2. Research findings from mature systems
 
@@ -218,6 +218,7 @@ The first engine should support compile-time evaluation of:
 
 - scalar literals and scalar locals:
   - `bool`, `char`, `int`, `long`, unsigned integer variants already modeled by the frontend;
+  - `float`, `double`, and the project's existing floating-point scalar family where already modeled by the frontend/codegen;
 - string literals, represented as immutable static byte arrays but still surface-typed as `const char*` for compatibility with current scpp typing/codegen behavior;[^movecheck-string][^codegen-string]
 - null pointers and pointers into immutable static storage created by string literals or constexpr globals;
 - fixed-size arrays of constexpr-compatible element types;
@@ -238,6 +239,7 @@ The first engine should support compile-time evaluation of:
   - `return`
   - recursion
 - ordinary function calls to `constexpr` and `consteval` functions;
+- floating-point arithmetic and comparison in checked constant-expression contexts, with compile-time rejection for engine-visible invalid operations such as division by zero in the same spirit as ordinary constant-expression failure;[^cpp-constant-expression]
 - compile-time evaluation of expanded folds / pack-expanded helper code **after monomorphization**.
 
 That subset is enough for:
@@ -471,14 +473,33 @@ This cache should be keyed by `(function name, concrete argument values/types, t
 
 Current `.scppm` support is generic-only and currently unread on import.[^driver-sgen][^driver-scppm-read]
 
-Extend it as follows:
+The settled design is to replace that source-snapshot direction with **structured AST serialization** from the outset.
 
-1. broaden the optional source snapshot block from “generic bodies” to **compile-time bodies**;
-2. keep the current “whole source snapshot + exported entrypoint names” idea, because imported constexpr evaluation may need private helper functions in the same source;
-3. treat exported `constexpr`, `consteval`, and generic definitions the same way for interface retention;
-4. on import, actually parse and retain this block instead of discarding it.
+### Structured AST payload
 
-Whether the block is still called `SGEN` or renamed to something broader is an implementation detail; semantically it becomes the **compile-time body block**.
+`.scppm` should gain a structured “compile-time AST” section containing serialized AST nodes, not source text. That section should store:
+
+1. exported `constexpr` and `consteval` definitions;
+2. exported generic definitions;
+3. any private helper definitions, type definitions, and constant initializers reachable from those exported compile-time-relevant definitions;
+4. enough symbol/type metadata to reconnect the deserialized nodes to the importing module's semantic environment without reparsing source text.
+
+### Why structured AST now
+
+This is the more ambitious v1 path, but it is the right one.
+
+- It matches the architecture mature module implementations converge on: imported templates and constexpr-evaluable entities are carried as compiler-readable structured frontend state, not as raw source text snapshots to be reparsed by every importer.
+- It avoids baking a header-era “reparse source in every consumer” model into scpp's module system just as the language is adding its first real cross-module compile-time execution story.
+- It gives generics and constexpr bodies the same long-term representation boundary.
+
+### Recommendation on coexistence vs unification
+
+This document recommends **unification, not coexistence**:
+
+- the new structured serialization mechanism should become the cross-module representation for both constexpr-evaluable bodies **and** scpp's existing exported generic bodies;
+- the current `SGEN` source snapshot path should be treated as a transitional implementation detail of the reference compiler, not as a second permanent module-interface mechanism.
+
+The reason is architectural, not cosmetic. Imported generic monomorphization and imported constexpr evaluation are both consuming frontend body graphs across a module boundary. Maintaining one source-snapshot path for generics and one structured-AST path for constexpr would duplicate reachability rules, versioning, deserialization, and semantic reattachment logic for two pieces of functionality that are fundamentally the same kind of payload.
 
 ## 4.5 Diagnostics and error taxonomy
 
@@ -625,23 +646,38 @@ That is the exact motivating gap solved end-to-end.
 
 ## 6. Phased implementation plan
 
-## Phase A — syntax, AST, and interface retention plumbing
+## Phase A — syntax, AST, and serialization schema
 
 1. add lexer tokens for `constexpr` / `consteval`
 2. add `FunctionEvalMode`, variable `is_constexpr`, and `if consteval` AST flags
 3. parse function/constructor declarations carrying those specifiers
-4. broaden `should_keep_function_body_in_interface` to retain exported constexpr/consteval bodies as compile-time bodies, not just generics[^driver-keep-body]
-5. teach `.scppm` loading to recover the compile-time body block rather than ignoring it[^driver-scppm-read]
+4. define a versioned structured `.scppm` AST payload format for compile-time-relevant definitions
+5. mark exported generic / `constexpr` / `consteval` roots and compute the reachable helper/type graph that must be serialized with them
 
 Merge/testability:
 
 - parser tests
-- AST round-trip / module-interface tests
+- AST serialization-schema tests
+- reachability tests over exported compile-time definitions
 - no evaluator yet
 
-## Phase B — generic pack-deduction refactor
+## Phase B — structured `.scppm` serialization / deserialization
 
-1. refactor full-header generic-call monomorphization into constraint collection + solving
+1. serialize structured AST nodes for exported generic and constexpr-relevant definitions instead of source snapshots
+2. deserialize those AST nodes on import and reattach symbol/type identity in the importing compiler session
+3. replace the current generics-only source snapshot path with the structured representation
+4. preserve backward rejection with a clear diagnostic for older `.scppm` files that do not carry the required structured payload
+5. add focused cross-module tests for imported generic bodies and imported `consteval` helpers
+
+Merge/testability:
+
+- module-interface round-trip tests
+- imported generic body tests
+- imported constexpr body availability tests
+
+## Phase C — generic pack-deduction refactor
+
+1. refactor full-header-form generic-call monomorphization into constraint collection + solving
 2. add deferred compatibility obligations
 3. add `substitute_type_pack(...)` for earlier dependent parameter types
 4. preserve existing tuple/base-class deduction as one constraint producer
@@ -655,21 +691,22 @@ Merge/testability:
 - no constexpr engine required yet
 - this phase alone should make the `format_string<Args...>` parameter shape resolvable
 
-## Phase C — minimal consteval engine
+## Phase D — minimal constexpr / consteval engine
 
 1. add `ConstexprError`, `ConstValue`, `ConstexprEngine`
-2. support scalar locals, string literals, arrays, read-only spans, `if`, `while`, `return`, recursion
-3. reject unsafe/FFI/dynamic-allocation paths explicitly
-4. wire `consteval` calls into semantic checking
-5. add budget exhaustion diagnostics
+2. support scalar locals including floating-point values, string literals, arrays, read-only spans, `if`, `while`, `return`, recursion
+3. support checked floating-point arithmetic/comparison alongside integer arithmetic in constant-expression contexts
+4. reject unsafe/FFI/dynamic-allocation paths explicitly
+5. wire `consteval` calls into semantic checking
+6. add budget exhaustion diagnostics
 
 Merge/testability:
 
-- immediate functions over ints/chars/strings
+- immediate functions over ints/chars/floats/strings
 - compile-time string parser micro-tests
 - imported-module consteval helper tests
 
-## Phase D — `constexpr` proper and required constant-expression contexts
+## Phase E — `constexpr` proper and required constant-expression contexts
 
 1. allow `constexpr` functions and constructors
 2. add required constant-expression checking for:
@@ -683,8 +720,9 @@ Merge/testability:
 
 - same function callable both at compile time and runtime
 - branch-selection tests for `if consteval`
+- floating-point constexpr variable / helper tests
 
-## Phase E — stdlib integration for `<format>` / `<print>`
+## Phase F — stdlib integration for `<format>` / `<print>`
 
 1. add `std::format_string<Args...>`
 2. port current runtime validator into constexpr-friendly helpers
@@ -697,7 +735,7 @@ Merge/testability:
 - positive/negative blackbox tests for `std::print` / `std::println`
 - imported `std` module tests
 
-## Phase F — widening the constexpr subset
+## Phase G — widening the constexpr subset
 
 Later, if needed:
 
@@ -707,24 +745,22 @@ Later, if needed:
 - richer pointer semantics
 - optional bytecode/MIR layer if profiling shows AST-walking is a bottleneck
 
-## 7. Open design questions for review
+## 7. Final settled design decisions
 
-1. **How far should v1 class support go?**
-   This draft recommends “constexpr-compatible fields + constexpr/consteval constructors, but no user-defined destructor execution”. That is enough for `format_string` and many value-like wrappers, but human review should confirm whether that cutoff is the right first merge target.
+User review has now resolved the remaining forks. The final design decisions are:
 
-2. **Should the compile-time body block stay source-based or grow a structured format immediately?**
-   Reusing the current whole-source-snapshot approach is the lowest-risk path because it already exists for generics.[^driver-sgen] A structured serialization of AST fragments may be better long-term, but it is more implementation work up front.
-
-3. **Should float constexpr arithmetic be in the first engine or the first widening phase?**
-   The worked `format_string` use case does not need it. The design above keeps the integer/character/string subset as the hard v1 requirement and leaves float support easy to add later.
+1. **Keep v1 class support at the originally recommended boundary:** constexpr-compatible fields plus `constexpr`/`consteval` constructors, but no user-defined destructor execution in v1.
+2. **Adopt structured AST serialization immediately for `.scppm` compile-time payloads, rather than reusing source snapshots.**
+3. **Unify generic-body and constexpr-body cross-module transport on that one structured serialization mechanism, instead of maintaining two permanent mechanisms.**
+4. **Include floating-point constexpr arithmetic in v1, not in a later widening phase.**
 
 ## 8. Final recommendation
 
 The practical recommendation is:
 
-1. **land the pack-deduction refactor first**;
-2. **land a frontend AST interpreter for immediate functions second**;
-3. **carry constexpr-relevant bodies through `.scppm`** so imported modules can be evaluated;
+1. **land structured AST serialization/deserialization for compile-time-relevant `.scppm` payloads first**;
+2. **land the pack-deduction refactor second**;
+3. **land a frontend AST interpreter for `constexpr` / `consteval` third, with floating-point support already in v1**;
 4. **use `std::format_string<Args...>` as the first proving example**;
 5. **ship a documented subset instead of waiting for full C++ constexpr parity**.
 
@@ -738,7 +774,6 @@ That gives scpp the smallest architecture that is still genuinely general-purpos
 [^driver-pipeline]: `scpp-reference/src/driver.cppm:660-701`.
 [^driver-sgen]: `scpp-reference/src/driver.cppm:86-121`.
 [^driver-scppm-read]: `scpp-reference/src/driver.cppm:211-243`.
-[^driver-keep-body]: `scpp-reference/src/driver.cppm:273-275`.
 [^lexer-keywords]: `scpp-reference/src/lexer.cppm:40-126,240-276`.
 [^ast-function]: `scpp-reference/src/ast.cppm:553-724`.
 [^ast-stmt]: `scpp-reference/src/ast.cppm:468-525`.
