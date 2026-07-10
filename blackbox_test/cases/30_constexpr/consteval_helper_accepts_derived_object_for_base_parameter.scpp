@@ -1,0 +1,26 @@
+template<typename... Ts> class TagList;
+
+template<>
+class TagList<> {
+public:
+    TagList() { return; }
+};
+
+template<typename Head, typename... Tail>
+class TagList<Head, Tail...> : private TagList<Tail...> {
+public:
+    TagList() { return; }
+};
+
+consteval int take(TagList<> tags) {
+    return 41;
+}
+
+consteval int answer() {
+    TagList<int, bool> tags;
+    return take(tags);
+}
+
+int main() {
+    return answer();
+}

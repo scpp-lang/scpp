@@ -1443,6 +1443,76 @@ void run_consteval_tests() {
     }
 
     {
+        std::string case_name = "consteval_helper_call_accepts_derived_object_for_base_parameter";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_helper_call_accepts_derived_object_for_base_parameter_exe";
+        scpp::compile_to_executable(
+            "template<typename... Ts> class TagList;\n"
+            "template<>\n"
+            "class TagList<> {\n"
+            "public:\n"
+            "    TagList() { return; }\n"
+            "};\n"
+            "template<typename Head, typename... Tail>\n"
+            "class TagList<Head, Tail...> : private TagList<Tail...> {\n"
+            "public:\n"
+            "    TagList() { return; }\n"
+            "};\n"
+            "consteval int take(TagList<> tags) {\n"
+            "    return 41;\n"
+            "}\n"
+            "consteval int answer() {\n"
+            "    TagList<int, bool> tags;\n"
+            "    return take(tags);\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 41;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected derived-to-base consteval helper call to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "consteval_helper_call_accepts_derived_object_for_base_reference_parameter";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() /
+                                         "consteval_helper_call_accepts_derived_object_for_base_reference_parameter_exe";
+        scpp::compile_to_executable(
+            "template<typename... Ts> class TagList;\n"
+            "template<>\n"
+            "class TagList<> {\n"
+            "public:\n"
+            "    TagList() { return; }\n"
+            "};\n"
+            "template<typename Head, typename... Tail>\n"
+            "class TagList<Head, Tail...> : private TagList<Tail...> {\n"
+            "public:\n"
+            "    TagList() { return; }\n"
+            "};\n"
+            "consteval int take_ref(const TagList<>& tags) {\n"
+            "    return 41;\n"
+            "}\n"
+            "consteval int answer() {\n"
+            "    TagList<int, bool> tags;\n"
+            "    return take_ref(tags);\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 41;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected derived-to-base consteval ref call to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
         std::string case_name = "consteval_rejects_runtime_only_call";
         cases_run++;
         bool threw = false;
