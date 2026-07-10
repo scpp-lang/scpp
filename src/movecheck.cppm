@@ -4784,6 +4784,11 @@ private:
                 if (tp.is_pack && !tp.is_non_type && tp.name == type.name) return tp.name;
             }
         }
+        for (const Type& arg : type.template_args) {
+            if (std::optional<std::string> found = referenced_type_pack_param_name(arg, template_params)) {
+                return found;
+            }
+        }
         if (type.pointee) {
             if (std::optional<std::string> found =
                     referenced_type_pack_param_name(*type.pointee, template_params)) {
@@ -4793,6 +4798,17 @@ private:
         if (type.element) {
             if (std::optional<std::string> found =
                     referenced_type_pack_param_name(*type.element, template_params)) {
+                return found;
+            }
+        }
+        if (type.function_return) {
+            if (std::optional<std::string> found =
+                    referenced_type_pack_param_name(*type.function_return, template_params)) {
+                return found;
+            }
+        }
+        for (const Type& param : type.function_params) {
+            if (std::optional<std::string> found = referenced_type_pack_param_name(param, template_params)) {
                 return found;
             }
         }

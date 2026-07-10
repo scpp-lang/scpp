@@ -1,0 +1,20 @@
+template<typename T>
+class Token {
+public:
+    Token() { return; }
+};
+
+int classify(const Token<int>& a, const Token<char>& b) {
+    return 42;
+}
+
+template<typename... Tail>
+int forward_tokens(const Token<Tail>&... tokens) {
+    return classify(tokens...);
+}
+
+int main() {
+    Token<int> a;
+    Token<char> b;
+    return forward_tokens(a, b);
+}

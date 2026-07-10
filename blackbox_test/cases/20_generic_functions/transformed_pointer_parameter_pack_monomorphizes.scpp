@@ -1,0 +1,16 @@
+int pair_sum(int* a, int* b) {
+    [[scpp::unsafe]] {
+        return *a + *b;
+    }
+}
+
+template<typename... Tail>
+int forward_ptrs(Tail*... ptrs) {
+    return pair_sum(ptrs...);
+}
+
+int main() {
+    int x = 40;
+    int y = 2;
+    return forward_ptrs(&x, &y);
+}
