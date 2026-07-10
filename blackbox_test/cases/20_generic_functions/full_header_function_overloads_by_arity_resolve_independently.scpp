@@ -1,0 +1,13 @@
+template<typename T>
+int choose(T x) {
+    return 1;
+}
+
+template<typename T, typename U>
+int choose(T x, U y) {
+    return 2;
+}
+
+int main() {
+    return choose(7) + choose(7, 8);
+}
