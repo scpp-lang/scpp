@@ -6339,6 +6339,7 @@ private:
             }
             std::vector<GenericTypeParam> params_copy = base_case_tmpl->template_params;
             std::string owner_id_copy = base_case_tmpl->template_owner_id;
+            std::vector<ClassField> fields_copy = base_case_tmpl->fields;
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             ClassDef concrete;
             concrete.name = cache_key;
@@ -6353,6 +6354,7 @@ private:
                 concrete.thread_movable_if_shareable_expr = clone_expr(*base_case_tmpl->thread_movable_if_shareable_expr);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
             }
+            for (const ClassField& field : fields_copy) concrete.fields.push_back(field);
             program_.classes.push_back(std::move(concrete));
             clone_variadic_class_methods(cache_key, template_name, owner_id_copy, methods, params_copy,
                                          /*type_replacements=*/{}, /*pack_replacements=*/{}, non_type_args);

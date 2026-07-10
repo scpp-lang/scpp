@@ -1,0 +1,18 @@
+template<typename... Ts>
+class Box;
+
+template<>
+class Box<> {
+public:
+    int value;
+    consteval Box(const char* s) {
+        this->value = 7;
+        return;
+    }
+    int get() const { return this->value; }
+};
+
+int main() {
+    Box<> b("hi");
+    return b.get() - 7;
+}
