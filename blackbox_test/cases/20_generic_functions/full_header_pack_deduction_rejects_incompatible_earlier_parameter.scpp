@@ -1,0 +1,21 @@
+template<typename Sig>
+class Holder;
+
+template<typename R, typename... Params>
+class Holder<R(Params...)> {
+public:
+    R (*fn_)(Params...);
+};
+
+int add(int a, int b) { return a + b; }
+
+template<typename... Args>
+int invoke(Holder<int(Args...)>& h, Args&&... args) {
+    return h.fn_(args...);
+}
+
+int main() {
+    Holder<int(int, int)> h;
+    h.fn_ = add;
+    return invoke(h, 7);
+}

@@ -946,6 +946,132 @@ void run_generic_type_tests() {
                               "argument doesn't satisfy to fail");
 }
 
+void run_generic_pack_deduction_tests() {
+    {
+        std::string case_name = "generic_pack_deduction_substitutes_later_args_into_earlier_function_type";
+        cases_run++;
+        std::string source =
+            "template<typename Sig>\n"
+            "class Holder;\n"
+            "\n"
+            "template<typename R, typename... Params>\n"
+            "class Holder<R(Params...)> {\n"
+            "public:\n"
+            "    R (*fn_)(Params...);\n"
+            "};\n"
+            "\n"
+            "int add(int a, int b) { return a + b; }\n"
+            "\n"
+            "template<typename... Args>\n"
+            "int invoke(Holder<int(Args...)>& h, Args&&... args) {\n"
+            "    return h.fn_(args...);\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    Holder<int(int, int)> h;\n"
+            "    h.fn_ = add;\n"
+            "    return invoke(h, 19, 23) - 42;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected later Args... deduction to make the earlier Holder<int(Args...)> "
+                                    "parameter type compatible");
+    }
+
+    {
+        std::string case_name = "generic_pack_deduction_supports_explicit_and_deduced_mixed_arguments";
+        cases_run++;
+        std::string source =
+            "template<typename Sig>\n"
+            "class Holder;\n"
+            "\n"
+            "template<typename R, typename... Params>\n"
+            "class Holder<R(Params...)> {\n"
+            "public:\n"
+            "    R (*fn_)(Params...);\n"
+            "};\n"
+            "\n"
+            "int add(int a, int b) { return a + b; }\n"
+            "\n"
+            "template<typename R, typename... Args>\n"
+            "R invoke(Holder<R(Args...)>& h, Args&&... args) {\n"
+            "    return h.fn_(args...);\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    Holder<int(int, int)> h;\n"
+            "    h.fn_ = add;\n"
+            "    return invoke<int>(h, 20, 22) - 42;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected explicit R plus deduced Args... to instantiate successfully");
+    }
+
+    {
+        std::string case_name = "generic_pack_deduction_rejects_incompatible_earlier_parameter_after_substitution";
+        cases_run++;
+        std::string source =
+            "template<typename Sig>\n"
+            "class Holder;\n"
+            "\n"
+            "template<typename R, typename... Params>\n"
+            "class Holder<R(Params...)> {\n"
+            "public:\n"
+            "    R (*fn_)(Params...);\n"
+            "};\n"
+            "\n"
+            "int add(int a, int b) { return a + b; }\n"
+            "\n"
+            "template<typename... Args>\n"
+            "int invoke(Holder<int(Args...)>& h, Args&&... args) {\n"
+            "    return h.fn_(args...);\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    Holder<int(int, int)> h;\n"
+            "    h.fn_ = add;\n"
+            "    return invoke(h, 7);\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected a mismatched earlier dependent parameter to be rejected");
+    }
+}
+
 void run_functional_tests() {
     std::string case_name = "std_function_rejects_move_only_target";
     cases_run++;
@@ -2045,6 +2171,7 @@ int main() {
     run_module_system_tests();
     run_concept_tests();
     run_generic_type_tests();
+    run_generic_pack_deduction_tests();
     run_functional_tests();
     run_thread_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
