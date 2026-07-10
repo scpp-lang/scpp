@@ -6413,6 +6413,7 @@ private:
     void deduce_via_base_class_chain(const Expr& expr, size_t arg_index, const Type& pattern, Body& body,
                                       std::unordered_map<std::string, Type>& type_bindings,
                                       std::unordered_map<std::string, int>& value_bindings,
+                                      std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
                                       std::vector<std::pair<size_t, Type>>& upcasts) {
         std::vector<int> search_non_type_values;
         search_non_type_values.reserve(pattern.non_type_args.size());
@@ -6457,9 +6458,22 @@ private:
 
         size_t ti = 0;
         for (const Type& sym : pattern.template_args) {
-            if (sym.is_pack_expansion) break; // the doc's own examples never use the pack itself directly
+            if (sym.is_pack_expansion) {
+                std::vector<Type> remaining_types;
+                for (; ti < matched->type_args.size(); ti++) remaining_types.push_back(matched->type_args[ti]);
+                if (!bind_type_pack_binding(pack_bindings, sym.name, remaining_types)) {
+                    throw DataflowError("deduced types for template parameter pack '" + sym.name +
+                                            "' disagree across base-class-deduction and later arguments",
+                        expr.loc);
+                }
+                break;
+            }
             if (ti < matched->type_args.size()) {
-                type_bindings[sym.name] = matched->type_args[ti];
+                if (!bind_type_binding(type_bindings, sym.name, matched->type_args[ti])) {
+                    throw DataflowError("deduced type for template parameter '" + sym.name +
+                                            "' disagrees across base-class-deduction and later arguments",
+                        expr.loc);
+                }
                 ti++;
             }
         }
@@ -6719,6 +6733,40 @@ private:
         return false;
     }
 
+    [[nodiscard]] bool argument_type_can_participate_in_variadic_base_deduction(const Expr& expr, size_t arg_index,
+                                                                                 const std::string& template_name,
+                                                                                 Body& body) {
+        if (arg_index >= expr.args.size()) return false;
+        std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_index], body, signatures_);
+        if (!arg_type.has_value()) return false;
+        Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+
+        std::string current_name = named.name;
+        while (true) {
+            auto it = variadic_instance_info_.find(current_name);
+            if (it != variadic_instance_info_.end() && it->second.template_name == template_name) return true;
+            const ClassDef* cd = nullptr;
+            for (const ClassDef& c : program_.classes) {
+                if (c.name == current_name) {
+                    cd = &c;
+                    break;
+                }
+            }
+            if (!cd || cd->base_class_name.empty()) break;
+            current_name = cd->base_class_name;
+        }
+        return false;
+    }
+
+    [[nodiscard]] static bool type_still_depends_on_unbound_template_params(
+        Type type, const std::vector<GenericTypeParam>& template_params,
+        const std::unordered_map<std::string, Type>& type_bindings,
+        const std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
+        for (const auto& [name, replacement] : type_bindings) type = substitute_type_param(type, name, replacement);
+        type = substitute_type_packs(type, pack_bindings);
+        return type_depends_on_template_params(type, template_params);
+    }
+
     [[nodiscard]] Type apply_template_bindings_to_type(
         Type type, const std::unordered_map<std::string, Type>& type_bindings,
         const std::unordered_map<std::string, std::vector<Type>>& pack_bindings, SourceLocation loc) {
@@ -6764,6 +6812,7 @@ private:
             try {
                 std::unordered_map<std::string, Type> type_bindings;
                 std::unordered_map<std::string, int> value_bindings;
+                std::unordered_map<std::string, std::vector<Type>> pack_bindings;
                 std::vector<std::pair<size_t, Type>> upcasts;
                 std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
 
@@ -6804,7 +6853,8 @@ private:
                         Expr fake_call;
                         fake_call.loc = loc;
                         for (const ExprPtr& arg : args) fake_call.args.push_back(clone_expr(*arg));
-                        deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings, value_bindings,
+                        deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings,
+                                                    value_bindings, pack_bindings,
                                                     upcasts);
                     }
                     arg_cursor++;
@@ -7130,10 +7180,18 @@ private:
                     continue;
                 }
                 if (variadic_generic_type_names_.contains(underlying.name)) {
-                    ExprPtr expr_copy_for_base_deduction = clone_expr(expr);
-                    deduce_via_base_class_chain(*expr_copy_for_base_deduction, arg_cursor, underlying, body,
-                                                resolution.type_bindings, resolution.value_bindings,
-                                                resolution.upcasts);
+                    if (argument_type_can_participate_in_variadic_base_deduction(*expr_copy, arg_cursor, underlying.name,
+                                                                                 body)) {
+                        ExprPtr expr_copy_for_base_deduction = clone_expr(expr);
+                        deduce_via_base_class_chain(*expr_copy_for_base_deduction, arg_cursor, underlying, body,
+                                                    resolution.type_bindings, resolution.value_bindings,
+                                                    resolution.pack_bindings, resolution.upcasts);
+                    }
+                    if (type_still_depends_on_unbound_template_params(param_type, tmpl.template_params,
+                                                                      resolution.type_bindings,
+                                                                      resolution.pack_bindings)) {
+                        resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                    }
                     arg_cursor++;
                     continue;
                 }
@@ -7463,7 +7521,14 @@ private:
             // Case B: a base-class-deduction pattern (e.g.
             // "TupleImpl<I, Head, Tail...>& t").
             if (variadic_generic_type_names_.contains(underlying.name)) {
-                deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings, upcasts);
+                if (argument_type_can_participate_in_variadic_base_deduction(expr, arg_cursor, underlying.name, body)) {
+                    deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings,
+                                                pack_bindings, upcasts);
+                }
+                if (type_still_depends_on_unbound_template_params(param_type, tmpl.template_params, type_bindings,
+                                                                  pack_bindings)) {
+                    deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                }
                 arg_cursor++;
                 continue;
             }

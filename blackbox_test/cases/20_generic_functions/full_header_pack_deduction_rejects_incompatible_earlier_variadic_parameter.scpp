@@ -1,0 +1,17 @@
+template<typename... Args> class Box;
+
+template<>
+class Box<> {};
+
+template<typename Head, typename... Tail>
+class Box<Head, Tail...> : private Box<Tail...> {};
+
+template<typename... Args>
+int use(const Box<Args...>& fmt, Args&&... args) {
+    return 42;
+}
+
+int main() {
+    Box<int, bool> bad;
+    return use(bad, 1);
+}
