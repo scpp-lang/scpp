@@ -1070,6 +1070,78 @@ void run_generic_pack_deduction_tests() {
         }
         expect(threw, case_name + ": expected a mismatched earlier dependent parameter to be rejected");
     }
+
+    {
+        std::string case_name = "variadic_generic_parameter_is_checked_after_later_pack_deduction";
+        cases_run++;
+        std::string source =
+            "template<typename... Args> class Box;\n"
+            "\n"
+            "template<> class Box<> {};\n"
+            "\n"
+            "template<typename Head, typename... Tail>\n"
+            "class Box<Head, Tail...> : private Box<Tail...> {};\n"
+            "\n"
+            "template<typename... Args>\n"
+            "int use(const Box<Args...>& fmt, Args&&... args) {\n"
+            "    return 42;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    Box<int> ok;\n"
+            "    return use(ok, 1) - 42;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected Box<int> plus one later arg to satisfy Box<Args...>");
+    }
+
+    {
+        std::string case_name = "variadic_generic_parameter_rejects_mismatch_after_later_pack_deduction";
+        cases_run++;
+        std::string source =
+            "template<typename... Args> class Box;\n"
+            "\n"
+            "template<> class Box<> {};\n"
+            "\n"
+            "template<typename Head, typename... Tail>\n"
+            "class Box<Head, Tail...> : private Box<Tail...> {};\n"
+            "\n"
+            "template<typename... Args>\n"
+            "int use(const Box<Args...>& fmt, Args&&... args) {\n"
+            "    return 42;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    Box<int, bool> bad;\n"
+            "    return use(bad, 1) - 42;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected Box<int, bool> plus one later arg to be rejected as incompatible with "
+                                  "Box<Args...> after Args... deduces to <int>");
+    }
 }
 
 void run_generic_function_overload_tests() {
