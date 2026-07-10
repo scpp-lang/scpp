@@ -3007,6 +3007,37 @@ void test_variadic_specialization_with_leading_non_type_param_parses() {
            "base_non_type_arg set, base_pack_arg_name='Tail'");
 }
 
+void test_namespace_relative_qualified_generic_type_declaration_parses() {
+    scpp::Program program = scpp::parse(
+        "namespace m {\n"
+        "namespace detail {\n"
+        "template<typename Left, typename Right>\n"
+        "class Pair {\n"
+        "public:\n"
+        "    Pair() { return; }\n"
+        "};\n"
+        "}\n"
+        "int f() {\n"
+        "    detail::Pair<int, bool> pair;\n"
+        "    return 0;\n"
+        "}\n"
+        "}\n"
+        "int main() { return m::f(); }\n");
+    const scpp::Function* fn = find_function_named(program, "m::f");
+    expect(fn != nullptr, "namespace_relative_qualified_generic_type_declaration_parses: expected m::f");
+    expect(fn->body != nullptr && fn->body->statements.size() == 2,
+           "namespace_relative_qualified_generic_type_declaration_parses: expected local decl + return");
+    const scpp::Stmt& decl = *fn->body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl,
+           "namespace_relative_qualified_generic_type_declaration_parses: first stmt should be VarDecl");
+    expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "m::detail::Pair",
+           "namespace_relative_qualified_generic_type_declaration_parses: local type should resolve to "
+           "'m::detail::Pair'");
+    expect(decl.type.template_args.size() == 2 && is_named_type(decl.type.template_args[0], "int") &&
+               is_named_type(decl.type.template_args[1], "bool"),
+           "namespace_relative_qualified_generic_type_declaration_parses: expected <int, bool> template args");
+}
+
 void test_break_and_continue_parse_inside_loop() {
     scpp::Program program = scpp::parse(
         "int main() {\n"
@@ -3233,6 +3264,7 @@ int main() {
     test_explicit_type_template_argument_call_parses();
     test_explicit_non_type_template_argument_call_parses();
     test_variadic_specialization_with_leading_non_type_param_parses();
+    test_namespace_relative_qualified_generic_type_declaration_parses();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
