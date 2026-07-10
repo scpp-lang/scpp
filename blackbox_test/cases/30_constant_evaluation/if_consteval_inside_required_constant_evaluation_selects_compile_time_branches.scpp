@@ -1,0 +1,29 @@
+// spec §9.2(3)-(6): when a plain `constexpr` function is invoked in required
+// constant evaluation, `if consteval` must take its first branch and
+// `if !consteval` must take its `else` branch; the same function invoked at
+// runtime must take the opposite branches.
+consteval int ct_leaf(int x) {
+    return x + 40;
+}
+
+constexpr int via_if_consteval(int x) {
+    if consteval {
+        return ct_leaf(x);
+    } else {
+        return x + 1;
+    }
+}
+
+constexpr int via_if_not_consteval(int x) {
+    if !consteval {
+        return x + 2;
+    } else {
+        return ct_leaf(x);
+    }
+}
+
+int main() {
+    constexpr int compile_time = via_if_consteval(2) + via_if_not_consteval(2);
+    int runtime = via_if_consteval(2) + via_if_not_consteval(2);
+    return compile_time + runtime;
+}
