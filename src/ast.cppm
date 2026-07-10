@@ -465,6 +465,18 @@ enum class StmtKind {
     Block,
 };
 
+enum class FunctionEvalMode {
+    RuntimeOnly,
+    Constexpr,
+    Consteval,
+};
+
+enum class IfMode {
+    Runtime,
+    ConstevalTrue,
+    ConstevalFalse,
+};
+
 struct Stmt {
     StmtKind kind;
 
@@ -487,6 +499,10 @@ struct Stmt {
     // is_mutable_pointee and never set this flag (see parse_var_decl).
     // Always false for a Reference/Pointer-typed `type` above.
     bool is_const = false;
+    // True for a local declared `constexpr` -- syntactically distinct from
+    // `const`, but equally immutable once initialized. Phase A only records
+    // the spelling; constant-evaluation semantics land later.
+    bool is_constexpr = false;
 
     // VarDecl, class-typed only (ch04 §4.2): `ClassName name(args);`,
     // direct-initialization via an explicit constructor call --
@@ -505,6 +521,7 @@ struct Stmt {
 
     // If / While
     ExprPtr condition;
+    IfMode if_mode = IfMode::Runtime;
     StmtPtr then_branch;
     StmtPtr else_branch; // optional, If only
 
@@ -606,6 +623,9 @@ struct Function {
     // parses one declaration at a time and has no cross-declaration
     // view).
     bool is_unsafe = false;
+    // Records whether this declaration was spelled `constexpr` or
+    // `consteval`. RuntimeOnly is the ordinary pre-existing case.
+    FunctionEvalMode eval_mode = FunctionEvalMode::RuntimeOnly;
     // ch02 §2.1: the declaration ends in a trailing `...` (e.g.
     // `printf(const char* fmt, ...)`). Parsed and stored, but v0.1
     // doesn't yet support a *call site* passing extra arguments beyond

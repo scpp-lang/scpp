@@ -348,6 +348,17 @@ void test_concept_keywords() {
 }
 
 // ch05 §5.12: `mutable` for a lambda's own operator().
+void test_constexpr_and_consteval_keywords() {
+    expect_kinds(
+        "constexpr consteval",
+        {
+            scpp::TokenKind::KwConstexpr,
+            scpp::TokenKind::KwConsteval,
+            scpp::TokenKind::EndOfFile,
+        },
+        "constexpr_and_consteval_keywords");
+}
+
 void test_mutable_keyword() {
     expect_kinds(
         "mutable",
@@ -386,6 +397,7 @@ int main() {
     test_module_keywords();
     test_dotted_module_name();
     test_concept_keywords();
+    test_constexpr_and_consteval_keywords();
     test_mutable_keyword();
 
     if (failures > 0) {

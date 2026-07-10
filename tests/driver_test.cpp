@@ -992,6 +992,33 @@ void run_thread_tests() {
     expect(threw, case_name + ": expected std::jthread to reject a reference-capturing closure target");
 }
 
+void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
+    std::string case_name = "compile_time_payload_plan_collects_exported_roots_and_helpers";
+    cases_run++;
+    scpp::Program program = scpp::parse(
+        "export module math;\n"
+        "namespace math {\n"
+        "    class Helper { public: constexpr Helper(int v) { value = v; } int value; };\n"
+        "    int helper_value(const Helper& h) { return h.value; }\n"
+        "    export constexpr int answer() { Helper h(42); return helper_value(h); }\n"
+        "}\n");
+    scpp::CompileTimePayloadPlan plan = scpp::plan_compile_time_payload(program);
+    expect(plan.format_version == scpp::SCPPM_COMPILE_TIME_AST_VERSION,
+           case_name + ": expected compile-time payload format version 1");
+    expect(std::find(plan.root_function_names.begin(), plan.root_function_names.end(), "math::answer") !=
+               plan.root_function_names.end(),
+           case_name + ": expected exported constexpr function root");
+    expect(std::find(plan.reachable_function_names.begin(), plan.reachable_function_names.end(), "math::helper_value") !=
+               plan.reachable_function_names.end(),
+           case_name + ": expected private helper function to be reachable");
+    expect(std::find(plan.reachable_function_names.begin(), plan.reachable_function_names.end(), "math::Helper_new") !=
+               plan.reachable_function_names.end(),
+           case_name + ": expected constexpr constructor to be reachable");
+    expect(std::find(plan.reachable_type_names.begin(), plan.reachable_type_names.end(), "math::Helper") !=
+               plan.reachable_type_names.end(),
+           case_name + ": expected helper type to be reachable");
+}
+
 void run_cli_extension_tests() {
     {
         std::string case_name = "cli_build_module_emits_roundtrip_artifacts";
@@ -1899,6 +1926,7 @@ int main() {
     run_generic_type_tests();
     run_functional_tests();
     run_thread_tests();
+    test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_cli_extension_tests();
 
     if (failures > 0) {

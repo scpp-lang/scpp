@@ -1232,6 +1232,66 @@ void test_const_local_variable_without_initializer_is_rejected() {
     expect(threw, "const_local_variable_without_initializer_is_rejected: expected a ParseError");
 }
 
+// Phase A: `constexpr` / `consteval` syntax is now represented directly in
+// the AST so later constant-evaluation phases can consume it.
+void test_constexpr_function_parses() {
+    scpp::Program program = scpp::parse("constexpr int answer() { return 42; }\n");
+    expect(program.functions[0].eval_mode == scpp::FunctionEvalMode::Constexpr,
+           "constexpr_function_parses: eval_mode should be Constexpr");
+}
+
+void test_consteval_function_parses() {
+    scpp::Program program = scpp::parse("consteval int answer() { return 42; }\n");
+    expect(program.functions[0].eval_mode == scpp::FunctionEvalMode::Consteval,
+           "consteval_function_parses: eval_mode should be Consteval");
+}
+
+void test_constexpr_constructor_parses() {
+    scpp::Program program = scpp::parse("class Box { public: constexpr Box(int v) { value = v; } int value; };\n");
+    const scpp::Function* ctor = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Box_new") ctor = &fn;
+    }
+    expect(ctor != nullptr, "constexpr_constructor_parses: expected synthesized constructor function");
+    if (ctor) {
+        expect(ctor->eval_mode == scpp::FunctionEvalMode::Constexpr,
+               "constexpr_constructor_parses: ctor eval_mode should be Constexpr");
+    }
+}
+
+void test_constexpr_local_variable_parses() {
+    scpp::Program program = scpp::parse("int f() { constexpr int x = 5; return x; }\n");
+    const scpp::Stmt& decl = *program.functions[0].body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "constexpr_local_variable_parses: statement 0 should be VarDecl");
+    expect(decl.is_constexpr, "constexpr_local_variable_parses: is_constexpr should be true");
+    expect(!decl.is_const, "constexpr_local_variable_parses: is_const should stay false");
+}
+
+void test_constexpr_local_variable_without_initializer_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int f() { constexpr int x; return x; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "constexpr_local_variable_without_initializer_is_rejected: expected a ParseError");
+}
+
+void test_if_consteval_parses() {
+    scpp::Program program = scpp::parse("int f() { if consteval { return 1; } else { return 2; } }\n");
+    const scpp::Stmt& stmt = *program.functions[0].body->statements[0];
+    expect(stmt.kind == scpp::StmtKind::If, "if_consteval_parses: statement 0 should be If");
+    expect(stmt.if_mode == scpp::IfMode::ConstevalTrue, "if_consteval_parses: if_mode should be ConstevalTrue");
+    expect(stmt.else_branch != nullptr, "if_consteval_parses: else branch should be present");
+}
+
+void test_if_not_consteval_parses() {
+    scpp::Program program = scpp::parse("int f() { if !consteval { return 1; } else { return 2; } }\n");
+    const scpp::Stmt& stmt = *program.functions[0].body->statements[0];
+    expect(stmt.if_mode == scpp::IfMode::ConstevalFalse,
+           "if_not_consteval_parses: if_mode should be ConstevalFalse");
+}
+
 // ch11 §11.3: `export module name;` marks a primary interface unit.
 void test_export_module_declaration() {
     scpp::Program program = scpp::parse("export module std;\n");
@@ -2999,6 +3059,13 @@ int main() {
     test_const_local_variable_parses();
     test_ordinary_local_variable_is_not_const();
     test_const_local_variable_without_initializer_is_rejected();
+    test_constexpr_function_parses();
+    test_consteval_function_parses();
+    test_constexpr_constructor_parses();
+    test_constexpr_local_variable_parses();
+    test_constexpr_local_variable_without_initializer_is_rejected();
+    test_if_consteval_parses();
+    test_if_not_consteval_parses();
     test_export_module_declaration();
     test_dotted_module_name_declaration();
     test_plain_module_declaration_is_implementation_unit();

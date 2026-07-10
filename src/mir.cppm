@@ -278,7 +278,7 @@ private:
 
             case StmtKind::VarDecl: {
                 declare_local(stmt.var_name, stmt.type);
-                if (stmt.is_const) body_.const_locals.insert(stmt.var_name);
+                if (stmt.is_const || stmt.is_constexpr) body_.const_locals.insert(stmt.var_name);
                 if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
                     for (const LambdaCapture& capture : stmt.init->lambda_captures) {
                         if (capture.by_reference) {
