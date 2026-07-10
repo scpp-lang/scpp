@@ -4091,6 +4091,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.is_extern_c = fn.is_extern_c;
     clone.is_module_extern = fn.is_module_extern;
     clone.is_unsafe = fn.is_unsafe;
+    clone.is_compile_time_dependency = fn.is_compile_time_dependency;
     clone.has_varargs = fn.has_varargs;
     clone.method_requires_concept = fn.method_requires_concept;
     clone.is_generic_template = fn.is_generic_template;
@@ -5838,6 +5839,8 @@ private:
                 clone.namespace_path = method_tmpl.namespace_path;
                 clone.is_exported = false;
                 clone.is_unsafe = method_tmpl.is_unsafe;
+                clone.owning_module = method_tmpl.owning_module;
+                clone.eval_mode = method_tmpl.eval_mode;
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
@@ -6693,6 +6696,8 @@ private:
         clone.namespace_path = tmpl.namespace_path;
         clone.is_exported = false;
         clone.is_unsafe = tmpl.is_unsafe;
+        clone.owning_module = tmpl.owning_module;
+        clone.eval_mode = tmpl.eval_mode;
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
         clone.return_type = tmpl.return_type;
         for (const auto& [name, replacement] : type_bindings) {
@@ -8029,6 +8034,8 @@ private:
         // synthesized clone with a compiler-synthesized name).
         clone.is_exported = false;
         clone.is_unsafe = tmpl.is_unsafe;
+        clone.owning_module = tmpl.owning_module;
+        clone.eval_mode = tmpl.eval_mode;
         std::unordered_map<std::string, Type> witness_replacements;
         for (size_t i = 0; i < tmpl.params.size() && i < concrete_param_types.size(); i++) {
             if (!tmpl.params[i].generic_concept.empty()) {

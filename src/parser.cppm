@@ -430,6 +430,7 @@ private:
         clone.fields = def.fields;
         clone.namespace_path = def.namespace_path;
         clone.is_exported = def.is_exported;
+        clone.is_compile_time_dependency = def.is_compile_time_dependency;
         clone.owning_module = def.owning_module;
         clone.is_concept_witness = def.is_concept_witness;
         clone.template_params = def.template_params;
@@ -1613,6 +1614,7 @@ private:
         clone.is_extern_c = fn.is_extern_c;
         clone.is_module_extern = fn.is_module_extern;
         clone.is_unsafe = fn.is_unsafe;
+        clone.is_compile_time_dependency = fn.is_compile_time_dependency;
         clone.has_varargs = fn.has_varargs;
         clone.method_requires_concept = fn.method_requires_concept;
         clone.is_generic_template = fn.is_generic_template;
@@ -1660,7 +1662,7 @@ private:
     void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
                                 bool is_reexport) {
         for (const StructDef& def : imported.structs) {
-            if (!def.is_exported) continue;
+            if (!def.is_exported && !def.is_compile_time_dependency) continue;
             struct_names_.insert(def.name);
             if (!def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
@@ -1672,7 +1674,7 @@ private:
             program.structs.push_back(std::move(clone));
         }
         for (const ClassDef& def : imported.classes) {
-            if (!def.is_exported) continue;
+            if (!def.is_exported && !def.is_compile_time_dependency) continue;
             struct_names_.insert(def.name);
             class_names_.insert(def.name);
             if (!def.template_params.empty() || def.is_variadic_primary_template) {
@@ -1689,7 +1691,7 @@ private:
             program.classes.push_back(std::move(clone));
         }
         for (const Function& fn : imported.functions) {
-            if (!fn.is_exported) continue;
+            if (!fn.is_exported && !fn.is_compile_time_dependency) continue;
             if (!fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
             bool keep_body =
                 fn.is_generic_template ||

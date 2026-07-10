@@ -72,6 +72,20 @@ std::uint32_t read_u32_le(const std::vector<unsigned char>& bytes, size_t offset
            (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
 }
 
+void write_u32_le(std::ostream& out, std::uint32_t value) {
+    char bytes[4] = {static_cast<char>(value & 0xFFu), static_cast<char>((value >> 8) & 0xFFu),
+                     static_cast<char>((value >> 16) & 0xFFu), static_cast<char>((value >> 24) & 0xFFu)};
+    out.write(bytes, sizeof(bytes));
+}
+
+void write_legacy_scppm_without_payload(const std::filesystem::path& path, std::string_view interface_source) {
+    std::ofstream out(path, std::ios::binary);
+    const char header[8] = {'S', 'C', 'P', 'P', 'M', 1, 0, 0};
+    out.write(header, sizeof(header));
+    write_u32_le(out, static_cast<std::uint32_t>(interface_source.size()));
+    out.write(interface_source.data(), static_cast<std::streamsize>(interface_source.size()));
+}
+
 std::unordered_map<std::string, std::string> std_import_paths() {
     return {{"std", SCPP_STDLIB_STD_MODULE_PATH}};
 }
@@ -1141,6 +1155,113 @@ void run_cli_extension_tests() {
         expect(run_result.exit_code == 0,
                case_name + ": expected partition artifact-linked binary to exit 0, got " +
                    std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_build_module_with_generic_payload_roundtrips_without_sources";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_with_generic_payload_roundtrips_without_sources";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    struct Secret {\n"
+                        "        int value;\n"
+                        "    };\n"
+                        "    template<typename T>\n"
+                        "    T add_bonus(T value, const Secret& s) {\n"
+                        "        return value + s.value;\n"
+                        "    }\n"
+                        "    export template<typename T>\n"
+                        "    T add_secret(T value) {\n"
+                        "        Secret s;\n"
+                        "        s.value = 5;\n"
+                        "        return add_bonus(value, s);\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::vector<unsigned char> interface_bytes = read_binary_file(interface_path);
+        expect(interface_bytes.size() >= 16, case_name + ": expected payload-bearing .scppm output");
+        if (interface_bytes.size() >= 16) {
+            expect((interface_bytes[7] & 0x01u) != 0u, case_name + ": expected structured payload flag");
+            std::uint32_t interface_length = read_u32_le(interface_bytes, 8);
+            expect(interface_bytes.size() >= static_cast<size_t>(12 + interface_length + 8),
+                   case_name + ": expected payload bytes after embedded interface source");
+            std::string embedded_source(interface_bytes.begin() + 12, interface_bytes.begin() + 12 + interface_length);
+            expect(embedded_source.find("return add_bonus(value, s);") == std::string::npos,
+                   case_name + ": generic function body should be stripped from interface source");
+            expect(embedded_source.find("return value + s.value;") == std::string::npos,
+                   case_name + ": private helper generic body should be stripped from interface source");
+            std::uint32_t payload_length = read_u32_le(interface_bytes, 12 + interface_length);
+            expect(payload_length > 8, case_name + ": expected non-trivial structured payload length");
+            if (interface_bytes.size() >= static_cast<size_t>(16 + interface_length + payload_length)) {
+                size_t payload_offset = 16 + interface_length;
+                expect(std::string(interface_bytes.begin() + payload_offset, interface_bytes.begin() + payload_offset + 4) ==
+                           "SAST",
+                       case_name + ": expected structured payload magic");
+                expect(read_u32_le(interface_bytes, payload_offset + 4) == scpp::SCPPM_COMPILE_TIME_AST_VERSION,
+                       case_name + ": expected structured payload version 1");
+            }
+        }
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    return helper::add_secret(37) - 42;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": generic consumer build should succeed from .scppm payload, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected payload-backed generic binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_rejects_legacy_scppm_missing_structured_payload_for_generic_exports";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_rejects_legacy_scppm_missing_structured_payload_for_generic_exports";
+        std::filesystem::path interface_path = root / "legacy.scppm";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_legacy_scppm_without_payload(interface_path,
+                                           "export module legacy;\n"
+                                           "namespace legacy {\n"
+                                           "    export template<typename T>\n"
+                                           "    T add_one(T value);\n"
+                                           "}\n");
+        write_text_file(consumer_source,
+                        "import legacy;\n"
+                        "int main() {\n"
+                        "    return legacy::add_one(1);\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import legacy=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code != 0, case_name + ": expected legacy artifact import to be rejected");
+        expect(build_result.stdout_text.find("lacks the required structured compile-time payload") != std::string::npos,
+               case_name + ": expected structured payload error, got '" + build_result.stdout_text + "'");
         std::filesystem::remove_all(root);
     }
 
