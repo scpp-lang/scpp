@@ -36,6 +36,9 @@ This file is an internal backlog, not reader-facing book content.
 - There is no mdBook-/Rustdoc-style automatic code-block extraction and
   compile-test harness for `docs/book/`; examples must currently be verified by
   separate manual scripts or external tests.
+- No `rustup`-style installer or toolchain manager yet; today the getting
+  started story is still "build from source, then optionally `cmake --install`
+  it somewhere on your `PATH`."
 - No Cargo/crates.io-style registry, package publishing, or dependency-fetch
   workflow yet; current project builds cover local manifests, path deps, and
   workspaces, but not a full package ecosystem.
