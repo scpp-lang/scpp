@@ -40,8 +40,8 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined by the build"
 #endif
-#ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
+#ifndef SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH must be defined by the build"
 #endif
 
 namespace {
@@ -95,7 +95,7 @@ std::unordered_map<std::string, std::string> std_import_paths() {
 
 std::vector<std::string> std_link_inputs() {
     return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_IO_WRAPPER_LIB_PATH};
+            SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {

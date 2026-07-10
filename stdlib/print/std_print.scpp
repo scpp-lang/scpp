@@ -1,0 +1,225 @@
+export module std:print;
+
+export import :format;
+
+extern "C" {
+    void scpp_print_int(int value);
+    void scpp_print_bool(bool value);
+    void scpp_print_char(char value);
+    void scpp_print_double(double value);
+    void scpp_print_cstr(const char* value);
+    void scpp_print_newline();
+}
+
+namespace std {
+
+export int __format_next_field(const char* s, int i) {
+    while (s[i] != '\0') {
+        if (s[i] == '{') {
+            if (s[i + 1] == '{') {
+                i = i + 2;
+                continue;
+            }
+            return i + 2;
+        }
+        if (s[i] == '}') {
+            if (s[i + 1] == '}') {
+                i = i + 2;
+                continue;
+            }
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+export void __print_int(const int& value) {
+    [[scpp::unsafe]] {
+        scpp_print_int(value);
+    }
+    return;
+}
+
+export void __print_bool(const bool& value) {
+    [[scpp::unsafe]] {
+        scpp_print_bool(value);
+    }
+    return;
+}
+
+export void __print_char(const char& value) {
+    [[scpp::unsafe]] {
+        scpp_print_char(value);
+    }
+    return;
+}
+
+export void __print_double(const double& value) {
+    [[scpp::unsafe]] {
+        scpp_print_double(value);
+    }
+    return;
+}
+
+export void __print_cstr(const char* value) {
+    [[scpp::unsafe]] {
+        scpp_print_cstr(value);
+    }
+    return;
+}
+
+export void __print_newline() {
+    [[scpp::unsafe]] {
+        scpp_print_newline();
+    }
+    return;
+}
+
+export template<typename T>
+class __format_printer;
+
+export template<>
+class __format_printer<int> {
+public:
+    void write(const int& value) {
+        [[scpp::unsafe]] {
+            std::__print_int(value);
+        }
+        return;
+    }
+};
+
+export template<>
+class __format_printer<bool> {
+public:
+    void write(const bool& value) {
+        [[scpp::unsafe]] {
+            std::__print_bool(value);
+        }
+        return;
+    }
+};
+
+export template<>
+class __format_printer<char> {
+public:
+    void write(const char& value) {
+        [[scpp::unsafe]] {
+            std::__print_char(value);
+        }
+        return;
+    }
+};
+
+export template<>
+class __format_printer<double> {
+public:
+    void write(const double& value) {
+        [[scpp::unsafe]] {
+            std::__print_double(value);
+        }
+        return;
+    }
+};
+
+export template<>
+class __format_printer<const char*> {
+public:
+    void write(const char* value) {
+        [[scpp::unsafe]] {
+            std::__print_cstr(value);
+        }
+        return;
+    }
+};
+
+export template<>
+class __format_printer<char*> {
+public:
+    void write(char* value) {
+        [[scpp::unsafe]] {
+            std::__print_cstr(value);
+        }
+        return;
+    }
+};
+
+export template<>
+class __format_printer<std::string> {
+public:
+    void write(const std::string& value) {
+        [[scpp::unsafe]] {
+            std::__print_cstr(value.c_str());
+        }
+        return;
+    }
+};
+
+export void __format_emit_range(const char* s, int begin, int end) {
+    int i = begin;
+    while (i < end) {
+        if (s[i] == '{' && s[i + 1] == '{') {
+            std::__format_printer<char> printer;
+            printer.write('{');
+            i = i + 2;
+            continue;
+        }
+        if (s[i] == '}' && s[i + 1] == '}') {
+            std::__format_printer<char> printer;
+            printer.write('}');
+            i = i + 2;
+            continue;
+        }
+        std::__format_printer<char> printer;
+        printer.write(s[i]);
+        i = i + 1;
+    }
+    return;
+}
+
+export void __format_emit(const char* s, int i) {
+    int end = __format_next_field(s, i);
+    __format_emit_range(s, i, end);
+    return;
+}
+
+export template<typename Head, typename... Tail>
+void __format_emit(const char* s, int i, const Head& head, const Tail&... tail) {
+    int next = __format_next_field(s, i);
+    __format_emit_range(s, i, next - 2);
+    std::__format_printer<Head> printer;
+    printer.write(head);
+    __format_emit(s, next, tail...);
+    return;
+}
+
+export void print(format_string<> fmt) {
+    __format_emit(fmt.c_str(), 0);
+    return;
+}
+
+export template<typename... Args>
+void print(format_string<Args...> fmt, Args... args) {
+    __format_emit(fmt.c_str(), 0, args...);
+    return;
+}
+
+export void println(format_string<> fmt) {
+    __format_emit(fmt.c_str(), 0);
+    [[scpp::unsafe]] {
+        std::__print_newline();
+    }
+    return;
+}
+
+export template<typename... Args>
+void println(format_string<Args...> fmt, Args... args) {
+    __format_emit(fmt.c_str(), 0, args...);
+    [[scpp::unsafe]] {
+        std::__print_newline();
+    }
+    return;
+}
+
+} // namespace std

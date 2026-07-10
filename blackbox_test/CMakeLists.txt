@@ -32,4 +32,4 @@ target_compile_definitions(run_tests PRIVATE
     SCPP_STDLIB_STD_THREAD_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/thread/std_thread.scpp"
     SCPP_STDLIB_STRING_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_string_wrapper.a"
     SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_thread_wrapper.a"
-    SCPP_STDLIB_IO_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_io_wrapper.a")
+    SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_print_wrapper.a")

@@ -118,8 +118,8 @@
 #ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined by the build"
 #endif
-#ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
+#ifndef SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH must be defined by the build"
 #endif
 
 #include <algorithm>
@@ -303,7 +303,7 @@ std::vector<std::string> default_std_build_args() {
             "--import", std::string("std:thread=") + SCPP_STDLIB_STD_THREAD_MODULE_PATH,
             "--link", SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
             "--link", SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
-            "--link", SCPP_STDLIB_IO_WRAPPER_LIB_PATH};
+            "--link", SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH};
 }
 
 std::vector<std::string> parse_token_file(const fs::path& path) {
