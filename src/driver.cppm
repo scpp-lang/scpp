@@ -100,9 +100,28 @@ void write_u32_le(std::ostream& out, std::uint32_t value) {
 
 namespace {
 
-[[nodiscard]] bool is_compile_time_root(const scpp::Function& fn) {
-    return fn.is_exported &&
-           (fn.eval_mode != scpp::FunctionEvalMode::RuntimeOnly || fn.is_generic_template || !fn.template_params.empty());
+[[nodiscard]] bool is_exported_generic_type_name(const scpp::Program& program, std::string_view name) {
+    for (const scpp::StructDef& def : program.structs) {
+        if (!def.is_exported || def.name != name) continue;
+        if (!def.template_params.empty()) return true;
+    }
+    for (const scpp::ClassDef& def : program.classes) {
+        if (!def.is_exported || def.name != name) continue;
+        if (!def.template_params.empty() || def.is_variadic_primary_template || def.is_variadic_specialization ||
+            def.is_partial_specialization) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_compile_time_root(const scpp::Program& program, const scpp::Function& fn) {
+    if (!fn.is_exported) return false;
+    if (fn.eval_mode != scpp::FunctionEvalMode::RuntimeOnly || fn.is_generic_template || !fn.template_params.empty()) {
+        return true;
+    }
+    return !fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
+           is_exported_generic_type_name(program, fn.params[0].type.pointee->name);
 }
 
 void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>& out) {
@@ -201,7 +220,7 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     };
 
     for (const Function& fn : program.functions) {
-        if (is_compile_time_root(fn)) enqueue_function(fn.name, true);
+        if (is_compile_time_root(program, fn)) enqueue_function(fn.name, true);
     }
 
     for (size_t i = 0; i < worklist.size(); i++) {
@@ -838,15 +857,51 @@ void write_function(std::ostream& out, const Function& fn) {
            params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier;
 }
 
+[[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
+                                                const std::vector<GenericTypeParam>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i].name != b[i].name || a[i].concept_name != b[i].concept_name ||
+            a[i].is_non_type != b[i].is_non_type || a[i].is_pack != b[i].is_pack) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (!types_equal_for_payload_merge(a[i], b[i])) return false;
+    }
+    return true;
+}
+
 [[nodiscard]] bool same_struct_identity_for_payload_merge(const StructDef& a, const StructDef& b) {
-    return a.name == b.name && a.is_union == b.is_union && a.template_owner_id == b.template_owner_id;
+    return a.name == b.name && a.is_union == b.is_union && same_template_param_shape(a.template_params, b.template_params);
 }
 
 [[nodiscard]] bool same_class_identity_for_payload_merge(const ClassDef& a, const ClassDef& b) {
-    return a.name == b.name && a.template_owner_id == b.template_owner_id &&
-           a.is_variadic_primary_template == b.is_variadic_primary_template &&
+    return a.name == b.name && a.is_variadic_primary_template == b.is_variadic_primary_template &&
            a.is_variadic_specialization == b.is_variadic_specialization &&
-           a.is_partial_specialization == b.is_partial_specialization;
+           a.is_partial_specialization == b.is_partial_specialization &&
+           same_template_param_shape(a.template_params, b.template_params) &&
+           same_specialization_args(a.specialization_template_args, b.specialization_template_args);
+}
+
+
+struct GenericMethodOwnerRemap {
+    std::string old_owner_id;
+    std::string new_owner_id;
+    std::string class_name;
+};
+
+[[nodiscard]] std::string rewrite_generic_method_name_for_owner(const Function& fn,
+                                                                const GenericMethodOwnerRemap& remap) {
+    std::string old_prefix = remap.class_name + "__" + remap.old_owner_id;
+    std::string new_prefix = remap.class_name + "__" + remap.new_owner_id;
+    if (fn.name.rfind(old_prefix, 0) == 0) return new_prefix + fn.name.substr(old_prefix.size());
+    return fn.name;
 }
 
 [[nodiscard]] bool is_local_module_struct(const StructDef& def) { return def.owning_module.empty(); }
@@ -922,6 +977,7 @@ void write_function(std::ostream& out, const Function& fn) {
 }
 
 void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&& payload) {
+    std::vector<GenericMethodOwnerRemap> owner_remaps;
     for (StructDef& def : payload.structs) {
         if (!def.is_exported) def.is_compile_time_dependency = true;
         auto existing = std::find_if(imported.structs.begin(), imported.structs.end(),
@@ -937,9 +993,19 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
         auto existing = std::find_if(imported.classes.begin(), imported.classes.end(),
                                      [&](const ClassDef& current) { return same_class_identity_for_payload_merge(current, def); });
         if (existing != imported.classes.end()) {
+            if (!existing->template_owner_id.empty() && existing->template_owner_id != def.template_owner_id) {
+                owner_remaps.push_back(GenericMethodOwnerRemap{existing->template_owner_id, def.template_owner_id, def.name});
+            }
             *existing = std::move(def);
         } else {
             imported.classes.push_back(std::move(def));
+        }
+    }
+    for (const GenericMethodOwnerRemap& remap : owner_remaps) {
+        for (Function& fn : imported.functions) {
+            if (fn.generic_method_owner_id != remap.old_owner_id) continue;
+            fn.name = rewrite_generic_method_name_for_owner(fn, remap);
+            fn.generic_method_owner_id = remap.new_owner_id;
         }
     }
     for (Function& fn : payload.functions) {
@@ -1088,6 +1154,7 @@ void create_archive(const std::string& object_path, const std::string& archive_p
         if (!lib_dir.has_value()) continue;
         append_if_exists(*lib_dir / "libscpp_string_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_thread_wrapper.a");
+        append_if_exists(*lib_dir / "libscpp_io_wrapper.a");
     }
     return result;
 }
@@ -1516,46 +1583,50 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     } catch (const ConstexprError& error) {
         throw DriverError(error.what());
     }
-    check_moves(program);
+    try {
+        check_moves(program);
 
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter();
 
-    std::string triple = llvm::sys::getDefaultTargetTriple();
-    llvm::Triple target_triple(triple);
+        std::string triple = llvm::sys::getDefaultTargetTriple();
+        llvm::Triple target_triple(triple);
 
-    std::string lookup_error;
-    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(target_triple, lookup_error);
-    if (target == nullptr) {
-        throw DriverError("failed to lookup target '" + triple + "': " + lookup_error);
+        std::string lookup_error;
+        const llvm::Target* target = llvm::TargetRegistry::lookupTarget(target_triple, lookup_error);
+        if (target == nullptr) {
+            throw DriverError("failed to lookup target '" + triple + "': " + lookup_error);
+        }
+
+        llvm::TargetOptions options;
+        std::unique_ptr<llvm::TargetMachine> target_machine(target->createTargetMachine(
+            target_triple, "generic", "", options, llvm::Reloc::PIC_, std::nullopt, codegen_opt_level_for(opt_level)));
+        if (!target_machine) {
+            throw DriverError("failed to create target machine for '" + triple + "'");
+        }
+
+        // The data layout must be set *before* codegen runs: std::make_unique
+        // needs a target-accurate sizeof(T) to call malloc with, which comes
+        // from the module's DataLayout.
+        Codegen codegen("scpp_module", program.source_path, emit_debug_info);
+        codegen.set_target(target_triple, target_machine->createDataLayout());
+        llvm::Module& module = codegen.generate(program);
+
+        std::error_code error_code;
+        llvm::raw_fd_ostream dest(object_path, error_code, llvm::sys::fs::OF_None);
+        if (error_code) {
+            throw DriverError("could not open object file '" + object_path + "': " + error_code.message());
+        }
+
+        llvm::legacy::PassManager pass_manager;
+        if (target_machine->addPassesToEmitFile(pass_manager, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+            throw DriverError("target machine cannot emit an object file of this type");
+        }
+        pass_manager.run(module);
+        dest.flush();
+    } catch (const ConstexprError& error) {
+        throw DriverError(error.what());
     }
-
-    llvm::TargetOptions options;
-    std::unique_ptr<llvm::TargetMachine> target_machine(target->createTargetMachine(
-        target_triple, "generic", "", options, llvm::Reloc::PIC_, std::nullopt, codegen_opt_level_for(opt_level)));
-    if (!target_machine) {
-        throw DriverError("failed to create target machine for '" + triple + "'");
-    }
-
-    // The data layout must be set *before* codegen runs: std::make_unique
-    // needs a target-accurate sizeof(T) to call malloc with, which comes
-    // from the module's DataLayout.
-    Codegen codegen("scpp_module", program.source_path, emit_debug_info);
-    codegen.set_target(target_triple, target_machine->createDataLayout());
-    llvm::Module& module = codegen.generate(program);
-
-    std::error_code error_code;
-    llvm::raw_fd_ostream dest(object_path, error_code, llvm::sys::fs::OF_None);
-    if (error_code) {
-        throw DriverError("could not open object file '" + object_path + "': " + error_code.message());
-    }
-
-    llvm::legacy::PassManager pass_manager;
-    if (target_machine->addPassesToEmitFile(pass_manager, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-        throw DriverError("target machine cannot emit an object file of this type");
-    }
-    pass_manager.run(module);
-    dest.flush();
 }
 
 void emit_module_archive_for_program(Program& program, const std::string& archive_path, int opt_level = 2) {

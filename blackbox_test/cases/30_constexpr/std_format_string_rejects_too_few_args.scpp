@@ -1,0 +1,5 @@
+import std;
+int main() {
+    std::print("{} {}", 1);
+    return 0;
+}
