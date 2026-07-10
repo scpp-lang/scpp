@@ -1,0 +1,33 @@
+template<typename... Args>
+class Box;
+
+template<>
+class Box<> {
+public:
+    int value;
+    consteval Box(const char* s) {
+        this->value = 7;
+        return;
+    }
+    int get() const { return this->value; }
+};
+
+template<typename Head, typename... Tail>
+class Box<Head, Tail...> : private Box<Tail...> {
+public:
+    int value;
+    consteval Box(const char* s) {
+        this->value = 9;
+        return;
+    }
+    int get() const { return this->value; }
+};
+
+template<typename... Args>
+int use(Box<Args...> fmt, Args&&... args) {
+    return fmt.get();
+}
+
+int main() {
+    return use("hi", 1, true) - 9;
+}

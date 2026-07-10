@@ -1026,6 +1026,45 @@ void run_generic_type_tests() {
         }
         expect(!threw, case_name + ": expected concrete variadic instantiations to clone method bodies");
     }
+
+    {
+        std::string source =
+            "template<typename... Ts>\n"
+            "class Box;\n"
+            "\n"
+            "template<>\n"
+            "class Box<> {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Box(const char* s) {\n"
+            "        this->value = 7;\n"
+            "        return;\n"
+            "    }\n"
+            "    int get() const { return this->value; }\n"
+            "};\n"
+            "\n"
+            "int main() {\n"
+            "    Box<> b(\"hi\");\n"
+            "    return b.get() - 7;\n"
+            "}\n";
+        std::string case_name = "variadic_empty_pack_base_case_clones_fields";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected the synthesized empty-pack concrete class to keep base-case fields");
+    }
 }
 
 void run_generic_pack_deduction_tests() {
@@ -1267,6 +1306,60 @@ void run_generic_pack_deduction_tests() {
         }
         expect(!threw, case_name + ": expected recursive variadic instantiation to avoid invalidating the active "
                                     "generic function template definition");
+    }
+
+    {
+        std::string case_name = "variadic_generic_value_parameter_with_converting_ctor_and_fields_codegen";
+        cases_run++;
+        std::string source =
+            "template<typename... Args> class Box;\n"
+            "\n"
+            "template<>\n"
+            "class Box<> {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Box(const char* s) {\n"
+            "        this->value = 7;\n"
+            "        return;\n"
+            "    }\n"
+            "    int get() const { return this->value; }\n"
+            "};\n"
+            "\n"
+            "template<typename Head, typename... Tail>\n"
+            "class Box<Head, Tail...> : private Box<Tail...> {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Box(const char* s) {\n"
+            "        this->value = 9;\n"
+            "        return;\n"
+            "    }\n"
+            "    int get() const { return this->value; }\n"
+            "};\n"
+            "\n"
+            "template<typename... Args>\n"
+            "int use(Box<Args...> fmt, Args&&... args) {\n"
+            "    return fmt.get();\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    return use(\"hi\", 1, true) - 9;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected codegen to use the concrete variadic instantiation rather than the "
+                                    "template-shape declaration");
     }
 }
 

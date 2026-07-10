@@ -122,6 +122,10 @@ public:
                 witness_class_names.insert(def.name);
                 continue;
             }
+            if (def.is_variadic_specialization) {
+                generic_type_template_names.insert(def.name);
+                continue;
+            }
             if (!def.template_params.empty()) {
                 generic_type_template_names.insert(def.name);
                 continue;
