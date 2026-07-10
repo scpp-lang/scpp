@@ -42,6 +42,8 @@ namespace {
 
 struct Cell;
 
+void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value);
+
 struct PointerValue {
     std::shared_ptr<Cell> storage;
     std::string storage_id;
@@ -197,7 +199,7 @@ public:
         return evaluate_expr(expr);
     }
 
-    void validate_constexpr_locals(const Function& fn) {
+    void validate_constexpr_locals(Function& fn) {
         if (!fn.body) return;
         frames_.clear();
         steps_ = 0;
@@ -226,16 +228,30 @@ private:
         }
     }
 
-    void validate_constexpr_stmt_tree(const Stmt& stmt) {
+    void validate_constexpr_stmt_tree(Stmt& stmt) {
         tick(stmt.loc, "checking a constexpr local declaration");
         switch (stmt.kind) {
             case StmtKind::VarDecl:
-                if (stmt.is_constexpr) execute_stmt(stmt, named_type("void"));
+                if (stmt.is_constexpr) {
+                    execute_stmt(stmt, named_type("void"));
+                    if (stmt.init) {
+                        const auto& binding = lookup_binding(stmt.var_name, stmt.loc);
+                        try {
+                            rewrite_expr_as_constant(*stmt.init, binding.cell);
+                        } catch (const ConstexprError&) {
+                            // Some valid constant-expression results (notably
+                            // richer object values) still cannot be lowered
+                            // back into source-form AST here. Validation has
+                            // already succeeded, so keep the original
+                            // initializer in those cases.
+                        }
+                    }
+                }
                 return;
             case StmtKind::Block:
                 frames_.push_back({});
                 try {
-                    for (const StmtPtr& nested : stmt.statements) validate_constexpr_stmt_tree(*nested);
+                    for (StmtPtr& nested : stmt.statements) validate_constexpr_stmt_tree(*nested);
                 } catch (...) {
                     frames_.pop_back();
                     throw;
@@ -1153,11 +1169,17 @@ void fold_immediate_calls(Program& program, ConstexprLimits limits) {
         collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
     }
     for (ExprRewrite& rewrite : expr_rewrites) rewrite_expr_as_constant(*rewrite.target, rewrite.value);
-    for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
-    for (const Function& fn : program.functions) {
+    // Validate required-constant-expression contexts *before* stripping
+    // `if consteval` / `if !consteval` down to their runtime-selected
+    // branches. Otherwise a `constexpr` local initializer that calls a
+    // constexpr function containing `if consteval` would incorrectly see
+    // only the runtime branch, because the callee's AST has already been
+    // destructively rewritten for the later runtime pipeline.
+    for (Function& fn : program.functions) {
         if (!fn.body) continue;
         engine.validate_constexpr_locals(fn);
     }
+    for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
     for (Function& fn : program.functions) {
         if (fn.eval_mode == FunctionEvalMode::Consteval) fn.body.reset();
     }

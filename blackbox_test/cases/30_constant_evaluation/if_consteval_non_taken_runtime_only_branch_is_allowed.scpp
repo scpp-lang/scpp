@@ -1,0 +1,23 @@
+// spec §9.2(3)-(6): only the selected substatement is executed. A non-taken
+// runtime-only branch therefore does not make the compile-time path
+// ill-formed.
+int runtime_only(int x) {
+    return x + 1;
+}
+
+consteval int ct_leaf(int x) {
+    return x + 40;
+}
+
+constexpr int choose(int x) {
+    if consteval {
+        return ct_leaf(x);
+    } else {
+        return runtime_only(x);
+    }
+}
+
+int main() {
+    constexpr int compile_time = choose(2);
+    return compile_time + choose(2);
+}

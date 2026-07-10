@@ -1340,6 +1340,73 @@ void run_consteval_tests() {
         }
         expect(threw, case_name + ": expected constexpr local to reject runtime-only initializer");
     }
+
+    {
+        std::string case_name = "if_consteval_propagates_required_constant_evaluation_into_callees";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "if_consteval_propagates_required_constant_evaluation_into_callees_exe";
+        scpp::compile_to_executable(
+            "consteval int ct_leaf(int x) {\n"
+            "    return x + 40;\n"
+            "}\n"
+            "constexpr int via_if_consteval(int x) {\n"
+            "    if consteval {\n"
+            "        return ct_leaf(x);\n"
+            "    } else {\n"
+            "        return x + 1;\n"
+            "    }\n"
+            "}\n"
+            "constexpr int via_if_not_consteval(int x) {\n"
+            "    if !consteval {\n"
+            "        return x + 2;\n"
+            "    } else {\n"
+            "        return ct_leaf(x);\n"
+            "    }\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int compile_time = via_if_consteval(2) + via_if_not_consteval(2);\n"
+            "    int runtime = via_if_consteval(2) + via_if_not_consteval(2);\n"
+            "    return compile_time + runtime;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 91,
+               case_name + ": expected required-constant-evaluation total 91, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "if_consteval_skips_non_selected_runtime_only_branch";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "if_consteval_skips_non_selected_runtime_only_branch_exe";
+        scpp::compile_to_executable(
+            "int runtime_only(int x) {\n"
+            "    return x + 1;\n"
+            "}\n"
+            "consteval int ct_leaf(int x) {\n"
+            "    return x + 40;\n"
+            "}\n"
+            "constexpr int choose(int x) {\n"
+            "    if consteval {\n"
+            "        return ct_leaf(x);\n"
+            "    } else {\n"
+            "        return runtime_only(x);\n"
+            "    }\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int compile_time = choose(2);\n"
+            "    return compile_time + choose(2);\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 45,
+               case_name + ": expected non-selected runtime-only branch to be ignored, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
 }
 
 void run_cli_extension_tests() {

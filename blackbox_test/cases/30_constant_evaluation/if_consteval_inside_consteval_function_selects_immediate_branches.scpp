@@ -1,0 +1,31 @@
+// spec §9.2(3)-(6): inside a `consteval` function the evaluation context is
+// manifestly constant-evaluated, so `if consteval` takes its first branch and
+// `if !consteval` takes its `else` branch. The non-selected runtime-only paths
+// must not be executed.
+int runtime_only(int x) {
+    return x + 1;
+}
+
+consteval int ct_leaf(int x) {
+    return x + 40;
+}
+
+consteval int direct_if_consteval(int x) {
+    if consteval {
+        return ct_leaf(x);
+    } else {
+        return runtime_only(x);
+    }
+}
+
+consteval int direct_if_not_consteval(int x) {
+    if !consteval {
+        return runtime_only(x);
+    } else {
+        return ct_leaf(x);
+    }
+}
+
+int main() {
+    return direct_if_consteval(1) + direct_if_not_consteval(1);
+}
