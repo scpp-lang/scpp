@@ -32,11 +32,3 @@ add_scpp_module_artifacts(scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/memory/std_memory.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/thread/std_thread.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/string/std_string.scpp")
-
-install(TARGETS scpp_string_wrapper scpp_thread_wrapper
-    ARCHIVE DESTINATION "share/scpp/stdlib")
-
-install(FILES
-    "${SCPP_STDLIB_INTERFACE_PATH}"
-    "${SCPP_STDLIB_ARCHIVE_PATH}"
-    DESTINATION "share/scpp/stdlib")

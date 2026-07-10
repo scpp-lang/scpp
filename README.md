@@ -83,22 +83,7 @@ cmake --build build
 ctest --test-dir build
 ```
 
-To stage a self-contained toolchain root for packagers/CI, install into a
-dedicated prefix such as `~/.scpp/toolchains/scpp26`:
-
-```sh
-cmake --install build --prefix ~/.scpp/toolchains/scpp26
-```
-
-That install layout stays fully under one prefix:
-
-```text
-~/.scpp/toolchains/scpp26/
-├── bin/scpp
-└── share/scpp/stdlib/
-```
-
-For an end-user install driven by the compiler itself, run the built binary:
+To stage a self-contained toolchain root, run the built compiler itself:
 
 ```sh
 ./build/scpp installself

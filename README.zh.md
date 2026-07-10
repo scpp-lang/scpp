@@ -70,23 +70,8 @@ cmake --build build
 ctest --test-dir build
 ```
 
-如果是给打包/CI 使用，想把某个版本安装成一个完整、自包含的 toolchain
-根目录，可直接装到专用 prefix（例如 `~/.scpp/toolchains/scpp26`）：
-
-```sh
-cmake --install build --prefix ~/.scpp/toolchains/scpp26
-```
-
-安装后的布局会完整收敛在一个目录下：
-
-```text
-~/.scpp/toolchains/scpp26/
-├── bin/scpp
-└── share/scpp/stdlib/
-```
-
-如果是面向终端用户、希望由编译器自己完成安装，可直接运行当前构建出的
-编译器：
+如果想把当前编译器安装成一个完整、自包含的 toolchain 根目录，可直接运行
+当前构建出的编译器：
 
 ```sh
 ./build/scpp installself
