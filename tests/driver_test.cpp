@@ -1072,6 +1072,80 @@ void run_generic_pack_deduction_tests() {
     }
 }
 
+void run_generic_function_overload_tests() {
+    {
+        std::string case_name = "generic_function_overload_by_arity_picks_matching_template";
+        cases_run++;
+        std::string source =
+            "template<typename T>\n"
+            "int choose(T x) {\n"
+            "    return 1;\n"
+            "}\n"
+            "\n"
+            "template<typename T, typename U>\n"
+            "int choose(T x, U y) {\n"
+            "    return 2;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    return choose(7) + choose(7, 8) - 3;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected the 1-arg and 2-arg generic overloads to monomorphize independently");
+    }
+
+    {
+        std::string case_name = "generic_function_overload_can_fall_back_to_nongeneric_helper";
+        cases_run++;
+        std::string source =
+            "int walk(int x) {\n"
+            "    return x + 1;\n"
+            "}\n"
+            "\n"
+            "template<typename T>\n"
+            "T invoke(T x) {\n"
+            "    return walk(x);\n"
+            "}\n"
+            "\n"
+            "template<typename T, typename U>\n"
+            "int walk(T x, U y) {\n"
+            "    return 0;\n"
+            "}\n"
+            "\n"
+            "int main() {\n"
+            "    return invoke(1) - 2;\n"
+            "}\n";
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected unmatched generic helpers to defer to the nongeneric overload");
+    }
+}
+
 void run_functional_tests() {
     std::string case_name = "std_function_rejects_move_only_target";
     cases_run++;
@@ -2422,6 +2496,7 @@ int main() {
     run_concept_tests();
     run_generic_type_tests();
     run_generic_pack_deduction_tests();
+    run_generic_function_overload_tests();
     run_functional_tests();
     run_thread_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();

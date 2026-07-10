@@ -4423,7 +4423,9 @@ public:
     explicit Monomorphizer(Program& program) : program_(program) {
         for (const ConceptDef& c : program.concepts) concepts_by_name_[c.name] = &c;
         for (size_t i = 0; i < program.functions.size(); i++) {
-            if (program.functions[i].is_generic_template) generic_template_indices_[program.functions[i].name] = i;
+            if (program.functions[i].is_generic_template) {
+                generic_template_indices_[program.functions[i].name].push_back(i);
+            }
         }
         // ch05 §5.12: names a blanket lambda capture must never
         // implicitly bind to -- a known type name (struct/class/
@@ -4575,7 +4577,7 @@ public:
 private:
     Program& program_;
     std::unordered_map<std::string, const ConceptDef*> concepts_by_name_;
-    std::unordered_map<std::string, size_t> generic_template_indices_;
+    std::unordered_map<std::string, std::vector<size_t>> generic_template_indices_;
     std::unordered_map<std::string, size_t> class_template_indices_by_owner_id_;
     std::unordered_map<std::string, std::vector<std::string>> ordinary_class_template_owner_ids_by_name_;
     std::unordered_map<std::string, std::string> clone_cache_;
@@ -6021,8 +6023,8 @@ private:
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
                 walk_new_concrete_function(program_.functions.size() - 1);
-                            if (!program_.functions.back().template_params.empty()) {
-                    generic_template_indices_[program_.functions.back().name] = program_.functions.size() - 1;
+                if (!program_.functions.back().template_params.empty()) {
+                    generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
                 }
             }
             return cache_key;
@@ -6114,7 +6116,7 @@ private:
                 program_.functions.push_back(std::move(clone));
                 walk_new_concrete_function(program_.functions.size() - 1);
                 if (!program_.functions.back().template_params.empty()) {
-                    generic_template_indices_[program_.functions.back().name] = program_.functions.size() - 1;
+                    generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
                 }
             }
             return cache_key;
@@ -6988,6 +6990,316 @@ private:
         }
     }
 
+    [[nodiscard]] bool has_non_generic_overload(const std::string& name) const {
+        for (const Function& fn : program_.functions) {
+            if (fn.name == name && !fn.is_generic_template) return true;
+        }
+        return false;
+    }
+
+    struct FullHeaderGenericCallResolution {
+        std::unordered_map<std::string, Type> type_bindings;
+        std::unordered_map<std::string, int> value_bindings;
+        std::unordered_map<std::string, std::vector<Type>> pack_bindings;
+        std::vector<std::pair<size_t, Type>> upcasts;
+        std::vector<DeferredTemplateObligation> deferred_obligations;
+        std::vector<std::vector<Type>> concrete_pack_param_types;
+    };
+
+    [[nodiscard]] bool try_resolve_full_header_generic_function_call(const Expr& expr, const Function& tmpl, Body& body,
+                                                                     size_t param_offset,
+                                                                     FullHeaderGenericCallResolution& resolution) {
+        try {
+            resolution.type_bindings.clear();
+            resolution.value_bindings.clear();
+            resolution.pack_bindings.clear();
+            resolution.upcasts.clear();
+            resolution.deferred_obligations.clear();
+            resolution.concrete_pack_param_types.assign(tmpl.params.size(), {});
+
+            ExprPtr expr_copy = clone_expr(expr);
+            seed_explicit_template_arguments(*expr_copy, tmpl, resolution.type_bindings, resolution.value_bindings,
+                                             resolution.pack_bindings);
+
+            size_t arg_cursor = 0;
+            for (size_t i = param_offset; i < tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
+                if (tmpl.params[i].is_parameter_pack) {
+                    std::optional<std::string> pack_type_name =
+                        referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
+                    std::vector<Type> deduced_pack_types;
+                    for (; arg_cursor < expr.args.size(); arg_cursor++) {
+                        std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+                        if (!arg_type.has_value()) return false;
+                        deduced_pack_types.push_back(arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
+                    }
+                    if (pack_type_name.has_value() &&
+                        !bind_type_pack_binding(resolution.pack_bindings, *pack_type_name, deduced_pack_types)) {
+                        return false;
+                    }
+                    continue;
+                }
+                const Type& param_type = tmpl.params[i].type;
+                const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
+                if (underlying.kind != TypeKind::Named) {
+                    if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+                        resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                    }
+                    arg_cursor++;
+                    continue;
+                }
+
+                if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
+                    for (const GenericTypeParam& tp : tmpl.template_params) {
+                        if (tp.is_non_type || tp.name != underlying.name || resolution.type_bindings.contains(tp.name)) {
+                            continue;
+                        }
+                        std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+                        if (!arg_type.has_value()) return false;
+                        Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                        if (!bind_type_binding(resolution.type_bindings, tp.name, named)) return false;
+                    }
+                    arg_cursor++;
+                    continue;
+                }
+                if (variadic_generic_type_names_.contains(underlying.name)) {
+                    ExprPtr expr_copy_for_base_deduction = clone_expr(expr);
+                    deduce_via_base_class_chain(*expr_copy_for_base_deduction, arg_cursor, underlying, body,
+                                                resolution.type_bindings, resolution.value_bindings,
+                                                resolution.upcasts);
+                    arg_cursor++;
+                    continue;
+                }
+                if (type_depends_on_template_params(param_type, tmpl.template_params)) {
+                    resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                }
+                arg_cursor++;
+            }
+            if (arg_cursor != expr.args.size()) return false;
+
+            populate_concrete_pack_param_types(tmpl, resolution.pack_bindings, resolution.concrete_pack_param_types);
+
+            for (const GenericTypeParam& tp : tmpl.template_params) {
+                if (tp.is_pack) continue;
+                bool bound =
+                    tp.is_non_type ? resolution.value_bindings.contains(tp.name) : resolution.type_bindings.contains(tp.name);
+                if (!bound) return false;
+            }
+
+            for (const DeferredTemplateObligation& obligation : resolution.deferred_obligations) {
+                Type concrete_pattern = apply_template_bindings_to_type(
+                    obligation.parameter_type_pattern, resolution.type_bindings, resolution.pack_bindings, expr.loc);
+                if (type_depends_on_template_params(concrete_pattern, tmpl.template_params)) return false;
+                if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
+                    return false;
+                }
+            }
+
+            check_thread_safety_constraints(*expr_copy, tmpl, resolution.type_bindings, resolution.pack_bindings);
+            return true;
+        } catch (const DataflowError&) {
+            return false;
+        }
+    }
+
+    struct AbbreviatedGenericCallResolution {
+        std::vector<Type> concrete_param_types;
+        std::vector<std::vector<Type>> concrete_pack_param_types;
+    };
+
+    [[nodiscard]] bool try_resolve_abbreviated_generic_function_call(
+        const Expr& expr, const Function& tmpl, Body& body, size_t param_offset,
+        AbbreviatedGenericCallResolution& resolution) {
+        resolution.concrete_param_types.clear();
+        resolution.concrete_pack_param_types.assign(tmpl.params.size(), {});
+        size_t arg_cursor = 0;
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            const Param& param = tmpl.params[i];
+            if (i < param_offset) {
+                resolution.concrete_param_types.push_back(param.type);
+                continue;
+            }
+            if (param.is_parameter_pack) {
+                for (; arg_cursor < expr.args.size(); arg_cursor++) {
+                    std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+                    if (!arg_type.has_value()) return false;
+                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    if (param.generic_concept != "$auto") {
+                        auto concept_it = concepts_by_name_.find(param.generic_concept);
+                        if (concept_it == concepts_by_name_.end()) return false;
+                        if (!type_satisfies_concept(named, *concept_it->second, program_)) return false;
+                    }
+                    Type substituted = param.type;
+                    if (substituted.kind == TypeKind::Reference) {
+                        substituted.pointee = std::make_shared<Type>(named);
+                    } else {
+                        substituted = named;
+                    }
+                    resolution.concrete_pack_param_types[i].push_back(std::move(substituted));
+                }
+                resolution.concrete_param_types.push_back(resolution.concrete_pack_param_types[i].empty()
+                                                              ? param.type
+                                                              : resolution.concrete_pack_param_types[i][0]);
+                continue;
+            }
+            if (param.generic_concept.empty()) {
+                resolution.concrete_param_types.push_back(param.type);
+                arg_cursor++;
+                continue;
+            }
+            if (arg_cursor >= expr.args.size()) return false;
+            std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+            if (!arg_type.has_value()) return false;
+            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+            if (param.generic_concept != "$auto") {
+                auto concept_it = concepts_by_name_.find(param.generic_concept);
+                if (concept_it == concepts_by_name_.end()) return false;
+                if (!type_satisfies_concept(named, *concept_it->second, program_)) return false;
+            }
+            Type substituted = param.type;
+            if (substituted.kind == TypeKind::Reference) {
+                substituted.pointee = std::make_shared<Type>(named);
+            } else {
+                substituted = named;
+            }
+            resolution.concrete_param_types.push_back(std::move(substituted));
+            arg_cursor++;
+        }
+        if (arg_cursor != expr.args.size()) return false;
+
+        for (size_t i = param_offset; i < tmpl.params.size(); i++) {
+            const Param& param = tmpl.params[i];
+            if (!param.require_thread_movable && !param.require_thread_shareable) continue;
+            const std::vector<Type>* types_to_check = param.is_parameter_pack ? &resolution.concrete_pack_param_types[i]
+                                                                              : nullptr;
+            if (types_to_check == nullptr) {
+                if (param.require_thread_movable && !is_thread_movable(resolution.concrete_param_types[i])) return false;
+                if (param.require_thread_shareable && !is_thread_shareable(resolution.concrete_param_types[i])) {
+                    return false;
+                }
+                continue;
+            }
+            for (const Type& concrete_type : *types_to_check) {
+                if (param.require_thread_movable && !is_thread_movable(concrete_type)) return false;
+                if (param.require_thread_shareable && !is_thread_shareable(concrete_type)) return false;
+            }
+        }
+        return true;
+    }
+
+    void monomorphize_abbreviated_generic_function_call(Expr& expr, const Function& tmpl, Body& body, size_t param_offset = 0,
+                                                        const std::string& cloned_method_suffix_prefix = "") {
+        std::vector<Type> concrete_param_types;
+        concrete_param_types.reserve(tmpl.params.size());
+        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+        size_t arg_cursor = 0;
+        for (size_t i = 0; i < tmpl.params.size(); i++) {
+            const Param& param = tmpl.params[i];
+            if (i < param_offset) {
+                concrete_param_types.push_back(param.type);
+                continue;
+            }
+            if (param.is_parameter_pack) {
+                for (; arg_cursor < expr.args.size(); arg_cursor++) {
+                    std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+                    if (!arg_type.has_value()) return;
+                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    if (param.generic_concept != "$auto") {
+                        auto concept_it = concepts_by_name_.find(param.generic_concept);
+                        if (concept_it == concepts_by_name_.end()) return;
+                        if (!type_satisfies_concept(named, *concept_it->second, program_)) {
+                            throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
+                                                    param.generic_concept + "' required by generic function '" +
+                                                    tmpl.name +
+                                                    "' (ch05 §5.11 -- every requirement's method must exist with a "
+                                                    "matching signature)",
+                                expr.loc);
+                        }
+                    }
+                    Type substituted = param.type;
+                    if (substituted.kind == TypeKind::Reference) {
+                        substituted.pointee = std::make_shared<Type>(named);
+                    } else {
+                        substituted = named;
+                    }
+                    concrete_pack_param_types[i].push_back(std::move(substituted));
+                }
+                concrete_param_types.push_back(concrete_pack_param_types[i].empty() ? param.type
+                                                                                    : concrete_pack_param_types[i][0]);
+                continue;
+            }
+            if (param.generic_concept.empty()) {
+                concrete_param_types.push_back(param.type);
+                arg_cursor++;
+                continue;
+            }
+            if (arg_cursor >= expr.args.size()) return;
+            std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+            if (!arg_type.has_value()) return;
+            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+            if (param.generic_concept != "$auto") {
+                auto concept_it = concepts_by_name_.find(param.generic_concept);
+                if (concept_it == concepts_by_name_.end()) return;
+                if (!type_satisfies_concept(named, *concept_it->second, program_)) {
+                    throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
+                                           param.generic_concept + "' required by generic function '" + tmpl.name +
+                                           "' (ch05 §5.11 -- every requirement's method must exist with a matching "
+                                           "signature)",
+                        expr.loc);
+                }
+            }
+            Type substituted = param.type;
+            if (substituted.kind == TypeKind::Reference) {
+                substituted.pointee = std::make_shared<Type>(named);
+            } else {
+                substituted = named;
+            }
+            concrete_param_types.push_back(std::move(substituted));
+            arg_cursor++;
+        }
+
+        for (size_t i = param_offset; i < tmpl.params.size(); i++) {
+            const Param& param = tmpl.params[i];
+            if (!param.require_thread_movable && !param.require_thread_shareable) continue;
+            const std::vector<Type>* types_to_check = param.is_parameter_pack ? &concrete_pack_param_types[i] : nullptr;
+            if (types_to_check == nullptr) {
+                if (param.require_thread_movable && !is_thread_movable(concrete_param_types[i])) {
+                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                            tmpl.name +
+                                            "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
+                        expr.loc);
+                }
+                if (param.require_thread_shareable && !is_thread_shareable(concrete_param_types[i])) {
+                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                            tmpl.name +
+                                            "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
+                        expr.loc);
+                }
+                continue;
+            }
+            for (const Type& concrete_type : *types_to_check) {
+                if (param.require_thread_movable && !is_thread_movable(concrete_type)) {
+                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                            tmpl.name +
+                                            "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
+                        expr.loc);
+                }
+                if (param.require_thread_shareable && !is_thread_shareable(concrete_type)) {
+                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                            tmpl.name +
+                                            "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
+                        expr.loc);
+                }
+            }
+        }
+
+        std::string clone_name = get_or_create_clone(tmpl, concrete_param_types, concrete_pack_param_types);
+        if (expr.lhs == nullptr) {
+            expr.name = std::move(clone_name);
+        } else {
+            expr.name = clone_name.substr(cloned_method_suffix_prefix.size());
+        }
+    }
+
     void monomorphize_generic_function_designator(Expr& expr, const Function& tmpl) {
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
@@ -7326,9 +7638,33 @@ private:
         if (expr.kind == ExprKind::Identifier && !expr.explicit_template_args.empty()) {
             auto template_it = generic_template_indices_.find(expr.name);
             if (template_it == generic_template_indices_.end()) return;
-            const Function& tmpl = program_.functions[template_it->second];
-            if (tmpl.template_params.empty()) return;
-            monomorphize_generic_function_designator(expr, tmpl);
+            std::vector<size_t> matching_candidates;
+            for (size_t candidate_index : template_it->second) {
+                const Function& tmpl = program_.functions[candidate_index];
+                if (tmpl.template_params.empty()) continue;
+                try {
+                    ExprPtr expr_copy = clone_expr(expr);
+                    std::unordered_map<std::string, Type> type_bindings;
+                    std::unordered_map<std::string, int> value_bindings;
+                    std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
+                    std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+                    seed_explicit_template_arguments(*expr_copy, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
+                    populate_concrete_pack_param_types(tmpl, explicit_pack_bindings, concrete_pack_param_types);
+                    bool every_non_pack_bound = true;
+                    for (const GenericTypeParam& tp : tmpl.template_params) {
+                        if (tp.is_pack) continue;
+                        bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
+                        every_non_pack_bound = every_non_pack_bound && bound;
+                    }
+                    if (every_non_pack_bound) matching_candidates.push_back(candidate_index);
+                } catch (const DataflowError&) {
+                }
+            }
+            if (matching_candidates.empty()) return;
+            if (matching_candidates.size() > 1) {
+                throw DataflowError("ambiguous generic function designator '" + expr.name + "'", expr.loc);
+            }
+            monomorphize_generic_function_designator(expr, program_.functions[matching_candidates[0]]);
             return;
         }
         if (expr.kind != ExprKind::Call) return;
@@ -7346,143 +7682,49 @@ private:
         }
         auto template_it = generic_template_indices_.find(generic_template_name);
         if (template_it == generic_template_indices_.end()) return;
-        const Function& tmpl = program_.functions[template_it->second];
-
-        // ch05 §5.11: a full-header-form generic function template
-        // (Function::template_params non-empty) is monomorphized by an
-        // entirely separate mechanism (explicit-argument/base-class-
-        // deduction, not this abbreviated-Concept-auto-form's own
-        // per-constrained-parameter-position matching below) --
-        // dispatched first and returned from immediately, since the
-        // rest of this function assumes the abbreviated form's own
-        // shape (Param::generic_concept) throughout.
-        if (!tmpl.template_params.empty()) {
-            monomorphize_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
+        const bool ordinary_overload_exists = has_non_generic_overload(generic_template_name);
+        if (template_it->second.size() == 1 && !ordinary_overload_exists) {
+            const Function& tmpl = program_.functions[template_it->second[0]];
+            if (!tmpl.template_params.empty()) {
+                monomorphize_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
+            } else {
+                monomorphize_abbreviated_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
+            }
             return;
         }
 
-        std::vector<Type> concrete_param_types;
-        concrete_param_types.reserve(tmpl.params.size());
-        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
-        size_t arg_cursor = 0;
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
-            const Param& param = tmpl.params[i];
-            if (i < param_offset) {
-                concrete_param_types.push_back(param.type);
+        std::vector<size_t> matching_candidates;
+        for (size_t candidate_index : template_it->second) {
+            const Function& tmpl = program_.functions[candidate_index];
+            if (!tmpl.template_params.empty()) {
+                FullHeaderGenericCallResolution resolution;
+                if (try_resolve_full_header_generic_function_call(expr, tmpl, body, param_offset, resolution)) {
+                    matching_candidates.push_back(candidate_index);
+                }
                 continue;
             }
-            if (param.is_parameter_pack) {
-                for (; arg_cursor < expr.args.size(); arg_cursor++) {
-                    std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-                    if (!arg_type.has_value()) return;
-                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-                    if (param.generic_concept != "$auto") {
-                        auto concept_it = concepts_by_name_.find(param.generic_concept);
-                        if (concept_it == concepts_by_name_.end()) return;
-                        if (!type_satisfies_concept(named, *concept_it->second, program_)) {
-                            throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
-                                                    param.generic_concept + "' required by generic function '" +
-                                                    tmpl.name +
-                                                    "' (ch05 §5.11 -- every requirement's method must exist with a "
-                                                    "matching signature)",
+            AbbreviatedGenericCallResolution resolution;
+            if (try_resolve_abbreviated_generic_function_call(expr, tmpl, body, param_offset, resolution)) {
+                matching_candidates.push_back(candidate_index);
+            }
+        }
+
+        if (matching_candidates.empty()) {
+            if (ordinary_overload_exists) return;
+            throw DataflowError("no generic overload of '" + generic_template_name + "' matches these argument types",
                                 expr.loc);
-                        }
-                    }
-                    Type substituted = param.type;
-                    if (substituted.kind == TypeKind::Reference) {
-                        substituted.pointee = std::make_shared<Type>(named);
-                    } else {
-                        substituted = named;
-                    }
-                    concrete_pack_param_types[i].push_back(std::move(substituted));
-                }
-                concrete_param_types.push_back(concrete_pack_param_types[i].empty() ? param.type
-                                                                                    : concrete_pack_param_types[i][0]);
-                continue;
-            }
-            if (param.generic_concept.empty()) {
-                concrete_param_types.push_back(param.type);
-                arg_cursor++;
-                continue;
-            }
-            if (arg_cursor >= expr.args.size()) return; // arg-count mismatch -- leave for codegen's own error
-            std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-            if (!arg_type.has_value()) return;
-            // The concept is checked against the argument's *underlying*
-            // named type -- e.g. a `const Shape auto&` parameter's
-            // argument might itself be a plain `Circle` local (arg_type
-            // == Named("Circle")) or an already-bound `const Circle&`
-            // reference variable (arg_type == Reference(Circle)) -- both
-            // resolve to the same concrete type for concept-satisfaction
-            // and substitution purposes.
-            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-            if (param.generic_concept != "$auto") {
-                auto concept_it = concepts_by_name_.find(param.generic_concept);
-                if (concept_it == concepts_by_name_.end()) return;
-                if (!type_satisfies_concept(named, *concept_it->second, program_)) {
-                    throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
-                                           param.generic_concept + "' required by generic function '" + tmpl.name +
-                                           "' (ch05 §5.11 -- every requirement's method must exist with a matching "
-                                           "signature)",
-                        expr.loc);
-                }
-            }
-            Type substituted = param.type;
-            if (substituted.kind == TypeKind::Reference) {
-                substituted.pointee = std::make_shared<Type>(named);
-            } else {
-                substituted = named;
-            }
-            concrete_param_types.push_back(std::move(substituted));
-            arg_cursor++;
+        }
+        if (matching_candidates.size() > 1) {
+            throw DataflowError("ambiguous call to overloaded generic function '" + generic_template_name + "'",
+                                expr.loc);
         }
 
-        // ch05 §5.15: the abbreviated (`Concept auto&`) form's own
-        // identical check -- see check_thread_safety_constraints' own
-        // comment; this form's own concrete param types are already
-        // fully resolved in concrete_param_types by this point, so no
-        // extra type_bindings substitution is needed here.
-        for (size_t i = param_offset; i < tmpl.params.size(); i++) {
-            const Param& param = tmpl.params[i];
-            if (!param.require_thread_movable && !param.require_thread_shareable) continue;
-            const std::vector<Type>* types_to_check =
-                param.is_parameter_pack ? &concrete_pack_param_types[i] : nullptr;
-            if (types_to_check == nullptr) {
-                if (param.require_thread_movable && !is_thread_movable(concrete_param_types[i])) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
-                                            "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
-                        expr.loc);
-                }
-                if (param.require_thread_shareable && !is_thread_shareable(concrete_param_types[i])) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
-                                            "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
-                        expr.loc);
-                }
-                continue;
-            }
-            for (const Type& concrete_type : *types_to_check) {
-                if (param.require_thread_movable && !is_thread_movable(concrete_type)) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
-                                            "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
-                        expr.loc);
-                }
-                if (param.require_thread_shareable && !is_thread_shareable(concrete_type)) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
-                                            "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
-                        expr.loc);
-                }
-            }
-        }
-
-        std::string clone_name = get_or_create_clone(tmpl, concrete_param_types, concrete_pack_param_types);
-        if (expr.lhs == nullptr) {
-            expr.name = std::move(clone_name);
+        const Function& selected = program_.functions[matching_candidates[0]];
+        if (!selected.template_params.empty()) {
+            monomorphize_generic_function_call(expr, selected, body, param_offset, cloned_method_suffix_prefix);
         } else {
-            expr.name = clone_name.substr(cloned_method_suffix_prefix.size());
+            monomorphize_abbreviated_generic_function_call(expr, selected, body, param_offset,
+                                                           cloned_method_suffix_prefix);
         }
     }
 
@@ -7694,7 +7936,7 @@ private:
         Function& synthesized = program_.functions.back();
         known_function_names_.insert(synthesized.name);
         if (synthesized.is_generic_template) {
-            generic_template_indices_[synthesized.name] = program_.functions.size() - 1;
+            generic_template_indices_[synthesized.name].push_back(program_.functions.size() - 1);
         }
 
         expr.name = class_name;
