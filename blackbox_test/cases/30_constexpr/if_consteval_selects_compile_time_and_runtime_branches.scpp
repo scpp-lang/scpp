@@ -1,0 +1,27 @@
+constexpr int choose_positive() {
+    if consteval {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+constexpr int choose_negative() {
+    if !consteval {
+        return 4;
+    } else {
+        return 3;
+    }
+}
+
+consteval int immediate_total() {
+    return choose_positive() * 10 + choose_negative();
+}
+
+int runtime_total() {
+    return choose_positive() * 10 + choose_negative();
+}
+
+int main() {
+    return runtime_total() + immediate_total();
+}

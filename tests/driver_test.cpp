@@ -1237,6 +1237,69 @@ void run_consteval_tests() {
         }
         expect(threw, case_name + ": expected clear runtime-only immediate-call rejection");
     }
+
+    {
+        std::string case_name = "if_consteval_selects_compile_time_and_runtime_branches";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "if_consteval_selects_compile_time_and_runtime_branches_exe";
+        scpp::compile_to_executable(
+            "constexpr int choose_positive() {\n"
+            "    if consteval {\n"
+            "        return 1;\n"
+            "    } else {\n"
+            "        return 2;\n"
+            "    }\n"
+            "}\n"
+            "constexpr int choose_negative() {\n"
+            "    if !consteval {\n"
+            "        return 4;\n"
+            "    } else {\n"
+            "        return 3;\n"
+            "    }\n"
+            "}\n"
+            "consteval int immediate_total() {\n"
+            "    return choose_positive() * 10 + choose_negative();\n"
+            "}\n"
+            "int runtime_total() {\n"
+            "    return choose_positive() * 10 + choose_negative();\n"
+            "}\n"
+            "int main() {\n"
+            "    return runtime_total() + immediate_total();\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 37,
+               case_name + ": expected runtime/immediate branch total 37, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "consteval_supports_pointer_reads_and_const_spans";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_supports_pointer_reads_and_const_spans_exe";
+        scpp::compile_to_executable(
+            "import std;\n"
+            "consteval int inspect_views() {\n"
+            "    int arr[3];\n"
+            "    arr[0] = 4;\n"
+            "    arr[1] = 5;\n"
+            "    arr[2] = 6;\n"
+            "    int* p = &arr[0];\n"
+            "    std::span<const int> s = arr;\n"
+            "    return *p + s[1] + s.size;\n"
+            "}\n"
+            "int main() {\n"
+            "    return inspect_views();\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 12,
+               case_name + ": expected pointer/span total 12, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
 }
 
 void run_cli_extension_tests() {

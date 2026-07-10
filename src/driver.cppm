@@ -159,9 +159,6 @@ void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
         if (stmt.is_constexpr) {
             throw_phase_a_constexpr_not_yet_lowerable(stmt.loc, "constexpr variable declarations");
         }
-        if (stmt.kind == StmtKind::If && stmt.if_mode != IfMode::Runtime) {
-            throw_phase_a_constexpr_not_yet_lowerable(stmt.loc, "'if consteval'");
-        }
         if (stmt.init) {
             // nothing to validate inside expressions yet
         }

@@ -48,6 +48,11 @@ struct PointerValue {
     long long index = 0;
 };
 
+struct SpanValue {
+    PointerValue pointer;
+    long long size = 0;
+};
+
 struct ObjectValue {
     std::string type_name;
     std::unordered_map<std::string, std::shared_ptr<Cell>> fields;
@@ -58,7 +63,7 @@ struct ArrayValue {
     std::vector<std::shared_ptr<Cell>> elements;
 };
 
-using CellData = std::variant<std::monostate, long long, double, bool, PointerValue, ObjectValue, ArrayValue>;
+using CellData = std::variant<std::monostate, long long, double, bool, PointerValue, SpanValue, ObjectValue, ArrayValue>;
 
 struct Cell {
     Type type;
@@ -73,6 +78,11 @@ struct Binding {
 struct LValue {
     std::shared_ptr<Cell> cell;
     bool read_only = false;
+};
+
+struct ExprRewrite {
+    Expr* target = nullptr;
+    std::shared_ptr<Cell> value;
 };
 
 struct ReturnSignal {
@@ -139,6 +149,37 @@ struct ContinueSignal {};
 
 [[nodiscard]] bool is_floating_like(const Type& type) { return is_named_type(type, "double"); }
 
+[[nodiscard]] Type make_pointer_type_to(const Type& pointee, bool is_mutable_pointee) {
+    Type type;
+    type.kind = TypeKind::Pointer;
+    type.pointee = std::make_shared<Type>(pointee);
+    type.is_mutable_pointee = is_mutable_pointee;
+    return type;
+}
+
+[[nodiscard]] std::shared_ptr<Cell> dereference_pointer(const PointerValue& pointer, const Type& pointer_type,
+                                                        const SourceLocation& loc) {
+    if (!pointer.storage) throw ConstexprError(loc, "constexpr dereference requires a non-null pointer");
+    if (pointer_type.kind != TypeKind::Pointer || !pointer_type.pointee) {
+        throw ConstexprError(loc, "malformed constexpr pointer type");
+    }
+    if (types_equal(*pointer_type.pointee, pointer.storage->type)) {
+        if (pointer.index != 0) {
+            throw ConstexprError(loc, "constexpr pointer arithmetic escaped the pointed-to object");
+        }
+        return pointer.storage;
+    }
+    auto* array = std::get_if<ArrayValue>(&pointer.storage->data);
+    if (!array) throw ConstexprError(loc, "constexpr pointer does not point to supported storage");
+    if (!types_equal(*pointer_type.pointee, array->element_type)) {
+        throw ConstexprError(loc, "constexpr pointer element type does not match the pointed-to storage");
+    }
+    if (pointer.index < 0 || static_cast<size_t>(pointer.index) >= array->elements.size()) {
+        throw ConstexprError(loc, "constexpr dereference out of bounds");
+    }
+    return array->elements[static_cast<size_t>(pointer.index)];
+}
+
 class ConstexprEngine {
 public:
     ConstexprEngine(const Program& program, ConstexprLimits limits)
@@ -182,7 +223,7 @@ private:
                 using T = std::decay_t<decltype(data)>;
                 if constexpr (std::is_same_v<T, std::monostate> || std::is_same_v<T, long long> ||
                               std::is_same_v<T, double> || std::is_same_v<T, bool> ||
-                              std::is_same_v<T, PointerValue>) {
+                              std::is_same_v<T, PointerValue> || std::is_same_v<T, SpanValue>) {
                     copy->data = data;
                 } else if constexpr (std::is_same_v<T, ObjectValue>) {
                     ObjectValue object_copy;
@@ -287,10 +328,15 @@ private:
                 return cell;
             }
             case TypeKind::Reference:
-            case TypeKind::Span:
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
                 throw ConstexprError(loc, "type is not yet supported by the constexpr evaluator in Phase D1");
+            case TypeKind::Span:
+                if (type.is_mutable_ref) {
+                    throw ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation");
+                }
+                cell->data = SpanValue{};
+                return cell;
         }
         throw ConstexprError(loc, "unsupported constexpr type");
     }
@@ -354,6 +400,51 @@ private:
         target->data = std::move(cloned->data);
     }
 
+    [[nodiscard]] std::shared_ptr<Cell> bind_read_only_span(const Type& span_type, const Expr& init_expr,
+                                                            const SourceLocation& loc) {
+        if (span_type.kind != TypeKind::Span || !span_type.pointee) {
+            throw ConstexprError(loc, "malformed constexpr span type");
+        }
+        if (span_type.is_mutable_ref) {
+            throw ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation");
+        }
+
+        auto result = std::make_shared<Cell>();
+        result->type = span_type;
+        SpanValue span;
+
+        if (init_expr.kind == ExprKind::StringLiteral) {
+            std::shared_ptr<Cell> pointer_cell = evaluate_expr(init_expr);
+            auto* pointer = std::get_if<PointerValue>(&pointer_cell->data);
+            auto* array = pointer && pointer->storage ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
+            if (!pointer || !array) {
+                throw ConstexprError(loc, "string-literal span binding lost its backing storage");
+            }
+            if (!types_equal(*span_type.pointee, array->element_type)) {
+                throw ConstexprError(loc, "string-literal element type does not match std::span element type");
+            }
+            span.pointer = *pointer;
+            span.size = static_cast<long long>(array->elements.size()) - 1;
+            result->data = std::move(span);
+            return result;
+        }
+
+        LValue source = resolve_lvalue(init_expr);
+        auto* array = std::get_if<ArrayValue>(&source.cell->data);
+        if (!array) {
+            throw ConstexprError(loc, "std::span<const T> can only be constructed from an array or string literal");
+        }
+        if (!types_equal(*span_type.pointee, array->element_type)) {
+            throw ConstexprError(loc, "array element type does not match std::span element type");
+        }
+        span.pointer.storage = source.cell;
+        span.pointer.index = 0;
+        span.pointer.storage_id = "span#" + std::to_string(string_storage_counter_ + 1);
+        span.size = static_cast<long long>(array->elements.size());
+        result->data = std::move(span);
+        return result;
+    }
+
     [[nodiscard]] LValue resolve_lvalue(const Expr& expr) {
         tick(expr.loc, "resolving an lvalue");
         switch (expr.kind) {
@@ -372,38 +463,50 @@ private:
                 return LValue{it->second, base.read_only};
             }
             case ExprKind::Subscript: {
-                std::shared_ptr<Cell> base = evaluate_expr(*expr.lhs);
+                std::shared_ptr<Cell> base;
+                bool base_read_only = false;
+                try {
+                    LValue base_lvalue = resolve_lvalue(*expr.lhs);
+                    base = base_lvalue.cell;
+                    base_read_only = base_lvalue.read_only;
+                } catch (const ConstexprError&) {
+                    base = evaluate_expr(*expr.lhs);
+                }
                 long long index = as_integer(evaluate_expr(*expr.rhs), expr.loc);
                 if (auto* array = std::get_if<ArrayValue>(&base->data)) {
                     if (index < 0 || static_cast<size_t>(index) >= array->elements.size()) {
                         throw ConstexprError(expr.loc, "constexpr subscript out of bounds");
                     }
-                    return LValue{array->elements[static_cast<size_t>(index)], false};
+                    return LValue{array->elements[static_cast<size_t>(index)], base_read_only};
+                }
+                if (auto* span = std::get_if<SpanValue>(&base->data)) {
+                    if (index < 0 || index >= span->size) {
+                        throw ConstexprError(expr.loc, "constexpr span subscript out of bounds");
+                    }
+                    PointerValue element_ptr = span->pointer;
+                    element_ptr.index += index;
+                    return LValue{dereference_pointer(element_ptr, make_pointer_type_to(*base->type.pointee, false), expr.loc),
+                                  true};
                 }
                 if (auto* pointer = std::get_if<PointerValue>(&base->data)) {
-                    auto* array = std::get_if<ArrayValue>(&pointer->storage->data);
+                    if (!base->type.pointee) throw ConstexprError(expr.loc, "malformed constexpr pointer type");
+                    PointerValue shifted = *pointer;
+                    shifted.index += index;
+                    auto* array = shifted.storage ? std::get_if<ArrayValue>(&shifted.storage->data) : nullptr;
                     if (!array) throw ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage");
-                    long long offset = pointer->index + index;
-                    if (offset < 0 || static_cast<size_t>(offset) >= array->elements.size()) {
+                    if (shifted.index < 0 || static_cast<size_t>(shifted.index) >= array->elements.size()) {
                         throw ConstexprError(expr.loc, "constexpr subscript out of bounds");
                     }
-                    bool read_only = base->type.kind == TypeKind::Pointer && !base->type.is_mutable_pointee;
-                    return LValue{array->elements[static_cast<size_t>(offset)], read_only};
+                    return LValue{dereference_pointer(shifted, base->type, expr.loc), true};
                 }
-                throw ConstexprError(expr.loc, "constexpr subscript requires an array or pointer");
+                throw ConstexprError(expr.loc, "constexpr subscript requires an array, pointer, or std::span");
             }
             case ExprKind::Unary:
                 if (expr.unary_op == UnaryOp::Deref) {
                     std::shared_ptr<Cell> pointer_cell = evaluate_expr(*expr.lhs);
                     auto* pointer = std::get_if<PointerValue>(&pointer_cell->data);
                     if (!pointer) throw ConstexprError(expr.loc, "constexpr dereference requires a pointer");
-                    auto* array = std::get_if<ArrayValue>(&pointer->storage->data);
-                    if (!array) throw ConstexprError(expr.loc, "constexpr pointer does not point to supported storage");
-                    if (pointer->index < 0 || static_cast<size_t>(pointer->index) >= array->elements.size()) {
-                        throw ConstexprError(expr.loc, "constexpr dereference out of bounds");
-                    }
-                    bool read_only = pointer_cell->type.kind == TypeKind::Pointer && !pointer_cell->type.is_mutable_pointee;
-                    return LValue{array->elements[static_cast<size_t>(pointer->index)], read_only};
+                    return LValue{dereference_pointer(*pointer, pointer_cell->type, expr.loc), true};
                 }
                 break;
             default:
@@ -639,7 +742,13 @@ private:
             case ExprKind::Identifier: return clone_cell(lookup_binding(expr.name, expr.loc).cell);
             case ExprKind::Conditional:
                 return as_bool(evaluate_expr(*expr.lhs), expr.loc) ? evaluate_expr(*expr.rhs) : evaluate_expr(*expr.third);
-            case ExprKind::Member: return clone_cell(resolve_lvalue(expr).cell);
+            case ExprKind::Member: {
+                std::shared_ptr<Cell> base = evaluate_expr(*expr.lhs);
+                if (auto* span = std::get_if<SpanValue>(&base->data); span && expr.name == "size") {
+                    return make_checked_int_cell(span->size, expr.loc);
+                }
+                return clone_cell(resolve_lvalue(expr).cell);
+            }
             case ExprKind::Subscript: return clone_cell(resolve_lvalue(expr).cell);
             case ExprKind::Call: return evaluate_call_expr(expr);
             case ExprKind::Cast: return cast_value(expr.type, evaluate_expr(*expr.lhs), expr.loc);
@@ -673,8 +782,42 @@ private:
                     }
                     case UnaryOp::Not: return make_bool_cell(!as_bool(evaluate_expr(*expr.lhs), expr.loc));
                     case UnaryOp::Deref: return clone_cell(resolve_lvalue(expr).cell);
-                    case UnaryOp::AddressOf:
-                        throw ConstexprError(expr.loc, "constexpr address-of is not yet implemented in Phase D1");
+                    case UnaryOp::AddressOf: {
+                        LValue target = resolve_lvalue(*expr.lhs);
+                        auto result = std::make_shared<Cell>();
+                        result->type = make_pointer_type_to(target.cell->type, !target.read_only);
+                        PointerValue pointer;
+                        if (expr.lhs->kind == ExprKind::Subscript && expr.lhs->lhs && expr.lhs->rhs) {
+                            long long offset = as_integer(evaluate_expr(*expr.lhs->rhs), expr.loc);
+                            try {
+                                LValue base_lvalue = resolve_lvalue(*expr.lhs->lhs);
+                                if (std::holds_alternative<ArrayValue>(base_lvalue.cell->data)) {
+                                    pointer.storage = base_lvalue.cell;
+                                    pointer.index = offset;
+                                } else {
+                                    pointer.storage = target.cell;
+                                    pointer.index = 0;
+                                }
+                            } catch (const ConstexprError&) {
+                                std::shared_ptr<Cell> base_value = evaluate_expr(*expr.lhs->lhs);
+                                if (auto* span = std::get_if<SpanValue>(&base_value->data)) {
+                                    pointer = span->pointer;
+                                    pointer.index += offset;
+                                } else if (auto* base_pointer = std::get_if<PointerValue>(&base_value->data)) {
+                                    pointer = *base_pointer;
+                                    pointer.index += offset;
+                                } else {
+                                    pointer.storage = target.cell;
+                                    pointer.index = 0;
+                                }
+                            }
+                        } else {
+                            pointer.storage = target.cell;
+                            pointer.index = 0;
+                        }
+                        result->data = std::move(pointer);
+                        return result;
+                    }
                 }
                 break;
             case ExprKind::TypeTrait:
@@ -694,6 +837,14 @@ private:
         tick(stmt.loc, "executing a statement");
         switch (stmt.kind) {
             case StmtKind::VarDecl: {
+                if (stmt.type.kind == TypeKind::Span) {
+                    if (!stmt.init) {
+                        throw ConstexprError(stmt.loc, "std::span<const T> must be initialized during constant evaluation");
+                    }
+                    frames_.back()[stmt.var_name] = Binding{bind_read_only_span(stmt.type, *stmt.init, stmt.loc),
+                                                            stmt.is_const || stmt.is_constexpr};
+                    return;
+                }
                 auto cell = make_default_cell(stmt.type, stmt.loc);
                 if (stmt.has_ctor_args) {
                     std::vector<Binding> ctor_bindings;
@@ -731,8 +882,13 @@ private:
                 if (stmt.expr) static_cast<void>(evaluate_expr(*stmt.expr));
                 return;
             case StmtKind::If:
-                if (stmt.if_mode != IfMode::Runtime) {
-                    throw ConstexprError(stmt.loc, "if consteval folding is deferred to Phase E");
+                if (stmt.if_mode == IfMode::ConstevalTrue) {
+                    execute_stmt(*stmt.then_branch, return_type);
+                    return;
+                }
+                if (stmt.if_mode == IfMode::ConstevalFalse) {
+                    if (stmt.else_branch) execute_stmt(*stmt.else_branch, return_type);
+                    return;
                 }
                 if (as_bool(evaluate_expr(*stmt.condition), stmt.loc)) {
                     execute_stmt(*stmt.then_branch, return_type);
@@ -841,40 +997,96 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     expr.type = value->type;
 }
 
-void fold_expr_immediate_calls(Program& program, Expr& expr, ConstexprEngine& engine, bool in_immediate_function);
-void fold_stmt_immediate_calls(Program& program, Stmt& stmt, ConstexprEngine& engine, bool in_immediate_function);
+void collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
+                                   std::vector<ExprRewrite>& expr_rewrites,
+                                   std::vector<Stmt*>& consteval_if_rewrites);
+void collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
+                                   std::vector<ExprRewrite>& expr_rewrites,
+                                   std::vector<Stmt*>& consteval_if_rewrites);
 
-void fold_stmt_immediate_calls(Program& program, Stmt& stmt, ConstexprEngine& engine, bool in_immediate_function) {
-    if (stmt.init) fold_expr_immediate_calls(program, *stmt.init, engine, in_immediate_function);
-    for (ExprPtr& arg : stmt.ctor_args) fold_expr_immediate_calls(program, *arg, engine, in_immediate_function);
-    if (stmt.expr) fold_expr_immediate_calls(program, *stmt.expr, engine, in_immediate_function);
-    if (stmt.condition) fold_expr_immediate_calls(program, *stmt.condition, engine, in_immediate_function);
-    if (stmt.then_branch) fold_stmt_immediate_calls(program, *stmt.then_branch, engine, in_immediate_function);
-    if (stmt.else_branch) fold_stmt_immediate_calls(program, *stmt.else_branch, engine, in_immediate_function);
-    for (StmtPtr& nested : stmt.statements) fold_stmt_immediate_calls(program, *nested, engine, in_immediate_function);
+void collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
+                                   std::vector<ExprRewrite>& expr_rewrites,
+                                   std::vector<Stmt*>& consteval_if_rewrites) {
+    if (stmt.kind == StmtKind::If && stmt.if_mode != IfMode::Runtime) {
+        Stmt* runtime_branch = nullptr;
+        if (stmt.if_mode == IfMode::ConstevalFalse) {
+            runtime_branch = stmt.then_branch.get();
+        } else if (stmt.else_branch) {
+            runtime_branch = stmt.else_branch.get();
+        }
+        if (runtime_branch) collect_runtime_stmt_rewrites(program, *runtime_branch, engine, expr_rewrites, consteval_if_rewrites);
+        consteval_if_rewrites.push_back(&stmt);
+        return;
+    }
+
+    if (stmt.init) collect_runtime_expr_rewrites(program, *stmt.init, engine, expr_rewrites, consteval_if_rewrites);
+    for (ExprPtr& arg : stmt.ctor_args) {
+        collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+    }
+    if (stmt.expr) collect_runtime_expr_rewrites(program, *stmt.expr, engine, expr_rewrites, consteval_if_rewrites);
+    if (stmt.condition) {
+        collect_runtime_expr_rewrites(program, *stmt.condition, engine, expr_rewrites, consteval_if_rewrites);
+    }
+    if (stmt.then_branch) collect_runtime_stmt_rewrites(program, *stmt.then_branch, engine, expr_rewrites, consteval_if_rewrites);
+    if (stmt.else_branch) collect_runtime_stmt_rewrites(program, *stmt.else_branch, engine, expr_rewrites, consteval_if_rewrites);
+    for (StmtPtr& nested : stmt.statements) {
+        collect_runtime_stmt_rewrites(program, *nested, engine, expr_rewrites, consteval_if_rewrites);
+    }
 }
 
-void fold_expr_immediate_calls(Program& program, Expr& expr, ConstexprEngine& engine, bool in_immediate_function) {
-    if (expr.lhs) fold_expr_immediate_calls(program, *expr.lhs, engine, in_immediate_function);
-    if (expr.rhs) fold_expr_immediate_calls(program, *expr.rhs, engine, in_immediate_function);
-    if (expr.third) fold_expr_immediate_calls(program, *expr.third, engine, in_immediate_function);
-    for (ExprPtr& arg : expr.args) fold_expr_immediate_calls(program, *arg, engine, in_immediate_function);
-    if (expr.lambda_body) fold_stmt_immediate_calls(program, *expr.lambda_body, engine, in_immediate_function);
-    if (in_immediate_function) return;
-    const Function* fn = find_consteval_function(program, expr);
-    if (!fn) return;
-    std::shared_ptr<Cell> value = engine.evaluate_root_expr(expr);
-    rewrite_expr_as_constant(expr, value);
+void collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
+                                   std::vector<ExprRewrite>& expr_rewrites,
+                                   std::vector<Stmt*>& consteval_if_rewrites) {
+    if (find_consteval_function(program, expr) != nullptr) {
+        expr_rewrites.push_back(ExprRewrite{&expr, engine.evaluate_root_expr(expr)});
+        return;
+    }
+    if (expr.lhs) collect_runtime_expr_rewrites(program, *expr.lhs, engine, expr_rewrites, consteval_if_rewrites);
+    if (expr.rhs) collect_runtime_expr_rewrites(program, *expr.rhs, engine, expr_rewrites, consteval_if_rewrites);
+    if (expr.third) {
+        collect_runtime_expr_rewrites(program, *expr.third, engine, expr_rewrites, consteval_if_rewrites);
+    }
+    for (ExprPtr& arg : expr.args) {
+        collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+    }
+    if (expr.lambda_body) {
+        collect_runtime_stmt_rewrites(program, *expr.lambda_body, engine, expr_rewrites, consteval_if_rewrites);
+    }
+}
+
+void rewrite_consteval_if_for_runtime(Stmt& stmt) {
+    if (stmt.kind != StmtKind::If || stmt.if_mode == IfMode::Runtime) return;
+    SourceLocation loc = stmt.loc;
+    IfMode mode = stmt.if_mode;
+    StmtPtr selected;
+    if (mode == IfMode::ConstevalFalse) {
+        selected = std::move(stmt.then_branch);
+    } else {
+        selected = std::move(stmt.else_branch);
+    }
+    if (selected) {
+        stmt = std::move(*selected);
+        return;
+    }
+    stmt = Stmt{};
+    stmt.kind = StmtKind::Block;
+    stmt.loc = loc;
 }
 
 } // namespace
 
 void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     ConstexprEngine engine(program, limits);
+    std::vector<ExprRewrite> expr_rewrites;
+    std::vector<Stmt*> consteval_if_rewrites;
     for (Function& fn : program.functions) {
         if (!fn.body) continue;
-        bool in_immediate_function = fn.eval_mode != FunctionEvalMode::RuntimeOnly;
-        fold_stmt_immediate_calls(program, *fn.body, engine, in_immediate_function);
+        collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
+    }
+    for (ExprRewrite& rewrite : expr_rewrites) rewrite_expr_as_constant(*rewrite.target, rewrite.value);
+    for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
+    for (Function& fn : program.functions) {
+        if (fn.eval_mode == FunctionEvalMode::Consteval) fn.body.reset();
     }
 }
 

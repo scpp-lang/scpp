@@ -1,0 +1,15 @@
+import std;
+
+consteval int inspect_views() {
+    int arr[3];
+    arr[0] = 4;
+    arr[1] = 5;
+    arr[2] = 6;
+    int* p = &arr[0];
+    std::span<const int> s = arr;
+    return *p + s[1] + s.size;
+}
+
+int main() {
+    return inspect_views();
+}
