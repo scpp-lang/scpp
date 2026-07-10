@@ -29,6 +29,34 @@ constant evaluation only for a class type satisfying 7.2(2).
 `constexpr` and `consteval`. The SCPP26-specific restrictions are those
 of Clause 7's supported constant-evaluation subset. — end note]
 
+## 9.2 The `if consteval` statement [stmt.if]
+
+(1) An `if` statement of the form `if consteval` is a **consteval if
+statement**. An `if` statement of the form `if !consteval` is a
+**negated consteval if statement**.
+
+(2) Except as modified by this subclause, [stmt.if] applies unchanged to
+a consteval if statement or negated consteval if statement.
+
+(3) If a consteval if statement is evaluated in a context that is
+manifestly constant-evaluated ([expr.const.defns]), the first
+substatement is executed. That first substatement is an immediate
+function context.
+
+(4) Otherwise, if the else part of a consteval if statement is present,
+the second substatement is executed.
+
+(5) If a negated consteval if statement is evaluated in a context that is
+manifestly constant-evaluated ([expr.const.defns]), the first
+substatement is not executed and, if the else part is present, the
+second substatement is executed.
+
+(6) Otherwise, the first substatement of a negated consteval if
+statement is executed.
+
+(7) Each substatement of a consteval if statement or negated consteval if
+statement is a control-flow-limited statement ([stmt.label]).
+
 ---
 
 [← Previous: Constant evaluation](06-constant-evaluation.md) · [Table of Contents](README.md) · [Next: Function template argument deduction →](08-function-template-argument-deduction.md)
