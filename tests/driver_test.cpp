@@ -901,49 +901,131 @@ void run_concept_tests() {
 // unresolved callee -- codegen's own job, unreachable through
 // movetest_source's movecheck-only throws_move_error helper.
 void run_generic_type_tests() {
-    std::string source =
-        "template<typename T>\n"
-        "concept Describable = requires(const T& t) {\n"
-        "    { t.magnitude() } -> std::same_as<int>;\n"
-        "};\n"
-        "class NoMagnitude {\n"
-        "public:\n"
-        "    NoMagnitude(int v) { this.value = v; return; }\n"
-        "private:\n"
-        "    int value;\n"
-        "};\n"
-        "template<typename T>\n"
-        "class Vec {\n"
-        "    T item;\n"
-        "public:\n"
-        "    Vec(const T& x) { this.item = x; return; }\n"
-        "    int describe() const requires Describable<T> {\n"
-        "        return this.item.magnitude();\n"
-        "    }\n"
-        "};\n"
-        "int main() {\n"
-        "    NoMagnitude n(1);\n"
-        "    Vec<NoMagnitude> vn(n);\n"
-        "    return vn.describe();\n"
-        "}\n";
-    std::string case_name = "generic_class_constrained_method_unsatisfying_type_is_rejected";
-    cases_run++;
-    bool threw = false;
-    try {
-        scpp::Program program = scpp::parse(source);
-        scpp::monomorphize_generics(program);
-        scpp::check_moves(program);
-        scpp::Codegen codegen("test_module");
-        codegen.generate(program);
-    } catch (const scpp::DataflowError&) {
-        threw = true;
-    } catch (const scpp::CodegenError&) {
-        threw = true;
-    } catch (const scpp::ParseError&) {
-        threw = true;
+    {
+        std::string source =
+            "template<typename T>\n"
+            "concept Describable = requires(const T& t) {\n"
+            "    { t.magnitude() } -> std::same_as<int>;\n"
+            "};\n"
+            "class NoMagnitude {\n"
+            "public:\n"
+            "    NoMagnitude(int v) { this.value = v; return; }\n"
+            "private:\n"
+            "    int value;\n"
+            "};\n"
+            "template<typename T>\n"
+            "class Vec {\n"
+            "    T item;\n"
+            "public:\n"
+            "    Vec(const T& x) { this.item = x; return; }\n"
+            "    int describe() const requires Describable<T> {\n"
+            "        return this.item.magnitude();\n"
+            "    }\n"
+            "};\n"
+            "int main() {\n"
+            "    NoMagnitude n(1);\n"
+            "    Vec<NoMagnitude> vn(n);\n"
+            "    return vn.describe();\n"
+            "}\n";
+        std::string case_name = "generic_class_constrained_method_unsatisfying_type_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected calling a method whose own requires-clause the concrete type "
+                                  "argument doesn't satisfy to fail");
     }
-    expect(threw, case_name + ": expected calling a method whose own requires-clause the concrete type "
-                              "argument doesn't satisfy to fail");
+
+    {
+        std::string source =
+            "template<typename... Ts>\n"
+            "class Box;\n"
+            "\n"
+            "template<>\n"
+            "class Box<> {\n"
+            "public:\n"
+            "    Box(const char* s) { return; }\n"
+            "};\n"
+            "\n"
+            "template<typename Head, typename... Tail>\n"
+            "class Box<Head, Tail...> : private Box<Tail...> {\n"
+            "public:\n"
+            "    Box(const char* s) { return; }\n"
+            "};\n"
+            "\n"
+            "int main() {\n"
+            "    Box<int, bool> b(\"hi\");\n"
+            "    return 0;\n"
+            "}\n";
+        std::string case_name = "variadic_generic_instantiation_clones_constructor";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected concrete variadic instantiations to inherit cloned constructors");
+    }
+
+    {
+        std::string source =
+            "template<typename... Ts>\n"
+            "class Box;\n"
+            "\n"
+            "template<>\n"
+            "class Box<> {\n"
+            "public:\n"
+            "    int size() const { return 10; }\n"
+            "};\n"
+            "\n"
+            "template<typename Head, typename... Tail>\n"
+            "class Box<Head, Tail...> : private Box<Tail...> {\n"
+            "public:\n"
+            "    int size() const { return 50; }\n"
+            "};\n"
+            "\n"
+            "int main() {\n"
+            "    Box<int, bool> b;\n"
+            "    return b.size() - 50;\n"
+            "}\n";
+        std::string case_name = "variadic_generic_instantiation_clones_methods";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(source);
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected concrete variadic instantiations to clone method bodies");
+    }
 }
 
 void run_generic_pack_deduction_tests() {
