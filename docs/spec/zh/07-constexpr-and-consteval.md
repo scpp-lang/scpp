@@ -24,6 +24,33 @@
 【注：本条款直接复用 C++ 的 `constexpr` / `consteval` 拼写和含义。
 SCPP26 的专有限制，体现在第 7 条所规定的常量求值支持子集。——注释结束】
 
+## 9.2 `if consteval` 语句 [stmt.if]
+
+(1) 形如 `if consteval` 的 `if` 语句，是一个 **consteval if
+statement**。形如 `if !consteval` 的 `if` 语句，是一个
+**negated consteval if statement**。
+
+(2) 除本小节明确修改的部分外，[stmt.if] 原样适用于 consteval if
+statement 与 negated consteval if statement。
+
+(3) 如果一个 consteval if statement 在一个 manifestly
+constant-evaluated（[expr.const.defns]）的上下文中被求值，那么它的第一个
+substatement 会被执行。这个第一个 substatement 是一个 immediate
+function context。
+
+(4) 否则，如果一个 consteval if statement 带有 else 部分，那么它的第二个
+substatement 会被执行。
+
+(5) 如果一个 negated consteval if statement 在一个 manifestly
+constant-evaluated（[expr.const.defns]）的上下文中被求值，那么它的第一个
+substatement 不会被执行；而如果带有 else 部分，则第二个 substatement
+会被执行。
+
+(6) 否则，negated consteval if statement 的第一个 substatement 会被执行。
+
+(7) consteval if statement 或 negated consteval if statement 的每一个
+substatement，都是一个 control-flow-limited statement（[stmt.label]）。
+
 ---
 
 [← 上一节：常量求值](06-constant-evaluation.md) · [目录](README.md) · [下一节：函数模板实参推导 →](08-function-template-argument-deduction.md)
