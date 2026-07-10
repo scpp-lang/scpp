@@ -110,14 +110,6 @@ target_compile_definitions(scpp PRIVATE
     SCPP_VERSION="${PROJECT_VERSION}"
     SCPP_VERSION_MAJOR="${PROJECT_VERSION_MAJOR}")
 
-install(TARGETS scpp
-    RUNTIME DESTINATION bin)
-
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
-    DESTINATION "share/scpp/stdlib"
-    FILES_MATCHING
-        PATTERN "*.scpp")
-
 enable_testing()
 
 add_executable(lexer_test tests/lexer_test.cpp)
