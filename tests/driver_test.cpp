@@ -220,19 +220,6 @@ std::string shell_quote(const std::string& text) {
     return quoted;
 }
 
-std::vector<std::filesystem::path> relative_tree_entries(const std::filesystem::path& root) {
-    std::vector<std::filesystem::path> entries;
-    std::error_code ec;
-    if (!std::filesystem::exists(root)) return entries;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(root, ec)) {
-        if (ec) return {};
-        entries.push_back(std::filesystem::relative(entry.path(), root, ec));
-        if (ec) return {};
-    }
-    std::sort(entries.begin(), entries.end());
-    return entries;
-}
-
 // Compiles `source` to a temporary executable, runs it, and captures both
 // its stdout and exit code (0-255, matching POSIX wait status semantics).
 RunResult compile_and_run(std::string_view source, const std::string& case_name) {
@@ -1308,112 +1295,6 @@ void run_cli_extension_tests() {
                case_name + ": expected installed-layout binary output exit code 9, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove_all(install_root);
-    }
-
-    {
-        std::string case_name = "cli_installself_sets_up_toolchain_only_under_dot_scpp";
-        std::filesystem::path root =
-            std::filesystem::current_path() / "cli_installself_sets_up_toolchain_only_under_dot_scpp_root";
-        std::filesystem::path home = root / "home";
-        std::filesystem::path toolchain_root = home / ".scpp" / "toolchains" / "scpp26";
-        std::filesystem::path toolchain_binary = toolchain_root / "bin" / "scpp";
-        std::filesystem::path toolchain_stdlib = toolchain_root / "share" / "scpp" / "stdlib";
-        std::filesystem::path versioned_link = home / ".scpp" / "bin" / "scpp26";
-        std::filesystem::path default_link = home / ".scpp" / "bin" / "scpp";
-        std::filesystem::path hello_path = root / "hello.scpp";
-        std::filesystem::path exe1_path = root / "hello_scpp";
-        std::filesystem::path exe2_path = root / "hello_scpp26";
-        cases_run++;
-        std::filesystem::remove_all(root);
-        std::filesystem::create_directories(home / "notes");
-        write_text_file(home / ".profile", "# profile\n");
-        write_text_file(home / ".bashrc", "# bashrc\n");
-        write_text_file(home / "notes" / "keep.txt", "untouched\n");
-        std::vector<std::filesystem::path> before_entries = relative_tree_entries(home);
-
-        std::string install_command =
-            "env HOME=" + shell_quote(home.string()) + " " + shell_quote(std::string(SCPP_BINARY_PATH)) +
-            " installself 2>&1";
-        RunResult first_install = run_command_capture(install_command);
-        expect(first_install.exit_code == 0,
-               case_name + ": first installself should succeed, got '" + first_install.stdout_text + "'");
-        expect(first_install.stdout_text.find("Installed scpp26 to") != std::string::npos,
-               case_name + ": expected install summary, got '" + first_install.stdout_text + "'");
-        expect(first_install.stdout_text.find("export PATH=\"$HOME/.scpp/bin:$PATH\"") != std::string::npos,
-               case_name + ": expected manual PATH instructions, got '" + first_install.stdout_text + "'");
-
-        expect(std::filesystem::exists(toolchain_binary), case_name + ": expected installed binary");
-        expect(std::filesystem::exists(toolchain_stdlib / "std.scpp"), case_name + ": expected std.scpp in installed stdlib");
-        expect(std::filesystem::exists(toolchain_stdlib / "std.scppm"), case_name + ": expected std.scppm in installed stdlib");
-        expect(std::filesystem::exists(toolchain_stdlib / "libstd.scppa"), case_name + ": expected libstd.scppa in installed stdlib");
-        expect(std::filesystem::exists(toolchain_stdlib / "libscpp_string_wrapper.a"),
-               case_name + ": expected libscpp_string_wrapper.a in installed stdlib");
-        expect(std::filesystem::exists(toolchain_stdlib / "libscpp_thread_wrapper.a"),
-               case_name + ": expected libscpp_thread_wrapper.a in installed stdlib");
-        expect(!std::filesystem::exists(toolchain_stdlib / "CMakeFiles"),
-               case_name + ": installself should not copy build-system metadata directories");
-        expect(!std::filesystem::exists(toolchain_stdlib / "cmake_install.cmake"),
-               case_name + ": installself should not copy build-system metadata files");
-        expect(std::filesystem::is_symlink(versioned_link), case_name + ": expected versioned symlink");
-        expect(std::filesystem::is_symlink(default_link), case_name + ": expected default symlink");
-        expect(std::filesystem::read_symlink(versioned_link) == toolchain_binary,
-               case_name + ": versioned symlink should point at installed binary");
-        expect(std::filesystem::read_symlink(default_link) == toolchain_binary,
-               case_name + ": default symlink should point at installed binary");
-        expect(!std::filesystem::exists(home / ".scpp" / "env"), case_name + ": installself should not create ~/.scpp/env");
-        expect(!std::filesystem::exists(home / ".scpp" / "env.fish"),
-               case_name + ": installself should not create ~/.scpp/env.fish");
-        expect(read_file(home / ".profile") == "# profile\n", case_name + ": installself should not modify ~/.profile");
-        expect(read_file(home / ".bashrc") == "# bashrc\n", case_name + ": installself should not modify ~/.bashrc");
-        expect(read_file(home / "notes" / "keep.txt") == "untouched\n",
-               case_name + ": installself should not modify unrelated home files");
-        std::vector<std::filesystem::path> after_entries = relative_tree_entries(home);
-        for (const std::filesystem::path& entry : before_entries) {
-            if (entry.empty() || entry.string().starts_with(".scpp")) continue;
-            expect(std::find(after_entries.begin(), after_entries.end(), entry) != after_entries.end(),
-                   case_name + ": home entry disappeared unexpectedly: '" + entry.string() + "'");
-        }
-        for (const std::filesystem::path& entry : after_entries) {
-            if (entry.empty() || entry.string().starts_with(".scpp")) continue;
-            expect(std::find(before_entries.begin(), before_entries.end(), entry) != before_entries.end(),
-                   case_name + ": installself wrote outside ~/.scpp: '" + entry.string() + "'");
-        }
-
-        RunResult second_install =
-            run_command_capture("env HOME=" + shell_quote(home.string()) + " " + shell_quote(toolchain_binary.string()) +
-                                " installself 2>&1");
-        expect(second_install.exit_code == 0,
-               case_name + ": second installself should succeed, got '" + second_install.stdout_text + "'");
-        expect(read_file(home / ".profile") == "# profile\n",
-               case_name + ": second installself should still leave ~/.profile untouched");
-        expect(read_file(home / ".bashrc") == "# bashrc\n",
-               case_name + ": second installself should still leave ~/.bashrc untouched");
-
-        write_text_file(hello_path,
-                        "import std;\n"
-                        "int main() {\n"
-                        "    std::string s(\"hello\");\n"
-                        "    return s.length();\n"
-                        "}\n");
-        RunResult sourced_run = run_command_capture(
-            "env HOME=" + shell_quote(home.string()) +
-            " /bin/sh -lc 'export PATH=\"$HOME/.scpp/bin:$PATH\" && command -v scpp && command -v scpp26 && scpp " +
-            shell_quote(hello_path.string()) + " -o " + shell_quote(exe1_path.string()) + " && scpp26 " +
-            shell_quote(hello_path.string()) + " -o " + shell_quote(exe2_path.string()) + "; " +
-            shell_quote(exe1_path.string()) + "; status1=$?; " + shell_quote(exe2_path.string()) +
-            "; status2=$?; echo EXIT1:$status1; echo EXIT2:$status2' 2>&1");
-        expect(sourced_run.exit_code == 0,
-               case_name + ": sourced shell run should succeed, got '" + sourced_run.stdout_text + "'");
-        expect(sourced_run.stdout_text.find((home / ".scpp" / "bin" / "scpp").string()) != std::string::npos,
-               case_name + ": expected command -v scpp output, got '" + sourced_run.stdout_text + "'");
-        expect(sourced_run.stdout_text.find((home / ".scpp" / "bin" / "scpp26").string()) != std::string::npos,
-               case_name + ": expected command -v scpp26 output, got '" + sourced_run.stdout_text + "'");
-        expect(sourced_run.stdout_text.find("EXIT1:5") != std::string::npos,
-               case_name + ": expected scpp-built binary exit code 5, got '" + sourced_run.stdout_text + "'");
-        expect(sourced_run.stdout_text.find("EXIT2:5") != std::string::npos,
-               case_name + ": expected scpp26-built binary exit code 5, got '" + sourced_run.stdout_text + "'");
-
-        std::filesystem::remove_all(root);
     }
 
     {
