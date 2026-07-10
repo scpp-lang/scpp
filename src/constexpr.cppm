@@ -210,7 +210,7 @@ class ConstexprEngine {
 public:
     ConstexprEngine(const Program& program, ConstexprLimits limits)
         : program_(program), limits_(limits) {
-        for (const Function& fn : program_.functions) functions_by_name_[fn.name].push_back(&fn);
+        for (size_t i = 0; i < program_.functions.size(); ++i) functions_by_name_[program_.functions[i].name].push_back(i);
         for (const ClassDef& def : program_.classes) classes_by_name_.emplace(def.name, &def);
         for (const StructDef& def : program_.structs) structs_by_name_.emplace(def.name, &def);
     }
@@ -241,7 +241,7 @@ private:
     int call_depth_ = 0;
     int string_storage_counter_ = 0;
     std::vector<std::unordered_map<std::string, Binding>> frames_;
-    std::unordered_map<std::string, std::vector<const Function*>> functions_by_name_;
+    std::unordered_map<std::string, std::vector<size_t>> functions_by_name_;
     std::unordered_map<std::string, const ClassDef*> classes_by_name_;
     std::unordered_map<std::string, const StructDef*> structs_by_name_;
 
@@ -650,7 +650,8 @@ private:
                                                 bool require_constexpr) {
         auto it = functions_by_name_.find(std::string(name));
         if (it == functions_by_name_.end()) return nullptr;
-        for (const Function* fn : it->second) {
+        for (size_t fn_index : it->second) {
+            const Function* fn = &program_.functions[fn_index];
             if (!fn->body) continue;
             if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn->params.size() != args.size()) continue;
@@ -671,7 +672,8 @@ private:
                                                                               bool require_constexpr) {
         auto it = functions_by_name_.find(std::string(class_name) + "_new");
         if (it == functions_by_name_.end()) return nullptr;
-        for (const Function* fn : it->second) {
+        for (size_t fn_index : it->second) {
+            const Function* fn = &program_.functions[fn_index];
             if (!fn->body) continue;
             if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn->params.size() != 2) continue;
@@ -744,7 +746,8 @@ private:
                                                    bool require_constexpr) {
         auto it = functions_by_name_.find(std::string(class_name) + "_new");
         if (it == functions_by_name_.end()) return nullptr;
-        for (const Function* fn : it->second) {
+        for (size_t fn_index : it->second) {
+            const Function* fn = &program_.functions[fn_index];
             if (!fn->body) continue;
             if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn->params.size() != args.size() + 1) continue;
@@ -770,7 +773,8 @@ private:
     [[nodiscard]] bool has_runtime_only_match(std::string_view name, const std::vector<std::shared_ptr<Cell>>& args) {
         auto it = functions_by_name_.find(std::string(name));
         if (it == functions_by_name_.end()) return false;
-        for (const Function* fn : it->second) {
+        for (size_t fn_index : it->second) {
+            const Function* fn = &program_.functions[fn_index];
             if (!fn->body || fn->eval_mode != FunctionEvalMode::RuntimeOnly || fn->params.size() != args.size()) continue;
             bool params_match = true;
             for (size_t i = 0; i < args.size(); ++i) {
