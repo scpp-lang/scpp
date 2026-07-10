@@ -686,13 +686,53 @@ private:
         return nullptr;
     }
 
+    [[nodiscard]] bool is_same_or_base_class_type(const Type& expected, const Type& actual) const {
+        if (types_equal(expected, actual)) return true;
+        if (expected.kind != TypeKind::Named || actual.kind != TypeKind::Named) return false;
+        if (!is_class_name(expected.name) || !is_class_name(actual.name)) return false;
+        std::string current = actual.name;
+        while (true) {
+            auto it = classes_by_name_.find(current);
+            if (it == classes_by_name_.end() || it->second->base_class_name.empty()) return false;
+            current = it->second->base_class_name;
+            if (current == expected.name) return true;
+        }
+    }
+
+    [[nodiscard]] std::shared_ptr<Cell> clone_cell_as_type(const std::shared_ptr<Cell>& cell, const Type& target_type,
+                                                           const SourceLocation& loc) {
+        auto clone = clone_cell(cell);
+        if (!is_same_or_base_class_type(target_type, clone->type)) {
+            throw ConstexprError(loc, "constexpr value is not compatible with requested parameter type");
+        }
+        clone->type = target_type;
+        if (auto* object = std::get_if<ObjectValue>(&clone->data)) object->type_name = target_type.name;
+        return clone;
+    }
+
+    [[nodiscard]] std::shared_ptr<Cell> alias_cell_as_type(const std::shared_ptr<Cell>& cell, const Type& target_type,
+                                                           const SourceLocation& loc) {
+        if (!is_same_or_base_class_type(target_type, cell->type)) {
+            throw ConstexprError(loc, "constexpr object is not compatible with requested reference type");
+        }
+        auto* object = std::get_if<ObjectValue>(&cell->data);
+        if (!object) throw ConstexprError(loc, "constexpr base-class binding requires an object value");
+        auto alias = std::make_shared<Cell>();
+        alias->type = target_type;
+        ObjectValue alias_object;
+        alias_object.type_name = target_type.name;
+        for (const auto& [name, field] : object->fields) alias_object.fields.emplace(name, field);
+        alias->data = std::move(alias_object);
+        return alias;
+    }
+
     [[nodiscard]] bool constexpr_argument_matches_parameter(const Type& param_type, const std::shared_ptr<Cell>& arg,
                                                             bool require_constexpr) {
         const Type& arg_type = arg->type;
         if (param_type.kind == TypeKind::Reference) {
-            return param_type.pointee && types_equal(*param_type.pointee, arg_type);
+            return param_type.pointee && is_same_or_base_class_type(*param_type.pointee, arg_type);
         }
-        if (types_equal(param_type, arg_type)) return true;
+        if (is_same_or_base_class_type(param_type, arg_type)) return true;
         if (param_type.kind == TypeKind::Named && is_class_name(param_type.name)) {
             return find_single_argument_converting_constructor(param_type.name, arg, require_constexpr) != nullptr;
         }
@@ -853,26 +893,50 @@ private:
             const Param& param = fn.params[i];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
-                    bindings.push_back(Binding{evaluate_expr(*args[i]), false});
+                    std::shared_ptr<Cell> value = evaluate_expr(*args[i]);
+                    if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
+                        !types_equal(*param.type.pointee, value->type)) {
+                        value = clone_cell_as_type(value, *param.type.pointee, loc);
+                    }
+                    bindings.push_back(Binding{value, false});
                     continue;
                 }
                 if (param.type.is_mutable_ref) {
                     LValue arg = resolve_lvalue(*args[i]);
-                    bindings.push_back(Binding{arg.cell, false});
+                    if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, arg.cell->type) &&
+                        !types_equal(*param.type.pointee, arg.cell->type)) {
+                        bindings.push_back(Binding{alias_cell_as_type(arg.cell, *param.type.pointee, loc), false});
+                    } else {
+                        bindings.push_back(Binding{arg.cell, false});
+                    }
                 } else {
                     bool can_bind_lvalue = false;
                     try {
                         LValue arg = resolve_lvalue(*args[i]);
-                        bindings.push_back(Binding{arg.cell, true});
+                        if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, arg.cell->type) &&
+                            !types_equal(*param.type.pointee, arg.cell->type)) {
+                            bindings.push_back(Binding{alias_cell_as_type(arg.cell, *param.type.pointee, loc), true});
+                        } else {
+                            bindings.push_back(Binding{arg.cell, true});
+                        }
                         can_bind_lvalue = true;
                     } catch (const ConstexprError&) {
                     }
-                    if (!can_bind_lvalue) bindings.push_back(Binding{evaluate_expr(*args[i]), true});
+                    if (!can_bind_lvalue) {
+                        std::shared_ptr<Cell> value = evaluate_expr(*args[i]);
+                        if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
+                            !types_equal(*param.type.pointee, value->type)) {
+                            value = clone_cell_as_type(value, *param.type.pointee, loc);
+                        }
+                        bindings.push_back(Binding{value, true});
+                    }
                 }
             } else {
                 std::shared_ptr<Cell> value = evaluate_expr(*args[i]);
-                if (!types_equal(param.type, value->type) &&
-                    param.type.kind == TypeKind::Named && is_class_name(param.type.name)) {
+                if (is_same_or_base_class_type(param.type, value->type) && !types_equal(param.type, value->type)) {
+                    bindings.push_back(Binding{clone_cell_as_type(value, param.type, loc), false});
+                } else if (!types_equal(param.type, value->type) &&
+                           param.type.kind == TypeKind::Named && is_class_name(param.type.name)) {
                     const Function* ctor =
                         find_single_argument_converting_constructor(param.type.name, value, /*require_constexpr=*/true);
                     if (ctor == nullptr) {
