@@ -1,0 +1,14 @@
+import std;
+
+class Widget {
+public:
+    Widget() {
+        return;
+    }
+};
+
+int main() {
+    Widget w;
+    std::println("{}", w);
+    return 0;
+}

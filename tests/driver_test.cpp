@@ -34,6 +34,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
 #endif
@@ -77,7 +80,7 @@ std::unordered_map<std::string, std::string> std_import_paths() {
 }
 
 std::vector<std::string> std_link_inputs() {
-    return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH};
+    return {SCPP_STDLIB_IO_WRAPPER_LIB_PATH, SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -239,6 +242,14 @@ RunResult compile_and_run(std::string_view source, const std::string& case_name)
 
     std::filesystem::remove(exe_path);
     return RunResult{WEXITSTATUS(status), output};
+}
+
+RunResult compile_and_run_merged_output(std::string_view source, const std::string& case_name) {
+    std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
+    scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), std_import_paths());
+    RunResult result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+    std::filesystem::remove(exe_path);
+    return result;
 }
 
 // A `<name>.expected` file's first line is the expected exit code; anything
@@ -990,6 +1001,44 @@ void run_thread_tests() {
         threw = true;
     }
     expect(threw, case_name + ": expected std::jthread to reject a reference-capturing closure target");
+}
+
+void run_std_io_tests() {
+    {
+        std::string case_name = "std_println_formats_common_supported_types";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "import std;\n"
+            "int main() {\n"
+            "    std::format_string once(\"{}\");\n"
+            "    std::string text(\"five\");\n"
+            "    std::print(once, 1);\n"
+            "    std::println();\n"
+            "    std::println(\"{} {} {}\", true, 'x', 2.5);\n"
+            "    std::println(\"{} {}\", text, \"six\");\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "1\ntrue x 2.5\nfive six\n",
+               case_name + ": expected formatted stdout, got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "std_println_rejects_placeholder_count_mismatch_at_runtime";
+        cases_run++;
+        RunResult result = compile_and_run_merged_output(
+            "import std;\n"
+            "int main() {\n"
+            "    std::println(\"{} {}\", 1);\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 1, case_name + ": expected exit code 1, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text.find("std::print/std::println format error: placeholder count exceeds provided argument count") !=
+                   std::string::npos,
+               case_name + ": expected clear format error, got '" + result.stdout_text + "'");
+    }
 }
 
 void run_cli_extension_tests() {
@@ -1899,6 +1948,7 @@ int main() {
     run_generic_type_tests();
     run_functional_tests();
     run_thread_tests();
+    run_std_io_tests();
     run_cli_extension_tests();
 
     if (failures > 0) {

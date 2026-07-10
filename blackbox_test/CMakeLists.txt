@@ -26,9 +26,11 @@ target_compile_definitions(run_tests PRIVATE
     SCPP_BLACKBOX_TEST_CASES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cases"
     SCPP_DEFAULT_SCPP_BINARY="${CMAKE_CURRENT_SOURCE_DIR}/../build/scpp"
     SCPP_STDLIB_STD_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/std.scpp"
+    SCPP_STDLIB_STD_IO_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/io/std_io.scpp"
     SCPP_STDLIB_STD_STRING_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/string/std_string.scpp"
     SCPP_STDLIB_STD_MEMORY_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/memory/std_memory.scpp"
     SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/functional/std_functional.scpp"
     SCPP_STDLIB_STD_THREAD_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../stdlib/thread/std_thread.scpp"
+    SCPP_STDLIB_IO_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_io_wrapper.a"
     SCPP_STDLIB_STRING_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_string_wrapper.a"
     SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../build/stdlib/libscpp_thread_wrapper.a")

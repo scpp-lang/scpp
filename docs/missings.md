@@ -4,6 +4,14 @@ This file is an internal backlog, not reader-facing book content.
 
 ## Language / standard-library gaps
 
+- `std::format_string` / `std::print` / `std::println` now exist only as a
+  deliberately small teaching-oriented subset: bare `{}` placeholders plus
+  escaped `{{` / `}}`, with runtime placeholder-count validation and exact
+  overloads for only 0-3 arguments. The current `std::format_string` is a
+  runtime wrapper, not C++23's typed `format_string<Args...>`; full format
+  specs (`{:x}`, width/alignment/precision, positional arguments, consteval
+  compile-time checking, arbitrarily long argument packs, etc.) are still
+  missing.
 - No `std::string_view`-style borrowed text view yet, which makes it harder to
   teach Rust-like “borrowed slice of text” examples.
 - No ordinary member-call syntax such as `.size()` yet; the book currently has

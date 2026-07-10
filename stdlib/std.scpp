@@ -13,6 +13,6 @@
 export module std;
 
 export import :functional;
+export import :io;
 export import :memory;
 export import :thread;
-export import :string;

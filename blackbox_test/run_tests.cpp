@@ -100,6 +100,9 @@
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_IO_MODULE_PATH
+#error "SCPP_STDLIB_STD_IO_MODULE_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STD_STRING_MODULE_PATH
 #error "SCPP_STDLIB_STD_STRING_MODULE_PATH must be defined by the build"
 #endif
@@ -114,6 +117,9 @@
 #endif
 #ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
 #endif
 #ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined by the build"
@@ -294,10 +300,12 @@ struct InvocationSpec {
 
 std::vector<std::string> default_std_build_args() {
     return {"--import", std::string("std=") + SCPP_STDLIB_STD_MODULE_PATH,
+            "--import", std::string("std:io=") + SCPP_STDLIB_STD_IO_MODULE_PATH,
             "--import", std::string("std:string=") + SCPP_STDLIB_STD_STRING_MODULE_PATH,
             "--import", std::string("std:memory=") + SCPP_STDLIB_STD_MEMORY_MODULE_PATH,
             "--import", std::string("std:functional=") + SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH,
             "--import", std::string("std:thread=") + SCPP_STDLIB_STD_THREAD_MODULE_PATH,
+            "--link", SCPP_STDLIB_IO_WRAPPER_LIB_PATH,
             "--link", SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
             "--link", SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH};
 }
