@@ -1348,6 +1348,29 @@ void run_consteval_tests() {
     }
 
     {
+        std::string case_name = "consteval_helper_call_uses_outer_call_bindings";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_helper_call_uses_outer_call_bindings_exe";
+        scpp::compile_to_executable(
+            "consteval int add_40(int x) {\n"
+            "    return x + 40;\n"
+            "}\n"
+            "consteval int route(int x) {\n"
+            "    return add_40(x);\n"
+            "}\n"
+            "int main() {\n"
+            "    return route(2) - 42;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected nested consteval helper call to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
         std::string case_name = "consteval_rejects_runtime_only_call";
         cases_run++;
         bool threw = false;

@@ -1168,6 +1168,32 @@ private:
     return only_match;
 }
 
+[[nodiscard]] bool expr_depends_on_runtime_bindings(const Expr& expr) {
+    switch (expr.kind) {
+        case ExprKind::Identifier:
+            return true;
+        case ExprKind::IntegerLiteral:
+        case ExprKind::FloatLiteral:
+        case ExprKind::BoolLiteral:
+        case ExprKind::CharLiteral:
+        case ExprKind::StringLiteral:
+        case ExprKind::TypeTrait:
+            break;
+        default:
+            break;
+    }
+    if (expr.lhs && expr_depends_on_runtime_bindings(*expr.lhs)) return true;
+    if (expr.rhs && expr_depends_on_runtime_bindings(*expr.rhs)) return true;
+    if (expr.third && expr_depends_on_runtime_bindings(*expr.third)) return true;
+    for (const ExprPtr& arg : expr.args) {
+        if (expr_depends_on_runtime_bindings(*arg)) return true;
+    }
+    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
+        if (arg.value && expr_depends_on_runtime_bindings(*arg.value)) return true;
+    }
+    return false;
+}
+
 void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     if (is_named_type(value->type, "int")) {
         expr.kind = ExprKind::IntegerLiteral;
@@ -1313,7 +1339,7 @@ void collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, Constexpr
 void collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<Stmt*>& consteval_if_rewrites) {
-    if (find_consteval_function(program, expr) != nullptr) {
+    if (find_consteval_function(program, expr) != nullptr && !expr_depends_on_runtime_bindings(expr)) {
         expr_rewrites.push_back(ExprRewrite{&expr, engine.evaluate_root_expr(expr)});
         return;
     }

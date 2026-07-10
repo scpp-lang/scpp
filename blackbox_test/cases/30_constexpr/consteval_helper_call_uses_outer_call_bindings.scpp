@@ -1,0 +1,11 @@
+consteval int add_40(int x) {
+    return x + 40;
+}
+
+consteval int route(int x) {
+    return add_40(x);
+}
+
+int main() {
+    return route(2);
+}
