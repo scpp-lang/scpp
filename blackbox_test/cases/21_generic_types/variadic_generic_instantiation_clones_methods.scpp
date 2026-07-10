@@ -1,0 +1,19 @@
+template<typename... Ts>
+class Box;
+
+template<>
+class Box<> {
+public:
+    int size() const { return 10; }
+};
+
+template<typename Head, typename... Tail>
+class Box<Head, Tail...> : private Box<Tail...> {
+public:
+    int size() const { return 50; }
+};
+
+int main() {
+    Box<int, bool> b;
+    return b.size() - 50;
+}

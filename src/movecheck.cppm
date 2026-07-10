@@ -5079,6 +5079,93 @@ private:
         return result;
     }
 
+    void clone_variadic_class_methods(const std::string& cache_key, const std::string& template_name,
+                                      const std::string& owner_id, const std::vector<Function>& methods,
+                                      const std::vector<GenericTypeParam>& template_params_copy,
+                                      const std::vector<std::pair<std::string, Type>>& type_replacements,
+                                      const std::unordered_map<std::string, std::vector<Type>>& pack_replacements,
+                                      const std::vector<int>& non_type_args) {
+        for (const Function& method_tmpl : methods) {
+            Function clone;
+            clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, owner_id);
+            clone.loc = method_tmpl.loc;
+            clone.namespace_path = method_tmpl.namespace_path;
+            clone.is_exported = false;
+            clone.is_unsafe = method_tmpl.is_unsafe;
+            clone.owning_module = method_tmpl.owning_module;
+            clone.eval_mode = method_tmpl.eval_mode;
+            clone.is_generic_template = method_tmpl.is_generic_template;
+            clone.template_params = method_tmpl.template_params;
+            clone.method_requires_concept = method_tmpl.method_requires_concept;
+            clone.return_type = instantiate_type_pattern(method_tmpl.return_type, type_replacements, pack_replacements);
+            clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
+            std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
+            clone.params.reserve(method_tmpl.params.size());
+            for (const Param& p : method_tmpl.params) {
+                if (p.name == "this") {
+                    Param np;
+                    np.name = p.name;
+                    Type this_type;
+                    this_type.kind = TypeKind::Reference;
+                    this_type.pointee = std::make_shared<Type>(named_type(cache_key));
+                    this_type.is_mutable_ref = p.type.is_mutable_ref;
+                    np.type = std::move(this_type);
+                    clone.params.push_back(std::move(np));
+                    continue;
+                }
+                if (p.is_parameter_pack) {
+                    std::optional<std::string> pack_name =
+                        referenced_type_pack_param_name(p.type, template_params_copy);
+                    auto pack_it = pack_name ? pack_replacements.find(*pack_name) : pack_replacements.end();
+                    if (pack_name && pack_it != pack_replacements.end()) {
+                        pack_param_names[p.name] = {};
+                        for (size_t j = 0; j < pack_it->second.size(); j++) {
+                            Param np = p;
+                            np.is_parameter_pack = false;
+                            np.name = p.name + "$" + std::to_string(j);
+                            std::vector<std::pair<std::string, Type>> param_replacements = type_replacements;
+                            param_replacements.emplace_back(*pack_name, pack_it->second[j]);
+                            np.type = instantiate_type_pattern(p.type, param_replacements, {});
+                            np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                            clone.params.push_back(std::move(np));
+                            pack_param_names[p.name].push_back(clone.params.back().name);
+                        }
+                        continue;
+                    }
+                }
+                Param np = p;
+                np.type = instantiate_type_pattern(p.type, type_replacements, pack_replacements);
+                np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                clone.params.push_back(std::move(np));
+            }
+            clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
+            if (clone.body) {
+                substitute_type_params_in_stmt(*clone.body, type_replacements);
+                for (size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                    if (!template_params_copy[i].is_non_type) continue;
+                    substitute_non_type_param_in_stmt(*clone.body, template_params_copy[i].name, non_type_args[i]);
+                }
+                for (const auto& [class_pack_name, concrete_pack_types] : pack_replacements) {
+                    std::vector<std::string> concrete_names;
+                    concrete_names.reserve(concrete_pack_types.size());
+                    for (const Type& concrete_type : concrete_pack_types) concrete_names.push_back(concrete_type.name);
+                    expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_names);
+                }
+                for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
+                    expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names);
+                    expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names);
+                }
+                resolve_generic_types_in_stmt(*clone.body);
+            }
+            known_function_names_.insert(clone.name);
+            program_.functions.push_back(std::move(clone));
+            walk_new_concrete_function(program_.functions.size() - 1);
+            if (!program_.functions.back().template_params.empty()) {
+                generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+            }
+        }
+    }
+
     [[nodiscard]] static const Type* find_type_replacement(const std::vector<std::pair<std::string, Type>>& replacements,
                                                            const std::string& name) {
         for (const auto& [param_name, replacement] : replacements) {
@@ -6250,6 +6337,9 @@ private:
                                          std::to_string(non_type_args.size()) + " non-type argument(s) (ch05 §5.14)",
                     loc);
             }
+            std::vector<GenericTypeParam> params_copy = base_case_tmpl->template_params;
+            std::string owner_id_copy = base_case_tmpl->template_owner_id;
+            std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             ClassDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = base_case_tmpl->namespace_path;
@@ -6264,6 +6354,8 @@ private:
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
             }
             program_.classes.push_back(std::move(concrete));
+            clone_variadic_class_methods(cache_key, template_name, owner_id_copy, methods, params_copy,
+                                         /*type_replacements=*/{}, /*pack_replacements=*/{}, non_type_args);
             variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
             return cache_key;
         }
@@ -6301,10 +6393,22 @@ private:
         std::vector<ClassField> fields_copy = recursive_tmpl->fields;
         std::vector<std::string> namespace_path_copy = recursive_tmpl->namespace_path;
         std::shared_ptr<Expr> base_non_type_arg_expr = recursive_tmpl->base_non_type_arg;
+        ExprPtr thread_movable_if_movable_expr_copy = recursive_tmpl->thread_movable_if_movable_expr
+                                                          ? clone_expr(*recursive_tmpl->thread_movable_if_movable_expr)
+                                                          : nullptr;
+        ExprPtr thread_movable_if_shareable_expr_copy = recursive_tmpl->thread_movable_if_shareable_expr
+                                                            ? clone_expr(*recursive_tmpl->thread_movable_if_shareable_expr)
+                                                            : nullptr;
+        std::vector<GenericTypeParam> template_params_copy = recursive_tmpl->template_params;
+        std::string owner_id_copy = recursive_tmpl->template_owner_id;
+        std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
 
         Type head_concrete = type_args[0];
         std::vector<Type> tail_concrete(type_args.begin() + 1, type_args.end());
         check_type_param_constraint(head_param, head_concrete, template_name, loc);
+        std::vector<std::pair<std::string, Type>> type_replacements = {{head_param.name, head_concrete}};
+        std::unordered_map<std::string, std::vector<Type>> pack_replacements;
+        pack_replacements[template_params_copy[leading_non_type_count + 1].name] = tail_concrete;
 
         // ch05 §5.14: the base's own non-type argument (e.g. "Idx + 1"
         // in TupleImpl's own `: public TupleImpl<Idx + 1, Tail...>`) is
@@ -6331,24 +6435,27 @@ private:
         concrete.base_access = base_access;
         concrete.thread_movable_override = recursive_tmpl->thread_movable_override;
         concrete.thread_shareable_override = recursive_tmpl->thread_shareable_override;
-        if (recursive_tmpl->thread_movable_if_movable_expr) {
-            concrete.thread_movable_if_movable_expr = clone_expr(*recursive_tmpl->thread_movable_if_movable_expr);
-            substitute_type_param_in_expr(*concrete.thread_movable_if_movable_expr, head_param.name, head_concrete);
+        if (thread_movable_if_movable_expr_copy) {
+            concrete.thread_movable_if_movable_expr = std::move(thread_movable_if_movable_expr_copy);
+            substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr, type_replacements);
             resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
         }
-        if (recursive_tmpl->thread_movable_if_shareable_expr) {
-            concrete.thread_movable_if_shareable_expr = clone_expr(*recursive_tmpl->thread_movable_if_shareable_expr);
-            substitute_type_param_in_expr(*concrete.thread_movable_if_shareable_expr, head_param.name, head_concrete);
+        if (thread_movable_if_shareable_expr_copy) {
+            concrete.thread_movable_if_shareable_expr = std::move(thread_movable_if_shareable_expr_copy);
+            substitute_type_params_in_expr(*concrete.thread_movable_if_shareable_expr, type_replacements);
             resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
         }
         for (const ClassField& f : fields_copy) {
             ClassField nf;
             nf.name = f.name;
             nf.access = f.access;
-            nf.type = substitute_type_param(f.type, head_param.name, head_concrete);
+            nf.type = instantiate_type_pattern(f.type, type_replacements, pack_replacements);
+            nf.type = resolve_generic_type(nf.type, loc);
             concrete.fields.push_back(std::move(nf));
         }
         program_.classes.push_back(std::move(concrete));
+        clone_variadic_class_methods(cache_key, template_name, owner_id_copy, methods, template_params_copy,
+                                     type_replacements, pack_replacements, non_type_args);
         variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
         return cache_key;
     }

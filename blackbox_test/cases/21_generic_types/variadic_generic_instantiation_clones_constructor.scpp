@@ -1,0 +1,19 @@
+template<typename... Ts>
+class Box;
+
+template<>
+class Box<> {
+public:
+    Box(const char* s) { return; }
+};
+
+template<typename Head, typename... Tail>
+class Box<Head, Tail...> : private Box<Tail...> {
+public:
+    Box(const char* s) { return; }
+};
+
+int main() {
+    Box<int, bool> b("hi");
+    return 0;
+}
