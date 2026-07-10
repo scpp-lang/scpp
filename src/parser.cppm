@@ -1720,7 +1720,7 @@ private:
             if (!fn.is_exported && !fn.is_compile_time_dependency) continue;
             if (!fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
             bool keep_body =
-                fn.is_generic_template ||
+                fn.is_generic_template || fn.eval_mode != FunctionEvalMode::RuntimeOnly ||
                 (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
                  is_exported_generic_type_template(imported, fn.params[0].type.pointee->name));
             program.functions.push_back(clone_function_declaration(fn, imported_name, is_reexport, keep_body));

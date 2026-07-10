@@ -24,6 +24,10 @@ This file is an internal backlog, not reader-facing book content.
   and C-compatible buffers instead.
 - No `for` / range-for loops yet; learner-facing iteration still has to center
   on `while` and explicit indices.
+- `const T&` parameter binding still rejects `double` literals, so generic APIs that
+  want literal-friendly scalar calls currently have to prefer by-value parameters;
+  one visible consequence is that `std::print`/`std::println` accept a bare
+  `std::string` lvalue only via `std::move(s)` or a fresh temporary for now.
 - No inheritance or virtual-function-based dynamic dispatch in v0.1, which rules
   out a direct translation of TRPL's object-oriented/trait-object discussions.
 - No async/await, futures, or streams story yet, so TRPL's async chapter has no

@@ -5141,6 +5141,7 @@ private:
             clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
             if (clone.body) {
                 substitute_type_params_in_stmt(*clone.body, type_replacements);
+                substitute_type_packs_in_stmt(*clone.body, pack_replacements);
                 for (size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
                     if (!template_params_copy[i].is_non_type) continue;
                     substitute_non_type_param_in_stmt(*clone.body, template_params_copy[i].name, non_type_args[i]);
@@ -6418,17 +6419,20 @@ private:
         // (e.g. this level's own concrete "Idx") -- empty when the base
         // template has no non-type parameter at all (plain Tuple's own
         // `: private Tuple<Tail...>`).
-        std::vector<int> base_non_type_args;
-        if (base_non_type_arg_expr) {
-            std::unordered_map<std::string, int> param_values;
-            for (size_t i = 0; i < leading_non_type_params.size(); i++) {
-                param_values[leading_non_type_params[i].name] = non_type_args[i];
+        std::string base_concrete_name;
+        if (!base_template_name.empty()) {
+            std::vector<int> base_non_type_args;
+            if (base_non_type_arg_expr) {
+                std::unordered_map<std::string, int> param_values;
+                for (size_t i = 0; i < leading_non_type_params.size(); i++) {
+                    param_values[leading_non_type_params[i].name] = non_type_args[i];
+                }
+                base_non_type_args.push_back(evaluate_non_type_arg(*base_non_type_arg_expr, param_values));
             }
-            base_non_type_args.push_back(evaluate_non_type_arg(*base_non_type_arg_expr, param_values));
-        }
 
-        std::string base_concrete_name =
-            instantiate_variadic_generic_type(base_template_name, base_non_type_args, tail_concrete, loc);
+            base_concrete_name =
+                instantiate_variadic_generic_type(base_template_name, base_non_type_args, tail_concrete, loc);
+        }
 
         ClassDef concrete;
         concrete.name = cache_key;

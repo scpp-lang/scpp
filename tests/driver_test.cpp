@@ -40,6 +40,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 
 namespace {
 
@@ -91,7 +94,8 @@ std::unordered_map<std::string, std::string> std_import_paths() {
 }
 
 std::vector<std::string> std_link_inputs() {
-    return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH};
+    return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
+            SCPP_STDLIB_IO_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -2227,6 +2231,63 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_prebuilt_variadic_consteval_constructor_and_runtime_method_work";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_prebuilt_variadic_consteval_constructor_and_runtime_method_work";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    export template<typename... Args>\n"
+                        "    class Box;\n"
+                        "\n"
+                        "    export template<>\n"
+                        "    class Box<> {\n"
+                        "    public:\n"
+                        "        consteval Box(const char* s) { return; }\n"
+                        "        int mark() const { return 7; }\n"
+                        "    };\n"
+                        "\n"
+                        "    export template<typename Head, typename... Tail>\n"
+                        "    class Box<Head, Tail...> : private helper::Box<Tail...> {\n"
+                        "    public:\n"
+                        "        consteval Box(const char* s) { helper::Box<Tail...> tail(s); return; }\n"
+                        "        int mark() const { return 11; }\n"
+                        "    };\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    helper::Box<int, bool> box(\"ok\");\n"
+                        "    return box.mark() - 11;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": prebuilt variadic generic consumer should succeed, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected prebuilt variadic binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_rejects_legacy_scppm_missing_structured_payload_for_generic_exports";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_rejects_legacy_scppm_missing_structured_payload_for_generic_exports";
@@ -2356,8 +2417,8 @@ void run_cli_extension_tests() {
         write_text_file(source_path,
                        "import std;\n"
                        "int main() {\n"
-                       "    std::string s(\"hi\");\n"
-                       "    return s.length();\n"
+                       "    std::println(\"{} {}\", std::string(\"hi\"), 2);\n"
+                       "    return 2;\n"
                        "}\n");
         RunResult build_result =
             run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() + " -o " +
@@ -2367,6 +2428,8 @@ void run_cli_extension_tests() {
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 2,
                case_name + ": expected exit code 2, got " + std::to_string(run_result.exit_code));
+        expect(run_result.stdout_text == "hi 2\n",
+               case_name + ": expected stdout 'hi 2\n', got '" + run_result.stdout_text + "'");
         std::filesystem::remove(source_path);
         std::filesystem::remove(exe_path);
     }
@@ -2422,8 +2485,10 @@ void run_cli_extension_tests() {
         write_text_file(source_path,
                         "import std;\n"
                         "int main() {\n"
-                        "    std::string s(\"installed\");\n"
-                        "    return s.length();\n"
+                        "    const char* tail = \"ok\";\n"
+                        "    std::print(\"{} {}\", std::string(\"installed\"), tail);\n"
+                        "    std::println(\"{{ready}}\");\n"
+                        "    return 9;\n"
                         "}\n");
         RunResult build_result =
             run_command_capture(installed_scpp.string() + " " + source_path.string() + " -o " + exe_path.string() + " 2>&1");
@@ -2433,6 +2498,9 @@ void run_cli_extension_tests() {
         expect(run_result.exit_code == 9,
                case_name + ": expected installed-layout binary output exit code 9, got " +
                    std::to_string(run_result.exit_code));
+        expect(run_result.stdout_text == "installed ok{ready}\n",
+               case_name + ": expected installed-layout stdout 'installed ok{ready}\n', got '" +
+                   run_result.stdout_text + "'");
         std::filesystem::remove_all(install_root);
     }
 
