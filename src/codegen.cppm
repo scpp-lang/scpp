@@ -31,6 +31,7 @@ module;
 export module scpp.codegen;
 
 import scpp.ast;
+import scpp.constexpr_engine;
 
 export namespace scpp {
 
@@ -532,6 +533,130 @@ private:
         return nullptr;
     }
 
+    ExprPtr clone_expr(const Expr& expr) const {
+        auto clone = std::make_unique<Expr>();
+        clone->kind = expr.kind;
+        clone->loc = expr.loc;
+        clone->int_value = expr.int_value;
+        clone->float_value = expr.float_value;
+        clone->bool_value = expr.bool_value;
+        clone->name = expr.name;
+        clone->binary_op = expr.binary_op;
+        clone->unary_op = expr.unary_op;
+        clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
+        if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
+        if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
+        if (expr.third) clone->third = clone_expr(*expr.third);
+        for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
+        clone->explicit_template_args.reserve(expr.explicit_template_args.size());
+        for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            ExplicitTemplateArg cloned_arg;
+            cloned_arg.is_type = arg.is_type;
+            cloned_arg.type = arg.type;
+            if (arg.value) cloned_arg.value = std::shared_ptr<Expr>(clone_expr(*arg.value).release());
+            clone->explicit_template_args.push_back(std::move(cloned_arg));
+        }
+        clone->type = expr.type;
+        clone->has_paren_init = expr.has_paren_init;
+        return clone;
+    }
+
+    [[nodiscard]] const Function* resolve_converting_constructor_by_type(const std::string& class_name, const Expr& arg) {
+        return find_single_argument_converting_constructor(class_name, arg);
+    }
+
+    void store_constexpr_value_into(llvm::Value* dest_ptr, const Type& dest_type, const ConstexprValue& value) {
+        if (is_scalar_type_name(dest_type.name)) {
+            if (dest_type.kind == TypeKind::Named && dest_type.name == "bool") {
+                create_store(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), value.bool_value ? 1 : 0), dest_ptr,
+                             std::nullopt);
+                return;
+            }
+            if (dest_type.kind == TypeKind::Named && dest_type.name == "char") {
+                create_store(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), value.int_value, false), dest_ptr,
+                             std::nullopt);
+                return;
+            }
+            if (dest_type.kind == TypeKind::Named && dest_type.name == "double") {
+                create_store(llvm::ConstantFP::get(llvm::Type::getDoubleTy(*context_), value.double_value), dest_ptr,
+                             std::nullopt);
+                return;
+            }
+            create_store(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), value.int_value, true), dest_ptr,
+                         std::nullopt);
+            return;
+        }
+        if (dest_type.kind == TypeKind::Pointer && dest_type.pointee &&
+            dest_type.pointee->kind == TypeKind::Named && dest_type.pointee->name == "char" && !dest_type.is_mutable_pointee &&
+            value.kind == ConstexprValueKind::StringLiteralPointer) {
+            create_store(builder_->CreateGlobalString(value.string_value, "cexprstr"), dest_ptr, std::nullopt);
+            return;
+        }
+        if (dest_type.kind == TypeKind::Array && dest_type.element && value.kind == ConstexprValueKind::Array) {
+            for (size_t i = 0; i < value.elements.size(); ++i) {
+                llvm::Value* elem_ptr = builder_->CreateConstGEP2_32(to_llvm_type(dest_type), dest_ptr, 0,
+                                                                     static_cast<unsigned>(i));
+                store_constexpr_value_into(elem_ptr, *dest_type.element, value.elements[i]);
+            }
+            return;
+        }
+        if (dest_type.kind == TypeKind::Named && find_class_def(dest_type.name) != nullptr &&
+            value.kind == ConstexprValueKind::Object) {
+            const StructInfo& info = structs_.at(dest_type.name);
+            for (size_t i = 0; i < info.field_names.size(); ++i) {
+                auto it = std::find_if(value.object_fields.begin(), value.object_fields.end(),
+                                       [&](const auto& field) { return field.first == info.field_names[i]; });
+                if (it == value.object_fields.end()) continue;
+                llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, dest_ptr, i, info.field_names[i]);
+                store_constexpr_value_into(field_ptr, info.field_types[i], *it->second);
+            }
+            return;
+        }
+        throw CodegenError("unsupported constexpr class materialization for type '" + dest_type.name + "'", current_loc_);
+    }
+
+    llvm::Value* codegen_consteval_class_value(const Expr& expr, const std::string& class_name) {
+        ConstexprValue value = evaluate_immediate_expr(*program_, expr);
+        llvm::Type* llvm_type = to_llvm_type(named_type(class_name));
+        llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "constevalclasstmp");
+        zero_initialize_storage(temp, named_type(class_name));
+        store_constexpr_value_into(temp, named_type(class_name), value);
+        return builder_->CreateLoad(llvm_type, temp, "constevalclass.value");
+    }
+
+    llvm::Value* codegen_constructed_class_value(const std::string& class_name, const std::vector<ExprPtr>& args,
+                                                 const Function* ctor_def, const Expr* original_expr = nullptr) {
+        llvm::Type* llvm_type = to_llvm_type(named_type(class_name));
+        llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtmp");
+        zero_initialize_storage(temp, named_type(class_name));
+        if (ctor_def != nullptr) {
+            if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+                ExprPtr ctor_expr;
+                if (original_expr != nullptr) {
+                    ctor_expr = clone_expr(*original_expr);
+                } else {
+                    ctor_expr = std::make_unique<Expr>();
+                    ctor_expr->kind = ExprKind::Call;
+                    ctor_expr->loc = current_loc_;
+                    ctor_expr->name = class_name;
+                    ctor_expr->has_paren_init = true;
+                    for (const ExprPtr& arg : args) ctor_expr->args.push_back(clone_expr(*arg));
+                }
+                ConstexprValue value = evaluate_immediate_expr(*program_, *ctor_expr);
+                store_constexpr_value_into(temp, named_type(class_name), value);
+            } else {
+                llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
+                if (ctor == nullptr) {
+                    throw CodegenError("class '" + class_name + "' has no constructor matching this call", current_loc_);
+                }
+                std::vector<llvm::Value*> ctor_args = codegen_call_args(args, ctor_def, /*param_offset=*/1);
+                ctor_args.insert(ctor_args.begin(), temp);
+                builder_->CreateCall(ctor, ctor_args);
+            }
+        }
+        return builder_->CreateLoad(llvm_type, temp, "classtmp.value");
+    }
+
     // Infers `expr`'s scpp type, for function-overload resolution
     // purposes only (ch05 §5.10) -- mirrors movecheck's own
     // infer_expr_type (same overall shape and non-exhaustiveness: this
@@ -808,6 +933,18 @@ private:
     // parameter declared as `param_type` -- mirrors movecheck's own
     // argument_matches_parameter (ch05 §5.10) exactly, just phrased over
     // codegen's own infer_type/types_equal instead of movecheck's.
+    const Function* find_single_argument_converting_constructor(const std::string& class_name, const Expr& arg) {
+        if (arg.kind != ExprKind::StringLiteral) return nullptr;
+        std::vector<const Function*> matches;
+        for (const Function& fn : program_->functions) {
+            if (fn.name != class_name + "_new" || fn.params.size() != 2) continue;
+            if (fn.eval_mode != FunctionEvalMode::Consteval) continue;
+            if (argument_matches_parameter(arg, fn.params[1].type)) matches.push_back(&fn);
+        }
+        if (matches.empty()) return nullptr;
+        return matches[0];
+    }
+
     bool argument_matches_parameter(const Expr& arg, const Type& param_type) {
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
             // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- mirror image of
@@ -832,7 +969,14 @@ private:
             return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
         }
         std::optional<Type> arg_type = infer_type(arg);
-        if (!arg_type.has_value() || !types_equal(*arg_type, param_type)) return false;
+        if (!arg_type.has_value()) return false;
+        if (!types_equal(*arg_type, param_type)) {
+            if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr &&
+                find_single_argument_converting_constructor(param_type.name, arg) != nullptr) {
+                return true;
+            }
+            return false;
+        }
         if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr) {
             return (is_bare_same_type_copy_source(arg, param_type) && is_copy_constructible(param_type.name)) ||
                    produces_rvalue_of_type(arg, param_type);
@@ -2175,6 +2319,11 @@ private:
                         throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                             current_loc_);
                     }
+                    if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+                        llvm::Value* value = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
+                        create_store(value, slot, std::nullopt);
+                        return;
+                    }
                     llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
                     if (ctor == nullptr) {
                         throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
@@ -2492,26 +2641,18 @@ private:
         }
         if (expr.lhs == nullptr) {
             if (find_class_def(expr.name) != nullptr) {
-                llvm::Type* llvm_type = to_llvm_type(named_type(expr.name));
-                llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtmp");
-                zero_initialize_storage(temp, named_type(expr.name));
+                const Function* ctor_def = nullptr;
                 if (!expr.args.empty() || expr.has_paren_init) {
                     std::string ctor_name = expr.name + "_new";
-                    const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
+                    ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
                     if (ctor_def == nullptr) {
-                        if (expr.args.empty()) return CallResult{builder_->CreateLoad(llvm_type, temp, "classtmp.value"), nullptr};
+                        if (expr.args.empty()) {
+                            return CallResult{codegen_constructed_class_value(expr.name, expr.args, nullptr, &expr), nullptr};
+                        }
                         throw CodegenError("class '" + expr.name + "' has no constructor matching this call", current_loc_);
                     }
-                    llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
-                    if (ctor == nullptr) {
-                        if (expr.args.empty()) return CallResult{builder_->CreateLoad(llvm_type, temp, "classtmp.value"), nullptr};
-                        throw CodegenError("class '" + expr.name + "' has no constructor matching this call", current_loc_);
-                    }
-                    std::vector<llvm::Value*> ctor_args = codegen_call_args(expr.args, ctor_def, /*param_offset=*/1);
-                    ctor_args.insert(ctor_args.begin(), temp);
-                    builder_->CreateCall(ctor, ctor_args);
                 }
-                return CallResult{builder_->CreateLoad(llvm_type, temp, "classtmp.value"), nullptr};
+                return CallResult{codegen_constructed_class_value(expr.name, expr.args, ctor_def, &expr), nullptr};
             }
             auto local_it = locals_.find(expr.name);
             if (local_it != locals_.end() && local_it->second.type.kind == TypeKind::FunctionPointer) {
@@ -2629,6 +2770,15 @@ private:
         if (expr.kind == ExprKind::Lambda) {
             llvm::Value* temp = codegen_expr(expr);
             return builder_->CreateLoad(llvm_type, temp, "classtransport.lambda");
+        }
+        if (produces_rvalue_of_type(expr, target_type)) {
+            return codegen_expr(expr);
+        }
+        if (const Function* converting_ctor = resolve_converting_constructor_by_type(target_type.name, expr);
+            converting_ctor != nullptr) {
+            std::vector<ExprPtr> ctor_args;
+            ctor_args.push_back(clone_expr(expr));
+            return codegen_constructed_class_value(target_type.name, ctor_args, converting_ctor);
         }
         return codegen_expr(expr);
     }
@@ -3201,6 +3351,11 @@ private:
                     if (expr.args.empty()) return heap_ptr;
                     throw CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
                         current_loc_);
+                }
+                if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+                    llvm::Value* value = codegen_constructed_class_value(expr.type.name, expr.args, ctor_def);
+                    builder_->CreateStore(value, heap_ptr);
+                    return heap_ptr;
                 }
                 llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
                 if (ctor == nullptr) {

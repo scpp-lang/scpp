@@ -827,6 +827,9 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 // check_call_arguments/apply_reference_argument's job, once a specific
 // overload has already been picked); this only needs to decide which of
 // several candidates is *the* match.
+[[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
+    const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures);
+
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
                                                 const Signatures& signatures) {
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
@@ -859,12 +862,32 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
     }
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-    if (!arg_type.has_value() || !types_equal(*arg_type, param_type)) return false;
+    if (!arg_type.has_value()) return false;
+    if (!types_equal(*arg_type, param_type)) {
+        if (is_named_class_type(param_type, body) &&
+            find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr) {
+            return true;
+        }
+        return false;
+    }
     if (is_named_class_type(param_type, body)) {
         return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
                produces_rvalue_of_type(arg, param_type, body, signatures);
     }
     return true;
+}
+
+[[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
+    const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures) {
+    if (arg.kind != ExprKind::StringLiteral) return nullptr;
+    if (class_type.kind != TypeKind::Named) return nullptr;
+    auto it = signatures.find(class_type.name + "_new");
+    if (it == signatures.end()) return nullptr;
+    for (const FunctionSignature& candidate : it->second) {
+        if (candidate.param_types.size() != 2) continue;
+        if (argument_matches_parameter(arg, candidate.param_types[1], body, signatures)) return &candidate;
+    }
+    return nullptr;
 }
 
 [[nodiscard]] bool receiver_matches_method_qualifier(const Expr& receiver_expr, const FunctionSignature& candidate,
@@ -2595,12 +2618,41 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
+            const FunctionSignature* converting_ctor =
+                class_value_param ? find_single_argument_converting_constructor_signature(sig->param_types[param_index], arg, body,
+                                                                                         signatures)
+                                  : nullptr;
             if (report_errors && class_value_param && !copyable_lvalue_source &&
-                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
+                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
                                      "' by value requires either a copyable bare local of that exact type or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc);
+            }
+            if (converting_ctor != nullptr) {
+                if (report_errors && converting_ctor->is_unsafe && state.unsafe_depth == 0) {
+                    throw DataflowError("cannot use '" + sig->param_types[param_index].name +
+                                         "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
+                                         "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
+                                         "caller can guarantee (ch01 §1.2/§1.3)",
+                        state.current_loc);
+                }
+                const Type& ctor_param_type = converting_ctor->param_types[1];
+                if (is_reference(ctor_param_type) && ctor_param_type.is_rvalue_ref) {
+                    if (report_errors && !produces_rvalue_of_type(arg, *ctor_param_type.pointee, body, signatures)) {
+                        throw DataflowError(
+                            "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
+                            "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
+                            "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
+                            state.current_loc);
+                    }
+                    apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                } else if (is_reference(ctor_param_type)) {
+                    apply_reference_argument(arg, ctor_param_type, state, in_call_borrows, body, signatures, report_errors);
+                } else {
+                    apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                }
+                continue;
             }
             apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
 

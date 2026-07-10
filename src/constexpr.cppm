@@ -33,7 +33,30 @@ struct ConstexprError : std::runtime_error {
           loc(loc) {}
 };
 
+enum class ConstexprValueKind {
+    Void,
+    Integer,
+    Double,
+    Bool,
+    StringLiteralPointer,
+    Object,
+    Array,
+};
+
+struct ConstexprValue {
+    Type type;
+    ConstexprValueKind kind = ConstexprValueKind::Void;
+    long long int_value = 0;
+    double double_value = 0.0;
+    bool bool_value = false;
+    std::string string_value;
+    std::vector<std::pair<std::string, std::shared_ptr<ConstexprValue>>> object_fields;
+    std::vector<ConstexprValue> elements;
+};
+
 void fold_immediate_calls(Program& program, ConstexprLimits limits = {});
+[[nodiscard]] ConstexprValue evaluate_immediate_expr(const Program& program, const Expr& expr,
+                                                     ConstexprLimits limits = {});
 
 } // namespace scpp
 
@@ -43,6 +66,7 @@ namespace {
 struct Cell;
 
 void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value);
+[[nodiscard]] ConstexprValue snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc);
 
 struct PointerValue {
     std::shared_ptr<Cell> storage;
@@ -632,7 +656,61 @@ private:
             if (fn->params.size() != args.size()) continue;
             bool params_match = true;
             for (size_t i = 0; i < args.size(); ++i) {
-                const Type& param_type = fn->params[i].type;
+                if (!constexpr_argument_matches_parameter(fn->params[i].type, args[i], require_constexpr)) {
+                    params_match = false;
+                    break;
+                }
+            }
+            if (params_match) return fn;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const Function* find_single_argument_converting_constructor(std::string_view class_name,
+                                                                              const std::shared_ptr<Cell>& arg,
+                                                                              bool require_constexpr) {
+        auto it = functions_by_name_.find(std::string(class_name) + "_new");
+        if (it == functions_by_name_.end()) return nullptr;
+        for (const Function* fn : it->second) {
+            if (!fn->body) continue;
+            if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
+            if (fn->params.size() != 2) continue;
+            const Type& param_type = fn->params[1].type;
+            const Type& arg_type = arg->type;
+            if (param_type.kind == TypeKind::Reference) {
+                if (param_type.pointee && types_equal(*param_type.pointee, arg_type)) return fn;
+            } else if (types_equal(param_type, arg_type)) {
+                return fn;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] bool constexpr_argument_matches_parameter(const Type& param_type, const std::shared_ptr<Cell>& arg,
+                                                            bool require_constexpr) {
+        const Type& arg_type = arg->type;
+        if (param_type.kind == TypeKind::Reference) {
+            return param_type.pointee && types_equal(*param_type.pointee, arg_type);
+        }
+        if (types_equal(param_type, arg_type)) return true;
+        if (param_type.kind == TypeKind::Named && is_class_name(param_type.name)) {
+            return find_single_argument_converting_constructor(param_type.name, arg, require_constexpr) != nullptr;
+        }
+        return false;
+    }
+
+    [[nodiscard]] const Function* find_constructor(std::string_view class_name,
+                                                   const std::vector<std::shared_ptr<Cell>>& args,
+                                                   bool require_constexpr) {
+        auto it = functions_by_name_.find(std::string(class_name) + "_new");
+        if (it == functions_by_name_.end()) return nullptr;
+        for (const Function* fn : it->second) {
+            if (!fn->body) continue;
+            if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
+            if (fn->params.size() != args.size() + 1) continue;
+            bool params_match = true;
+            for (size_t i = 0; i < args.size(); ++i) {
+                const Type& param_type = fn->params[i + 1].type;
                 const Type& arg_type = args[i]->type;
                 if (param_type.kind == TypeKind::Reference) {
                     if (!param_type.pointee || !types_equal(*param_type.pointee, arg_type)) {
@@ -656,14 +734,7 @@ private:
             if (!fn->body || fn->eval_mode != FunctionEvalMode::RuntimeOnly || fn->params.size() != args.size()) continue;
             bool params_match = true;
             for (size_t i = 0; i < args.size(); ++i) {
-                const Type& param_type = fn->params[i].type;
-                const Type& arg_type = args[i]->type;
-                if (param_type.kind == TypeKind::Reference) {
-                    if (!param_type.pointee || !types_equal(*param_type.pointee, arg_type)) {
-                        params_match = false;
-                        break;
-                    }
-                } else if (!types_equal(param_type, arg_type)) {
+                if (!constexpr_argument_matches_parameter(fn->params[i].type, args[i], /*require_constexpr=*/false)) {
                     params_match = false;
                     break;
                 }
@@ -671,6 +742,10 @@ private:
             if (params_match) return true;
         }
         return false;
+    }
+
+    [[nodiscard]] bool is_class_name(std::string_view name) const {
+        return classes_by_name_.contains(std::string(name));
     }
 
     [[nodiscard]] std::shared_ptr<Cell> cast_value(const Type& target_type, const std::shared_ptr<Cell>& operand,
@@ -795,14 +870,77 @@ private:
                     if (!can_bind_lvalue) bindings.push_back(Binding{evaluate_expr(*args[i]), true});
                 }
             } else {
-                bindings.push_back(Binding{evaluate_expr(*args[i]), false});
+                std::shared_ptr<Cell> value = evaluate_expr(*args[i]);
+                if (!types_equal(param.type, value->type) &&
+                    param.type.kind == TypeKind::Named && is_class_name(param.type.name)) {
+                    const Function* ctor =
+                        find_single_argument_converting_constructor(param.type.name, value, /*require_constexpr=*/true);
+                    if (ctor == nullptr) {
+                        throw ConstexprError(loc, "constexpr call has no viable converting constructor for parameter '" +
+                                                      param.name + "'");
+                    }
+                    auto object = make_default_cell(param.type, loc);
+                    std::vector<Binding> ctor_bindings;
+                    ctor_bindings.push_back(Binding{object, false});
+                    ctor_bindings.push_back(Binding{value, false});
+                    (void)call_function(*ctor, std::move(ctor_bindings), loc);
+                    bindings.push_back(Binding{object, false});
+                } else {
+                    bindings.push_back(Binding{value, false});
+                }
             }
         }
         return call_function(fn, std::move(bindings), loc);
     }
 
+    [[nodiscard]] std::shared_ptr<Cell> evaluate_constructor_expr(const Expr& expr) {
+        Type object_type = named_type(expr.name);
+        auto object = make_default_cell(object_type, expr.loc);
+        std::vector<std::shared_ptr<Cell>> arg_values;
+        arg_values.reserve(expr.args.size());
+        for (const ExprPtr& arg : expr.args) arg_values.push_back(evaluate_expr(*arg));
+        const Function* ctor = find_constructor(expr.name, arg_values, /*require_constexpr=*/true);
+        if (!ctor) {
+            if (has_runtime_only_match(expr.name + "_new", arg_values)) {
+                throw ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval constructors");
+            }
+            throw ConstexprError(expr.loc, "no constexpr/consteval constructor matches for type '" + expr.name + "'");
+        }
+        std::vector<Binding> bindings;
+        bindings.reserve(ctor->params.size());
+        bindings.push_back(Binding{object, false});
+        for (size_t i = 1; i < ctor->params.size(); ++i) {
+            const Param& param = ctor->params[i];
+            const Expr& arg_expr = *expr.args[i - 1];
+            if (param.type.kind == TypeKind::Reference) {
+                if (param.type.is_rvalue_ref) {
+                    bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+                    continue;
+                }
+                if (param.type.is_mutable_ref) {
+                    LValue arg = resolve_lvalue(arg_expr);
+                    bindings.push_back(Binding{arg.cell, false});
+                } else {
+                    bool can_bind_lvalue = false;
+                    try {
+                        LValue arg = resolve_lvalue(arg_expr);
+                        bindings.push_back(Binding{arg.cell, true});
+                        can_bind_lvalue = true;
+                    } catch (const ConstexprError&) {
+                    }
+                    if (!can_bind_lvalue) bindings.push_back(Binding{evaluate_expr(arg_expr), true});
+                }
+            } else {
+                bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+            }
+        }
+        static_cast<void>(call_function(*ctor, std::move(bindings), expr.loc));
+        return object;
+    }
+
     [[nodiscard]] std::shared_ptr<Cell> evaluate_call_expr(const Expr& expr) {
         if (expr.lhs) throw ConstexprError(expr.loc, "constexpr method calls are not yet implemented in Phase D1");
+        if (is_class_name(expr.name)) return evaluate_constructor_expr(expr);
         std::vector<std::shared_ptr<Cell>> arg_values;
         arg_values.reserve(expr.args.size());
         for (const ExprPtr& arg : expr.args) arg_values.push_back(evaluate_expr(*arg));
@@ -1082,6 +1220,59 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     expr.type = value->type;
 }
 
+[[nodiscard]] ConstexprValue snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc) {
+    ConstexprValue snapshot;
+    snapshot.type = value->type;
+    if (is_named_type(value->type, "void")) {
+        snapshot.kind = ConstexprValueKind::Void;
+        return snapshot;
+    }
+    if (is_named_type(value->type, "int") || is_named_type(value->type, "char")) {
+        snapshot.kind = ConstexprValueKind::Integer;
+        snapshot.int_value = std::get<long long>(value->data);
+        return snapshot;
+    }
+    if (is_named_type(value->type, "bool")) {
+        snapshot.kind = ConstexprValueKind::Bool;
+        snapshot.bool_value = std::get<bool>(value->data);
+        return snapshot;
+    }
+    if (is_named_type(value->type, "double")) {
+        snapshot.kind = ConstexprValueKind::Double;
+        snapshot.double_value = std::get<double>(value->data);
+        return snapshot;
+    }
+    if (types_equal(value->type, make_const_char_pointer_type())) {
+        auto* pointer = std::get_if<PointerValue>(&value->data);
+        auto* array = pointer ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
+        if (!pointer || !array) {
+            throw ConstexprError(loc, "unsupported constexpr pointer result");
+        }
+        snapshot.kind = ConstexprValueKind::StringLiteralPointer;
+        for (size_t i = static_cast<size_t>(std::max(pointer->index, 0LL)); i < array->elements.size(); ++i) {
+            long long ch = std::get<long long>(array->elements[i]->data);
+            if (ch == 0) break;
+            snapshot.string_value.push_back(static_cast<char>(ch));
+        }
+        return snapshot;
+    }
+    if (auto* object = std::get_if<ObjectValue>(&value->data)) {
+        snapshot.kind = ConstexprValueKind::Object;
+        for (const auto& [name, field] : object->fields) {
+            snapshot.object_fields.push_back({name, std::make_shared<ConstexprValue>(snapshot_constexpr_value(field, loc))});
+        }
+        return snapshot;
+    }
+    if (auto* array = std::get_if<ArrayValue>(&value->data)) {
+        snapshot.kind = ConstexprValueKind::Array;
+        for (const auto& element : array->elements) {
+            snapshot.elements.push_back(snapshot_constexpr_value(element, loc));
+        }
+        return snapshot;
+    }
+    throw ConstexprError(loc, "unsupported constexpr value kind");
+}
+
 void collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<Stmt*>& consteval_if_rewrites);
@@ -1181,8 +1372,13 @@ void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     }
     for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
     for (Function& fn : program.functions) {
-        if (fn.eval_mode == FunctionEvalMode::Consteval) fn.body.reset();
+        if (fn.eval_mode == FunctionEvalMode::Consteval && !fn.name.ends_with("_new")) fn.body.reset();
     }
+}
+
+ConstexprValue evaluate_immediate_expr(const Program& program, const Expr& expr, ConstexprLimits limits) {
+    ConstexprEngine engine(program, limits);
+    return snapshot_constexpr_value(engine.evaluate_root_expr(expr), expr.loc);
 }
 
 } // namespace scpp

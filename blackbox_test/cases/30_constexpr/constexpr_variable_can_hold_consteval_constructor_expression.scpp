@@ -1,0 +1,20 @@
+class Box {
+public:
+    int value;
+    consteval Box(const char* text) {
+        this->value = 23;
+        return;
+    }
+};
+
+constexpr int take(Box b) {
+    return b.value;
+}
+
+consteval int answer() {
+    return take(Box("hi"));
+}
+
+int main() {
+    return answer();
+}
