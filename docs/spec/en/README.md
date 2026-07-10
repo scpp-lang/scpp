@@ -26,6 +26,9 @@ is still designed (see the book) but not yet formalized in this document.
 7. [Dereference and Member Access](03-dereference-and-member-access.md)
 8. [Thread-Safety Properties](04-thread-safety-properties.md)
 9. [Union types and packed layout](05-unions-and-packed-layout.md)
+7. [Constant evaluation](06-constant-evaluation.md)
+9. [The `constexpr` and `consteval` specifiers](07-constexpr-and-consteval.md)
+13. [Function template argument deduction](08-function-template-argument-deduction.md)
 
 ## File-Format Specifications
 

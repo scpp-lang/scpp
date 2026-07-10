@@ -75,4 +75,4 @@ C++ toolchains typically expose this facility with extensions such as
 
 ---
 
-[← Previous: Thread-Safety Properties](04-thread-safety-properties.md) · [Table of Contents](README.md)
+[← Previous: Thread-Safety Properties](04-thread-safety-properties.md) · [Table of Contents](README.md) · [Next: Constant evaluation →](06-constant-evaluation.md)

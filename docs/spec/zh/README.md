@@ -24,6 +24,9 @@
 7. [解引用与成员访问](03-dereference-and-member-access.md)
 8. [线程安全属性](04-thread-safety-properties.md)
 9. [union 类型与 packed 布局](05-unions-and-packed-layout.md)
+7. [常量求值](06-constant-evaluation.md)
+9. [`constexpr` 与 `consteval` 说明符](07-constexpr-and-consteval.md)
+13. [函数模板实参推导](08-function-template-argument-deduction.md)
 
 ## 文件格式规范
 
