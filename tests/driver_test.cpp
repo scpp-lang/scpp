@@ -1289,6 +1289,65 @@ void run_consteval_tests() {
     }
 
     {
+        std::string case_name = "consteval_constructor_implicitly_converts_string_literal_argument";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_constructor_implicitly_converts_string_literal_argument_exe";
+        scpp::compile_to_executable(
+            "class Box {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Box(const char* text) {\n"
+            "        this->value = 17;\n"
+            "        return;\n"
+            "    }\n"
+            "};\n"
+            "int take(Box b) {\n"
+            "    return b.value;\n"
+            "}\n"
+            "int main() {\n"
+            "    return take(\"hi\") - 17;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected implicit consteval conversion path to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "consteval_constructor_expression_flows_through_consteval_call";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_constructor_expression_flows_through_consteval_call_exe";
+        scpp::compile_to_executable(
+            "class Box {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Box(const char* text) {\n"
+            "        this->value = 23;\n"
+            "        return;\n"
+            "    }\n"
+            "};\n"
+            "constexpr int take(Box b) {\n"
+            "    return b.value;\n"
+            "}\n"
+            "consteval int answer() {\n"
+            "    return take(Box(\"hi\"));\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 23;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected consteval constructor expression path to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
         std::string case_name = "consteval_rejects_runtime_only_call";
         cases_run++;
         bool threw = false;
