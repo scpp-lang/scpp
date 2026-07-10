@@ -332,16 +332,30 @@ private:
     [[nodiscard]] std::optional<std::string> referenced_pack_type_param_name(const Type& type) const {
         const Type* current = &type;
         if (current->kind == TypeKind::Reference && current->pointee) current = current->pointee.get();
-        if (current->kind != TypeKind::Named || !current->template_args.empty() || !current->non_type_args.empty()) {
-            return std::nullopt;
+        if (current->kind == TypeKind::Named) {
+            for (const GenericTypeParam& param : current_class_template_params_) {
+                if (!param.is_pack || param.is_non_type) continue;
+                if (param.name == current->name) return param.name;
+            }
+            for (const GenericTypeParam& param : current_function_template_params_) {
+                if (!param.is_pack || param.is_non_type) continue;
+                if (param.name == current->name) return param.name;
+            }
         }
-        for (const GenericTypeParam& param : current_class_template_params_) {
-            if (!param.is_pack || param.is_non_type) continue;
-            if (param.name == current->name) return param.name;
+        for (const Type& arg : current->template_args) {
+            if (std::optional<std::string> found = referenced_pack_type_param_name(arg)) return found;
         }
-        for (const GenericTypeParam& param : current_function_template_params_) {
-            if (!param.is_pack || param.is_non_type) continue;
-            if (param.name == current->name) return param.name;
+        if (current->pointee) {
+            if (std::optional<std::string> found = referenced_pack_type_param_name(*current->pointee)) return found;
+        }
+        if (current->element) {
+            if (std::optional<std::string> found = referenced_pack_type_param_name(*current->element)) return found;
+        }
+        if (current->function_return) {
+            if (std::optional<std::string> found = referenced_pack_type_param_name(*current->function_return)) return found;
+        }
+        for (const Type& param_type : current->function_params) {
+            if (std::optional<std::string> found = referenced_pack_type_param_name(param_type)) return found;
         }
         return std::nullopt;
     }

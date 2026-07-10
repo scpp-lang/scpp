@@ -943,6 +943,43 @@ void test_full_header_parameter_pack_and_new_pack_expansion_parse() {
            "full_header_parameter_pack_and_new_pack_expansion_parse: pack expansion should expand 'args'");
 }
 
+void test_full_header_transformed_pointer_parameter_pack_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename... Tail>\n"
+        "int bridge(Tail*... ptrs) { return 0; }\n");
+    expect(program.functions.size() == 1,
+           "full_header_transformed_pointer_parameter_pack_parses: expected 1 function");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.template_params.size() == 1 && fn.template_params[0].is_pack,
+           "full_header_transformed_pointer_parameter_pack_parses: expected Tail pack template parameter");
+    expect(fn.params.size() == 1 && fn.params[0].is_parameter_pack,
+           "full_header_transformed_pointer_parameter_pack_parses: expected pointer parameter pack");
+    expect(fn.params[0].type.kind == scpp::TypeKind::Pointer && fn.params[0].type.pointee != nullptr &&
+               is_named_type(*fn.params[0].type.pointee, "Tail"),
+           "full_header_transformed_pointer_parameter_pack_parses: expected Tail* parameter type");
+}
+
+void test_full_header_wrapped_template_parameter_pack_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Token {\n"
+        "public:\n"
+        "    Token() { return; }\n"
+        "};\n"
+        "template<typename... Tail>\n"
+        "int bridge(Token<Tail>... tokens) { return 0; }\n");
+    expect(program.functions.size() == 2,
+           "full_header_wrapped_template_parameter_pack_parses: expected Token ctor plus bridge");
+    const scpp::Function& fn = program.functions.back();
+    expect(fn.template_params.size() == 1 && fn.template_params[0].is_pack,
+           "full_header_wrapped_template_parameter_pack_parses: expected Tail pack template parameter");
+    expect(fn.params.size() == 1 && fn.params[0].is_parameter_pack,
+           "full_header_wrapped_template_parameter_pack_parses: expected wrapped parameter pack");
+    expect(fn.params[0].type.kind == scpp::TypeKind::Named && fn.params[0].type.name == "Token" &&
+               fn.params[0].type.template_args.size() == 1 && is_named_type(fn.params[0].type.template_args[0], "Tail"),
+           "full_header_wrapped_template_parameter_pack_parses: expected Token<Tail> parameter type");
+}
+
 void test_extern_c_single_declaration() {
     // ch02 §2.1: a bodyless `extern "C"` declaration.
     scpp::Program program = scpp::parse("extern \"C\" int c_abs(int n); int main() { return 0; }");
@@ -3190,6 +3227,8 @@ int main() {
     test_generic_function_full_header_form_parses();
     test_generic_function_multiple_type_params_parses();
     test_full_header_parameter_pack_and_new_pack_expansion_parse();
+    test_full_header_transformed_pointer_parameter_pack_parses();
+    test_full_header_wrapped_template_parameter_pack_parses();
     test_abbreviated_generic_parameter_pack_and_fold_parse();
     test_explicit_type_template_argument_call_parses();
     test_explicit_non_type_template_argument_call_parses();
