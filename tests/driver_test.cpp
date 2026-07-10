@@ -1300,6 +1300,46 @@ void run_consteval_tests() {
                case_name + ": expected pointer/span total 12, got " + std::to_string(run_result.exit_code));
         std::filesystem::remove(exe_path);
     }
+
+    {
+        std::string case_name = "constexpr_local_initializer_is_checked_as_constant_expression";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "constexpr_local_initializer_is_checked_as_constant_expression_exe";
+        scpp::compile_to_executable(
+            "constexpr int plus_one(int x) {\n"
+            "    return x + 1;\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int base = 4;\n"
+            "    constexpr int total = plus_one(base);\n"
+            "    return total;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 5,
+               case_name + ": expected constexpr local result 5, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "constexpr_local_rejects_runtime_initializer";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "int main() {\n"
+                "    int runtime = 4;\n"
+                "    constexpr int total = runtime + 1;\n"
+                "    return total;\n"
+                "}\n",
+                (std::filesystem::current_path() / "constexpr_local_rejects_runtime_initializer_exe").string(),
+                std_link_inputs(), std_import_paths());
+        } catch (const scpp::DriverError& error) {
+            threw = std::string(error.what()).find("identifier 'runtime' is not available") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected constexpr local to reject runtime-only initializer");
+    }
 }
 
 void run_cli_extension_tests() {

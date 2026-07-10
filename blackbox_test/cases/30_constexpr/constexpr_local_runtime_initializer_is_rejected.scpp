@@ -1,0 +1,5 @@
+int main() {
+    int runtime = 4;
+    constexpr int total = runtime + 1;
+    return total;
+}

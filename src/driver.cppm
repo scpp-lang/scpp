@@ -148,17 +148,8 @@ void collect_function_signature_types(const scpp::Function& fn, std::unordered_s
     for (const scpp::Param& param : fn.params) collect_type_names(param.type, type_names);
 }
 
-[[noreturn]] void throw_phase_a_constexpr_not_yet_lowerable(const SourceLocation& loc, std::string_view what) {
-    throw DriverError(std::to_string(loc.line) + ":" + std::to_string(loc.column) +
-                      ": " + std::string(what) +
-                      " is parsed in constexpr Phase A, but code generation still lands in a later phase");
-}
-
 void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
     std::function<void(const Stmt&)> walk_stmt = [&](const Stmt& stmt) {
-        if (stmt.is_constexpr) {
-            throw_phase_a_constexpr_not_yet_lowerable(stmt.loc, "constexpr variable declarations");
-        }
         if (stmt.init) {
             // nothing to validate inside expressions yet
         }
