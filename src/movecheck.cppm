@@ -4065,6 +4065,8 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     if (stmt.condition) clone->condition = clone_expr(*stmt.condition);
     if (stmt.then_branch) clone->then_branch = clone_stmt(*stmt.then_branch);
     if (stmt.else_branch) clone->else_branch = clone_stmt(*stmt.else_branch);
+    clone->is_constexpr = stmt.is_constexpr;
+    clone->if_mode = stmt.if_mode;
     clone->statements.reserve(stmt.statements.size());
     for (const StmtPtr& s : stmt.statements) clone->statements.push_back(clone_stmt(*s));
     clone->is_unsafe = stmt.is_unsafe;
@@ -4095,6 +4097,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.template_params = fn.template_params;
     clone.generic_method_owner_id = fn.generic_method_owner_id;
     clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+    clone.eval_mode = fn.eval_mode;
     clone.namespace_path = fn.namespace_path;
     clone.is_exported = fn.is_exported;
     clone.owning_module = fn.owning_module;

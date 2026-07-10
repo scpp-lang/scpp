@@ -7,6 +7,7 @@ module;
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -40,6 +41,18 @@ export namespace scpp {
 struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
+
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 1;
+inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
+
+struct CompileTimePayloadPlan {
+    std::uint32_t format_version = SCPPM_COMPILE_TIME_AST_VERSION;
+    std::vector<std::string> root_function_names;
+    std::vector<std::string> reachable_function_names;
+    std::vector<std::string> reachable_type_names;
+};
+
+[[nodiscard]] CompileTimePayloadPlan plan_compile_time_payload(const Program& program);
 
 } // namespace scpp
 
@@ -81,6 +94,164 @@ void write_u32_le(std::ostream& out, std::uint32_t value) {
         static_cast<char>((value >> 24) & 0xffu),
     };
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+
+namespace {
+
+[[nodiscard]] bool is_compile_time_root(const scpp::Function& fn) {
+    return fn.is_exported &&
+           (fn.eval_mode != scpp::FunctionEvalMode::RuntimeOnly || fn.is_generic_template || !fn.template_params.empty());
+}
+
+void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>& out) {
+    if (type.kind == scpp::TypeKind::Named && !type.name.empty()) out.insert(type.name);
+    if (type.pointee) collect_type_names(*type.pointee, out);
+    if (type.function_return) collect_type_names(*type.function_return, out);
+    for (const scpp::Type& arg : type.template_args) collect_type_names(arg, out);
+    for (const scpp::Type& param : type.function_params) collect_type_names(param, out);
+}
+
+void collect_stmt_edges(const scpp::Stmt& stmt, std::unordered_set<std::string>& function_names,
+                        std::unordered_set<std::string>& type_names);
+
+void collect_expr_edges(const scpp::Expr& expr, std::unordered_set<std::string>& function_names,
+                        std::unordered_set<std::string>& type_names) {
+    collect_type_names(expr.type, type_names);
+    if (expr.kind == scpp::ExprKind::Call && !expr.name.empty()) function_names.insert(expr.name);
+    if (expr.kind == scpp::ExprKind::New) collect_type_names(expr.type, type_names);
+    if (expr.lhs) collect_expr_edges(*expr.lhs, function_names, type_names);
+    if (expr.rhs) collect_expr_edges(*expr.rhs, function_names, type_names);
+    if (expr.third) collect_expr_edges(*expr.third, function_names, type_names);
+    for (const auto& arg : expr.args) collect_expr_edges(*arg, function_names, type_names);
+    if (expr.lambda_body) collect_stmt_edges(*expr.lambda_body, function_names, type_names);
+}
+
+void collect_stmt_edges(const scpp::Stmt& stmt, std::unordered_set<std::string>& function_names,
+                        std::unordered_set<std::string>& type_names) {
+    collect_type_names(stmt.type, type_names);
+    if (stmt.init) collect_expr_edges(*stmt.init, function_names, type_names);
+    for (const auto& ctor_arg : stmt.ctor_args) collect_expr_edges(*ctor_arg, function_names, type_names);
+    if (stmt.has_ctor_args && stmt.type.kind == scpp::TypeKind::Named && !stmt.type.name.empty()) {
+        function_names.insert(stmt.type.name + "_new");
+    }
+    if (stmt.expr) collect_expr_edges(*stmt.expr, function_names, type_names);
+    if (stmt.condition) collect_expr_edges(*stmt.condition, function_names, type_names);
+    if (stmt.then_branch) collect_stmt_edges(*stmt.then_branch, function_names, type_names);
+    if (stmt.else_branch) collect_stmt_edges(*stmt.else_branch, function_names, type_names);
+    for (const auto& nested : stmt.statements) collect_stmt_edges(*nested, function_names, type_names);
+}
+
+void collect_function_signature_types(const scpp::Function& fn, std::unordered_set<std::string>& type_names) {
+    collect_type_names(fn.return_type, type_names);
+    for (const scpp::Param& param : fn.params) collect_type_names(param.type, type_names);
+}
+
+[[noreturn]] void throw_phase_a_constexpr_not_yet_lowerable(const SourceLocation& loc, std::string_view what) {
+    throw DriverError(std::to_string(loc.line) + ":" + std::to_string(loc.column) +
+                      ": " + std::string(what) +
+                      " is parsed in constexpr Phase A, but code generation still lands in a later phase");
+}
+
+void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
+    std::function<void(const Stmt&)> walk_stmt = [&](const Stmt& stmt) {
+        if (stmt.is_constexpr) {
+            throw_phase_a_constexpr_not_yet_lowerable(stmt.loc, "constexpr variable declarations");
+        }
+        if (stmt.kind == StmtKind::If && stmt.if_mode != IfMode::Runtime) {
+            throw_phase_a_constexpr_not_yet_lowerable(stmt.loc, "'if consteval'");
+        }
+        if (stmt.init) {
+            // nothing to validate inside expressions yet
+        }
+        if (stmt.then_branch) walk_stmt(*stmt.then_branch);
+        if (stmt.else_branch) walk_stmt(*stmt.else_branch);
+        for (const StmtPtr& nested : stmt.statements) walk_stmt(*nested);
+    };
+    for (const Function& fn : program.functions) {
+        if (fn.eval_mode != FunctionEvalMode::RuntimeOnly) {
+            throw_phase_a_constexpr_not_yet_lowerable(fn.loc, fn.eval_mode == FunctionEvalMode::Consteval
+                                                                  ? "consteval functions"
+                                                                  : "constexpr functions");
+        }
+        if (fn.body) walk_stmt(*fn.body);
+    }
+}
+
+} // namespace
+
+CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
+    CompileTimePayloadPlan plan;
+    std::unordered_map<std::string, const Function*> functions_by_name;
+    std::unordered_map<std::string, const StructDef*> structs_by_name;
+    std::unordered_map<std::string, const ClassDef*> classes_by_name;
+    for (const Function& fn : program.functions) functions_by_name.emplace(fn.name, &fn);
+    for (const StructDef& def : program.structs) structs_by_name.emplace(def.name, &def);
+    for (const ClassDef& def : program.classes) classes_by_name.emplace(def.name, &def);
+
+    std::unordered_set<std::string> visited_functions;
+    std::unordered_set<std::string> visited_types;
+    std::unordered_set<std::string> pending_types;
+    std::vector<std::string> worklist;
+
+    auto enqueue_type = [&](const std::string& name) {
+        if (name.empty()) return;
+        if (visited_types.insert(name).second) {
+            plan.reachable_type_names.push_back(name);
+            pending_types.insert(name);
+        }
+    };
+
+    auto enqueue_function = [&](const std::string& name, bool is_root = false) {
+        if (name.empty()) return;
+        auto it = functions_by_name.find(name);
+        if (it == functions_by_name.end()) return;
+        if (visited_functions.insert(name).second) {
+            plan.reachable_function_names.push_back(name);
+            worklist.push_back(name);
+        }
+        if (is_root && std::find(plan.root_function_names.begin(), plan.root_function_names.end(), name) ==
+                           plan.root_function_names.end()) {
+            plan.root_function_names.push_back(name);
+        }
+    };
+
+    for (const Function& fn : program.functions) {
+        if (is_compile_time_root(fn)) enqueue_function(fn.name, true);
+    }
+
+    for (size_t i = 0; i < worklist.size(); i++) {
+        const Function& fn = *functions_by_name.at(worklist[i]);
+        std::unordered_set<std::string> local_function_names;
+        std::unordered_set<std::string> local_type_names;
+        collect_function_signature_types(fn, local_type_names);
+        if (fn.body) collect_stmt_edges(*fn.body, local_function_names, local_type_names);
+        for (const std::string& callee : local_function_names) enqueue_function(callee);
+        for (const std::string& type_name : local_type_names) enqueue_type(type_name);
+    }
+
+    while (!pending_types.empty()) {
+        std::vector<std::string> batch(pending_types.begin(), pending_types.end());
+        pending_types.clear();
+        for (const std::string& type_name : batch) {
+            if (auto it = structs_by_name.find(type_name); it != structs_by_name.end()) {
+                for (const StructField& field : it->second->fields) {
+                    std::unordered_set<std::string> nested;
+                    collect_type_names(field.type, nested);
+                    for (const std::string& nested_name : nested) enqueue_type(nested_name);
+                }
+            }
+            if (auto it = classes_by_name.find(type_name); it != classes_by_name.end()) {
+                for (const ClassField& field : it->second->fields) {
+                    std::unordered_set<std::string> nested;
+                    collect_type_names(field.type, nested);
+                    for (const std::string& nested_name : nested) enqueue_type(nested_name);
+                }
+            }
+        }
+    }
+
+    return plan;
 }
 
 [[nodiscard]] std::string serialize_generics_block(const Program& program, std::string_view source) {
@@ -666,6 +837,7 @@ llvm::CodeGenOptLevel codegen_opt_level_for(int opt_level) {
 // file it came from.
 void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
                                   int opt_level = 2) {
+    reject_not_yet_lowerable_constexpr_surface(program);
     // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
     // comment in movecheck.cppm for why call-site monomorphization has
     // to happen first (movecheck's ordinary exact-type-match call-
@@ -786,6 +958,7 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
+    reject_not_yet_lowerable_constexpr_surface(program);
     if (!program.is_module_interface) {
         throw DriverError("module artifacts can only be emitted from an interface unit, not '" +
                           (program.module_name.empty() ? std::string("<non-module>") : module_key(program)) + "'");

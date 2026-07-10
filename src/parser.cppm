@@ -278,6 +278,7 @@ private:
 
     [[nodiscard]] bool looks_like_type_start() const {
         const Token& tok = peek();
+        if (tok.kind == TokenKind::KwConstexpr) return true;
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst ||
             tok.kind == TokenKind::KwVoid || tok.kind == TokenKind::KwChar || tok.kind == TokenKind::KwLong ||
             tok.kind == TokenKind::KwFloat || tok.kind == TokenKind::KwDouble ||
@@ -527,6 +528,31 @@ private:
                              " -- only to a struct or union declaration (spec §9.2)");
     }
 
+
+    [[nodiscard]] FunctionEvalMode parse_optional_function_eval_mode() {
+        FunctionEvalMode mode = FunctionEvalMode::RuntimeOnly;
+        if (match(TokenKind::KwConstexpr)) {
+            mode = FunctionEvalMode::Constexpr;
+        } else if (match(TokenKind::KwConsteval)) {
+            mode = FunctionEvalMode::Consteval;
+        }
+        if (mode != FunctionEvalMode::RuntimeOnly &&
+            (check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval))) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                              "a declaration may specify at most one of 'constexpr' or 'consteval'");
+        }
+        return mode;
+    }
+
+    [[nodiscard]] ExprPtr make_bool_literal_expr(SourceLocation loc, bool value) {
+        auto expr = std::make_unique<Expr>();
+        expr->kind = ExprKind::BoolLiteral;
+        expr->loc = loc;
+        expr->bool_value = value;
+        return expr;
+    }
+
     // Checks (without consuming) for the 3-token sequence `std :: <member>`.
     // Only the still-builtin spellings (`std::move`, plus the parser-only
     // `std::span` type form) use this helper; ordinary library names now
@@ -632,11 +658,13 @@ private:
         clone->type = stmt.type;
         clone->var_name = stmt.var_name;
         if (stmt.init) clone->init = clone_expr(*stmt.init);
+        clone->is_constexpr = stmt.is_constexpr;
         clone->has_ctor_args = stmt.has_ctor_args;
         clone->ctor_args.clear();
         for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_expr(*arg));
         if (stmt.expr) clone->expr = clone_expr(*stmt.expr);
         if (stmt.condition) clone->condition = clone_expr(*stmt.condition);
+        clone->if_mode = stmt.if_mode;
         if (stmt.then_branch) clone->then_branch = clone_stmt(*stmt.then_branch);
         if (stmt.else_branch) clone->else_branch = clone_stmt(*stmt.else_branch);
         clone->statements.clear();
@@ -750,7 +778,7 @@ private:
         return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
-               a.receiver_ref_qualifier == b.receiver_ref_qualifier;
+               a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier;
     }
 
     [[nodiscard]] static std::string join_namespace_path(const std::vector<std::string>& namespace_path) {
@@ -1591,6 +1619,7 @@ private:
         clone.template_params = fn.template_params;
         clone.generic_method_owner_id = fn.generic_method_owner_id;
         clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+        clone.eval_mode = fn.eval_mode;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
         clone.is_exported = is_reexport && fn.is_exported;
@@ -3331,10 +3360,15 @@ private:
             ParsedAttributes member_attrs = parse_attribute_specifier_seq();
             reject_packed_attribute(member_attrs, member_attr_start_tok, "a class member declaration");
             bool member_requested_unsafe = member_attrs.has("unsafe");
+            FunctionEvalMode member_eval_mode = parse_optional_function_eval_mode();
             if (match(TokenKind::Tilde)) {
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
                                       "a destructor cannot be a member template");
+                }
+                if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a destructor cannot be declared constexpr or consteval");
                 }
                 // Destructor: `~ClassName() { ... }` -- no parameters, no
                 // return type, and always a mutable (non-`const`) `this`
@@ -3360,7 +3394,6 @@ private:
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
                 continue;
             }
-
             if (check(TokenKind::Identifier) && std::string(peek().text) == class_name &&
                 peek_at(1).kind == TokenKind::LParen) {
                 // Constructor: `ClassName(args) { ... }` -- distinguished
@@ -3374,6 +3407,7 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.eval_mode = member_eval_mode;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_new";
@@ -3443,6 +3477,7 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator*");
                 bool is_const = match(TokenKind::KwConst);
@@ -3466,6 +3501,7 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator=");
                 // spec §6.4(1): a program shall not declare a move
@@ -3507,6 +3543,10 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                       "a member template declaration must declare a constructor or method, not a field");
                 }
+                if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "only a member function or constructor may be declared constexpr or consteval");
+                }
                 if (member_requested_unsafe) {
                     throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
                                       "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
@@ -3524,6 +3564,7 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a method");
                 fn.template_params = member_template_params;
@@ -3553,6 +3594,10 @@ private:
             // a struct field access (movecheck's apply_expr Member
             // case: the whole-root-conservative treatment, not a new
             // per-field mechanism).
+            if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
+                throw ParseError(member_loc.line, member_loc.column,
+                                  "only a member function or constructor may be declared constexpr or consteval");
+            }
             if (member_requested_unsafe) {
                 throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
                                   "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
@@ -3590,6 +3635,7 @@ private:
         fn.is_extern_c = is_extern_c;
         fn.is_module_extern = is_module_extern;
         fn.is_unsafe = is_unsafe;
+        fn.eval_mode = parse_optional_function_eval_mode();
         fn.return_type = parse_type();
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
 
@@ -3721,6 +3767,7 @@ private:
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
         stmt->loc = loc;
+        stmt->is_constexpr = match(TokenKind::KwConstexpr);
         if (match(TokenKind::KwAuto)) {
             // ch05 §5.12: `auto name = expr;` infers the local's type
             // from its initializer -- the only way to name a closure's
@@ -3777,10 +3824,11 @@ private:
         // ever give it a value, unlike an ordinary mutable local, which
         // may be declared bare and assigned later. Matches real C++'s
         // own "default initialization of const variable" rejection.
-        if (stmt->is_const && !stmt->init && !stmt->has_ctor_args) {
+        if ((stmt->is_const || stmt->is_constexpr) && !stmt->init && !stmt->has_ctor_args) {
             throw ParseError(loc.line, loc.column,
-                              "a 'const' variable must be initialized ('const " + stmt->type.name + " " +
-                                  stmt->var_name + " = ...;') -- it can never be given a value afterward");
+                              "a constant variable must be initialized ('" +
+                                  std::string(stmt->is_constexpr ? "constexpr " : "const ") + stmt->type.name +
+                                  " " + stmt->var_name + " = ...;') -- it can never be given a value afterward");
         }
         expect(TokenKind::Semicolon, "';'");
         return stmt;
@@ -3802,12 +3850,21 @@ private:
     StmtPtr parse_if() {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwIf, "'if'");
-        expect(TokenKind::LParen, "'('");
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::If;
         stmt->loc = loc;
-        stmt->condition = parse_expr();
-        expect(TokenKind::RParen, "')'");
+        if (match(TokenKind::KwConsteval)) {
+            stmt->if_mode = IfMode::ConstevalTrue;
+            stmt->condition = make_bool_literal_expr(loc, true);
+        } else if (match(TokenKind::Bang)) {
+            expect(TokenKind::KwConsteval, "'consteval'");
+            stmt->if_mode = IfMode::ConstevalFalse;
+            stmt->condition = make_bool_literal_expr(loc, false);
+        } else {
+            expect(TokenKind::LParen, "'('");
+            stmt->condition = parse_expr();
+            expect(TokenKind::RParen, "')'");
+        }
         stmt->then_branch = parse_statement();
         if (match(TokenKind::KwElse)) {
             stmt->else_branch = parse_statement();
