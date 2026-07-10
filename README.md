@@ -83,23 +83,23 @@ cmake --build build
 ctest --test-dir build
 ```
 
-To stage a self-contained toolchain root, run the built compiler itself:
+To install a built scpp from source, use CMake's ordinary prefix-based install
+step:
 
 ```sh
-./build/scpp installself
+cmake --install build --prefix <your-chosen-directory>
 ```
 
-`installself` copies the current compiler into `~/.scpp/toolchains/scpp26/`,
-updates `~/.scpp/bin/scpp26` and `~/.scpp/bin/scpp`, and prints the exact PATH
-line you should add manually in your own shell config:
+This produces a self-contained tree under that prefix:
 
-```sh
-export PATH="$HOME/.scpp/bin:$PATH"
+```text
+<prefix>/
+├── bin/scpp
+└── share/scpp/stdlib/
 ```
 
-`installself` only writes under `~/.scpp/`. It does not modify shell rc files
-for you, and it cannot mutate the current parent shell's live `PATH`, so
-re-open your shell or run that `export` manually in the current session.
+Then add `<prefix>/bin` to your `PATH` however you prefer. scpp itself does not
+modify shell rc files or manage installed toolchains.
 
 The `scpp` CLI supports:
 

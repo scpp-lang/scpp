@@ -70,24 +70,23 @@ cmake --build build
 ctest --test-dir build
 ```
 
-如果想把当前编译器安装成一个完整、自包含的 toolchain 根目录，可直接运行
-当前构建出的编译器：
+如果想把当前源码构建出的 scpp 安装到一个自包含目录里，直接使用 CMake 的
+普通 prefix 安装步骤：
 
 ```sh
-./build/scpp installself
+cmake --install build --prefix <你选择的目录>
 ```
 
-`installself` 会把当前编译器复制到 `~/.scpp/toolchains/scpp26/`，更新
-`~/.scpp/bin/scpp26` 和 `~/.scpp/bin/scpp`，并打印出你应当手动加入自己
-shell 配置的 PATH 语句：
+安装后会得到一个完整、自包含的目录树：
 
-```sh
-export PATH="$HOME/.scpp/bin:$PATH"
+```text
+<prefix>/
+├── bin/scpp
+└── share/scpp/stdlib/
 ```
 
-`installself` 的所有写入都严格限制在 `~/.scpp/` 下；它不会替你修改任何
-shell rc 文件。由于子进程无法直接修改父 shell 当前会话里的 `PATH`，
-安装后仍需重开 shell，或在当前会话里手动执行上面的 `export`。
+之后按你自己的方式把 `<prefix>/bin` 加进 `PATH` 即可。scpp 本身不会替你
+修改 shell rc 文件，也不负责管理已安装 toolchain。
 
 `scpp` CLI 支持：
 

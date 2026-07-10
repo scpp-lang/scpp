@@ -16,7 +16,6 @@ import scpp.parser;
 import scpp.ast;
 import scpp.codegen;
 import scpp.movecheck;
-import scpp.clicommands;
 import scpp.driver;
 import scpp.project;
 
@@ -647,13 +646,6 @@ int run(int argc, char** argv) {
         }
         return run_build_module(argv[2], interface_path, archive_path, import_paths, import_search_dirs);
     }
-    if (argc >= 2 && std::string_view(argv[1]) == "installself") {
-        if (argc != 2) {
-            std::cerr << "error: installself takes no additional arguments\n";
-            return 1;
-        }
-        return scpp::run_installself();
-    }
     if (argc >= 2 && std::string_view(argv[1]) == "build") {
         scpp::ProjectBuildOptions options;
         for (int i = 2; i < argc; i++) {
@@ -735,7 +727,6 @@ int run(int argc, char** argv) {
               << " build [--workspace] [-p <package>] [--lib] [--bin <name>] [--profile <name>] [--release]\n";
     std::cout << "       " << name
               << " build-module <file.scpp> --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
-    std::cout << "       " << name << " installself\n";
     return 0;
 }
 

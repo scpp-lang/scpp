@@ -6,6 +6,8 @@ project(scpp
     LANGUAGES C CXX)
 
 set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/std.scpp")
+set(SCPP_STDLIB_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/std.scppm")
+set(SCPP_STDLIB_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libstd.scppa")
 set(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_string_wrapper.a")
 set(SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_thread_wrapper.a")
 
@@ -100,15 +102,27 @@ target_sources(scpp
         src/main.cpp
     PRIVATE
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/cli/cli.cppm
-            src/cli/commands.cppm
-            src/cli/commands/installself.cppm)
+            src/cli/cli.cppm)
 target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver scpp_project)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
 target_compile_definitions(scpp PRIVATE
-    SCPP_VERSION="${PROJECT_VERSION}"
-    SCPP_VERSION_MAJOR="${PROJECT_VERSION_MAJOR}")
+    SCPP_VERSION="${PROJECT_VERSION}")
+
+install(TARGETS scpp
+    RUNTIME DESTINATION bin)
+
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
+    DESTINATION "share/scpp/stdlib"
+    FILES_MATCHING
+        PATTERN "*.scpp")
+
+install(FILES
+    "${SCPP_STDLIB_INTERFACE_PATH}"
+    "${SCPP_STDLIB_ARCHIVE_PATH}"
+    "${SCPP_STDLIB_STRING_WRAPPER_LIB_PATH}"
+    "${SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH}"
+    DESTINATION "share/scpp/stdlib")
 
 enable_testing()
 
