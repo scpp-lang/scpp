@@ -1,0 +1,14 @@
+// spec §7.3(1): if required constant evaluation would evaluate a
+// `[[scpp::unsafe]]` compound-statement, the program is ill-formed.
+constexpr int pick_value() {
+    int arr[1];
+    arr[0] = 42;
+    [[scpp::unsafe]] {
+        return arr[0];
+    }
+}
+
+int main() {
+    constexpr int value = pick_value();
+    return value;
+}

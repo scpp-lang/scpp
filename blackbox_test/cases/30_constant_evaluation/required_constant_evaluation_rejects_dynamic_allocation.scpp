@@ -1,0 +1,14 @@
+// spec §7.3(1) and §7.3(3): required constant evaluation must reject
+// dynamic allocation/deallocation paths even when they are written in
+// an unsafe context.
+constexpr int allocate_value() {
+    [[scpp::unsafe]] {
+        int* p = new int(42);
+        return *p;
+    }
+}
+
+int main() {
+    constexpr int value = allocate_value();
+    return value;
+}

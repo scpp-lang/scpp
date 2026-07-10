@@ -1,0 +1,11 @@
+// spec §7.3(4): required constant evaluation is ill-formed if it would
+// evaluate a lambda-expression.
+constexpr int make_value() {
+    auto f = []() { return 42; };
+    return f();
+}
+
+int main() {
+    constexpr int value = make_value();
+    return value;
+}

@@ -1,0 +1,10 @@
+// spec §7.4(2.2): division or remainder by a zero right operand during
+// required constant evaluation is ill-formed.
+constexpr int divide() {
+    return 42 / 0;
+}
+
+int main() {
+    constexpr int value = divide();
+    return value;
+}

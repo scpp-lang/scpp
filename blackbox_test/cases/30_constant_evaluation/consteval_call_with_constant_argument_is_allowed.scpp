@@ -1,0 +1,10 @@
+// spec §9.1(4): a `consteval` call is well-formed when the call itself
+// produces a constant expression, even if it appears inside an ordinary
+// runtime function.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+int main() {
+    return twice(21);
+}

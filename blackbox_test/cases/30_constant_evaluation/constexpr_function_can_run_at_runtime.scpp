@@ -1,0 +1,11 @@
+// spec §9.1(3): a `constexpr` function may still be called as an
+// ordinary runtime function when the surrounding context does not
+// require a constant expression.
+constexpr int add_one(int x) {
+    return x + 1;
+}
+
+int main() {
+    int base = 41;
+    return add_one(base);
+}

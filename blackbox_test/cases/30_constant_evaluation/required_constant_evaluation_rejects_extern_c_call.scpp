@@ -1,0 +1,17 @@
+// spec §7.3(1) and §7.3(2.1): even if the call site is put inside an
+// unsafe context, required constant evaluation still cannot execute an
+// `extern "C"` call.
+extern "C" int plus_one(int x) {
+    return x + 1;
+}
+
+constexpr int call_ffi() {
+    [[scpp::unsafe]] {
+        return plus_one(41);
+    }
+}
+
+int main() {
+    constexpr int value = call_ffi();
+    return value;
+}

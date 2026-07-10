@@ -1,0 +1,11 @@
+// spec §7.4(2.1): checked arithmetic overflow during required constant
+// evaluation is ill-formed.
+constexpr int overflow() {
+    int max = 2147483647;
+    return max + 1;
+}
+
+int main() {
+    constexpr int value = overflow();
+    return value;
+}

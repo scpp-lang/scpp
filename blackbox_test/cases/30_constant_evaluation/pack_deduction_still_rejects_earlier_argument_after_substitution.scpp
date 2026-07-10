@@ -1,0 +1,15 @@
+// spec §13.1(4)-(5): after a later argument binds the pack, the earlier
+// dependent parameter is checked against the argument using the substituted
+// concrete type; if it does not satisfy that type, the program is ill-formed.
+void accept_int_char(int x, char y) {
+    return;
+}
+
+template<typename... Args>
+int call_with(void (*f)(Args...), Args... args) {
+    return 0;
+}
+
+int main() {
+    return call_with(accept_int_char, 7, 8);
+}

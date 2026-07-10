@@ -1,0 +1,14 @@
+// spec §7.2(5)-(6): required constant evaluation in v1 supports local
+// declarations, assignments, and integer / character / string-literal /
+// floating-point operations inside a `constexpr` function.
+constexpr int compute_value() {
+    const char* text = "z";
+    double scaled = (20.5 + 0.5) * 2.0;
+    return static_cast<int>(scaled) +
+           (static_cast<int>(text[0]) - static_cast<int>('z'));
+}
+
+int main() {
+    constexpr int value = compute_value();
+    return value;
+}

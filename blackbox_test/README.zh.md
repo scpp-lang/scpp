@@ -2,15 +2,16 @@
 
 > English version: [README.md](README.md)
 
-这个目录是 `scpp` 编译器的**黑盒**测试套件。它与 `src/`（实现）和
-`docs/book/`（语言规范）相互独立地维护：这里的测试完全通过阅读 `docs/book/`
-编写，并把编译好的 `scpp` CLI 当作外部工具来调用——就像语言的普通使用者一样，
-不依赖、也不需要了解 scpp 编译器的内部模块。
+这个目录是 `scpp` 编译器的**黑盒**测试套件。它与 `src/`（实现）、
+`docs/book/`（面向读者的指南）以及 `docs/spec/`（形式化语言规范）相互独立地
+维护：这里的测试完全通过阅读这些已发布文档来编写，并把编译好的 `scpp` CLI
+当作外部工具来调用——就像语言的普通使用者一样，不依赖、也不需要了解 scpp
+编译器的内部模块。
 
 ## 工作原理
 
 - `cases/<NN_category>/<name>.scpp` —— 一段展示某条文档化语言规则的小 scpp
-  程序（文件顶部注释会引用 `docs/book/en/chXX-*.md` 里对应的章节）。scpp
+  程序（文件顶部注释会引用对应的 `docs/book/` 或 `docs/spec/` 章节）。scpp
   源文件用 `.scpp` 后缀，不用 `.cpp`（ch08 Q7/Q13）：既然现在每个函数默认都
   无条件被检查，就绝不能让一个普通的 `.cpp` 文件被悄悄喂给 scpp 编译器、在
   作者没有要求的情况下被检查。
@@ -112,13 +113,15 @@ cmake --build build
 | `27_unions_packed_layout` | union 成员的 unsafe 门控，以及 `[[scpp::packed]]` 的布局/FFI 行为，包括 Linux `epoll_event` / `epoll_data_t` 形态 |
 | `28_cli_invocation` | CLI 表面：直接 `scpp file.scpp` 构建、默认/自定义输出名、移除的 `build` 关键字，以及仍保留的 `lex`/`parse`/`build-module` 子命令 |
 | `29_project_build` | manifest 驱动的项目构建：单包 `build`、workspace/path dependency、直接依赖可见性、`-p` 选包，以及对尚未实现 manifest 特性的拒绝路径 |
+| `30_constant_evaluation` | 形式化规范驱动的 `constexpr`/`consteval` 覆盖：required constant evaluation、`if consteval` / `if !consteval`、v1 暂不支持的操作，以及“后面的参数先推导包，再回填前面依赖参数类型”的规则 |
 
 ## 测试理念
 
-- 每个 `.scpp` 文件都力求**严格符合 `docs/book/`**——如果某个测试失败了，先去
-  查它引用的文档章节。如果测试本身其实违反了规范，就修正测试。如果测试确实
-  符合规范却依然失败，那就是实现上的 bug，记录在这里留给 `src/` 的维护者去
-  修——这个套件本身不会为了绕开失败而去改 `src/`。
+- 每个 `.scpp` 文件都力求**严格符合已发布语言文档**（`docs/book/`，以及那些
+  目前只先落在 `docs/spec/` 里的新工作）——如果某个测试失败了，先去查它引用
+  的文档章节。如果测试本身其实违反了规范，就修正测试。如果测试确实符合规范
+  却依然失败，那就是实现上的 bug，记录在这里留给 `src/` 的维护者去修——这个
+  套件本身不会为了绕开失败而去改 `src/`。
 - 程序优先通过**进程退出码**（`main` 的返回值）来观察行为；如果要验证真实的
   C 互操作，就使用通过 `extern "C"` 声明的真实 libc 调用（`puts`、
   `printf`）——这两者都是文档里明确记载的机制。`tests/test_source` 使用的那些
