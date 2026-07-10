@@ -1,0 +1,25 @@
+class Counter {
+public:
+    int value;
+    consteval Counter(int v) {
+        this->value = v;
+        return;
+    }
+    consteval void bump() {
+        this->value = this->value + 1;
+        return;
+    }
+    constexpr int get() const {
+        return this->value;
+    }
+};
+
+consteval int answer() {
+    Counter c(6);
+    c.bump();
+    return c.get();
+}
+
+int main() {
+    return answer() - 7;
+}

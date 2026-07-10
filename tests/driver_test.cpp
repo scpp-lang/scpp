@@ -1694,6 +1694,43 @@ void run_consteval_tests() {
     }
 
     {
+        std::string case_name = "consteval_method_calls_support_mutating_and_const_receivers";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_method_calls_support_mutating_and_const_receivers_exe";
+        scpp::compile_to_executable(
+            "class Counter {\n"
+            "public:\n"
+            "    int value;\n"
+            "    consteval Counter(int v) {\n"
+            "        this->value = v;\n"
+            "        return;\n"
+            "    }\n"
+            "    consteval void bump() {\n"
+            "        this->value = this->value + 1;\n"
+            "        return;\n"
+            "    }\n"
+            "    constexpr int get() const {\n"
+            "        return this->value;\n"
+            "    }\n"
+            "};\n"
+            "consteval int answer() {\n"
+            "    Counter c(6);\n"
+            "    c.bump();\n"
+            "    return c.get();\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 7;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected consteval/constexpr method calls to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
         std::string case_name = "consteval_helper_call_accepts_derived_object_for_base_parameter";
         cases_run++;
         std::filesystem::path exe_path =
