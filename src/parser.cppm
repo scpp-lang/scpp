@@ -4219,8 +4219,15 @@ private:
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Call;
                 node->loc = expr->loc;
-                node->name = expr->kind == ExprKind::Lambda ? "call" : "";
-                node->lhs = std::move(expr);
+                if (expr->kind == ExprKind::Identifier) {
+                    node->name = expr->name;
+                    node->explicit_template_args = std::move(expr->explicit_template_args);
+                } else if (expr->kind == ExprKind::Lambda) {
+                    node->name = "call";
+                    node->lhs = std::move(expr);
+                } else {
+                    node->lhs = std::move(expr);
+                }
                 if (!check(TokenKind::RParen)) {
                     do {
                         node->args.push_back(parse_expr());
@@ -4565,20 +4572,6 @@ private:
                     } while (match(TokenKind::Comma));
                 }
                 expect(TokenKind::Greater, "'>'");
-            }
-            if (match(TokenKind::LParen)) {
-                auto node = std::make_unique<Expr>();
-                node->kind = ExprKind::Call;
-                node->loc = loc;
-                node->name = name;
-                node->explicit_template_args = std::move(explicit_template_args);
-                if (!check(TokenKind::RParen)) {
-                    do {
-                        node->args.push_back(parse_expr());
-                    } while (match(TokenKind::Comma));
-                }
-                expect(TokenKind::RParen, "')'");
-                return node;
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;

@@ -2939,6 +2939,31 @@ void test_explicit_type_template_argument_call_parses() {
            "explicit_type_template_argument_call_parses: expected explicit_template_args == [Circle]");
 }
 
+// ch05 §5.11: an explicit-template-argument call still parses as an
+// ordinary multi-argument Call expression, not as a one-argument call
+// accidentally terminated at the first comma.
+void test_explicit_template_argument_call_with_multiple_value_args_parses() {
+    scpp::Program program = scpp::parse("template<typename T> int pick(T x, int y) {\n"
+                                         "    return y;\n"
+                                         "}\n"
+                                         "int main() {\n"
+                                         "    int value = pick<int>(1, 42);\n"
+                                         "    return value;\n"
+                                         "}\n");
+    const scpp::Function* main_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "main") main_fn = &fn;
+    }
+    const scpp::Stmt& var_decl = *main_fn->body->statements[0];
+    expect(var_decl.init != nullptr && var_decl.init->kind == scpp::ExprKind::Call && var_decl.init->name == "pick",
+           "explicit_template_argument_call_with_multiple_value_args_parses: expected a Call to 'pick'");
+    expect(var_decl.init->args.size() == 2,
+           "explicit_template_argument_call_with_multiple_value_args_parses: expected two value arguments");
+    expect(var_decl.init->explicit_template_args.size() == 1 && var_decl.init->explicit_template_args[0].is_type &&
+               is_named_type(var_decl.init->explicit_template_args[0].type, "int"),
+           "explicit_template_argument_call_with_multiple_value_args_parses: expected explicit_template_args == [int]");
+}
+
 // ch05 §5.14: `name<2>(t)` -- an explicit non-type call-site template
 // argument (ch05 §5.14's base-class-deduction accessor pattern,
 // `get<I>`) -- recorded as a non-type (value) ExplicitTemplateArg, not a
@@ -3262,6 +3287,7 @@ int main() {
     test_full_header_wrapped_template_parameter_pack_parses();
     test_abbreviated_generic_parameter_pack_and_fold_parse();
     test_explicit_type_template_argument_call_parses();
+    test_explicit_template_argument_call_with_multiple_value_args_parses();
     test_explicit_non_type_template_argument_call_parses();
     test_variadic_specialization_with_leading_non_type_param_parses();
     test_namespace_relative_qualified_generic_type_declaration_parses();
