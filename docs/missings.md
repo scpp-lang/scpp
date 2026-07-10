@@ -30,6 +30,20 @@ This file is an internal backlog, not reader-facing book content.
   direct scpp counterpart today.
 - No macro system yet, which removes a whole category of Rust metaprogramming
   examples from any near-term scpp book.
+- No true typed `std::format_string<Args...>` with compile-time format-string
+  checking yet (real C++23 has this via `<format>` / `<print>`). Two bounded
+  compiler gaps block it today: (1) generic pack deduction is still narrow, so
+  monomorphization can deduce `Args...` from a direct pack-expanded parameter
+  or the tuple-like base-class-deduction pattern, but not from later call
+  arguments and then substitute/check an earlier dependent parameter type such
+  as `format_string<Args...>`; (2) there is no constexpr / consteval evaluation
+  engine yet, so there is nowhere to run a format-string parser/validator at
+  compile time even if the deduction problem were solved. The current
+  `std::print` / `std::println` workaround is runtime-validated and limited to
+  a 0-3 argument subset. A likely minimal path is: first extend generic-call
+  monomorphization to support pack binding/substitution inside dependent
+  parameter types, then add a narrow builtin validator for format-string
+  literals rather than a full general-purpose constexpr evaluator up front.
 - No beginner-friendly standard randomness API yet, so a first guessing-game
   tutorial cannot naturally generate a fresh secret number without reaching for
   external C APIs or fixing the secret in source.
