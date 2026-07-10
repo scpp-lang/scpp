@@ -1,0 +1,9 @@
+constexpr int plus_one(int x) {
+    return x + 1;
+}
+
+int main() {
+    constexpr int base = 4;
+    constexpr int total = plus_one(base);
+    return total;
+}

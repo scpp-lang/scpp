@@ -20,9 +20,9 @@ import scpp.ast;
 export namespace scpp {
 
 struct ConstexprLimits {
-    int max_steps = 100000;
+    int max_steps = 1000000;
     int max_recursion_depth = 512;
-    int max_loop_iterations = 100000;
+    int max_loop_iterations = 262144;
 };
 
 struct ConstexprError : std::runtime_error {
@@ -197,6 +197,17 @@ public:
         return evaluate_expr(expr);
     }
 
+    void validate_constexpr_locals(const Function& fn) {
+        if (!fn.body) return;
+        frames_.clear();
+        steps_ = 0;
+        call_depth_ = 0;
+        string_storage_counter_ = 0;
+        frames_.push_back({});
+        validate_constexpr_stmt_tree(*fn.body);
+        frames_.pop_back();
+    }
+
 private:
     const Program& program_;
     ConstexprLimits limits_;
@@ -212,6 +223,64 @@ private:
         ++steps_;
         if (steps_ > limits_.max_steps) {
             throw ConstexprError(loc, "constexpr evaluation exceeded step budget while " + std::string(what));
+        }
+    }
+
+    void validate_constexpr_stmt_tree(const Stmt& stmt) {
+        tick(stmt.loc, "checking a constexpr local declaration");
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                if (stmt.is_constexpr) execute_stmt(stmt, named_type("void"));
+                return;
+            case StmtKind::Block:
+                frames_.push_back({});
+                try {
+                    for (const StmtPtr& nested : stmt.statements) validate_constexpr_stmt_tree(*nested);
+                } catch (...) {
+                    frames_.pop_back();
+                    throw;
+                }
+                frames_.pop_back();
+                return;
+            case StmtKind::If:
+                if (stmt.then_branch) {
+                    frames_.push_back({});
+                    try {
+                        validate_constexpr_stmt_tree(*stmt.then_branch);
+                    } catch (...) {
+                        frames_.pop_back();
+                        throw;
+                    }
+                    frames_.pop_back();
+                }
+                if (stmt.else_branch) {
+                    frames_.push_back({});
+                    try {
+                        validate_constexpr_stmt_tree(*stmt.else_branch);
+                    } catch (...) {
+                        frames_.pop_back();
+                        throw;
+                    }
+                    frames_.pop_back();
+                }
+                return;
+            case StmtKind::While:
+                if (stmt.then_branch) {
+                    frames_.push_back({});
+                    try {
+                        validate_constexpr_stmt_tree(*stmt.then_branch);
+                    } catch (...) {
+                        frames_.pop_back();
+                        throw;
+                    }
+                    frames_.pop_back();
+                }
+                return;
+            case StmtKind::Return:
+            case StmtKind::Break:
+            case StmtKind::Continue:
+            case StmtKind::ExprStmt:
+                return;
         }
     }
 
@@ -1085,6 +1154,10 @@ void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     }
     for (ExprRewrite& rewrite : expr_rewrites) rewrite_expr_as_constant(*rewrite.target, rewrite.value);
     for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
+    for (const Function& fn : program.functions) {
+        if (!fn.body) continue;
+        engine.validate_constexpr_locals(fn);
+    }
     for (Function& fn : program.functions) {
         if (fn.eval_mode == FunctionEvalMode::Consteval) fn.body.reset();
     }
