@@ -5,7 +5,7 @@
   - [Hello, World!](ch01-02-hello-world.md)
   - [Hello, Project Builds](ch01-03-hello-project-builds.md)
 
-- Programming a Guessing Game
+- [Programming a Guessing Game](ch02-00-guessing-game.md)
 
 - Common Programming Concepts
   - Variables, Initialization, and Zero Defaults

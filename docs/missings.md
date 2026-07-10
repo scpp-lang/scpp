@@ -30,6 +30,11 @@ This file is an internal backlog, not reader-facing book content.
   direct scpp counterpart today.
 - No macro system yet, which removes a whole category of Rust metaprogramming
   examples from any near-term scpp book.
+- No beginner-friendly standard randomness API yet, so a first guessing-game
+  tutorial cannot naturally generate a fresh secret number without reaching for
+  external C APIs or fixing the secret in source.
+- No safe, high-level stdin text-input story yet; beginner interactive examples
+  still fall back to `extern "C"` calls such as `scanf`.
 
 ## Tooling gaps
 
