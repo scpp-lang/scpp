@@ -1,0 +1,18 @@
+namespace m {
+namespace detail {
+template<typename Left, typename Right>
+class Pair {
+public:
+    Pair() { return; }
+};
+}
+
+int f() {
+    detail::Pair<int, bool> pair;
+    return 0;
+}
+}
+
+int main() {
+    return m::f();
+}

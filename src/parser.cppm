@@ -721,7 +721,19 @@ private:
     [[nodiscard]] std::string resolve_visible_type_name(const std::string& spelled_name) const {
         if (spelled_name.empty()) return {};
         if (spelled_name.contains("::")) {
-            return struct_names_.contains(spelled_name) ? spelled_name : std::string();
+            if (struct_names_.contains(spelled_name)) return spelled_name;
+            if (!namespace_stack_.empty()) {
+                for (size_t depth = namespace_stack_.size(); depth > 0; depth--) {
+                    std::string candidate;
+                    for (size_t i = 0; i < depth; i++) {
+                        candidate += namespace_stack_[i];
+                        candidate += "::";
+                    }
+                    candidate += spelled_name;
+                    if (struct_names_.contains(candidate)) return candidate;
+                }
+            }
+            return {};
         }
         if (struct_names_.contains(spelled_name)) return spelled_name;
         if (!namespace_stack_.empty()) {
