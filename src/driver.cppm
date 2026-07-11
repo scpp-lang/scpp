@@ -1152,6 +1152,7 @@ void create_archive(const std::string& object_path, const std::string& archive_p
     };
     for (const std::optional<std::filesystem::path>& lib_dir : candidate_dirs) {
         if (!lib_dir.has_value()) continue;
+        append_if_exists(*lib_dir / "libstd.scppa");
         append_if_exists(*lib_dir / "libscpp_string_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_thread_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_print_wrapper.a");
