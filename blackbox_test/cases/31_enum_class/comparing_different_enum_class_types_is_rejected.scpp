@@ -1,0 +1,8 @@
+// PR #122 driver coverage: comparing values from two different enum class
+// types is rejected even when the enumerator spellings match.
+enum class Color { Red };
+enum class Shape { Red };
+
+int main() {
+    return Color::Red == Shape::Red;
+}

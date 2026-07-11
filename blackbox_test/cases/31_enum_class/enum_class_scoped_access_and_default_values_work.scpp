@@ -1,0 +1,13 @@
+// PR #122 landed `enum class` as a scoped enumeration: enumerators are named
+// through the enum type (`Name::A`) and default to successive integer values
+// starting at 0.
+enum class Choice { A, B, C };
+
+int main() {
+    Choice pick = Choice::B;
+    if (pick != Choice::B) return 1;
+    if (Choice::A == Choice::C) return 2;
+    return static_cast<int>(Choice::A) +
+           static_cast<int>(Choice::B) +
+           static_cast<int>(Choice::C);
+}

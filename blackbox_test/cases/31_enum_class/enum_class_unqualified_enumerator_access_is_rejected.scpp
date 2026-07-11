@@ -1,0 +1,7 @@
+// PR #122 semantics: `enum class` is scoped; enumerators do not leak into the
+// enclosing scope, so bare `A` is ill-formed.
+enum class Choice { A, B, C };
+
+int main() {
+    return static_cast<int>(A);
+}
