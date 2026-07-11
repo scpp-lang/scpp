@@ -1,0 +1,23 @@
+// Current `sizeof` semantics: both `sizeof(type)` and `sizeof(expr)` report
+// target-ABI byte sizes at runtime.
+struct Pair {
+    int number;
+    char byte;
+};
+
+struct [[scpp::packed]] PackedPair {
+    int number;
+    char byte;
+};
+
+int main() {
+    int values[3];
+    Pair pair;
+    if (sizeof(int) != 4) return 1;
+    if (sizeof(values) != 12) return 2;
+    if (sizeof(Pair) != 8) return 3;
+    if (sizeof(pair) != sizeof(Pair)) return 4;
+    if (sizeof(PackedPair) != 5) return 5;
+    if (sizeof(&pair) == 0) return 6;
+    return 0;
+}

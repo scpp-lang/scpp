@@ -113,7 +113,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `13_unsupported_robustness` | unsupported/not-yet-implemented syntax fails cleanly, never crashes |
 | `14_classes` | constructors/destructors, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
-| `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup; `using namespace` rejected |
+| `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup, and leading `::` global-scope lookup; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
 | `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
 | `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, and comparison rules for same-type vs mixed-type scalars |
@@ -129,6 +129,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
 | `30_constant_evaluation` | formal-spec-driven `constexpr`/`consteval` coverage: required constant evaluation, `if consteval` / `if !consteval`, unsupported v1 operations, and the later-pack-to-earlier-parameter deduction rule |
 | `31_enum_class` | scoped enumerations: `enum class` declaration, scoped enumerator access, enum-type separation, explicit casts, and explicit underlying types/values |
+| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`, `std::storage_for<T, ...>`, placement-new, and explicit destructor-call syntax |
 
 ## Testing philosophy
 
@@ -211,8 +212,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **287 cases total**
-- **287/287 passing**
+- **297 cases total**
+- **297/297 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -244,6 +245,11 @@ re-run via `./build/run_tests`:
 - **Union / packed-layout coverage now exists in direct black-box form**:
   unsafe-gated union member access, raw-byte packed-struct layout, and the
   real Linux `epoll_event` / `epoll_data_t` FFI declaration shape
+- **Low-level size/storage/lifetime building blocks now have direct
+  black-box coverage too**:
+  `sizeof(type)` / `sizeof(expr)`, `std::storage_for<T, ...>`,
+  placement-new, explicit destructor calls, and leading `::` global-scope
+  lookup
 - **CLI invocation now has direct black-box coverage too**:
   bare `scpp file.scpp`, `-o custom_name`, rejection of the removed
   `build` keyword, and spot-checks that `lex`, `parse`, and

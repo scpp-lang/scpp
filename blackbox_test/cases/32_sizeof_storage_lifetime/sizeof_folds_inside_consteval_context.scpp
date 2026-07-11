@@ -1,0 +1,14 @@
+// docs/spec/en/06-constant-evaluation.md and docs/spec/en/07-constexpr-and-consteval.md:
+// required constant evaluation may fold `sizeof(type)` and `sizeof(expr)`.
+struct Tiny {
+    char x;
+};
+
+consteval int folded_size() {
+    int value = 0;
+    return static_cast<int>(sizeof(int)) + static_cast<int>(sizeof(value));
+}
+
+int main() {
+    return folded_size() - 8;
+}
