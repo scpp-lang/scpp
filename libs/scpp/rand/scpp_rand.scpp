@@ -6,8 +6,7 @@ export module scpp:rand;
 
 import std;
 
-namespace scpp {
-namespace rand {
+namespace scpp::rand {
 
 export enum class uniform_int_distribution_error { empty_range };
 
@@ -74,5 +73,4 @@ public:
     }
 };
 
-} // namespace rand
-} // namespace scpp
+} // namespace scpp::rand
