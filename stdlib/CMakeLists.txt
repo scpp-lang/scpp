@@ -31,6 +31,7 @@ add_scpp_module_artifacts(scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/std.scpp"
     "${SCPP_STDLIB_INTERFACE_PATH}"
     "${SCPP_STDLIB_ARCHIVE_PATH}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cstdlib/std_cstdlib.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/expected/std_expected.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/functional/std_functional.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/format/std_format.scpp"
