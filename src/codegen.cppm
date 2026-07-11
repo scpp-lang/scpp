@@ -594,6 +594,7 @@ private:
         }
         clone->type = expr.type;
         clone->has_paren_init = expr.has_paren_init;
+        clone->destroy_through_pointer = expr.destroy_through_pointer;
         return clone;
     }
 
@@ -750,6 +751,7 @@ private:
             }
 
             case ExprKind::Delete:
+            case ExprKind::Destroy:
                 return named_type("void");
 
             case ExprKind::Lambda: {
@@ -2546,6 +2548,10 @@ private:
                     codegen_delete_expr(*stmt.expr);
                     return;
                 }
+                if (stmt.expr && stmt.expr->kind == ExprKind::Destroy) {
+                    codegen_destroy_expr(*stmt.expr);
+                    return;
+                }
                 codegen_expr(*stmt.expr);
                 return;
 
@@ -3373,7 +3379,9 @@ private:
                 return codegen_new_expr(expr);
 
             case ExprKind::Delete:
-                throw CodegenError("'delete' is only supported as a standalone statement in this version",
+            case ExprKind::Destroy:
+                throw CodegenError("'delete' and explicit destructor calls are only supported as standalone statements "
+                                   "in this version",
                     current_loc_);
 
             case ExprKind::Fold:
@@ -3531,6 +3539,19 @@ private:
             }
         }
         builder_->CreateCall(get_or_declare_free(), {ptr});
+    }
+
+    void codegen_destroy_expr(const Expr& expr) {
+        if (!expr.destroy_through_pointer) {
+            throw CodegenError("explicit destructor calls currently require the pointer form 'ptr->~T()'",
+                               current_loc_);
+        }
+        llvm::Value* ptr = codegen_expr(*expr.lhs);
+        if (expr.type.kind == TypeKind::Named) {
+            if (llvm::Function* dtor = find_destructor(expr.type.name)) {
+                codegen_call_destructor_unless_moved(dtor, ptr, nullptr);
+            }
+        }
     }
 
     // Returns `class_name`'s destructor function, if it has one (see

@@ -1491,6 +1491,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         }
 
         case ExprKind::Delete:
+        case ExprKind::Destroy:
             return named_type("void");
 
         case ExprKind::TypeTrait:
@@ -1960,6 +1961,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
             for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
             return;
         case ExprKind::Delete:
+        case ExprKind::Destroy:
         case ExprKind::PackExpansion:
             collect_reference_uses(expr->lhs.get(), body, out);
             return;
@@ -3212,6 +3214,26 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             return;
 
+        case ExprKind::Destroy:
+            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (!report_errors) return;
+            if (state.unsafe_depth == 0) {
+                throw DataflowError("cannot call an explicit destructor outside '[[scpp::unsafe]] { }'", state.current_loc);
+            }
+            if (!expr.destroy_through_pointer) {
+                throw DataflowError("explicit destructor calls currently require the pointer form 'ptr->~T()'",
+                                    state.current_loc);
+            }
+            {
+                std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
+                if (!operand_type.has_value() || operand_type->kind != TypeKind::Pointer || operand_type->pointee == nullptr ||
+                    !types_equal(*operand_type->pointee, expr.type)) {
+                    throw DataflowError("explicit destructor calls require a raw pointer to the named type in this version",
+                                        state.current_loc);
+                }
+            }
+            return;
+
         case ExprKind::Fold:
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             if (expr.rhs) apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
@@ -4226,6 +4248,7 @@ ExprPtr clone_expr(const Expr& expr) {
     }
     clone->type = expr.type;
     clone->has_paren_init = expr.has_paren_init;
+    clone->destroy_through_pointer = expr.destroy_through_pointer;
     clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
     return clone;
 }

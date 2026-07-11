@@ -524,6 +524,7 @@ void write_expr(std::ostream& out, const Expr& expr) {
     write_type(out, expr.type);
     write_u8(out, expr.sizeof_operand_is_type ? 1u : 0u);
     write_u8(out, expr.has_paren_init ? 1u : 0u);
+    write_u8(out, expr.destroy_through_pointer ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_captures.size()));
     for (const LambdaCapture& capture : expr.lambda_captures) write_lambda_capture(out, capture);
     write_enum(out, expr.lambda_blanket_mode);
@@ -558,6 +559,7 @@ ExprPtr read_expr(std::istream& in, const std::string& context) {
     expr->type = read_type(in, context + " type");
     expr->sizeof_operand_is_type = read_u8(in, context + " sizeof is type") != 0u;
     expr->has_paren_init = read_u8(in, context + " has paren init") != 0u;
+    expr->destroy_through_pointer = read_u8(in, context + " destroy through pointer") != 0u;
     std::uint32_t capture_count = read_u32_le(in, context + " capture count");
     expr->lambda_captures.reserve(capture_count);
     for (std::uint32_t i = 0; i < capture_count; i++) expr->lambda_captures.push_back(read_lambda_capture(in, context + " capture"));

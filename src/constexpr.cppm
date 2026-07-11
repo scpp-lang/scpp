@@ -1165,6 +1165,7 @@ private:
             case ExprKind::CharLiteral: return named_type("char");
             case ExprKind::TypeTrait: return named_type("bool");
             case ExprKind::Sizeof: return named_type("size_t");
+            case ExprKind::Destroy: return named_type("void");
             case ExprKind::StringLiteral: return make_const_char_pointer_type();
             case ExprKind::Identifier:
                 try {
@@ -1289,6 +1290,8 @@ private:
             case ExprKind::BoolLiteral: return make_bool_cell(expr.bool_value);
             case ExprKind::CharLiteral: return make_scalar_cell(named_type("char"), expr.int_value);
             case ExprKind::StringLiteral: return make_string_literal_pointer(expr);
+            case ExprKind::Destroy:
+                throw ConstexprError(expr.loc, "explicit destructor calls are not supported during constant evaluation");
             case ExprKind::Sizeof: {
                 Type queried_type;
                 if (expr.sizeof_operand_is_type) {

@@ -1720,6 +1720,58 @@ void run_placement_new_tests() {
     }
 }
 
+void run_explicit_destructor_tests() {
+    {
+        std::string case_name = "explicit_destructor_runs_user_declared_destructor";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "explicit_destructor_runs_user_declared_destructor_exe";
+        scpp::compile_to_executable(
+            "class Box {\n"
+            "public:\n"
+            "    int* out;\n"
+            "    Box(int* p) { this->out = p; return; }\n"
+            "    ~Box() { [[scpp::unsafe]] { *this->out = 9; } return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    int result = 0;\n"
+            "    std::storage_for<Box> slot;\n"
+            "    [[scpp::unsafe]] {\n"
+            "        Box* p = new ((Box*)&slot) Box(&result);\n"
+            "        p->~Box();\n"
+            "    }\n"
+            "    return result - 9;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected explicit destructor call to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "object_form_explicit_destructor_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(
+                "class Box { public: ~Box() { return; } }; int main() { Box b; [[scpp::unsafe]] { b.~Box(); } return 0; }");
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected object-form explicit destructor call to be rejected");
+    }
+}
+
 void run_consteval_tests() {
     {
         std::string case_name = "consteval_folds_recursive_constexpr_helper";
@@ -3454,6 +3506,7 @@ int main() {
     run_sizeof_tests();
     run_storage_tests();
     run_placement_new_tests();
+    run_explicit_destructor_tests();
     run_consteval_tests();
     run_cli_extension_tests();
 

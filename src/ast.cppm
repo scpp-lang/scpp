@@ -284,6 +284,8 @@ enum class ExprKind {
                 // `[[scpp::unsafe]]`, returning `T*` (spec §5.1(5.4)).
     Delete,     // `delete expr` -- destroys the pointed-to object (if any) and
                 // frees its storage; also gated by `[[scpp::unsafe]]`.
+    Destroy,    // `expr.~T()` / `ptr->~T()` -- explicit destructor call without
+                // deallocation, gated by `[[scpp::unsafe]]`.
     Move,       // std::move(x) -- compiler builtin move hint, not an ordinary call
     TypeTrait,  // scpp::is_thread_movable(T) / scpp::is_thread_shareable(T) --
                 // compiler builtin type-trait predicates whose queried type
@@ -424,6 +426,8 @@ struct Expr {
     std::vector<ExplicitTemplateArg> explicit_template_args;
 
     // New: the allocated element type `T` in `new T...`.
+    // Destroy: the explicitly-named destroyed type `T` in `expr.~T()` /
+    // `ptr->~T()`.
     // Lambda: the explicit trailing return type (`-> Type`), only
     // meaningful when has_lambda_explicit_return_type is true.
     // Cast: the target type `T` in `static_cast<T>(expr)`/`(T)expr`
@@ -439,6 +443,8 @@ struct Expr {
     // local-construction syntax's own "bare declaration vs explicit ctor
     // call" distinction.
     bool has_paren_init = false;
+    // Destroy only: true for `ptr->~T()`, false for `obj.~T()`.
+    bool destroy_through_pointer = false;
 
     // Member: object stored in `lhs`, field name in `name`.
     // Subscript: array/collection stored in `lhs`, index expr in `rhs`.
