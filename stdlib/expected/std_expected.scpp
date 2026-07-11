@@ -38,7 +38,7 @@ public:
 };
 
 export template<typename T, typename E>
-class expected {
+class [[nodiscard("expected results must be checked")]] expected {
 private:
     bool has_value_;
     std::storage_for<T, E> storage_;
