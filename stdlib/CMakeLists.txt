@@ -14,9 +14,6 @@ target_compile_features(scpp_thread_wrapper PRIVATE cxx_std_23)
 add_library(scpp_print_wrapper STATIC print/scpp_print_wrapper.cpp)
 target_compile_features(scpp_print_wrapper PRIVATE cxx_std_23)
 
-add_library(scpp_expected_wrapper STATIC expected/scpp_expected_wrapper.cpp)
-target_compile_features(scpp_expected_wrapper PRIVATE cxx_std_23)
-
 function(add_scpp_module_artifacts target_name source_path interface_path archive_path)
     get_filename_component(interface_dir "${interface_path}" DIRECTORY)
     add_custom_command(
