@@ -1,0 +1,10 @@
+import std;
+// Current `std::expected<T, E>` semantics: calling `.error()` while the
+// object holds a value aborts symmetrically.
+enum class calc_error { invalid };
+
+int main() {
+    std::expected<int, calc_error> good(42);
+    calc_error err = good.error();
+    return 0;
+}

@@ -1,0 +1,26 @@
+import std;
+// docs/old-book/en/ch05-static-checks.md §5.6 and current stdlib semantics:
+// `std::expected<T, E>` and `std::unexpected<E>` represent success/error
+// states without exceptions.
+enum class calc_error { invalid };
+
+std::expected<int, calc_error> ok() {
+    std::expected<int, calc_error> result(42);
+    return std::move(result);
+}
+
+std::expected<int, calc_error> fail() {
+    std::unexpected<calc_error> err(calc_error::invalid);
+    std::expected<int, calc_error> result(err);
+    return std::move(result);
+}
+
+int main() {
+    std::expected<int, calc_error> good = ok();
+    if (!good.has_value()) return 1;
+    if (good.value() != 42) return 2;
+    std::expected<int, calc_error> bad = fail();
+    if (bad.has_value()) return 3;
+    if (bad.error() != calc_error::invalid) return 4;
+    return 0;
+}
