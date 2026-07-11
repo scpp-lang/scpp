@@ -3449,10 +3449,15 @@ private:
 
     llvm::Value* codegen_new_expr(const Expr& expr) {
         llvm::Type* element_type = to_llvm_type(expr.type);
-        llvm::Function* malloc_fn = get_or_declare_malloc();
-        uint64_t size_in_bytes = module_->getDataLayout().getTypeAllocSize(element_type);
-        llvm::Value* size_arg = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), size_in_bytes);
-        llvm::Value* heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
+        llvm::Value* heap_ptr = nullptr;
+        if (expr.lhs) {
+            heap_ptr = codegen_expr(*expr.lhs);
+        } else {
+            llvm::Function* malloc_fn = get_or_declare_malloc();
+            uint64_t size_in_bytes = module_->getDataLayout().getTypeAllocSize(element_type);
+            llvm::Value* size_arg = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), size_in_bytes);
+            heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
+        }
 
         if (expr.type.kind == TypeKind::Named && structs_.contains(expr.type.name)) {
             zero_initialize_storage(heap_ptr, expr.type);
