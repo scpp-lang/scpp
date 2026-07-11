@@ -99,9 +99,6 @@ public:
         }
     }
 
-    void* __native_handle() {
-        return this->handle_;
-    }
 };
 
 export template<typename T>
