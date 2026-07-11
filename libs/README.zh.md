@@ -1,7 +1,7 @@
-# stdlib —— scpp 的 `std` 标准库
+# libs —— scpp 的库模块
 
-这个目录保存 scpp 自己实现的标准库：`std` 模块主接口单元、各个分区，
-以及这些分区在需要时依赖的原生辅助库。
+这个目录保存 scpp 随附的库模块：`libs/std/` 下是真实 `std` 模块，
+`libs/scpp/` 下是 scpp 自己扩展出来的模块；需要时也会包含配套的原生辅助库。
 
 本项目在标准库上的约定是：
 
@@ -15,10 +15,11 @@
 
 | 路径 | 作用 |
 |---|---|
-| `std.scpp` | `std` 模块的主接口单元；通过 `export import :...;` 重新导出各分区 |
-| `string/` | `std:string` 分区，以及桥接真实 C++ `std::string` 的原生 `scpp_string_wrapper` |
-| `memory/` | `std:memory` 分区；目前是纯 scpp（`std::unique_ptr`、`std::make_unique`） |
-| `CMakeLists.txt` | 构建各 stdlib 分区所需的原生辅助库 |
+| `std/std.scpp` | `std` 模块的主接口单元；通过 `export import :...;` 重新导出各分区 |
+| `std/` | `std` 模块的各分区和原生包装库 |
+| `scpp/scpp.scpp` | `scpp` 模块的主接口单元；重新导出 scpp 自己的扩展分区 |
+| `scpp/rand/` | `scpp:rand` 分区，提供 `scpp::rand::uniform_int_distribution<int>` |
+| `CMakeLists.txt` | 构建 `std` / `scpp` 模块及所需的原生辅助库 |
 
 ## 如何使用 `std`
 
@@ -32,16 +33,17 @@ import std;
 
 ```sh
 scpp app.scpp -o app \
-  --import std=stdlib/std.scpp \
-  --import std:string=stdlib/string/std_string.scpp \
-  --import std:memory=stdlib/memory/std_memory.scpp \
-  --link build/stdlib/libscpp_string_wrapper.a
+  --import std=libs/std/std.scpp \
+  --import scpp=libs/scpp/scpp.scpp \
+  --link build/libs/libscpp_string_wrapper.a
 ```
 
 说明：
 
-- `std.scpp` 负责聚合各个分区；源码消费者不应直接在代码里写
+- `libs/std/std.scpp` 负责聚合 `std` 的各个分区；源码消费者不应直接在代码里写
   `import std:string;` 或 `import std:memory;`
+- `libs/scpp/scpp.scpp` 负责聚合 scpp 自己的扩展分区；只有显式
+  `import scpp;` 才会使用它们
 - 只有需要原生辅助库的分区才需要 `--link`。当前只有 `std:string`
   需要；`std:memory` 是纯 scpp，不需要额外原生库
 - 各分区会和主接口单元一起编译成同一个 `std` 模块目标文件，不存在文本拼接
@@ -50,19 +52,19 @@ scpp app.scpp -o app \
 
 ### `std:string`
 
-- 文件：`string/std_string.scpp`
-- 底层实现：`string/scpp_string_wrapper.{h,cpp}`
+- 文件：`std/string/std_string.scpp`
+- 底层实现：`std/string/scpp_string_wrapper.{h,cpp}`
 - 通过 `extern "C"` 包装函数提供一小部分 `std::string` 能力
 
 ### `std:memory`
 
-- 文件：`memory/std_memory.scpp`
+- 文件：`std/memory/std_memory.scpp`
 - 纯 scpp 实现
 - 提供 `std::unique_ptr<T>` 和 `std::make_unique<T>(...)`
 
 ## 测试原则
 
-`stdlib/` 是库源码目录，不是演示程序目录。行为覆盖应该进入真正的测试套件：
+`libs/` 是库源码目录，不是演示程序目录。行为覆盖应该进入真正的测试套件：
 
 - `tests/`：dev-agent 负责的单元/集成测试
 - `blackbox_test/`：面向用户可见行为的黑盒测试

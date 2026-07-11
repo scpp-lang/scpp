@@ -1198,19 +1198,19 @@ void create_archive(const std::string& object_path, const std::string& archive_p
 [[nodiscard]] std::optional<std::filesystem::path> runtime_default_prebuilt_stdlib_dir() {
     std::optional<std::filesystem::path> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
-    return (exe->parent_path() / "stdlib").lexically_normal();
+    return (exe->parent_path() / "libs").lexically_normal();
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> runtime_installed_stdlib_dir() {
     std::optional<std::filesystem::path> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
-    return (exe->parent_path() / ".." / "share" / "scpp" / "stdlib").lexically_normal();
+    return (exe->parent_path() / ".." / "share" / "scpp" / "libs").lexically_normal();
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> runtime_default_source_stdlib_dir() {
     std::optional<std::filesystem::path> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
-    return (exe->parent_path() / ".." / "stdlib").lexically_normal();
+    return (exe->parent_path() / ".." / "libs").lexically_normal();
 }
 
 [[nodiscard]] std::vector<std::string> build_default_import_search_dirs(const std::vector<std::string>& explicit_dirs) {
@@ -1219,17 +1219,22 @@ void create_archive(const std::string& object_path, const std::string& archive_p
         if (path.empty()) return;
         if (std::find(dirs.begin(), dirs.end(), path) == dirs.end()) dirs.push_back(std::move(path));
     };
+    auto append_module_dirs = [&](const std::filesystem::path& base) {
+        append_if_missing(base.string());
+        append_if_missing((base / "std").string());
+        append_if_missing((base / "scpp").string());
+    };
     if (const char* env = std::getenv("SCPP_STDLIB_PATH"); env != nullptr && env[0] != '\0') {
-        append_if_missing(env);
+        append_module_dirs(env);
     } else {
         if (std::optional<std::filesystem::path> runtime_dir = runtime_default_prebuilt_stdlib_dir(); runtime_dir.has_value()) {
-            append_if_missing(runtime_dir->string());
+            append_module_dirs(*runtime_dir);
         }
         if (std::optional<std::filesystem::path> runtime_dir = runtime_installed_stdlib_dir(); runtime_dir.has_value()) {
-            append_if_missing(runtime_dir->string());
+            append_module_dirs(*runtime_dir);
         }
         if (std::optional<std::filesystem::path> runtime_dir = runtime_default_source_stdlib_dir(); runtime_dir.has_value()) {
-            append_if_missing(runtime_dir->string());
+            append_module_dirs(*runtime_dir);
         }
     }
     return dirs;
@@ -1817,7 +1822,7 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
 // driver (clang/cc); this keeps us out of the business of re-implementing a
 // platform linker for M1. `extra_link_inputs` is appended verbatim after the
 // scpp object file -- additional .o/.a paths (e.g. a separately-built
-// `extern "C"` wrapper library, see stdlib/README.md, or another module's
+// `extern "C"` wrapper library, see libs/README.md, or another module's
 // own compiled object file, see compile_to_executable below) or
 // `-lname`/`-Lpath` flags a caller wants forwarded straight to the linker;
 // empty by default (an ordinary, no-C++-interop build needs none of this).
