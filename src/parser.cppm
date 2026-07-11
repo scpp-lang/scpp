@@ -410,6 +410,7 @@ private:
         clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
         clone->unary_op = expr.unary_op;
         clone->type = expr.type;
+        clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
         clone->has_paren_init = expr.has_paren_init;
         clone->lambda_blanket_mode = expr.lambda_blanket_mode;
         clone->lambda_params = expr.lambda_params;
@@ -4159,6 +4160,30 @@ private:
 
     ExprPtr parse_unary() {
         SourceLocation loc = current_loc();
+        if (match(TokenKind::KwSizeof)) {
+            expect(TokenKind::LParen, "'(' after 'sizeof'");
+            size_t saved_pos = pos_;
+            try {
+                if (looks_like_type_start()) {
+                    Type target_type = parse_type();
+                    expect(TokenKind::RParen, "')' after sizeof type operand");
+                    auto node = std::make_unique<Expr>();
+                    node->kind = ExprKind::Sizeof;
+                    node->loc = loc;
+                    node->type = std::move(target_type);
+                    node->sizeof_operand_is_type = true;
+                    return node;
+                }
+            } catch (const ParseError&) {
+            }
+            pos_ = saved_pos;
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Sizeof;
+            node->loc = loc;
+            node->lhs = parse_expr();
+            expect(TokenKind::RParen, "')' after sizeof expression operand");
+            return node;
+        }
         // ch06 §6: `(T)expr` -- the C-style cast spelling (real C++
         // accepts both this and `static_cast<T>(expr)`; scpp's own
         // scalar-conversion table doesn't prefer one over the other, so

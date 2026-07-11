@@ -453,6 +453,30 @@ void test_parenthesized_expression_is_not_misdetected_as_cast() {
            "parenthesized_expression_is_not_misdetected_as_cast: expected Binary");
 }
 
+void test_sizeof_type_expression_parses() {
+    scpp::Program program = scpp::parse("int f() { return (int)sizeof(int); }");
+    const scpp::Stmt& ret = *program.functions[0].body->statements[0];
+    const scpp::Expr& cast = *ret.expr;
+    expect(cast.kind == scpp::ExprKind::Cast, "sizeof_type_expression_parses: expected outer Cast");
+    expect(cast.lhs != nullptr && cast.lhs->kind == scpp::ExprKind::Sizeof,
+           "sizeof_type_expression_parses: cast operand should be Sizeof");
+    expect(cast.lhs->sizeof_operand_is_type, "sizeof_type_expression_parses: expected sizeof(type) form");
+    expect(is_named_type(cast.lhs->type, "int"), "sizeof_type_expression_parses: queried type should be 'int'");
+}
+
+void test_sizeof_value_expression_parses() {
+    scpp::Program program = scpp::parse("int f() { return (int)sizeof(x + 1); }");
+    const scpp::Stmt& ret = *program.functions[0].body->statements[0];
+    const scpp::Expr& cast = *ret.expr;
+    expect(cast.kind == scpp::ExprKind::Cast, "sizeof_value_expression_parses: expected outer Cast");
+    expect(cast.lhs != nullptr && cast.lhs->kind == scpp::ExprKind::Sizeof,
+           "sizeof_value_expression_parses: cast operand should be Sizeof");
+    expect(!cast.lhs->sizeof_operand_is_type, "sizeof_value_expression_parses: expected sizeof(expr) form");
+    expect(cast.lhs->lhs != nullptr && cast.lhs->lhs->kind == scpp::ExprKind::Binary &&
+               cast.lhs->lhs->binary_op == scpp::BinaryOp::Add,
+           "sizeof_value_expression_parses: operand should be Binary Add");
+}
+
 void test_operator_precedence() {
     // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3.
     scpp::Program program = scpp::parse("int f() { return 1 + 2 * 3; }");
@@ -3194,6 +3218,8 @@ int main() {
     test_static_cast_parses();
     test_c_style_cast_parses();
     test_parenthesized_expression_is_not_misdetected_as_cast();
+    test_sizeof_type_expression_parses();
+    test_sizeof_value_expression_parses();
     test_conditional_expression_parses();
     test_operator_precedence();
     test_unary_and_call();

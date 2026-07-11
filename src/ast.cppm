@@ -1,7 +1,11 @@
 module;
 
+#include <algorithm>
+#include <cstdint>
+#include <optional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <utility>
 
@@ -298,6 +302,10 @@ enum class ExprKind {
                 // between two distinct scpp scalar types (no implicit
                 // conversion exists anywhere else). Target type `T` stored in
                 // `type`, operand in `lhs` -- see Expr's own comment.
+    Sizeof,     // `sizeof(T)` / `sizeof(expr)` -- target-ABI size in bytes of
+                // either a type operand (stored in `type`) or an unevaluated
+                // expression operand (stored in `lhs`), distinguished by
+                // `sizeof_operand_is_type` below.
 };
 
 enum class BinaryOp {
@@ -420,7 +428,12 @@ struct Expr {
     // meaningful when has_lambda_explicit_return_type is true.
     // Cast: the target type `T` in `static_cast<T>(expr)`/`(T)expr`
     // (operand stored in `lhs`, like Unary).
+    // Sizeof(type): the queried type operand `T`.
     Type type;
+    // Sizeof only: true when this node is the `sizeof(T)` form (queried type
+    // stored in `type`), false for `sizeof(expr)` (unevaluated operand stored
+    // in `lhs`).
+    bool sizeof_operand_is_type = false;
     // New only: distinguishes `new T` (false) from `new T(...)` (true,
     // including the explicit-empty `new T()` form) so codegen can mirror
     // local-construction syntax's own "bare declaration vs explicit ctor
@@ -1145,5 +1158,177 @@ struct Program {
     // pass for re-export bookkeeping.
     std::vector<ImportDecl> imports;
 };
+
+struct TargetLayoutInfo {
+    std::uint64_t pointer_size_bytes = sizeof(void*);
+    std::uint64_t pointer_align_bytes = alignof(void*);
+};
+
+struct TypeLayoutInfo {
+    std::uint64_t size_bytes = 0;
+    std::uint64_t abi_align_bytes = 1;
+};
+
+[[nodiscard]] inline std::optional<TypeLayoutInfo> layout_of_type(const Program& program, const Type& type,
+                                                                  TargetLayoutInfo target = {}) {
+    struct LayoutComputer {
+        const Program& program;
+        TargetLayoutInfo target;
+        std::unordered_set<std::string> visiting_named_types;
+
+        [[nodiscard]] static std::uint64_t align_up(std::uint64_t value, std::uint64_t align) {
+            if (align <= 1) return value;
+            return ((value + align - 1) / align) * align;
+        }
+
+        [[nodiscard]] const EnumDef* find_enum(std::string_view name) const {
+            for (const EnumDef& def : program.enums) {
+                if (def.name == name) return &def;
+            }
+            return nullptr;
+        }
+
+        [[nodiscard]] const StructDef* find_struct(std::string_view name) const {
+            for (const StructDef& def : program.structs) {
+                if (def.name == name) return &def;
+            }
+            return nullptr;
+        }
+
+        [[nodiscard]] const ClassDef* find_class(std::string_view name) const {
+            const ClassDef* forward_decl = nullptr;
+            for (const ClassDef& def : program.classes) {
+                if (def.name != name) continue;
+                if (!def.is_forward_declaration) return &def;
+                if (forward_decl == nullptr) forward_decl = &def;
+            }
+            return forward_decl;
+        }
+
+        [[nodiscard]] std::optional<TypeLayoutInfo> named_scalar_layout(std::string_view name) const {
+            if (name == "bool" || name == "char" || name == "int8_t" || name == "uint8_t") return TypeLayoutInfo{1, 1};
+            if (name == "int16_t" || name == "uint16_t") return TypeLayoutInfo{2, 2};
+            if (name == "int" || name == "unsigned int" || name == "int32_t" || name == "uint32_t" ||
+                name == "float" || name == "float32_t") {
+                return TypeLayoutInfo{4, 4};
+            }
+            if (name == "long" || name == "unsigned long" || name == "int64_t" || name == "uint64_t" ||
+                name == "double" || name == "float64_t") {
+                return TypeLayoutInfo{8, 8};
+            }
+            if (name == "size_t" || name == "ptrdiff_t") {
+                std::uint64_t align = std::max<std::uint64_t>(target.pointer_align_bytes, 1);
+                return TypeLayoutInfo{target.pointer_size_bytes, align};
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::optional<TypeLayoutInfo> operator()(const Type& current) {
+            switch (current.kind) {
+                case TypeKind::Pointer:
+                case TypeKind::Reference:
+                case TypeKind::FunctionPointer: {
+                    std::uint64_t align = std::max<std::uint64_t>(target.pointer_align_bytes, 1);
+                    return TypeLayoutInfo{target.pointer_size_bytes, align};
+                }
+                case TypeKind::Function:
+                    return std::nullopt;
+                case TypeKind::Span: {
+                    std::uint64_t pointer_align = std::max<std::uint64_t>(target.pointer_align_bytes, 1);
+                    std::uint64_t count_align = 8;
+                    std::uint64_t size = align_up(target.pointer_size_bytes, count_align) + 8;
+                    return TypeLayoutInfo{align_up(size, std::max(pointer_align, count_align)),
+                                          std::max(pointer_align, count_align)};
+                }
+                case TypeKind::Array: {
+                    if (!current.element || current.array_size < 0) return std::nullopt;
+                    std::optional<TypeLayoutInfo> element = (*this)(*current.element);
+                    if (!element.has_value()) return std::nullopt;
+                    return TypeLayoutInfo{element->size_bytes * static_cast<std::uint64_t>(current.array_size),
+                                          element->abi_align_bytes};
+                }
+                case TypeKind::Named: {
+                    if (current.name == "void") return std::nullopt;
+                    if (std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name)) return scalar;
+                    if (const EnumDef* def = find_enum(current.name)) return (*this)(def->underlying_type);
+                    if (visiting_named_types.contains(current.name)) return std::nullopt;
+                    visiting_named_types.insert(current.name);
+                    auto clear_visit = [&]() { visiting_named_types.erase(current.name); };
+                    if (const StructDef* def = find_struct(current.name)) {
+                        if (!def->is_union) {
+                            std::uint64_t offset = 0;
+                            std::uint64_t overall_align = def->is_packed ? 1 : 1;
+                            for (const StructField& field : def->fields) {
+                                std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
+                                if (!field_layout.has_value()) {
+                                    clear_visit();
+                                    return std::optional<TypeLayoutInfo>{};
+                                }
+                                std::uint64_t field_align = def->is_packed ? 1 : field_layout->abi_align_bytes;
+                                offset = align_up(offset, field_align);
+                                offset += field_layout->size_bytes;
+                                overall_align = std::max(overall_align, field_align);
+                            }
+                            clear_visit();
+                            return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
+                        }
+                        if (def->fields.empty()) {
+                            clear_visit();
+                            return std::nullopt;
+                        }
+                        std::uint64_t max_size = 0;
+                        std::uint64_t overall_align = def->is_packed ? 1 : 1;
+                        for (const StructField& field : def->fields) {
+                            std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
+                            if (!field_layout.has_value()) {
+                                clear_visit();
+                                return std::optional<TypeLayoutInfo>{};
+                            }
+                            max_size = std::max(max_size, field_layout->size_bytes);
+                            overall_align = std::max(overall_align,
+                                                     def->is_packed ? std::uint64_t{1} : field_layout->abi_align_bytes);
+                        }
+                        clear_visit();
+                        return TypeLayoutInfo{align_up(max_size, overall_align), overall_align};
+                    }
+                    if (const ClassDef* def = find_class(current.name)) {
+                        if (def->is_forward_declaration) {
+                            clear_visit();
+                            return std::nullopt;
+                        }
+                        std::uint64_t offset = 0;
+                        std::uint64_t overall_align = 1;
+                        if (!def->base_class_name.empty()) {
+                            std::optional<TypeLayoutInfo> base_layout = (*this)(named_type(def->base_class_name));
+                            if (!base_layout.has_value()) {
+                                clear_visit();
+                                return std::optional<TypeLayoutInfo>{};
+                            }
+                            offset = base_layout->size_bytes;
+                            overall_align = std::max(overall_align, base_layout->abi_align_bytes);
+                        }
+                        for (const ClassField& field : def->fields) {
+                            std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
+                            if (!field_layout.has_value()) {
+                                clear_visit();
+                                return std::optional<TypeLayoutInfo>{};
+                            }
+                            offset = align_up(offset, field_layout->abi_align_bytes);
+                            offset += field_layout->size_bytes;
+                            overall_align = std::max(overall_align, field_layout->abi_align_bytes);
+                        }
+                        clear_visit();
+                        return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
+                    }
+                    clear_visit();
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
+        }
+    };
+
+    return LayoutComputer{program, target, {}}(type);
+}
 
 } // namespace scpp

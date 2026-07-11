@@ -4,6 +4,7 @@ module;
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -169,11 +170,21 @@ struct ContinueSignal {};
     return type.kind == TypeKind::Named && type.name == name && type.template_args.empty();
 }
 
-[[nodiscard]] bool is_integer_like(const Type& type) {
-    return is_named_type(type, "int") || is_named_type(type, "char") || is_named_type(type, "bool");
+[[nodiscard]] bool is_integral_named_type(std::string_view name) {
+    return name == "int" || name == "bool" || name == "char" || name == "long" || name == "unsigned int" ||
+           name == "unsigned long" || name == "size_t" || name == "ptrdiff_t" || name == "int8_t" ||
+           name == "int16_t" || name == "int32_t" || name == "int64_t" || name == "uint8_t" ||
+           name == "uint16_t" || name == "uint32_t" || name == "uint64_t";
 }
 
-[[nodiscard]] bool is_floating_like(const Type& type) { return is_named_type(type, "double"); }
+[[nodiscard]] bool is_integer_like(const Type& type) {
+    return type.kind == TypeKind::Named && is_integral_named_type(type.name);
+}
+
+[[nodiscard]] bool is_floating_like(const Type& type) {
+    return type.kind == TypeKind::Named &&
+           (type.name == "float" || type.name == "double" || type.name == "float32_t" || type.name == "float64_t");
+}
 
 [[nodiscard]] Type make_pointer_type_to(const Type& pointee, bool is_mutable_pointee) {
     Type type;
@@ -390,7 +401,7 @@ private:
         cell->type = type;
         switch (type.kind) {
             case TypeKind::Named:
-                if (type.name == "int" || type.name == "char") {
+                if (is_integral_named_type(type.name) && type.name != "bool") {
                     cell->data = 0LL;
                     return cell;
                 }
@@ -398,7 +409,7 @@ private:
                     cell->data = false;
                     return cell;
                 }
-                if (type.name == "double") {
+                if (is_floating_like(type)) {
                     cell->data = 0.0;
                     return cell;
                 }
@@ -478,25 +489,48 @@ private:
         throw ConstexprError(loc, "expected a boolean constexpr value");
     }
 
-    void checked_assign_integer(const std::shared_ptr<Cell>& target, long long value, const SourceLocation& loc) {
-        if (is_named_type(target->type, "char")) {
-            if (value < 0 || value > 255) throw ConstexprError(loc, "constexpr char conversion overflow");
-            target->data = value;
-            return;
+    [[nodiscard]] std::pair<long long, long long> integer_bounds_for_type(const Type& type) const {
+        if (is_named_type(type, "char")) return {0, 255};
+        if (is_named_type(type, "bool")) return {0, 1};
+        if (is_named_type(type, "int")) {
+            return {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()};
         }
+        if (is_named_type(type, "int8_t")) return {-128, 127};
+        if (is_named_type(type, "uint8_t")) return {0, 255};
+        if (is_named_type(type, "int16_t")) return {-32768, 32767};
+        if (is_named_type(type, "uint16_t")) return {0, 65535};
+        if (is_named_type(type, "int32_t")) {
+            return {std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()};
+        }
+        if (is_named_type(type, "unsigned int")) return {0, std::numeric_limits<uint32_t>::max()};
+        if (is_named_type(type, "size_t") || is_named_type(type, "uint64_t") || is_named_type(type, "unsigned long")) {
+            return {0, std::numeric_limits<long long>::max()};
+        }
+        if (is_named_type(type, "ptrdiff_t") || is_named_type(type, "int64_t") || is_named_type(type, "long")) {
+            return {std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max()};
+        }
+        return {std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max()};
+    }
+
+    void checked_assign_integer(const std::shared_ptr<Cell>& target, long long value, const SourceLocation& loc) {
         if (is_named_type(target->type, "bool")) {
             target->data = (value != 0);
             return;
         }
-        if (value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
+        auto [min_value, max_value] = integer_bounds_for_type(target->type);
+        if (value < min_value || value > max_value) {
             throw ConstexprError(loc, "constexpr integer overflow");
         }
         target->data = value;
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_checked_int_cell(long long value, const SourceLocation& loc) {
+        return make_checked_int_cell_as(named_type("int"), value, loc);
+    }
+
+    [[nodiscard]] std::shared_ptr<Cell> make_checked_int_cell_as(const Type& type, long long value, const SourceLocation& loc) {
         auto cell = std::make_shared<Cell>();
-        cell->type = named_type("int");
+        cell->type = type;
         checked_assign_integer(cell, value, loc);
         return cell;
     }
@@ -841,25 +875,26 @@ private:
         } else {
             long long left = as_integer(lhs, expr.loc);
             long long right = as_integer(rhs, expr.loc);
+            Type result_type = types_equal(lhs->type, rhs->type) ? lhs->type : named_type("int");
             switch (expr.binary_op) {
                 case BinaryOp::Add: {
                     long long result;
                     if (__builtin_add_overflow(left, right, &result)) throw ConstexprError(expr.loc, "constexpr integer overflow");
-                    return make_checked_int_cell(result, expr.loc);
+                    return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Sub: {
                     long long result;
                     if (__builtin_sub_overflow(left, right, &result)) throw ConstexprError(expr.loc, "constexpr integer overflow");
-                    return make_checked_int_cell(result, expr.loc);
+                    return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Mul: {
                     long long result;
                     if (__builtin_mul_overflow(left, right, &result)) throw ConstexprError(expr.loc, "constexpr integer overflow");
-                    return make_checked_int_cell(result, expr.loc);
+                    return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Div:
                     if (right == 0) throw ConstexprError(expr.loc, "constexpr division by zero");
-                    return make_checked_int_cell(left / right, expr.loc);
+                    return make_checked_int_cell_as(result_type, left / right, expr.loc);
                 case BinaryOp::Eq: return make_bool_cell(left == right);
                 case BinaryOp::Ne: return make_bool_cell(left != right);
                 case BinaryOp::Lt: return make_bool_cell(left < right);
@@ -1113,6 +1148,139 @@ private:
         return call_with_expr_args(*fn, expr.args, expr.loc);
     }
 
+    [[nodiscard]] const EnumDef* find_enum_for_variant(std::string_view variant_name) const {
+        for (const EnumDef& def : program_.enums) {
+            for (const EnumVariant& variant : def.variants) {
+                if (variant.name == variant_name) return &def;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] std::optional<Type> infer_unevaluated_expr_type(const Expr& expr) {
+        switch (expr.kind) {
+            case ExprKind::IntegerLiteral: return named_type("int");
+            case ExprKind::FloatLiteral: return named_type("double");
+            case ExprKind::BoolLiteral: return named_type("bool");
+            case ExprKind::CharLiteral: return named_type("char");
+            case ExprKind::TypeTrait: return named_type("bool");
+            case ExprKind::Sizeof: return named_type("size_t");
+            case ExprKind::StringLiteral: return make_const_char_pointer_type();
+            case ExprKind::Identifier:
+                try {
+                    return lookup_binding(expr.name, expr.loc).cell->type;
+                } catch (const ConstexprError&) {
+                    if (const EnumDef* def = find_enum_for_variant(expr.name)) return named_type(def->name);
+                    return std::nullopt;
+                }
+            case ExprKind::Move:
+                return expr.lhs ? infer_unevaluated_expr_type(*expr.lhs) : std::nullopt;
+            case ExprKind::New: {
+                Type result;
+                result.kind = TypeKind::Pointer;
+                result.pointee = std::make_shared<Type>(expr.type);
+                result.is_mutable_pointee = true;
+                return result;
+            }
+            case ExprKind::Delete:
+                return named_type("void");
+            case ExprKind::Cast:
+                return expr.type;
+            case ExprKind::Lambda:
+                return expr.name.empty() ? std::nullopt : std::optional<Type>(named_type(expr.name));
+            case ExprKind::Conditional: {
+                if (!expr.rhs || !expr.third) return std::nullopt;
+                std::optional<Type> lhs_type = infer_unevaluated_expr_type(*expr.rhs);
+                std::optional<Type> rhs_type = infer_unevaluated_expr_type(*expr.third);
+                if (!lhs_type.has_value() || !rhs_type.has_value() || !types_equal(*lhs_type, *rhs_type)) return std::nullopt;
+                return lhs_type;
+            }
+            case ExprKind::Member: {
+                std::optional<Type> base = infer_unevaluated_expr_type(*expr.lhs);
+                if (!base.has_value()) return std::nullopt;
+                if (auto* span_pointee = base->kind == TypeKind::Span ? base->pointee.get() : nullptr; span_pointee && expr.name == "size") {
+                    return named_type("size_t");
+                }
+                const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
+                if (base_named.kind != TypeKind::Named) return std::nullopt;
+                if (auto struct_it = structs_by_name_.find(base_named.name); struct_it != structs_by_name_.end()) {
+                    for (const StructField& field : struct_it->second->fields) {
+                        if (field.name == expr.name) return field.type;
+                    }
+                }
+                if (auto class_it = classes_by_name_.find(base_named.name); class_it != classes_by_name_.end()) {
+                    for (const ClassField& field : collect_class_fields(*class_it->second)) {
+                        if (field.name == expr.name) return field.type.kind == TypeKind::Reference ? *field.type.pointee : field.type;
+                    }
+                }
+                return std::nullopt;
+            }
+            case ExprKind::Subscript: {
+                std::optional<Type> base = infer_unevaluated_expr_type(*expr.lhs);
+                if (!base.has_value()) return std::nullopt;
+                if (base->kind == TypeKind::Array && base->element) return *base->element;
+                if ((base->kind == TypeKind::Pointer || base->kind == TypeKind::Span) && base->pointee) return *base->pointee;
+                return std::nullopt;
+            }
+            case ExprKind::Unary:
+                if (!expr.lhs) return std::nullopt;
+                switch (expr.unary_op) {
+                    case UnaryOp::Neg: return infer_unevaluated_expr_type(*expr.lhs);
+                    case UnaryOp::Not: return named_type("bool");
+                    case UnaryOp::Deref: {
+                        std::optional<Type> operand = infer_unevaluated_expr_type(*expr.lhs);
+                        if (!operand.has_value()) return std::nullopt;
+                        if ((operand->kind == TypeKind::Pointer || operand->kind == TypeKind::Reference) && operand->pointee) {
+                            return *operand->pointee;
+                        }
+                        return std::nullopt;
+                    }
+                    case UnaryOp::AddressOf: {
+                        std::optional<Type> operand = infer_unevaluated_expr_type(*expr.lhs);
+                        if (!operand.has_value()) return std::nullopt;
+                        return make_pointer_type_to(*operand, true);
+                    }
+                }
+                return std::nullopt;
+            case ExprKind::Binary:
+                if (!expr.lhs || !expr.rhs) return std::nullopt;
+                if (expr.binary_op == BinaryOp::Assign) return infer_unevaluated_expr_type(*expr.lhs);
+                if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne || expr.binary_op == BinaryOp::Lt ||
+                    expr.binary_op == BinaryOp::Gt || expr.binary_op == BinaryOp::Le || expr.binary_op == BinaryOp::Ge ||
+                    expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) {
+                    return named_type("bool");
+                }
+                return infer_unevaluated_expr_type(*expr.lhs);
+            case ExprKind::Call:
+                if (expr.lhs) {
+                    std::optional<Type> receiver = infer_unevaluated_expr_type(*expr.lhs);
+                    const Type& receiver_named = receiver.has_value() && receiver->kind == TypeKind::Reference ? *receiver->pointee
+                                                                                                                 : *receiver;
+                    if (!receiver.has_value() || receiver_named.kind != TypeKind::Named) return std::nullopt;
+                    std::string full_name = receiver_named.name + "_" + expr.name;
+                    auto it = functions_by_name_.find(full_name);
+                    if (it == functions_by_name_.end()) return std::nullopt;
+                    for (size_t fn_index : it->second) {
+                        const Function& fn = program_.functions[fn_index];
+                        if (fn.params.size() == expr.args.size() + 1) return fn.return_type;
+                    }
+                    return std::nullopt;
+                }
+                if (is_class_name(expr.name)) return named_type(expr.name);
+                if (auto it = functions_by_name_.find(expr.name); it != functions_by_name_.end()) {
+                    for (size_t fn_index : it->second) {
+                        const Function& fn = program_.functions[fn_index];
+                        if (fn.params.size() == expr.args.size()) return fn.return_type;
+                    }
+                }
+                return std::nullopt;
+            case ExprKind::PackExpansion:
+            case ExprKind::Fold:
+                return std::nullopt;
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] std::shared_ptr<Cell> evaluate_expr(const Expr& expr) {
         tick(expr.loc, "evaluating an expression");
         switch (expr.kind) {
@@ -1121,6 +1289,21 @@ private:
             case ExprKind::BoolLiteral: return make_bool_cell(expr.bool_value);
             case ExprKind::CharLiteral: return make_scalar_cell(named_type("char"), expr.int_value);
             case ExprKind::StringLiteral: return make_string_literal_pointer(expr);
+            case ExprKind::Sizeof: {
+                Type queried_type;
+                if (expr.sizeof_operand_is_type) {
+                    queried_type = expr.type;
+                } else {
+                    std::optional<Type> inferred = infer_unevaluated_expr_type(*expr.lhs);
+                    if (!inferred.has_value()) {
+                        throw ConstexprError(expr.loc, "cannot apply 'sizeof' to this expression: its type could not be inferred");
+                    }
+                    queried_type = *inferred;
+                }
+                std::optional<TypeLayoutInfo> layout = layout_of_type(program_, queried_type);
+                if (!layout.has_value()) throw ConstexprError(expr.loc, "cannot apply 'sizeof' to this type in this version");
+                return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->size_bytes));
+            }
             case ExprKind::Identifier: return clone_cell(lookup_binding(expr.name, expr.loc).cell);
             case ExprKind::Conditional:
                 return as_bool(evaluate_expr(*expr.lhs), expr.loc) ? evaluate_expr(*expr.rhs) : evaluate_expr(*expr.third);

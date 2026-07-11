@@ -711,6 +711,7 @@ private:
             case ExprKind::IntegerLiteral: return named_type("int");
             case ExprKind::FloatLiteral: return named_type("double");
             case ExprKind::BoolLiteral: return named_type("bool");
+            case ExprKind::Sizeof: return named_type("size_t");
             case ExprKind::TypeTrait: return named_type("bool");
             case ExprKind::CharLiteral: return named_type("char");
             case ExprKind::StringLiteral: {
@@ -932,6 +933,7 @@ private:
             case ExprKind::BoolLiteral:
             case ExprKind::CharLiteral:
             case ExprKind::StringLiteral:
+            case ExprKind::Sizeof:
             case ExprKind::Lambda:
                 break;
             case ExprKind::Call: {
@@ -949,6 +951,30 @@ private:
             return types_equal(*arg_type->pointee, expected_type);
         }
         return false;
+    }
+
+    [[nodiscard]] TargetLayoutInfo current_target_layout_info() const {
+        return TargetLayoutInfo{module_->getDataLayout().getPointerSize(),
+                                module_->getDataLayout().getPointerABIAlignment(0).value()};
+    }
+
+    llvm::Value* codegen_sizeof_value(const Expr& expr) {
+        Type queried_type;
+        if (expr.sizeof_operand_is_type) {
+            queried_type = expr.type;
+        } else {
+            std::optional<Type> inferred = infer_type(*expr.lhs);
+            if (!inferred.has_value()) {
+                throw CodegenError("cannot apply 'sizeof' to this expression: its type could not be inferred", current_loc_);
+            }
+            queried_type = *inferred;
+        }
+        if (program_ == nullptr) throw CodegenError("internal error: sizeof requires program type information", current_loc_);
+        std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, queried_type, current_target_layout_info());
+        if (!layout.has_value()) {
+            throw CodegenError("cannot apply 'sizeof' to this type in this version", current_loc_);
+        }
+        return llvm::ConstantInt::get(to_llvm_type(named_type("size_t")), layout->size_bytes, /*isSigned=*/false);
     }
 
     [[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr) {
@@ -3098,6 +3124,9 @@ private:
                 // value 0-255 (see parser's decode_char_literal), which
                 // fits identically in the 8 bits either way.
                 return llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), expr.int_value, /*isSigned=*/false);
+
+            case ExprKind::Sizeof:
+                return codegen_sizeof_value(expr);
 
             case ExprKind::StringLiteral:
                 // A read-only global byte array (null-terminated, like a
