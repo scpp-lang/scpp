@@ -3,7 +3,7 @@
 单文件编译非常适合快速试验。但只要你想要一个有名字的二进制程序、一个真正的项目
 目录，scpp 的 manifest-based build 模式就会更顺手。
 
-创建一个目录，并把下面两个文件放进去。
+创建一个目录，然后把顶层的 `scpp.toml` 和放在 `src/` 下面的 `main.scpp` 准备好。
 
 `scpp.toml`：
 
@@ -16,19 +16,17 @@ version = "0.1.0"
 
 [[bin]]
 name = "hello"
-root = "main.scpp"
-sources = ["*.scpp"]
+root = "src/main.scpp"
+sources = ["src/**/*.scpp"]
 ```
 
-`main.scpp`：
+`src/main.scpp`：
 
 ```cpp
-extern "C" int puts(const char* s);
+import std;
 
 int main() {
-    [[scpp::unsafe]] {
-        puts("Hello from a project build!");
-    }
+    std::println("Hello from a project build!");
     return 0;
 }
 ```
