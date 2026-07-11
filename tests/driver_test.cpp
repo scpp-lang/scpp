@@ -2839,7 +2839,7 @@ void run_cli_extension_tests() {
                         "    if (seeded.max() != expected_max) {\n"
                         "        return 7;\n"
                         "    }\n"
-                        "    auto hundred = scpp::rand::uniform_int_distribution::make(1, 100);\n"
+                        "    auto hundred = scpp::rand::uniform_int_distribution<int>::make(1, 100);\n"
                         "    if (!hundred.has_value()) {\n"
                         "        return 3;\n"
                         "    }\n"
@@ -2853,7 +2853,7 @@ void run_cli_extension_tests() {
                         "    if (first == second) {\n"
                         "        return 1;\n"
                         "    }\n"
-                        "    auto die = scpp::rand::uniform_int_distribution::make(1, 6);\n"
+                        "    auto die = scpp::rand::uniform_int_distribution<int>::make(1, 6);\n"
                         "    if (!die.has_value()) {\n"
                         "        return 9;\n"
                         "    }\n"
@@ -3829,6 +3829,43 @@ int main() {
     }
 
     {
+        std::string case_name = "static_member_function_on_template_specialization_is_callable";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(template<typename T>
+class Box;
+
+template<>
+class Box<int> {
+public:
+    static Box<int> make(int value) {
+        Box<int> box(value);
+        return box;
+    }
+
+    int reveal() const {
+        return this->secret;
+    }
+
+private:
+    int secret;
+
+    Box(int value) {
+        this->secret = value;
+        return;
+    }
+};
+
+int main() {
+    Box<int> box = Box<int>::make(9);
+    return box.reveal() - 9;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
         std::string case_name = "private_constructor_is_not_callable_outside_the_class";
         cases_run++;
         bool threw = false;
@@ -3887,7 +3924,7 @@ void run_random_tests() {
             R"SCPP(import std;
 import scpp;
 int main() {
-    auto bad = scpp::rand::uniform_int_distribution::make(9, 3);
+    auto bad = scpp::rand::uniform_int_distribution<int>::make(9, 3);
     if (bad.has_value()) return 1;
     if (bad.error() != scpp::rand::uniform_int_distribution_error::empty_range) return 2;
     return 0;
@@ -3904,14 +3941,14 @@ int main() {
             R"SCPP(import std;
 import scpp;
 int main() {
-    auto maybe_die = scpp::rand::uniform_int_distribution::make(1, 6);
+    auto maybe_die = scpp::rand::uniform_int_distribution<int>::make(1, 6);
     if (!maybe_die.has_value()) return 1;
     std::mt19937 gen(123);
     int roll1 = maybe_die.value()(gen);
     int roll2 = maybe_die.value()(gen);
     if (roll1 < 1 || roll1 > 6) return 2;
     if (roll2 < 1 || roll2 > 6) return 3;
-    auto maybe_singleton = scpp::rand::uniform_int_distribution::make(4, 4);
+    auto maybe_singleton = scpp::rand::uniform_int_distribution<int>::make(4, 4);
     if (!maybe_singleton.has_value()) return 4;
     if (maybe_singleton.value()(gen) != 4) return 5;
     return 0;
@@ -3930,7 +3967,7 @@ int main() {
                         R"SCPP(import std;
 import scpp;
 int main() {
-    scpp::rand::uniform_int_distribution die(1, 6);
+    scpp::rand::uniform_int_distribution<int> die(1, 6);
     std::mt19937 gen(123);
     return die(gen);
 }
