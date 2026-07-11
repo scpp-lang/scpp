@@ -2026,6 +2026,42 @@ void run_consteval_tests() {
                    std::to_string(run_result.exit_code));
         std::filesystem::remove(exe_path);
     }
+
+    {
+        std::string case_name = "required_constant_evaluation_rejects_user_defined_destructor_execution";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "class NeedsDrop {\n"
+                "public:\n"
+                "    int value;\n"
+                "    constexpr NeedsDrop(int x) {\n"
+                "        this->value = x;\n"
+                "        return;\n"
+                "    }\n"
+                "    ~NeedsDrop() {\n"
+                "        return;\n"
+                "    }\n"
+                "};\n"
+                "constexpr int make_value() {\n"
+                "    NeedsDrop box(42);\n"
+                "    return box.value;\n"
+                "}\n"
+                "int main() {\n"
+                "    constexpr int value = make_value();\n"
+                "    return value;\n"
+                "}\n",
+                (std::filesystem::current_path() /
+                 "required_constant_evaluation_rejects_user_defined_destructor_execution_exe")
+                    .string(),
+                std_link_inputs(), std_import_paths());
+        } catch (const scpp::DriverError& error) {
+            threw = std::string(error.what()).find("cannot execute user-defined destructor of 'NeedsDrop'") !=
+                    std::string::npos;
+        }
+        expect(threw, case_name + ": expected required constant evaluation to reject user-defined destructor execution");
+    }
 }
 
 void run_cli_extension_tests() {

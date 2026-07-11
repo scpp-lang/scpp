@@ -1,0 +1,26 @@
+// spec §7.2(2.4) and §7.3(4): a class may participate in required
+// constant evaluation only when no evaluation path requires execution
+// of a user-defined destructor.
+class NeedsDrop {
+public:
+    int value;
+
+    constexpr NeedsDrop(int x) {
+        this->value = x;
+        return;
+    }
+
+    ~NeedsDrop() {
+        return;
+    }
+};
+
+constexpr int make_value() {
+    NeedsDrop box(42);
+    return box.value;
+}
+
+int main() {
+    constexpr int value = make_value();
+    return value;
+}

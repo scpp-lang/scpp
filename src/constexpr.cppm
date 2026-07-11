@@ -792,6 +792,21 @@ private:
         return classes_by_name_.contains(std::string(name));
     }
 
+    [[nodiscard]] bool has_user_defined_destructor(std::string_view class_name) const {
+        auto it = functions_by_name_.find(std::string(class_name) + "_delete");
+        if (it == functions_by_name_.end()) return false;
+        for (size_t fn_index : it->second) {
+            if (program_.functions[fn_index].body) return true;
+        }
+        return false;
+    }
+
+    void reject_user_defined_destructor_execution(const Type& type, const SourceLocation& loc) const {
+        if (type.kind != TypeKind::Named || !is_class_name(type.name) || !has_user_defined_destructor(type.name)) return;
+        throw ConstexprError(loc, "required constant evaluation cannot execute user-defined destructor of '" + type.name +
+                                      "'");
+    }
+
     [[nodiscard]] std::shared_ptr<Cell> cast_value(const Type& target_type, const std::shared_ptr<Cell>& operand,
                                                    const SourceLocation& loc) {
         if (is_named_type(target_type, "double")) return make_double_cell(as_double(operand, loc));
@@ -868,6 +883,10 @@ private:
         if (call_depth_ > limits_.max_recursion_depth) {
             --call_depth_;
             throw ConstexprError(loc, "constexpr evaluation exceeded recursion budget");
+        }
+        for (size_t i = 0; i < fn.params.size(); ++i) {
+            if (fn.params[i].type.kind == TypeKind::Reference) continue;
+            reject_user_defined_destructor_execution(fn.params[i].type, loc);
         }
         frames_.push_back({});
         auto& frame = frames_.back();
@@ -1208,6 +1227,7 @@ private:
                                                             stmt.is_const || stmt.is_constexpr};
                     return;
                 }
+                reject_user_defined_destructor_execution(stmt.type, stmt.loc);
                 auto cell = make_default_cell(stmt.type, stmt.loc);
                 if (stmt.has_ctor_args) {
                     std::vector<Binding> ctor_bindings;
