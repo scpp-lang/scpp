@@ -1,14 +1,12 @@
 // std_random.scpp
 //
 // The `:random` partition of the "std" module: a beginner-friendly subset
-// of real C++ <random> built around std::random_device, std::mt19937, and
-// std::uniform_int_distribution<int>. scpp already supports the same
-// first-class fixed-width unsigned scalars (`uint32_t`) that real
-// `std::mt19937::result_type` uses, so the generator-facing APIs expose that
-// range directly, including the exact max value 4294967295.
+// of real C++ <random> built around std::random_device and std::mt19937.
+// scpp already supports the same first-class fixed-width unsigned scalars
+// (`uint32_t`) that real `std::mt19937::result_type` uses, so the
+// generator-facing APIs expose that range directly, including the exact max
+// value 4294967295.
 export module std:random;
-
-import :expected;
 
 extern "C" {
     uint32_t scpp_random_device_next();
@@ -24,11 +22,6 @@ extern "C" {
 }
 
 namespace std {
-
-class __uniform_int_distribution_ctor_token {
-public:
-    __uniform_int_distribution_ctor_token() { return; }
-};
 
 export class random_device {
 public:
@@ -100,71 +93,5 @@ public:
     }
 
 };
-
-export template<typename T>
-class uniform_int_distribution;
-
-export enum class uniform_int_distribution_error { empty_range };
-
-export template<>
-class uniform_int_distribution<int> {
-private:
-    int minimum_;
-    int maximum_;
-
-public:
-    uniform_int_distribution(const __uniform_int_distribution_ctor_token& token, int minimum, int maximum) {
-        this->minimum_ = minimum;
-        this->maximum_ = maximum;
-        return;
-    }
-
-    uniform_int_distribution(const uniform_int_distribution<int>& other) {
-        this->minimum_ = other.minimum_;
-        this->maximum_ = other.maximum_;
-        return;
-    }
-
-    ~uniform_int_distribution() { return; }
-
-    int call(std::mt19937& generator) {
-        int64_t min_i = static_cast<int64_t>(this->minimum_);
-        int64_t max_i = static_cast<int64_t>(this->maximum_);
-        uint64_t range = static_cast<uint64_t>((max_i - min_i) + static_cast<int64_t>(1));
-        uint64_t full = static_cast<uint64_t>(static_cast<uint32_t>(4294967295)) + static_cast<uint64_t>(1);
-        uint64_t limit = (full / range) * range;
-        while (true) {
-            uint64_t sample = static_cast<uint64_t>(generator.call());
-            if (sample < limit) {
-                uint64_t offset = sample - ((sample / range) * range);
-                int64_t result = min_i + static_cast<int64_t>(offset);
-                return static_cast<int>(result);
-            }
-        }
-        return this->minimum_;
-    }
-
-    int min() const {
-        return this->minimum_;
-    }
-
-    int max() const {
-        return this->maximum_;
-    }
-};
-
-export std::expected<uniform_int_distribution<int>, uniform_int_distribution_error>
-make_uniform_int_distribution(int minimum, int maximum) {
-    if (minimum > maximum) {
-        uniform_int_distribution_error code = (uniform_int_distribution_error)0;
-        std::unexpected<uniform_int_distribution_error> error(code);
-        std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(error);
-        return std::move(result);
-    }
-    __uniform_int_distribution_ctor_token token;
-    std::uniform_int_distribution<int> distribution(token, minimum, maximum);
-    std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(std::move(distribution));
-    return std::move(result);
-}
 
 } // namespace std

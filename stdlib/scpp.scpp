@@ -1,0 +1,8 @@
+// scpp.scpp
+//
+// scpp's own extension module: the primary interface unit. Concrete
+// library surface area lives in dedicated interface partitions, which
+// this file re-exports for consumers of `import scpp;`.
+export module scpp;
+
+export import :rand;

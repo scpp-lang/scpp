@@ -279,6 +279,26 @@ void test_nodiscard_function_and_method_attributes_parse() {
            "nodiscard_function_and_method_attributes_parse: bare nodiscard should have empty reason");
 }
 
+void test_template_static_member_call_parses() {
+    scpp::Program program = scpp::parse(R"SCPP(template<typename T>
+class Box;
+template<>
+class Box<int> {
+public:
+    static int make() { return 7; }
+};
+int main() { return Box<int>::make(); }
+)SCPP");
+    bool found_static_make = false;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.is_static && fn.name.find("_make") != std::string::npos && fn.member_owner_class == "Box") {
+            found_static_make = true;
+            break;
+        }
+    }
+    expect(found_static_make, "template_static_member_call_parses: expected a static Box make method");
+}
+
 void test_static_member_function_parses_without_this() {
     scpp::Program program = scpp::parse(
         "class Box {\n"
@@ -1546,17 +1566,16 @@ void test_export_class_propagates_to_methods() {
     expect(program.functions[0].is_exported, "export_class_propagates_to_methods: ctor should inherit is_exported");
 }
 
-// ch11 §11.5: `export` on a declaration whose namespace doesn't match
-// the module's own name is a compile error -- both gates (export
-// marker, correct namespace) are independently mandatory.
-void test_export_outside_matching_namespace_is_rejected() {
+// ch11 §11.5: exported declarations must live in a namespace whose prefix
+// matches the module name.
+void test_export_in_non_matching_namespace_is_rejected() {
     bool threw = false;
     try {
         scpp::parse("export module std;\nnamespace other { export int f() { return 0; } }");
     } catch (const scpp::ParseError&) {
         threw = true;
     }
-    expect(threw, "export_outside_matching_namespace_is_rejected: expected a ParseError");
+    expect(threw, "export_in_non_matching_namespace_is_rejected: expected a ParseError");
 }
 
 // ch11 §11.5: `export` with no enclosing namespace at all (while inside
@@ -3309,6 +3328,7 @@ int main() {
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
+    test_template_static_member_call_parses();
     test_static_member_function_parses_without_this();
     test_unsafe_attribute_on_struct_is_rejected();
     test_thread_safety_attribute_on_struct_parses();
@@ -3401,7 +3421,7 @@ int main() {
     test_no_export_prefix_leaves_function_not_exported();
     test_export_group_marks_multiple_declarations_exported();
     test_export_class_propagates_to_methods();
-    test_export_outside_matching_namespace_is_rejected();
+    test_export_in_non_matching_namespace_is_rejected();
     test_export_with_no_namespace_is_rejected();
     test_export_in_deeper_nested_namespace_is_allowed();
     test_export_without_any_module_declaration_is_rejected();
