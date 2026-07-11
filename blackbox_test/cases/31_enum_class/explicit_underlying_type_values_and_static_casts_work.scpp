@@ -1,0 +1,12 @@
+// PR #122 parser/driver coverage: `enum class` supports an explicit
+// underlying integral type, explicit enumerator values, and explicit
+// `static_cast` both to and from that underlying type.
+enum class Color : int { Red = 1, Green = 2, Blue = 7 };
+
+int main() {
+    Color color = static_cast<Color>(2);
+    if (color != Color::Green) return 1;
+    int blue = static_cast<int>(Color::Blue);
+    if (blue != 7) return 2;
+    return static_cast<int>(Color::Red) + blue;
+}

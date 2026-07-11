@@ -1,0 +1,8 @@
+// PR #122 semantics: enum class values do not implicitly convert to ints;
+// extraction to the underlying type must be explicit.
+enum class Status { Ok, Error };
+
+int main() {
+    int raw = Status::Error;
+    return raw;
+}
