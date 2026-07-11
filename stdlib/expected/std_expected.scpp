@@ -1,14 +1,14 @@
 export module std:expected;
 
 extern "C" {
-    void scpp_expected_abort();
+    void abort();
 }
 
 namespace std {
 
 export void __expected_detail_abort_bad_expected_access() {
     [[scpp::unsafe]] {
-        scpp_expected_abort();
+        abort();
     }
     return;
 }
