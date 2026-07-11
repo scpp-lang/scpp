@@ -1,8 +1,6 @@
-# stdlib — scpp's `std` library
+# libs — scpp's library modules
 
-This directory contains scpp's own standard-library implementation: the
-`std` module interface unit plus its partitions and any native helper
-libraries those partitions need.
+This directory contains scpp's shipped library modules: the real-`std` module under `libs/std/`, plus scpp-specific extensions under `libs/scpp/`. Native helper libraries live here too.
 
 The project convention is:
 
@@ -18,10 +16,11 @@ The project convention is:
 
 | Path | Role |
 |---|---|
-| `std.scpp` | Primary interface unit of module `std`; re-exports partitions with `export import :...;` |
-| `string/` | `std:string` partition plus the native `scpp_string_wrapper` bridge to real C++ `std::string` |
-| `memory/` | `std:memory` partition; currently pure scpp (`std::unique_ptr`, `std::make_unique`) |
-| `CMakeLists.txt` | Builds native helper libraries needed by stdlib partitions |
+| `std/std.scpp` | Primary interface unit of module `std`; re-exports its partitions with `export import :...;` |
+| `std/` | Real-C++-mirroring library partitions and native wrappers for module `std` |
+| `scpp/scpp.scpp` | Primary interface unit of module `scpp`; re-exports scpp-specific partitions |
+| `scpp/rand/` | `scpp:rand` partition with `scpp::rand::uniform_int_distribution<int>` |
+| `CMakeLists.txt` | Builds native helper libraries plus the `std` and `scpp` module artifacts |
 
 ## Consuming `std`
 
@@ -35,16 +34,17 @@ and the build passes the module mappings explicitly, for example:
 
 ```sh
 scpp app.scpp -o app \
-  --import std=stdlib/std.scpp \
-  --import std:string=stdlib/string/std_string.scpp \
-  --import std:memory=stdlib/memory/std_memory.scpp \
-  --link build/stdlib/libscpp_string_wrapper.a
+  --import std=libs/std/std.scpp \
+  --import scpp=libs/scpp/scpp.scpp \
+  --link build/libs/libscpp_string_wrapper.a
 ```
 
 Notes:
 
-- `std.scpp` aggregates the partitions; consumers never import `std:string`
-  or `std:memory` directly in source.
+- `libs/std/std.scpp` aggregates the `std` partitions; consumers never import
+  `std:string` or `std:memory` directly in source.
+- `libs/scpp/scpp.scpp` aggregates scpp-specific partitions; consumers explicitly
+  opt in with `import scpp;`.
 - `--link` is only needed for partitions with a native helper library.
   Today that means `std:string`; `std:memory` is pure scpp and needs no
   extra native library.
@@ -55,19 +55,19 @@ Notes:
 
 ### `std:string`
 
-- File: `string/std_string.scpp`
-- Backed by: `string/scpp_string_wrapper.{h,cpp}`
+- File: `std/string/std_string.scpp`
+- Backed by: `std/string/scpp_string_wrapper.{h,cpp}`
 - Provides a small `std::string` surface via `extern "C"` wrapper calls
 
 ### `std:memory`
 
-- File: `memory/std_memory.scpp`
+- File: `std/memory/std_memory.scpp`
 - Pure scpp implementation
 - Provides `std::unique_ptr<T>` and `std::make_unique<T>(...)`
 
 ## Testing policy
 
-`stdlib/` is library source, not a demo area. Coverage belongs in the real
+`libs/` is library source, not a demo area. Coverage belongs in the real
 test suites:
 
 - `tests/` for dev-agent-owned unit/integration coverage

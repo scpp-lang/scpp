@@ -2883,7 +2883,7 @@ void run_cli_extension_tests() {
         std::string case_name = "cli_import_std_works_after_relocation";
         std::filesystem::path bundle_root = std::filesystem::current_path() / "cli_import_std_works_after_relocation_bundle";
         std::filesystem::path bundle_build_dir = bundle_root / "build";
-        std::filesystem::path bundle_build_stdlib_dir = bundle_build_dir / "stdlib";
+        std::filesystem::path bundle_build_libs_dir = bundle_build_dir / "libs";
         std::filesystem::path relocated_scpp = bundle_build_dir / "scpp";
         std::filesystem::path source_path = bundle_root / "main.scpp";
         std::filesystem::path exe_path = bundle_root / "app";
@@ -2891,7 +2891,7 @@ void run_cli_extension_tests() {
         std::filesystem::remove_all(bundle_root);
         std::filesystem::create_directories(bundle_build_dir);
         std::filesystem::copy_file(SCPP_BINARY_PATH, relocated_scpp, std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::copy(std::filesystem::path(SCPP_BINARY_PATH).parent_path() / "stdlib", bundle_build_stdlib_dir,
+        std::filesystem::copy(std::filesystem::path(SCPP_BINARY_PATH).parent_path() / "libs", bundle_build_libs_dir,
                               std::filesystem::copy_options::recursive);
         write_text_file(source_path,
                         "import std;\n"
@@ -2914,18 +2914,18 @@ void run_cli_extension_tests() {
         std::string case_name = "cli_import_std_works_from_installed_layout";
         std::filesystem::path install_root = std::filesystem::current_path() / "cli_import_std_works_from_installed_layout_root";
         std::filesystem::path install_bin_dir = install_root / "bin";
-        std::filesystem::path install_stdlib_dir = install_root / "share" / "scpp" / "stdlib";
+        std::filesystem::path install_libs_dir = install_root / "share" / "scpp" / "libs";
         std::filesystem::path installed_scpp = install_bin_dir / "scpp";
         std::filesystem::path source_path = install_root / "main.scpp";
         std::filesystem::path exe_path = install_root / "app";
         cases_run++;
         std::filesystem::remove_all(install_root);
         std::filesystem::create_directories(install_bin_dir);
-        std::filesystem::create_directories(install_stdlib_dir);
+        std::filesystem::create_directories(install_libs_dir);
         std::filesystem::copy_file(SCPP_BINARY_PATH, installed_scpp, std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::copy(std::filesystem::path(SCPP_STDLIB_STD_MODULE_PATH).parent_path(), install_stdlib_dir,
+        std::filesystem::copy(std::filesystem::path(SCPP_STDLIB_STD_MODULE_PATH).parent_path(), install_libs_dir,
                               std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::copy(std::filesystem::path(SCPP_BINARY_PATH).parent_path() / "stdlib", install_stdlib_dir,
+        std::filesystem::copy(std::filesystem::path(SCPP_BINARY_PATH).parent_path() / "libs", install_libs_dir,
                               std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
         write_text_file(source_path,
                         "import std;\n"

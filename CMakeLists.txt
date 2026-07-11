@@ -5,16 +5,16 @@ project(scpp
     DESCRIPTION "A compiler frontend for a C++-looking language with safe regions"
     LANGUAGES C CXX)
 
-set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/std.scpp")
-set(SCPP_STDLIB_STD_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/std.scppm")
-set(SCPP_STDLIB_STD_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libstd.scppa")
-set(SCPP_STDLIB_SCPP_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/scpp.scpp")
-set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/scpp.scppm")
-set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp.scppa")
-set(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_string_wrapper.a")
-set(SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_thread_wrapper.a")
-set(SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_print_wrapper.a")
-set(SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_random_wrapper.a")
+set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/std/std.scpp")
+set(SCPP_STDLIB_STD_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/std.scppm")
+set(SCPP_STDLIB_STD_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libstd.scppa")
+set(SCPP_STDLIB_SCPP_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp/scpp.scpp")
+set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/scpp.scppm")
+set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libscpp.scppa")
+set(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libscpp_string_wrapper.a")
+set(SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libscpp_thread_wrapper.a")
+set(SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libscpp_print_wrapper.a")
+set(SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libscpp_random_wrapper.a")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -125,8 +125,8 @@ target_compile_definitions(scpp PRIVATE
 install(TARGETS scpp
     RUNTIME DESTINATION bin)
 
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
-    DESTINATION "share/scpp/stdlib"
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/libs/"
+    DESTINATION "share/scpp/libs"
     FILES_MATCHING
         PATTERN "*.scpp")
 
@@ -139,7 +139,7 @@ install(FILES
     "${SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH}"
     "${SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH}"
     "${SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH}"
-    DESTINATION "share/scpp/stdlib")
+    DESTINATION "share/scpp/libs")
 
 enable_testing()
 
@@ -195,7 +195,7 @@ target_compile_definitions(driver_test PRIVATE
 
 add_test(NAME driver_test COMMAND driver_test)
 
-# Builds stdlib helper libraries (e.g. the native wrapper behind
+# Builds library helper libraries (e.g. the native wrapper behind
 # std::string). Library behavior itself is covered by tests/, not demos.
-add_subdirectory(stdlib)
+add_subdirectory(libs)
 add_subdirectory(applications/httpserver)
