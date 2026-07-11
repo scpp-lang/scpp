@@ -113,9 +113,15 @@ private:
     int maximum_;
 
 public:
-    uniform_int_distribution(__uniform_int_distribution_ctor_token, int minimum, int maximum) {
+    uniform_int_distribution(const __uniform_int_distribution_ctor_token& token, int minimum, int maximum) {
         this->minimum_ = minimum;
         this->maximum_ = maximum;
+        return;
+    }
+
+    uniform_int_distribution(const uniform_int_distribution<int>& other) {
+        this->minimum_ = other.minimum_;
+        this->maximum_ = other.maximum_;
         return;
     }
 
@@ -150,14 +156,15 @@ public:
 export std::expected<uniform_int_distribution<int>, uniform_int_distribution_error>
 make_uniform_int_distribution(int minimum, int maximum) {
     if (minimum > maximum) {
-        std::unexpected<uniform_int_distribution_error> error(uniform_int_distribution_error::empty_range);
+        uniform_int_distribution_error code = (uniform_int_distribution_error)0;
+        std::unexpected<uniform_int_distribution_error> error(code);
         std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(error);
-        return result;
+        return std::move(result);
     }
     __uniform_int_distribution_ctor_token token;
-    std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(
-        uniform_int_distribution<int>(token, minimum, maximum));
-    return result;
+    std::uniform_int_distribution<int> distribution(token, minimum, maximum);
+    std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(std::move(distribution));
+    return std::move(result);
 }
 
 } // namespace std
