@@ -959,6 +959,19 @@ void test_placement_new_parse() {
     expect(decl.init->has_paren_init, "placement_new_parse: placement new should preserve ctor paren-init");
 }
 
+void test_explicit_destructor_parse() {
+    scpp::Program program = scpp::parse(
+        "class Box { public: ~Box() { return; } }; int f() { [[scpp::unsafe]] { Box* p; p->~Box(); } return 0; }");
+    const scpp::Function& fn = *find_function_named(program, "f");
+    const scpp::Stmt& unsafe_block = *fn.body->statements[0];
+    const scpp::Stmt& stmt = *unsafe_block.statements[1];
+    expect(stmt.kind == scpp::StmtKind::ExprStmt, "explicit_destructor_parse: statement 1 should be ExprStmt");
+    expect(stmt.expr != nullptr && stmt.expr->kind == scpp::ExprKind::Destroy,
+           "explicit_destructor_parse: expr should be a Destroy expression");
+    expect(stmt.expr->destroy_through_pointer, "explicit_destructor_parse: expected pointer-form destructor call");
+    expect(is_named_type(stmt.expr->type, "Box"), "explicit_destructor_parse: destroyed type should be Box");
+}
+
 void test_full_header_parameter_pack_and_new_pack_expansion_parse() {
     scpp::Program program = scpp::parse(
         "template<typename T, typename... Args>\n"
@@ -3281,6 +3294,7 @@ int main() {
     test_make_unique_of_struct_type();
     test_new_and_delete_parse();
     test_placement_new_parse();
+    test_explicit_destructor_parse();
     test_extern_c_single_declaration();
     test_extern_c_block_form();
     test_extern_c_definition_is_checked_like_any_function();

@@ -417,6 +417,7 @@ private:
         clone->type = expr.type;
         clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
         clone->has_paren_init = expr.has_paren_init;
+        clone->destroy_through_pointer = expr.destroy_through_pointer;
         clone->lambda_blanket_mode = expr.lambda_blanket_mode;
         clone->lambda_params = expr.lambda_params;
         clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
@@ -669,6 +670,7 @@ private:
         if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
         clone->type = expr.type;
         clone->has_paren_init = expr.has_paren_init;
+        clone->destroy_through_pointer = expr.destroy_through_pointer;
         return clone;
     }
 
@@ -4314,9 +4316,34 @@ private:
     ExprPtr parse_postfix(ExprPtr expr) {
         for (;;) {
             if (match(TokenKind::Dot)) {
+                if (match(TokenKind::Tilde)) {
+                    Type destroyed_type = parse_type();
+                    expect(TokenKind::LParen, "'('");
+                    expect(TokenKind::RParen, "')'");
+                    auto node = std::make_unique<Expr>();
+                    node->kind = ExprKind::Destroy;
+                    node->loc = expr->loc;
+                    node->lhs = std::move(expr);
+                    node->type = std::move(destroyed_type);
+                    expr = std::move(node);
+                    continue;
+                }
                 std::string name = std::string(expect(TokenKind::Identifier, "field or method name").text);
                 expr = parse_member_or_method_call(std::move(expr), name);
             } else if (match(TokenKind::Arrow)) {
+                if (match(TokenKind::Tilde)) {
+                    Type destroyed_type = parse_type();
+                    expect(TokenKind::LParen, "'('");
+                    expect(TokenKind::RParen, "')'");
+                    auto node = std::make_unique<Expr>();
+                    node->kind = ExprKind::Destroy;
+                    node->loc = expr->loc;
+                    node->lhs = std::move(expr);
+                    node->type = std::move(destroyed_type);
+                    node->destroy_through_pointer = true;
+                    expr = std::move(node);
+                    continue;
+                }
                 std::string name = std::string(expect(TokenKind::Identifier, "field or method name").text);
                 // `this->x` (ch05 §5.9): `this` is represented as an
                 // ordinary Reference-typed pseudo-parameter (see parser's

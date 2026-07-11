@@ -382,6 +382,11 @@ void print_expr(const scpp::Expr& expr, int depth) {
             std::cout << "Delete\n";
             print_expr(*expr.lhs, depth + 1);
             break;
+        case scpp::ExprKind::Destroy:
+            std::cout << (expr.destroy_through_pointer ? "DestroyPtr " : "DestroyObj ")
+                      << type_to_string(expr.type) << "\n";
+            print_expr(*expr.lhs, depth + 1);
+            break;
         case scpp::ExprKind::PackExpansion:
             std::cout << "PackExpansion\n";
             print_expr(*expr.lhs, depth + 1);
