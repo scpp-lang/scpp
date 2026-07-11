@@ -1,0 +1,15 @@
+// Current leading-`::` semantics: a globally qualified call from inside a
+// namespace bypasses same-name shadowing there and resolves the real global.
+int ping() {
+    return 41;
+}
+
+namespace inner {
+int ping() {
+    return ::ping() + 1;
+}
+}
+
+int main() {
+    return inner::ping() - 42;
+}
