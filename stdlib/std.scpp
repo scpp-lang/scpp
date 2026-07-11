@@ -11,3 +11,4 @@ export import :functional;
 export import :memory;
 export import :thread;
 export import :print;
+export import :random;
