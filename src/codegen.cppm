@@ -4303,6 +4303,16 @@ private:
             case ExprKind::Move:
                 return codegen_lvalue(*expr.lhs);
 
+            case ExprKind::Cast: {
+                if (expr.type.kind != TypeKind::Pointer) {
+                    throw CodegenError("expression is not assignable", current_loc_);
+                }
+                llvm::Value* value = codegen_expr(expr);
+                llvm::AllocaInst* slot = create_entry_block_alloca(to_llvm_type(expr.type), "castptrtmp");
+                create_store(value, slot, alignment_for_type(expr.type));
+                return LValue{slot, expr.type, alignment_for_type(expr.type)};
+            }
+
             case ExprKind::Unary: {
                 // Only `*p` (Deref) is addressable; Neg/Not produce a
                 // plain value with no backing storage.

@@ -3590,6 +3590,39 @@ int main() {
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
     }
+
+    {
+        std::string case_name = "std_expected_uses_inline_storage_without_default_constructibility";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+class no_default {
+public:
+    int value;
+    no_default(int v) {
+        this->value = v;
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+};
+int main() {
+    std::expected<no_default, int> good(no_default(7));
+    std::unexpected<int> err(5);
+    std::expected<no_default, int> bad(err);
+    if (!good.has_value()) return 1;
+    if (good.value().get() != 7) return 2;
+    if (bad.has_value()) return 3;
+    if (bad.error() != 5) return 4;
+    if ((int)sizeof(std::unexpected<long>) != 8) return 5;
+    if ((int)sizeof(std::expected<int, long>) != 16) return 6;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
 }
 
 } // namespace

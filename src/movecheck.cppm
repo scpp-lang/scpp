@@ -2284,6 +2284,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // allocation out from under a live reference would otherwise
             // be a use-after-free.
             if (is_explicit_star_this(expr)) return "this";
+            if (expr.unary_op == UnaryOp::AddressOf) {
+                return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+            }
             if (expr.unary_op != UnaryOp::Deref) {
                 if (report_errors) {
                     throw DataflowError("a reference can currently only borrow a plain local variable, a "
@@ -2302,6 +2305,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             }
             return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
         }
+
+        case ExprKind::Cast:
+            // A cast changes only the static view of the same underlying
+            // storage/root place. This is specifically needed for manual-
+            // lifetime patterns like `(T*)&slot`, where the cast itself
+            // doesn't manufacture a fresh borrow source; the root still
+            // comes from the operand (`&slot`, or a field thereof).
+            return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body);
