@@ -3594,6 +3594,26 @@ void run_global_scope_resolution_tests() {
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
         std::filesystem::remove(exe_path);
     }
+
+    {
+        std::string case_name = "global_scope_resolution_bypasses_std_namespace_shadowing";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
+        scpp::compile_to_executable(
+            "int raw_ping() { return 41; }\n"
+            "namespace std {\n"
+            "int raw_ping() {\n"
+            "    return ::raw_ping() + 1;\n"
+            "}\n"
+            "}\n"
+            "int main() {\n"
+            "    return std::raw_ping() - 42;\n"
+            "}\n",
+            exe_path.string());
+        RunResult result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
 }
 
 void run_expected_tests() {

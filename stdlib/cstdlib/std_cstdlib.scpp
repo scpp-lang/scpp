@@ -4,20 +4,12 @@ extern "C" {
     void abort();
 }
 
-// Calling `abort()` unqualified from inside `std::abort()` would recurse
-// back to the wrapper itself, so keep the raw C entrypoint in a distinct
-// file-scope helper.
-void __std_cstdlib_abort_raw() {
-    [[scpp::unsafe]] {
-        abort();
-    }
-    return;
-}
-
 namespace std {
 
 export void abort() {
-    __std_cstdlib_abort_raw();
+    [[scpp::unsafe]] {
+        ::abort();
+    }
     return;
 }
 
