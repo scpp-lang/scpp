@@ -1,5 +1,6 @@
 module;
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -791,7 +792,8 @@ private:
         if (a.kind != b.kind) return false;
         if (a.name != b.name || a.is_mutable_ref != b.is_mutable_ref ||
             a.is_mutable_pointee != b.is_mutable_pointee || a.array_size != b.array_size ||
-            a.is_pack_expansion != b.is_pack_expansion || a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) {
+            a.is_pack_expansion != b.is_pack_expansion || a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
+            a.is_const_function != b.is_const_function || a.function_ref_qualifier != b.function_ref_qualifier) {
             return false;
         }
         if (a.template_args.size() != b.template_args.size() || a.non_type_args.size() != b.non_type_args.size() ||
@@ -839,6 +841,80 @@ private:
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
                a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier;
+    }
+
+    [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
+                                                 const std::vector<GenericTypeParam>& b) const {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (a[i].name != b[i].name || a[i].concept_name != b[i].concept_name ||
+                a[i].is_non_type != b[i].is_non_type || a[i].is_pack != b[i].is_pack ||
+                !types_equal(a[i].non_type_type, b[i].non_type_type)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool same_non_type_expr(const std::shared_ptr<Expr>& a, const std::shared_ptr<Expr>& b) const {
+        if (static_cast<bool>(a) != static_cast<bool>(b)) return false;
+        if (!a) return true;
+        return a->kind == b->kind && a->int_value == b->int_value && a->name == b->name;
+    }
+
+    [[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) const {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (!types_equal(a[i], b[i])) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool same_enum_identity(const EnumDef& a, const EnumDef& b) const {
+        if (a.name != b.name || a.namespace_path != b.namespace_path || !types_equal(a.underlying_type, b.underlying_type) ||
+            a.variants.size() != b.variants.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.variants.size(); i++) {
+            if (a.variants[i].name != b.variants[i].name || a.variants[i].value != b.variants[i].value) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool same_struct_identity(const StructDef& a, const StructDef& b) const {
+        if (a.name != b.name || a.namespace_path != b.namespace_path || a.is_union != b.is_union ||
+            a.is_packed != b.is_packed || a.thread_movable_override != b.thread_movable_override ||
+            a.thread_shareable_override != b.thread_shareable_override ||
+            !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.fields.size(); i++) {
+            if (a.fields[i].name != b.fields[i].name || !types_equal(a.fields[i].type, b.fields[i].type)) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool same_class_identity(const ClassDef& a, const ClassDef& b) const {
+        if (a.name != b.name || a.namespace_path != b.namespace_path || a.is_concept_witness != b.is_concept_witness ||
+            a.is_forward_declaration != b.is_forward_declaration ||
+            a.is_synthetic_check_only != b.is_synthetic_check_only || a.base_class_name != b.base_class_name ||
+            a.base_access != b.base_access || a.is_variadic_primary_template != b.is_variadic_primary_template ||
+            a.is_variadic_specialization != b.is_variadic_specialization ||
+            a.is_partial_specialization != b.is_partial_specialization || a.base_pack_arg_name != b.base_pack_arg_name ||
+            a.thread_movable_override != b.thread_movable_override ||
+            a.thread_shareable_override != b.thread_shareable_override ||
+            !same_non_type_expr(a.base_non_type_arg, b.base_non_type_arg) ||
+            !same_specialization_args(a.specialization_template_args, b.specialization_template_args) ||
+            !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.fields.size(); i++) {
+            if (a.fields[i].name != b.fields[i].name || a.fields[i].access != b.fields[i].access ||
+                !types_equal(a.fields[i].type, b.fields[i].type)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     [[nodiscard]] static std::string join_namespace_path(const std::vector<std::string>& namespace_path) {
@@ -1741,6 +1817,15 @@ private:
         for (const EnumDef& def : imported.enums) {
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
             struct_names_.insert(def.name);
+            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
+            auto existing = std::find_if(program.enums.begin(), program.enums.end(), [&](const EnumDef& current) {
+                return current.owning_module == effective_owner && same_enum_identity(current, def);
+            });
+            if (existing != program.enums.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || def.is_compile_time_dependency;
+                continue;
+            }
             EnumDef clone = def;
             if (clone.owning_module.empty()) clone.owning_module = imported_name;
             clone.is_exported = is_reexport && clone.is_exported;
@@ -1752,6 +1837,15 @@ private:
             if (!def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
+            }
+            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
+            auto existing = std::find_if(program.structs.begin(), program.structs.end(), [&](const StructDef& current) {
+                return current.owning_module == effective_owner && same_struct_identity(current, def);
+            });
+            if (existing != program.structs.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || def.is_compile_time_dependency;
+                continue;
             }
             StructDef clone = def;
             if (clone.owning_module.empty()) clone.owning_module = imported_name;
@@ -1770,6 +1864,15 @@ private:
                     ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
             }
+            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
+            auto existing = std::find_if(program.classes.begin(), program.classes.end(), [&](const ClassDef& current) {
+                return current.owning_module == effective_owner && same_class_identity(current, def);
+            });
+            if (existing != program.classes.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || def.is_compile_time_dependency;
+                continue;
+            }
             ClassDef clone = clone_class_def(def);
             if (clone.owning_module.empty()) clone.owning_module = imported_name;
             clone.is_exported = is_reexport && clone.is_exported;
@@ -1782,6 +1885,17 @@ private:
                 fn.is_generic_template || fn.eval_mode != FunctionEvalMode::RuntimeOnly ||
                 (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
                  is_exported_generic_type_template(imported, fn.params[0].type.pointee->name));
+            std::string effective_owner = fn.owning_module.empty() ? imported_name : fn.owning_module;
+            auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {
+                return current.owning_module == effective_owner && current.loc.source_path_text() == fn.loc.source_path_text() &&
+                       current.loc.line == fn.loc.line && current.loc.column == fn.loc.column &&
+                       same_function_signature(current, fn);
+            });
+            if (existing != program.functions.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && fn.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || fn.is_compile_time_dependency;
+                continue;
+            }
             program.functions.push_back(clone_function_declaration(fn, imported_name, is_reexport, keep_body));
         }
     }
@@ -1825,6 +1939,14 @@ private:
         }
         for (EnumDef& def : partition.enums) {
             struct_names_.insert(def.name);
+            auto existing = std::find_if(program.enums.begin(), program.enums.end(), [&](const EnumDef& current) {
+                return current.owning_module == def.owning_module && same_enum_identity(current, def);
+            });
+            if (existing != program.enums.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || def.is_compile_time_dependency;
+                continue;
+            }
             def.is_exported = is_reexport && def.is_exported;
             program.enums.push_back(std::move(def));
         }
@@ -1833,6 +1955,14 @@ private:
             if (!def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
+            }
+            auto existing = std::find_if(program.structs.begin(), program.structs.end(), [&](const StructDef& current) {
+                return current.owning_module == def.owning_module && same_struct_identity(current, def);
+            });
+            if (existing != program.structs.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || def.is_compile_time_dependency;
+                continue;
             }
             def.is_exported = is_reexport && def.is_exported;
             program.structs.push_back(std::move(def));
@@ -1848,10 +1978,28 @@ private:
                     ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
             }
+            auto existing = std::find_if(program.classes.begin(), program.classes.end(), [&](const ClassDef& current) {
+                return current.owning_module == def.owning_module && same_class_identity(current, def);
+            });
+            if (existing != program.classes.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || def.is_compile_time_dependency;
+                continue;
+            }
             def.is_exported = is_reexport && def.is_exported;
             program.classes.push_back(std::move(def));
         }
         for (Function& fn : partition.functions) {
+            auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {
+                return current.owning_module == fn.owning_module && current.loc.source_path_text() == fn.loc.source_path_text() &&
+                       current.loc.line == fn.loc.line && current.loc.column == fn.loc.column &&
+                       same_function_signature(current, fn);
+            });
+            if (existing != program.functions.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && fn.is_exported);
+                existing->is_compile_time_dependency = existing->is_compile_time_dependency || fn.is_compile_time_dependency;
+                continue;
+            }
             fn.is_exported = is_reexport && fn.is_exported;
             program.functions.push_back(std::move(fn));
         }
