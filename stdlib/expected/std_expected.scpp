@@ -1,12 +1,12 @@
 export module std:expected;
 
-export extern "C" {
+extern "C" {
     void scpp_expected_abort();
 }
 
 namespace std {
 
-export void __expected_abort() {
+export void __expected_detail_abort_bad_expected_access() {
     [[scpp::unsafe]] {
         scpp_expected_abort();
     }
@@ -88,7 +88,7 @@ public:
 
     T& value() {
         if (!this->has_value_) {
-            std::__expected_abort();
+            std::__expected_detail_abort_bad_expected_access();
         }
         [[scpp::unsafe]] {
             return ((T*)&this->storage_)[0];
@@ -97,7 +97,7 @@ public:
 
     const T& value() const {
         if (!this->has_value_) {
-            std::__expected_abort();
+            std::__expected_detail_abort_bad_expected_access();
         }
         [[scpp::unsafe]] {
             return ((T*)&this->storage_)[0];
@@ -106,7 +106,7 @@ public:
 
     E& error() {
         if (this->has_value_) {
-            std::__expected_abort();
+            std::__expected_detail_abort_bad_expected_access();
         }
         [[scpp::unsafe]] {
             return ((E*)&this->storage_)[0];
@@ -115,7 +115,7 @@ public:
 
     const E& error() const {
         if (this->has_value_) {
-            std::__expected_abort();
+            std::__expected_detail_abort_bad_expected_access();
         }
         [[scpp::unsafe]] {
             return ((E*)&this->storage_)[0];

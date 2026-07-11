@@ -722,6 +722,45 @@ void run_module_system_tests() {
         std::filesystem::remove(lib_path);
     }
 
+    // A non-exported declaration inside one partition is still visible to
+    // another partition of the same module that imports it privately; only
+    // *external* importers are blocked from naming that helper.
+    {
+        std::string case_name = "partition_private_helper_visible_inside_same_module";
+        cases_run++;
+        std::filesystem::path helper_path = write_temp_file(case_name, "helper",
+            "export module mathlib:helper;\n"
+            "namespace mathlib { int hidden_twice(int x) { return x * 2; } }\n");
+        std::filesystem::path api_path = write_temp_file(case_name, "api",
+            "export module mathlib:api;\n"
+            "import :helper;\n"
+            "namespace mathlib { export int call_hidden(int x) { return hidden_twice(x); } }\n");
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module mathlib;\n"
+            "export import :api;\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() { return mathlib::call_hidden(21) - 42; }\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"mathlib", lib_path.string()},
+                                          {"mathlib:api", api_path.string()},
+                                          {"mathlib:helper", helper_path.string()}});
+            RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+            std::filesystem::remove(exe_path);
+            expect(run_result.exit_code == 0,
+                   case_name + ": expected same-module private helper call to succeed, got " +
+                       std::to_string(run_result.exit_code));
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(helper_path);
+        std::filesystem::remove(api_path);
+        std::filesystem::remove(lib_path);
+    }
+
     // ch11 §11.8: `export import a;` inside module `b` re-exports `a`'s
     // exports *transitively* -- a third file that only `import b;` (never
     // importing `a` directly) can still call `a::value()` by relying on
