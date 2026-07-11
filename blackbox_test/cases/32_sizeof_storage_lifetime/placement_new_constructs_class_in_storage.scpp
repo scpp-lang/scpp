@@ -1,0 +1,25 @@
+import std;
+// docs/spec/en/01-unsafe.md §5.1 and current merged semantics: placement-new
+// constructs an object at a raw address without allocating, but only inside
+// [[scpp::unsafe]].
+class Box {
+public:
+    int value;
+
+    Box(int v) {
+        this->value = v;
+        return;
+    }
+
+    int get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    std::storage_for<Box> slot;
+    [[scpp::unsafe]] {
+        Box* p = new ((Box*)&slot) Box(9);
+        return p->get() - 9;
+    }
+}

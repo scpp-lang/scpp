@@ -99,7 +99,7 @@ cmake --build build
 | `13_unsupported_robustness` | 不支持/尚未实现的语法能干净地报错，不会崩溃 |
 | `14_classes` | 构造/析构函数、私有成员访问控制、编译器提供/用户自定义的拷贝构造与拷贝赋值、只能由编译器提供的移动构造与移动赋值、方法调用的借用检查、`this` |
 | `15_function_overloading` | 按精确类型匹配解析重载、by-value/by-reference 独立轴、const/非-const 方法 |
-| `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套、同一命名空间内类名的非限定查找；`using namespace` 被拒绝 |
+| `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套、同一命名空间内类名的非限定查找，以及前缀 `::` 的全局作用域查找；`using namespace` 被拒绝 |
 | `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition |
 | `18_closures` | lambda 表达式（ch05 §5.12）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
 | `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
@@ -115,6 +115,7 @@ cmake --build build
 | `29_project_build` | manifest 驱动的项目构建：单包 `build`、workspace/path dependency、直接依赖可见性、`-p` 选包，以及对尚未实现 manifest 特性的拒绝路径 |
 | `30_constant_evaluation` | 形式化规范驱动的 `constexpr`/`consteval` 覆盖：required constant evaluation、`if consteval` / `if !consteval`、v1 暂不支持的操作，以及“后面的参数先推导包，再回填前面依赖参数类型”的规则 |
 | `31_enum_class` | scoped enumeration：`enum class` 声明、带作用域的枚举项访问、不同枚举类型分离、显式 cast，以及显式底层类型/枚举值 |
+| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、placement-new，以及显式析构调用语法 |
 
 ## 测试理念
 
@@ -176,8 +177,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 287 个用例**
-- 运行器原始统计 **287/287 通过**
+- **总共 297 个用例**
+- 运行器原始统计 **297/297 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -202,6 +203,9 @@ cmake --build build
 - **union / packed 布局现在也有直接黑盒覆盖**：
   union 成员访问的 unsafe 门控、packed struct 的原始字节布局，以及
   Linux `epoll_event` / `epoll_data_t` 的真实 FFI 声明形态
+- **底层的 size/storage/lifetime 积木现在也有直接黑盒覆盖**：
+  `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、
+  placement-new、显式析构调用，以及前缀 `::` 的全局作用域查找
 - **CLI 调用方式现在也有直接黑盒覆盖**：
   裸 `scpp file.scpp`、`-o custom_name`、被移除的 `build` 关键字拒绝路径，
   以及 `lex`、`parse`、`build-module` 子命令仍然可用

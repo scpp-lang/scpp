@@ -1,0 +1,20 @@
+import std;
+// docs/spec/en/01-unsafe.md §5.1: an explicit destructor call is a manual
+// lifetime operation and must be rejected outside [[scpp::unsafe]].
+class Box {
+public:
+    ~Box() {
+        return;
+    }
+};
+
+int main() {
+    Box* p;
+    [[scpp::unsafe]] {
+        std::storage_for<Box> slot;
+        p = (Box*)&slot;
+        new (p) Box();
+    }
+    p->~Box();
+    return 0;
+}

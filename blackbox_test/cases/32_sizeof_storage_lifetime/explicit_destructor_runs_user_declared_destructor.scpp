@@ -1,0 +1,30 @@
+import std;
+// docs/spec/en/01-unsafe.md §5.1 and current merged semantics: an explicit
+// destructor call ends an in-place object's lifetime without deallocating,
+// and user destructor code still runs.
+class Box {
+public:
+    int* out;
+
+    Box(int* p) {
+        this->out = p;
+        return;
+    }
+
+    ~Box() {
+        [[scpp::unsafe]] {
+            *this->out = 9;
+        }
+        return;
+    }
+};
+
+int main() {
+    int result = 0;
+    std::storage_for<Box> slot;
+    [[scpp::unsafe]] {
+        Box* p = new ((Box*)&slot) Box(&result);
+        p->~Box();
+    }
+    return result - 9;
+}
