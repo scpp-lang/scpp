@@ -1528,6 +1528,87 @@ void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
            case_name + ": expected helper type to be reachable");
 }
 
+void run_sizeof_tests() {
+    {
+        std::string case_name = "sizeof_runtime_layout_matches_current_abi_rules";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "sizeof_runtime_layout_matches_current_abi_rules_exe";
+        scpp::compile_to_executable(
+            "struct Pair {\n"
+            "    char a;\n"
+            "    int b;\n"
+            "};\n"
+            "struct [[scpp::packed]] PackedPair {\n"
+            "    char a;\n"
+            "    int b;\n"
+            "};\n"
+            "int main() {\n"
+            "    int values[3];\n"
+            "    Pair pair;\n"
+            "    if ((int)sizeof(int) != 4) return 1;\n"
+            "    if ((int)sizeof(values) != 12) return 2;\n"
+            "    if ((int)sizeof(Pair) != 8) return 3;\n"
+            "    if ((int)sizeof(pair) != (int)sizeof(Pair)) return 4;\n"
+            "    if ((int)sizeof(PackedPair) != 5) return 5;\n"
+            "    if ((int)sizeof(&pair) != " +
+                std::to_string(sizeof(void*)) +
+                ") return 6;\n"
+            "    return 0;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected sizeof runtime checks to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "sizeof_is_unevaluated_for_movecheck";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() / "sizeof_is_unevaluated_for_movecheck_exe";
+        scpp::compile_to_executable(
+            "import std;\n"
+            "int consume(std::unique_ptr<int> p) {\n"
+            "    return 0;\n"
+            "}\n"
+            "int main() {\n"
+            "    std::unique_ptr<int> p;\n"
+            "    int n = (int)sizeof(std::move(p));\n"
+            "    return consume(std::move(p)) + n - n;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected sizeof operand to be unevaluated, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "consteval_can_fold_sizeof_type_and_expr";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "consteval_can_fold_sizeof_type_and_expr_exe";
+        scpp::compile_to_executable(
+            "struct Tiny {\n"
+            "    char x;\n"
+            "};\n"
+            "consteval int answer() {\n"
+            "    Tiny t;\n"
+            "    return (int)sizeof(Tiny) + (int)sizeof(t);\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer() - 2;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected consteval sizeof folding to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+}
+
 void run_consteval_tests() {
     {
         std::string case_name = "consteval_folds_recursive_constexpr_helper";
@@ -3259,6 +3340,7 @@ int main() {
     run_thread_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
+    run_sizeof_tests();
     run_consteval_tests();
     run_cli_extension_tests();
 

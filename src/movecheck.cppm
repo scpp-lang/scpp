@@ -1442,6 +1442,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::FloatLiteral: return named_type("double");
         case ExprKind::BoolLiteral: return named_type("bool");
         case ExprKind::CharLiteral: return named_type("char");
+        case ExprKind::Sizeof: return named_type("size_t");
         case ExprKind::StringLiteral: {
             Type result;
             result.kind = TypeKind::Pointer;
@@ -1559,6 +1560,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                                            : std::optional<Type>(sig.return_type);
                             }
                         }
+
                     }
                     if (operand->kind != TypeKind::Pointer) return std::nullopt;
                     return *operand->pointee;
@@ -1653,6 +1655,26 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         }
     }
     return std::nullopt;
+}
+
+void validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
+                             const SourceLocation& loc) {
+    Type queried_type;
+    if (expr.sizeof_operand_is_type) {
+        queried_type = expr.type;
+    } else {
+        std::optional<Type> inferred = infer_expr_type(*expr.lhs, body, signatures);
+        if (!inferred.has_value()) {
+            throw DataflowError("cannot apply 'sizeof' to this expression: its type could not be inferred", loc);
+        }
+        queried_type = *inferred;
+    }
+    if (body.program == nullptr) {
+        throw DataflowError("internal error: sizeof requires program type information", loc);
+    }
+    if (!layout_of_type(*body.program, queried_type).has_value()) {
+        throw DataflowError("cannot apply 'sizeof' to this type in this version", loc);
+    }
 }
 
 [[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
@@ -1931,6 +1953,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
         case ExprKind::TypeTrait:
+        case ExprKind::Sizeof:
             return;
         case ExprKind::New:
             for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
@@ -2974,6 +2997,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
         case ExprKind::TypeTrait:
+            return;
+
+        case ExprKind::Sizeof:
+            if (report_errors) validate_sizeof_operand(expr, body, signatures, state.current_loc);
             return;
 
         case ExprKind::Identifier: {
