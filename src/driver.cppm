@@ -708,6 +708,8 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     write_string(out, def.template_owner_id);
     write_u8(out, def.thread_movable_override ? 1u : 0u);
     write_u8(out, def.thread_shareable_override ? 1u : 0u);
+    write_u8(out, def.is_nodiscard ? 1u : 0u);
+    write_string(out, def.nodiscard_reason);
 }
 
 [[nodiscard]] StructDef read_struct_def(std::istream& in, const std::string& context) {
@@ -730,6 +732,8 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     def.template_owner_id = read_string(in, context + " template owner id");
     def.thread_movable_override = read_u8(in, context + " thread movable override") != 0u;
     def.thread_shareable_override = read_u8(in, context + " thread shareable override") != 0u;
+    def.is_nodiscard = read_u8(in, context + " nodiscard") != 0u;
+    def.nodiscard_reason = read_string(in, context + " nodiscard reason");
     return def;
 }
 
@@ -764,6 +768,8 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     if (def.thread_movable_if_movable_expr) write_expr(out, *def.thread_movable_if_movable_expr);
     write_u8(out, def.thread_movable_if_shareable_expr ? 1u : 0u);
     if (def.thread_movable_if_shareable_expr) write_expr(out, *def.thread_movable_if_shareable_expr);
+    write_u8(out, def.is_nodiscard ? 1u : 0u);
+    write_string(out, def.nodiscard_reason);
 }
 
 [[nodiscard]] ClassDef read_class_def(std::istream& in, const std::string& context) {
@@ -803,6 +809,8 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     if (read_u8(in, context + " shareable_if expr present") != 0u) {
         def.thread_movable_if_shareable_expr = read_expr(in, context + " shareable_if expr");
     }
+    def.is_nodiscard = read_u8(in, context + " nodiscard") != 0u;
+    def.nodiscard_reason = read_string(in, context + " nodiscard reason");
     return def;
 }
 
@@ -817,6 +825,8 @@ void write_function(std::ostream& out, const Function& fn) {
     write_u8(out, fn.is_extern_c ? 1u : 0u);
     write_u8(out, fn.is_module_extern ? 1u : 0u);
     write_u8(out, fn.is_unsafe ? 1u : 0u);
+    write_u8(out, fn.is_nodiscard ? 1u : 0u);
+    write_string(out, fn.nodiscard_reason);
     write_u8(out, fn.is_compile_time_dependency ? 1u : 0u);
     write_enum(out, fn.eval_mode);
     write_u8(out, fn.has_varargs ? 1u : 0u);
@@ -845,6 +855,8 @@ void write_function(std::ostream& out, const Function& fn) {
     fn.is_extern_c = read_u8(in, context + " extern_c") != 0u;
     fn.is_module_extern = read_u8(in, context + " module_extern") != 0u;
     fn.is_unsafe = read_u8(in, context + " unsafe") != 0u;
+    fn.is_nodiscard = read_u8(in, context + " nodiscard") != 0u;
+    fn.nodiscard_reason = read_string(in, context + " nodiscard reason");
     fn.is_compile_time_dependency = read_u8(in, context + " compile_time_dependency") != 0u;
     fn.eval_mode = read_enum<FunctionEvalMode>(in, context + " eval mode");
     fn.has_varargs = read_u8(in, context + " has_varargs") != 0u;
@@ -908,7 +920,8 @@ void write_function(std::ostream& out, const Function& fn) {
 
 [[nodiscard]] bool same_function_identity_for_payload_merge(const Function& a, const Function& b) {
     return a.name == b.name && types_equal_for_payload_merge(a.return_type, b.return_type) &&
-           params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier;
+           params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
+           a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason;
 }
 
 [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
@@ -932,13 +945,16 @@ void write_function(std::ostream& out, const Function& fn) {
 }
 
 [[nodiscard]] bool same_struct_identity_for_payload_merge(const StructDef& a, const StructDef& b) {
-    return a.name == b.name && a.is_union == b.is_union && same_template_param_shape(a.template_params, b.template_params);
+    return a.name == b.name && a.is_union == b.is_union && a.is_nodiscard == b.is_nodiscard &&
+           a.nodiscard_reason == b.nodiscard_reason &&
+           same_template_param_shape(a.template_params, b.template_params);
 }
 
 [[nodiscard]] bool same_class_identity_for_payload_merge(const ClassDef& a, const ClassDef& b) {
     return a.name == b.name && a.is_variadic_primary_template == b.is_variadic_primary_template &&
            a.is_variadic_specialization == b.is_variadic_specialization &&
            a.is_partial_specialization == b.is_partial_specialization &&
+           a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason &&
            same_template_param_shape(a.template_params, b.template_params) &&
            same_specialization_args(a.specialization_template_args, b.specialization_template_args);
 }

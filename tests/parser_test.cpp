@@ -259,6 +259,26 @@ void test_function_level_unsafe_marker_parses() {
     expect(f_fn->is_unsafe, "function_level_unsafe_marker_parses: is_unsafe should be true");
 }
 
+void test_nodiscard_function_and_method_attributes_parse() {
+    scpp::Program program = scpp::parse(
+        "[[nodiscard(\"use the result\")]] int f() { return 1; }\n"
+        "class Box {\n"
+        "public:\n"
+        "    [[nodiscard]] int value() const { return 7; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* f_fn = find_function_named(program, "f");
+    const scpp::Function* value_fn = find_function_named(program, "Box_value");
+    expect(f_fn != nullptr, "nodiscard_function_and_method_attributes_parse: expected a Function named 'f'");
+    expect(f_fn->is_nodiscard, "nodiscard_function_and_method_attributes_parse: function should be nodiscard");
+    expect(f_fn->nodiscard_reason == "use the result",
+           "nodiscard_function_and_method_attributes_parse: function reason should parse");
+    expect(value_fn != nullptr, "nodiscard_function_and_method_attributes_parse: expected method clone");
+    expect(value_fn->is_nodiscard, "nodiscard_function_and_method_attributes_parse: method should be nodiscard");
+    expect(value_fn->nodiscard_reason.empty(),
+           "nodiscard_function_and_method_attributes_parse: bare nodiscard should have empty reason");
+}
+
 // ch01 §1.3 (1): `[[scpp::unsafe]]` may only appertain to a compound-
 // statement or a function's own declaration -- appertaining to a
 // struct/class declaration is ill-formed.
@@ -277,7 +297,7 @@ void test_unsafe_attribute_on_struct_is_rejected() {
 // struct's own declaration set the manual-override flags.
 void test_thread_safety_attribute_on_struct_parses() {
     scpp::Program program = scpp::parse(
-        "struct [[scpp::thread_movable]] RawBufferHandle { int* data; int len; };\n"
+        "struct [[scpp::thread_movable, nodiscard(\"keep this handle\")]] RawBufferHandle { int* data; int len; };\n"
         "int main() { return 0; }\n");
     const scpp::StructDef* s = nullptr;
     for (const scpp::StructDef& def : program.structs) {
@@ -286,6 +306,9 @@ void test_thread_safety_attribute_on_struct_parses() {
     expect(s != nullptr, "thread_safety_attribute_on_struct_parses: expected a StructDef named 'RawBufferHandle'");
     expect(s->thread_movable_override, "thread_safety_attribute_on_struct_parses: thread_movable_override should be true");
     expect(!s->thread_shareable_override, "thread_safety_attribute_on_struct_parses: thread_shareable_override should be false");
+    expect(s->is_nodiscard, "thread_safety_attribute_on_struct_parses: struct should be nodiscard");
+    expect(s->nodiscard_reason == "keep this handle",
+           "thread_safety_attribute_on_struct_parses: struct reason should parse");
 }
 
 // Same attribute grammar slot on a class's own declaration; both
@@ -3264,6 +3287,7 @@ int main() {
     test_bare_unsafe_identifier_followed_by_return_is_parse_error();
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();
+    test_nodiscard_function_and_method_attributes_parse();
     test_unsafe_attribute_on_struct_is_rejected();
     test_thread_safety_attribute_on_struct_parses();
     test_thread_safety_attributes_on_class_parse();

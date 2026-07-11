@@ -222,6 +222,8 @@ struct FunctionSignature {
     // is_extern_c above (see check_call_arguments) -- scpp's equivalent
     // of Rust's `unsafe fn`.
     bool is_unsafe = false;
+    bool is_nodiscard = false;
+    std::string nodiscard_reason;
     // Where this specific overload's declaration begins -- see
     // Function::loc; needed for diagnostics that are about one
     // particular overload (e.g. a redefinition error naming the
@@ -861,6 +863,51 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         if (def.name == type.name) return !def.is_concept_witness;
     }
     return false;
+}
+
+struct NodiscardInfo {
+    std::string subject;
+    std::string reason;
+};
+
+[[nodiscard]] const NodiscardInfo* nodiscard_info_for_named_type(const Type& type, const Body& body) {
+    if (type.kind != TypeKind::Named || body.program == nullptr) return nullptr;
+    for (const ClassDef& def : body.program->classes) {
+        if (def.name == type.name && def.is_nodiscard) {
+            static thread_local NodiscardInfo info;
+            info.subject = "type '" + def.name + "'";
+            info.reason = def.nodiscard_reason;
+            return &info;
+        }
+    }
+    for (const StructDef& def : body.program->structs) {
+        if (def.name == type.name && def.is_nodiscard) {
+            static thread_local NodiscardInfo info;
+            info.subject = "type '" + def.name + "'";
+            info.reason = def.nodiscard_reason;
+            return &info;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] const NodiscardInfo* nodiscard_info_for_discarded_call(const Expr& expr, const Body& body,
+                                                                     const Signatures& signatures) {
+    if (expr.kind != ExprKind::Call) return nullptr;
+    CalleeSignature callee = resolve_callee_signature(expr, body);
+    if (const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures)) {
+        if (sig->is_nodiscard) {
+            static thread_local NodiscardInfo info;
+            info.subject = "function '" + (callee.key.empty() ? expr.name : callee.key) + "'";
+            info.reason = sig->nodiscard_reason;
+            return &info;
+        }
+        if (sig->return_type.kind == TypeKind::Named) return nodiscard_info_for_named_type(sig->return_type, body);
+        return nullptr;
+    }
+    std::optional<Type> inferred = infer_expr_type(expr, body, signatures);
+    if (!inferred.has_value() || inferred->kind != TypeKind::Named) return nullptr;
+    return nodiscard_info_for_named_type(*inferred, body);
 }
 
 [[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type, const Body& body,
@@ -3961,6 +4008,13 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
 
         case MirStatementKind::Eval:
             apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (report_errors) {
+                if (const NodiscardInfo* info = nodiscard_info_for_discarded_call(*stmt.expr, body, signatures)) {
+                    std::string message = "discarded return value of nodiscard " + info->subject;
+                    if (!info->reason.empty()) message += ": " + info->reason;
+                    throw DataflowError(message, stmt.expr->loc);
+                }
+            }
             return;
 
         case MirStatementKind::Drop:
@@ -4211,6 +4265,8 @@ void check_function(const Function& fn, const Program& program, const Signatures
         sig.elided_param_index = resolve_elided_param_index(fn);
         sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr;
         sig.is_unsafe = fn.is_unsafe;
+        sig.is_nodiscard = fn.is_nodiscard;
+        sig.nodiscard_reason = fn.nodiscard_reason;
         sig.loc = fn.loc;
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
@@ -4306,6 +4362,8 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.is_extern_c = fn.is_extern_c;
     clone.is_module_extern = fn.is_module_extern;
     clone.is_unsafe = fn.is_unsafe;
+    clone.is_nodiscard = fn.is_nodiscard;
+    clone.nodiscard_reason = fn.nodiscard_reason;
     clone.is_compile_time_dependency = fn.is_compile_time_dependency;
     clone.has_varargs = fn.has_varargs;
     clone.method_requires_concept = fn.method_requires_concept;
@@ -5256,6 +5314,8 @@ private:
             clone.namespace_path = method_tmpl.namespace_path;
             clone.is_exported = false;
             clone.is_unsafe = method_tmpl.is_unsafe;
+            clone.is_nodiscard = method_tmpl.is_nodiscard;
+            clone.nodiscard_reason = method_tmpl.nodiscard_reason;
             clone.owning_module = method_tmpl.owning_module;
             clone.eval_mode = method_tmpl.eval_mode;
             clone.is_generic_template = method_tmpl.is_generic_template;
@@ -6187,6 +6247,8 @@ private:
             StructDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
+            concrete.is_nodiscard = tmpl.is_nodiscard;
+            concrete.nodiscard_reason = tmpl.nodiscard_reason;
             for (const StructField& f : tmpl.fields) {
                 StructField nf;
                 nf.name = f.name;
@@ -6246,6 +6308,8 @@ private:
             concrete.base_access = tmpl_base_access;
             concrete.thread_movable_override = tmpl_thread_movable_override;
             concrete.thread_shareable_override = tmpl_thread_shareable_override;
+            concrete.is_nodiscard = tmpl.is_nodiscard;
+            concrete.nodiscard_reason = tmpl.nodiscard_reason;
             if (tmpl_thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = std::move(tmpl_thread_movable_if_movable_expr);
                 substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr,
@@ -6284,6 +6348,8 @@ private:
                 clone.namespace_path = method_tmpl.namespace_path;
                 clone.is_exported = false;
                 clone.is_unsafe = method_tmpl.is_unsafe;
+                clone.is_nodiscard = method_tmpl.is_nodiscard;
+                clone.nodiscard_reason = method_tmpl.nodiscard_reason;
                 clone.owning_module = method_tmpl.owning_module;
                 clone.eval_mode = method_tmpl.eval_mode;
                 clone.is_generic_template = method_tmpl.is_generic_template;
@@ -6380,6 +6446,8 @@ private:
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
             concrete.fields = tmpl.fields;
+            concrete.is_nodiscard = tmpl.is_nodiscard;
+            concrete.nodiscard_reason = tmpl.nodiscard_reason;
             program_.structs.push_back(std::move(concrete));
             return cache_key;
         }
@@ -6397,6 +6465,8 @@ private:
             concrete.namespace_path = tmpl.namespace_path;
             concrete.thread_movable_override = tmpl.thread_movable_override;
             concrete.thread_shareable_override = tmpl.thread_shareable_override;
+            concrete.is_nodiscard = tmpl.is_nodiscard;
+            concrete.nodiscard_reason = tmpl.nodiscard_reason;
             if (tmpl.thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
@@ -6416,6 +6486,8 @@ private:
                 clone.namespace_path = method_tmpl.namespace_path;
                 clone.is_exported = false;
                 clone.is_unsafe = method_tmpl.is_unsafe;
+                clone.is_nodiscard = method_tmpl.is_nodiscard;
+                clone.nodiscard_reason = method_tmpl.nodiscard_reason;
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
@@ -6520,6 +6592,8 @@ private:
             concrete.namespace_path = base_case_tmpl->namespace_path;
             concrete.thread_movable_override = base_case_tmpl->thread_movable_override;
             concrete.thread_shareable_override = base_case_tmpl->thread_shareable_override;
+            concrete.is_nodiscard = base_case_tmpl->is_nodiscard;
+            concrete.nodiscard_reason = base_case_tmpl->nodiscard_reason;
             if (base_case_tmpl->thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
@@ -6566,6 +6640,10 @@ private:
         GenericTypeParam head_param = recursive_tmpl->template_params[leading_non_type_count];
         std::string base_template_name = recursive_tmpl->base_class_name;
         AccessSpecifier base_access = recursive_tmpl->base_access;
+        bool thread_movable_override = recursive_tmpl->thread_movable_override;
+        bool thread_shareable_override = recursive_tmpl->thread_shareable_override;
+        bool is_nodiscard = recursive_tmpl->is_nodiscard;
+        std::string nodiscard_reason = recursive_tmpl->nodiscard_reason;
         std::vector<ClassField> fields_copy = recursive_tmpl->fields;
         std::vector<std::string> namespace_path_copy = recursive_tmpl->namespace_path;
         std::shared_ptr<Expr> base_non_type_arg_expr = recursive_tmpl->base_non_type_arg;
@@ -6612,8 +6690,10 @@ private:
         concrete.namespace_path = namespace_path_copy;
         concrete.base_class_name = base_concrete_name;
         concrete.base_access = base_access;
-        concrete.thread_movable_override = recursive_tmpl->thread_movable_override;
-        concrete.thread_shareable_override = recursive_tmpl->thread_shareable_override;
+        concrete.thread_movable_override = thread_movable_override;
+        concrete.thread_shareable_override = thread_shareable_override;
+        concrete.is_nodiscard = is_nodiscard;
+        concrete.nodiscard_reason = std::move(nodiscard_reason);
         if (thread_movable_if_movable_expr_copy) {
             concrete.thread_movable_if_movable_expr = std::move(thread_movable_if_movable_expr_copy);
             substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr, type_replacements);
@@ -7178,6 +7258,8 @@ private:
                 clone.namespace_path = tmpl.namespace_path;
                 clone.is_exported = false;
                 clone.is_unsafe = tmpl.is_unsafe;
+                clone.is_nodiscard = tmpl.is_nodiscard;
+                clone.nodiscard_reason = tmpl.nodiscard_reason;
                 clone.return_type = tmpl.return_type;
                 for (const auto& [name, replacement] : type_bindings) {
                     clone.return_type = substitute_type_param(clone.return_type, name, replacement);
@@ -7276,6 +7358,8 @@ private:
         clone.namespace_path = tmpl.namespace_path;
         clone.is_exported = false;
         clone.is_unsafe = tmpl.is_unsafe;
+        clone.is_nodiscard = tmpl.is_nodiscard;
+        clone.nodiscard_reason = tmpl.nodiscard_reason;
         clone.owning_module = tmpl.owning_module;
         clone.eval_mode = tmpl.eval_mode;
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
@@ -8902,6 +8986,8 @@ private:
         // synthesized clone with a compiler-synthesized name).
         clone.is_exported = false;
         clone.is_unsafe = tmpl.is_unsafe;
+        clone.is_nodiscard = tmpl.is_nodiscard;
+        clone.nodiscard_reason = tmpl.nodiscard_reason;
         clone.owning_module = tmpl.owning_module;
         clone.eval_mode = tmpl.eval_mode;
         std::unordered_map<std::string, Type> witness_replacements;
