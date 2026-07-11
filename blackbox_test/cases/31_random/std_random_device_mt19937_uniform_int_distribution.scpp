@@ -1,43 +1,34 @@
+// stdlib/random/std_random.scpp: `std::random_device` and `std::mt19937`
+// expose a `call()` operator plus `min()`/`max()`, and
+// `std::uniform_int_distribution<int>(a, b)` draws values in the requested
+// inclusive range.
 import std;
 
 int main() {
     std::random_device rd;
     uint32_t expected_max = static_cast<uint32_t>(4294967295);
     if (rd.min() != static_cast<uint32_t>(0)) {
-        return 4;
-    }
-    if (rd.max() != expected_max) {
-        return 5;
-    }
-    std::mt19937 seeded(rd());
-    if (seeded.min() != static_cast<uint32_t>(0)) {
-        return 6;
-    }
-    if (seeded.max() != expected_max) {
-        return 7;
-    }
-    std::uniform_int_distribution<int> hundred(1, 100);
-    int secret = hundred(seeded);
-    if (secret < 1 || secret > 100) {
-        return 3;
-    }
-
-    std::mt19937 gen(123);
-    uint32_t first = gen();
-    uint32_t second = gen();
-    if (first == second) {
         return 1;
     }
-
-    std::uniform_int_distribution<int> die(1, 6);
-    int roll1 = die(gen);
-    int roll2 = die(gen);
-    if (roll1 < 1 || roll1 > 6 || roll2 < 1 || roll2 > 6) {
+    if (rd.max() != expected_max) {
         return 2;
     }
-    if (roll1 == roll2 && first == second) {
-        return 8;
+
+    std::mt19937 seeded(rd());
+    if (seeded.min() != static_cast<uint32_t>(0)) {
+        return 3;
+    }
+    if (seeded.max() != expected_max) {
+        return 4;
     }
 
+    std::uniform_int_distribution<int> hundred(1, 100);
+    if (hundred.min() != 1 || hundred.max() != 100) {
+        return 5;
+    }
+    int secret = hundred(seeded);
+    if (secret < 1 || secret > 100) {
+        return 6;
+    }
     return 0;
 }

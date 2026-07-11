@@ -114,6 +114,7 @@ cmake --build build
 | `28_cli_invocation` | CLI 表面：直接 `scpp file.scpp` 构建、默认/自定义输出名、移除的 `build` 关键字，以及仍保留的 `lex`/`parse`/`build-module` 子命令 |
 | `29_project_build` | manifest 驱动的项目构建：单包 `build`、workspace/path dependency、直接依赖可见性、`-p` 选包，以及对尚未实现 manifest 特性的拒绝路径 |
 | `30_constant_evaluation` | 形式化规范驱动的 `constexpr`/`consteval` 覆盖：required constant evaluation、`if consteval` / `if !consteval`、v1 暂不支持的操作，以及“后面的参数先推导包，再回填前面依赖参数类型”的规则 |
+| `31_random` | 首个 `std::random` 子集：`std::random_device`、`std::mt19937` 与 `std::uniform_int_distribution<int>` 的种子、取值范围与错误路径行为 |
 
 ## 测试理念
 

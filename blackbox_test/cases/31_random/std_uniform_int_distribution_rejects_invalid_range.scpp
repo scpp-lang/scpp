@@ -1,3 +1,5 @@
+// stdlib/random/std_random.scpp: `std::uniform_int_distribution<int>`
+// rejects an invalid constructor range where minimum > maximum.
 import std;
 
 int main() {

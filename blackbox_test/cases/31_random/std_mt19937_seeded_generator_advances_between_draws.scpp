@@ -1,0 +1,27 @@
+// stdlib/random/std_random.scpp: `std::mt19937(seed)` is stateful. Repeated
+// draws from one generator should advance the engine rather than returning a
+// constant hard-coded value, while re-seeding a fresh generator reproduces the
+// same first output.
+import std;
+
+int main() {
+    std::mt19937 gen(123);
+    uint32_t first = gen();
+    uint32_t second = gen();
+    if (first == second) {
+        return 1;
+    }
+
+    std::mt19937 again(123);
+    if (first != again()) {
+        return 2;
+    }
+
+    std::uniform_int_distribution<int> die(1, 6);
+    int roll = die(gen);
+    if (roll < 1 || roll > 6) {
+        return 3;
+    }
+
+    return 0;
+}

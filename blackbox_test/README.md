@@ -128,6 +128,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `28_cli_invocation` | CLI surface: direct `scpp file.scpp` builds, default/custom output names, removed `build` keyword, and surviving `lex`/`parse`/`build-module` subcommands |
 | `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
 | `30_constant_evaluation` | formal-spec-driven `constexpr`/`consteval` coverage: required constant evaluation, `if consteval` / `if !consteval`, unsupported v1 operations, and the later-pack-to-earlier-parameter deduction rule |
+| `31_random` | the first `std::random` subset: `std::random_device`, `std::mt19937`, and `std::uniform_int_distribution<int>` seeding/range/error behavior |
 
 ## Testing philosophy
 
