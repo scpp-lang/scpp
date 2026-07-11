@@ -4968,6 +4968,94 @@ private:
         return fn.name;
     }
 
+
+    [[nodiscard]] static size_t find_matching_angle(const std::string& text, size_t open_pos) {
+        int depth = 0;
+        for (size_t i = open_pos; i < text.size(); i++) {
+            if (text[i] == '<') depth++;
+            else if (text[i] == '>') {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return std::string::npos;
+    }
+
+    [[nodiscard]] static size_t find_last_scope_outside_angles(const std::string& text) {
+        int depth = 0;
+        for (size_t i = text.size(); i-- > 1;) {
+            char c = text[i];
+            if (c == '>') depth++;
+            else if (c == '<') depth--;
+            else if (c == ':' && text[i - 1] == ':' && depth == 0) return i - 1;
+        }
+        return std::string::npos;
+    }
+
+    [[nodiscard]] static std::string trim_copy(std::string text) {
+        size_t start = 0;
+        while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) start++;
+        size_t end = text.size();
+        while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1]))) end--;
+        return text.substr(start, end - start);
+    }
+
+    [[nodiscard]] std::optional<Type> parse_type_spelling(std::string_view spelling) const {
+        std::string text = trim_copy(std::string(spelling));
+        if (text.empty()) return std::nullopt;
+        Type type;
+        type.kind = TypeKind::Named;
+        size_t lt = text.find('<');
+        if (lt == std::string::npos) {
+            type.name = text;
+            return type;
+        }
+        size_t gt = find_matching_angle(text, lt);
+        if (gt == std::string::npos || gt + 1 != text.size()) return std::nullopt;
+        type.name = text.substr(0, lt);
+        std::string inner = text.substr(lt + 1, gt - lt - 1);
+        int depth = 0;
+        size_t start = 0;
+        for (size_t i = 0; i <= inner.size(); i++) {
+            bool at_end = i == inner.size();
+            char c = at_end ? ',' : inner[i];
+            if (!at_end) {
+                if (c == '<') depth++;
+                else if (c == '>') depth--;
+            }
+            if ((at_end || (c == ',' && depth == 0))) {
+                std::optional<Type> arg = parse_type_spelling(inner.substr(start, i - start));
+                if (!arg.has_value()) return std::nullopt;
+                type.template_args.push_back(*arg);
+                start = i + 1;
+            }
+        }
+        return type;
+    }
+
+    struct StaticTemplateCallResolution {
+        std::string concrete_class_name;
+        std::string member_name;
+    };
+
+    [[nodiscard]] std::optional<StaticTemplateCallResolution>
+    resolve_static_template_call_target(const std::string& name, SourceLocation loc) {
+        size_t scope = find_last_scope_outside_angles(name);
+        if (scope == std::string::npos) return std::nullopt;
+        std::string owner = name.substr(0, scope);
+        std::string member_name = name.substr(scope + 2);
+        if (owner.find('<') == std::string::npos) return std::nullopt;
+        std::optional<Type> owner_type = parse_type_spelling(owner);
+        if (!owner_type.has_value() || owner_type->template_args.empty()) return std::nullopt;
+        std::vector<Type> resolved_args;
+        resolved_args.reserve(owner_type->template_args.size());
+        for (const Type& arg : owner_type->template_args) {
+            resolved_args.push_back(resolve_generic_type(arg, loc));
+        }
+        std::string concrete_class_name = instantiate_generic_type(owner_type->name, resolved_args, loc);
+        return StaticTemplateCallResolution{concrete_class_name, member_name};
+    }
+
     void walk_new_concrete_function(size_t fn_index) {
         if (fn_index >= program_.functions.size()) return;
         Function& fn = program_.functions[fn_index];
@@ -6121,6 +6209,13 @@ private:
             if (c.init) resolve_generic_types_in_expr(*c.init);
         }
         if (expr.lambda_body) resolve_generic_types_in_stmt(*expr.lambda_body);
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
+            if (std::optional<StaticTemplateCallResolution> resolved =
+                    resolve_static_template_call_target(expr.name, expr.loc)) {
+                expr.name = resolved->concrete_class_name + "_" + resolved->member_name;
+                expr.explicit_global_qualification = false;
+            }
+        }
         if (expr.kind == ExprKind::TypeTrait) {
             bool value = expr.name == "is_thread_movable" ? is_thread_movable(expr.type) : is_thread_shareable(expr.type);
             expr.kind = ExprKind::BoolLiteral;

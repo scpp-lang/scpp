@@ -34,6 +34,15 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_STD_INTERFACE_PATH
+#error "SCPP_STDLIB_STD_INTERFACE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_SCPP_MODULE_PATH
+#error "SCPP_STDLIB_SCPP_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_SCPP_INTERFACE_PATH
+#error "SCPP_STDLIB_SCPP_INTERFACE_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
 #endif
@@ -91,8 +100,12 @@ void write_legacy_scppm_without_payload(const std::filesystem::path& path, std::
     out.write(interface_source.data(), static_cast<std::streamsize>(interface_source.size()));
 }
 
-std::unordered_map<std::string, std::string> std_import_paths() {
-    return {{"std", SCPP_STDLIB_STD_MODULE_PATH}};
+std::unordered_map<std::string, std::string> source_module_import_paths() {
+    return {{"std", SCPP_STDLIB_STD_MODULE_PATH}, {"scpp", SCPP_STDLIB_SCPP_MODULE_PATH}};
+}
+
+std::unordered_map<std::string, std::string> prebuilt_module_import_paths() {
+    return {{"std", SCPP_STDLIB_STD_INTERFACE_PATH}, {"scpp", SCPP_STDLIB_SCPP_INTERFACE_PATH}};
 }
 
 std::vector<std::string> std_link_inputs() {
@@ -146,7 +159,7 @@ private:
 };
 
 scpp::Program parse_with_std_imports(std::string_view source) {
-    TestModuleCache cache(std_import_paths());
+    TestModuleCache cache(source_module_import_paths());
     return scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
@@ -244,7 +257,7 @@ std::string shell_quote(const std::string& text) {
 // its stdout and exit code (0-255, matching POSIX wait status semantics).
 RunResult compile_and_run(std::string_view source, const std::string& case_name) {
     std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
-    scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), std_import_paths());
+    scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
 
     FILE* pipe = popen(exe_path.string().c_str(), "r");
     std::string output;
@@ -1644,7 +1657,7 @@ void run_sizeof_tests() {
                 ") return 6;\n"
             "    return 0;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected sizeof runtime checks to exit 0, got " + std::to_string(run_result.exit_code));
@@ -1665,7 +1678,7 @@ void run_sizeof_tests() {
             "    int n = (int)sizeof(std::move(p));\n"
             "    return consume(std::move(p)) + n - n;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected sizeof operand to be unevaluated, got " + std::to_string(run_result.exit_code));
@@ -1688,7 +1701,7 @@ void run_sizeof_tests() {
             "int main() {\n"
             "    return answer() - 2;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval sizeof folding to exit 0, got " +
@@ -1721,7 +1734,7 @@ void run_storage_tests() {
             "    if ((int)sizeof(Holder) != 24) return 3;\n"
             "    return 0;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected aligned storage layout checks to exit 0, got " +
@@ -1749,7 +1762,7 @@ void run_storage_tests() {
             "    if ((int)sizeof(Wrapper) != 24) return 2;\n"
             "    return 0;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected user-defined-type storage checks to exit 0, got " +
@@ -1772,7 +1785,7 @@ void run_placement_new_tests() {
             "        return *p - 7;\n"
             "    }\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected scalar placement-new path to exit 0, got " +
@@ -1799,7 +1812,7 @@ void run_placement_new_tests() {
             "        return p->get() - 9;\n"
             "    }\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected class placement-new path to exit 0, got " +
@@ -1830,7 +1843,7 @@ void run_explicit_destructor_tests() {
             "    }\n"
             "    return result - 9;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected explicit destructor call to exit 0, got " +
@@ -1879,7 +1892,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return answer() - 21;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected folded immediate call to exit 0, got " + std::to_string(run_result.exit_code));
@@ -1907,7 +1920,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return answer() - 42;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval constructor path to exit 0, got " +
@@ -1935,7 +1948,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return take(\"hi\") - 17;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected implicit consteval conversion path to exit 0, got " +
@@ -1966,7 +1979,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return answer() - 23;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval constructor expression path to exit 0, got " +
@@ -1989,7 +2002,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return route(2) - 42;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected nested consteval helper call to exit 0, got " +
@@ -2021,7 +2034,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return answer() - 7;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval constructor helper call to exit 0, got " +
@@ -2058,7 +2071,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return answer() - 7;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval/constexpr method calls to exit 0, got " +
@@ -2087,7 +2100,7 @@ void run_consteval_tests() {
             "    Outer o(\"x\");\n"
             "    return 0;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected local consteval constructor call to use outer ctor bindings, got " +
@@ -2122,7 +2135,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return answer() - 41;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected derived-to-base consteval helper call to exit 0, got " +
@@ -2157,7 +2170,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return answer() - 41;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected derived-to-base consteval ref call to exit 0, got " +
@@ -2181,7 +2194,7 @@ void run_consteval_tests() {
                 "    return answer();\n"
                 "}\n",
                 (std::filesystem::current_path() / "consteval_rejects_runtime_only_call_exe").string(),
-                std_link_inputs(), std_import_paths());
+                std_link_inputs(), prebuilt_module_import_paths());
         } catch (const scpp::DriverError& error) {
             threw = std::string(error.what()).find("immediate evaluation may only call constexpr/consteval functions") !=
                     std::string::npos;
@@ -2218,7 +2231,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return runtime_total() + immediate_total();\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 37,
                case_name + ": expected runtime/immediate branch total 37, got " +
@@ -2245,7 +2258,7 @@ void run_consteval_tests() {
             "int main() {\n"
             "    return inspect_views();\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 12,
                case_name + ": expected pointer/span total 12, got " + std::to_string(run_result.exit_code));
@@ -2266,7 +2279,7 @@ void run_consteval_tests() {
             "    constexpr int total = plus_one(base);\n"
             "    return total;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 5,
                case_name + ": expected constexpr local result 5, got " + std::to_string(run_result.exit_code));
@@ -2285,7 +2298,7 @@ void run_consteval_tests() {
                 "    return total;\n"
                 "}\n",
                 (std::filesystem::current_path() / "constexpr_local_rejects_runtime_initializer_exe").string(),
-                std_link_inputs(), std_import_paths());
+                std_link_inputs(), prebuilt_module_import_paths());
         } catch (const scpp::DriverError& error) {
             threw = std::string(error.what()).find("identifier 'runtime' is not available") != std::string::npos;
         }
@@ -2320,7 +2333,7 @@ void run_consteval_tests() {
             "    int runtime = via_if_consteval(2) + via_if_not_consteval(2);\n"
             "    return compile_time + runtime;\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 91,
                case_name + ": expected required-constant-evaluation total 91, got " +
@@ -2351,7 +2364,7 @@ void run_consteval_tests() {
             "    constexpr int compile_time = choose(2);\n"
             "    return compile_time + choose(2);\n"
             "}\n",
-            exe_path.string(), std_link_inputs(), std_import_paths());
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 45,
                case_name + ": expected non-selected runtime-only branch to be ignored, got " +
@@ -2387,7 +2400,7 @@ void run_consteval_tests() {
                 (std::filesystem::current_path() /
                  "required_constant_evaluation_rejects_user_defined_destructor_execution_exe")
                     .string(),
-                std_link_inputs(), std_import_paths());
+                std_link_inputs(), prebuilt_module_import_paths());
         } catch (const scpp::DriverError& error) {
             threw = std::string(error.what()).find("cannot execute user-defined destructor of 'NeedsDrop'") !=
                     std::string::npos;
@@ -2803,12 +2816,13 @@ void run_cli_extension_tests() {
     }
 
     {
-        std::string case_name = "cli_import_std_random_works_without_flags";
-        std::filesystem::path source_path = std::filesystem::current_path() / "cli_import_std_random_works_without_flags.scpp";
-        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_import_std_random_works_without_flags_exe";
+        std::string case_name = "cli_import_std_and_scpp_random_works_without_flags";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_import_std_and_scpp_random_works_without_flags.scpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_import_std_and_scpp_random_works_without_flags_exe";
         cases_run++;
         write_text_file(source_path,
                         "import std;\n"
+                        "import scpp;\n"
                         "int main() {\n"
                         "    std::random_device rd;\n"
                         "    uint32_t expected_max = static_cast<uint32_t>(4294967295);\n"
@@ -2825,7 +2839,7 @@ void run_cli_extension_tests() {
                         "    if (seeded.max() != expected_max) {\n"
                         "        return 7;\n"
                         "    }\n"
-                        "    auto hundred = std::make_uniform_int_distribution(1, 100);\n"
+                        "    auto hundred = scpp::rand::uniform_int_distribution<int>::make(1, 100);\n"
                         "    if (!hundred.has_value()) {\n"
                         "        return 3;\n"
                         "    }\n"
@@ -2839,7 +2853,7 @@ void run_cli_extension_tests() {
                         "    if (first == second) {\n"
                         "        return 1;\n"
                         "    }\n"
-                        "    auto die = std::make_uniform_int_distribution(1, 6);\n"
+                        "    auto die = scpp::rand::uniform_int_distribution<int>::make(1, 6);\n"
                         "    if (!die.has_value()) {\n"
                         "        return 9;\n"
                         "    }\n"
@@ -3780,20 +3794,14 @@ void run_static_member_function_tests() {
         std::string case_name = "static_member_function_is_callable_via_class_qualification";
         cases_run++;
         RunResult result = compile_and_run(
-            "class Math {
-"
-            "public:
-"
-            "    static int add_one(int value) { return value + 1; }
-"
-            "};
-"
-            "int main() {
-"
-            "    return Math::add_one(6) - 7;
-"
-            "}
-",
+            R"SCPP(class Math {
+public:
+    static int add_one(int value) { return value + 1; }
+};
+int main() {
+    return Math::add_one(6) - 7;
+}
+)SCPP",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
     }
@@ -3802,32 +3810,20 @@ void run_static_member_function_tests() {
         std::string case_name = "static_member_function_can_use_private_constructor_and_field";
         cases_run++;
         RunResult result = compile_and_run(
-            "class Box {
-"
-            "public:
-"
-            "    static int reveal(int value) {
-"
-            "        Box box(value);
-"
-            "        return box.secret;
-"
-            "    }
-"
-            "private:
-"
-            "    int secret;
-"
-            "    Box(int value) { this.secret = value; return; }
-"
-            "};
-"
-            "int main() {
-"
-            "    return Box::reveal(9) - 9;
-"
-            "}
-",
+            R"SCPP(class Box {
+public:
+    static int reveal(int value) {
+        Box box(value);
+        return box.secret;
+    }
+private:
+    int secret;
+    Box(int value) { this.secret = value; return; }
+};
+int main() {
+    return Box::reveal(9) - 9;
+}
+)SCPP",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
     }
@@ -3838,34 +3834,21 @@ void run_static_member_function_tests() {
         bool threw = false;
         try {
             scpp::compile_to_executable(
-                "class Box {
-"
-                "public:
-"
-                "    static int reveal(int value) {
-"
-                "        Box box(value);
-"
-                "        return box.secret;
-"
-                "    }
-"
-                "private:
-"
-                "    int secret;
-"
-                "    Box(int value) { this.secret = value; return; }
-"
-                "};
-"
-                "int main() {
-"
-                "    Box box(4);
-"
-                "    return 0;
-"
-                "}
-",
+                R"SCPP(class Box {
+public:
+    static int reveal(int value) {
+        Box box(value);
+        return box.secret;
+    }
+private:
+    int secret;
+    Box(int value) { this.secret = value; return; }
+};
+int main() {
+    Box box(4);
+    return 0;
+}
+)SCPP",
                 (std::filesystem::current_path() / case_name).string());
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("private constructor") != std::string::npos;
@@ -3879,22 +3862,15 @@ void run_static_member_function_tests() {
         bool threw = false;
         try {
             scpp::compile_to_executable(
-                "class Box {
-"
-                "public:
-"
-                "    int secret;
-"
-                "    static int broken() {
-"
-                "        return this->secret;
-"
-                "    }
-"
-                "};
-"
-                "int main() { return 0; }
-",
+                R"SCPP(class Box {
+public:
+    int secret;
+    static int broken() {
+        return this->secret;
+    }
+};
+int main() { return 0; }
+)SCPP",
                 (std::filesystem::current_path() / case_name).string());
         } catch (const scpp::CodegenError& e) {
             threw = std::string(e.what()).find("undeclared variable 'this'") != std::string::npos;
@@ -3905,15 +3881,15 @@ void run_static_member_function_tests() {
 
 void run_random_tests() {
     {
-        std::string case_name = "std_make_uniform_int_distribution_rejects_empty_range";
+        std::string case_name = "scpp_rand_uniform_int_distribution_rejects_empty_range";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
+import scpp;
 int main() {
-    std::expected<std::uniform_int_distribution<int>, std::uniform_int_distribution_error> bad =
-        std::make_uniform_int_distribution(9, 3);
+    auto bad = scpp::rand::uniform_int_distribution<int>::make(9, 3);
     if (bad.has_value()) return 1;
-    if (bad.error() != std::uniform_int_distribution_error::empty_range) return 2;
+    if (bad.error() != scpp::rand::uniform_int_distribution_error::empty_range) return 2;
     return 0;
 }
 )SCPP",
@@ -3922,21 +3898,20 @@ int main() {
     }
 
     {
-        std::string case_name = "std_make_uniform_int_distribution_produces_working_distribution";
+        std::string case_name = "scpp_rand_uniform_int_distribution_produces_working_distribution";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
+import scpp;
 int main() {
-    std::expected<std::uniform_int_distribution<int>, std::uniform_int_distribution_error> maybe_die =
-        std::make_uniform_int_distribution(1, 6);
+    auto maybe_die = scpp::rand::uniform_int_distribution<int>::make(1, 6);
     if (!maybe_die.has_value()) return 1;
     std::mt19937 gen(123);
     int roll1 = maybe_die.value()(gen);
     int roll2 = maybe_die.value()(gen);
     if (roll1 < 1 || roll1 > 6) return 2;
     if (roll2 < 1 || roll2 > 6) return 3;
-    std::expected<std::uniform_int_distribution<int>, std::uniform_int_distribution_error> maybe_singleton =
-        std::make_uniform_int_distribution(4, 4);
+    auto maybe_singleton = scpp::rand::uniform_int_distribution<int>::make(4, 4);
     if (!maybe_singleton.has_value()) return 4;
     if (maybe_singleton.value()(gen) != 4) return 5;
     return 0;
@@ -3947,23 +3922,19 @@ int main() {
     }
 
     {
-        std::string case_name = "std_uniform_int_distribution_direct_constructor_is_not_public";
+        std::string case_name = "scpp_rand_uniform_int_distribution_direct_constructor_is_not_public";
         std::filesystem::path source_path = std::filesystem::current_path() / (case_name + ".scpp");
         std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
         cases_run++;
         write_text_file(source_path,
-                        "import std;
-"
-                        "int main() {
-"
-                        "    std::uniform_int_distribution<int> die(1, 6);
-"
-                        "    std::mt19937 gen(123);
-"
-                        "    return die(gen);
-"
-                        "}
-");
+                        R"SCPP(import std;
+import scpp;
+int main() {
+    scpp::rand::uniform_int_distribution<int> die(1, 6);
+    std::mt19937 gen(123);
+    return die(gen);
+}
+)SCPP");
         RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
                                                      " -o " + exe_path.string() + " 2>&1");
         expect(build_result.exit_code != 0,
@@ -4133,11 +4104,8 @@ int main() {
     run_thread_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
-<<<<<<< HEAD
     run_static_member_function_tests();
-=======
     run_random_tests();
->>>>>>> 911a618 (Add std::random subset)
     run_expected_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();

@@ -223,6 +223,7 @@ private:
     // above already handles the separate recursive-inheritance variadic
     // family.
     std::unordered_map<std::string, std::vector<GenericTypeParam>> ordinary_generic_type_template_params_;
+    std::unordered_map<std::string, std::string> specialized_static_member_owner_names_;
     // ch05 §5.11: every full-header-form generic function's own declared
     // template parameter list (`template<size_t I, typename Head,
     // typename... Tail> Head& get(...)`), keyed by its qualified name --
@@ -807,8 +808,99 @@ private:
     resolve_static_member_owner_name(const std::string& spelled_owner, bool explicit_global_qualification) const {
         std::string resolved_owner =
             explicit_global_qualification ? spelled_owner : resolve_visible_type_name(spelled_owner);
-        if (resolved_owner.empty() || !class_names_.contains(resolved_owner)) return std::nullopt;
-        return resolved_owner;
+        std::string lookup_owner = resolved_owner.empty() ? spelled_owner : resolved_owner;
+        if (class_names_.contains(lookup_owner)) return lookup_owner;
+        auto specialized_it = specialized_static_member_owner_names_.find(lookup_owner);
+        if (specialized_it != specialized_static_member_owner_names_.end()) return specialized_it->second;
+        size_t template_start = lookup_owner.find('<');
+        if (template_start != std::string::npos) {
+            std::string unspecialized_owner = lookup_owner.substr(0, template_start);
+            if (class_names_.contains(unspecialized_owner)) return unspecialized_owner;
+        }
+        return std::nullopt;
+    }
+
+
+    [[nodiscard]] std::string type_to_string(const Type& type) const {
+        switch (type.kind) {
+        case TypeKind::Named: {
+            std::string result = type.name;
+            if (!type.template_args.empty()) {
+                result += "<";
+                for (size_t i = 0; i < type.template_args.size(); i++) {
+                    if (i != 0) result += ", ";
+                    result += type_to_string(type.template_args[i]);
+                }
+                result += ">";
+            }
+            return result;
+        }
+        case TypeKind::Pointer:
+            return (type.is_mutable_pointee ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
+                   "*";
+        case TypeKind::Function: {
+            std::string result = type_to_string(*type.function_return) + "(";
+            for (size_t i = 0; i < type.function_params.size(); i++) {
+                if (i != 0) result += ", ";
+                result += type_to_string(type.function_params[i]);
+            }
+            result += ")";
+            return result;
+        }
+        case TypeKind::FunctionPointer: {
+            std::string result = type_to_string(*type.function_return) + " (*";
+            result += ")(";
+            for (size_t i = 0; i < type.function_params.size(); i++) {
+                if (i != 0) result += ", ";
+                result += type_to_string(type.function_params[i]);
+            }
+            result += ")";
+            return result;
+        }
+        case TypeKind::Array: return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
+        case TypeKind::Reference:
+            if (type.is_rvalue_ref) return type_to_string(*type.pointee) + "&&";
+            return (type.is_mutable_ref ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
+                   "&";
+        case TypeKind::Span:
+            return std::string("std::span<") + (type.is_mutable_ref ? std::string() : std::string("const ")) +
+                   type_to_string(*type.pointee) + ">";
+        }
+        return "<unknown-type>";
+    }
+
+    [[nodiscard]] std::optional<std::string>
+    try_parse_template_static_member_name(const std::string& base_name, bool explicit_global_qualification) {
+        if (!check(TokenKind::Less)) return std::nullopt;
+        std::string resolved_base =
+            explicit_global_qualification ? base_name : resolve_visible_type_name(base_name);
+        if (resolved_base.empty() || !generic_type_names_.contains(resolved_base)) return std::nullopt;
+        size_t saved_pos = pos_;
+        try {
+            advance(); // '<'
+            std::vector<Type> template_args;
+            if (!check(TokenKind::Greater)) {
+                do {
+                    template_args.push_back(parse_template_type_argument());
+                } while (match(TokenKind::Comma));
+            }
+            expect(TokenKind::Greater, "'>'");
+            if (!match(TokenKind::ColonColon)) {
+                pos_ = saved_pos;
+                return std::nullopt;
+            }
+            std::string member_name = std::string(expect(TokenKind::Identifier, "member name").text);
+            std::string result = resolved_base + "<";
+            for (size_t i = 0; i < template_args.size(); i++) {
+                if (i != 0) result += ", ";
+                result += type_to_string(template_args[i]);
+            }
+            result += ">::" + member_name;
+            return result;
+        } catch (const ParseError&) {
+            pos_ = saved_pos;
+            return std::nullopt;
+        }
     }
 
     [[nodiscard]] bool types_equal(const Type& a, const Type& b) const {
@@ -884,6 +976,26 @@ private:
         if (static_cast<bool>(a) != static_cast<bool>(b)) return false;
         if (!a) return true;
         return a->kind == b->kind && a->int_value == b->int_value && a->name == b->name;
+    }
+
+
+    [[nodiscard]] const ClassDef* class_template_by_owner_id(const Program& program, const std::string& owner_id) const {
+        for (const ClassDef& def : program.classes) {
+            if (def.template_owner_id == owner_id) return &def;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] bool imported_function_body_must_stay_available(const Program& imported, const Function& fn) const {
+        if (fn.is_generic_template || fn.eval_mode != FunctionEvalMode::RuntimeOnly) return true;
+        if (!fn.member_owner_class.empty()) {
+            std::string owner_name = fn.member_owner_class;
+            if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr) {
+                owner_name = fn.params[0].type.pointee->name;
+            }
+            if (is_exported_generic_type_template(imported, owner_name)) return true;
+        }
+        return false;
     }
 
     [[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) const {
@@ -1147,15 +1259,33 @@ private:
                                   " has no effect: this file has no 'export module'/'module' declaration "
                                   "(ch11 §11.3)");
         }
-        std::vector<std::string> module_segments = split_dotted_name(program.module_name);
-        bool starts_with_module_name = namespace_path.size() >= module_segments.size();
-        for (size_t i = 0; starts_with_module_name && i < module_segments.size(); i++) {
-            starts_with_module_name = namespace_path[i] == module_segments[i];
-        }
-        if (!starts_with_module_name) {
+        if (namespace_path.empty()) {
             throw ParseError(loc.line, loc.column,
-                              "exported " + what + " must be declared inside a namespace matching this "
-                              "module's own name ('" + program.module_name + "') -- ch11 §11.5");
+                              "exported " + what + " must be declared inside a namespace -- ch11 §11.5");
+        }
+        std::string module_name = program.module_name;
+        size_t partition = module_name.find(':');
+        if (partition != std::string::npos) module_name = module_name.substr(0, partition);
+        std::vector<std::string> module_namespace;
+        size_t start = 0;
+        while (start <= module_name.size()) {
+            size_t dot = module_name.find('.', start);
+            std::string piece = module_name.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
+            if (!piece.empty()) module_namespace.push_back(piece);
+            if (dot == std::string::npos) break;
+            start = dot + 1;
+        }
+        if (module_namespace.size() > namespace_path.size()) {
+            throw ParseError(loc.line, loc.column,
+                             "exported " + what + " must be declared in namespace matching module '" +
+                                 program.module_name + "' -- ch11 §11.5");
+        }
+        for (size_t i = 0; i < module_namespace.size(); i++) {
+            if (module_namespace[i] != namespace_path[i]) {
+                throw ParseError(loc.line, loc.column,
+                                 "exported " + what + " must be declared in namespace matching module '" +
+                                     program.module_name + "' -- ch11 §11.5");
+            }
         }
     }
 
@@ -1894,6 +2024,15 @@ private:
                     ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
             }
+            if (def.is_partial_specialization && !def.specialization_template_args.empty() && !def.template_owner_id.empty()) {
+                std::string specialized_owner_name = def.name + "<";
+                for (size_t i = 0; i < def.specialization_template_args.size(); i++) {
+                    if (i != 0) specialized_owner_name += ", ";
+                    specialized_owner_name += type_to_string(def.specialization_template_args[i]);
+                }
+                specialized_owner_name += ">";
+                specialized_static_member_owner_names_[specialized_owner_name] = def.name + "__" + def.template_owner_id;
+            }
             std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
             auto existing = std::find_if(program.classes.begin(), program.classes.end(), [&](const ClassDef& current) {
                 return current.owning_module == effective_owner && same_class_identity(current, def);
@@ -1911,10 +2050,7 @@ private:
         for (const Function& fn : imported.functions) {
             if (!fn.is_exported && !fn.is_compile_time_dependency) continue;
             if (!fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
-            bool keep_body =
-                fn.is_generic_template || fn.eval_mode != FunctionEvalMode::RuntimeOnly ||
-                (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
-                 is_exported_generic_type_template(imported, fn.params[0].type.pointee->name));
+            bool keep_body = imported_function_body_must_stay_available(imported, fn);
             std::string effective_owner = fn.owning_module.empty() ? imported_name : fn.owning_module;
             auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {
                 return current.owning_module == effective_owner && current.loc.source_path_text() == fn.loc.source_path_text() &&
@@ -2007,6 +2143,15 @@ private:
                 } else if (!def.is_partial_specialization) {
                     ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
+            }
+            if (def.is_partial_specialization && !def.specialization_template_args.empty() && !def.template_owner_id.empty()) {
+                std::string specialized_owner_name = def.name + "<";
+                for (size_t i = 0; i < def.specialization_template_args.size(); i++) {
+                    if (i != 0) specialized_owner_name += ", ";
+                    specialized_owner_name += type_to_string(def.specialization_template_args[i]);
+                }
+                specialized_owner_name += ">";
+                specialized_static_member_owner_names_[specialized_owner_name] = def.name + "__" + def.template_owner_id;
             }
             auto existing = std::find_if(program.classes.begin(), program.classes.end(), [&](const ClassDef& current) {
                 return current.owning_module == def.owning_module && same_class_identity(current, def);
@@ -3471,6 +3616,14 @@ private:
         def.template_owner_id = next_generic_template_owner_id();
         def.is_partial_specialization = true;
         def.specialization_template_args = std::move(specialization_args);
+        std::string specialized_owner_name = qualified_class_name + "<";
+        for (size_t i = 0; i < def.specialization_template_args.size(); i++) {
+            if (i != 0) specialized_owner_name += ", ";
+            specialized_owner_name += type_to_string(def.specialization_template_args[i]);
+        }
+        specialized_owner_name += ">";
+        specialized_static_member_owner_names_[specialized_owner_name] =
+            qualified_class_name + "__" + def.template_owner_id;
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
         if (match(TokenKind::Colon)) {
@@ -4680,10 +4833,12 @@ private:
                     if (last_separator != std::string::npos) {
                         std::string owner_name = node->name.substr(0, last_separator);
                         std::string member_name = node->name.substr(last_separator + 2);
-                        if (std::optional<std::string> resolved_owner =
-                                resolve_static_member_owner_name(owner_name, node->explicit_global_qualification)) {
-                            node->name = *resolved_owner + "_" + member_name;
-                            node->explicit_global_qualification = false;
+                        if (owner_name.find('<') == std::string::npos) {
+                            if (std::optional<std::string> resolved_owner =
+                                    resolve_static_member_owner_name(owner_name, node->explicit_global_qualification)) {
+                                node->name = *resolved_owner + "_" + member_name;
+                                node->explicit_global_qualification = false;
+                            }
                         }
                     }
                 } else if (expr->kind == ExprKind::Lambda) {
@@ -4884,6 +5039,10 @@ private:
                 return node;
             }
             std::string name = parse_global_qualified_name();
+            if (std::optional<std::string> specialized_name =
+                    try_parse_template_static_member_name(name, /*explicit_global_qualification=*/true)) {
+                name = *specialized_name;
+            }
             auto generic_fn_it = generic_function_template_params_.find(name);
             std::vector<ExplicitTemplateArg> explicit_template_args;
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
@@ -5070,6 +5229,10 @@ private:
             // the overwhelmingly common case, is just a chain of length
             // one).
             std::string name = parse_qualified_name();
+            if (std::optional<std::string> specialized_name =
+                    try_parse_template_static_member_name(name, /*explicit_global_qualification=*/false)) {
+                name = *specialized_name;
+            }
             // ch05 §5.11: `name<Args>(...)` -- an explicit-template-
             // argument call to a known full-header-form generic
             // function (e.g. `make<Circle>()`, `get<2>(t)`) --

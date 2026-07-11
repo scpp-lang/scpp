@@ -28,12 +28,12 @@ function(add_scpp_module_artifacts target_name source_path interface_path archiv
     add_custom_target(${target_name} ALL DEPENDS "${interface_path}" "${archive_path}")
 endfunction()
 
-set(SCPP_STDLIB_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/std.scppm")
-set(SCPP_STDLIB_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libstd.scppa")
+set(SCPP_STDLIB_STD_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/std.scppm")
+set(SCPP_STDLIB_STD_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libstd.scppa")
 add_scpp_module_artifacts(scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/std.scpp"
-    "${SCPP_STDLIB_INTERFACE_PATH}"
-    "${SCPP_STDLIB_ARCHIVE_PATH}"
+    "${SCPP_STDLIB_STD_INTERFACE_PATH}"
+    "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
     "${CMAKE_CURRENT_SOURCE_DIR}/cstdlib/std_cstdlib.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/expected/std_expected.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/functional/std_functional.scpp"
@@ -43,3 +43,13 @@ add_scpp_module_artifacts(scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/random/std_random.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/thread/std_thread.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/string/std_string.scpp")
+
+set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/scpp.scppm")
+set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libscpp.scppa")
+add_scpp_module_artifacts(scpp_scpp_artifacts
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp.scpp"
+    "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
+    "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
+    scpp_std_artifacts
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp.scpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rand/scpp_rand.scpp")

@@ -6,8 +6,11 @@ project(scpp
     LANGUAGES C CXX)
 
 set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/std.scpp")
-set(SCPP_STDLIB_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/std.scppm")
-set(SCPP_STDLIB_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libstd.scppa")
+set(SCPP_STDLIB_STD_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/std.scppm")
+set(SCPP_STDLIB_STD_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libstd.scppa")
+set(SCPP_STDLIB_SCPP_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/scpp.scpp")
+set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/scpp.scppm")
+set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp.scppa")
 set(SCPP_STDLIB_STRING_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_string_wrapper.a")
 set(SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_thread_wrapper.a")
 set(SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH "${CMAKE_CURRENT_BINARY_DIR}/stdlib/libscpp_print_wrapper.a")
@@ -128,8 +131,10 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
         PATTERN "*.scpp")
 
 install(FILES
-    "${SCPP_STDLIB_INTERFACE_PATH}"
-    "${SCPP_STDLIB_ARCHIVE_PATH}"
+    "${SCPP_STDLIB_STD_INTERFACE_PATH}"
+    "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
+    "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
+    "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
     "${SCPP_STDLIB_STRING_WRAPPER_LIB_PATH}"
     "${SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH}"
     "${SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH}"
@@ -148,7 +153,8 @@ add_executable(parser_test tests/parser_test.cpp)
 target_link_libraries(parser_test PRIVATE scpp_parser scpp_ast scpp_lexer)
 target_compile_features(parser_test PRIVATE cxx_std_23)
 target_compile_definitions(parser_test PRIVATE
-    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}")
+    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_SCPP_MODULE_PATH="${SCPP_STDLIB_SCPP_MODULE_PATH}")
 
 add_test(NAME parser_test COMMAND parser_test)
 
@@ -157,7 +163,8 @@ target_link_libraries(codegen_test PRIVATE scpp_codegen scpp_movecheck scpp_pars
 target_compile_features(codegen_test PRIVATE cxx_std_23)
 target_compile_definitions(codegen_test PRIVATE
     SCPP_CODEGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source"
-    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}")
+    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_SCPP_MODULE_PATH="${SCPP_STDLIB_SCPP_MODULE_PATH}")
 
 add_test(NAME codegen_test COMMAND codegen_test)
 
@@ -166,7 +173,8 @@ target_link_libraries(movecheck_test PRIVATE scpp_movecheck scpp_parser scpp_ast
 target_compile_features(movecheck_test PRIVATE cxx_std_23)
 target_compile_definitions(movecheck_test PRIVATE
     SCPP_MOVETEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/movetest_source"
-    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}")
+    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_SCPP_MODULE_PATH="${SCPP_STDLIB_SCPP_MODULE_PATH}")
 
 add_test(NAME movecheck_test COMMAND movecheck_test)
 
@@ -177,6 +185,9 @@ target_compile_definitions(driver_test PRIVATE
     SCPP_BINARY_PATH="$<TARGET_FILE:scpp>"
     SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source"
     SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
+    SCPP_STDLIB_STD_INTERFACE_PATH="${SCPP_STDLIB_STD_INTERFACE_PATH}"
+    SCPP_STDLIB_SCPP_MODULE_PATH="${SCPP_STDLIB_SCPP_MODULE_PATH}"
+    SCPP_STDLIB_SCPP_INTERFACE_PATH="${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
     SCPP_STDLIB_STRING_WRAPPER_LIB_PATH="${SCPP_STDLIB_STRING_WRAPPER_LIB_PATH}"
     SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH="${SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH}"
     SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH="${SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH}"
