@@ -4559,6 +4559,11 @@ private:
         }
 
         if (match(TokenKind::KwNew)) {
+            ExprPtr placement;
+            if (match(TokenKind::LParen)) {
+                placement = parse_expr();
+                expect(TokenKind::RParen, "')'");
+            }
             Type element_type = parse_type();
             if (match(TokenKind::LBracket)) {
                 expect(TokenKind::RBracket, "']' after 'new T['");
@@ -4570,6 +4575,7 @@ private:
             node->kind = ExprKind::New;
             node->loc = loc;
             node->type = std::move(element_type);
+            node->lhs = std::move(placement);
             if (match(TokenKind::LParen)) {
                 node->has_paren_init = true;
                 if (!check(TokenKind::RParen)) {

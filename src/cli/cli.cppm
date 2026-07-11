@@ -371,6 +371,11 @@ void print_expr(const scpp::Expr& expr, int depth) {
             break;
         case scpp::ExprKind::New:
             std::cout << "New " << type_to_string(expr.type) << "\n";
+            if (expr.lhs) {
+                print_indent(depth + 1);
+                std::cout << "Placement\n";
+                print_expr(*expr.lhs, depth + 2);
+            }
             for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
             break;
         case scpp::ExprKind::Delete:

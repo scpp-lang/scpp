@@ -1670,6 +1670,56 @@ void run_storage_tests() {
     }
 }
 
+void run_placement_new_tests() {
+    {
+        std::string case_name = "placement_new_constructs_scalar_in_storage";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "placement_new_constructs_scalar_in_storage_exe";
+        scpp::compile_to_executable(
+            "int main() {\n"
+            "    std::storage_for<int> slot;\n"
+            "    [[scpp::unsafe]] {\n"
+            "        int* p = new ((int*)&slot) int(7);\n"
+            "        return *p - 7;\n"
+            "    }\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected scalar placement-new path to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "placement_new_constructs_class_in_storage";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "placement_new_constructs_class_in_storage_exe";
+        scpp::compile_to_executable(
+            "class Box {\n"
+            "public:\n"
+            "    int value;\n"
+            "    Box(int v) { this->value = v; return; }\n"
+            "    int get() const { return this->value; }\n"
+            "};\n"
+            "int main() {\n"
+            "    std::storage_for<Box> slot;\n"
+            "    [[scpp::unsafe]] {\n"
+            "        Box* p = new ((Box*)&slot) Box(9);\n"
+            "        return p->get() - 9;\n"
+            "    }\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected class placement-new path to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+}
+
 void run_consteval_tests() {
     {
         std::string case_name = "consteval_folds_recursive_constexpr_helper";
@@ -3403,6 +3453,7 @@ int main() {
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_sizeof_tests();
     run_storage_tests();
+    run_placement_new_tests();
     run_consteval_tests();
     run_cli_extension_tests();
 

@@ -946,6 +946,19 @@ void test_new_and_delete_parse() {
            "new_and_delete_parse: delete operand should be identifier 'p'");
 }
 
+void test_placement_new_parse() {
+    scpp::Program program = scpp::parse(
+        "int f() { [[scpp::unsafe]] { std::storage_for<int> slot; int* p = new ((int*)&slot) int(7); } return 0; }");
+    const scpp::Stmt& unsafe_block = *program.functions[0].body->statements[0];
+    const scpp::Stmt& decl = *unsafe_block.statements[1];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "placement_new_parse: statement 1 should be VarDecl");
+    expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::New,
+           "placement_new_parse: initializer should be a New expression");
+    expect(decl.init->lhs != nullptr && decl.init->lhs->kind == scpp::ExprKind::Cast,
+           "placement_new_parse: placement operand should parse as a Cast");
+    expect(decl.init->has_paren_init, "placement_new_parse: placement new should preserve ctor paren-init");
+}
+
 void test_full_header_parameter_pack_and_new_pack_expansion_parse() {
     scpp::Program program = scpp::parse(
         "template<typename T, typename... Args>\n"
@@ -3267,6 +3280,7 @@ int main() {
     test_make_unique_with_arg();
     test_make_unique_of_struct_type();
     test_new_and_delete_parse();
+    test_placement_new_parse();
     test_extern_c_single_declaration();
     test_extern_c_block_form();
     test_extern_c_definition_is_checked_like_any_function();

@@ -1956,6 +1956,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::Sizeof:
             return;
         case ExprKind::New:
+            if (expr->lhs) collect_reference_uses(expr->lhs.get(), body, out);
             for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
             return;
         case ExprKind::Delete:
@@ -3164,6 +3165,18 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             if (report_errors && state.unsafe_depth == 0) {
                 throw DataflowError("cannot use 'new' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
                                     state.current_loc);
+            }
+            if (expr.lhs) {
+                apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                if (report_errors) {
+                    std::optional<Type> placement_type = infer_expr_type(*expr.lhs, body, signatures);
+                    if (!placement_type.has_value() || placement_type->kind != TypeKind::Pointer ||
+                        placement_type->pointee == nullptr || !types_equal(*placement_type->pointee, expr.type)) {
+                        throw DataflowError("placement 'new' requires a raw pointer to the constructed type in this "
+                                                "version",
+                                            state.current_loc);
+                    }
+                }
             }
             if (expr.type.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(expr.type.name)) {
                 bool move_shape = expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move &&
