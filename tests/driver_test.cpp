@@ -43,6 +43,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 
 namespace {
 
@@ -95,7 +98,7 @@ std::unordered_map<std::string, std::string> std_import_paths() {
 
 std::vector<std::string> std_link_inputs() {
     return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH};
+            SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH, SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -2466,6 +2469,63 @@ void run_cli_extension_tests() {
                case_name + ": expected exit code 2, got " + std::to_string(run_result.exit_code));
         expect(run_result.stdout_text == "hi 2\n",
                case_name + ": expected stdout 'hi 2\n', got '" + run_result.stdout_text + "'");
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "cli_import_std_random_works_without_flags";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_import_std_random_works_without_flags.scpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_import_std_random_works_without_flags_exe";
+        cases_run++;
+        write_text_file(source_path,
+                        "import std;\n"
+                        "int main() {\n"
+                        "    std::random_device rd;\n"
+                        "    uint32_t expected_max = static_cast<uint32_t>(4294967295);\n"
+                        "    if (rd.min() != static_cast<uint32_t>(0)) {\n"
+                        "        return 4;\n"
+                        "    }\n"
+                        "    if (rd.max() != expected_max) {\n"
+                        "        return 5;\n"
+                        "    }\n"
+                        "    std::mt19937 seeded(rd());\n"
+                        "    if (seeded.min() != static_cast<uint32_t>(0)) {\n"
+                        "        return 6;\n"
+                        "    }\n"
+                        "    if (seeded.max() != expected_max) {\n"
+                        "        return 7;\n"
+                        "    }\n"
+                        "    std::uniform_int_distribution<int> hundred(1, 100);\n"
+                        "    int secret = hundred(seeded);\n"
+                        "    if (secret < 1 || secret > 100) {\n"
+                        "        return 3;\n"
+                        "    }\n"
+                        "    std::mt19937 gen(123);\n"
+                        "    uint32_t first = gen();\n"
+                        "    uint32_t second = gen();\n"
+                        "    if (first == second) {\n"
+                        "        return 1;\n"
+                        "    }\n"
+                        "    std::uniform_int_distribution<int> die(1, 6);\n"
+                        "    int roll1 = die(gen);\n"
+                        "    int roll2 = die(gen);\n"
+                        "    if (roll1 < 1 || roll1 > 6 || roll2 < 1 || roll2 > 6) {\n"
+                        "        return 2;\n"
+                        "    }\n"
+                        "    if (roll1 == roll2 && first == second) {\n"
+                        "        return 8;\n"
+                        "    }\n"
+                        "    return 0;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() + " -o " +
+                               exe_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": build should succeed without import flags, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected exit code 0, got " + std::to_string(run_result.exit_code));
         std::filesystem::remove(source_path);
         std::filesystem::remove(exe_path);
     }

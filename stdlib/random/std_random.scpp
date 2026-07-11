@@ -1,0 +1,168 @@
+// std_random.scpp
+//
+// The `:random` partition of the "std" module: a beginner-friendly subset
+// of real C++ <random> built around std::random_device, std::mt19937, and
+// std::uniform_int_distribution<int>. scpp already supports the same
+// first-class fixed-width unsigned scalars (`uint32_t`) that real
+// `std::mt19937::result_type` uses, so the generator-facing APIs expose that
+// range directly, including the exact max value 4294967295.
+export module std:random;
+
+extern "C" {
+    uint32_t scpp_random_device_next();
+    uint32_t scpp_random_device_min();
+    uint32_t scpp_random_device_max();
+
+    void* scpp_mt19937_new(uint32_t seed);
+    void scpp_mt19937_delete(void* handle);
+    uint32_t scpp_mt19937_next(void* handle);
+    uint32_t scpp_mt19937_min();
+    uint32_t scpp_mt19937_max();
+
+    void* scpp_random_uniform_int_new(int minimum, int maximum);
+    void scpp_random_uniform_int_delete(void* handle);
+    int scpp_random_uniform_int_next(void* handle, void* generator_handle);
+    int scpp_random_uniform_int_min(void* handle);
+    int scpp_random_uniform_int_max(void* handle);
+}
+
+namespace std {
+
+export class random_device {
+public:
+    random_device() { return; }
+
+    ~random_device() { return; }
+
+    uint32_t call() {
+        [[scpp::unsafe]] {
+            return scpp_random_device_next();
+        }
+    }
+
+    uint32_t min() const {
+        [[scpp::unsafe]] {
+            return scpp_random_device_min();
+        }
+    }
+
+    uint32_t max() const {
+        [[scpp::unsafe]] {
+            return scpp_random_device_max();
+        }
+    }
+};
+
+export class mt19937 {
+private:
+    void* handle_;
+
+public:
+    mt19937(int seed) {
+        [[scpp::unsafe]] {
+            this->handle_ = scpp_mt19937_new(static_cast<uint32_t>(seed));
+        }
+        return;
+    }
+
+    mt19937(uint32_t seed) {
+        [[scpp::unsafe]] {
+            this->handle_ = scpp_mt19937_new(seed);
+        }
+        return;
+    }
+
+    ~mt19937() {
+        [[scpp::unsafe]] {
+            scpp_mt19937_delete(this->handle_);
+        }
+        return;
+    }
+
+    uint32_t call() {
+        [[scpp::unsafe]] {
+            return scpp_mt19937_next(this->handle_);
+        }
+    }
+
+    uint32_t min() const {
+        [[scpp::unsafe]] {
+            return scpp_mt19937_min();
+        }
+    }
+
+    uint32_t max() const {
+        [[scpp::unsafe]] {
+            return scpp_mt19937_max();
+        }
+    }
+
+    void* __native_handle() {
+        return this->handle_;
+    }
+};
+
+export void* __random_uniform_int_new_native(int minimum, int maximum) {
+    [[scpp::unsafe]] {
+        return scpp_random_uniform_int_new(minimum, maximum);
+    }
+}
+
+export void __random_uniform_int_delete_native(void* handle) {
+    [[scpp::unsafe]] {
+        scpp_random_uniform_int_delete(handle);
+    }
+    return;
+}
+
+export int __random_uniform_int_next_native(void* handle, std::mt19937& generator) {
+    [[scpp::unsafe]] {
+        return scpp_random_uniform_int_next(handle, generator.__native_handle());
+    }
+}
+
+export int __random_uniform_int_min_native(void* handle) {
+    [[scpp::unsafe]] {
+        return scpp_random_uniform_int_min(handle);
+    }
+}
+
+export int __random_uniform_int_max_native(void* handle) {
+    [[scpp::unsafe]] {
+        return scpp_random_uniform_int_max(handle);
+    }
+}
+
+export template<typename T>
+class uniform_int_distribution;
+
+export template<>
+class uniform_int_distribution<int> {
+private:
+    void* handle_;
+
+public:
+    uniform_int_distribution(int minimum, int maximum) {
+        this->handle_ = std::__random_uniform_int_new_native(minimum, maximum);
+        return;
+    }
+
+    ~uniform_int_distribution() {
+        std::__random_uniform_int_delete_native(this->handle_);
+        return;
+    }
+
+    int call(std::mt19937& generator) {
+        return std::__random_uniform_int_next_native(this->handle_, generator);
+    }
+
+    int min() const {
+        return std::__random_uniform_int_min_native(this->handle_);
+    }
+
+    int max() const {
+        return std::__random_uniform_int_max_native(this->handle_);
+    }
+};
+
+} // namespace std

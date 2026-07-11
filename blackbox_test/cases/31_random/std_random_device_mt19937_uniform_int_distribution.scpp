@@ -1,0 +1,43 @@
+import std;
+
+int main() {
+    std::random_device rd;
+    uint32_t expected_max = static_cast<uint32_t>(4294967295);
+    if (rd.min() != static_cast<uint32_t>(0)) {
+        return 4;
+    }
+    if (rd.max() != expected_max) {
+        return 5;
+    }
+    std::mt19937 seeded(rd());
+    if (seeded.min() != static_cast<uint32_t>(0)) {
+        return 6;
+    }
+    if (seeded.max() != expected_max) {
+        return 7;
+    }
+    std::uniform_int_distribution<int> hundred(1, 100);
+    int secret = hundred(seeded);
+    if (secret < 1 || secret > 100) {
+        return 3;
+    }
+
+    std::mt19937 gen(123);
+    uint32_t first = gen();
+    uint32_t second = gen();
+    if (first == second) {
+        return 1;
+    }
+
+    std::uniform_int_distribution<int> die(1, 6);
+    int roll1 = die(gen);
+    int roll2 = die(gen);
+    if (roll1 < 1 || roll1 > 6 || roll2 < 1 || roll2 > 6) {
+        return 2;
+    }
+    if (roll1 == roll2 && first == second) {
+        return 8;
+    }
+
+    return 0;
+}
