@@ -49,6 +49,28 @@ struct CodegenError : std::runtime_error {
     return scalar_names.contains(name);
 }
 
+[[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name) {
+    if (program == nullptr) return nullptr;
+    for (const EnumDef& def : program->enums) {
+        if (def.name == name) return &def;
+    }
+    return nullptr;
+}
+
+[[nodiscard]] const EnumVariant* find_enum_variant(const Program* program, const std::string& name,
+                                                   const EnumDef** owning_enum = nullptr) {
+    if (program == nullptr) return nullptr;
+    for (const EnumDef& def : program->enums) {
+        for (const EnumVariant& variant : def.variants) {
+            if (variant.name == name) {
+                if (owning_enum != nullptr) *owning_enum = &def;
+                return &variant;
+            }
+        }
+    }
+    return nullptr;
+}
+
 // Lowers the M1/M2 AST subset (scalars + locals + control flow + functions +
 // trivial structs, no borrow/move checks yet) directly to LLVM IR.
 class Codegen {
@@ -406,6 +428,11 @@ private:
                 else if (is_scalar_type_name(type.name)) {
                     result = basic(is_unsigned_scalar_type_name(type.name) ? llvm::dwarf::DW_ATE_unsigned
                                                                             : llvm::dwarf::DW_ATE_signed);
+                } else if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
+                    const std::string& underlying = enum_def->underlying_type.name;
+                    result = basic(underlying == "char"                ? llvm::dwarf::DW_ATE_signed_char
+                                   : is_unsigned_scalar_type_name(underlying) ? llvm::dwarf::DW_ATE_unsigned
+                                                                               : llvm::dwarf::DW_ATE_signed);
                 } else {
                     result = dibuilder_->createUnspecifiedType(type.name);
                 }
@@ -697,6 +724,13 @@ private:
             case ExprKind::Identifier: {
                 auto it = locals_.find(expr.name);
                 if (it != locals_.end()) return it->second.type;
+                if (const EnumDef* def = [&]() {
+                        const EnumDef* enum_def = nullptr;
+                        [[maybe_unused]] const EnumVariant* variant = find_enum_variant(program_, expr.name, &enum_def);
+                        return enum_def;
+                    }()) {
+                    return named_type(def->name);
+                }
                 return resolve_function_designator_type(expr);
             }
 
@@ -1165,6 +1199,7 @@ private:
                 return;
             case TypeKind::Named: {
                 if (is_scalar_type_name(type.name)) return;
+                if (find_enum_def(program_, type.name) != nullptr) return;
                 if (type.name == "void") {
                     throw CodegenError("'void' cannot be a struct field (only a return type or a "
                                         "pointer's pointee -- 'void*' -- may be 'void')",
@@ -1388,6 +1423,9 @@ private:
                 if (type.name == "double" || type.name == "float64_t") return llvm::Type::getDoubleTy(*context_);
                 if (type.name == "size_t" || type.name == "ptrdiff_t") {
                     return llvm::Type::getIntNTy(*context_, module_->getDataLayout().getPointerSizeInBits());
+                }
+                if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
+                    return to_llvm_type(enum_def->underlying_type);
                 }
                 // `void` (ch02 §2.1): only meaningful as a function return
                 // type or a pointer's pointee (`void*`, whose own
@@ -3118,12 +3156,29 @@ private:
                     throw CodegenError("cast is only supported between scalar types or raw pointer types in this version",
                                        current_loc_);
                 }
+                bool source_is_scalar_or_enum =
+                    is_scalar_type_name(source_type->name) || find_enum_def(program_, source_type->name) != nullptr;
+                bool target_is_scalar_or_enum =
+                    is_scalar_type_name(expr.type.name) || find_enum_def(program_, expr.type.name) != nullptr;
+                if (!source_is_scalar_or_enum || !target_is_scalar_or_enum) {
+                    throw CodegenError(
+                        "cast is only supported between builtin scalar types or between an enum class and its "
+                        "underlying integer type in this version",
+                        current_loc_);
+                }
                 llvm::Value* operand = codegen_value_for_target(*expr.lhs, *source_type);
                 return codegen_scalar_cast(operand, *source_type, expr.type);
             }
 
             case ExprKind::Identifier: {
                 if (!locals_.contains(expr.name)) {
+                    const EnumDef* enum_def = nullptr;
+                    const EnumVariant* enum_variant = find_enum_variant(program_, expr.name, &enum_def);
+                    if (enum_variant != nullptr) {
+                        return llvm::ConstantInt::get(to_llvm_type(named_type(enum_def->name)), enum_variant->value,
+                                                      /*isSigned=*/!is_unsigned_scalar_type_name(
+                                                          enum_def->underlying_type.name));
+                    }
                     if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
                         if (llvm::Value* fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
                     }
@@ -3840,6 +3895,12 @@ private:
         return name == "bool" || name == "char" || is_unsigned_scalar_type_name(name);
     }
 
+    [[nodiscard]] std::string scalar_name_for_cast(const Type& type) const {
+        if (type.kind != TypeKind::Named) return {};
+        if (const EnumDef* def = find_enum_def(program_, type.name)) return def->underlying_type.name;
+        return type.name;
+    }
+
     // ch06 §6: the actual conversion instruction for `static_cast<T>(expr)`/
     // `(T)expr`, given `value` already evaluated as `source_type`'s own
     // LLVM representation -- dispatches on the (source, target) type
@@ -3854,26 +3915,28 @@ private:
     llvm::Value* codegen_scalar_cast(llvm::Value* value, const Type& source_type, const Type& target_type) {
         llvm::Type* target_llvm = to_llvm_type(target_type);
         if (value->getType() == target_llvm) return value;
-        bool source_is_float = is_float_scalar_type_name(source_type.name);
-        bool target_is_float = is_float_scalar_type_name(target_type.name);
+        std::string source_name = scalar_name_for_cast(source_type);
+        std::string target_name = scalar_name_for_cast(target_type);
+        bool source_is_float = is_float_scalar_type_name(source_name);
+        bool target_is_float = is_float_scalar_type_name(target_name);
         if (source_is_float && target_is_float) {
             return value->getType()->getScalarSizeInBits() < target_llvm->getScalarSizeInBits()
                        ? builder_->CreateFPExt(value, target_llvm, "fpexttmp")
                        : builder_->CreateFPTrunc(value, target_llvm, "fptrunctmp");
         }
         if (source_is_float) {
-            return is_unsigned_for_cast(target_type.name) ? builder_->CreateFPToUI(value, target_llvm, "fptouitmp")
-                                                            : builder_->CreateFPToSI(value, target_llvm, "fptositmp");
+            return is_unsigned_for_cast(target_name) ? builder_->CreateFPToUI(value, target_llvm, "fptouitmp")
+                                                     : builder_->CreateFPToSI(value, target_llvm, "fptositmp");
         }
         if (target_is_float) {
-            return is_unsigned_for_cast(source_type.name) ? builder_->CreateUIToFP(value, target_llvm, "uitofptmp")
-                                                            : builder_->CreateSIToFP(value, target_llvm, "sitofptmp");
+            return is_unsigned_for_cast(source_name) ? builder_->CreateUIToFP(value, target_llvm, "uitofptmp")
+                                                     : builder_->CreateSIToFP(value, target_llvm, "sitofptmp");
         }
         // int -> int: same width already returned `value` unchanged
         // above (e.g. int8_t <-> uint8_t <-> char <-> bool).
         if (value->getType()->getScalarSizeInBits() < target_llvm->getScalarSizeInBits()) {
-            return is_unsigned_for_cast(source_type.name) ? builder_->CreateZExt(value, target_llvm, "zexttmp")
-                                                            : builder_->CreateSExt(value, target_llvm, "sexttmp");
+            return is_unsigned_for_cast(source_name) ? builder_->CreateZExt(value, target_llvm, "zexttmp")
+                                                     : builder_->CreateSExt(value, target_llvm, "sexttmp");
         }
         return builder_->CreateTrunc(value, target_llvm, "trunctmp");
     }

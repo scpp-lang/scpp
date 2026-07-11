@@ -3116,6 +3116,54 @@ void test_conditional_expression_parses() {
            "conditional_expression_parses: expected condition, then, and else arms");
 }
 
+void test_enum_class_declaration_parses() {
+    scpp::Program program = scpp::parse(
+        "enum class Color { red, green = 4, blue };\n"
+        "int main() { return 0; }\n");
+    expect(program.enums.size() == 1, "enum_class_declaration_parses: expected 1 enum");
+    if (program.enums.size() != 1) return;
+    const scpp::EnumDef& def = program.enums[0];
+    expect(def.name == "Color", "enum_class_declaration_parses: expected enum name Color");
+    expect(is_named_type(def.underlying_type, "int"),
+           "enum_class_declaration_parses: expected default underlying type int");
+    expect(def.variants.size() == 3, "enum_class_declaration_parses: expected 3 variants");
+    if (def.variants.size() != 3) return;
+    expect(def.variants[0].name == "Color::red" && def.variants[0].value == 0,
+           "enum_class_declaration_parses: expected Color::red = 0");
+    expect(def.variants[1].name == "Color::green" && def.variants[1].value == 4,
+           "enum_class_declaration_parses: expected Color::green = 4");
+    expect(def.variants[2].name == "Color::blue" && def.variants[2].value == 5,
+           "enum_class_declaration_parses: expected Color::blue = 5");
+}
+
+void test_enum_class_underlying_type_parses() {
+    scpp::Program program = scpp::parse(
+        "enum class Small : uint8_t { a = 1, b = 3 };\n"
+        "int main() { return 0; }\n");
+    expect(program.enums.size() == 1, "enum_class_underlying_type_parses: expected 1 enum");
+    if (program.enums.empty()) return;
+    const scpp::EnumDef& def = program.enums[0];
+    expect(def.name == "Small", "enum_class_underlying_type_parses: expected enum name Small");
+    expect(is_named_type(def.underlying_type, "uint8_t"),
+           "enum_class_underlying_type_parses: expected underlying type uint8_t");
+    expect(def.variants.size() == 2, "enum_class_underlying_type_parses: expected 2 variants");
+    if (def.variants.size() != 2) return;
+    expect(def.variants[0].name == "Small::a" && def.variants[0].value == 1,
+           "enum_class_underlying_type_parses: expected Small::a = 1");
+    expect(def.variants[1].name == "Small::b" && def.variants[1].value == 3,
+           "enum_class_underlying_type_parses: expected Small::b = 3");
+}
+
+void test_old_style_enum_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("enum Color { red, green };\nint main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "old_style_enum_is_rejected: expected a ParseError");
+}
+
 } // namespace
 
 int main() {
@@ -3129,6 +3177,9 @@ int main() {
     test_unsafe_block_sets_is_unsafe_flag();
     test_ordinary_block_is_not_unsafe();
     test_nested_unsafe_blocks_parse();
+    test_enum_class_declaration_parses();
+    test_enum_class_underlying_type_parses();
+    test_old_style_enum_is_rejected();
     test_bare_unsafe_identifier_followed_by_return_is_parse_error();
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();

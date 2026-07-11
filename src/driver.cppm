@@ -43,7 +43,7 @@ struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 1;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 2;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -186,9 +186,11 @@ void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
 CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     CompileTimePayloadPlan plan;
     std::unordered_map<std::string, const Function*> functions_by_name;
+    std::unordered_map<std::string, const EnumDef*> enums_by_name;
     std::unordered_map<std::string, const StructDef*> structs_by_name;
     std::unordered_map<std::string, const ClassDef*> classes_by_name;
     for (const Function& fn : program.functions) functions_by_name.emplace(fn.name, &fn);
+    for (const EnumDef& def : program.enums) enums_by_name.emplace(def.name, &def);
     for (const StructDef& def : program.structs) structs_by_name.emplace(def.name, &def);
     for (const ClassDef& def : program.classes) classes_by_name.emplace(def.name, &def);
 
@@ -237,6 +239,11 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
         std::vector<std::string> batch(pending_types.begin(), pending_types.end());
         pending_types.clear();
         for (const std::string& type_name : batch) {
+            if (auto it = enums_by_name.find(type_name); it != enums_by_name.end()) {
+                std::unordered_set<std::string> nested;
+                collect_type_names(it->second->underlying_type, nested);
+                for (const std::string& nested_name : nested) enqueue_type(nested_name);
+            }
             if (auto it = structs_by_name.find(type_name); it != structs_by_name.end()) {
                 for (const StructField& field : it->second->fields) {
                     std::unordered_set<std::string> nested;
@@ -259,6 +266,7 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
 
 struct StructuredCompileTimePayload {
     std::vector<std::string> root_function_names;
+    std::vector<EnumDef> enums;
     std::vector<StructDef> structs;
     std::vector<ClassDef> classes;
     std::vector<Function> functions;
@@ -638,6 +646,46 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     return field;
 }
 
+void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
+    write_string(out, variant.name);
+    write_i64_le(out, variant.value);
+}
+
+[[nodiscard]] EnumVariant read_enum_variant(std::istream& in, const std::string& context) {
+    EnumVariant variant;
+    variant.name = read_string(in, context + " name");
+    variant.value = read_i64_le(in, context + " value");
+    return variant;
+}
+
+void write_enum_def(std::ostream& out, const EnumDef& def) {
+    write_string(out, def.name);
+    write_type(out, def.underlying_type);
+    write_u32_le(out, static_cast<std::uint32_t>(def.variants.size()));
+    for (const EnumVariant& variant : def.variants) write_enum_variant(out, variant);
+    write_u32_le(out, static_cast<std::uint32_t>(def.namespace_path.size()));
+    for (const std::string& segment : def.namespace_path) write_string(out, segment);
+    write_u8(out, def.is_exported ? 1u : 0u);
+    write_u8(out, def.is_compile_time_dependency ? 1u : 0u);
+    write_string(out, def.owning_module);
+}
+
+[[nodiscard]] EnumDef read_enum_def(std::istream& in, const std::string& context) {
+    EnumDef def;
+    def.name = read_string(in, context + " name");
+    def.underlying_type = read_type(in, context + " underlying");
+    std::uint32_t variant_count = read_u32_le(in, context + " variant count");
+    def.variants.reserve(variant_count);
+    for (std::uint32_t i = 0; i < variant_count; i++) def.variants.push_back(read_enum_variant(in, context + " variant"));
+    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    def.namespace_path.reserve(ns_count);
+    for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));
+    def.is_exported = read_u8(in, context + " is_exported") != 0u;
+    def.is_compile_time_dependency = read_u8(in, context + " is_compile_time_dependency") != 0u;
+    def.owning_module = read_string(in, context + " owning_module");
+    return def;
+}
+
 void write_struct_def(std::ostream& out, const StructDef& def) {
     write_string(out, def.name);
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
@@ -904,6 +952,7 @@ struct GenericMethodOwnerRemap {
     return fn.name;
 }
 
+[[nodiscard]] bool is_local_module_enum(const EnumDef& def) { return def.owning_module.empty(); }
 [[nodiscard]] bool is_local_module_struct(const StructDef& def) { return def.owning_module.empty(); }
 [[nodiscard]] bool is_local_module_class(const ClassDef& def) { return def.owning_module.empty(); }
 [[nodiscard]] bool is_local_module_function(const Function& fn) { return fn.owning_module.empty(); }
@@ -917,7 +966,13 @@ struct GenericMethodOwnerRemap {
     std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
     std::vector<const StructDef*> structs;
     std::vector<const ClassDef*> classes;
+    std::vector<const EnumDef*> enums;
     std::vector<const Function*> functions;
+    for (const EnumDef& def : program.enums) {
+        if (is_local_module_enum(def) && reachable_type_names.contains(def.name)) {
+            enums.push_back(&def);
+        }
+    }
     for (const StructDef& def : program.structs) {
         if (is_local_module_struct(def) && reachable_type_names.contains(def.name)) structs.push_back(&def);
     }
@@ -934,6 +989,8 @@ struct GenericMethodOwnerRemap {
     write_u32_le(payload, SCPPM_COMPILE_TIME_AST_VERSION);
     write_u32_le(payload, static_cast<std::uint32_t>(plan.root_function_names.size()));
     for (const std::string& name : plan.root_function_names) write_string(payload, name);
+    write_u32_le(payload, static_cast<std::uint32_t>(enums.size()));
+    for (const EnumDef* def : enums) write_enum_def(payload, *def);
     write_u32_le(payload, static_cast<std::uint32_t>(structs.size()));
     for (const StructDef* def : structs) write_struct_def(payload, *def);
     write_u32_le(payload, static_cast<std::uint32_t>(classes.size()));
@@ -959,6 +1016,9 @@ struct GenericMethodOwnerRemap {
     std::uint32_t root_count = read_u32_le(in, path + " root count");
     payload.root_function_names.reserve(root_count);
     for (std::uint32_t i = 0; i < root_count; i++) payload.root_function_names.push_back(read_string(in, path + " root"));
+    std::uint32_t enum_count = read_u32_le(in, path + " enum count");
+    payload.enums.reserve(enum_count);
+    for (std::uint32_t i = 0; i < enum_count; i++) payload.enums.push_back(read_enum_def(in, path + " enum"));
     std::uint32_t struct_count = read_u32_le(in, path + " struct count");
     payload.structs.reserve(struct_count);
     for (std::uint32_t i = 0; i < struct_count; i++) payload.structs.push_back(read_struct_def(in, path + " struct"));
@@ -978,6 +1038,16 @@ struct GenericMethodOwnerRemap {
 
 void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&& payload) {
     std::vector<GenericMethodOwnerRemap> owner_remaps;
+    for (EnumDef& def : payload.enums) {
+        if (!def.is_exported) def.is_compile_time_dependency = true;
+        auto existing =
+            std::find_if(imported.enums.begin(), imported.enums.end(), [&](const EnumDef& current) { return current.name == def.name; });
+        if (existing != imported.enums.end()) {
+            *existing = std::move(def);
+        } else {
+            imported.enums.push_back(std::move(def));
+        }
+    }
     for (StructDef& def : payload.structs) {
         if (!def.is_exported) def.is_compile_time_dependency = true;
         auto existing = std::find_if(imported.structs.begin(), imported.structs.end(),

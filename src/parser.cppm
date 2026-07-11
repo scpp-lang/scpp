@@ -1687,6 +1687,14 @@ private:
     // modules.
     void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
                                 bool is_reexport) {
+        for (const EnumDef& def : imported.enums) {
+            if (!def.is_exported && !def.is_compile_time_dependency) continue;
+            struct_names_.insert(def.name);
+            EnumDef clone = def;
+            if (clone.owning_module.empty()) clone.owning_module = imported_name;
+            clone.is_exported = is_reexport && clone.is_exported;
+            program.enums.push_back(std::move(clone));
+        }
         for (const StructDef& def : imported.structs) {
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
             struct_names_.insert(def.name);
@@ -1764,6 +1772,11 @@ private:
                                   "its own module declaration), so it can never export anything to the "
                                   "outside (ch11 §11.4)");
         }
+        for (EnumDef& def : partition.enums) {
+            struct_names_.insert(def.name);
+            def.is_exported = is_reexport && def.is_exported;
+            program.enums.push_back(std::move(def));
+        }
         for (StructDef& def : partition.structs) {
             struct_names_.insert(def.name);
             if (!def.template_params.empty()) {
@@ -1823,7 +1836,7 @@ private:
         }
     }
 
-    // Parses exactly one struct/class/concept/function(-or-extern-group)
+    // Parses exactly one enum/struct/class/concept/function(-or-extern-group)
     // top-level item, given whether an `export` marker (individual, or
     // inherited from an enclosing `export { }` group) applies to it.
     void parse_top_level_item(Program& program, bool is_exported) {
@@ -1856,6 +1869,14 @@ private:
             def.is_exported = is_exported;
             check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
+        } else if (check(TokenKind::KwEnum)) {
+            reject_unsafe_if_requested("an 'enum class' declaration");
+            reject_packed_attribute(leading_attrs, attr_start_tok, "an 'enum class' declaration");
+            SourceLocation loc = current_loc();
+            EnumDef def = parse_enum_def();
+            def.is_exported = is_exported;
+            check_export_namespace(program, is_exported, def.namespace_path, loc, "enum class '" + def.name + "'");
+            program.enums.push_back(std::move(def));
         } else if (check(TokenKind::KwUnion)) {
             reject_unsafe_if_requested("a 'union' declaration");
             SourceLocation loc = current_loc();
@@ -2157,6 +2178,75 @@ private:
                           "invalid char literal " + std::string(tok.text) +
                               ": must be exactly one character or one of the supported escape "
                               "sequences (\\n \\t \\r \\\\ \\' \\\" \\0)");
+    }
+
+    [[nodiscard]] bool is_valid_enum_underlying_type(const Type& type) const {
+        return type.kind == TypeKind::Named &&
+               (type.name == "char" || type.name == "int" || type.name == "long" || type.name == "unsigned int" ||
+                type.name == "unsigned long" || type.name == "int8_t" || type.name == "int16_t" ||
+                type.name == "int32_t" || type.name == "int64_t" || type.name == "uint8_t" ||
+                type.name == "uint16_t" || type.name == "uint32_t" || type.name == "uint64_t" ||
+                type.name == "size_t" || type.name == "ptrdiff_t");
+    }
+
+    [[nodiscard]] long long parse_enum_constant_expr(const std::string& enum_name) {
+        ExprPtr expr = parse_unary();
+        std::function<long long(const Expr&)> eval = [&](const Expr& current) -> long long {
+            switch (current.kind) {
+                case ExprKind::IntegerLiteral:
+                case ExprKind::CharLiteral:
+                    return current.int_value;
+                case ExprKind::Unary:
+                    if (current.unary_op == UnaryOp::Neg && current.lhs) return -eval(*current.lhs);
+                    [[fallthrough]];
+                default:
+                    throw ParseError(current.loc.line, current.loc.column,
+                                     "enum class '" + enum_name +
+                                         "' only supports integer-literal enumerator values in this version");
+            }
+        };
+        return eval(*expr);
+    }
+
+    EnumDef parse_enum_def() {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwEnum, "'enum'");
+        if (!match(TokenKind::KwClass)) {
+            throw ParseError(loc.line, loc.column,
+                             "only 'enum class' is supported in this version; old-style unscoped 'enum' is not supported");
+        }
+
+        EnumDef def;
+        std::string bare_name = std::string(expect(TokenKind::Identifier, "enum class name").text);
+        def.name = qualify_name(bare_name);
+        def.namespace_path = namespace_stack_;
+        if (match(TokenKind::Colon)) {
+            def.underlying_type = parse_type();
+            if (!is_valid_enum_underlying_type(def.underlying_type)) {
+                throw ParseError(loc.line, loc.column,
+                                 "enum class underlying type must be an integral scalar type in this version");
+            }
+        }
+        struct_names_.insert(def.name);
+
+        expect(TokenKind::LBrace, "'{'");
+        long long next_value = 0;
+        bool first = true;
+        while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+            if (!first) expect(TokenKind::Comma, "','");
+            if (check(TokenKind::RBrace)) break;
+            first = false;
+
+            EnumVariant variant;
+            variant.name = def.name + "::" + std::string(expect(TokenKind::Identifier, "enumerator name").text);
+            variant.value = next_value;
+            if (match(TokenKind::Assign)) variant.value = parse_enum_constant_expr(def.name);
+            def.variants.push_back(std::move(variant));
+            next_value = def.variants.back().value + 1;
+        }
+        expect(TokenKind::RBrace, "'}'");
+        expect(TokenKind::Semicolon, "';'");
+        return def;
     }
 
     // ch05 §5.14: `template_params`, non-empty exactly when the caller

@@ -3132,6 +3132,119 @@ void run_cli_extension_tests() {
     }
 }
 
+void run_enum_tests() {
+    {
+        std::string case_name = "enum_class_same_type_comparison_and_casts_compile_and_run";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "enum class Color : uint8_t { red = 1, green = 2, blue = 3 };\n"
+            "int main() {\n"
+            "    Color color = static_cast<Color>((uint8_t)2);\n"
+            "    if (color != Color::green) return 1;\n"
+            "    uint8_t raw = static_cast<uint8_t>(Color::blue);\n"
+            "    return (int)raw - 3;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "enum_class_cross_type_comparison_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(
+                "enum class Color { red };\n"
+                "enum class Shape { red };\n"
+                "int main() { return Color::red == Shape::red; }\n");
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected cross-enum comparison to be rejected");
+    }
+
+    {
+        std::string case_name = "enum_class_implicit_int_to_enum_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(
+                "enum class Color { red };\n"
+                "int main() { Color color = 1; return 0; }\n");
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected implicit int-to-enum conversion to be rejected");
+    }
+
+    {
+        std::string case_name = "enum_class_implicit_enum_to_int_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(
+                "enum class Color { red };\n"
+                "int main() { int value = Color::red; return value; }\n");
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected implicit enum-to-int conversion to be rejected");
+    }
+
+    {
+        std::string case_name = "enum_class_module_import_round_trip_works";
+        cases_run++;
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        std::filesystem::path module_path = root / "colors.scpp";
+        std::filesystem::path exe_path = root / "enum_import_exe";
+        write_text_file(module_path,
+                        "export module colors;\n"
+                        "namespace colors {\n"
+                        "    export enum class Color : uint8_t { red = 1, green = 2 };\n"
+                        "    export Color favorite() { return colors::Color::green; }\n"
+                        "}\n");
+        scpp::compile_to_executable(
+            "import colors;\n"
+            "int main() {\n"
+            "    uint8_t lhs = static_cast<uint8_t>(colors::favorite());\n"
+            "    uint8_t rhs = static_cast<uint8_t>(colors::Color::green);\n"
+            "    return (int)lhs - (int)rhs;\n"
+            "}\n",
+            exe_path.string(), {}, {{"colors", module_path.string()}});
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected imported enum module executable to succeed, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -3144,6 +3257,7 @@ int main() {
     run_generic_function_overload_tests();
     run_functional_tests();
     run_thread_tests();
+    run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_consteval_tests();
     run_cli_extension_tests();
