@@ -1,0 +1,34 @@
+// Current [[nodiscard]] semantics: assigning, passing, and returning a
+// nodiscard-marked result are all legitimate uses and must compile cleanly.
+[[nodiscard]] int answer() {
+    return 7;
+}
+
+int twice(int value) {
+    return value * 2;
+}
+
+struct [[nodiscard]] Status {
+    int code;
+};
+
+Status make_status() {
+    Status s;
+    s.code = 5;
+    return s;
+}
+
+int forward_answer() {
+    return answer();
+}
+
+Status forward_status() {
+    return make_status();
+}
+
+int main() {
+    int a = answer();
+    int b = twice(answer());
+    Status s = forward_status();
+    return a + b + s.code + forward_answer() - 33;
+}

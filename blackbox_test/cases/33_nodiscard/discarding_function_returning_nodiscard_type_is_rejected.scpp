@@ -1,0 +1,16 @@
+// Current [[nodiscard]] semantics: marking a type propagates to any function
+// returning that type, so discarding such a call is also a hard error.
+struct [[nodiscard("keep the status")]] Status {
+    int code;
+};
+
+Status make_status() {
+    Status s;
+    s.code = 5;
+    return s;
+}
+
+int main() {
+    make_status();
+    return 0;
+}

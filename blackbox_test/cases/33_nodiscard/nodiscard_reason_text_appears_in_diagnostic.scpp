@@ -1,0 +1,10 @@
+// Current [[nodiscard("reason")]] semantics: the reason string surfaces in
+// the hard-error diagnostic when the call result is discarded.
+[[nodiscard("check the status")]] int answer() {
+    return 7;
+}
+
+int main() {
+    answer();
+    return 0;
+}
