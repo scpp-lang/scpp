@@ -3930,17 +3930,15 @@ int main() {
     std::expected<std::uniform_int_distribution<int>, std::uniform_int_distribution_error> maybe_die =
         std::make_uniform_int_distribution(1, 6);
     if (!maybe_die.has_value()) return 1;
-    std::uniform_int_distribution<int> die = maybe_die.value();
     std::mt19937 gen(123);
-    int roll1 = die(gen);
-    int roll2 = die(gen);
+    int roll1 = maybe_die.value()(gen);
+    int roll2 = maybe_die.value()(gen);
     if (roll1 < 1 || roll1 > 6) return 2;
     if (roll2 < 1 || roll2 > 6) return 3;
     std::expected<std::uniform_int_distribution<int>, std::uniform_int_distribution_error> maybe_singleton =
         std::make_uniform_int_distribution(4, 4);
     if (!maybe_singleton.has_value()) return 4;
-    std::uniform_int_distribution<int> singleton = maybe_singleton.value();
-    if (singleton(gen) != 4) return 5;
+    if (maybe_singleton.value()(gen) != 4) return 5;
     return 0;
 }
 )SCPP",
