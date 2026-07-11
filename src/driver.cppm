@@ -43,7 +43,7 @@ struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 2;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 3;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -508,6 +508,7 @@ void write_expr(std::ostream& out, const Expr& expr) {
     write_double_le(out, expr.float_value);
     write_u8(out, expr.bool_value ? 1u : 0u);
     write_string(out, expr.name);
+    write_u8(out, expr.explicit_global_qualification ? 1u : 0u);
     write_enum(out, expr.binary_op);
     write_u8(out, expr.lhs ? 1u : 0u);
     if (expr.lhs) write_expr(out, *expr.lhs);
@@ -544,6 +545,7 @@ ExprPtr read_expr(std::istream& in, const std::string& context) {
     expr->float_value = read_double_le(in, context + " double");
     expr->bool_value = read_u8(in, context + " bool") != 0u;
     expr->name = read_string(in, context + " name");
+    expr->explicit_global_qualification = read_u8(in, context + " global qualification") != 0u;
     expr->binary_op = read_enum<BinaryOp>(in, context + " binary op");
     if (read_u8(in, context + " lhs present") != 0u) expr->lhs = read_expr(in, context + " lhs");
     if (read_u8(in, context + " rhs present") != 0u) expr->rhs = read_expr(in, context + " rhs");

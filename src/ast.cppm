@@ -394,6 +394,11 @@ struct Expr {
     // sees this node).
     std::string name;
 
+    // Identifier / Call only: true when the source spelled this name
+    // with a leading `::`, forcing lookup from the global namespace
+    // rather than the current enclosing namespace.
+    bool explicit_global_qualification = false;
+
     // Binary; also Call's method-call receiver (ch05 §5.9), nullptr for
     // an ordinary free-function call -- `obj.method(args)` parses to a
     // Call with `lhs = obj`, `name = "method"`, resolved to a concrete

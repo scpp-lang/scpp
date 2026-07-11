@@ -577,6 +577,7 @@ private:
         clone->float_value = expr.float_value;
         clone->bool_value = expr.bool_value;
         clone->name = expr.name;
+        clone->explicit_global_qualification = expr.explicit_global_qualification;
         clone->binary_op = expr.binary_op;
         clone->unary_op = expr.unary_op;
         clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
@@ -724,7 +725,7 @@ private:
             }
 
             case ExprKind::Identifier: {
-                auto it = locals_.find(expr.name);
+                auto it = expr.explicit_global_qualification ? locals_.end() : locals_.find(expr.name);
                 if (it != locals_.end()) return it->second.type;
                 if (const EnumDef* def = [&]() {
                         const EnumDef* enum_def = nullptr;
@@ -894,7 +895,7 @@ private:
                     }
                     return std::nullopt;
                 }
-                if (expr.lhs == nullptr && locals_.contains(expr.name) &&
+                if (expr.lhs == nullptr && !expr.explicit_global_qualification && locals_.contains(expr.name) &&
                     locals_.at(expr.name).type.kind == TypeKind::FunctionPointer) {
                     return *locals_.at(expr.name).type.function_return;
                 }
@@ -1808,7 +1809,10 @@ private:
                                                                        const std::optional<Type>& target_type = std::nullopt) {
         const Expr* source = &expr;
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
-        if (source->kind != ExprKind::Identifier || locals_.contains(source->name)) return std::nullopt;
+        if (source->kind != ExprKind::Identifier ||
+            (!source->explicit_global_qualification && locals_.contains(source->name))) {
+            return std::nullopt;
+        }
         std::optional<Type> result;
         for (const Function& fn : program_->functions) {
             if (fn.name != source->name) continue;
@@ -2769,7 +2773,7 @@ private:
                 }
                 return CallResult{codegen_constructed_class_value(expr.name, expr.args, ctor_def, &expr), nullptr};
             }
-            auto local_it = locals_.find(expr.name);
+            auto local_it = expr.explicit_global_qualification ? locals_.end() : locals_.find(expr.name);
             if (local_it != locals_.end() && local_it->second.type.kind == TypeKind::FunctionPointer) {
                 llvm::Value* callee_value = builder_->CreateLoad(to_llvm_type(local_it->second.type), local_it->second.alloca,
                                                                  expr.name + ".fnptr");
@@ -3242,7 +3246,7 @@ private:
             }
 
             case ExprKind::Identifier: {
-                if (!locals_.contains(expr.name)) {
+                if (expr.explicit_global_qualification || !locals_.contains(expr.name)) {
                     const EnumDef* enum_def = nullptr;
                     const EnumVariant* enum_variant = find_enum_variant(program_, expr.name, &enum_def);
                     if (enum_variant != nullptr) {
@@ -3252,6 +3256,9 @@ private:
                     }
                     if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
                         if (llvm::Value* fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
+                    }
+                    if (expr.explicit_global_qualification) {
+                        throw CodegenError("use of undeclared global name '" + expr.name + "'", current_loc_);
                     }
                 }
                 LValue lv = codegen_lvalue(expr);
