@@ -224,6 +224,9 @@ struct FunctionSignature {
     bool is_unsafe = false;
     bool is_nodiscard = false;
     std::string nodiscard_reason;
+    std::string member_owner_class;
+    bool is_static = false;
+    AccessSpecifier access = AccessSpecifier::Public;
     // Where this specific overload's declaration begins -- see
     // Function::loc; needed for diagnostics that are about one
     // particular overload (e.g. a redefinition error naming the
@@ -2715,6 +2718,12 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                              "type match only; an explicit cast may be required)",
             state.current_loc);
     }
+    if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
+        !sig->member_owner_class.empty() && state.current_class != sig->member_owner_class) {
+        throw DataflowError("cannot call private member function '" + callee_display + "' of class '" +
+                             sig->member_owner_class + "' from outside its own methods",
+            state.current_loc);
+    }
     if (report_errors && sig != nullptr && sig->is_extern_c_declaration_only && state.unsafe_depth == 0) {
         throw DataflowError("cannot call 'extern \"C\"' function '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': no scpp compiler ever sees its real "
@@ -2875,6 +2884,12 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             }
             if (matches.size() == 1) sig = matches[0];
         }
+    }
+    if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
+        !sig->member_owner_class.empty() && state.current_class != sig->member_owner_class) {
+        throw DataflowError("cannot call private constructor of class '" + class_name +
+                             "' from outside its own methods",
+            state.current_loc);
     }
     if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
         throw DataflowError("cannot call '" + class_name +
@@ -4173,7 +4188,9 @@ void check_function(const Function& fn, const Program& program, const Signatures
     // parser's make_this_param) -- a user can never spell a same-named
     // parameter themselves, since `this` is a keyword, not an ordinary
     // identifier token.
-    if (!fn.params.empty() && fn.params[0].name == "this") {
+    if (!fn.member_owner_class.empty()) {
+        entry_state.current_class = fn.member_owner_class;
+    } else if (!fn.params.empty() && fn.params[0].name == "this") {
         entry_state.current_class = fn.params[0].type.pointee->name;
     }
     entry_state.class_names = &class_names;
@@ -4267,6 +4284,9 @@ void check_function(const Function& fn, const Program& program, const Signatures
         sig.is_unsafe = fn.is_unsafe;
         sig.is_nodiscard = fn.is_nodiscard;
         sig.nodiscard_reason = fn.nodiscard_reason;
+        sig.member_owner_class = fn.member_owner_class;
+        sig.is_static = fn.is_static;
+        sig.access = fn.access;
         sig.loc = fn.loc;
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
@@ -4370,7 +4390,10 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.is_generic_template = fn.is_generic_template;
     clone.template_params = fn.template_params;
     clone.generic_method_owner_id = fn.generic_method_owner_id;
+    clone.member_owner_class = fn.member_owner_class;
     clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+    clone.is_static = fn.is_static;
+    clone.access = fn.access;
     clone.eval_mode = fn.eval_mode;
     clone.namespace_path = fn.namespace_path;
     clone.is_exported = fn.is_exported;
@@ -5279,8 +5302,7 @@ private:
     [[nodiscard]] std::vector<Function> methods_of_type_name(const std::string& type_name) const {
         std::vector<Function> result;
         for (const Function& fn : program_.functions) {
-            if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
-                fn.params[0].type.pointee->name == type_name) {
+            if (fn.member_owner_class == type_name) {
                 result.push_back(clone_function(fn));
             }
         }
@@ -5321,6 +5343,9 @@ private:
             clone.is_generic_template = method_tmpl.is_generic_template;
             clone.template_params = method_tmpl.template_params;
             clone.method_requires_concept = method_tmpl.method_requires_concept;
+            clone.member_owner_class = cache_key;
+            clone.is_static = method_tmpl.is_static;
+            clone.access = method_tmpl.access;
             clone.return_type = instantiate_type_pattern(method_tmpl.return_type, type_replacements, pack_replacements);
             clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
             std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
@@ -5657,6 +5682,7 @@ private:
 
             std::vector<Function> base_methods = methods_of_type_name(base_name);
             for (const Function& base_method : base_methods) {
+                if (base_method.is_static) continue;
                 // e.g. "_foo" out of "Circle_foo" -- see
                 // method_templates_of's exact-name-match filter, which
                 // guarantees this is always a clean prefix.
@@ -5678,6 +5704,9 @@ private:
                 forward.return_type = base_method.return_type;
                 forward.namespace_path = namespace_path_copy;
                 forward.is_exported = is_exported_copy;
+                forward.member_owner_class = derived_name;
+                forward.receiver_ref_qualifier = base_method.receiver_ref_qualifier;
+                forward.access = base_method.access;
                 forward.forwards_to = base_method.name;
                 forward.body = nullptr; // purely a codegen-level wrapper -- see Function::forwards_to's own comment
                 Param this_param;
@@ -6355,6 +6384,9 @@ private:
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
+                clone.member_owner_class = cache_key;
+                clone.is_static = method_tmpl.is_static;
+                clone.access = method_tmpl.access;
                 clone.return_type = instantiate_type_pattern(method_tmpl.return_type, class_selection.bindings.type_replacements,
                                                              class_selection.bindings.type_pack_replacements);
                 clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
@@ -6491,6 +6523,9 @@ private:
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
+                clone.member_owner_class = cache_key;
+                clone.is_static = method_tmpl.is_static;
+                clone.access = method_tmpl.access;
                 clone.return_type = method_tmpl.return_type;
                 clone.params.reserve(method_tmpl.params.size());
                 for (const Param& param : method_tmpl.params) {
@@ -7260,6 +7295,9 @@ private:
                 clone.is_unsafe = tmpl.is_unsafe;
                 clone.is_nodiscard = tmpl.is_nodiscard;
                 clone.nodiscard_reason = tmpl.nodiscard_reason;
+                clone.member_owner_class = class_name;
+                clone.is_static = tmpl.is_static;
+                clone.access = tmpl.access;
                 clone.return_type = tmpl.return_type;
                 for (const auto& [name, replacement] : type_bindings) {
                     clone.return_type = substitute_type_param(clone.return_type, name, replacement);
@@ -7362,7 +7400,10 @@ private:
         clone.nodiscard_reason = tmpl.nodiscard_reason;
         clone.owning_module = tmpl.owning_module;
         clone.eval_mode = tmpl.eval_mode;
+        clone.member_owner_class = tmpl.member_owner_class;
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
+        clone.is_static = tmpl.is_static;
+        clone.access = tmpl.access;
         clone.return_type = apply_template_bindings_to_type(tmpl.return_type, type_bindings, pack_bindings, tmpl.loc);
         clone.params.reserve(tmpl.params.size());
         std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
@@ -8990,6 +9031,9 @@ private:
         clone.nodiscard_reason = tmpl.nodiscard_reason;
         clone.owning_module = tmpl.owning_module;
         clone.eval_mode = tmpl.eval_mode;
+        clone.member_owner_class = tmpl.member_owner_class;
+        clone.is_static = tmpl.is_static;
+        clone.access = tmpl.access;
         std::unordered_map<std::string, Type> witness_replacements;
         for (size_t i = 0; i < tmpl.params.size() && i < concrete_param_types.size(); i++) {
             if (!tmpl.params[i].generic_concept.empty()) {

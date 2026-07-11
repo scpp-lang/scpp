@@ -43,7 +43,7 @@ struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 3;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 4;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -120,8 +120,7 @@ namespace {
     if (fn.eval_mode != scpp::FunctionEvalMode::RuntimeOnly || fn.is_generic_template || !fn.template_params.empty()) {
         return true;
     }
-    return !fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
-           is_exported_generic_type_name(program, fn.params[0].type.pointee->name);
+    return !fn.member_owner_class.empty() && is_exported_generic_type_name(program, fn.member_owner_class);
 }
 
 void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>& out) {
@@ -835,7 +834,10 @@ void write_function(std::ostream& out, const Function& fn) {
     write_u32_le(out, static_cast<std::uint32_t>(fn.template_params.size()));
     for (const GenericTypeParam& param : fn.template_params) write_generic_type_param(out, param);
     write_string(out, fn.generic_method_owner_id);
+    write_string(out, fn.member_owner_class);
     write_enum(out, fn.receiver_ref_qualifier);
+    write_u8(out, fn.is_static ? 1u : 0u);
+    write_enum(out, fn.access);
     write_string(out, fn.forwards_to);
     write_u32_le(out, static_cast<std::uint32_t>(fn.namespace_path.size()));
     for (const std::string& segment : fn.namespace_path) write_string(out, segment);
@@ -866,7 +868,10 @@ void write_function(std::ostream& out, const Function& fn) {
     fn.template_params.reserve(template_param_count);
     for (std::uint32_t i = 0; i < template_param_count; i++) fn.template_params.push_back(read_generic_type_param(in, context + " template param"));
     fn.generic_method_owner_id = read_string(in, context + " generic method owner");
+    fn.member_owner_class = read_string(in, context + " member owner class");
     fn.receiver_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
+    fn.is_static = read_u8(in, context + " is_static") != 0u;
+    fn.access = read_enum<AccessSpecifier>(in, context + " access");
     fn.forwards_to = read_string(in, context + " forwards_to");
     std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
     fn.namespace_path.reserve(ns_count);
@@ -921,7 +926,8 @@ void write_function(std::ostream& out, const Function& fn) {
 [[nodiscard]] bool same_function_identity_for_payload_merge(const Function& a, const Function& b) {
     return a.name == b.name && types_equal_for_payload_merge(a.return_type, b.return_type) &&
            params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
-           a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason;
+           a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason &&
+           a.member_owner_class == b.member_owner_class && a.is_static == b.is_static && a.access == b.access;
 }
 
 [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,

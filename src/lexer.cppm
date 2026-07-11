@@ -84,6 +84,8 @@ enum class TokenKind {
     KwClass,   // ch04 §4.2: owns resources, participates in move/borrow
                // checking, private-by-default access control -- unlike
                // `struct` (trivial aggregate, always-public fields).
+    KwStatic,  // class member function specifier: no implicit `this`,
+               // callable as `ClassName::method(...)`.
     KwPublic,  // Only legal directly above a member *function* -- ch04
                // §4.2 permanently forbids a public member variable
                // (including a class-level constant).
@@ -268,6 +270,7 @@ private:
         if (text == "constexpr") return TokenKind::KwConstexpr;
         if (text == "consteval") return TokenKind::KwConsteval;
         if (text == "class") return TokenKind::KwClass;
+        if (text == "static") return TokenKind::KwStatic;
         if (text == "public") return TokenKind::KwPublic;
         if (text == "private") return TokenKind::KwPrivate;
         if (text == "this") return TokenKind::KwThis;

@@ -174,9 +174,7 @@ public:
             // type_satisfies_concept/monomorphization) -- purely a
             // signature for the generic template's own body-check to
             // resolve against.
-            if (!fn.params.empty() && fn.params[0].name == "this" &&
-                fn.params[0].type.kind == TypeKind::Reference &&
-                witness_class_names.contains(fn.params[0].type.pointee->name)) {
+            if (!fn.member_owner_class.empty() && witness_class_names.contains(fn.member_owner_class)) {
                 return true;
             }
             // ch05 §5.14: a generic class template's own, not-yet-
@@ -188,8 +186,7 @@ public:
             // already excluded above) and resolve_generic_types' own
             // concrete-instantiation clones (ordinary functions by now)
             // are ever compiled.
-            return !fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr &&
-                   generic_type_template_names.contains(fn.params[0].type.pointee->name);
+            return !fn.member_owner_class.empty() && generic_type_template_names.contains(fn.member_owner_class);
         };
         for (const Function& fn : program.functions) {
             if (is_never_compiled(fn)) continue;

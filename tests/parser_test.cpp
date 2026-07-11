@@ -279,6 +279,27 @@ void test_nodiscard_function_and_method_attributes_parse() {
            "nodiscard_function_and_method_attributes_parse: bare nodiscard should have empty reason");
 }
 
+void test_static_member_function_parses_without_this() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "public:\n"
+        "    static int make(int value) { return value; }\n"
+        "private:\n"
+        "    static int secret() { return 7; }\n"
+        "};\n"
+        "int main() { return Box::make(3); }\n");
+    const scpp::Function* make_fn = find_function_named(program, "Box_make");
+    const scpp::Function* secret_fn = find_function_named(program, "Box_secret");
+    expect(make_fn != nullptr, "static_member_function_parses_without_this: expected Box_make");
+    expect(make_fn->is_static, "static_member_function_parses_without_this: method should be static");
+    expect(make_fn->member_owner_class == "Box",
+           "static_member_function_parses_without_this: owner class should be recorded");
+    expect(make_fn->params.size() == 1 && make_fn->params[0].name == "value",
+           "static_member_function_parses_without_this: static method should not get implicit this");
+    expect(secret_fn != nullptr && secret_fn->access == scpp::AccessSpecifier::Private,
+           "static_member_function_parses_without_this: private static access should parse");
+}
+
 // ch01 §1.3 (1): `[[scpp::unsafe]]` may only appertain to a compound-
 // statement or a function's own declaration -- appertaining to a
 // struct/class declaration is ill-formed.
@@ -3288,6 +3309,7 @@ int main() {
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
+    test_static_member_function_parses_without_this();
     test_unsafe_attribute_on_struct_is_rejected();
     test_thread_safety_attribute_on_struct_parses();
     test_thread_safety_attributes_on_class_parse();
