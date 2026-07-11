@@ -591,6 +591,11 @@ struct GenericTypeParam {
     Type non_type_type; // meaningful only when is_non_type is true
 };
 
+enum class AccessSpecifier {
+    Public,
+    Private,
+};
+
 struct Function {
     Type return_type;
     std::string name;
@@ -722,11 +727,22 @@ struct Function {
     // alone. Cleared again on every concrete clone and on every
     // non-template class method.
     std::string generic_method_owner_id;
+    // Member functions only: the owning class's own fully-qualified name.
+    // Empty for a free function.
+    std::string member_owner_class;
     // Member functions only: trailing ref-qualifier after the parameter
     // list (`&` / `&&`). `None` means unqualified, so the method is
     // callable on either an lvalue or rvalue receiver. `const` remains
     // represented by params[0]'s own `this` type.
     ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
+    // Member functions only: whether this declaration was spelled
+    // `static`. A static member function has no implicit `this`
+    // parameter and is called through `ClassName::method(...)`.
+    bool is_static = false;
+    // Member functions only: whether this declaration was parsed under a
+    // `public:` or `private:` section of its enclosing class. Free
+    // functions leave this at the default Public.
+    AccessSpecifier access = AccessSpecifier::Public;
 
     // ch05 §5.14: non-empty only for a synthesized *forwarding stub* --
     // a derived class inheriting a base method it doesn't itself
@@ -837,11 +853,6 @@ struct StructDef {
     bool thread_shareable_override = false;
     bool is_nodiscard = false;
     std::string nodiscard_reason;
-};
-
-enum class AccessSpecifier {
-    Public,
-    Private,
 };
 
 struct ClassField {

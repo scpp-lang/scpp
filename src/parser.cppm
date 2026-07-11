@@ -803,6 +803,14 @@ private:
         return !resolve_visible_type_name(spelled_name).empty();
     }
 
+    [[nodiscard]] std::optional<std::string>
+    resolve_static_member_owner_name(const std::string& spelled_owner, bool explicit_global_qualification) const {
+        std::string resolved_owner =
+            explicit_global_qualification ? spelled_owner : resolve_visible_type_name(spelled_owner);
+        if (resolved_owner.empty() || !class_names_.contains(resolved_owner)) return std::nullopt;
+        return resolved_owner;
+    }
+
     [[nodiscard]] bool types_equal(const Type& a, const Type& b) const {
         if (a.kind != b.kind) return false;
         if (a.name != b.name || a.is_mutable_ref != b.is_mutable_ref ||
@@ -855,7 +863,8 @@ private:
         return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
-               a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier;
+               a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
+               a.is_static == b.is_static && a.access == b.access && a.member_owner_class == b.member_owner_class;
     }
 
     [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
@@ -1791,7 +1800,10 @@ private:
         clone.is_generic_template = fn.is_generic_template;
         clone.template_params = fn.template_params;
         clone.generic_method_owner_id = fn.generic_method_owner_id;
+        clone.member_owner_class = fn.member_owner_class;
         clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+        clone.is_static = fn.is_static;
+        clone.access = fn.access;
         clone.eval_mode = fn.eval_mode;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
@@ -3086,6 +3098,7 @@ private:
             fn.name = def.name + "_" + req.method_name;
             fn.namespace_path = namespace_stack_;
             fn.is_exported = is_exported;
+            fn.member_owner_class = def.name;
             fn.return_type =
                 req.has_return_constraint ? req.return_type : named_type("void");
             fn.params.push_back(make_this_param(def.name, placeholder_is_const));
@@ -3722,11 +3735,18 @@ private:
             bool member_requested_unsafe = member_attrs.has("unsafe");
             bool member_requested_nodiscard = member_attrs.has_nodiscard;
             std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
+            bool member_is_static = false;
+            if (match(TokenKind::KwStatic)) member_is_static = true;
             FunctionEvalMode member_eval_mode = parse_optional_function_eval_mode();
+            if (!member_is_static && match(TokenKind::KwStatic)) member_is_static = true;
             if (match(TokenKind::Tilde)) {
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
                                       "a destructor cannot be a member template");
+                }
+                if (member_is_static) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a destructor cannot be declared static");
                 }
                 if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
                     throw ParseError(member_loc.line, member_loc.column,
@@ -3748,6 +3768,8 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
+                fn.member_owner_class = qualified_class_name;
+                fn.access = current_access;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_delete";
@@ -3768,12 +3790,18 @@ private:
                 // `this` is always mutable here too (it's what the
                 // constructor initializes).
                 advance(); // class name
+                if (member_is_static) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a constructor cannot be declared static");
+                }
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
+                fn.member_owner_class = qualified_class_name;
+                fn.access = current_access;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_new";
@@ -3838,6 +3866,10 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                       "an operator* cannot currently be a member template");
                 }
+                if (member_is_static) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "an operator* cannot be declared static");
+                }
                 advance(); // 'operator'
                 advance(); // '*'
                 Function fn;
@@ -3846,6 +3878,8 @@ private:
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
+                fn.member_owner_class = qualified_class_name;
+                fn.access = current_access;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator*");
                 bool is_const = match(TokenKind::KwConst);
@@ -3864,6 +3898,10 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                       "an operator= cannot currently be a member template");
                 }
+                if (member_is_static) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "an operator= cannot be declared static");
+                }
                 advance(); // 'operator'
                 advance(); // '='
                 Function fn;
@@ -3872,6 +3910,8 @@ private:
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
+                fn.member_owner_class = qualified_class_name;
+                fn.access = current_access;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator=");
                 // spec §6.4(1): a program shall not declare a move
@@ -3922,6 +3962,10 @@ private:
                                       "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
                                       "compound-statement or a function's own declaration (ch01 §1.3)");
                 }
+                if (member_is_static) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "static data members are not supported in this version");
+                }
                 ClassField field;
                 field.type = parse_function_pointer_declarator(std::move(member_type), field.name);
                 field.access = current_access;
@@ -3937,6 +3981,9 @@ private:
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
+                fn.member_owner_class = qualified_class_name;
+                fn.is_static = member_is_static;
+                fn.access = current_access;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a method");
                 fn.template_params = member_template_params;
@@ -3947,9 +3994,15 @@ private:
                 // parsing the params above.
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
+                if (member_is_static && (is_const || fn.receiver_ref_qualifier != ReceiverRefQualifier::None)) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a static member function cannot be const-qualified or ref-qualified");
+                }
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_" + member_name;
-                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                if (!member_is_static) {
+                    fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                }
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_member_body_or_declaration();
                 finish_member_fn(fn);
@@ -3974,6 +4027,10 @@ private:
                 throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
                                   "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
                                   "compound-statement or a function's own declaration (ch01 §1.3)");
+            }
+            if (member_is_static) {
+                throw ParseError(member_loc.line, member_loc.column,
+                                  "static data members are not supported in this version");
             }
             if (member_is_template) {
                 throw ParseError(member_loc.line, member_loc.column,
@@ -4619,6 +4676,16 @@ private:
                     node->name = expr->name;
                     node->explicit_global_qualification = expr->explicit_global_qualification;
                     node->explicit_template_args = std::move(expr->explicit_template_args);
+                    size_t last_separator = node->name.rfind("::");
+                    if (last_separator != std::string::npos) {
+                        std::string owner_name = node->name.substr(0, last_separator);
+                        std::string member_name = node->name.substr(last_separator + 2);
+                        if (std::optional<std::string> resolved_owner =
+                                resolve_static_member_owner_name(owner_name, node->explicit_global_qualification)) {
+                            node->name = *resolved_owner + "_" + member_name;
+                            node->explicit_global_qualification = false;
+                        }
+                    }
                 } else if (expr->kind == ExprKind::Lambda) {
                     node->name = "call";
                     node->lhs = std::move(expr);

@@ -3709,6 +3709,92 @@ void run_nodiscard_tests() {
 
 }
 
+void run_static_member_function_tests() {
+    {
+        std::string case_name = "static_member_function_is_callable_via_class_qualification";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Math {\n"
+            "public:\n"
+            "    static int add_one(int value) { return value + 1; }\n"
+            "};\n"
+            "int main() {\n"
+            "    return Math::add_one(6) - 7;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "static_member_function_can_use_private_constructor_and_field";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Box {\n"
+            "public:\n"
+            "    static int reveal(int value) {\n"
+            "        Box box(value);\n"
+            "        return box.secret;\n"
+            "    }\n"
+            "private:\n"
+            "    int secret;\n"
+            "    Box(int value) { this.secret = value; return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    return Box::reveal(9) - 9;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "private_constructor_is_not_callable_outside_the_class";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "class Box {\n"
+                "public:\n"
+                "    static int reveal(int value) {\n"
+                "        Box box(value);\n"
+                "        return box.secret;\n"
+                "    }\n"
+                "private:\n"
+                "    int secret;\n"
+                "    Box(int value) { this.secret = value; return; }\n"
+                "};\n"
+                "int main() {\n"
+                "    Box box(4);\n"
+                "    return 0;\n"
+                "}\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("private constructor") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected private constructor diagnostic");
+    }
+
+    {
+        std::string case_name = "static_member_function_cannot_use_this";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "class Box {\n"
+                "public:\n"
+                "    int secret;\n"
+                "    static int broken() {\n"
+                "        return this->secret;\n"
+                "    }\n"
+                "};\n"
+                "int main() { return 0; }\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::CodegenError& e) {
+            threw = std::string(e.what()).find("undeclared variable 'this'") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected static method to reject use of this");
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -3866,6 +3952,7 @@ int main() {
     run_thread_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
+    run_static_member_function_tests();
     run_expected_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
