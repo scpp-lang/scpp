@@ -673,6 +673,88 @@ private:
         return joined;
     }
 
+    [[nodiscard]] std::string type_to_string(const Type& type) const {
+        switch (type.kind) {
+        case TypeKind::Named: {
+            std::string result = type.name;
+            if (!type.template_args.empty()) {
+                result += "<";
+                for (size_t i = 0; i < type.template_args.size(); i++) {
+                    if (i != 0) result += ", ";
+                    result += type_to_string(type.template_args[i]);
+                }
+                result += ">";
+            }
+            return result;
+        }
+        case TypeKind::Pointer:
+            return (type.is_mutable_pointee ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
+                   "*";
+        case TypeKind::Function: {
+            std::string result = type_to_string(*type.function_return) + "(";
+            for (size_t i = 0; i < type.function_params.size(); i++) {
+                if (i != 0) result += ", ";
+                result += type_to_string(type.function_params[i]);
+            }
+            result += ")";
+            return result;
+        }
+        case TypeKind::FunctionPointer: {
+            std::string result = type_to_string(*type.function_return) + " (*";
+            result += ")(";
+            for (size_t i = 0; i < type.function_params.size(); i++) {
+                if (i != 0) result += ", ";
+                result += type_to_string(type.function_params[i]);
+            }
+            result += ")";
+            return result;
+        }
+        case TypeKind::Array: return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
+        case TypeKind::Reference:
+            if (type.is_rvalue_ref) return type_to_string(*type.pointee) + "&&";
+            return (type.is_mutable_ref ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
+                   "&";
+        case TypeKind::Span:
+            return std::string("std::span<") + (type.is_mutable_ref ? std::string() : std::string("const ")) +
+                   type_to_string(*type.pointee) + ">";
+        }
+        return "<unknown-type>";
+    }
+
+    [[nodiscard]] std::optional<std::string>
+    try_parse_template_static_member_name(const std::string& base_name, bool explicit_global_qualification) {
+        if (!check(TokenKind::Less)) return std::nullopt;
+        std::string resolved_base =
+            explicit_global_qualification ? base_name : resolve_visible_type_name(base_name);
+        if (resolved_base.empty() || !generic_type_names_.contains(resolved_base)) return std::nullopt;
+        size_t saved_pos = pos_;
+        try {
+            advance(); // '<'
+            std::vector<Type> template_args;
+            if (!check(TokenKind::Greater)) {
+                do {
+                    template_args.push_back(parse_template_type_argument());
+                } while (match(TokenKind::Comma));
+            }
+            expect(TokenKind::Greater, "'>'");
+            if (!match(TokenKind::ColonColon)) {
+                pos_ = saved_pos;
+                return std::nullopt;
+            }
+            std::string member_name = std::string(expect(TokenKind::Identifier, "member name").text);
+            std::string result = resolved_base + "<";
+            for (size_t i = 0; i < template_args.size(); i++) {
+                if (i != 0) result += ", ";
+                result += type_to_string(template_args[i]);
+            }
+            result += ">::" + member_name;
+            return result;
+        } catch (const ParseError&) {
+            pos_ = saved_pos;
+            return std::nullopt;
+        }
+    }
+
     ExprPtr clone_expr(const Expr& expr) {
         auto clone = std::make_unique<Expr>();
         clone->kind = expr.kind;
@@ -4921,6 +5003,10 @@ private:
                 return node;
             }
             std::string name = parse_global_qualified_name();
+            if (std::optional<std::string> specialized_name =
+                    try_parse_template_static_member_name(name, /*explicit_global_qualification=*/true)) {
+                name = *specialized_name;
+            }
             auto generic_fn_it = generic_function_template_params_.find(name);
             std::vector<ExplicitTemplateArg> explicit_template_args;
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
@@ -5107,6 +5193,10 @@ private:
             // the overwhelmingly common case, is just a chain of length
             // one).
             std::string name = parse_qualified_name();
+            if (std::optional<std::string> specialized_name =
+                    try_parse_template_static_member_name(name, /*explicit_global_qualification=*/false)) {
+                name = *specialized_name;
+            }
             // ch05 §5.11: `name<Args>(...)` -- an explicit-template-
             // argument call to a known full-header-form generic
             // function (e.g. `make<Circle>()`, `get<2>(t)`) --

@@ -11,7 +11,11 @@ namespace rand {
 
 export enum class uniform_int_distribution_error { empty_range };
 
-export class uniform_int_distribution {
+export template<typename T>
+class uniform_int_distribution;
+
+export template<>
+class uniform_int_distribution<int> {
 private:
     int minimum_;
     int maximum_;
@@ -23,7 +27,7 @@ private:
     }
 
 public:
-    uniform_int_distribution(const uniform_int_distribution& other) {
+    uniform_int_distribution(const uniform_int_distribution<int>& other) {
         this->minimum_ = other.minimum_;
         this->maximum_ = other.maximum_;
         return;
@@ -31,15 +35,16 @@ public:
 
     ~uniform_int_distribution() { return; }
 
-    static std::expected<uniform_int_distribution, uniform_int_distribution_error> make(int minimum, int maximum) {
+    static std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> make(int minimum,
+                                                                                              int maximum) {
         if (minimum > maximum) {
             uniform_int_distribution_error code = (uniform_int_distribution_error)0;
             std::unexpected<uniform_int_distribution_error> error(code);
-            std::expected<uniform_int_distribution, uniform_int_distribution_error> result(error);
+            std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(error);
             return std::move(result);
         }
-        uniform_int_distribution distribution(minimum, maximum);
-        std::expected<uniform_int_distribution, uniform_int_distribution_error> result(std::move(distribution));
+        uniform_int_distribution<int> distribution(minimum, maximum);
+        std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(std::move(distribution));
         return std::move(result);
     }
 

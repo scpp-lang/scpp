@@ -300,6 +300,28 @@ void test_static_member_function_parses_without_this() {
            "static_member_function_parses_without_this: private static access should parse");
 }
 
+void test_template_specialization_static_member_call_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Box;\n"
+        "template<>\n"
+        "class Box<int> {\n"
+        "public:\n"
+        "    static int make() { return 7; }\n"
+        "};\n"
+        "int main() { return Box<int>::make(); }\n");
+    const scpp::Function* make_fn = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.member_owner_class == "Box" && fn.is_static && fn.name.find("_make") != std::string::npos &&
+            !fn.generic_method_owner_id.empty()) {
+            make_fn = &fn;
+            break;
+        }
+    }
+    expect(make_fn != nullptr,
+           "template_specialization_static_member_call_parses: expected specialized static make function");
+}
+
 // ch01 §1.3 (1): `[[scpp::unsafe]]` may only appertain to a compound-
 // statement or a function's own declaration -- appertaining to a
 // struct/class declaration is ill-formed.
@@ -3309,6 +3331,7 @@ int main() {
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
     test_static_member_function_parses_without_this();
+    test_template_specialization_static_member_call_parses();
     test_unsafe_attribute_on_struct_is_rejected();
     test_thread_safety_attribute_on_struct_parses();
     test_thread_safety_attributes_on_class_parse();
