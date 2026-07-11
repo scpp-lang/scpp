@@ -87,6 +87,10 @@ void test_safe_is_no_longer_a_keyword() {
     expect_kinds("safe", {scpp::TokenKind::Identifier, scpp::TokenKind::EndOfFile}, "safe_is_no_longer_a_keyword");
 }
 
+void test_friend_is_a_keyword() {
+    expect_kinds("friend", {scpp::TokenKind::KwFriend, scpp::TokenKind::EndOfFile}, "friend_is_a_keyword");
+}
+
 void test_identifier_text() {
     std::vector<scpp::Token> tokens = scpp::tokenize("foo_bar1");
     expect(tokens.size() == 2, "identifier_text: expected 2 tokens");
@@ -377,6 +381,7 @@ int main() {
     test_keywords();
     test_safe_is_no_longer_a_keyword();
     test_unsafe_is_not_a_keyword();
+    test_friend_is_a_keyword();
     test_identifier_text();
     test_integer_literal_text();
     test_operators();

@@ -453,6 +453,8 @@ private:
         ClassDef clone;
         clone.name = def.name;
         clone.fields = def.fields;
+        clone.friend_functions = def.friend_functions;
+        clone.friend_classes = def.friend_classes;
         clone.namespace_path = def.namespace_path;
         clone.is_exported = def.is_exported;
         clone.is_compile_time_dependency = def.is_compile_time_dependency;
@@ -673,6 +675,12 @@ private:
         return joined;
     }
 
+    std::string parse_friend_decl_name() {
+        if (peek().kind == TokenKind::ColonColon) return parse_global_qualified_name();
+        std::string spelled = parse_qualified_name();
+        return spelled.find("::") == std::string::npos ? qualify_name(spelled) : spelled;
+    }
+
     ExprPtr clone_expr(const Expr& expr) {
         auto clone = std::make_unique<Expr>();
         clone->kind = expr.kind;
@@ -855,6 +863,7 @@ private:
         return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
+               a.access == b.access &&
                a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier;
     }
 
@@ -881,6 +890,18 @@ private:
         if (a.size() != b.size()) return false;
         for (size_t i = 0; i < a.size(); i++) {
             if (!types_equal(a[i], b[i])) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool same_friend_functions(const std::vector<FriendFunctionDecl>& a,
+                                             const std::vector<FriendFunctionDecl>& b) const {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (a[i].name != b[i].name || a[i].param_types.size() != b[i].param_types.size()) return false;
+            for (size_t j = 0; j < a[i].param_types.size(); j++) {
+                if (!types_equal(a[i].param_types[j], b[i].param_types[j])) return false;
+            }
         }
         return true;
     }
@@ -921,7 +942,9 @@ private:
             a.thread_shareable_override != b.thread_shareable_override || a.is_nodiscard != b.is_nodiscard ||
             a.nodiscard_reason != b.nodiscard_reason || !same_non_type_expr(a.base_non_type_arg, b.base_non_type_arg) ||
             !same_specialization_args(a.specialization_template_args, b.specialization_template_args) ||
-            !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
+            !same_template_param_shape(a.template_params, b.template_params) ||
+            !same_friend_functions(a.friend_functions, b.friend_functions) || a.friend_classes != b.friend_classes ||
+            a.fields.size() != b.fields.size()) {
             return false;
         }
         for (size_t i = 0; i < a.fields.size(); i++) {
@@ -1792,6 +1815,7 @@ private:
         clone.template_params = fn.template_params;
         clone.generic_method_owner_id = fn.generic_method_owner_id;
         clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+        clone.access = fn.access;
         clone.eval_mode = fn.eval_mode;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
@@ -3723,6 +3747,39 @@ private:
             bool member_requested_nodiscard = member_attrs.has_nodiscard;
             std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
             FunctionEvalMode member_eval_mode = parse_optional_function_eval_mode();
+            if (match(TokenKind::KwFriend)) {
+                if (member_is_template) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a friend declaration cannot currently be a member template");
+                }
+                if (member_requested_unsafe || member_requested_nodiscard ||
+                    member_eval_mode != FunctionEvalMode::RuntimeOnly) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "attributes, constexpr, and consteval are not supported on friend declarations");
+                }
+                if (match(TokenKind::KwClass)) {
+                    if (peek().kind != TokenKind::Identifier && peek().kind != TokenKind::ColonColon) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column, "expected friend class name");
+                    }
+                    def.friend_classes.push_back(parse_friend_decl_name());
+                    expect(TokenKind::Semicolon, "';'");
+                    continue;
+                }
+                Type friend_return_type = parse_type();
+                (void)friend_return_type;
+                if (peek().kind != TokenKind::Identifier && peek().kind != TokenKind::ColonColon) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, "expected friend function name");
+                }
+                FriendFunctionDecl friend_decl;
+                friend_decl.name = parse_friend_decl_name();
+                std::vector<Param> friend_params = parse_param_list();
+                for (const Param& param : friend_params) friend_decl.param_types.push_back(param.type);
+                expect(TokenKind::Semicolon, "';'");
+                def.friend_functions.push_back(std::move(friend_decl));
+                continue;
+            }
             if (match(TokenKind::Tilde)) {
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
@@ -3748,6 +3805,7 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
+                fn.access = current_access;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_delete";
@@ -3773,6 +3831,7 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
+                fn.access = current_access;
                 fn.eval_mode = member_eval_mode;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
@@ -3845,6 +3904,7 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
+                fn.access = current_access;
                 fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator*");
@@ -3871,6 +3931,7 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
+                fn.access = current_access;
                 fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator=");
@@ -3936,6 +3997,7 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
+                fn.access = current_access;
                 fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a method");

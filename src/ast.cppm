@@ -591,6 +591,11 @@ struct GenericTypeParam {
     Type non_type_type; // meaningful only when is_non_type is true
 };
 
+enum class AccessSpecifier {
+    Public,
+    Private,
+};
+
 struct Function {
     Type return_type;
     std::string name;
@@ -727,6 +732,10 @@ struct Function {
     // callable on either an lvalue or rvalue receiver. `const` remains
     // represented by params[0]'s own `this` type.
     ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
+    // Member functions only: whether this declaration was parsed under a
+    // `public:` or `private:` section of its enclosing class. Free
+    // functions leave this at the default Public.
+    AccessSpecifier access = AccessSpecifier::Public;
 
     // ch05 §5.14: non-empty only for a synthesized *forwarding stub* --
     // a derived class inheriting a base method it doesn't itself
@@ -839,11 +848,6 @@ struct StructDef {
     std::string nodiscard_reason;
 };
 
-enum class AccessSpecifier {
-    Public,
-    Private,
-};
-
 struct ClassField {
     Type type;
     std::string name;
@@ -853,6 +857,11 @@ struct ClassField {
     // never representing it) so this stays a plain, uniform data shape,
     // matching StructField's own style.
     AccessSpecifier access = AccessSpecifier::Private;
+};
+
+struct FriendFunctionDecl {
+    std::string name;
+    std::vector<Type> param_types;
 };
 
 // ch04 §4.2 / ch05 §5.9: unlike `struct` (a purely trivial aggregate, ch04
@@ -1016,6 +1025,8 @@ struct ClassDef {
     // structural derivation".
     ExprPtr thread_movable_if_movable_expr;
     ExprPtr thread_movable_if_shareable_expr;
+    std::vector<FriendFunctionDecl> friend_functions;
+    std::vector<std::string> friend_classes;
     bool is_nodiscard = false;
     std::string nodiscard_reason;
 };

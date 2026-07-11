@@ -3709,6 +3709,109 @@ void run_nodiscard_tests() {
 
 }
 
+void run_friend_tests() {
+    {
+        std::string case_name = "friend_function_can_access_private_ctor_and_field";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Box {\n"
+            "    friend int reveal(int value);\n"
+            "private:\n"
+            "    int secret;\n"
+            "    Box(int value) { this.secret = value; return; }\n"
+            "};\n"
+            "int reveal(int value) {\n"
+            "    Box box(value);\n"
+            "    return box.secret;\n"
+            "}\n"
+            "int main() {\n"
+            "    return reveal(7) - 7;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "non_friend_function_cannot_access_private_constructor";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "class Box {\n"
+                "private:\n"
+                "    int secret;\n"
+                "    Box(int value) { this.secret = value; return; }\n"
+                "};\n"
+                "int reveal(int value) {\n"
+                "    Box box(value);\n"
+                "    return 0;\n"
+                "}\n"
+                "int main() { return reveal(7); }\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            std::string message = e.what();
+            threw = message.find("private constructor") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected private constructor diagnostic");
+    }
+
+    {
+        std::string case_name = "friend_class_can_access_private_ctor_and_field";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Box {\n"
+            "    friend class Inspector;\n"
+            "private:\n"
+            "    int secret;\n"
+            "    Box(int value) { this.secret = value; return; }\n"
+            "};\n"
+            "class Inspector {\n"
+            "public:\n"
+            "    int inspect(int value) {\n"
+            "        Box box(value);\n"
+            "        return box.secret;\n"
+            "    }\n"
+            "};\n"
+            "int main() {\n"
+            "    Inspector inspector;\n"
+            "    return inspector.inspect(9) - 9;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "non_friend_class_cannot_access_private_member";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "class Box {\n"
+                "public:\n"
+                "    Box() { this.secret = 4; return; }\n"
+                "private:\n"
+                "    int secret;\n"
+                "};\n"
+                "class Thief {\n"
+                "public:\n"
+                "    int steal() {\n"
+                "        Box box;\n"
+                "        return box.secret;\n"
+                "    }\n"
+                "};\n"
+                "int main() {\n"
+                "    Thief thief;\n"
+                "    return thief.steal();\n"
+                "}\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            std::string message = e.what();
+            threw = message.find("cannot access private member 'secret'") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected private member diagnostic");
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -3866,6 +3969,7 @@ int main() {
     run_thread_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
+    run_friend_tests();
     run_expected_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();

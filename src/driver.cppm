@@ -652,6 +652,21 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     return field;
 }
 
+void write_friend_function_decl(std::ostream& out, const FriendFunctionDecl& decl) {
+    write_string(out, decl.name);
+    write_u32_le(out, static_cast<std::uint32_t>(decl.param_types.size()));
+    for (const Type& param_type : decl.param_types) write_type(out, param_type);
+}
+
+[[nodiscard]] FriendFunctionDecl read_friend_function_decl(std::istream& in, const std::string& context) {
+    FriendFunctionDecl decl;
+    decl.name = read_string(in, context + " name");
+    std::uint32_t param_count = read_u32_le(in, context + " param count");
+    decl.param_types.reserve(param_count);
+    for (std::uint32_t i = 0; i < param_count; i++) decl.param_types.push_back(read_type(in, context + " param type"));
+    return decl;
+}
+
 void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
     write_string(out, variant.name);
     write_i64_le(out, variant.value);
@@ -754,6 +769,10 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     write_u8(out, def.is_synthetic_check_only ? 1u : 0u);
     write_string(out, def.base_class_name);
     write_enum(out, def.base_access);
+    write_u32_le(out, static_cast<std::uint32_t>(def.friend_functions.size()));
+    for (const FriendFunctionDecl& decl : def.friend_functions) write_friend_function_decl(out, decl);
+    write_u32_le(out, static_cast<std::uint32_t>(def.friend_classes.size()));
+    for (const std::string& name : def.friend_classes) write_string(out, name);
     write_u8(out, def.is_variadic_primary_template ? 1u : 0u);
     write_u8(out, def.is_variadic_specialization ? 1u : 0u);
     write_u8(out, def.is_partial_specialization ? 1u : 0u);
@@ -793,6 +812,16 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     def.is_synthetic_check_only = read_u8(in, context + " is_synthetic_check_only") != 0u;
     def.base_class_name = read_string(in, context + " base class");
     def.base_access = read_enum<AccessSpecifier>(in, context + " base access");
+    std::uint32_t friend_fn_count = read_u32_le(in, context + " friend function count");
+    def.friend_functions.reserve(friend_fn_count);
+    for (std::uint32_t i = 0; i < friend_fn_count; i++) {
+        def.friend_functions.push_back(read_friend_function_decl(in, context + " friend function"));
+    }
+    std::uint32_t friend_class_count = read_u32_le(in, context + " friend class count");
+    def.friend_classes.reserve(friend_class_count);
+    for (std::uint32_t i = 0; i < friend_class_count; i++) {
+        def.friend_classes.push_back(read_string(in, context + " friend class"));
+    }
     def.is_variadic_primary_template = read_u8(in, context + " is_variadic_primary") != 0u;
     def.is_variadic_specialization = read_u8(in, context + " is_variadic_specialization") != 0u;
     def.is_partial_specialization = read_u8(in, context + " is_partial_specialization") != 0u;
@@ -836,6 +865,7 @@ void write_function(std::ostream& out, const Function& fn) {
     for (const GenericTypeParam& param : fn.template_params) write_generic_type_param(out, param);
     write_string(out, fn.generic_method_owner_id);
     write_enum(out, fn.receiver_ref_qualifier);
+    write_enum(out, fn.access);
     write_string(out, fn.forwards_to);
     write_u32_le(out, static_cast<std::uint32_t>(fn.namespace_path.size()));
     for (const std::string& segment : fn.namespace_path) write_string(out, segment);
@@ -867,6 +897,7 @@ void write_function(std::ostream& out, const Function& fn) {
     for (std::uint32_t i = 0; i < template_param_count; i++) fn.template_params.push_back(read_generic_type_param(in, context + " template param"));
     fn.generic_method_owner_id = read_string(in, context + " generic method owner");
     fn.receiver_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
+    fn.access = read_enum<AccessSpecifier>(in, context + " access");
     fn.forwards_to = read_string(in, context + " forwards_to");
     std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
     fn.namespace_path.reserve(ns_count);
@@ -921,7 +952,7 @@ void write_function(std::ostream& out, const Function& fn) {
 [[nodiscard]] bool same_function_identity_for_payload_merge(const Function& a, const Function& b) {
     return a.name == b.name && types_equal_for_payload_merge(a.return_type, b.return_type) &&
            params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
-           a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason;
+           a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason && a.access == b.access;
 }
 
 [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
@@ -944,6 +975,18 @@ void write_function(std::ostream& out, const Function& fn) {
     return true;
 }
 
+[[nodiscard]] bool same_friend_functions_for_payload_merge(const std::vector<FriendFunctionDecl>& a,
+                                                           const std::vector<FriendFunctionDecl>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i].name != b[i].name || a[i].param_types.size() != b[i].param_types.size()) return false;
+        for (size_t j = 0; j < a[i].param_types.size(); j++) {
+            if (!types_equal_for_payload_merge(a[i].param_types[j], b[i].param_types[j])) return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] bool same_struct_identity_for_payload_merge(const StructDef& a, const StructDef& b) {
     return a.name == b.name && a.is_union == b.is_union && a.is_nodiscard == b.is_nodiscard &&
            a.nodiscard_reason == b.nodiscard_reason &&
@@ -955,6 +998,8 @@ void write_function(std::ostream& out, const Function& fn) {
            a.is_variadic_specialization == b.is_variadic_specialization &&
            a.is_partial_specialization == b.is_partial_specialization &&
            a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason &&
+           same_friend_functions_for_payload_merge(a.friend_functions, b.friend_functions) &&
+           a.friend_classes == b.friend_classes &&
            same_template_param_shape(a.template_params, b.template_params) &&
            same_specialization_args(a.specialization_template_args, b.specialization_template_args);
 }

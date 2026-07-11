@@ -279,6 +279,37 @@ void test_nodiscard_function_and_method_attributes_parse() {
            "nodiscard_function_and_method_attributes_parse: bare nodiscard should have empty reason");
 }
 
+void test_friend_declarations_parse() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "    friend int reveal(int value);\n"
+        "    friend class Inspector;\n"
+        "private:\n"
+        "    int secret;\n"
+        "    Box(int value) { this.secret = value; return; }\n"
+        "    int hidden() const { return this.secret; }\n"
+        "};\n"
+        "int reveal(int value) { return value; }\n"
+        "int main() { return 0; }\n");
+    expect(program.classes.size() == 1, "friend_declarations_parse: expected 1 class");
+    const scpp::ClassDef& def = program.classes[0];
+    expect(def.friend_functions.size() == 1, "friend_declarations_parse: expected 1 friend function");
+    expect(def.friend_functions[0].name == "reveal",
+           "friend_declarations_parse: expected friend function named 'reveal'");
+    expect(def.friend_functions[0].param_types.size() == 1 &&
+               is_named_type(def.friend_functions[0].param_types[0], "int"),
+           "friend_declarations_parse: expected friend function parameter type 'int'");
+    expect(def.friend_classes.size() == 1 && def.friend_classes[0] == "Inspector",
+           "friend_declarations_parse: expected friend class 'Inspector'");
+
+    const scpp::Function* ctor = find_function_named(program, "Box_new");
+    const scpp::Function* hidden = find_function_named(program, "Box_hidden");
+    expect(ctor != nullptr && ctor->access == scpp::AccessSpecifier::Private,
+           "friend_declarations_parse: expected private constructor access");
+    expect(hidden != nullptr && hidden->access == scpp::AccessSpecifier::Private,
+           "friend_declarations_parse: expected private method access");
+}
+
 // ch01 §1.3 (1): `[[scpp::unsafe]]` may only appertain to a compound-
 // statement or a function's own declaration -- appertaining to a
 // struct/class declaration is ill-formed.
@@ -3288,6 +3319,7 @@ int main() {
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
+    test_friend_declarations_parse();
     test_unsafe_attribute_on_struct_is_rejected();
     test_thread_safety_attribute_on_struct_parses();
     test_thread_safety_attributes_on_class_parse();

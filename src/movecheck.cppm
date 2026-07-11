@@ -94,6 +94,8 @@ using ClassFieldTypes = std::unordered_map<std::string, std::unordered_map<std::
 // struct (struct fields have no access control at all, ch04 §4.1 -- see
 // check_moves, which only fills this in for program.classes).
 using ClassFieldAccess = std::unordered_map<std::string, std::unordered_map<std::string, AccessSpecifier>>;
+using ClassFriendFunctions = std::unordered_map<std::string, std::vector<FriendFunctionDecl>>;
+using ClassFriendClasses = std::unordered_map<std::string, std::unordered_set<std::string>>;
 
 // The full per-program-point dataflow state: ownership/move state per
 // local (`locals`), active borrows per root place (`borrows`), which root
@@ -124,6 +126,7 @@ struct DataflowState {
     // predecessor path), so join_states doesn't need real join logic here
     // either.
     std::string current_class;
+    const Function* current_function = nullptr;
     // All class names in the whole program (ch04 §4.2), built once by
     // check_moves and never mutated afterward -- used only to tell a
     // class-typed Member base (access-controlled: private-by-construction
@@ -156,6 +159,8 @@ struct DataflowState {
     // external field access the way an earlier, stricter version of this
     // rule did.
     const ClassFieldAccess* class_field_access = nullptr;
+    const ClassFriendFunctions* class_friend_functions = nullptr;
+    const ClassFriendClasses* class_friend_classes = nullptr;
     // spec §6.5: every class name that has a copy constructor (user-
     // declared or compiler-eligible) / copy assignment operator,
     // respectively -- built once by check_moves (mirrors class_names'
@@ -184,8 +189,11 @@ struct DataflowState {
         return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
                closure_capture_borrows == other.closure_capture_borrows &&
                unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
+               current_function == other.current_function &&
                class_names == other.class_names && class_field_types == other.class_field_types &&
                class_field_access == other.class_field_access &&
+               class_friend_functions == other.class_friend_functions &&
+               class_friend_classes == other.class_friend_classes &&
                classes_with_copy_ctor == other.classes_with_copy_ctor &&
                classes_with_copy_assign == other.classes_with_copy_assign;
     }
@@ -230,6 +238,8 @@ struct FunctionSignature {
     // conflicting declaration).
     SourceLocation loc;
     ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
+    AccessSpecifier access = AccessSpecifier::Public;
+    std::string member_owner_class;
 };
 
 // ch05 §5.10: a name (free function or method, post class-mangling --
@@ -321,7 +331,7 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // fixed-point iteration computes along the way, mirroring
         // join_ref_targets' own comment above.
         std::min(a.unsafe_depth, b.unsafe_depth),
-        // `current_class`/`class_names`/`class_field_types` are set once
+        // `current_class`/`current_function`/`class_names`/`class_field_types` are set once
         // per function and never change afterward (see DataflowState's
         // own comments) -- identical on both sides in a well-formed
         // program, so simply keeping `a`'s is enough (no real join
@@ -329,11 +339,14 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // "fail safe" tie-break since there's no meaningful direction to
         // fail toward here).
         a.current_class,
+        a.current_function,
         a.class_names,
         a.class_field_types,
         a.class_field_access,
+        a.class_friend_functions,
+        a.class_friend_classes,
         // Same "set once, never changes, no real join needed" reasoning
-        // as class_names/class_field_types/class_field_access just
+        // as class_names/class_field_types/class_field_access/class_friend_* just
         // above.
         a.classes_with_copy_ctor,
         a.classes_with_copy_assign,
@@ -704,6 +717,34 @@ struct CalleeSignature {
     sig.return_type = *type.function_return;
     sig.is_unsafe = type.is_unsafe_function_pointer;
     return sig;
+}
+
+[[nodiscard]] bool current_function_matches_friend_decl(const Function& fn, const FriendFunctionDecl& decl) {
+    if (fn.name != decl.name || fn.params.size() != decl.param_types.size()) return false;
+    if (!fn.params.empty() && fn.params[0].name == "this") return false;
+    for (size_t i = 0; i < fn.params.size(); i++) {
+        if (!types_equal(fn.params[i].type, decl.param_types[i])) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool current_context_has_class_access(const std::string& class_name, const DataflowState& state) {
+    if (class_name == state.current_class) return true;
+    if (state.class_friend_classes != nullptr && !state.current_class.empty()) {
+        auto class_it = state.class_friend_classes->find(class_name);
+        if (class_it != state.class_friend_classes->end() && class_it->second.contains(state.current_class)) {
+            return true;
+        }
+    }
+    if (state.class_friend_functions != nullptr && state.current_function != nullptr) {
+        auto class_it = state.class_friend_functions->find(class_name);
+        if (class_it != state.class_friend_functions->end()) {
+            for (const FriendFunctionDecl& decl : class_it->second) {
+                if (current_function_matches_friend_decl(*state.current_function, decl)) return true;
+            }
+        }
+    }
+    return false;
 }
 
 // Resolves a Call expression's signature-lookup key, accounting for a
@@ -2728,6 +2769,12 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                              "caller can guarantee (ch01 §1.2/§1.3)",
             state.current_loc);
     }
+    if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
+        !sig->member_owner_class.empty() && !current_context_has_class_access(sig->member_owner_class, state)) {
+        throw DataflowError("cannot call private member function '" + callee_display + "' of class '" +
+                             sig->member_owner_class + "' from outside its own methods or friends (ch04 §4.2)",
+            state.current_loc);
+    }
     // Scratch borrow-map shared by every reference argument of *this*
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
@@ -2775,6 +2822,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                     state.current_loc);
             }
             if (converting_ctor != nullptr) {
+                if (report_errors && converting_ctor->access == AccessSpecifier::Private &&
+                    !converting_ctor->member_owner_class.empty() &&
+                    !current_context_has_class_access(converting_ctor->member_owner_class, state)) {
+                    throw DataflowError("cannot use private constructor of class '" +
+                                         converting_ctor->member_owner_class +
+                                         "' from outside its own methods or friends (ch04 §4.2)",
+                        state.current_loc);
+                }
                 if (report_errors && converting_ctor->is_unsafe && state.unsafe_depth == 0) {
                     throw DataflowError("cannot use '" + sig->param_types[param_index].name +
                                          "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
@@ -2881,6 +2936,12 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                              "'s constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                              "caller can guarantee (ch01 §1.2/§1.3)",
+            state.current_loc);
+    }
+    if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
+        !current_context_has_class_access(class_name, state)) {
+        throw DataflowError("cannot call private constructor of class '" + class_name +
+                             "' from outside its own methods or friends (ch04 §4.2)",
             state.current_loc);
     }
     BorrowMap in_call_borrows;
@@ -3476,7 +3537,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 if (type_it != body.local_types.end()) {
                     std::string class_name = named_type_name(type_it->second);
                     if (!class_name.empty() && state.class_names->contains(class_name) &&
-                        class_name != state.current_class) {
+                        !current_context_has_class_access(class_name, state)) {
                         AccessSpecifier access = AccessSpecifier::Private;
                         if (state.class_field_access != nullptr) {
                             auto class_it = state.class_field_access->find(class_name);
@@ -3487,7 +3548,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                         }
                         if (access == AccessSpecifier::Private) {
                             throw DataflowError("cannot access private member '" + expr.name + "' of class '" +
-                                                 class_name + "' from outside its own methods (ch04 §4.2)",
+                                                 class_name + "' from outside its own methods or friends (ch04 §4.2)",
                                 state.current_loc);
                         }
                     }
@@ -4128,6 +4189,8 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
 void check_function(const Function& fn, const Program& program, const Signatures& signatures,
                      const std::unordered_set<std::string>& class_names,
                      const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access,
+                     const ClassFriendFunctions& class_friend_functions,
+                     const ClassFriendClasses& class_friend_classes,
                      const std::unordered_set<std::string>& classes_with_copy_ctor,
                      const std::unordered_set<std::string>& classes_with_copy_assign,
                      [[maybe_unused]] const std::unordered_set<std::string>& witness_class_names) {
@@ -4176,9 +4239,12 @@ void check_function(const Function& fn, const Program& program, const Signatures
     if (!fn.params.empty() && fn.params[0].name == "this") {
         entry_state.current_class = fn.params[0].type.pointee->name;
     }
+    entry_state.current_function = &fn;
     entry_state.class_names = &class_names;
     entry_state.class_field_types = &class_field_types;
     entry_state.class_field_access = &class_field_access;
+    entry_state.class_friend_functions = &class_friend_functions;
+    entry_state.class_friend_classes = &class_friend_classes;
     entry_state.classes_with_copy_ctor = &classes_with_copy_ctor;
     entry_state.classes_with_copy_assign = &classes_with_copy_assign;
     for (const Param& param : fn.params) {
@@ -4269,6 +4335,10 @@ void check_function(const Function& fn, const Program& program, const Signatures
         sig.nodiscard_reason = fn.nodiscard_reason;
         sig.loc = fn.loc;
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+        sig.access = fn.access;
+        if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr) {
+            sig.member_owner_class = fn.params[0].type.pointee->name;
+        }
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             bool same_params = existing.param_types.size() == sig.param_types.size();
@@ -4371,6 +4441,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.template_params = fn.template_params;
     clone.generic_method_owner_id = fn.generic_method_owner_id;
     clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+    clone.access = fn.access;
     clone.eval_mode = fn.eval_mode;
     clone.namespace_path = fn.namespace_path;
     clone.is_exported = fn.is_exported;
@@ -5316,6 +5387,7 @@ private:
             clone.is_unsafe = method_tmpl.is_unsafe;
             clone.is_nodiscard = method_tmpl.is_nodiscard;
             clone.nodiscard_reason = method_tmpl.nodiscard_reason;
+            clone.access = method_tmpl.access;
             clone.owning_module = method_tmpl.owning_module;
             clone.eval_mode = method_tmpl.eval_mode;
             clone.is_generic_template = method_tmpl.is_generic_template;
@@ -6310,6 +6382,8 @@ private:
             concrete.thread_shareable_override = tmpl_thread_shareable_override;
             concrete.is_nodiscard = tmpl.is_nodiscard;
             concrete.nodiscard_reason = tmpl.nodiscard_reason;
+            concrete.friend_functions = tmpl.friend_functions;
+            concrete.friend_classes = tmpl.friend_classes;
             if (tmpl_thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = std::move(tmpl_thread_movable_if_movable_expr);
                 substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr,
@@ -6467,6 +6541,8 @@ private:
             concrete.thread_shareable_override = tmpl.thread_shareable_override;
             concrete.is_nodiscard = tmpl.is_nodiscard;
             concrete.nodiscard_reason = tmpl.nodiscard_reason;
+            concrete.friend_functions = tmpl.friend_functions;
+            concrete.friend_classes = tmpl.friend_classes;
             if (tmpl.thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
@@ -6488,6 +6564,7 @@ private:
                 clone.is_unsafe = method_tmpl.is_unsafe;
                 clone.is_nodiscard = method_tmpl.is_nodiscard;
                 clone.nodiscard_reason = method_tmpl.nodiscard_reason;
+                clone.access = method_tmpl.access;
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
@@ -6594,6 +6671,8 @@ private:
             concrete.thread_shareable_override = base_case_tmpl->thread_shareable_override;
             concrete.is_nodiscard = base_case_tmpl->is_nodiscard;
             concrete.nodiscard_reason = base_case_tmpl->nodiscard_reason;
+            concrete.friend_functions = base_case_tmpl->friend_functions;
+            concrete.friend_classes = base_case_tmpl->friend_classes;
             if (base_case_tmpl->thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
                 resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
@@ -6644,6 +6723,8 @@ private:
         bool thread_shareable_override = recursive_tmpl->thread_shareable_override;
         bool is_nodiscard = recursive_tmpl->is_nodiscard;
         std::string nodiscard_reason = recursive_tmpl->nodiscard_reason;
+        std::vector<FriendFunctionDecl> friend_functions_copy = recursive_tmpl->friend_functions;
+        std::vector<std::string> friend_classes_copy = recursive_tmpl->friend_classes;
         std::vector<ClassField> fields_copy = recursive_tmpl->fields;
         std::vector<std::string> namespace_path_copy = recursive_tmpl->namespace_path;
         std::shared_ptr<Expr> base_non_type_arg_expr = recursive_tmpl->base_non_type_arg;
@@ -6694,6 +6775,8 @@ private:
         concrete.thread_shareable_override = thread_shareable_override;
         concrete.is_nodiscard = is_nodiscard;
         concrete.nodiscard_reason = std::move(nodiscard_reason);
+        concrete.friend_functions = std::move(friend_functions_copy);
+        concrete.friend_classes = std::move(friend_classes_copy);
         if (thread_movable_if_movable_expr_copy) {
             concrete.thread_movable_if_movable_expr = std::move(thread_movable_if_movable_expr_copy);
             substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr, type_replacements);
@@ -7260,6 +7343,7 @@ private:
                 clone.is_unsafe = tmpl.is_unsafe;
                 clone.is_nodiscard = tmpl.is_nodiscard;
                 clone.nodiscard_reason = tmpl.nodiscard_reason;
+                clone.access = tmpl.access;
                 clone.return_type = tmpl.return_type;
                 for (const auto& [name, replacement] : type_bindings) {
                     clone.return_type = substitute_type_param(clone.return_type, name, replacement);
@@ -7360,6 +7444,7 @@ private:
         clone.is_unsafe = tmpl.is_unsafe;
         clone.is_nodiscard = tmpl.is_nodiscard;
         clone.nodiscard_reason = tmpl.nodiscard_reason;
+        clone.access = tmpl.access;
         clone.owning_module = tmpl.owning_module;
         clone.eval_mode = tmpl.eval_mode;
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
@@ -8988,6 +9073,7 @@ private:
         clone.is_unsafe = tmpl.is_unsafe;
         clone.is_nodiscard = tmpl.is_nodiscard;
         clone.nodiscard_reason = tmpl.nodiscard_reason;
+        clone.access = tmpl.access;
         clone.owning_module = tmpl.owning_module;
         clone.eval_mode = tmpl.eval_mode;
         std::unordered_map<std::string, Type> witness_replacements;
@@ -9085,6 +9171,13 @@ void check_moves(const Program& program) {
             class_field_access[def.name][field.name] = field.access;
         }
     }
+    ClassFriendFunctions class_friend_functions;
+    ClassFriendClasses class_friend_classes;
+    for (const ClassDef& def : program.classes) {
+        class_friend_functions[def.name] = def.friend_functions;
+        class_friend_classes[def.name] =
+            std::unordered_set<std::string>(def.friend_classes.begin(), def.friend_classes.end());
+    }
     // spec §6.5: every class eligible for copy construction/assignment
     // (user-declared or compiler-provided) -- see DataflowState's own
     // comment and is_copy_constructible/is_copy_assignable. No cycle
@@ -9130,7 +9223,8 @@ void check_moves(const Program& program) {
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
         if (!fn.generic_method_owner_id.empty()) continue;
-        check_function(fn, program, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
+        check_function(fn, program, signatures, class_names, class_field_types, class_field_access,
+                       class_friend_functions, class_friend_classes, classes_with_copy_ctor,
                        classes_with_copy_assign, witness_class_names);
     }
 }
