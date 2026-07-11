@@ -3726,6 +3726,33 @@ int main() {
     }
 
     {
+        std::string case_name = "std_expected_discard_is_rejected_by_nodiscard";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(import std;
+enum class calc_error { invalid };
+std::expected<int, calc_error> fail() {
+    std::unexpected<calc_error> err(calc_error::invalid);
+    std::expected<int, calc_error> bad(err);
+    return std::move(bad);
+}
+int main() {
+    fail();
+    return 0;
+}
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            std::string message = e.what();
+            threw = message.find("nodiscard type") != std::string::npos &&
+                    message.find("expected results must be checked") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected discarded std::expected diagnostic");
+    }
+
+    {
         std::string case_name = "std_expected_success_and_error_paths_work";
         cases_run++;
         RunResult result = compile_and_run(
@@ -3748,6 +3775,26 @@ int main() {
     if (bad.has_value()) return 3;
     if (bad.error() != calc_error::invalid) return 4;
     return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_expected_used_result_is_allowed_with_nodiscard";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+enum class calc_error { invalid };
+std::expected<int, calc_error> ok() {
+    std::expected<int, calc_error> result(42);
+    return std::move(result);
+}
+int main() {
+    std::expected<int, calc_error> result = ok();
+    if (!result.has_value()) return 1;
+    return result.value() - 42;
 }
 )SCPP",
             case_name);
