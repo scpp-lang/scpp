@@ -1,0 +1,7 @@
+import std;
+// Current `std::abort()` semantics: it forwards to the real C abort path and
+// terminates the process immediately.
+int main() {
+    std::abort();
+    return 0;
+}

@@ -1,0 +1,29 @@
+import std;
+// Current `std::expected<T, E>` semantics: value/error storage is inline, so
+// neither branch needs `T` to be default-constructible first.
+class NoDefault {
+public:
+    int value;
+
+    NoDefault(int v) {
+        this->value = v;
+        return;
+    }
+
+    int get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    std::expected<NoDefault, int> good(NoDefault(7));
+    std::unexpected<int> err(5);
+    std::expected<NoDefault, int> bad(err);
+    if (!good.has_value()) return 1;
+    if (good.value().get() != 7) return 2;
+    if (bad.has_value()) return 3;
+    if (bad.error() != 5) return 4;
+    if (sizeof(std::unexpected<long>) != 8) return 5;
+    if (sizeof(std::expected<int, long>) != 16) return 6;
+    return 0;
+}
