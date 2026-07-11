@@ -647,6 +647,8 @@ struct Function {
     // parses one declaration at a time and has no cross-declaration
     // view).
     bool is_unsafe = false;
+    bool is_nodiscard = false;
+    std::string nodiscard_reason;
     // True only for a non-exported definition recovered from a compiled
     // module's structured compile-time payload. Lets the importer keep
     // reachable private helper bodies available for generic/constexpr use
@@ -833,6 +835,8 @@ struct StructDef {
     // false".
     bool thread_movable_override = false;
     bool thread_shareable_override = false;
+    bool is_nodiscard = false;
+    std::string nodiscard_reason;
 };
 
 enum class AccessSpecifier {
@@ -1012,6 +1016,8 @@ struct ClassDef {
     // structural derivation".
     ExprPtr thread_movable_if_movable_expr;
     ExprPtr thread_movable_if_shareable_expr;
+    bool is_nodiscard = false;
+    std::string nodiscard_reason;
 };
 
 // ch05 §5.11: one requirement inside a `concept Name = requires(...) {

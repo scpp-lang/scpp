@@ -3616,6 +3616,99 @@ void run_global_scope_resolution_tests() {
     }
 }
 
+void run_nodiscard_tests() {
+    {
+        std::string case_name = "nodiscard_function_discard_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "[[nodiscard]] int answer() { return 7; }\n"
+                "int main() {\n"
+                "    answer();\n"
+                "    return 0;\n"
+                "}\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("nodiscard function 'answer'") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected nodiscard discard diagnostic");
+    }
+
+    {
+        std::string case_name = "nodiscard_reason_is_included_in_diagnostic";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "[[nodiscard(\"check the status\")]] int answer() { return 7; }\n"
+                "int main() {\n"
+                "    answer();\n"
+                "    return 0;\n"
+                "}\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            std::string message = e.what();
+            threw = message.find("check the status") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected nodiscard reason in diagnostic");
+    }
+
+    {
+        std::string case_name = "nodiscard_type_propagates_to_returning_function";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "struct [[nodiscard(\"keep the status\")]] status {\n"
+                "    int code;\n"
+                "};\n"
+                "status make_status() {\n"
+                "    status s;\n"
+                "    s.code = 5;\n"
+                "    return s;\n"
+                "}\n"
+                "int main() {\n"
+                "    make_status();\n"
+                "    return 0;\n"
+                "}\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            std::string message = e.what();
+            threw = message.find("nodiscard type 'status'") != std::string::npos &&
+                    message.find("keep the status") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected nodiscard type diagnostic");
+    }
+
+    {
+        std::string case_name = "using_nodiscard_results_is_allowed";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "[[nodiscard]] int answer() { return 7; }\n"
+            "int twice(int value) { return value * 2; }\n"
+            "struct [[nodiscard]] status {\n"
+            "    int code;\n"
+            "};\n"
+            "status make_status() {\n"
+            "    status s;\n"
+            "    s.code = 5;\n"
+            "    return s;\n"
+            "}\n"
+            "int forward_answer() { return answer(); }\n"
+            "status forward_status() { return make_status(); }\n"
+            "int main() {\n"
+            "    int a = answer();\n"
+            "    int b = twice(answer());\n"
+            "    status s = forward_status();\n"
+            "    return a + b + s.code + forward_answer() - 33;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -3725,6 +3818,7 @@ int main() {
     run_functional_tests();
     run_thread_tests();
     run_global_scope_resolution_tests();
+    run_nodiscard_tests();
     run_expected_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();

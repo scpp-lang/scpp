@@ -401,6 +401,8 @@ private:
         std::unordered_set<std::string> scpp_tokens;
         ExprPtr thread_movable_if_movable_expr;
         ExprPtr thread_movable_if_shareable_expr;
+        bool has_nodiscard = false;
+        std::string nodiscard_reason;
         [[nodiscard]] bool has(const std::string& token) const { return scpp_tokens.contains(token); }
     };
 
@@ -470,6 +472,8 @@ private:
         if (def.base_non_type_arg) clone.base_non_type_arg = std::shared_ptr<Expr>(clone_expr_tree(*def.base_non_type_arg).release());
         clone.thread_movable_override = def.thread_movable_override;
         clone.thread_shareable_override = def.thread_shareable_override;
+        clone.is_nodiscard = def.is_nodiscard;
+        clone.nodiscard_reason = def.nodiscard_reason;
         if (def.thread_movable_if_movable_expr) {
             clone.thread_movable_if_movable_expr = clone_expr_tree(*def.thread_movable_if_movable_expr);
         }
@@ -527,7 +531,17 @@ private:
                         token = std::string(expect(TokenKind::Identifier, "attribute token").text);
                     }
                     if (match(TokenKind::LParen)) {
-                        if (ns == "scpp" && token == "thread_movable_if") {
+                        if (ns.empty() && token == "nodiscard") {
+                            if (!check(TokenKind::StringLiteral)) {
+                                const Token& tok = peek();
+                                throw ParseError(tok.line, tok.column,
+                                                 "'[[nodiscard]]' only accepts an optional single string literal reason");
+                            }
+                            result.has_nodiscard = true;
+                            result.nodiscard_reason =
+                                decode_string_literal(expect(TokenKind::StringLiteral, "a string literal"));
+                            expect(TokenKind::RParen, "')'");
+                        } else if (ns == "scpp" && token == "thread_movable_if") {
                             result.thread_movable_if_movable_expr = parse_expr();
                             expect(TokenKind::Comma, "','");
                             result.thread_movable_if_shareable_expr = parse_expr();
@@ -536,6 +550,7 @@ private:
                             skip_attribute_arguments();
                         }
                     }
+                    if (ns.empty() && token == "nodiscard") result.has_nodiscard = true;
                     if (ns == "scpp") result.scpp_tokens.insert(token);
                 } while (match(TokenKind::Comma));
             }
@@ -884,7 +899,8 @@ private:
     [[nodiscard]] bool same_struct_identity(const StructDef& a, const StructDef& b) const {
         if (a.name != b.name || a.namespace_path != b.namespace_path || a.is_union != b.is_union ||
             a.is_packed != b.is_packed || a.thread_movable_override != b.thread_movable_override ||
-            a.thread_shareable_override != b.thread_shareable_override ||
+            a.thread_shareable_override != b.thread_shareable_override || a.is_nodiscard != b.is_nodiscard ||
+            a.nodiscard_reason != b.nodiscard_reason ||
             !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
             return false;
         }
@@ -902,8 +918,8 @@ private:
             a.is_variadic_specialization != b.is_variadic_specialization ||
             a.is_partial_specialization != b.is_partial_specialization || a.base_pack_arg_name != b.base_pack_arg_name ||
             a.thread_movable_override != b.thread_movable_override ||
-            a.thread_shareable_override != b.thread_shareable_override ||
-            !same_non_type_expr(a.base_non_type_arg, b.base_non_type_arg) ||
+            a.thread_shareable_override != b.thread_shareable_override || a.is_nodiscard != b.is_nodiscard ||
+            a.nodiscard_reason != b.nodiscard_reason || !same_non_type_expr(a.base_non_type_arg, b.base_non_type_arg) ||
             !same_specialization_args(a.specialization_template_args, b.specialization_template_args) ||
             !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
             return false;
@@ -1767,6 +1783,8 @@ private:
         clone.is_extern_c = fn.is_extern_c;
         clone.is_module_extern = fn.is_module_extern;
         clone.is_unsafe = fn.is_unsafe;
+        clone.is_nodiscard = fn.is_nodiscard;
+        clone.nodiscard_reason = fn.nodiscard_reason;
         clone.is_compile_time_dependency = fn.is_compile_time_dependency;
         clone.has_varargs = fn.has_varargs;
         clone.method_requires_concept = fn.method_requires_concept;
@@ -2053,6 +2071,8 @@ private:
         ParsedAttributes leading_attrs = parse_attribute_specifier_seq();
         bool requested_unsafe = leading_attrs.has("unsafe");
         bool requested_packed = leading_attrs.has("packed");
+        bool requested_nodiscard = leading_attrs.has_nodiscard;
+        std::string requested_nodiscard_reason = leading_attrs.nodiscard_reason;
         auto reject_unsafe_if_requested = [&](const char* what) {
             if (requested_unsafe) {
                 throw ParseError(attr_start_tok.line, attr_start_tok.column,
@@ -2182,11 +2202,13 @@ private:
                 // (`template<...> ReturnType name(params) { body }`,
                 // ch05 §5.11's "generic functions may be spelled with
                 // either the abbreviated or full header form").
-                parse_generic_function_def(program, is_exported, requested_unsafe);
+                parse_generic_function_def(program, is_exported, requested_unsafe, requested_nodiscard,
+                                           requested_nodiscard_reason);
             }
         } else {
             reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
-            parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe);
+            parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe, requested_nodiscard,
+                                                     requested_nodiscard_reason);
         }
     }
 
@@ -2237,13 +2259,17 @@ private:
     // qualified or mangled (its name must stay the real, plain C symbol
     // regardless of enclosing namespace -- see qualify_name), so an
     // `export` marker on one is simply not applicable and is ignored.
-    void parse_top_level_function_or_extern_group(Program& program, bool is_exported, bool is_unsafe = false) {
+    void parse_top_level_function_or_extern_group(Program& program, bool is_exported, bool is_unsafe = false,
+                                                  bool is_nodiscard = false,
+                                                  const std::string& nodiscard_reason = {}) {
         SourceLocation loc = current_loc();
         if (match(TokenKind::KwExtern)) {
             if (!check(TokenKind::StringLiteral)) {
                 // Bare extern (ch11 §11.6): always a single bodyless
                 // declaration, ordinary scpp linkage.
-                Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/true, is_unsafe);
+                Function fn =
+                    parse_function(/*is_extern_c=*/false, /*is_module_extern=*/true, is_unsafe, is_nodiscard,
+                                   nodiscard_reason);
                 fn.loc = loc;
                 fn.name = qualify_name(fn.name);
                 fn.namespace_path = namespace_stack_;
@@ -2272,12 +2298,16 @@ private:
                 expect(TokenKind::RBrace, "'}'");
                 return;
             }
-            Function fn = parse_function(/*is_extern_c=*/true, /*is_module_extern=*/false, is_unsafe);
+            Function fn =
+                parse_function(/*is_extern_c=*/true, /*is_module_extern=*/false, is_unsafe, is_nodiscard,
+                               nodiscard_reason);
             fn.loc = loc;
             program.functions.push_back(std::move(fn));
             return;
         }
-        Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe);
+        Function fn =
+            parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe, is_nodiscard,
+                           nodiscard_reason);
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
@@ -2471,6 +2501,8 @@ private:
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
         def.is_packed = attrs.has("packed");
+        def.is_nodiscard = attrs.has_nodiscard;
+        def.nodiscard_reason = attrs.nodiscard_reason;
         if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
@@ -2552,6 +2584,8 @@ private:
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
         def.is_packed = attrs.has("packed");
+        def.is_nodiscard = attrs.has_nodiscard;
+        def.nodiscard_reason = attrs.nodiscard_reason;
         if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
@@ -2915,7 +2949,8 @@ private:
     // function-parameter position for one anyway, so a bare `Tail x`
     // parameter would simply never resolve to anything real at
     // monomorphization time, surfacing there instead).
-    void parse_generic_function_def(Program& program, bool is_exported, bool is_unsafe = false) {
+    void parse_generic_function_def(Program& program, bool is_exported, bool is_unsafe = false,
+                                    bool is_nodiscard = false, const std::string& nodiscard_reason = {}) {
         SourceLocation loc = current_loc();
         std::vector<GenericTypeParam> template_params = parse_generic_type_header();
         for (const GenericTypeParam& p : template_params) {
@@ -2926,7 +2961,9 @@ private:
 
         std::vector<GenericTypeParam> saved_template_params = current_function_template_params_;
         current_function_template_params_ = template_params;
-        Function fn = parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe);
+        Function fn =
+            parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe, is_nodiscard,
+                           nodiscard_reason);
         current_function_template_params_ = std::move(saved_template_params);
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
@@ -3325,6 +3362,8 @@ private:
         def.name = qualified_class_name;
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
+        def.is_nodiscard = class_attrs.has_nodiscard;
+        def.nodiscard_reason = class_attrs.nodiscard_reason;
         def.template_params = std::move(template_params);
         def.template_owner_id = next_generic_template_owner_id();
         def.is_forward_declaration = true;
@@ -3398,6 +3437,8 @@ private:
         def.name = qualified_class_name;
         def.thread_movable_override = class_attrs.has("thread_movable");
         def.thread_shareable_override = class_attrs.has("thread_shareable");
+        def.is_nodiscard = class_attrs.has_nodiscard;
+        def.nodiscard_reason = class_attrs.nodiscard_reason;
         if (class_attrs.thread_movable_if_movable_expr || class_attrs.thread_movable_if_shareable_expr) {
             if (!(class_attrs.thread_movable_if_movable_expr && class_attrs.thread_movable_if_shareable_expr)) {
                 throw ParseError(loc.line, loc.column,
@@ -3523,6 +3564,8 @@ private:
         def.name = qualified_class_name;
         def.thread_movable_override = class_attrs.has("thread_movable");
         def.thread_shareable_override = class_attrs.has("thread_shareable");
+        def.is_nodiscard = class_attrs.has_nodiscard;
+        def.nodiscard_reason = class_attrs.nodiscard_reason;
         if (class_attrs.thread_movable_if_movable_expr || class_attrs.thread_movable_if_shareable_expr) {
             if (!(class_attrs.thread_movable_if_movable_expr && class_attrs.thread_movable_if_shareable_expr)) {
                 throw ParseError(loc.line, loc.column,
@@ -3677,6 +3720,8 @@ private:
             ParsedAttributes member_attrs = parse_attribute_specifier_seq();
             reject_packed_attribute(member_attrs, member_attr_start_tok, "a class member declaration");
             bool member_requested_unsafe = member_attrs.has("unsafe");
+            bool member_requested_nodiscard = member_attrs.has_nodiscard;
+            std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
             FunctionEvalMode member_eval_mode = parse_optional_function_eval_mode();
             if (match(TokenKind::Tilde)) {
                 if (member_is_template) {
@@ -3701,6 +3746,8 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_delete";
@@ -3724,6 +3771,8 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
@@ -3794,6 +3843,8 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator*");
@@ -3818,6 +3869,8 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator=");
@@ -3881,6 +3934,8 @@ private:
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a method");
@@ -3946,12 +4001,15 @@ private:
     // runs, since their combination affects *which* prefixes were
     // already consumed (an item inside an `extern "C" { }` block isn't
     // preceded by its own `extern "C"` -- see that function).
-    Function parse_function(bool is_extern_c, bool is_module_extern = false, bool is_unsafe = false) {
+    Function parse_function(bool is_extern_c, bool is_module_extern = false, bool is_unsafe = false,
+                            bool is_nodiscard = false, const std::string& nodiscard_reason = {}) {
         Function fn;
         fn.loc = current_loc();
         fn.is_extern_c = is_extern_c;
         fn.is_module_extern = is_module_extern;
         fn.is_unsafe = is_unsafe;
+        fn.is_nodiscard = is_nodiscard;
+        fn.nodiscard_reason = nodiscard_reason;
         fn.eval_mode = parse_optional_function_eval_mode();
         fn.return_type = parse_type();
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
