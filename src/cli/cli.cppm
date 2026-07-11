@@ -50,6 +50,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwExtern: return "KwExtern";
         case scpp::TokenKind::KwTrue: return "KwTrue";
         case scpp::TokenKind::KwFalse: return "KwFalse";
+        case scpp::TokenKind::KwEnum: return "KwEnum";
         case scpp::TokenKind::KwStruct: return "KwStruct";
         case scpp::TokenKind::KwUnion: return "KwUnion";
         case scpp::TokenKind::KwConst: return "KwConst";

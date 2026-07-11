@@ -1046,6 +1046,21 @@ struct ConceptDef {
     std::string owning_module;
 };
 
+struct EnumVariant {
+    std::string name;
+    long long value = 0;
+};
+
+struct EnumDef {
+    std::string name;
+    Type underlying_type = named_type("int");
+    std::vector<EnumVariant> variants;
+    std::vector<std::string> namespace_path;
+    bool is_exported = false;
+    bool is_compile_time_dependency = false;
+    std::string owning_module;
+};
+
 // ch11 §11.8: one `import name;` / `export import name;` declaration,
 // or (ch11 §11.4) a same-module partition import (`import :part;` /
 // `export import :part;`).
@@ -1085,6 +1100,7 @@ struct ImportDecl {
 struct Program {
     std::vector<StructDef> structs;
     std::vector<ClassDef> classes;
+    std::vector<EnumDef> enums;
     std::vector<Function> functions;
     // ch05 §5.11: every `concept` declaration parsed from this file (or
     // merged in from an imported module -- concepts participate in

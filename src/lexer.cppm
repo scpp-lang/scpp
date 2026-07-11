@@ -75,6 +75,7 @@ enum class TokenKind {
     KwExtern,
     KwTrue,
     KwFalse,
+    KwEnum,
     KwStruct,
     KwUnion,
     KwConst,
@@ -258,6 +259,7 @@ private:
         if (text == "extern") return TokenKind::KwExtern;
         if (text == "true") return TokenKind::KwTrue;
         if (text == "false") return TokenKind::KwFalse;
+        if (text == "enum") return TokenKind::KwEnum;
         if (text == "struct") return TokenKind::KwStruct;
         if (text == "union") return TokenKind::KwUnion;
         if (text == "const") return TokenKind::KwConst;

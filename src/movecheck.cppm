@@ -384,6 +384,37 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return scalar_names.contains(name);
 }
 
+[[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name) {
+    if (program == nullptr) return nullptr;
+    for (const EnumDef& def : program->enums) {
+        if (def.name == name) return &def;
+    }
+    return nullptr;
+}
+
+[[nodiscard]] const EnumVariant* find_enum_variant(const Program* program, const std::string& name,
+                                                   const EnumDef** owning_enum = nullptr) {
+    if (program == nullptr) return nullptr;
+    for (const EnumDef& def : program->enums) {
+        for (const EnumVariant& variant : def.variants) {
+            if (variant.name == name) {
+                if (owning_enum != nullptr) *owning_enum = &def;
+                return &variant;
+            }
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] bool is_enum_type(const Type& type, const Program* program) {
+    return type.kind == TypeKind::Named && find_enum_def(program, type.name) != nullptr;
+}
+
+[[nodiscard]] const Type* enum_underlying_type(const Type& type, const Program* program) {
+    const EnumDef* def = find_enum_def(program, type.name);
+    return def == nullptr ? nullptr : &def->underlying_type;
+}
+
 // spec §6.5: whether `class_name` has declared its own copy constructor
 // -- a function named "class_name_new" (see parse_class_def) whose sole
 // non-`this` parameter is `const class_name&` (an ordinary, non-rvalue,
@@ -636,6 +667,23 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
         case ExprKind::CharLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "char";
         default: return false;
     }
+}
+
+[[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+
+void check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
+                                         const Signatures& signatures, const SourceLocation& loc) {
+    const Type& target_operand = binary_operand_type(target_type);
+    std::optional<Type> source_type = infer_expr_type(source_expr, body, signatures);
+    if (!source_type.has_value()) return;
+    const Type& source_operand = binary_operand_type(*source_type);
+    bool target_is_enum = is_enum_type(target_operand, body.program);
+    bool source_is_enum = is_enum_type(source_operand, body.program);
+    if (!(target_is_enum || source_is_enum)) return;
+    if (types_equal(target_operand, source_operand)) return;
+    throw DataflowError("enum class values do not implicitly convert to or from integers (or other enum types) in "
+                        "this version; use an explicit cast to the enum's underlying type",
+                        loc);
 }
 
 // A Call expression's signature-lookup key, plus how many leading
@@ -1405,6 +1453,13 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
             if (it != body.local_types.end()) return it->second;
+            if (const EnumDef* def = [&]() {
+                    const EnumDef* enum_def = nullptr;
+                    [[maybe_unused]] const EnumVariant* variant = find_enum_variant(body.program, expr.name, &enum_def);
+                    return enum_def;
+                }()) {
+                return named_type(def->name);
+            }
             auto sig_it = signatures.find(expr.name);
             if (sig_it != signatures.end() && sig_it->second.size() == 1) {
                 const FunctionSignature& sig = sig_it->second[0];
@@ -1622,13 +1677,18 @@ void check_binary_expr_operand_types(const Expr& expr, const Body& body, const S
                                      const SourceLocation& loc) {
     if (expr.binary_op == BinaryOp::Assign) return;
     if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) return;
+    std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+    std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+    bool lhs_is_enum = lhs_type.has_value() && is_enum_type(binary_operand_type(*lhs_type), body.program);
+    bool rhs_is_enum = rhs_type.has_value() && is_enum_type(binary_operand_type(*rhs_type), body.program);
+    if ((lhs_is_enum || rhs_is_enum) && expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne) {
+        throw DataflowError("enum class values only support '==' and '!=' in this version", loc);
+    }
     if (expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne && expr.binary_op != BinaryOp::Lt &&
         expr.binary_op != BinaryOp::Gt && expr.binary_op != BinaryOp::Le && expr.binary_op != BinaryOp::Ge) {
         return;
     }
     if (binary_expr_has_compatible_types(expr, body, signatures)) return;
-    std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
-    std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
     if (!lhs_type.has_value() || !rhs_type.has_value()) return;
     const Type& lhs_operand = binary_operand_type(*lhs_type);
     const Type& rhs_operand = binary_operand_type(*rhs_type);
@@ -3025,6 +3085,20 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 bool scalar_target = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
                 if (scalar_source && scalar_target) return;
 
+                const Type* source_enum_underlying =
+                    source_type.has_value() && source_type->kind == TypeKind::Named ? enum_underlying_type(*source_type, body.program)
+                                                                                    : nullptr;
+                const Type* target_enum_underlying =
+                    expr.type.kind == TypeKind::Named ? enum_underlying_type(expr.type, body.program) : nullptr;
+                if (source_type.has_value() && source_enum_underlying != nullptr && expr.type.kind == TypeKind::Named &&
+                    types_equal(*source_enum_underlying, expr.type)) {
+                    return;
+                }
+                if (source_type.has_value() && source_type->kind == TypeKind::Named && target_enum_underlying != nullptr &&
+                    types_equal(*source_type, *target_enum_underlying)) {
+                    return;
+                }
+
                 bool raw_pointer_source = source_type.has_value() && source_type->kind == TypeKind::Pointer;
                 bool raw_pointer_target = expr.type.kind == TypeKind::Pointer;
                 if (raw_pointer_source && raw_pointer_target) {
@@ -3038,8 +3112,9 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 
                 {
                     throw DataflowError(
-                        "a cast is only supported between two scalar types, or between two raw pointer types "
-                        "inside '[[scpp::unsafe]] { }', in this version",
+                        "a cast is only supported between two builtin scalar types, between an enum class and its "
+                        "underlying integer type, or between two raw pointer types inside '[[scpp::unsafe]] { }', "
+                        "in this version",
                         state.current_loc);
                 }
             }
@@ -3188,12 +3263,20 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     if (it != body.local_types.end()) {
                         check_function_pointer_assignment(it->second, *expr.rhs, body, signatures, state.current_loc,
                                                           expr.lhs->name, report_errors);
+                        if (report_errors) {
+                            check_enum_conversion_compatibility(it->second, *expr.rhs, body, signatures,
+                                                                state.current_loc);
+                        }
                     }
                 } else if (expr.lhs->kind == ExprKind::Member) {
                     std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state);
                     if (field_type.has_value()) {
                         check_function_pointer_assignment(*field_type, *expr.rhs, body, signatures, state.current_loc,
                                                           expr.lhs->name, report_errors);
+                        if (report_errors) {
+                            check_enum_conversion_compatibility(*field_type, *expr.rhs, body, signatures,
+                                                                state.current_loc);
+                        }
                     }
                 }
                 if (expr.lhs->kind == ExprKind::Identifier) {
@@ -3766,6 +3849,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                                                   stmt.local, report_errors);
                 check_raw_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
                                              stmt.local, report_errors);
+                if (report_errors) {
+                    check_enum_conversion_compatibility(type_it->second, *stmt.expr, body, signatures,
+                                                        state.current_loc);
+                }
             }
 
             // `T* p = &expr;` (ch05 §5.7): if `p`'s declared type wants a
@@ -4488,6 +4575,7 @@ public:
         // exclusion set (built per-lambda in resolve_lambda) doesn't
         // need to reconstruct these each time.
         for (const StructDef& s : program.structs) known_type_names_.insert(s.name);
+        for (const EnumDef& e : program.enums) known_type_names_.insert(e.name);
         for (size_t i = 0; i < program.classes.size(); i++) {
             const ClassDef& c = program.classes[i];
             known_type_names_.insert(c.name);
