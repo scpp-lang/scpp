@@ -18,7 +18,7 @@
 | `std/std.scpp` | `std` 模块的主接口单元；通过 `export import :...;` 重新导出各分区 |
 | `std/` | `std` 模块的各分区和原生包装库 |
 | `scpp/scpp.scpp` | `scpp` 模块的主接口单元；重新导出 scpp 自己的扩展分区 |
-| `scpp/rand/` | `scpp:rand` 分区，提供 `scpp::rand::uniform_int_distribution<int>` |
+| `scpp/rand/` | `scpp:rand` 分区，提供 `scpp::rand::uniform_int_distribution` |
 | `CMakeLists.txt` | 构建 `std` / `scpp` 模块及所需的原生辅助库 |
 
 ## 如何使用 `std`
