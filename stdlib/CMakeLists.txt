@@ -14,6 +14,9 @@ target_compile_features(scpp_thread_wrapper PRIVATE cxx_std_23)
 add_library(scpp_print_wrapper STATIC print/scpp_print_wrapper.cpp)
 target_compile_features(scpp_print_wrapper PRIVATE cxx_std_23)
 
+add_library(scpp_expected_wrapper STATIC expected/scpp_expected_wrapper.cpp)
+target_compile_features(scpp_expected_wrapper PRIVATE cxx_std_23)
+
 function(add_scpp_module_artifacts target_name source_path interface_path archive_path)
     get_filename_component(interface_dir "${interface_path}" DIRECTORY)
     add_custom_command(
@@ -31,6 +34,7 @@ add_scpp_module_artifacts(scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/std.scpp"
     "${SCPP_STDLIB_INTERFACE_PATH}"
     "${SCPP_STDLIB_ARCHIVE_PATH}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/expected/std_expected.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/functional/std_functional.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/format/std_format.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/memory/std_memory.scpp"

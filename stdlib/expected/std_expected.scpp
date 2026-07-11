@@ -1,0 +1,127 @@
+export module std:expected;
+
+export extern "C" {
+    void scpp_expected_abort();
+}
+
+namespace std {
+
+export void __expected_abort() {
+    [[scpp::unsafe]] {
+        scpp_expected_abort();
+    }
+    return;
+}
+
+export template<typename E>
+class unexpected {
+private:
+    E* error_;
+
+public:
+    unexpected(E error) {
+        [[scpp::unsafe]] {
+            this->error_ = new E(error);
+        }
+        return;
+    }
+
+    ~unexpected() {
+        [[scpp::unsafe]] {
+            delete this->error_;
+        }
+        return;
+    }
+
+    E& error() {
+        [[scpp::unsafe]] {
+            return *this->error_;
+        }
+    }
+
+    const E& error() const {
+        [[scpp::unsafe]] {
+            return *this->error_;
+        }
+    }
+};
+
+export template<typename T, typename E>
+class expected {
+private:
+    bool has_value_;
+    T* value_;
+    E* error_;
+
+public:
+    expected(T value) {
+        this->has_value_ = true;
+        [[scpp::unsafe]] {
+            this->value_ = new T(value);
+        }
+        return;
+    }
+
+    expected(const std::unexpected<E>& error) {
+        this->has_value_ = false;
+        [[scpp::unsafe]] {
+            this->error_ = new E(error.error());
+        }
+        return;
+    }
+
+    ~expected() {
+        if (this->has_value_) {
+            [[scpp::unsafe]] {
+                delete this->value_;
+            }
+        } else {
+            [[scpp::unsafe]] {
+                delete this->error_;
+            }
+        }
+        return;
+    }
+
+    bool has_value() const {
+        return this->has_value_;
+    }
+
+    T& value() {
+        if (!this->has_value_) {
+            std::__expected_abort();
+        }
+        [[scpp::unsafe]] {
+            return *this->value_;
+        }
+    }
+
+    const T& value() const {
+        if (!this->has_value_) {
+            std::__expected_abort();
+        }
+        [[scpp::unsafe]] {
+            return *this->value_;
+        }
+    }
+
+    E& error() {
+        if (this->has_value_) {
+            std::__expected_abort();
+        }
+        [[scpp::unsafe]] {
+            return *this->error_;
+        }
+    }
+
+    const E& error() const {
+        if (this->has_value_) {
+            std::__expected_abort();
+        }
+        [[scpp::unsafe]] {
+            return *this->error_;
+        }
+    }
+};
+
+} // namespace std
