@@ -4,7 +4,8 @@ Single-file compilation is great for quick experiments. The moment you want a
 named binary and a project directory, scpp's manifest-based build mode is more
 comfortable.
 
-Create a directory and put these two files in it.
+Create a directory, then add `scpp.toml` at the top level and `main.scpp`
+under `src/`.
 
 `scpp.toml`:
 
@@ -17,19 +18,17 @@ version = "0.1.0"
 
 [[bin]]
 name = "hello"
-root = "main.scpp"
-sources = ["*.scpp"]
+root = "src/main.scpp"
+sources = ["src/**/*.scpp"]
 ```
 
-`main.scpp`:
+`src/main.scpp`:
 
 ```cpp
-extern "C" int puts(const char* s);
+import std;
 
 int main() {
-    [[scpp::unsafe]] {
-        puts("Hello from a project build!");
-    }
+    std::println("Hello from a project build!");
     return 0;
 }
 ```

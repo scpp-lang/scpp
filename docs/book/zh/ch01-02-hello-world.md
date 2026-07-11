@@ -5,12 +5,10 @@
 创建一个名为 `hello.scpp` 的文件：
 
 ```cpp
-extern "C" int puts(const char* s);
+import std;
 
 int main() {
-    [[scpp::unsafe]] {
-        puts("Hello, world!");
-    }
+    std::println("Hello, world!");
     return 0;
 }
 ```
@@ -31,16 +29,13 @@ scpp hello.scpp
 Hello, world!
 ```
 
+这里用到的 `std::println` 来自 scpp 的标准库，用来打印一整行文本。
+
 这个极小程序里其实已经藏着几个重要概念：
 
 - `int main()` 是程序入口；
-- `extern "C"` 让 scpp 能声明由 C 运行时提供的函数；
-- `puts` 不是 scpp 编译器自己能验证的函数，所以调用它必须放在显式的
-  `[[scpp::unsafe]]` 块里；
+- `import std;` 让这个文件可以使用标准库；
 - 整个程序在表面上依然看起来像普通 C++，这正是 scpp 最核心的设计目标之一。
-
-如果你现在还觉得 `[[scpp::unsafe]]` 有点陌生，不必担心。此刻只要先把它理解成：
-“这里是我在本地、明确地信任一个编译器无法证明的外部边界”。
 
 下一节里，我们会保持程序同样很小，但把它放进一个真正的 manifest-based project。
 
