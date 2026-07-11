@@ -43,6 +43,12 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_EXPECTED_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_EXPECTED_WRAPPER_LIB_PATH must be defined by the build"
+#endif
+#ifndef SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 
 namespace {
 
@@ -95,7 +101,8 @@ std::unordered_map<std::string, std::string> std_import_paths() {
 
 std::vector<std::string> std_link_inputs() {
     return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH};
+            SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH, SCPP_STDLIB_EXPECTED_WRAPPER_LIB_PATH,
+            SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -768,6 +775,53 @@ void run_module_system_tests() {
         }
         std::filesystem::remove(a_path);
         std::filesystem::remove(b_path);
+    }
+
+    {
+        std::string case_name = "direct_and_transitive_partition_reexports_do_not_duplicate_decls";
+        cases_run++;
+        std::filesystem::path base_path = write_temp_file(case_name, "base",
+            "export module mathlib:base;\n"
+            "namespace mathlib { export int value() { return 42; } }\n");
+        std::filesystem::path random_path = write_temp_file(case_name, "random",
+            "export module mathlib:random;\n"
+            "export import :base;\n"
+            "namespace mathlib { export int helper() { return value() + 1; } }\n");
+        std::filesystem::path mathlib_path = write_temp_file(case_name, "mathlib",
+            "export module mathlib;\n"
+            "export import :base;\n"
+            "export import :random;\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() {\n"
+            "    print_int(mathlib::value());\n"
+            "    print_int(mathlib::helper());\n"
+            "    return 0;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"mathlib", mathlib_path.string()},
+                                          {"mathlib:base", base_path.string()},
+                                          {"mathlib:random", random_path.string()}});
+            FILE* pipe = popen(exe_path.string().c_str(), "r");
+            std::string output;
+            if (pipe != nullptr) {
+                char buffer[256];
+                size_t n;
+                while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
+            }
+            int status = pipe != nullptr ? pclose(pipe) : -1;
+            std::filesystem::remove(exe_path);
+            expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
+            expect(output == "42\n43\n", case_name + ": expected stdout '42\\n43\\n', got '" + output + "'");
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(base_path);
+        std::filesystem::remove(random_path);
+        std::filesystem::remove(mathlib_path);
     }
 
     // ch11 §11.8: a plain (non-reexporting) `import a;` inside module `b`
@@ -3245,6 +3299,86 @@ void run_enum_tests() {
     }
 }
 
+
+void run_expected_and_random_tests() {
+    {
+        std::string case_name = "std_expected_success_and_error_paths_work";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+enum class calc_error { invalid };
+std::expected<int, calc_error> ok() {
+    std::expected<int, calc_error> result(42);
+    return std::move(result);
+}
+std::expected<int, calc_error> fail() {
+    std::unexpected<calc_error> err(calc_error::invalid);
+    std::expected<int, calc_error> result(err);
+    return std::move(result);
+}
+int main() {
+    std::expected<int, calc_error> good = ok();
+    if (!good.has_value()) return 1;
+    if (good.value() != 42) return 2;
+    std::expected<int, calc_error> bad = fail();
+    if (bad.has_value()) return 3;
+    if (bad.error() != calc_error::invalid) return 4;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_make_uniform_int_distribution_reports_errors_and_builds_valid_distribution";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::expected<std::uniform_int_distribution<int>, std::uniform_int_distribution_error> bad =
+        std::make_uniform_int_distribution(9, 3);
+    if (bad.has_value()) return 1;
+    if (bad.error() != std::uniform_int_distribution_error::empty_range) return 2;
+    std::expected<std::uniform_int_distribution<int>, std::uniform_int_distribution_error> good =
+        std::make_uniform_int_distribution(1, 6);
+    if (!good.has_value()) return 3;
+    std::mt19937 gen(static_cast<uint32_t>(123));
+    uint32_t first = gen.call();
+    uint32_t second = gen.call();
+    if (first == second) return 4;
+    if (gen.max() != static_cast<uint32_t>(4294967295)) return 5;
+    int roll1 = good.value().call(gen);
+    int roll2 = good.value().call(gen);
+    if (roll1 < 1 || roll1 > 6 || roll2 < 1 || roll2 > 6) return 6;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "uniform_int_distribution_direct_invalid_range_aborts";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "uniform_int_distribution_direct_invalid_range_aborts_exe";
+        scpp::compile_to_executable(
+            R"SCPP(import std;
+int main() {
+    std::uniform_int_distribution<int> die(9, 3);
+    return die.min();
+}
+)SCPP",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code != 0,
+               case_name + ": expected invalid direct construction to abort, got exit code " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -3257,6 +3391,7 @@ int main() {
     run_generic_function_overload_tests();
     run_functional_tests();
     run_thread_tests();
+    run_expected_and_random_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_consteval_tests();
