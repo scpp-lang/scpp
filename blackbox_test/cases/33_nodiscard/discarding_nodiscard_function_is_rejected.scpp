@@ -1,0 +1,10 @@
+// Current [[nodiscard]] semantics: discarding a nodiscard function call is a
+// hard compile error in scpp, not merely a warning.
+[[nodiscard]] int answer() {
+    return 7;
+}
+
+int main() {
+    answer();
+    return 0;
+}
