@@ -116,6 +116,7 @@ cmake --build build
 | `30_constant_evaluation` | 形式化规范驱动的 `constexpr`/`consteval` 覆盖：required constant evaluation、`if consteval` / `if !consteval`、v1 暂不支持的操作，以及“后面的参数先推导包，再回填前面依赖参数类型”的规则 |
 | `31_enum_class` | scoped enumeration：`enum class` 声明、带作用域的枚举项访问、不同枚举类型分离、显式 cast，以及显式底层类型/枚举值 |
 | `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、placement-new，以及显式析构调用语法 |
+| `33_nodiscard` | 函数/类型上的 `[[nodiscard]]` / `[[nodiscard("reason")]]`，包括丢弃结果时报错，以及合法的非丢弃用法 |
 
 ## 测试理念
 
@@ -177,8 +178,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 297 个用例**
-- 运行器原始统计 **297/297 通过**
+- **总共 301 个用例**
+- 运行器原始统计 **301/301 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -206,6 +207,9 @@ cmake --build build
 - **底层的 size/storage/lifetime 积木现在也有直接黑盒覆盖**：
   `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、
   placement-new、显式析构调用，以及前缀 `::` 的全局作用域查找
+- **`[[nodiscard]]` 现在也有直接黑盒覆盖**：
+  函数级/类型级 nodiscard、带 reason 的诊断文本，以及那些本来就该
+  继续被接受的“有消费结果”的正常用法
 - **CLI 调用方式现在也有直接黑盒覆盖**：
   裸 `scpp file.scpp`、`-o custom_name`、被移除的 `build` 关键字拒绝路径，
   以及 `lex`、`parse`、`build-module` 子命令仍然可用
