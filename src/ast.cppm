@@ -1223,6 +1223,19 @@ struct TypeLayoutInfo {
             return std::nullopt;
         }
 
+        [[nodiscard]] std::optional<TypeLayoutInfo> storage_for_layout(const Type& current) {
+            if (current.template_args.empty()) return std::nullopt;
+            std::uint64_t max_size = 0;
+            std::uint64_t max_align = 1;
+            for (const Type& candidate : current.template_args) {
+                std::optional<TypeLayoutInfo> candidate_layout = (*this)(candidate);
+                if (!candidate_layout.has_value()) return std::nullopt;
+                max_size = std::max(max_size, candidate_layout->size_bytes);
+                max_align = std::max(max_align, candidate_layout->abi_align_bytes);
+            }
+            return TypeLayoutInfo{align_up(max_size, max_align), max_align};
+        }
+
         [[nodiscard]] std::optional<TypeLayoutInfo> operator()(const Type& current) {
             switch (current.kind) {
                 case TypeKind::Pointer:
@@ -1250,6 +1263,7 @@ struct TypeLayoutInfo {
                 case TypeKind::Named: {
                     if (current.name == "void") return std::nullopt;
                     if (std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name)) return scalar;
+                    if (current.name == "std::storage_for") return storage_for_layout(current);
                     if (const EnumDef* def = find_enum(current.name)) return (*this)(def->underlying_type);
                     if (visiting_named_types.contains(current.name)) return std::nullopt;
                     visiting_named_types.insert(current.name);

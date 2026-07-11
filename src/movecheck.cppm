@@ -6009,6 +6009,15 @@ private:
     // via a fresh index-based access afterward, never holding a
     // reference across the call.
     [[nodiscard]] Type resolve_generic_type(Type type, SourceLocation loc) {
+        if (type.name == "std::storage_for") {
+            std::vector<Type> resolved_args;
+            resolved_args.reserve(type.template_args.size());
+            for (const Type& arg : type.template_args) resolved_args.push_back(resolve_generic_type(arg, loc));
+            type.template_args = std::move(resolved_args);
+            if (type.pointee) type.pointee = std::make_shared<Type>(resolve_generic_type(*type.pointee, loc));
+            if (type.element) type.element = std::make_shared<Type>(resolve_generic_type(*type.element, loc));
+            return type;
+        }
         // ch05 §5.14: a variadic generic type (`Tuple<int,bool,char>`,
         // or even the zero-argument `Tuple<>` base case) is checked
         // *before* the ordinary "template_args empty means not a

@@ -832,6 +832,19 @@ void test_span_of_const_element_type() {
            "span_of_const_element_type: std::span<const int> should be read-only (!is_mutable_ref)");
 }
 
+void test_storage_for_type_declaration() {
+    scpp::Program program =
+        scpp::parse("int f() { std::storage_for<int, long> slot; return (int)sizeof(slot); }");
+    const scpp::Function& fn = program.functions[0];
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl, "storage_for_type_declaration: statement 0 should be VarDecl");
+    expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "std::storage_for",
+           "storage_for_type_declaration: type should be std::storage_for");
+    expect(decl.type.template_args.size() == 2, "storage_for_type_declaration: expected 2 type arguments");
+    expect(is_named_type(decl.type.template_args[0], "int"), "storage_for_type_declaration: arg 0 should be int");
+    expect(is_named_type(decl.type.template_args[1], "long"), "storage_for_type_declaration: arg 1 should be long");
+}
+
 void test_move_expression() {
     scpp::Program program = parse_with_std_imports(
         "import std;\n"
@@ -3247,6 +3260,7 @@ int main() {
     test_unique_ptr_of_struct_type();
     test_span_type_declaration();
     test_span_of_const_element_type();
+    test_storage_for_type_declaration();
     test_move_expression();
     test_move_as_function_argument();
     test_make_unique_zero_args();

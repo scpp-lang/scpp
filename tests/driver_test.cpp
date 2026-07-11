@@ -1609,6 +1609,67 @@ void run_sizeof_tests() {
     }
 }
 
+void run_storage_tests() {
+    {
+        std::string case_name = "storage_for_uses_max_size_and_alignment";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "storage_for_uses_max_size_and_alignment_exe";
+        scpp::compile_to_executable(
+            "class Box {\n"
+            "public:\n"
+            "    std::storage_for<int, long> slot;\n"
+            "    int payload_size() const { return (int)sizeof(this->slot); }\n"
+            "};\n"
+            "struct Holder {\n"
+            "    char tag;\n"
+            "    std::storage_for<int, long> slot;\n"
+            "    char tail;\n"
+            "};\n"
+            "int main() {\n"
+            "    Box box;\n"
+            "    if (box.payload_size() != 8) return 1;\n"
+            "    if ((int)sizeof(std::storage_for<int, long>) != 8) return 2;\n"
+            "    if ((int)sizeof(Holder) != 24) return 3;\n"
+            "    return 0;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected aligned storage layout checks to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "storage_for_accepts_user_defined_candidate_types";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "storage_for_accepts_user_defined_candidate_types_exe";
+        scpp::compile_to_executable(
+            "class Widget {\n"
+            "public:\n"
+            "    char c;\n"
+            "    long value;\n"
+            "};\n"
+            "struct Wrapper {\n"
+            "    char lead;\n"
+            "    std::storage_for<Widget, int> storage;\n"
+            "};\n"
+            "int main() {\n"
+            "    if ((int)sizeof(std::storage_for<Widget, int>) != 16) return 1;\n"
+            "    if ((int)sizeof(Wrapper) != 24) return 2;\n"
+            "    return 0;\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(), std_import_paths());
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected user-defined-type storage checks to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+}
+
 void run_consteval_tests() {
     {
         std::string case_name = "consteval_folds_recursive_constexpr_helper";
@@ -3341,6 +3402,7 @@ int main() {
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_sizeof_tests();
+    run_storage_tests();
     run_consteval_tests();
     run_cli_extension_tests();
 

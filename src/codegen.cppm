@@ -1226,6 +1226,7 @@ private:
             case TypeKind::Named: {
                 if (is_scalar_type_name(type.name)) return;
                 if (find_enum_def(program_, type.name) != nullptr) return;
+                if (type.name == "std::storage_for") return;
                 if (type.name == "void") {
                     throw CodegenError("'void' cannot be a struct field (only a return type or a "
                                         "pointer's pointee -- 'void*' -- may be 'void')",
@@ -1369,6 +1370,36 @@ private:
         declaring_aggregates_.erase(def.name);
     }
 
+    [[nodiscard]] llvm::Type* storage_for_llvm_type(const Type& type) {
+        if (type.template_args.empty()) {
+            throw CodegenError("'std::storage_for' requires at least one type argument", current_loc_);
+        }
+        size_t max_size = 0;
+        size_t max_align = 1;
+        llvm::Type* rep_type = nullptr;
+        size_t rep_size = 0;
+        size_t rep_align = 0;
+        for (const Type& candidate : type.template_args) {
+            llvm::Type* candidate_llvm = to_llvm_type(candidate);
+            size_t candidate_size = module_->getDataLayout().getTypeAllocSize(candidate_llvm);
+            size_t candidate_align = module_->getDataLayout().getABITypeAlign(candidate_llvm).value();
+            max_size = std::max(max_size, candidate_size);
+            max_align = std::max(max_align, candidate_align);
+            if (rep_type == nullptr || candidate_align > rep_align || (candidate_align == rep_align && candidate_size > rep_size)) {
+                rep_type = candidate_llvm;
+                rep_size = candidate_size;
+                rep_align = candidate_align;
+            }
+        }
+        size_t storage_size = ((max_size + max_align - 1) / max_align) * max_align;
+        std::vector<llvm::Type*> storage_fields;
+        storage_fields.push_back(rep_type);
+        if (storage_size > rep_size) {
+            storage_fields.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), storage_size - rep_size));
+        }
+        return llvm::StructType::get(*context_, storage_fields);
+    }
+
     llvm::Type* to_llvm_type(const Type& type) {
         switch (type.kind) {
             case TypeKind::Function:
@@ -1450,6 +1481,7 @@ private:
                 if (type.name == "size_t" || type.name == "ptrdiff_t") {
                     return llvm::Type::getIntNTy(*context_, module_->getDataLayout().getPointerSizeInBits());
                 }
+                if (type.name == "std::storage_for") return storage_for_llvm_type(type);
                 if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
                     return to_llvm_type(enum_def->underlying_type);
                 }
@@ -1494,6 +1526,10 @@ private:
 
     [[nodiscard]] std::optional<llvm::Align> alignment_for_type(const Type& type) const {
         if (type.kind != TypeKind::Named) return std::nullopt;
+        if (type.name == "std::storage_for") {
+            llvm::Type* llvm_type = const_cast<Codegen*>(this)->to_llvm_type(type);
+            return module_->getDataLayout().getABITypeAlign(llvm_type);
+        }
         auto it = structs_.find(type.name);
         if (it == structs_.end()) return std::nullopt;
         return it->second.abi_align;
