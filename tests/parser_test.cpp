@@ -2548,6 +2548,24 @@ void test_explicit_template_function_designator_parses() {
            "explicit_template_function_designator_parses: expected identifier with one explicit template arg");
 }
 
+void test_global_qualified_call_parses() {
+    scpp::Program program = scpp::parse(
+        "int main() {\n"
+        "    return ::foo::bar();\n"
+        "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr && main_fn->body != nullptr,
+           "global_qualified_call_parses: expected main body");
+    const scpp::Stmt* ret = main_fn->body->statements[0].get();
+    expect(ret->kind == scpp::StmtKind::Return && ret->expr != nullptr &&
+               ret->expr->kind == scpp::ExprKind::Call,
+           "global_qualified_call_parses: expected return call");
+    expect(ret->expr->name == "foo::bar",
+           "global_qualified_call_parses: expected joined qualified name");
+    expect(ret->expr->explicit_global_qualification,
+           "global_qualified_call_parses: expected explicit global qualification flag");
+}
+
 void test_class_partial_specialization_on_function_type_parses() {
     scpp::Program program = scpp::parse(
         "template<typename Sig>\n"
@@ -3384,6 +3402,7 @@ int main() {
     test_qualified_function_type_template_argument_parses();
     test_ref_qualified_methods_parse();
     test_explicit_template_function_designator_parses();
+    test_global_qualified_call_parses();
     test_class_partial_specialization_on_function_type_parses();
     test_generic_class_method_requires_clause_parses();
     test_generic_struct_concept_constrained_type_param_parses();

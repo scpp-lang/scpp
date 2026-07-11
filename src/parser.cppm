@@ -411,6 +411,7 @@ private:
         clone->float_value = expr.float_value;
         clone->bool_value = expr.bool_value;
         clone->name = expr.name;
+        clone->explicit_global_qualification = expr.explicit_global_qualification;
         clone->binary_op = expr.binary_op;
         clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
         clone->unary_op = expr.unary_op;
@@ -618,6 +619,18 @@ private:
         return joined;
     }
 
+    [[nodiscard]] std::string peek_global_qualified_name() const {
+        if (peek().kind != TokenKind::ColonColon || peek_at(1).kind != TokenKind::Identifier) return {};
+        std::string joined(peek_at(1).text);
+        size_t offset = 2;
+        while (peek_at(offset).kind == TokenKind::ColonColon && peek_at(offset + 1).kind == TokenKind::Identifier) {
+            joined += "::";
+            joined += peek_at(offset + 1).text;
+            offset += 2;
+        }
+        return joined;
+    }
+
     // Consumes a qualified name (`Identifier (:: Identifier)*`) and
     // returns it joined the same way peek_qualified_name does. Only call
     // when the current token is already known to be an Identifier (e.g.
@@ -625,6 +638,17 @@ private:
     // check(TokenKind::Identifier)).
     std::string parse_qualified_name() {
         std::string joined(advance().text);
+        while (check(TokenKind::ColonColon) && peek_at(1).kind == TokenKind::Identifier) {
+            advance(); // ::
+            joined += "::";
+            joined += advance().text;
+        }
+        return joined;
+    }
+
+    std::string parse_global_qualified_name() {
+        expect(TokenKind::ColonColon, "'::'");
+        std::string joined(expect(TokenKind::Identifier, "identifier after '::'").text);
         while (check(TokenKind::ColonColon) && peek_at(1).kind == TokenKind::Identifier) {
             advance(); // ::
             joined += "::";
@@ -641,6 +665,7 @@ private:
         clone->float_value = expr.float_value;
         clone->bool_value = expr.bool_value;
         clone->name = expr.name;
+        clone->explicit_global_qualification = expr.explicit_global_qualification;
         clone->binary_op = expr.binary_op;
         if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
         if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
@@ -948,7 +973,8 @@ private:
         Expr& expr, const std::string& namespace_prefix, const std::unordered_set<std::string>& known_function_names,
         std::vector<std::unordered_set<std::string>>& scopes) {
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.name.empty() &&
-            expr.name.find("::") == std::string::npos && !is_shadowed_local(expr.name, scopes)) {
+            !expr.explicit_global_qualification && expr.name.find("::") == std::string::npos &&
+            !is_shadowed_local(expr.name, scopes)) {
             std::string candidate = namespace_prefix + "::" + expr.name;
             if (known_function_names.contains(candidate)) expr.name = std::move(candidate);
         }
@@ -4385,6 +4411,7 @@ private:
                 node->loc = expr->loc;
                 if (expr->kind == ExprKind::Identifier) {
                     node->name = expr->name;
+                    node->explicit_global_qualification = expr->explicit_global_qualification;
                     node->explicit_template_args = std::move(expr->explicit_template_args);
                 } else if (expr->kind == ExprKind::Lambda) {
                     node->name = "call";
@@ -4555,6 +4582,73 @@ private:
 
         if (check(TokenKind::LBracket)) {
             return parse_lambda_expression();
+        }
+
+        if (check(TokenKind::ColonColon)) {
+            std::string global_name = peek_global_qualified_name();
+            if (global_name == "std::move") {
+                parse_global_qualified_name();
+                expect(TokenKind::LParen, "'('");
+                ExprPtr inner = parse_expr();
+                expect(TokenKind::RParen, "')'");
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Move;
+                node->loc = loc;
+                node->lhs = std::move(inner);
+                return node;
+            }
+            if (global_name == "scpp::is_thread_movable" || global_name == "scpp::is_thread_shareable") {
+                bool movable = global_name == "scpp::is_thread_movable";
+                parse_global_qualified_name();
+                expect(TokenKind::LParen, "'('");
+                Type queried = parse_type();
+                expect(TokenKind::RParen, "')'");
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::TypeTrait;
+                node->loc = loc;
+                node->name = movable ? "is_thread_movable" : "is_thread_shareable";
+                node->type = std::move(queried);
+                return node;
+            }
+            std::string name = parse_global_qualified_name();
+            auto generic_fn_it = generic_function_template_params_.find(name);
+            std::vector<ExplicitTemplateArg> explicit_template_args;
+            if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
+                advance(); // '<'
+                const std::vector<GenericTypeParam>& fn_template_params = generic_fn_it->second;
+                size_t arg_index = 0;
+                if (!check(TokenKind::Greater)) {
+                    do {
+                        ExplicitTemplateArg arg;
+                        bool is_non_type =
+                            arg_index < fn_template_params.size() && fn_template_params[arg_index].is_non_type;
+                        if (is_non_type) {
+                            arg.is_type = false;
+                            arg.value = std::shared_ptr<Expr>(parse_additive().release());
+                        } else if (arg_index < fn_template_params.size() && fn_template_params[arg_index].is_pack &&
+                                   check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
+                            arg.is_type = true;
+                            arg.type.kind = TypeKind::Named;
+                            arg.type.name = std::string(advance().text);
+                            advance(); // '...'
+                            arg.type.is_pack_expansion = true;
+                        } else {
+                            arg.is_type = true;
+                            arg.type = parse_template_type_argument();
+                        }
+                        explicit_template_args.push_back(std::move(arg));
+                        arg_index++;
+                    } while (match(TokenKind::Comma));
+                }
+                expect(TokenKind::Greater, "'>'");
+            }
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Identifier;
+            node->loc = loc;
+            node->name = std::move(name);
+            node->explicit_global_qualification = true;
+            node->explicit_template_args = std::move(explicit_template_args);
+            return node;
         }
 
         if (check_std_qualified("move")) {

@@ -3489,6 +3489,28 @@ void run_enum_tests() {
     }
 }
 
+void run_global_scope_resolution_tests() {
+    {
+        std::string case_name = "global_scope_resolution_bypasses_namespace_shadowing";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
+        scpp::compile_to_executable(
+            "int ping() { return 41; }\n"
+            "namespace inner {\n"
+            "int ping() {\n"
+            "    return ::ping() + 1;\n"
+            "}\n"
+            "}\n"
+            "int main() {\n"
+            "    return inner::ping() - 42;\n"
+            "}\n",
+            exe_path.string());
+        RunResult result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        std::filesystem::remove(exe_path);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -3501,6 +3523,7 @@ int main() {
     run_generic_function_overload_tests();
     run_functional_tests();
     run_thread_tests();
+    run_global_scope_resolution_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_sizeof_tests();

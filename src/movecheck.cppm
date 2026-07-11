@@ -780,7 +780,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             }
         }
     }
-    if (!call_expr.lhs && body.local_types.contains(call_expr.name) && is_function_pointer(body.local_types.at(call_expr.name))) {
+    if (!call_expr.lhs && !call_expr.explicit_global_qualification && body.local_types.contains(call_expr.name) &&
+        is_function_pointer(body.local_types.at(call_expr.name))) {
         return CalleeSignature{"", 0, function_pointer_signature(body.local_types.at(call_expr.name))};
     }
     if (call_expr.lhs) {
@@ -1452,7 +1453,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         }
 
         case ExprKind::Identifier: {
-            auto it = body.local_types.find(expr.name);
+            auto it = expr.explicit_global_qualification ? body.local_types.end() : body.local_types.find(expr.name);
             if (it != body.local_types.end()) return it->second;
             if (const EnumDef* def = [&]() {
                     const EnumDef* enum_def = nullptr;
@@ -3008,7 +3009,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 
         case ExprKind::Identifier: {
             if (!report_errors) return;
-            auto type_it = body.local_types.find(expr.name);
+            auto type_it = expr.explicit_global_qualification ? body.local_types.end() : body.local_types.find(expr.name);
             if (type_it == body.local_types.end()) return; // unknown name: left to codegen's own check
             LocalState current = lookup(state.locals, expr.name);
             if (current != LocalState::Initialized) {
@@ -4232,6 +4233,7 @@ ExprPtr clone_expr(const Expr& expr) {
     clone->int_value = expr.int_value;
     clone->bool_value = expr.bool_value;
     clone->name = expr.name;
+    clone->explicit_global_qualification = expr.explicit_global_qualification;
     clone->binary_op = expr.binary_op;
     if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
     if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
@@ -7978,7 +7980,7 @@ private:
         // there is no genuine ambiguity in practice, since a generic
         // template's own name (checked further below) is never itself
         // registered as a local.
-        if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification) {
             auto local_it = body.local_types.find(expr.name);
             if (local_it != body.local_types.end()) {
                 const Type& local_type = local_it->second;
