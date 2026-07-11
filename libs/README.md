@@ -19,7 +19,7 @@ The project convention is:
 | `std/std.scpp` | Primary interface unit of module `std`; re-exports its partitions with `export import :...;` |
 | `std/` | Real-C++-mirroring library partitions and native wrappers for module `std` |
 | `scpp/scpp.scpp` | Primary interface unit of module `scpp`; re-exports scpp-specific partitions |
-| `scpp/rand/` | `scpp:rand` partition with `scpp::rand::uniform_int_distribution<int>` |
+| `scpp/rand/` | `scpp:rand` partition with `scpp::rand::uniform_int_distribution` |
 | `CMakeLists.txt` | Builds native helper libraries plus the `std` and `scpp` module artifacts |
 
 ## Consuming `std`

@@ -279,26 +279,6 @@ void test_nodiscard_function_and_method_attributes_parse() {
            "nodiscard_function_and_method_attributes_parse: bare nodiscard should have empty reason");
 }
 
-void test_template_static_member_call_parses() {
-    scpp::Program program = scpp::parse(R"SCPP(template<typename T>
-class Box;
-template<>
-class Box<int> {
-public:
-    static int make() { return 7; }
-};
-int main() { return Box<int>::make(); }
-)SCPP");
-    bool found_static_make = false;
-    for (const scpp::Function& fn : program.functions) {
-        if (fn.is_static && fn.name.find("_make") != std::string::npos && fn.member_owner_class == "Box") {
-            found_static_make = true;
-            break;
-        }
-    }
-    expect(found_static_make, "template_static_member_call_parses: expected a static Box make method");
-}
-
 void test_static_member_function_parses_without_this() {
     scpp::Program program = scpp::parse(
         "class Box {\n"
@@ -3328,7 +3308,6 @@ int main() {
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
-    test_template_static_member_call_parses();
     test_static_member_function_parses_without_this();
     test_unsafe_attribute_on_struct_is_rejected();
     test_thread_safety_attribute_on_struct_parses();
