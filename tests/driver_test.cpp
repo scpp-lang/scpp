@@ -3598,6 +3598,21 @@ void run_global_scope_resolution_tests() {
 
 void run_expected_tests() {
     {
+        std::string case_name = "std_abort_aborts_process";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::abort();
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code != 0,
+               case_name + ": expected non-zero exit code, got " + std::to_string(result.exit_code));
+    }
+
+    {
         std::string case_name = "std_expected_success_and_error_paths_work";
         cases_run++;
         RunResult result = compile_and_run(
@@ -3657,6 +3672,23 @@ int main() {
 )SCPP",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_expected_bad_access_aborts_via_std_abort";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+enum class calc_error { invalid };
+int main() {
+    std::unexpected<calc_error> err(calc_error::invalid);
+    std::expected<int, calc_error> bad(err);
+    return bad.value();
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code != 0,
+               case_name + ": expected non-zero exit code, got " + std::to_string(result.exit_code));
     }
 }
 
