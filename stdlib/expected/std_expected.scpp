@@ -16,32 +16,32 @@ export void __expected_abort() {
 export template<typename E>
 class unexpected {
 private:
-    E* error_;
+    std::storage_for<E> error_storage_;
 
 public:
     unexpected(E error) {
         [[scpp::unsafe]] {
-            this->error_ = new E(error);
+            new ((E*)&this->error_storage_) E(error);
         }
         return;
     }
 
     ~unexpected() {
         [[scpp::unsafe]] {
-            delete this->error_;
+            ((E*)&this->error_storage_)->~E();
         }
         return;
     }
 
     E& error() {
         [[scpp::unsafe]] {
-            return *this->error_;
+            return ((E*)&this->error_storage_)[0];
         }
     }
 
     const E& error() const {
         [[scpp::unsafe]] {
-            return *this->error_;
+            return ((E*)&this->error_storage_)[0];
         }
     }
 };
@@ -50,14 +50,13 @@ export template<typename T, typename E>
 class expected {
 private:
     bool has_value_;
-    T* value_;
-    E* error_;
+    std::storage_for<T, E> storage_;
 
 public:
     expected(T value) {
         this->has_value_ = true;
         [[scpp::unsafe]] {
-            this->value_ = new T(value);
+            new ((T*)&this->storage_) T(value);
         }
         return;
     }
@@ -65,7 +64,7 @@ public:
     expected(const std::unexpected<E>& error) {
         this->has_value_ = false;
         [[scpp::unsafe]] {
-            this->error_ = new E(error.error());
+            new ((E*)&this->storage_) E(error.error());
         }
         return;
     }
@@ -73,11 +72,11 @@ public:
     ~expected() {
         if (this->has_value_) {
             [[scpp::unsafe]] {
-                delete this->value_;
+                ((T*)&this->storage_)->~T();
             }
         } else {
             [[scpp::unsafe]] {
-                delete this->error_;
+                ((E*)&this->storage_)->~E();
             }
         }
         return;
@@ -92,7 +91,7 @@ public:
             std::__expected_abort();
         }
         [[scpp::unsafe]] {
-            return *this->value_;
+            return ((T*)&this->storage_)[0];
         }
     }
 
@@ -101,7 +100,7 @@ public:
             std::__expected_abort();
         }
         [[scpp::unsafe]] {
-            return *this->value_;
+            return ((T*)&this->storage_)[0];
         }
     }
 
@@ -110,7 +109,7 @@ public:
             std::__expected_abort();
         }
         [[scpp::unsafe]] {
-            return *this->error_;
+            return ((E*)&this->storage_)[0];
         }
     }
 
@@ -119,7 +118,7 @@ public:
             std::__expected_abort();
         }
         [[scpp::unsafe]] {
-            return *this->error_;
+            return ((E*)&this->storage_)[0];
         }
     }
 };
