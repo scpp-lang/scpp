@@ -8,7 +8,7 @@
 - [做一个猜数字小游戏](ch02-00-guessing-game.md)
 
 - 常见编程概念
-  - 变量、初始化与默认清零
+  - [变量与显式初始化](ch03-01-variables-and-explicit-initialization.md)
   - 数据类型
   - 函数
   - 注释

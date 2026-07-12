@@ -8,7 +8,7 @@
 - [Programming a Guessing Game](ch02-00-guessing-game.md)
 
 - Common Programming Concepts
-  - Variables, Initialization, and Zero Defaults
+  - [Variables and Explicit Initialization](ch03-01-variables-and-explicit-initialization.md)
   - Data Types
   - Functions
   - Comments
