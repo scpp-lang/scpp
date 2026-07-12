@@ -117,10 +117,10 @@ class Outer {
     Inner a;
     int b;
 public:
-    Outer(int* p, int b_) : a{p}, b(b_) {}
+    Outer(int* p, int b_) : a{p}, b{b_} {}
 };
 
-Outer x{new int(1), 2};
+Outer x{new int{1}, 2};
 Outer y{std::move(x)};   // (4)：逐字段 move 构造 y.a、y.b，来自 x.a、x.b；
                           // 此后 x 处于 moved-out 状态（§6.2），如果它
                           // 声明了析构函数，也不会为它调用（§6.3）

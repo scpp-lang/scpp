@@ -139,10 +139,10 @@ class Outer {
     Inner a;
     int b;
 public:
-    Outer(int* p, int b_) : a{p}, b(b_) {}
+    Outer(int* p, int b_) : a{p}, b{b_} {}
 };
 
-Outer x{new int(1), 2};
+Outer x{new int{1}, 2};
 Outer y{std::move(x)};   // (4): memberwise move-constructs y.a, y.b from x.a, x.b;
                           // x is thereafter in the moved-out state (§6.2) and its
                           // destructor, if declared, is not invoked for it (§6.3)
