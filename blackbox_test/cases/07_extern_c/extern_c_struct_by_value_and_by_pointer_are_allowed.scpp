@@ -22,7 +22,7 @@ extern "C" int sum_point_by_pointer(Point* p) {
 }
 
 int main() {
-    Point a;
+    Point a{};
     a.x = 3;
     a.y = 4;
     int by_value = 0;

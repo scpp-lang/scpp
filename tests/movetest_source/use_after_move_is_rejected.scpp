@@ -1,6 +1,6 @@
 import std;
 int f() {
-    std::unique_ptr<int> a;
+    std::unique_ptr<int> a{};
     std::unique_ptr<int> b = std::move(a);
     std::unique_ptr<int> c = std::move(a);
     return 0;

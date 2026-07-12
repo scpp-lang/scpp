@@ -2,7 +2,7 @@ import std;
 // ch05 §5.18: an `Sig &&` wrapper promises an rvalue-callable target.
 class Adder {
 private:
-    int delta;
+    int delta{};
 public:
     Adder(int n) {
         this->delta = n;

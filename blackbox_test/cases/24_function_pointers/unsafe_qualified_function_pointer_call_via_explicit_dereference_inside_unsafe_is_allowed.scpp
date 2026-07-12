@@ -13,7 +13,7 @@ int main() {
     arr[1] = 20;
     arr[2] = 30;
     int (* [[scpp::unsafe]] up)(int*, int) = &get_unchecked;
-    int result;
+    int result{};
     [[scpp::unsafe]] {
         result = (*up)(arr, 2);
     }

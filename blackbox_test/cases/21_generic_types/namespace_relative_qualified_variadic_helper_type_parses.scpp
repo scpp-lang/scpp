@@ -8,7 +8,7 @@ public:
 }
 
 int f() {
-    detail::Pair<int, bool> pair;
+    detail::Pair<int, bool> pair{};
     return 0;
 }
 }

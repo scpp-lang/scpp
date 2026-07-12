@@ -6,7 +6,7 @@
 // reference into `add_ref` must conflict.
 class Adder {
 private:
-    int value;
+    int value{};
 public:
     Adder(int start) {
         this->value = start;

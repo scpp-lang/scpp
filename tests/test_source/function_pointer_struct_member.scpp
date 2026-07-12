@@ -7,7 +7,7 @@ int add(int a, int b) {
 }
 
 int main() {
-    Op op;
+    Op op{};
     op.fn = add;
     return op.fn(2, 3);
 }

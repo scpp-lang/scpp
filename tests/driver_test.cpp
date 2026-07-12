@@ -991,7 +991,7 @@ void run_concept_tests() {
             "    return s.perimeter();\n"
             "}\n"
             "int main() {\n"
-            "    Circle c;\n"
+            "    Circle c{};\n"
             "    return print_area(c);\n"
             "}\n";
         bool threw = false;
@@ -1030,15 +1030,15 @@ void run_generic_type_tests() {
             "};\n"
             "class NoMagnitude {\n"
             "public:\n"
-            "    NoMagnitude(int v) { this.value = v; return; }\n"
+            "    NoMagnitude(int v) : value{v} { return; }\n"
             "private:\n"
-            "    int value;\n"
+            "    int value{};\n"
             "};\n"
             "template<typename T>\n"
             "class Vec {\n"
             "    T item;\n"
             "public:\n"
-            "    Vec(const T& x) { this.item = x; return; }\n"
+            "    Vec(const T& x) : item{x} { return; }\n"
             "    int describe() const requires Describable<T> {\n"
             "        return this.item.magnitude();\n"
             "    }\n"
@@ -1126,7 +1126,7 @@ void run_generic_type_tests() {
             "};\n"
             "\n"
             "int main() {\n"
-            "    Box<int, bool> b;\n"
+            "    Box<int, bool> b{};\n"
             "    return b.size() - 50;\n"
             "}\n";
         std::string case_name = "variadic_generic_instantiation_clones_methods";
@@ -1156,11 +1156,8 @@ void run_generic_type_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Box(const char* s) {\n"
-            "        this->value = 7;\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Box(const char* s) : value{7} { return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
             "\n"
@@ -1210,7 +1207,7 @@ void run_generic_pack_deduction_tests() {
             "}\n"
             "\n"
             "int main() {\n"
-            "    Holder<int(int, int)> h;\n"
+            "    Holder<int(int, int)> h{};\n"
             "    h.fn_ = add;\n"
             "    return invoke(h, 19, 23) - 42;\n"
             "}\n";
@@ -1253,7 +1250,7 @@ void run_generic_pack_deduction_tests() {
             "}\n"
             "\n"
             "int main() {\n"
-            "    Holder<int(int, int)> h;\n"
+            "    Holder<int(int, int)> h{};\n"
             "    h.fn_ = add;\n"
             "    return invoke<int>(h, 20, 22) - 42;\n"
             "}\n";
@@ -1330,7 +1327,7 @@ void run_generic_pack_deduction_tests() {
             "}\n"
             "\n"
             "int main() {\n"
-            "    Box<int> ok;\n"
+            "    Box<int> ok{};\n"
             "    return use(ok, 1) - 42;\n"
             "}\n";
         bool threw = false;
@@ -1367,7 +1364,7 @@ void run_generic_pack_deduction_tests() {
             "}\n"
             "\n"
             "int main() {\n"
-            "    Box<int, bool> bad;\n"
+            "    Box<int, bool> bad{};\n"
             "    return use(bad, 1) - 42;\n"
             "}\n";
         bool threw = false;
@@ -1438,22 +1435,16 @@ void run_generic_pack_deduction_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Box(const char* s) {\n"
-            "        this->value = 7;\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Box(const char* s) : value{7} { return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
             "\n"
             "template<typename Head, typename... Tail>\n"
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Box(const char* s) {\n"
-            "        this->value = 9;\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Box(const char* s) : value{9} { return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
             "\n"
@@ -1662,7 +1653,7 @@ void run_functional_tests() {
         "private:\n"
         "    std::unique_ptr<int> value;\n"
         "public:\n"
-        "    MoveOnlyAdder(std::unique_ptr<int> value) { this->value = std::move(value); return; }\n"
+        "    MoveOnlyAdder(std::unique_ptr<int> value) : value{std::move(value)} { return; }\n"
         "    int call(int x) const { return x + *this->value; }\n"
         "};\n"
         "int main() {\n"
@@ -1719,7 +1710,7 @@ void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
     scpp::Program program = scpp::parse(
         "export module math;\n"
         "namespace math {\n"
-        "    class Helper { public: constexpr Helper(int v) { value = v; } int value; };\n"
+        "    class Helper { public: constexpr Helper(int v) : value{v} { return; } int value{}; };\n"
         "    int helper_value(const Helper& h) { return h.value; }\n"
         "    export constexpr int answer() { Helper h{42}; return helper_value(h); }\n"
         "}\n");
@@ -1760,7 +1751,7 @@ void run_sizeof_tests() {
             "};\n"
             "int main() {\n"
             "    int values[3];\n"
-            "    Pair pair;\n"
+            "    Pair pair{};\n"
             "    if ((int)sizeof(int) != 4) return 1;\n"
             "    if ((int)sizeof(values) != 12) return 2;\n"
             "    if ((int)sizeof(Pair) != 8) return 3;\n"
@@ -1788,7 +1779,7 @@ void run_sizeof_tests() {
             "    return 0;\n"
             "}\n"
             "int main() {\n"
-            "    std::unique_ptr<int> p;\n"
+            "    std::unique_ptr<int> p{};\n"
             "    int n = (int)sizeof(std::move(p));\n"
             "    return consume(std::move(p)) + n - n;\n"
             "}\n",
@@ -1809,7 +1800,7 @@ void run_sizeof_tests() {
             "    char x;\n"
             "};\n"
             "consteval int answer() {\n"
-            "    Tiny t;\n"
+            "    Tiny t{};\n"
             "    return (int)sizeof(Tiny) + (int)sizeof(t);\n"
             "}\n"
             "int main() {\n"
@@ -1842,7 +1833,7 @@ void run_storage_tests() {
             "    char tail;\n"
             "};\n"
             "int main() {\n"
-            "    Box box;\n"
+            "    Box box{};\n"
             "    if (box.payload_size() != 8) return 1;\n"
             "    if ((int)sizeof(std::storage_for<int, long>) != 8) return 2;\n"
             "    if ((int)sizeof(Holder) != 24) return 3;\n"
@@ -1893,7 +1884,7 @@ void run_placement_new_tests() {
             std::filesystem::current_path() / "placement_new_constructs_scalar_in_storage_exe";
         scpp::compile_to_executable(
             "int main() {\n"
-            "    std::storage_for<int> slot;\n"
+            "    std::storage_for<int> slot{};\n"
             "    [[scpp::unsafe]] {\n"
             "        int* p = new ((int*)&slot) int(7);\n"
             "        return *p - 7;\n"
@@ -1915,12 +1906,12 @@ void run_placement_new_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
-            "    int value;\n"
-            "    Box(int v) { this->value = v; return; }\n"
+            "    int value{};\n"
+            "    Box(int v) : value{v} { return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
             "int main() {\n"
-            "    std::storage_for<Box> slot;\n"
+            "    std::storage_for<Box> slot{};\n"
             "    [[scpp::unsafe]] {\n"
             "        Box* p = new ((Box*)&slot) Box(9);\n"
             "        return p->get() - 9;\n"
@@ -1944,13 +1935,13 @@ void run_explicit_destructor_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
-            "    int* out;\n"
-            "    Box(int* p) { this->out = p; return; }\n"
+            "    int* out{};\n"
+            "    Box(int* p) : out{p} { return; }\n"
             "    ~Box() { [[scpp::unsafe]] { *this->out = 9; } return; }\n"
             "};\n"
             "int main() {\n"
             "    int result = 0;\n"
-            "    std::storage_for<Box> slot;\n"
+            "    std::storage_for<Box> slot{};\n"
             "    [[scpp::unsafe]] {\n"
             "        Box* p = new ((Box*)&slot) Box(&result);\n"
             "        p->~Box();\n"
@@ -1971,7 +1962,7 @@ void run_explicit_destructor_tests() {
         bool threw = false;
         try {
             scpp::Program program = scpp::parse(
-                "class Box { public: ~Box() { return; } }; int main() { Box b; [[scpp::unsafe]] { b.~Box(); } return 0; }");
+                "class Box { public: ~Box() { return; } }; int main() { Box b{}; [[scpp::unsafe]] { b.~Box(); } return 0; }");
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -2021,11 +2012,8 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Box(int v) {\n"
-            "        this->value = v;\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Box(int v) : value{v} { return; }\n"
             "};\n"
             "consteval int answer() {\n"
             "    Box b{42};\n"
@@ -2050,11 +2038,8 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Box(const char* text) {\n"
-            "        this->value = 17;\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Box(const char* text) : value{17} { return; }\n"
             "};\n"
             "int take(Box b) {\n"
             "    return b.value;\n"
@@ -2078,11 +2063,8 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Box(const char* text) {\n"
-            "        this->value = 23;\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Box(const char* text) : value{23} { return; }\n"
             "};\n"
             "constexpr int take(Box b) {\n"
             "    return b.value;\n"
@@ -2135,11 +2117,8 @@ void run_consteval_tests() {
             "}\n"
             "class Box {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Box(const char* s) {\n"
-            "        this->value = size1(s);\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Box(const char* s) : value{size1(s)} { return; }\n"
             "};\n"
             "consteval int answer() {\n"
             "    Box b{\"hi\"};\n"
@@ -2164,11 +2143,8 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Counter {\n"
             "public:\n"
-            "    int value;\n"
-            "    consteval Counter(int v) {\n"
-            "        this->value = v;\n"
-            "        return;\n"
-            "    }\n"
+            "    int value{};\n"
+            "    consteval Counter(int v) : value{v} { return; }\n"
             "    consteval void bump() {\n"
             "        this->value = this->value + 1;\n"
             "        return;\n"
@@ -2243,7 +2219,7 @@ void run_consteval_tests() {
             "    return 41;\n"
             "}\n"
             "consteval int answer() {\n"
-            "    TagList<int, bool> tags;\n"
+            "    TagList<int, bool> tags{};\n"
             "    return take(tags);\n"
             "}\n"
             "int main() {\n"
@@ -2278,7 +2254,7 @@ void run_consteval_tests() {
             "    return 41;\n"
             "}\n"
             "consteval int answer() {\n"
-            "    TagList<int, bool> tags;\n"
+            "    TagList<int, bool> tags{};\n"
             "    return take_ref(tags);\n"
             "}\n"
             "int main() {\n"
@@ -2494,11 +2470,8 @@ void run_consteval_tests() {
             scpp::compile_to_executable(
                 "class NeedsDrop {\n"
                 "public:\n"
-                "    int value;\n"
-                "    constexpr NeedsDrop(int x) {\n"
-                "        this->value = x;\n"
-                "        return;\n"
-                "    }\n"
+                "    int value{};\n"
+                "    constexpr NeedsDrop(int x) : value{x} { return; }\n"
                 "    ~NeedsDrop() {\n"
                 "        return;\n"
                 "    }\n"
@@ -2672,7 +2645,7 @@ void run_cli_extension_tests() {
                         "    }\n"
                         "    export template<typename T>\n"
                         "    T add_secret(T value) {\n"
-                        "        Secret s;\n"
+                        "        Secret s{};\n"
                         "        s.value = 5;\n"
                         "        return add_bonus(value, s);\n"
                         "    }\n"
@@ -2800,8 +2773,8 @@ void run_cli_extension_tests() {
                         "    template<typename T>\n"
                         "    class Holder {\n"
                         "    public:\n"
-                        "        T value_;\n"
-                        "        Holder(const T& value) { this->value_ = value; return; }\n"
+                        "        T value_{};\n"
+                        "        Holder(const T& value) : value_{value} { return; }\n"
                         "        T get() const { return this->value_; }\n"
                         "    };\n"
                         "    export template<typename T>\n"
@@ -2858,9 +2831,8 @@ void run_cli_extension_tests() {
                         "    export template<typename T>\n"
                         "    class CheckedString {\n"
                         "    public:\n"
-                        "        const char* text_;\n"
-                        "        consteval CheckedString(const char* s) {\n"
-                        "            this->text_ = s;\n"
+                        "        const char* text_{};\n"
+                        "        consteval CheckedString(const char* s) : text_{s} {\n"
                         "            helper::HiddenValidator<T> validator{s};\n"
                         "            return;\n"
                         "        }\n"
@@ -2916,9 +2888,8 @@ void run_cli_extension_tests() {
                         "    export template<typename T>\n"
                         "    class CheckedString {\n"
                         "    public:\n"
-                        "        const char* text_;\n"
-                        "        consteval CheckedString(const char* s) {\n"
-                        "            this->text_ = s;\n"
+                        "        const char* text_{};\n"
+                        "        consteval CheckedString(const char* s) : text_{s} {\n"
                         "            helper::HiddenValidator<T> validator{s};\n"
                         "            return;\n"
                         "        }\n"
@@ -2978,7 +2949,7 @@ void run_cli_extension_tests() {
                         "import dep;\n"
                         "import wrapper;\n"
                         "int main() {\n"
-                        "    dep::Box box;\n"
+                        "    dep::Box box{};\n"
                         "    if (box.call() != 7) return 1;\n"
                         "    return wrapper::pass(box) - 7;\n"
                         "}\n");
@@ -3254,7 +3225,7 @@ void run_cli_extension_tests() {
                         "import std;\n"
                         "import scpp;\n"
                         "int main() {\n"
-                        "    std::random_device rd;\n"
+                        "    std::random_device rd{};\n"
                         "    uint32_t expected_max = static_cast<uint32_t>(4294967295);\n"
                         "    if (rd.min() != static_cast<uint32_t>(0)) {\n"
                         "        return 4;\n"
@@ -4197,7 +4168,7 @@ void run_nodiscard_tests() {
                 "    int code;\n"
                 "};\n"
                 "status make_status() {\n"
-                "    status s;\n"
+                "    status s{};\n"
                 "    s.code = 5;\n"
                 "    return s;\n"
                 "}\n"
@@ -4224,7 +4195,7 @@ void run_nodiscard_tests() {
             "    int code;\n"
             "};\n"
             "status make_status() {\n"
-            "    status s;\n"
+            "    status s{};\n"
             "    s.code = 5;\n"
             "    return s;\n"
             "}\n"
@@ -4270,8 +4241,8 @@ public:
         return box.secret;
     }
 private:
-    int secret;
-    Box(int value) { this.secret = value; return; }
+    int secret{};
+    Box(int value) : secret{value} { return; }
 };
 int main() {
     return Box::reveal(9) - 9;
@@ -4301,12 +4272,9 @@ public:
     }
 
 private:
-    int secret;
+    int secret{};
 
-    Box(int value) {
-        this->secret = value;
-        return;
-    }
+    Box(int value) : secret{value} { return; }
 };
 
 int main() {
@@ -4331,8 +4299,8 @@ public:
         return box.secret;
     }
 private:
-    int secret;
-    Box(int value) { this.secret = value; return; }
+    int secret{};
+    Box(int value) : secret{value} { return; }
 };
 int main() {
     Box box{4};
@@ -4595,11 +4563,8 @@ int main() {
             R"SCPP(import std;
 class no_default {
 public:
-    int value;
-    no_default(int v) {
-        this->value = v;
-        return;
-    }
+    int value{};
+    no_default(int v) : value{v} { return; }
     int get() const {
         return this->value;
     }
@@ -5002,10 +4967,7 @@ template<typename T>
 class Box {
 public:
     T value;
-    Box(T value) {
-        this->value = std::move(value);
-        return;
-    }
+    Box(T value) : value{std::move(value)} { return; }
 };
 int main() {
     Box<int> box{9};
@@ -5025,10 +4987,7 @@ template<typename T>
 class Box {
 public:
     T value;
-    Box(T value) {
-        this->value = std::move(value);
-        return;
-    }
+    Box(T value) : value{std::move(value)} { return; }
 };
 int main() {
     return 0;
@@ -5113,9 +5072,9 @@ void run_brace_init_only_var_decl_tests() {
         RunResult result = compile_and_run(
             R"SCPP(class Box {
 private:
-    int value_;
+    int value_{};
 public:
-    Box(int value) { this->value_ = value; return; }
+    Box(int value) : value_{value} { return; }
     int value() { return this->value_; }
 };
 int main() {

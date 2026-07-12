@@ -5,7 +5,7 @@ int choose(bool cond, int a, int b) {
 }
 
 int main() {
-    int x;
+    int x{};
     x = false ? 9 : 4;
     return choose(true, x + 7, 0);
 }

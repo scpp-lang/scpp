@@ -1,6 +1,6 @@
 class Box {
 private:
-    int value;
+    int value{};
 
 public:
     Box() {

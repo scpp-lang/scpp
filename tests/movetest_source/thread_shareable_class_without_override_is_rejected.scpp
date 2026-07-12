@@ -4,7 +4,7 @@ class PlainHandle {
 public:
     PlainHandle(int* d) { this.data = d; return; }
 private:
-    int* data;
+    int* data{};
 };
 
 template<typename T>

@@ -8,7 +8,7 @@ extern "C" int abs(int x);
 
 int main() {
     int (* [[scpp::unsafe]] up)(int) = abs;
-    int result;
+    int result{};
     [[scpp::unsafe]] {
         result = up(-7);
     }

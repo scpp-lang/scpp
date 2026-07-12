@@ -5,7 +5,7 @@
 // class_move_assignment_rejected_for_class_with_reference_member.scpp.
 class RefHolder {
 public:
-    RefHolder(int& r) {
+    RefHolder(int& r) : r{r} {
         return;
     }
 private:

@@ -3,10 +3,7 @@ template<typename T>
 class Box {
 public:
     T value;
-    Box(T value) {
-        this->value = std::move(value);
-        return;
-    }
+    Box(T value) : value{std::move(value)} { return; }
 };
 
 int main() {

@@ -12,7 +12,7 @@ struct [[scpp::packed]] PackedPair {
 
 int main() {
     int values[3];
-    Pair pair;
+    Pair pair{};
     if (sizeof(int) != 4) return 1;
     if (sizeof(values) != 12) return 2;
     if (sizeof(Pair) != 8) return 3;

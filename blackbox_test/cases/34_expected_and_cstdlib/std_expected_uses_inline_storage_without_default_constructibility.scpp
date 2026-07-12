@@ -3,7 +3,7 @@ import std;
 // neither branch needs `T` to be default-constructible first.
 class NoDefault {
 public:
-    int value;
+    int value{};
 
     NoDefault(int v) {
         this->value = v;

@@ -6,7 +6,7 @@
 // (bare reassignment) has no copy assignment operator to call at all.
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int start) {
         this->value = start;

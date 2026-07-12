@@ -1,8 +1,8 @@
 import std;
 int f(bool cond) {
-    std::unique_ptr<int> a;
-    std::unique_ptr<int> sink1;
-    std::unique_ptr<int> sink2;
+    std::unique_ptr<int> a{};
+    std::unique_ptr<int> sink1{};
+    std::unique_ptr<int> sink2{};
     if (cond) {
         sink1 = std::move(a);
     } else {

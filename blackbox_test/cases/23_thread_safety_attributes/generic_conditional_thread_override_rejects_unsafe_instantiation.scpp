@@ -7,7 +7,7 @@ class NotThreadMovable {
 private:
     int& ref;
 public:
-    NotThreadMovable(int& x) : ref(x) {
+    NotThreadMovable(int& x) : ref{x} {
         return;
     }
 };
@@ -18,7 +18,7 @@ class [[scpp::thread_movable_if(
     scpp::is_thread_shareable(T)
 )]] Box {
 private:
-    int* p;
+    int* p{};
 public:
     Box() {
         [[scpp::unsafe]] {
@@ -36,7 +36,7 @@ void spawn(T&& value [[scpp::thread_movable]]) {
 int main() {
     int x = 0;
     NotThreadMovable value{x};
-    Box<NotThreadMovable> box;
+    Box<NotThreadMovable> box{};
     spawn(std::move(box));
     return 0;
 }

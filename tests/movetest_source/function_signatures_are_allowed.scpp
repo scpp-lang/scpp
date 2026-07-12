@@ -2,7 +2,7 @@ import std;
 
 class Adder {
 private:
-    int value;
+    int value{};
 public:
     Adder(int value) {
         this->value = value;
@@ -16,7 +16,7 @@ public:
 
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int value) {
         this->value = value;
@@ -31,7 +31,7 @@ public:
 
 class Consume {
 private:
-    int value;
+    int value{};
 public:
     Consume(int value) {
         this->value = value;

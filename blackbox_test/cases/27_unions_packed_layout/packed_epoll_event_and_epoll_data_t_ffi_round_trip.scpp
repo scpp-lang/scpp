@@ -30,8 +30,8 @@ int has_flag(int bits, int flag) {
 
 int main() {
     int fds[2];
-    int epfd;
-    epoll_event ev;
+    int epfd{};
+    epoll_event ev{};
     epoll_event got[1];
     char byte = 'x';
     char out = '\0';
@@ -45,20 +45,20 @@ int main() {
     ev.events = static_cast<uint32_t>(1);
     [[scpp::unsafe]] { ev.data.u32 = static_cast<uint32_t>(123); }
 
-    int ctl;
+    int ctl{};
     [[scpp::unsafe]] { ctl = epoll_ctl(epfd, 1, fds[0], &ev); }
     if (ctl != 0) return 3;
 
-    long wrote;
+    long wrote{};
     [[scpp::unsafe]] { wrote = write(fds[1], &byte, 1); }
     if (wrote != 1) return 4;
 
-    int ready;
+    int ready{};
     [[scpp::unsafe]] { ready = epoll_wait(epfd, &got[0], 1, 1000); }
     if (ready != 1) return 5;
 
-    int token;
-    uint32_t flags;
+    int token{};
+    uint32_t flags{};
     [[scpp::unsafe]] {
         token = static_cast<int>(got[0].data.u32);
         flags = got[0].events;
@@ -66,7 +66,7 @@ int main() {
     if (token != 123) return 6;
     if (has_flag(static_cast<int>(flags), 1) == 0) return 7;
 
-    long nread;
+    long nread{};
     [[scpp::unsafe]] { nread = read(fds[0], &out, 1); }
     if (nread != 1) return 8;
     if (out != 'x') return 9;

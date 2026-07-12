@@ -5,7 +5,7 @@ struct Point {
 
 int f(bool cond) {
     if (cond) {
-        Point p;
+        Point p{};
         p.x = 1;
     }
     const int& r = p.x;

@@ -4,7 +4,7 @@ struct Point {
 };
 
 int main() {
-    Point p;
+    Point p{};
     p.x = 10;
     int& rx = p.x;
     rx = rx + 1;

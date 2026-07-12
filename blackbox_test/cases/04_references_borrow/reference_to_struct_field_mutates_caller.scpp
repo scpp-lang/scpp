@@ -11,7 +11,7 @@ void bump_x(Point& p) {
 }
 
 int main() {
-    Point p;
+    Point p{};
     p.x = 1;
     p.y = 2;
     bump_x(p);

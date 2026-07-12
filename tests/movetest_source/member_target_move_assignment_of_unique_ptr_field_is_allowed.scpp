@@ -8,7 +8,7 @@ class Holder {
 public:
     Holder(std::unique_ptr<int> p) { this.p = std::move(p); return; }
 private:
-    std::unique_ptr<int> p;
+    std::unique_ptr<int> p{};
 };
 int main() {
     Holder h{std::make_unique<int>(9)};

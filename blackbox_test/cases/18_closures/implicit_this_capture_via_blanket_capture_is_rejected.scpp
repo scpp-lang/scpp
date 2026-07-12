@@ -9,7 +9,7 @@
 // to be rejected.
 class Box {
 private:
-    int value;
+    int value{};
 public:
     Box(int v) {
         this->value = v;

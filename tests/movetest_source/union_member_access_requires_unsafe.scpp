@@ -1,5 +1,5 @@
 union Payload { int i; char c; };
 int main() {
-    Payload p;
+    Payload p{};
     return p.i;
 }

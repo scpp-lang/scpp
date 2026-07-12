@@ -566,6 +566,107 @@ struct Stmt {
     bool is_unsafe = false;
 };
 
+struct Initializer {
+    // `= expr`
+    ExprPtr expr;
+    // `{}` / `{args...}`
+    bool has_brace_args = false;
+    std::vector<ExprPtr> brace_args;
+
+    Initializer() = default;
+    Initializer(const Initializer& other);
+    Initializer& operator=(const Initializer& other);
+    Initializer(Initializer&&) = default;
+    Initializer& operator=(Initializer&&) = default;
+};
+
+struct MemberInitializer {
+    std::string member_name;
+    Initializer initializer;
+    SourceLocation loc;
+
+    MemberInitializer() = default;
+    MemberInitializer(const MemberInitializer&) = default;
+    MemberInitializer& operator=(const MemberInitializer&) = default;
+    MemberInitializer(MemberInitializer&&) = default;
+    MemberInitializer& operator=(MemberInitializer&&) = default;
+};
+
+[[nodiscard]] inline StmtPtr clone_initializer_stmt(const Stmt& stmt);
+
+[[nodiscard]] inline ExprPtr clone_initializer_expr(const Expr& expr) {
+    auto clone = std::make_unique<Expr>();
+    clone->kind = expr.kind;
+    clone->loc = expr.loc;
+    clone->int_value = expr.int_value;
+    clone->float_value = expr.float_value;
+    clone->bool_value = expr.bool_value;
+    clone->name = expr.name;
+    clone->explicit_global_qualification = expr.explicit_global_qualification;
+    clone->binary_op = expr.binary_op;
+    if (expr.lhs) clone->lhs = clone_initializer_expr(*expr.lhs);
+    if (expr.rhs) clone->rhs = clone_initializer_expr(*expr.rhs);
+    if (expr.third) clone->third = clone_initializer_expr(*expr.third);
+    clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
+    clone->unary_op = expr.unary_op;
+    for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_initializer_expr(*arg));
+    clone->explicit_template_args = expr.explicit_template_args;
+    for (ExplicitTemplateArg& arg : clone->explicit_template_args) {
+        if (arg.value) arg.value = std::shared_ptr<Expr>(clone_initializer_expr(*arg.value).release());
+    }
+    clone->type = expr.type;
+    clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
+    clone->has_paren_init = expr.has_paren_init;
+    clone->destroy_through_pointer = expr.destroy_through_pointer;
+    clone->lambda_captures.clear();
+    for (const LambdaCapture& capture : expr.lambda_captures) {
+        LambdaCapture cloned;
+        cloned.name = capture.name;
+        cloned.by_reference = capture.by_reference;
+        if (capture.init) cloned.init = clone_initializer_expr(*capture.init);
+        clone->lambda_captures.push_back(std::move(cloned));
+    }
+    clone->lambda_blanket_mode = expr.lambda_blanket_mode;
+    clone->lambda_params = expr.lambda_params;
+    clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
+    clone->lambda_is_mutable = expr.lambda_is_mutable;
+    if (expr.lambda_body) clone->lambda_body = clone_initializer_stmt(*expr.lambda_body);
+    return clone;
+}
+
+[[nodiscard]] inline StmtPtr clone_initializer_stmt(const Stmt& stmt) {
+    auto clone = std::make_unique<Stmt>();
+    clone->kind = stmt.kind;
+    clone->loc = stmt.loc;
+    clone->type = stmt.type;
+    clone->var_name = stmt.var_name;
+    if (stmt.init) clone->init = clone_initializer_expr(*stmt.init);
+    clone->is_const = stmt.is_const;
+    clone->is_constexpr = stmt.is_constexpr;
+    clone->has_ctor_args = stmt.has_ctor_args;
+    for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_initializer_expr(*arg));
+    if (stmt.expr) clone->expr = clone_initializer_expr(*stmt.expr);
+    if (stmt.condition) clone->condition = clone_initializer_expr(*stmt.condition);
+    clone->if_mode = stmt.if_mode;
+    if (stmt.then_branch) clone->then_branch = clone_initializer_stmt(*stmt.then_branch);
+    if (stmt.else_branch) clone->else_branch = clone_initializer_stmt(*stmt.else_branch);
+    for (const StmtPtr& nested : stmt.statements) clone->statements.push_back(clone_initializer_stmt(*nested));
+    clone->is_unsafe = stmt.is_unsafe;
+    return clone;
+}
+
+inline Initializer::Initializer(const Initializer& other) : has_brace_args(other.has_brace_args) {
+    if (other.expr) expr = clone_initializer_expr(*other.expr);
+    for (const ExprPtr& arg : other.brace_args) brace_args.push_back(clone_initializer_expr(*arg));
+}
+
+inline Initializer& Initializer::operator=(const Initializer& other) {
+    if (this == &other) return *this;
+    Initializer clone(other);
+    *this = std::move(clone);
+    return *this;
+}
+
 // ch05 §5.14: a generic type's (class or struct) own template
 // parameter -- either a *type* parameter (`typename T`, bare --
 // `concept_name` empty -- or `ConceptName T`, constrained), or a
@@ -730,6 +831,12 @@ struct Function {
     // Member functions only: the owning class's own fully-qualified name.
     // Empty for a free function.
     std::string member_owner_class;
+    // Constructors only: `Ctor(...) : field{...}, other{...} { ... }`
+    // parsed exactly as written (still in source order). Codegen applies
+    // them in field declaration order, matching real C++'s rule that the
+    // member-initializer-list's textual order does not control actual
+    // construction order.
+    std::vector<MemberInitializer> member_initializers;
     // Member functions only: trailing ref-qualifier after the parameter
     // list (`&` / `&&`). `None` means unqualified, so the method is
     // callable on either an lvalue or rvalue receiver. `const` remains
@@ -794,6 +901,7 @@ struct Function {
 struct StructField {
     Type type;
     std::string name;
+    std::optional<Initializer> default_initializer;
 };
 
 struct StructDef {
@@ -858,6 +966,7 @@ struct StructDef {
 struct ClassField {
     Type type;
     std::string name;
+    std::optional<Initializer> default_initializer;
     // ch04 §4.2: a member variable can never be Public -- rejected right
     // where it's parsed (parse_class_def), not deferred to a later pass
     // -- but the specifier is still recorded here (rather than simply

@@ -6,7 +6,7 @@
 // class data.
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     void set(int v) {
         this->value = v;
@@ -18,7 +18,7 @@ public:
 };
 
 int main() {
-    Counter c;
+    Counter c{};
     c.set(7);
     return c.get();
 }

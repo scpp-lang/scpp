@@ -1,5 +1,5 @@
 int main() {
-    int* p;
+    int* p{};
     [[scpp::unsafe]] {
         int x = *p;
     }

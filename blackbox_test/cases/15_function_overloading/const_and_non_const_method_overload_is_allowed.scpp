@@ -5,7 +5,7 @@
 // `Counter&` prefers the non-`const` overload.
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int start) {
         this->value = start;

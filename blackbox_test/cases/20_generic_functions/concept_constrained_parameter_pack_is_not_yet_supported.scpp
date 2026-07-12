@@ -8,7 +8,7 @@ concept HasGet = requires(T t) { t.get(); };
 
 class Num {
 public:
-    int v;
+    int v{};
     int get() const {
         return this->v;
     }
@@ -19,9 +19,9 @@ int sum_two(const HasGet auto&... args) {
 }
 
 int main() {
-    Num a;
+    Num a{};
     a.v = 3;
-    Num b;
+    Num b{};
     b.v = 4;
     return sum_two(a, b);
 }

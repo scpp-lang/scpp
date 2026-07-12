@@ -3,7 +3,7 @@ import std;
 // is copy-constructible; a move-only callable must therefore be rejected.
 class MoveOnlyAdder {
 private:
-    std::unique_ptr<int> delta;
+    std::unique_ptr<int> delta{};
 public:
     MoveOnlyAdder(std::unique_ptr<int> p) {
         this->delta = std::move(p);

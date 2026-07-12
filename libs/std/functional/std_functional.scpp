@@ -66,9 +66,9 @@ class function;
 export template<typename R, typename... Args>
 class move_only_function<R(Args...)> {
 private:
-    void* object_;
-    R (*invoke_)(void*, Args...);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(void*, Args...){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -96,9 +96,9 @@ public:
 export template<typename R, typename... Args>
 class move_only_function<R(Args...) const> {
 private:
-    void* object_;
-    R (*invoke_)(const void*, Args...);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(const void*, Args...){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -126,9 +126,9 @@ public:
 export template<typename R, typename... Args>
 class move_only_function<R(Args...) &> {
 private:
-    void* object_;
-    R (*invoke_)(void*, Args...);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(void*, Args...){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -156,9 +156,9 @@ public:
 export template<typename R, typename... Args>
 class move_only_function<R(Args...) const &> {
 private:
-    void* object_;
-    R (*invoke_)(const void*, Args...);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(const void*, Args...){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -186,9 +186,9 @@ public:
 export template<typename R, typename... Args>
 class move_only_function<R(Args...) &&> {
 private:
-    void* object_;
-    R (*invoke_)(void*, Args...);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(void*, Args...){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -216,9 +216,9 @@ public:
 export template<typename R, typename... Args>
 class move_only_function<R(Args...) const &&> {
 private:
-    void* object_;
-    R (*invoke_)(const void*, Args...);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(const void*, Args...){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -246,10 +246,10 @@ public:
 export template<typename R, typename... Args>
 class function<R(Args...)> {
 private:
-    void* object_;
-    R (*invoke_)(void*, Args...);
-    void* (*copy_)(const void*);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(void*, Args...){};
+    void* (*copy_)(const void*){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -298,10 +298,10 @@ public:
 export template<typename R, typename... Args>
 class function<R(Args...) const> {
 private:
-    void* object_;
-    R (*invoke_)(const void*, Args...);
-    void* (*copy_)(const void*);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(const void*, Args...){};
+    void* (*copy_)(const void*){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -350,10 +350,10 @@ public:
 export template<typename R, typename... Args>
 class function<R(Args...) &> {
 private:
-    void* object_;
-    R (*invoke_)(void*, Args...);
-    void* (*copy_)(const void*);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(void*, Args...){};
+    void* (*copy_)(const void*){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -402,10 +402,10 @@ public:
 export template<typename R, typename... Args>
 class function<R(Args...) const &> {
 private:
-    void* object_;
-    R (*invoke_)(const void*, Args...);
-    void* (*copy_)(const void*);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(const void*, Args...){};
+    void* (*copy_)(const void*){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -454,10 +454,10 @@ public:
 export template<typename R, typename... Args>
 class function<R(Args...) &&> {
 private:
-    void* object_;
-    R (*invoke_)(void*, Args...);
-    void* (*copy_)(const void*);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(void*, Args...){};
+    void* (*copy_)(const void*){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>
@@ -506,10 +506,10 @@ public:
 export template<typename R, typename... Args>
 class function<R(Args...) const &&> {
 private:
-    void* object_;
-    R (*invoke_)(const void*, Args...);
-    void* (*copy_)(const void*);
-    void (*destroy_)(void*);
+    void* object_{};
+    R (*invoke_)(const void*, Args...){};
+    void* (*copy_)(const void*){};
+    void (*destroy_)(void*){};
 
 public:
     template<typename F>

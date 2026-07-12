@@ -9,7 +9,7 @@ struct Point {
 };
 
 int main() {
-    Point a;
+    Point a{};
     a.x = 1;
     a.y = 2;
     Point b = a;

@@ -3,7 +3,7 @@ import std;
 // destination owns the callable target and remains invocable.
 class Adder {
 private:
-    int delta;
+    int delta{};
 public:
     Adder(int n) {
         this->delta = n;

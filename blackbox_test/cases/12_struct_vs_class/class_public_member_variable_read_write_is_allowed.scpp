@@ -6,11 +6,11 @@
 // (whole-root conservative, ch05 §5.2).
 class Widget {
 public:
-    int value;
+    int value{};
 };
 
 int main() {
-    Widget w;
+    Widget w{};
     w.value = 42;
     return w.value;
 }

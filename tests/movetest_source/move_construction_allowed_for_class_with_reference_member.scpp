@@ -4,7 +4,7 @@
 // spec §6.4(3) -- construction is unaffected).
 class RefHolder {
 public:
-    RefHolder(int& r) { return; }
+    RefHolder(int& r) : r{r} { return; }
 private:
     int& r;
 };

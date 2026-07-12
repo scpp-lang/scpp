@@ -2,7 +2,7 @@
 // local result object may be copied into the caller's destination.
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int start) {
         this->value = start;

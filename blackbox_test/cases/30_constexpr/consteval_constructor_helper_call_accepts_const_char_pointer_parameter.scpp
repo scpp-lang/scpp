@@ -4,7 +4,7 @@ constexpr int size1(const char* s) {
 
 class Box {
 public:
-    int value;
+    int value{};
 
     consteval Box(const char* s) {
         this->value = size1(s);

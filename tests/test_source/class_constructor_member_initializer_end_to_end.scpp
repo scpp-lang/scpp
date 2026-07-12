@@ -1,0 +1,12 @@
+class Pair {
+    int x{};
+    int y{4};
+public:
+    Pair(int seed) : y{seed + 1}, x{seed} { return; }
+    int sum() { return this->x + this->y; }
+};
+
+int main() {
+    Pair pair{5};
+    return pair.sum() - 11;
+}

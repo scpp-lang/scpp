@@ -12,11 +12,11 @@ class Widget {
 public:
     Widget() { return; }
     ~Widget() { return; }
-    int val;
+    int val{};
 };
 int main() {
-    Widget x;
-    Widget y;
+    Widget x{};
+    Widget y{};
     y = x;
     return 0;
 }

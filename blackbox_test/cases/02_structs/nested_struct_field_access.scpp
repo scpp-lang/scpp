@@ -11,7 +11,7 @@ struct Outer {
 };
 
 int main() {
-    Outer o;
+    Outer o{};
     o.inner.value = 5;
     o.extra = 2;
     return o.inner.value + o.extra;

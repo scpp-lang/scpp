@@ -4,8 +4,8 @@ struct Point {
 };
 
 int f() {
-    Point a;
-    Point b;
+    Point a{};
+    Point b{};
     int& ra = a.x;
     int& rb = b.y;
     ra = 1;

@@ -1,6 +1,6 @@
 class Guard {
 public:
-    int id_;
+    int id_{};
 
     Guard(int id) {
         this->id_ = id;

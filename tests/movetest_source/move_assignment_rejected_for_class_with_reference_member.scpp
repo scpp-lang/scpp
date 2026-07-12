@@ -4,7 +4,7 @@
 // assignment.
 class RefHolder {
 public:
-    RefHolder(int& r) { return; }
+    RefHolder(int& r) : r{r} { return; }
 private:
     int& r;
 };

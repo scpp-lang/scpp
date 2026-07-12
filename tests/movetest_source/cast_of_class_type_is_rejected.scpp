@@ -4,10 +4,10 @@
 class Widget {
 public:
     Widget() { return; }
-    int val;
+    int val{};
 };
 int main() {
-    Widget w;
+    Widget w{};
     int x = (int)w;
     return x;
 }

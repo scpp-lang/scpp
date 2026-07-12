@@ -3,7 +3,7 @@
 // of a user-defined destructor.
 class NeedsDrop {
 public:
-    int value;
+    int value{};
 
     constexpr NeedsDrop(int x) {
         this->value = x;

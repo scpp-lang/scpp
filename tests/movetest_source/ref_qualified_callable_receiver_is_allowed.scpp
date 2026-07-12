@@ -5,6 +5,6 @@ public:
 };
 
 int main() {
-    Callable c;
+    Callable c{};
     return c() + std::move(c)() - 3;
 }

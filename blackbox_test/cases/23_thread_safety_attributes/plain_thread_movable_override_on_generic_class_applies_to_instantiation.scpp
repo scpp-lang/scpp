@@ -5,7 +5,7 @@
 template<typename T>
 class [[scpp::thread_movable]] RawBox {
 private:
-    int* p;
+    int* p{};
 public:
     RawBox() {
         [[scpp::unsafe]] {
@@ -21,7 +21,7 @@ void spawn(T&& value [[scpp::thread_movable]]) {
 }
 
 int main() {
-    RawBox<int> box;
+    RawBox<int> box{};
     spawn(std::move(box));
     return 0;
 }

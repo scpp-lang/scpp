@@ -3,7 +3,7 @@ import std;
 // aligned to hold whichever candidate type is largest.
 class Box {
 public:
-    std::storage_for<int, long> slot;
+    std::storage_for<int, long> slot{};
 
     int payload_size() const {
         return static_cast<int>(sizeof(this->slot));
@@ -17,7 +17,7 @@ struct Holder {
 };
 
 int main() {
-    Box box;
+    Box box{};
     if (box.payload_size() != 8) return 1;
     if (sizeof(std::storage_for<int, long>) != 8) return 2;
     if (sizeof(Holder) != 24) return 3;

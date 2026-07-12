@@ -1,0 +1,11 @@
+class Bad {
+    int x;
+    int y{};
+public:
+    Bad() {}
+};
+
+int main() {
+    Bad bad{};
+    return 0;
+}

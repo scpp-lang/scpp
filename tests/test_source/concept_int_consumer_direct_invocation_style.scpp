@@ -19,7 +19,7 @@ int apply_it(IntConsumer auto& f, int x) {
 }
 
 int main() {
-    Doubler d;
+    Doubler d{};
     print_int(apply_it(d, 21));
     return 0;
 }

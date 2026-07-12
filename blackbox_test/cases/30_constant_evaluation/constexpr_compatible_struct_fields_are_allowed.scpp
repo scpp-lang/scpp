@@ -6,7 +6,7 @@ struct Pair {
 };
 
 constexpr Pair make_pair() {
-    Pair p;
+    Pair p{};
     p.left = 20;
     p.right = 22;
     return p;

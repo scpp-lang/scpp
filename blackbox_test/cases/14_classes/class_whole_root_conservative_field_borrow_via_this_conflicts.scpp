@@ -6,8 +6,8 @@
 // ordinary struct-typed local.
 class Pair {
 private:
-    int a;
-    int b;
+    int a{};
+    int b{};
 public:
     Pair(int x, int y) {
         this->a = x;

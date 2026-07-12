@@ -16,6 +16,6 @@ struct Wrapper {
 };
 
 int main() {
-    Wrapper<int> w;
+    Wrapper<int> w{};
     return 0;
 }

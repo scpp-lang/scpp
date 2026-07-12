@@ -8,6 +8,6 @@ public:
 };
 
 int main() {
-    Holder<int(int) const &&> h;
+    Holder<int(int) const &&> h{};
     return h.arity() - 1;
 }

@@ -4,6 +4,6 @@
 // std::string/std::string_view (now that char exists, unblocked but not
 // started)").
 int main() {
-    std::string s;
+    std::string s{};
     return 0;
 }

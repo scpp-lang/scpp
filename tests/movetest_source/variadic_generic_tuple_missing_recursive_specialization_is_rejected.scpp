@@ -7,6 +7,6 @@ template<typename... Ts> class Tuple;
 template<> class Tuple<> {};
 
 int main() {
-    Tuple<int> t;
+    Tuple<int> t{};
     return 0;
 }

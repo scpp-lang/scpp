@@ -6,7 +6,7 @@ union IntOrChar {
 };
 
 int main() {
-    IntOrChar value;
+    IntOrChar value{};
     value.number = 65;
     return 0;
 }

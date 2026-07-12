@@ -9,13 +9,13 @@ public:
         this->val = 0;
         return;
     }
-    int val;
+    int val{};
 };
 
 int main() {
-    Widget a;
+    Widget a{};
     a.val = 1;
-    Widget b;
+    Widget b{};
     b = a;
     b.val = 100;
     return a.val + b.val;

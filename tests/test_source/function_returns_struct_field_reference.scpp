@@ -8,7 +8,7 @@ int& get_x(Point& p) {
 }
 
 int main() {
-    Point p;
+    Point p{};
     p.x = 5;
     p.y = 6;
     print_int(get_x(p));

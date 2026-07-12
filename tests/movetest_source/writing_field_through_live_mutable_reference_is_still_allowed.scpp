@@ -4,7 +4,7 @@ int mutate(Point& p) {
     return 0;
 }
 int f() {
-    Point p;
+    Point p{};
     p.x = 1;
     mutate(p);
     return p.x;

@@ -12,10 +12,10 @@ public:
     Bar(Foo&& f) { this.v = f.get(); return; }
     int get() const { return this.v; }
 private:
-    int v;
+    int v{};
 };
 int main() {
-    Foo f;
+    Foo f{};
     Bar b{std::move(f)};
     return b.get();
 }

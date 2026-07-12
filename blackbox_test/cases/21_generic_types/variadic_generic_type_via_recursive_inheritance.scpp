@@ -14,7 +14,7 @@ public:
 };
 
 int main() {
-    Tuple<int, bool> t;
+    Tuple<int, bool> t{};
     t.head = 42;
     return t.head;
 }

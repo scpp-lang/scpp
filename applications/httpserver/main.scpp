@@ -1,7 +1,7 @@
 import httpserver;
 
 int main() {
-    httpserver::ServerBuilder builder;
+    httpserver::ServerBuilder builder{};
     builder.mount("/", ".");
     builder.set_port(8080);
     builder.set_max_connections(32);

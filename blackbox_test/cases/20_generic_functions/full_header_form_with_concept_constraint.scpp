@@ -7,7 +7,7 @@ concept HasGet = requires(T t) { t.get(); };
 
 class Num {
 public:
-    int v;
+    int v{};
     int get() const {
         return this->v;
     }
@@ -19,7 +19,7 @@ int use_it(const T& x) {
 }
 
 int main() {
-    Num n;
+    Num n{};
     n.v = 42;
     return use_it(n);
 }

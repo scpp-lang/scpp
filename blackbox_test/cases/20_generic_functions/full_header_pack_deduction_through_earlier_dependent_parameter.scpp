@@ -4,7 +4,7 @@ class Holder;
 template<typename R, typename... Params>
 class Holder<R(Params...)> {
 public:
-    R (*fn_)(Params...);
+    R (*fn_)(Params...){};
 };
 
 int add(int a, int b) { return a + b; }
@@ -15,7 +15,7 @@ int invoke(Holder<int(Args...)>& h, Args&&... args) {
 }
 
 int main() {
-    Holder<int(int, int)> h;
+    Holder<int(int, int)> h{};
     h.fn_ = add;
     return invoke(h, 19, 23);
 }

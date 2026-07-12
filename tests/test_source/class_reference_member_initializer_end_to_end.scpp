@@ -1,0 +1,13 @@
+class RefBox {
+    int& ref;
+public:
+    RefBox(int& input) : ref{input} { return; }
+    void set(int value) { this->ref = value; return; }
+};
+
+int main() {
+    int x = 1;
+    RefBox box{x};
+    box.set(9);
+    return x - 9;
+}

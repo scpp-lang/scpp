@@ -11,7 +11,7 @@ struct Pair {
 };
 
 int main() {
-    Pair<int> p;
+    Pair<int> p{};
     p.a = 3;
     p.b = 4;
     return p.a + p.b;

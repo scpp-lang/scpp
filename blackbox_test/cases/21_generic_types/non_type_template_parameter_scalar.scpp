@@ -19,6 +19,6 @@ public:
 };
 
 int main() {
-    FixedValue<42> v;
+    FixedValue<42> v{};
     return v.get_n();
 }

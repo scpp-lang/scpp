@@ -1,7 +1,7 @@
 import std;
 int f(bool cond) {
-    std::unique_ptr<int> a;
-    std::unique_ptr<int> sink;
+    std::unique_ptr<int> a{};
+    std::unique_ptr<int> sink{};
     if (cond) {
         sink = std::move(a);
     }

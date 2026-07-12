@@ -13,7 +13,7 @@ public:
     ~Resource() { print_int(999); return; }
     int get() { return *this.p; }
 private:
-    std::unique_ptr<int> p;
+    std::unique_ptr<int> p{};
 };
 int main() {
     Resource a{7};

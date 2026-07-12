@@ -1,6 +1,6 @@
 struct Point { int x; int y; };
 int main() {
-    Point p;
+    Point p{};
     int* px = &p.x;
     return 0;
 }

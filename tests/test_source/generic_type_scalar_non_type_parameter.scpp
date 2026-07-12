@@ -7,7 +7,7 @@ public:
 };
 
 int main() {
-    FixedValue<42> v;
+    FixedValue<42> v{};
     print_int(v.get_n());
     return 0;
 }

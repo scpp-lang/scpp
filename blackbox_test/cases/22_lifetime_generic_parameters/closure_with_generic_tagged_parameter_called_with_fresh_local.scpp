@@ -9,7 +9,7 @@
 // without itself requiring the generic tag).
 class Token {
 public:
-    int value;
+    int value{};
 };
 
 template<typename T>
@@ -18,7 +18,7 @@ concept AcceptsToken = requires(T a, Token& tok) {
 };
 
 void with_fresh_token(AcceptsToken auto&& f) {
-    Token tok;
+    Token tok{};
     tok.value = 42;
     f(tok);
     return;

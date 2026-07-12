@@ -3,10 +3,10 @@
 class Widget {
 public:
     Widget() { return; }
-    int val;
+    int val{};
 };
 int main() {
-    Widget x;
+    Widget x{};
     x.val = 5;
     Widget y{std::move(x)};
     return y.val;

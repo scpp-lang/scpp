@@ -4,7 +4,7 @@ import std;
 // invocable through the wrapper.
 class Adder {
 private:
-    int delta;
+    int delta{};
 public:
     Adder(int n) {
         this->delta = n;

@@ -2,7 +2,7 @@ import std;
 // docs/spec/en/01-unsafe.md §5.1: placement-new is a raw-memory operation and
 // must be rejected outside [[scpp::unsafe]].
 int main() {
-    std::storage_for<int> slot;
+    std::storage_for<int> slot{};
     int* p = new ((int*)&slot) int(7);
     return 0;
 }

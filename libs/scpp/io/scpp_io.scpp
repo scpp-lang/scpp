@@ -21,7 +21,7 @@ export enum class error {
 
 export std::expected<std::string, scpp::io::error> getline() {
     int status = 0;
-    void* handle;
+    void* handle{};
     [[scpp::unsafe]] {
         handle = ::scpp_io_getline(&status);
     }

@@ -12,6 +12,6 @@ int use(const Box<Args...>& fmt, Args&&... args) {
 }
 
 int main() {
-    Box<int> ok;
+    Box<int> ok{};
     return use(ok, 1);
 }

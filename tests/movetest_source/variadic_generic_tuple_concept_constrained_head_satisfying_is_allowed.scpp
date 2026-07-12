@@ -16,7 +16,7 @@ public:
     Circle(int r) { this.radius = r; return; }
     int magnitude() const { return this.radius; }
 private:
-    int radius;
+    int radius{};
 };
 
 template<typename... Ts> class Tuple;
@@ -29,6 +29,6 @@ class Tuple<Head, Tail...> : private Tuple<Tail...> {
 };
 
 int main() {
-    Tuple<Circle> t;
+    Tuple<Circle> t{};
     return 0;
 }

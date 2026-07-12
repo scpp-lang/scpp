@@ -7,7 +7,7 @@ public:
     int get() const {
         return (*this).val;
     }
-    int val;
+    int val{};
 };
 
 int main() {

@@ -7,7 +7,7 @@
 // both work.
 class Widget {
 private:
-    int value;
+    int value{};
 public:
     int get_constant() {
         return 42;
@@ -15,6 +15,6 @@ public:
 };
 
 int main() {
-    Widget w;
+    Widget w{};
     return w.get_constant();
 }

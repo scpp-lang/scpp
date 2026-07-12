@@ -1,0 +1,13 @@
+class Good {
+    int x{};
+    int y = 3;
+public:
+    Good() {}
+    Good(int value) : x{value}, y{value + 1} {}
+};
+
+int main() {
+    Good a{};
+    Good b{4};
+    return 0;
+}

@@ -37,7 +37,7 @@ private:
     // `std::string`, only this untyped handle (ch04 §4.2: a member
     // variable is never public, so this representation detail can never
     // leak to callers even accidentally).
-    void* handle;
+    void* handle{};
 
 public:
     string(const char* s) {

@@ -12,7 +12,7 @@ int add(int a, int b) {
 
 int main() {
     int (* [[scpp::unsafe]] up)(int, int) = add;
-    int result;
+    int result{};
     [[scpp::unsafe]] {
         result = up(2, 3);
     }
