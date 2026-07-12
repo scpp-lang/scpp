@@ -10,7 +10,7 @@
 - Common Programming Concepts
   - [Variables and Explicit Initialization](ch03-01-variables-and-explicit-initialization.md)
   - [Scalar Data Types](ch03-02-scalar-data-types.md)
-  - Functions
+  - [Functions](ch03-03-functions.md)
   - Comments
   - Control Flow
 

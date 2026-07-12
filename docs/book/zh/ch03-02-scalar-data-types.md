@@ -112,4 +112,4 @@ scpp 会把这些标量类型明确地区分开来。`bool`、`char`、`int`、`
 
 ---
 
-[← 上一章：变量与显式初始化](ch03-01-variables-and-explicit-initialization.md) · [目录](README.md)
+[← 上一章：变量与显式初始化](ch03-01-variables-and-explicit-initialization.md) · [目录](README.md) · [下一章：函数 →](ch03-03-functions.md)
