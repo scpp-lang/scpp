@@ -32,7 +32,7 @@ std::errc decode_from_chars_errc(int ec_value) {
     return std::errc::io_error;
 }
 
-from_chars_result from_chars_impl(const char* first, const char* last, int& value, int base) {
+export from_chars_result from_chars(const char* first, const char* last, int& value, int base) {
     int parsed = 0;
     int ec_value = 0;
     const char* ptr = first;
@@ -46,12 +46,8 @@ from_chars_result from_chars_impl(const char* first, const char* last, int& valu
     return result;
 }
 
-export from_chars_result from_chars(const char* first, const char* last, int& value, int base) {
-    return from_chars_impl(first, last, value, base);
-}
-
 export from_chars_result from_chars(const char* first, const char* last, int& value) {
-    return from_chars_impl(first, last, value, 10);
+    return from_chars(first, last, value, 10);
 }
 
 } // namespace std
