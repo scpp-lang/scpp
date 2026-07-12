@@ -394,23 +394,34 @@ void test_thread_safety_attribute_on_parameter_parses() {
            "thread_safety_attribute_on_parameter_parses: require_thread_shareable should be false");
 }
 
-// spec §6.4(1): a program shall not declare a move constructor for a
-// class type -- exactly one parameter, of type rvalue reference to the
-// class's own type. The compiler always provides one instead (spec
-// §6.4(2)).
-void test_user_declared_move_constructor_is_rejected() {
-    bool threw = false;
-    try {
-        scpp::parse("class Foo {\n"
-                    "public:\n"
-                    "    Foo() { return; }\n"
-                    "    Foo(Foo&& other) { return; }\n"
-                    "};\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
-        threw = true;
+void test_user_declared_move_constructor_parses_and_coexists_with_copy_constructor() {
+    scpp::Program program = scpp::parse(
+        "class Foo {\n"
+        "public:\n"
+        "    Foo() { return; }\n"
+        "    Foo(const Foo& other) { return; }\n"
+        "    Foo(Foo&& other) { return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* copy_ctor = nullptr;
+    const scpp::Function* move_ctor = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name != "Foo_new" || fn.params.size() != 2) continue;
+        if (fn.params[1].type.kind != scpp::TypeKind::Reference || fn.params[1].type.pointee == nullptr ||
+            fn.params[1].type.pointee->kind != scpp::TypeKind::Named ||
+            fn.params[1].type.pointee->name != "Foo") {
+            continue;
+        }
+        if (fn.params[1].type.is_rvalue_ref) {
+            move_ctor = &fn;
+        } else if (!fn.params[1].type.is_mutable_ref) {
+            copy_ctor = &fn;
+        }
     }
-    expect(threw, "user_declared_move_constructor_is_rejected: expected a ParseError");
+    expect(copy_ctor != nullptr,
+           "user_declared_move_constructor_parses_and_coexists_with_copy_constructor: expected copy ctor");
+    expect(move_ctor != nullptr,
+           "user_declared_move_constructor_parses_and_coexists_with_copy_constructor: expected move ctor");
 }
 
 // An ordinary constructor taking a *different* type's rvalue reference
@@ -459,15 +470,15 @@ void test_operator_assign_parses() {
            "operator_assign_parses: return type should be a Reference ('Widget&')");
 }
 
-// spec §6.4(1)/ch08 Q14: same unconditional rejection as
-// test_user_declared_move_constructor_is_rejected, for
+// User-declared move assignment remains unsupported, unlike move
+// constructors.
+// Same rejection as the historical constructor case, but for
 // `operator=(ClassName&&)` instead of the constructor -- a real,
 // discovered-and-fixed gap: when `operator=` parsing was first added
-// (test_operator_assign_parses above), the move-constructor shape check
+// (test_operator_assign_parses above), the move-assignment shape check
 // had no counterpart here at all, so a user-declared move assignment
 // operator silently parsed as an ordinary (if unusual) overload instead
-// of being rejected the same way the equivalent move constructor already
-// correctly is.
+// of being rejected.
 void test_user_declared_move_assignment_operator_is_rejected() {
     bool threw = false;
     try {
@@ -3336,7 +3347,7 @@ int main() {
     test_thread_safety_attribute_on_struct_parses();
     test_thread_safety_attributes_on_class_parse();
     test_thread_safety_attribute_on_parameter_parses();
-    test_user_declared_move_constructor_is_rejected();
+    test_user_declared_move_constructor_parses_and_coexists_with_copy_constructor();
     test_constructor_taking_other_type_rvalue_reference_parses();
     test_operator_assign_parses();
     test_user_declared_move_assignment_operator_is_rejected();

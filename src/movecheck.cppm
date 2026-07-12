@@ -444,6 +444,23 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return false;
 }
 
+[[nodiscard]] bool has_user_declared_move_ctor(const std::string& class_name, const Program& program) {
+    for (const Function& fn : program.functions) {
+        if (!fn.name.ends_with("_new") || fn.params.size() != 2) continue;
+        const Type& this_param = fn.params[0].type;
+        if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+            this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+            continue;
+        }
+        const Type& p = fn.params[1].type;
+        if (p.kind == TypeKind::Reference && p.is_rvalue_ref && p.pointee &&
+            p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // spec §6.5: whether `class_name` has declared its own copy assignment
 // operator -- a function named "class_name_operator_assign" (see
 // parse_class_body_into's operator= parsing) whose sole non-`this`
@@ -1084,10 +1101,10 @@ struct NodiscardInfo {
 
     // Tie-break: prefer whichever match has the most mutable-reference
     // parameters among positions where the argument is itself a mutable
-    // place (including `this`, checked the same way as above) -- the
-    // higher-scoring candidate is the more "specific" one a mutable
-    // argument licenses, exactly like real C++'s own T&-over-const-T&
-    // preference.
+    // place (including `this`, checked the same way as above), and
+    // prefer an rvalue-reference parameter when the argument itself is a
+    // genuine rvalue. This is enough to distinguish `T(T&&)` from
+    // `T(const T&)` without a full conversion-ranking algorithm.
     auto mutable_ref_score = [&](const FunctionSignature& candidate) {
         int score = 0;
         if (callee.param_offset == 1 && call_expr.lhs && candidate.param_types[0].is_mutable_ref &&
@@ -1105,6 +1122,10 @@ struct NodiscardInfo {
         }
         for (size_t i = 0; i < call_expr.args.size(); i++) {
             const Type& param_type = candidate.param_types[i + callee.param_offset];
+            if (is_reference(param_type) && param_type.is_rvalue_ref && param_type.pointee != nullptr &&
+                produces_rvalue_of_type(*call_expr.args[i], *param_type.pointee, body, signatures)) {
+                score += 2;
+            }
             if (is_reference(param_type) && param_type.is_mutable_ref &&
                 !is_read_only_reachable(*call_expr.args[i], body, signatures)) {
                 score++;
@@ -2855,12 +2876,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // Previously, constructor arguments were entirely invisible to the
 // dataflow checker (a has_ctor_args VarDecl lowered to a bare,
 // argument-blind Declare, see mir.cppm) -- e.g. `Holder h(std::move(p));`
-// never marked `p` moved-out at all. Multiple candidates matching by
-// argument count alone (ambiguous, or none at all) leave `sig` null,
-// exactly like resolve_overload's own "let a more specific, later check
-// report it" pattern -- codegen's own resolve_overload_by_type
-// independently re-derives the same answer and is the one that actually
-// rejects an unresolvable call.
+// never marked `p` moved-out at all. Overloaded constructors reuse the
+// same mutability/rvalue tie-breaks as ordinary overload resolution so a
+// copy-ctor / move-ctor pair resolves consistently here and in codegen.
 void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors) {
@@ -2882,7 +2900,39 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 }
                 if (all_match) matches.push_back(&candidate);
             }
-            if (matches.size() == 1) sig = matches[0];
+            if (matches.size() == 1) {
+                sig = matches[0];
+            } else if (matches.size() > 1) {
+                auto score = [&](const FunctionSignature& candidate) {
+                    int value = 0;
+                    for (size_t i = 0; i < ctor_args.size(); i++) {
+                        const Type& param_type = candidate.param_types[i + 1];
+                        if (is_reference(param_type) && param_type.is_rvalue_ref && param_type.pointee != nullptr &&
+                            produces_rvalue_of_type(*ctor_args[i], *param_type.pointee, body, signatures)) {
+                            value += 2;
+                        }
+                        if (is_reference(param_type) && param_type.is_mutable_ref &&
+                            !is_read_only_reachable(*ctor_args[i], body, signatures)) {
+                            value++;
+                        }
+                    }
+                    return value;
+                };
+                const FunctionSignature* best = matches[0];
+                int best_score = score(*best);
+                bool unique_best = true;
+                for (size_t i = 1; i < matches.size(); i++) {
+                    int candidate_score = score(*matches[i]);
+                    if (candidate_score > best_score) {
+                        best = matches[i];
+                        best_score = candidate_score;
+                        unique_best = true;
+                    } else if (candidate_score == best_score) {
+                        unique_best = false;
+                    }
+                }
+                sig = unique_best ? best : matches[0];
+            }
         }
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
@@ -3044,13 +3094,7 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
 // a bare `std::move(x)` is allowed to appear: a var-decl initializer, an
 // assignment RHS, a return value, a call argument, a constructor-call
 // argument, or a by-value class lambda capture initializer (ch04 §4.2 --
-// see check_constructor_arguments and apply_lambda_captures). ch04
-// §4.2/ch05 §5.15/spec §6.4: `std::move(x)` is legitimate here for any
-// class-typed variable -- move construction/assignment for `class` types
-// is always the compiler-provided memberwise operation (never
-// user-written, spec §6.4(1)), so there is no additional per-class
-// validation to do here beyond the ordinary move-state bookkeeping every
-// movable type already gets.
+// see check_constructor_arguments and apply_lambda_captures).
 //
 // This function is run twice per program point: once during the
 // worklist's fixed-point iteration (report_errors=false, just to compute
@@ -3120,32 +3164,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             const std::string& name = expr.lhs->name;
             auto type_it = body.local_types.find(name);
-            // ch04 §4.2/spec §6.4: any class type (move
-            // construction/assignment, always the compiler-provided
-            // memberwise operation -- never a struct/scalar, which isn't
-            // move-restricted at all (always freely copyable). Also
-            // recognizes an rvalue-reference-*to*-class
-            // local/parameter (`Inner&& i`, ch03/ch05 §5.11): `i` itself
-            // is a name, like any other, that can appear as `std::move`'s
-            // own operand (mirrors real C++: a *named* rvalue reference
-            // is itself an lvalue, so moving out of what it refers to
-            // still needs an explicit std::move) -- moving out of `i`
-            // here moves out of *its own current referent* (whatever
-            // temporary/argument that rvalue-reference parameter is
-            // itself bound to), not `i`'s own (nonexistent, references
-            // are never owning) storage.
-            auto is_named_class = [&](const Type& t) {
-                return t.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(t.name);
-            };
-            bool is_movable_class =
-                type_it != body.local_types.end() &&
-                (is_named_class(type_it->second) ||
-                 (type_it->second.kind == TypeKind::Reference && type_it->second.pointee &&
-                  is_named_class(*type_it->second.pointee)));
-            if (type_it == body.local_types.end() || !is_movable_class) {
+            if (type_it == body.local_types.end()) {
                 if (report_errors) {
-                    throw DataflowError("std::move is only supported for class-typed variables in this version; '" +
-                                         name + "' is not one",
+                    throw DataflowError("std::move currently only supports a named local or parameter; '" + name +
+                                         "' is not one",
                         state.current_loc);
                 }
                 return;
@@ -3166,7 +3188,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             state.locals[name] = LocalState::MovedOut;
             if (report_errors && !is_move_target_context) {
                 throw DataflowError("std::move(" + name + ") must be used to initialize, assign into, return, "
-                                                            "pass, or capture a same-typed class value",
+                                                            "pass, or capture a value",
                     state.current_loc);
             }
             return;
@@ -3256,7 +3278,8 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             if (expr.type.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(expr.type.name)) {
                 bool move_shape = expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move &&
-                                  produces_rvalue_of_type(*expr.args[0], expr.type, body, signatures);
+                                  produces_rvalue_of_type(*expr.args[0], expr.type, body, signatures) &&
+                                  (body.program == nullptr || !has_user_declared_move_ctor(expr.type.name, *body.program));
                 if (move_shape) {
                     apply_expr(*expr.args[0], /*is_move_target_context=*/true, state, body, signatures, report_errors);
                 } else if (expr.args.size() == 1 &&
@@ -3587,7 +3610,7 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     // `stmt.local` initialized.
     if (stmt.type.kind == TypeKind::Reference && !stmt.type.is_mutable_ref &&
         produces_rvalue_of_type(*stmt.expr, *stmt.type.pointee, body, signatures)) {
-        apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+        apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures, report_errors);
         state.locals[stmt.local] = LocalState::Initialized;
         return;
     }
@@ -3665,20 +3688,21 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
                 state.current_loc);
         }
     }
-    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+    bool move_target_context =
+        ref_type.pointee != nullptr && produces_rvalue_of_type(*stmt.expr, *ref_type.pointee, body, signatures);
+    apply_expr(*stmt.expr, /*is_move_target_context=*/move_target_context, state, body, signatures,
+               report_errors);
 }
 
-// ch04 §4.2/spec §6.4: true exactly when `ctor_args` is the single-
-// argument shape `std::move(x)` where `x`'s own declared type is the
-// exact same class `constructed_type` names -- the shape that dispatches
-// to the compiler-synthesized move constructor (spec §6.4(2)) rather
-// than any of the class's own user-declared constructors (which can
-// never themselves be a move constructor -- spec §6.4(1) forbids
-// declaring one, enforced at parse time). A mismatched-type std::move
-// argument (or any other shape) falls through to ordinary constructor
-// resolution unchanged, exactly as it always has -- e.g. a real,
-// user-declared `Bar(Foo&& f)` constructor taking a *different* type's
-// rvalue reference is untouched by this and still resolved by
+// True exactly when `ctor_args` is the single-argument shape
+// `std::move(x)` where `x`'s own declared type is the exact same class
+// `constructed_type` names -- the shape eligible for the compiler-
+// provided memberwise move-construction shortcut when no user-declared
+// move constructor exists. A mismatched-type std::move argument (or any
+// other shape) falls through to ordinary constructor resolution
+// unchanged, exactly as it always has -- e.g. a real, user-declared
+// `Bar(Foo&& f)` constructor taking a *different* type's rvalue
+// reference is untouched by this and still resolved by
 // check_constructor_arguments below.
 [[nodiscard]] bool is_move_construction_shape(const std::vector<ExprPtr>& ctor_args, const Type& constructed_type,
                                                const Body& body) {
@@ -3728,11 +3752,13 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // applied -- see MirStatement::ctor_args' own comment for
             // why this was previously entirely invisible here. A
             // std::move(x)-of-the-same-class single argument dispatches
-            // to the compiler-synthesized move constructor directly
-            // (spec §6.4(2)); anything else goes through ordinary
-            // constructor-overload argument checking.
+            // to the compiler-synthesized move constructor directly only
+            // when no user-declared move constructor exists; anything
+            // else goes through ordinary constructor-overload argument
+            // checking.
             if (stmt.ctor_args != nullptr) {
-                if (is_move_construction_shape(*stmt.ctor_args, stmt.type, body)) {
+                if (body.program != nullptr && !has_user_declared_move_ctor(stmt.type.name, *body.program) &&
+                    is_move_construction_shape(*stmt.ctor_args, stmt.type, body)) {
                     apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/true, state, body, signatures,
                                report_errors);
                 } else if (stmt.ctor_args->size() == 1 &&
@@ -3905,7 +3931,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                                 state.current_loc);
                         }
                     }
-                    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                    bool move_target_context =
+                        type_it != body.local_types.end() && produces_rvalue_of_type(*stmt.expr, type_it->second, body, signatures);
+                    apply_expr(*stmt.expr, /*is_move_target_context=*/move_target_context, state, body, signatures,
+                               report_errors);
                     state.locals[stmt.local] = LocalState::Initialized;
                     return;
                 }
@@ -3979,7 +4008,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 return;
             }
 
-            apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            bool move_target_context =
+                type_it != body.local_types.end() && produces_rvalue_of_type(*stmt.expr, type_it->second, body, signatures);
+            apply_expr(*stmt.expr, /*is_move_target_context=*/move_target_context, state, body, signatures,
+                       report_errors);
             if (type_it != body.local_types.end()) {
                 check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
                                                   stmt.local, report_errors);
@@ -4115,8 +4147,10 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             bool return_is_class_value = is_named_class_type(fn.return_type, body);
             bool copyable_lvalue_source =
                 return_is_class_value && is_copyable_class_lvalue_boundary_source(*term.return_value, fn.return_type, body, signatures);
-            apply_expr(*term.return_value, return_is_class_value && !copyable_lvalue_source, state, body, signatures,
-                       /*report_errors=*/true);
+            bool move_target_context =
+                (return_is_class_value && !copyable_lvalue_source) ||
+                produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures);
+            apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true);
             if (return_is_class_value && !copyable_lvalue_source &&
                 !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures)) {
                 throw DataflowError("returning class '" + fn.return_type.name +

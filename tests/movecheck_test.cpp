@@ -162,10 +162,68 @@ void run_test_case_files() {
     }
 }
 
+void run_direct_move_semantics_tests() {
+    {
+        std::string case_name = "primitive_std_move_is_accepted";
+        cases_run++;
+        expect(!throws_move_error("import std;\n"
+                                  "int passthrough(int value) { return value; }\n"
+                                  "int main() {\n"
+                                  "    int x = 7;\n"
+                                  "    return passthrough(std::move(x)) - 7;\n"
+                                  "}\n"),
+               case_name + ": expected move checker to accept moving an int");
+    }
+
+    {
+        std::string case_name = "enum_std_move_is_accepted";
+        cases_run++;
+        expect(!throws_move_error("import std;\n"
+                                  "enum class color { red, blue };\n"
+                                  "int main() {\n"
+                                  "    color c = color::red;\n"
+                                  "    color d = std::move(c);\n"
+                                  "    return 0;\n"
+                                  "}\n"),
+               case_name + ": expected move checker to accept moving an enum value");
+    }
+
+    {
+        std::string case_name = "primitive_use_after_move_is_rejected";
+        cases_run++;
+        expect(throws_move_error("import std;\n"
+                                 "int main() {\n"
+                                 "    int x = 7;\n"
+                                 "    int y = std::move(x);\n"
+                                 "    return x + y;\n"
+                                 "}\n"),
+               case_name + ": expected moved-from int use to be rejected");
+    }
+
+    {
+        std::string case_name = "class_use_after_move_ctor_is_rejected";
+        cases_run++;
+        expect(throws_move_error("import std;\n"
+                                 "class Box {\n"
+                                 "public:\n"
+                                 "    int value;\n"
+                                 "    Box(int n) { this->value = n; return; }\n"
+                                 "    Box(Box&& other) { this->value = other.value; return; }\n"
+                                 "};\n"
+                                 "int main() {\n"
+                                 "    Box a(3);\n"
+                                 "    Box b(std::move(a));\n"
+                                 "    return a.value + b.value;\n"
+                                 "}\n"),
+               case_name + ": expected moved-from class source use to be rejected");
+    }
+}
+
 } // namespace
 
 int main() {
     run_test_case_files();
+    run_direct_move_semantics_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

@@ -4127,6 +4127,44 @@ int main() {
     }
 }
 
+void run_move_constructor_tests() {
+    {
+        std::string case_name = "move_constructor_overload_resolution_prefers_copy_or_move_by_value_category";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+class Mark {
+public:
+    int tag;
+    Mark(int value) {
+        this->tag = value;
+        return;
+    }
+    Mark(const Mark& other) {
+        this->tag = other.tag + 100;
+        return;
+    }
+    Mark(Mark&& other) {
+        this->tag = other.tag + 200;
+        return;
+    }
+};
+int main() {
+    Mark original(1);
+    Mark copied(original);
+    Mark moved(std::move(original));
+    Mark temporary(Mark(2));
+    if (copied.tag != 101) return 1;
+    if (moved.tag != 201) return 2;
+    if (temporary.tag != 202) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -4144,6 +4182,7 @@ int main() {
     run_static_member_function_tests();
     run_random_tests();
     run_expected_tests();
+    run_move_constructor_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_sizeof_tests();

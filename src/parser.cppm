@@ -3926,27 +3926,6 @@ private:
                 reject_generic_params(fn.params, "a constructor");
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
-                // spec §6.4(1): a program shall not declare a move
-                // constructor for a class type -- exactly one parameter,
-                // of type rvalue reference to the class's own type (real
-                // C++'s own [class.copy.ctor] classification). Every
-                // class instead gets a compiler-synthesized one (spec
-                // §6.4(2)), dispatched directly at each `ClassName y
-                // (std::move(x));` call site (see movecheck's
-                // is_move_construction_shape) -- never through this
-                // user-declared-constructor machinery at all. See the
-                // `operator=` parsing block further below for spec
-                // §6.4(1)'s other half (a move *assignment* operator,
-                // `ClassName& operator=(ClassName&& other)`), rejected by
-                // the identical shape check.
-                if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
-                    fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
-                    fn.params[0].type.pointee->kind == TypeKind::Named &&
-                    fn.params[0].type.pointee->name == class_name) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a move constructor cannot be user-declared for class '" + class_name +
-                                          "' -- the compiler always provides one (spec §6.4(1)/(2), ch04 §4.2)");
-                }
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_member_body_or_declaration();

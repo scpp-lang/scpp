@@ -1159,8 +1159,10 @@ private:
         // Tie-break ("T& beats const T& for a mutable lvalue", ch05
         // §5.10): prefer whichever match has the most mutable-reference
         // parameters (including `this`) among positions where the
-        // argument/receiver is itself a mutable place. Falls back to the
-        // first match if that still doesn't produce a unique winner.
+        // argument/receiver is itself a mutable place, and prefer an
+        // rvalue-reference parameter when the argument itself is a
+        // genuine rvalue. Falls back to the first match if that still
+        // doesn't produce a unique winner.
         auto is_read_only_arg = [&](const Expr& arg) {
             std::optional<Type> t = infer_type(arg);
             return t.has_value() && t->kind == TypeKind::Reference && !t->is_mutable_ref;
@@ -1177,6 +1179,10 @@ private:
             }
             for (size_t i = 0; i < args.size(); i++) {
                 const Type& param_type = fn->params[i + param_offset].type;
+                if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref && param_type.pointee != nullptr &&
+                    produces_rvalue_of_type(*args[i], *param_type.pointee)) {
+                    score += 2;
+                }
                 if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref &&
                     !is_read_only_arg(*args[i])) {
                     score++;
@@ -2374,24 +2380,23 @@ private:
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
-                    // spec §6.4(2): `ClassName y(std::move(x));` -- the
-                    // compiler-synthesized move constructor -- dispatches
-                    // directly to the existing Move-expression codegen
-                    // (loads the source's whole aggregate value, nulls
-                    // the source slot -- see codegen_expr's Move case)
-                    // rather than resolving against any user-declared
-                    // constructor (spec §6.4(1) forbids declaring a move
-                    // constructor at all, enforced at parse time). This is
-                    // byte-for-byte equivalent to a recursive memberwise
-                    // move: every field kind bottoms out in either a
-                    // plain bitwise value (scalar/struct/pointer/
-                    // reference, unaffected either way) or a
-                    // std::unique_ptr, whose own move semantics --
-                    // capture the pointer, null the source -- the
-                    // whole-aggregate load+null already performs
-                    // correctly and transitively, however deeply nested.
+                    // `ClassName y(std::move(x));` with no user-declared
+                    // move constructor: dispatch directly to the
+                    // compiler-provided memberwise move (the existing
+                    // Move-expression codegen loads the source's whole
+                    // aggregate value, then nulls/zeroes the source slot
+                    // -- see codegen_expr's Move case). This is byte-for-
+                    // byte equivalent to a recursive memberwise move:
+                    // every field kind bottoms out in either a plain
+                    // bitwise value (scalar/struct/pointer/reference,
+                    // unaffected either way) or a std::unique_ptr, whose
+                    // own move semantics -- capture the pointer, null the
+                    // source -- the whole-aggregate load+null already
+                    // performs correctly and transitively, however deeply
+                    // nested.
                     if (stmt.ctor_args.size() == 1 && stmt.ctor_args[0]->kind == ExprKind::Move &&
-                        stmt.ctor_args[0]->lhs->kind == ExprKind::Identifier) {
+                        stmt.ctor_args[0]->lhs->kind == ExprKind::Identifier &&
+                        find_user_declared_move_ctor_ast(stmt.type.name) == nullptr) {
                         auto src_it = locals_.find(stmt.ctor_args[0]->lhs->name);
                         if (src_it != locals_.end() && types_equal(src_it->second.type, stmt.type)) {
                             llvm::Value* moved = codegen_expr(*stmt.ctor_args[0]);
@@ -3474,7 +3479,8 @@ private:
         if (expr.type.kind == TypeKind::Named && structs_.contains(expr.type.name)) {
             zero_initialize_storage(heap_ptr, expr.type);
             if (!expr.args.empty() || expr.has_paren_init) {
-                if (expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move) {
+                if (expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move &&
+                    find_user_declared_move_ctor_ast(expr.type.name) == nullptr) {
                     std::optional<Type> moved_type = infer_type(*expr.args[0]);
                     if (moved_type.has_value() && types_equal(*moved_type, expr.type)) {
                         llvm::Value* moved = codegen_expr(*expr.args[0]);
@@ -3596,6 +3602,23 @@ private:
             }
             const Type& p = fn.params[1].type;
             if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
+                p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+                return &fn;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const Function* find_user_declared_move_ctor_ast(const std::string& class_name) {
+        for (const Function& fn : program_->functions) {
+            if (!fn.name.ends_with("_new") || fn.params.size() != 2) continue;
+            const Type& this_param = fn.params[0].type;
+            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+                continue;
+            }
+            const Type& p = fn.params[1].type;
+            if (p.kind == TypeKind::Reference && p.is_rvalue_ref && p.pointee &&
                 p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
                 return &fn;
             }
