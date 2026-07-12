@@ -200,7 +200,7 @@ int (*                  sp2)(int*, int) = get_unchecked;  // 不合法：(4)
                                           // 不允许这个方向的转换
 
 int r1 = up(base, 0);                       // 不合法：(5)，safe context
-int r2;
+int r2{};
 [[scpp::unsafe]] { r2 = up(base, 0); }      // OK：unsafe context
 int r3 = sp(1, 2);                          // OK：sp 不是 unsafe-qualified
 ```

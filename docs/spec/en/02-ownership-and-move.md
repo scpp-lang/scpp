@@ -1,16 +1,70 @@
 # 6 Ownership, Initialization, and Move
 
-## 6.1 Zero-initialization [dcl.init]
+## 6.1 Required initialization and zero-initialization [dcl.init]
 
-(1) An object of automatic, static, thread, or member storage duration
-that has no *initializer* ([dcl.init]) is zero-initialized rather than
-left with an indeterminate value, regardless of its type: a scalar
-object's value is `0`, `false`, or `0.0` as its type requires; a pointer
-object's value is a null pointer value; and each subobject of an object
-of array or class type is, recursively, zero-initialized by this same
-rule.
+(1) A definition of a non-array local variable shall include an
+*initializer* ([dcl.init]). A definition of a local variable of non-array
+type with no *initializer* is ill-formed, regardless of that variable's
+type or storage duration.
 
-(2) If an object definition uses an *initializer* ([dcl.init]) to supply
+[Note: `int x;` and `Counter c;` are ill-formed; `int x{};`,
+`Counter c{};`, `Counter c{1, 2};`, and `Counter c = make_counter();`
+are well-formed. This rule is purely syntactic: SCPP26 does not permit
+an uninitialized local declaration whose later assignments are validated
+by flow analysis. — end note]
+
+(2) A non-static data member of a class or struct is initialized for a
+given constructor by exactly one of the following:
+
+  (2.1) an in-class default member initializer on that member's own
+  declaration; or
+
+  (2.2) a member-initializer naming that member in that constructor's
+  member-initializer-list.
+
+(3) A constructor definition may include a member-initializer-list
+immediately after its parameter list and before its function-body. A
+member-initializer-list is introduced by `:` and consists of one or more
+member-initializers separated by `,`. Each member-initializer shall:
+
+  (3.1) name a non-static data member of the constructor's class or
+  struct type; and
+
+  (3.2) supply that member with a *braced-init-list*
+  ([dcl.init.list]).
+
+A parenthesized *expression-list* in a member-initializer is
+ill-formed.
+
+(4) For each constructor definition of a class or struct, every
+non-static data member shall be initialized either by:
+
+  (4.1) a member-initializer in that constructor's own
+  member-initializer-list; or
+
+  (4.2) an in-class default member initializer on that member's
+  declaration, provided that constructor's member-initializer-list does
+  not name that member.
+
+If neither (4.1) nor (4.2) applies to a member for a given constructor,
+that constructor is ill-formed. A member shall not be named more than
+once in the same member-initializer-list.
+
+(5) A non-static data member of reference type shall satisfy (4) by a
+well-formed reference binding. Because a reference has no empty state, a
+constructor for a class or struct with a reference member is
+ill-formed unless that member is initialized either by an in-class
+default member initializer that binds it to an object, or by that
+constructor's member-initializer-list.
+
+(6) A variable definition that has no *initializer* ([dcl.init]), and is
+not ill-formed by (1), is zero-initialized rather than left with an
+indeterminate value, regardless of its type: a scalar object's value is
+`0`, `false`, or `0.0` as its type requires; a pointer object's value is
+a null pointer value; and each subobject of an object of array or class
+type is, recursively, zero-initialized by this same rule.
+
+(7) If an object definition uses an *initializer* ([dcl.init]) to supply
 arguments for direct-initialization, that *initializer* shall be a
 *braced-init-list* ([dcl.init.list]). A parenthesized
 *expression-list* in that position does not initialize an object in
@@ -21,15 +75,64 @@ ill-formed. This rule affects object definitions only; it does not
 modify the syntax of a constructor declaration such as `Widget(int,
 int)` or of a function call. — end note]
 
+[Note: `Widget(int x) : value{x} {}` is, however, a constructor
+member-initializer under (3), not an object definition under (7). — end
+note]
+
 [Note: unlike the C++ standard, under which an object of automatic
 storage duration and no initializer is left with an indeterminate value
 ([dcl.init]) unless every subobject is of a type with a user-provided
-default constructor, this document requires zero-initialization
-unconditionally, for every type. There is consequently no notion, in a
-SCPP26 program, of reading an object with an indeterminate value: every
-object is well-defined from the moment its lifetime begins
-([basic.life]), and no flow analysis is needed to establish that every
-execution path initializes an object before it is used. — end note]
+default constructor, SCPP26 rejects such local declarations outright by
+(1), requires member-initialization completeness by (4), and requires
+zero-initialization elsewhere by (6). There is
+consequently no notion, in an SCPP26 program, of reading an object with
+an indeterminate value, and no flow analysis is needed to establish that
+every execution path initializes a local object before it is used. — end
+note]
+
+[Note: (1)-(5) do not alter the rules for union members or for array
+declarations; those remain governed by other clauses or future design
+work. — end note]
+
+```cpp
+int x{};                         // OK: (1)
+int y = 1;                       // OK: (1)
+int z;                           // ill-formed: (1)
+
+class Defaults {
+    int a{};
+    int b{5};
+};
+
+class CtorOnly {
+    int a;
+    int b;
+public:
+    CtorOnly(int x, int y) : a{x}, b{y} {}
+};
+
+class Mixed {
+    int a{1};
+    int b;
+public:
+    Mixed(int x) : b{x} {}
+};
+
+int global_target{};
+
+class RefBox {
+    int& ref;
+public:
+    RefBox(int& r) : ref{r} {}
+};
+
+class Bad {
+    int a{};
+    int b;
+public:
+    Bad(int x) : a{x} {}   // ill-formed: (4), b is initialized by neither path
+};
+```
 
 ## 6.2 Ownership and move state [basic.life]
 

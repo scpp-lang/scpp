@@ -218,7 +218,7 @@ int (*                  sp2)(int*, int) = get_unchecked;  // ill-formed: (4)
                                     // permits no conversion in this direction
 
 int r1 = up(base, 0);                       // ill-formed: (5), a safe context
-int r2;
+int r2{};
 [[scpp::unsafe]] { r2 = up(base, 0); }      // OK: an unsafe context
 int r3 = sp(1, 2);                          // OK: sp is not unsafe-qualified
 ```
