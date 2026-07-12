@@ -1,0 +1,8 @@
+int main() {
+    int left_values[1];
+    int right_values[1];
+    int* left = &left_values[0];
+    int* right = &right_values[0];
+    int* bad = left + right;
+    return bad == left ? 0 : 1;
+}
