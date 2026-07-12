@@ -1,0 +1,12 @@
+import std;
+// ch05 §5.1 + §5.7: `std::move(x)` is generic over any local variable type,
+// including raw pointers; the moved-to pointer still designates the same
+// pointee value.
+int main() {
+    int x = 7;
+    int* p = &x;
+    int* q = std::move(p);
+    [[scpp::unsafe]] {
+        return *q;
+    }
+}
