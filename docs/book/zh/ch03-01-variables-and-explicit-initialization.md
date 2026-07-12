@@ -109,4 +109,4 @@ score = 0, level = 3, bonus = 7, finished = false
 
 ---
 
-[← 上一章：做一个猜数字小游戏](ch02-00-guessing-game.md) · [目录](README.md)
+[← 上一章：做一个猜数字小游戏](ch02-00-guessing-game.md) · [目录](README.md) · [下一章：标量数据类型 →](ch03-02-scalar-data-types.md)
