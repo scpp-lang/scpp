@@ -1,0 +1,23 @@
+import std;
+// A non-digit as the first character is rejected as `invalid_argument` and
+// leaves `ptr` at the original start.
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+
+int main() {
+    char text[4];
+    text[0] = 'a';
+    text[1] = 'b';
+    text[2] = 'c';
+    text[3] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[3];
+    int value = 88;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != 88) return 1;
+    if (result.ec != std::errc::invalid_argument) return 2;
+    return same_ptr(result.ptr, first) ? 0 : 3;
+}

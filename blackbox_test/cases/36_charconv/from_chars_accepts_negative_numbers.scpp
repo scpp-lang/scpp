@@ -1,0 +1,23 @@
+import std;
+// Signed decimal parsing accepts a leading `-` and still consumes the whole
+// input on success.
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+
+int main() {
+    char text[4];
+    text[0] = '-';
+    text[1] = '1';
+    text[2] = '7';
+    text[3] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[3];
+    int value = 0;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != -17) return 1;
+    if ((int)result.ec != 0) return 2;
+    return same_ptr(result.ptr, last) ? 0 : 3;
+}

@@ -1,0 +1,12 @@
+// spec 14.1(2): an enum value may still be explicitly converted to an
+// integral type with `static_cast`, even though the reverse direction is
+// now rejected and must use `scpp::enum_cast<T>(value)`.
+enum class Color : int { red = 1, green = 2, blue = 7 };
+
+int main() {
+    int red = static_cast<int>(Color::red);
+    int blue = static_cast<int>(Color::blue);
+    if (red != 1) return 1;
+    if (blue != 7) return 2;
+    return 0;
+}
