@@ -47,13 +47,6 @@ public:
         return;
     }
 
-    string(const string& other) {
-        [[scpp::unsafe]] {
-            this->handle = scpp_string_new(scpp_string_c_str(other.handle));
-        }
-        return;
-    }
-
     ~string() {
         [[scpp::unsafe]] {
             scpp_string_delete(this->handle);
