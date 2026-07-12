@@ -4795,6 +4795,132 @@ int main() {
     }
 }
 
+void run_strconv_tests() {
+    {
+        std::string case_name = "scpp_strconv_atoi_parses_positive_integer";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text{"12345"};
+    auto parsed = scpp::strconv::atoi(text);
+    if (!parsed.has_value()) return 1;
+    return parsed.value() - 12345;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_strconv_atoi_parses_negative_integer";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text{"-17"};
+    auto parsed = scpp::strconv::atoi(text);
+    if (!parsed.has_value()) return 1;
+    return parsed.value() + 17;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_strconv_atoi_rejects_empty_string";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text{""};
+    auto parsed = scpp::strconv::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::strconv::error::empty) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_strconv_atoi_rejects_non_numeric_string";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text{"abc"};
+    auto parsed = scpp::strconv::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::strconv::error::invalid_digit) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_strconv_atoi_requires_full_string_consumption";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text{"123abc"};
+    auto parsed = scpp::strconv::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::strconv::error::invalid_digit) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_strconv_atoi_reports_overflow";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text{"9999999999999999999999999"};
+    auto parsed = scpp::strconv::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::strconv::error::overflow) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_strconv_atoi_rejects_leading_plus";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text{"+17"};
+    auto parsed = scpp::strconv::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::strconv::error::invalid_digit) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_std_move_tests() {
     {
         std::string case_name = "std_move_accepts_primitives_and_enums";
@@ -4942,6 +5068,7 @@ int main() {
     run_thread_tests();
     run_std_move_tests();
     run_charconv_tests();
+    run_strconv_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
     run_static_member_function_tests();

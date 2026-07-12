@@ -1,0 +1,62 @@
+// scpp_strconv.scpp
+//
+// The `:strconv` partition of the "scpp" module: scpp-specific string
+// conversion helpers built ergonomically on top of std::from_chars.
+export module scpp:strconv;
+
+import std;
+
+extern "C" {
+    const char* scpp_cstr_end(const char* s);
+}
+
+namespace scpp::strconv {
+
+export enum class error {
+    empty,
+    invalid_digit,
+    overflow,
+};
+
+export std::expected<int32_t, scpp::strconv::error> atoi(const std::string& s) {
+    if (s.length() == 0) {
+        std::unexpected<scpp::strconv::error> err{scpp::strconv::error::empty};
+        std::expected<int32_t, scpp::strconv::error> result{err};
+        return std::move(result);
+    }
+
+    const char* first = s.c_str();
+    const char* last = first;
+    [[scpp::unsafe]] {
+        last = scpp_cstr_end(first);
+    }
+
+    int value = 0;
+    std::from_chars_result parse_result = std::from_chars(first, last, value);
+    if (parse_result.ec == std::errc::invalid_argument) {
+        std::unexpected<scpp::strconv::error> err{scpp::strconv::error::invalid_digit};
+        std::expected<int32_t, scpp::strconv::error> result{err};
+        return std::move(result);
+    }
+    if (parse_result.ec == std::errc::result_out_of_range) {
+        std::unexpected<scpp::strconv::error> err{scpp::strconv::error::overflow};
+        std::expected<int32_t, scpp::strconv::error> result{err};
+        return std::move(result);
+    }
+
+    bool consumed_all = false;
+    [[scpp::unsafe]] {
+        consumed_all = parse_result.ptr == last;
+    }
+    if (!consumed_all) {
+        std::unexpected<scpp::strconv::error> err{scpp::strconv::error::invalid_digit};
+        std::expected<int32_t, scpp::strconv::error> result{err};
+        return std::move(result);
+    }
+
+    int32_t parsed = static_cast<int32_t>(value);
+    std::expected<int32_t, scpp::strconv::error> result{parsed};
+    return std::move(result);
+}
+
+} // namespace scpp::strconv

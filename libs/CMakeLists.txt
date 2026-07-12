@@ -61,4 +61,5 @@ add_scpp_module_artifacts(scpp_scpp_artifacts
     scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/scpp.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/io/scpp_io.scpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/rand/scpp_rand.scpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/rand/scpp_rand.scpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/strconv/scpp_strconv.scpp")

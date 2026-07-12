@@ -26,6 +26,13 @@ int scpp_string_length(void* handle) { return static_cast<int>(as_string(handle)
 
 const char* scpp_string_c_str(void* handle) { return as_string(handle)->c_str(); }
 
+const char* scpp_cstr_end(const char* s) {
+    if (s == nullptr) return nullptr;
+    const char* current = s;
+    while (*current != '\0') current++;
+    return current;
+}
+
 void scpp_string_append(void* handle, const char* s) {
     if (s != nullptr) as_string(handle)->append(s);
 }
