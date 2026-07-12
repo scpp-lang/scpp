@@ -135,4 +135,4 @@ You win!
 
 ---
 
-[← 上一章：第一个 project build](ch01-03-hello-project-builds.md) · [目录](README.md) · [下一章：常见编程概念 →](README.md)
+[← 上一章：第一个 project build](ch01-03-hello-project-builds.md) · [目录](README.md) · [下一章：变量与显式初始化 →](ch03-01-variables-and-explicit-initialization.md)

@@ -142,4 +142,4 @@ next chapter slows down and names those building blocks one by one.
 
 ---
 
-[← Previous: Hello, Project Builds](ch01-03-hello-project-builds.md) · [Table of Contents](README.md) · [Next: Common Programming Concepts →](README.md)
+[← Previous: Hello, Project Builds](ch01-03-hello-project-builds.md) · [Table of Contents](README.md) · [Next: Variables and Explicit Initialization →](ch03-01-variables-and-explicit-initialization.md)
