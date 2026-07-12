@@ -161,6 +161,11 @@ struct Body {
     // reference-liveness pass treats reads of the closure local itself as
     // "reference-like" uses too.
     std::unordered_set<std::string> borrow_holding_closure_locals;
+    // Copied from the source Function so later passes can enforce
+    // compile-time-dependency visibility without storing a raw pointer into
+    // Program::functions (which may reallocate while new clones are appended).
+    std::string function_owning_module;
+    std::string function_source_path;
 };
 
 Body build_mir(const Function& fn);
@@ -175,6 +180,8 @@ public:
     explicit MirBuilder(const Function& fn) : fn_(fn) {}
 
     Body build() {
+        body_.function_owning_module = fn_.owning_module;
+        body_.function_source_path = fn_.loc.source_path_text();
         for (const Param& param : fn_.params) {
             declare_local(param.name, param.type);
         }

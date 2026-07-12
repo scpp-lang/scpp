@@ -224,6 +224,8 @@ struct FunctionSignature {
     bool is_unsafe = false;
     bool is_nodiscard = false;
     std::string nodiscard_reason;
+    bool is_compile_time_dependency = false;
+    std::string owning_module;
     std::string member_owner_class;
     bool is_static = false;
     AccessSpecifier access = AccessSpecifier::Public;
@@ -868,6 +870,12 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     return false;
 }
 
+[[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body) {
+    if (!candidate.is_compile_time_dependency) return true;
+    if (!candidate.owning_module.empty() && candidate.owning_module == body.function_owning_module) return true;
+    return !body.function_source_path.empty() && body.function_source_path == candidate.loc.source_path_text();
+}
+
 struct NodiscardInfo {
     std::string subject;
     std::string reason;
@@ -983,6 +991,7 @@ struct NodiscardInfo {
     auto it = signatures.find(class_type.name + "_new");
     if (it == signatures.end()) return nullptr;
     for (const FunctionSignature& candidate : it->second) {
+        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
         if (candidate.param_types.size() != 2) continue;
         if (argument_matches_parameter(arg, candidate.param_types[1], body, signatures)) return &candidate;
     }
@@ -1050,6 +1059,7 @@ struct NodiscardInfo {
     // checking, ...), exactly as before this feature.
     if (it->second.size() == 1) {
         const FunctionSignature& only = it->second[0];
+        if (!compile_time_dependency_visible_in_body(only, body)) return nullptr;
         if (callee.param_offset == 1 && call_expr.lhs) {
             if (!receiver_matches_method_qualifier(*call_expr.lhs, only, body, signatures)) return nullptr;
         }
@@ -1058,6 +1068,7 @@ struct NodiscardInfo {
 
     std::vector<const FunctionSignature*> matches;
     for (const FunctionSignature& candidate : it->second) {
+        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
         if (candidate.param_types.size() != call_expr.args.size() + callee.param_offset) continue;
         bool all_match = true;
         // The receiver (`this`), for a method call: viable only if the
@@ -1156,6 +1167,7 @@ struct NodiscardInfo {
     auto it = signatures.find(source->name);
     if (it == signatures.end()) return std::nullopt;
     for (const FunctionSignature& sig : it->second) {
+        if (!compile_time_dependency_visible_in_body(sig, body)) continue;
         Type candidate = function_pointer_type_from_signature(sig);
         if (same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) return candidate;
     }
@@ -1515,6 +1527,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             auto sig_it = signatures.find(expr.name);
             if (sig_it != signatures.end() && sig_it->second.size() == 1) {
                 const FunctionSignature& sig = sig_it->second[0];
+                if (!compile_time_dependency_visible_in_body(sig, body)) return std::nullopt;
                 Type result;
                 result.kind = TypeKind::FunctionPointer;
                 result.function_return = std::make_shared<Type>(sig.return_type);
@@ -1606,6 +1619,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                         auto sig_it = signatures.find(underlying.name + "_operator_deref");
                         if (sig_it != signatures.end()) {
                             for (const FunctionSignature& sig : sig_it->second) {
+                                if (!compile_time_dependency_visible_in_body(sig, body)) continue;
                                 if (sig.param_types.empty()) continue;
                                 return sig.return_type.kind == TypeKind::Reference
                                            ? std::optional<Type>(*sig.return_type.pointee)
@@ -4273,6 +4287,8 @@ void check_function(const Function& fn, const Program& program, const Signatures
         sig.is_unsafe = fn.is_unsafe;
         sig.is_nodiscard = fn.is_nodiscard;
         sig.nodiscard_reason = fn.nodiscard_reason;
+        sig.is_compile_time_dependency = fn.is_compile_time_dependency;
+        sig.owning_module = fn.owning_module;
         sig.member_owner_class = fn.member_owner_class;
         sig.is_static = fn.is_static;
         sig.access = fn.access;
@@ -7650,6 +7666,12 @@ private:
         return false;
     }
 
+    [[nodiscard]] bool compile_time_dependency_visible(const Function& fn, const Body& body) const {
+        if (!fn.is_compile_time_dependency) return true;
+        if (!fn.owning_module.empty() && fn.owning_module == body.function_owning_module) return true;
+        return !body.function_source_path.empty() && body.function_source_path == fn.loc.source_path_text();
+    }
+
     struct FullHeaderGenericCallResolution {
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
@@ -8316,6 +8338,7 @@ private:
             std::vector<size_t> matching_candidates;
             for (size_t candidate_index : template_it->second) {
                 const Function& tmpl = program_.functions[candidate_index];
+                if (!compile_time_dependency_visible(tmpl, body)) continue;
                 if (tmpl.template_params.empty()) continue;
                 try {
                     ExprPtr expr_copy = clone_expr(expr);
@@ -8357,9 +8380,24 @@ private:
         }
         auto template_it = generic_template_indices_.find(generic_template_name);
         if (template_it == generic_template_indices_.end()) return;
-        const bool ordinary_overload_exists = has_non_generic_overload(generic_template_name);
-        if (template_it->second.size() == 1 && !ordinary_overload_exists) {
-            const Function& tmpl = program_.functions[template_it->second[0]];
+        const bool ordinary_overload_exists = [&]() {
+            for (const Function& fn : program_.functions) {
+                if (fn.name == generic_template_name && !fn.is_generic_template &&
+                    compile_time_dependency_visible(fn, body)) {
+                    return true;
+                }
+            }
+            return false;
+        }();
+        std::vector<size_t> visible_template_candidates;
+        for (size_t candidate_index : template_it->second) {
+            if (compile_time_dependency_visible(program_.functions[candidate_index], body)) {
+                visible_template_candidates.push_back(candidate_index);
+            }
+        }
+        if (visible_template_candidates.empty()) return;
+        if (visible_template_candidates.size() == 1 && !ordinary_overload_exists) {
+            const Function& tmpl = program_.functions[visible_template_candidates[0]];
             if (!tmpl.template_params.empty()) {
                 monomorphize_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
             } else {
@@ -8369,7 +8407,7 @@ private:
         }
 
         std::vector<size_t> matching_candidates;
-        for (size_t candidate_index : template_it->second) {
+        for (size_t candidate_index : visible_template_candidates) {
             const Function& tmpl = program_.functions[candidate_index];
             if (!tmpl.template_params.empty()) {
                 FullHeaderGenericCallResolution resolution;

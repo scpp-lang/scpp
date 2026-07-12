@@ -977,6 +977,7 @@ private:
     }
 
     [[nodiscard]] bool imported_function_body_must_stay_available(const Program& imported, const Function& fn) const {
+        if (fn.is_compile_time_dependency) return true;
         if (fn.is_generic_template || fn.eval_mode != FunctionEvalMode::RuntimeOnly) return true;
         if (!fn.member_owner_class.empty()) {
             std::string owner_name = fn.member_owner_class;
@@ -1966,7 +1967,7 @@ private:
                                 bool is_reexport) {
         for (const EnumDef& def : imported.enums) {
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
-            struct_names_.insert(def.name);
+            if (def.is_exported) struct_names_.insert(def.name);
             std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
             auto existing = std::find_if(program.enums.begin(), program.enums.end(), [&](const EnumDef& current) {
                 return current.owning_module == effective_owner && same_enum_identity(current, def);
@@ -1983,8 +1984,8 @@ private:
         }
         for (const StructDef& def : imported.structs) {
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
-            struct_names_.insert(def.name);
-            if (!def.template_params.empty()) {
+            if (def.is_exported) struct_names_.insert(def.name);
+            if (def.is_exported && !def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
             }
@@ -2004,9 +2005,11 @@ private:
         }
         for (const ClassDef& def : imported.classes) {
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
-            struct_names_.insert(def.name);
-            class_names_.insert(def.name);
-            if (!def.template_params.empty() || def.is_variadic_primary_template) {
+            if (def.is_exported) {
+                struct_names_.insert(def.name);
+                class_names_.insert(def.name);
+            }
+            if (def.is_exported && (!def.template_params.empty() || def.is_variadic_primary_template)) {
                 generic_type_names_.insert(def.name);
                 if (def.is_variadic_primary_template) {
                     variadic_primary_template_params_[def.name] = def.template_params;
@@ -2030,7 +2033,7 @@ private:
         }
         for (const Function& fn : imported.functions) {
             if (!fn.is_exported && !fn.is_compile_time_dependency) continue;
-            if (!fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
+            if (fn.is_exported && !fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
             bool keep_body = imported_function_body_must_stay_available(imported, fn);
             std::string effective_owner = fn.owning_module.empty() ? imported_name : fn.owning_module;
             auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {

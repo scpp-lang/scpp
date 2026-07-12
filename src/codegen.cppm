@@ -1998,6 +1998,17 @@ private:
             by_name[fn.name].push_back(&fn);
         }
         for (const auto& [name, fns] : by_name) {
+            if (!fns.empty() && fns[0]->is_extern_c) {
+                if (fns.size() != 1) {
+                    throw CodegenError("'" + name +
+                                        "' cannot be overloaded: 'extern \"C\"' functions share real C's own "
+                                        "lack of a function-overloading concept, so every 'extern \"C\"' "
+                                        "declaration of the same name must have an identical signature",
+                        current_loc_);
+                }
+                overload_names_[fns[0]] = name;
+                continue;
+            }
             bool recovered_from_elsewhere = !fns[0]->owning_module.empty();
             bool exported_from_this_module = program_->module_name.empty() ? false : fns[0]->is_exported;
             if (recovered_from_elsewhere || exported_from_this_module) {
@@ -2086,7 +2097,8 @@ private:
         // never an scpp-level AST one -- eligible for the same internal
         // linkage as an ordinary defined function.
         bool has_definition = fn.body != nullptr || !fn.forwards_to.empty();
-        if (has_definition && fn.owning_module.empty() && !program_->module_name.empty() && !fn.is_exported) {
+        if (has_definition && !fn.is_exported && !fn.is_extern_c &&
+            (!fn.owning_module.empty() || !program_->module_name.empty() || fn.is_compile_time_dependency)) {
             linkage = llvm::Function::InternalLinkage;
         }
         llvm::Function::Create(fn_type, linkage, overload_names_.at(&fn), *module_);
