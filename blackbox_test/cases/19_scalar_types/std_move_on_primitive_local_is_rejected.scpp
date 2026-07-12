@@ -1,0 +1,10 @@
+import std;
+// Current `main` empirically rejects `std::move(x)` when `x` is a primitive
+// local: `std::move` is still restricted to class-typed variables in this
+// version. Keep this as the current-behavior baseline until the separate
+// std::move genericity investigation decides whether that restriction stays.
+int main() {
+    int x = 7;
+    int y = std::move(x);
+    return y;
+}
