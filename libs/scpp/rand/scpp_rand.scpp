@@ -4,7 +4,7 @@
 // utilities that intentionally do not live in `std::`.
 export module scpp:rand;
 
-import std;
+import :io;
 
 namespace scpp::rand {
 
