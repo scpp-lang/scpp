@@ -5,7 +5,7 @@
   - [Hello, World!](ch01-02-hello-world.md)
   - [第一个 project build](ch01-03-hello-project-builds.md)
 
-- 做一个猜数字小游戏
+- [做一个猜数字小游戏](ch02-00-guessing-game.md)
 
 - 常见编程概念
   - 变量、初始化与默认清零
