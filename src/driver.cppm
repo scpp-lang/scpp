@@ -1257,6 +1257,7 @@ void create_archive(const std::string& object_path, const std::string& archive_p
         if (!lib_dir.has_value()) continue;
         append_if_exists(*lib_dir / "libstd.scppa");
         append_if_exists(*lib_dir / "libscpp.scppa");
+        append_if_exists(*lib_dir / "libscpp_io_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_string_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_thread_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_print_wrapper.a");
@@ -1580,6 +1581,15 @@ private:
     return candidate.string();
 }
 
+[[nodiscard]] bool is_partition_import_line(std::string_view trimmed) {
+    return starts_with(trimmed, "export import :") || starts_with(trimmed, "import :");
+}
+
+[[nodiscard]] bool is_non_partition_import_line(std::string_view trimmed) {
+    if (is_partition_import_line(trimmed)) return false;
+    return starts_with(trimmed, "export import ") || starts_with(trimmed, "import ");
+}
+
 std::string render_module_interface_file(const Program& program, const std::string& file_path,
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
@@ -1595,7 +1605,7 @@ std::string inline_partition_imports(const Program& program, const std::string& 
         std::string_view line =
             had_newline ? source.substr(line_start, line_end - line_start) : source.substr(line_start);
         std::string trimmed = trim_copy(line);
-        if (starts_with(trimmed, "export import :") || starts_with(trimmed, "import :")) {
+        if (is_partition_import_line(trimmed)) {
             size_t colon = trimmed.find(':');
             size_t semi = trimmed.find(';', colon);
             std::string partition_name = trimmed.substr(colon + 1, semi == std::string::npos ? std::string::npos
@@ -1654,11 +1664,55 @@ std::string render_module_interface_file(const Program& program, const std::stri
     return out.str();
 }
 
+std::string hoist_non_partition_imports(std::string source) {
+    std::vector<std::string> imports;
+    std::unordered_set<std::string> seen_imports;
+    std::vector<std::string> body_lines;
+    std::string module_line;
+    bool module_line_set = false;
+
+    size_t line_start = 0;
+    while (line_start <= source.size()) {
+        size_t line_end = source.find('\n', line_start);
+        bool had_newline = line_end != std::string::npos;
+        std::string_view line =
+            had_newline ? std::string_view(source).substr(line_start, line_end - line_start)
+                        : std::string_view(source).substr(line_start);
+        std::string line_text(line);
+        std::string trimmed = trim_copy(line);
+        bool is_module_decl = starts_with(trimmed, "export module ") || starts_with(trimmed, "module ");
+        if (is_module_decl && !module_line_set) {
+            module_line = line_text;
+            module_line_set = true;
+        } else if (is_non_partition_import_line(trimmed)) {
+            if (seen_imports.insert(trimmed).second) imports.push_back(line_text);
+        } else {
+            body_lines.push_back(line_text);
+        }
+        if (!had_newline) break;
+        line_start = line_end + 1;
+    }
+
+    std::ostringstream out;
+    if (module_line_set) out << module_line << '\n';
+    if (!imports.empty()) {
+        out << '\n';
+        for (const std::string& import_line : imports) out << import_line << '\n';
+    }
+    for (size_t i = 0; i < body_lines.size(); i++) {
+        if ((module_line_set || !imports.empty()) || i > 0) out << '\n';
+        out << body_lines[i];
+    }
+    return out.str();
+}
+
 std::string build_merged_interface_source(const Program& program, const std::string& module_source_path,
                                           bool keep_concrete_bodies) {
     std::unordered_set<std::string> expanded_partition_paths;
-    return render_module_interface_file(program, module_source_path, module_source_path, keep_concrete_bodies,
-                                        /*keep_module_declaration=*/true, expanded_partition_paths);
+    return hoist_non_partition_imports(render_module_interface_file(program, module_source_path, module_source_path,
+                                                                    keep_concrete_bodies,
+                                                                    /*keep_module_declaration=*/true,
+                                                                    expanded_partition_paths));
 }
 
 llvm::CodeGenOptLevel codegen_opt_level_for(int opt_level) {

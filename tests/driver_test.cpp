@@ -43,6 +43,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_SCPP_INTERFACE_PATH
 #error "SCPP_STDLIB_SCPP_INTERFACE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
 #endif
@@ -109,8 +112,9 @@ std::unordered_map<std::string, std::string> prebuilt_module_import_paths() {
 }
 
 std::vector<std::string> std_link_inputs() {
-    return {SCPP_STDLIB_STRING_WRAPPER_LIB_PATH, SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH, SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH};
+    return {SCPP_STDLIB_IO_WRAPPER_LIB_PATH, SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
+            SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH, SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH,
+            SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -272,6 +276,15 @@ RunResult compile_and_run(std::string_view source, const std::string& case_name)
 
     std::filesystem::remove(exe_path);
     return RunResult{WEXITSTATUS(status), output};
+}
+
+RunResult compile_and_run_with_input(std::string_view source, const std::string& case_name, std::string_view input) {
+    std::filesystem::path exe_path = std::filesystem::current_path() / ("scpp_driver_test_" + case_name);
+    scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+    RunResult result = run_command_capture("printf %s " + shell_quote(std::string(input)) + " | " +
+                                           shell_quote(exe_path.string()) + " 2>&1");
+    std::filesystem::remove(exe_path);
+    return result;
 }
 
 // A `<name>.expected` file's first line is the expected exit code; anything
@@ -4219,6 +4232,46 @@ int main() {
     }
 }
 
+void run_io_tests() {
+    {
+        std::string case_name = "scpp_io_getline_reads_one_line_without_newline";
+        cases_run++;
+        RunResult result = compile_and_run_with_input(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    // getline follows the prior read_line behavior and strips the trailing newline.
+    auto line = scpp::io::getline();
+    if (!line.has_value()) return 1;
+    if (!line.value().equals("hello world")) return 2;
+    if (line.value().length() != 11) return 3;
+    return 0;
+}
+)SCPP",
+            case_name, "hello world\nsecond line\n");
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text.empty(),
+               case_name + ": expected empty stdout, got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "scpp_io_getline_returns_eof_error_on_empty_input";
+        cases_run++;
+        RunResult result = compile_and_run_with_input(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    auto line = scpp::io::getline();
+    if (line.has_value()) return 1;
+    if (line.error() != scpp::io::error::eof) return 2;
+    return 0;
+}
+)SCPP",
+            case_name, "");
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -4237,6 +4290,7 @@ int main() {
     run_static_member_function_tests();
     run_random_tests();
     run_expected_tests();
+    run_io_tests();
     run_enum_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_sizeof_tests();

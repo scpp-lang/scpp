@@ -1,0 +1,50 @@
+// scpp_io.scpp
+//
+// The `:io` partition of the "scpp" module: scpp-specific I/O helpers
+// that intentionally do not live in `std::`.
+export module scpp:io;
+
+import std;
+
+extern "C" {
+    void* scpp_io_getline(int* status);
+    void scpp_string_delete(void* handle);
+    const char* scpp_string_c_str(void* handle);
+}
+
+namespace scpp::io {
+
+export enum class error {
+    eof,
+    read_failed,
+};
+
+export std::expected<std::string, scpp::io::error> getline() {
+    int status = 0;
+    void* handle;
+    [[scpp::unsafe]] {
+        handle = ::scpp_io_getline(&status);
+    }
+    if (status == 0) {
+        const char* text = "";
+        [[scpp::unsafe]] {
+            text = ::scpp_string_c_str(handle);
+        }
+        std::string line(text);
+        [[scpp::unsafe]] {
+            ::scpp_string_delete(handle);
+        }
+        std::expected<std::string, scpp::io::error> result(std::move(line));
+        return std::move(result);
+    }
+    if (status == 1) {
+        std::unexpected<scpp::io::error> err(scpp::io::error::eof);
+        std::expected<std::string, scpp::io::error> result(err);
+        return std::move(result);
+    }
+    std::unexpected<scpp::io::error> err(scpp::io::error::read_failed);
+    std::expected<std::string, scpp::io::error> result(err);
+    return std::move(result);
+}
+
+} // namespace scpp::io

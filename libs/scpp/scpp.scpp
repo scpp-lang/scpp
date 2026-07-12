@@ -5,4 +5,5 @@
 // this file re-exports for consumers of `import scpp;`.
 export module scpp;
 
+export import :io;
 export import :rand;
