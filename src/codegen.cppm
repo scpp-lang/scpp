@@ -849,7 +849,23 @@ private:
             case ExprKind::Binary:
                 switch (expr.binary_op) {
                     case BinaryOp::Add:
+                        if (std::optional<Type> lhs = infer_type(*expr.lhs), rhs = infer_type(*expr.rhs);
+                            lhs.has_value() && rhs.has_value()) {
+                            if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
+                                return result;
+                            }
+                        }
+                        [[fallthrough]];
                     case BinaryOp::Sub:
+                        if (expr.binary_op == BinaryOp::Sub) {
+                            if (std::optional<Type> lhs = infer_type(*expr.lhs), rhs = infer_type(*expr.rhs);
+                                lhs.has_value() && rhs.has_value()) {
+                                if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
+                                    return result;
+                                }
+                            }
+                        }
+                        [[fallthrough]];
                     case BinaryOp::Mul:
                     case BinaryOp::Div:
                     case BinaryOp::Assign:
@@ -1755,6 +1771,39 @@ private:
 
     [[nodiscard]] static const Type& binary_operand_type(const Type& type) {
         return type.kind == TypeKind::Reference ? *type.pointee : type;
+    }
+
+    [[nodiscard]] static bool is_pointer_arithmetic_offset_type(const Type& type) {
+        return type.kind == TypeKind::Named && type.name != "bool" && is_integral_scalar_type_name(type.name);
+    }
+
+    [[nodiscard]] static bool pointer_supports_arithmetic(const Type& type) {
+        return type.kind == TypeKind::Pointer && type.pointee != nullptr &&
+               !(type.pointee->kind == TypeKind::Named && type.pointee->name == "void");
+    }
+
+    [[nodiscard]] static std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs) {
+        const Type& lhs_operand = binary_operand_type(lhs);
+        const Type& rhs_operand = binary_operand_type(rhs);
+        if (op == BinaryOp::Add) {
+            if (pointer_supports_arithmetic(lhs_operand) && is_pointer_arithmetic_offset_type(rhs_operand)) {
+                return lhs_operand;
+            }
+            if (is_pointer_arithmetic_offset_type(lhs_operand) && pointer_supports_arithmetic(rhs_operand)) {
+                return rhs_operand;
+            }
+            return std::nullopt;
+        }
+        if (op == BinaryOp::Sub) {
+            if (pointer_supports_arithmetic(lhs_operand) && is_pointer_arithmetic_offset_type(rhs_operand)) {
+                return lhs_operand;
+            }
+            if (pointer_supports_arithmetic(lhs_operand) && pointer_supports_arithmetic(rhs_operand) &&
+                types_equal(lhs_operand, rhs_operand)) {
+                return named_type("ptrdiff_t");
+            }
+        }
+        return std::nullopt;
     }
 
     // A short, LLVM-identifier-safe (alphanumeric/underscore only, no
@@ -4268,6 +4317,22 @@ private:
         return is_unsigned ? builder_->CreateUDiv(lhs, rhs, "divtmp") : builder_->CreateSDiv(lhs, rhs, "divtmp");
     }
 
+    llvm::Value* codegen_pointer_offset(llvm::Value* base_ptr, llvm::Value* offset, const Type& pointer_type, bool negate_offset) {
+        llvm::Value* gep_offset = negate_offset ? builder_->CreateNeg(offset, "ptroffset") : offset;
+        return builder_->CreateGEP(to_llvm_type(*pointer_type.pointee), base_ptr, {gep_offset}, "ptrarith");
+    }
+
+    llvm::Value* codegen_pointer_difference(llvm::Value* lhs_ptr, llvm::Value* rhs_ptr, const Type& pointer_type) {
+        llvm::Type* diff_type = to_llvm_type(named_type("ptrdiff_t"));
+        llvm::Value* lhs_int = builder_->CreatePtrToInt(lhs_ptr, diff_type, "lhsint");
+        llvm::Value* rhs_int = builder_->CreatePtrToInt(rhs_ptr, diff_type, "rhsint");
+        llvm::Value* byte_diff = builder_->CreateSub(lhs_int, rhs_int, "ptrbytes");
+        uint64_t elem_size = module_->getDataLayout().getTypeAllocSize(to_llvm_type(*pointer_type.pointee));
+        if (elem_size == 1) return byte_diff;
+        llvm::Value* elem_size_value = llvm::ConstantInt::get(diff_type, elem_size, /*isSigned=*/false);
+        return builder_->CreateSDiv(byte_diff, elem_size_value, "ptrdifftmp");
+    }
+
     // Computes the storage location (pointer + scpp Type) of an lvalue
     // expression, i.e. anything that can appear on the left of `=` or be
     // read via a plain load: a variable, or a chain of `.field`/`[index]`
@@ -4659,6 +4724,19 @@ private:
         bool rhs_is_literal = expr.rhs->kind == ExprKind::IntegerLiteral || expr.rhs->kind == ExprKind::FloatLiteral;
         std::optional<Type> lhs_type = infer_type(*expr.lhs);
         std::optional<Type> rhs_type = infer_type(*expr.rhs);
+        std::optional<Type> pointer_result_type =
+            lhs_type.has_value() && rhs_type.has_value() ? pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type)
+                                                         : std::nullopt;
+        bool arithmetic_op = expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub || expr.binary_op == BinaryOp::Mul ||
+                             expr.binary_op == BinaryOp::Div;
+        bool pointer_operand_present =
+            lhs_type.has_value() && rhs_type.has_value() &&
+            (binary_operand_type(*lhs_type).kind == TypeKind::Pointer || binary_operand_type(*rhs_type).kind == TypeKind::Pointer);
+        if (arithmetic_op && pointer_operand_present && !pointer_result_type.has_value()) {
+            throw CodegenError("pointer arithmetic requires 'pointer +/- integer' or 'pointer - pointer' with matching "
+                               "non-void pointer types",
+                current_loc_);
+        }
         bool needs_strict_scalar_match = expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne ||
                                          expr.binary_op == BinaryOp::Lt || expr.binary_op == BinaryOp::Gt ||
                                          expr.binary_op == BinaryOp::Le || expr.binary_op == BinaryOp::Ge;
@@ -4672,9 +4750,9 @@ private:
             }
         }
         std::optional<Type> context_type;
-        if (lhs_is_literal && !rhs_is_literal) {
+        if (!pointer_result_type.has_value() && lhs_is_literal && !rhs_is_literal) {
             context_type = lhs_type.has_value() && rhs_type.has_value() ? binary_operand_type(*rhs_type) : infer_type(*expr.rhs);
-        } else if (rhs_is_literal && !lhs_is_literal) {
+        } else if (!pointer_result_type.has_value() && rhs_is_literal && !lhs_is_literal) {
             context_type = lhs_type.has_value() && rhs_type.has_value() ? binary_operand_type(*lhs_type) : infer_type(*expr.lhs);
         }
         if (needs_strict_scalar_match && lhs_type.has_value() && rhs_type.has_value() &&
@@ -4718,6 +4796,18 @@ private:
         switch (expr.binary_op) {
             case BinaryOp::Add:
             case BinaryOp::Sub:
+                if (pointer_result_type.has_value()) {
+                    const Type& lhs_operand_type = binary_operand_type(*lhs_type);
+                    const Type& rhs_operand_type = binary_operand_type(*rhs_type);
+                    if (lhs_operand_type.kind == TypeKind::Pointer) {
+                        if (rhs_operand_type.kind == TypeKind::Pointer) {
+                            return codegen_pointer_difference(lhs, rhs, lhs_operand_type);
+                        }
+                        return codegen_pointer_offset(lhs, rhs, lhs_operand_type, expr.binary_op == BinaryOp::Sub);
+                    }
+                    return codegen_pointer_offset(rhs, lhs, binary_operand_type(*rhs_type), /*negate_offset=*/false);
+                }
+                [[fallthrough]];
             case BinaryOp::Mul:
                 if (is_float) return codegen_float_arith(expr.binary_op, lhs, rhs);
                 return codegen_checked_arith(expr.binary_op, lhs, rhs, is_unsigned, is_checked);

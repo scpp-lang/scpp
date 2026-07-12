@@ -4911,6 +4911,61 @@ int main() {
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
     }
+
+    {
+        std::string case_name = "pointer_addition_inline_call_argument_uses_gep";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    std::string line{"12345"};
+    int value = 0;
+    std::from_chars_result parsed = std::from_chars(line.c_str(), line.c_str() + line.size(), value);
+    if (value != 12345) return 1;
+    if ((int)parsed.ec != 0) return 2;
+    if (!same_ptr(parsed.ptr, line.c_str() + line.length())) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "pointer_subtraction_and_difference_work_for_string_ranges";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+char read_char(const char* ptr) {
+    [[scpp::unsafe]] {
+        return *ptr;
+    }
+}
+int main() {
+    std::string line{"scpp"};
+    const char* first = line.c_str();
+    const char* end = first + line.size();
+    const char* second = end - 3;
+    ptrdiff_t distance = end - first;
+    if (!same_ptr(second, first + 1)) return 1;
+    if (read_char(second) != 'c') return 2;
+    if (distance != 4) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
 }
 
 void run_std_move_tests() {

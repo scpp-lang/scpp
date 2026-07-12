@@ -674,6 +674,39 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return type.kind == TypeKind::Reference ? *type.pointee : type;
 }
 
+[[nodiscard]] bool is_pointer_arithmetic_offset_type(const Type& type) {
+    return type.kind == TypeKind::Named && type.name != "bool" && is_integral_scalar_type_name(type.name);
+}
+
+[[nodiscard]] bool pointer_supports_arithmetic(const Type& type) {
+    return type.kind == TypeKind::Pointer && type.pointee != nullptr &&
+           !(type.pointee->kind == TypeKind::Named && type.pointee->name == "void");
+}
+
+[[nodiscard]] std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs) {
+    const Type& lhs_operand = binary_operand_type(lhs);
+    const Type& rhs_operand = binary_operand_type(rhs);
+    if (op == BinaryOp::Add) {
+        if (pointer_supports_arithmetic(lhs_operand) && is_pointer_arithmetic_offset_type(rhs_operand)) {
+            return lhs_operand;
+        }
+        if (is_pointer_arithmetic_offset_type(lhs_operand) && pointer_supports_arithmetic(rhs_operand)) {
+            return rhs_operand;
+        }
+        return std::nullopt;
+    }
+    if (op == BinaryOp::Sub) {
+        if (pointer_supports_arithmetic(lhs_operand) && is_pointer_arithmetic_offset_type(rhs_operand)) {
+            return lhs_operand;
+        }
+        if (pointer_supports_arithmetic(lhs_operand) && pointer_supports_arithmetic(rhs_operand) &&
+            types_equal(lhs_operand, rhs_operand)) {
+            return named_type("ptrdiff_t");
+        }
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type) {
     const Type& operand_type = binary_operand_type(type);
     switch (literal.kind) {
@@ -1661,7 +1694,25 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Binary:
             switch (expr.binary_op) {
                 case BinaryOp::Add:
+                    if (std::optional<Type> lhs = infer_expr_type(*expr.lhs, body, signatures),
+                        rhs = infer_expr_type(*expr.rhs, body, signatures);
+                        lhs.has_value() && rhs.has_value()) {
+                        if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
+                            return result;
+                        }
+                    }
+                    [[fallthrough]];
                 case BinaryOp::Sub:
+                    if (expr.binary_op == BinaryOp::Sub) {
+                        if (std::optional<Type> lhs = infer_expr_type(*expr.lhs, body, signatures),
+                            rhs = infer_expr_type(*expr.rhs, body, signatures);
+                            lhs.has_value() && rhs.has_value()) {
+                            if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
+                                return result;
+                            }
+                        }
+                    }
+                    [[fallthrough]];
                 case BinaryOp::Mul:
                 case BinaryOp::Div:
                 case BinaryOp::Assign:
@@ -1785,6 +1836,17 @@ void validate_sizeof_operand(const Expr& expr, const Body& body, const Signature
     return false;
 }
 
+[[nodiscard]] bool binary_expr_has_valid_arithmetic_types(const Expr& expr, const Body& body, const Signatures& signatures) {
+    std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+    std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+    if (!lhs_type.has_value() || !rhs_type.has_value()) return true;
+    const Type& lhs_operand = binary_operand_type(*lhs_type);
+    const Type& rhs_operand = binary_operand_type(*rhs_type);
+    bool pointer_operand_present = lhs_operand.kind == TypeKind::Pointer || rhs_operand.kind == TypeKind::Pointer;
+    if (!pointer_operand_present) return true;
+    return pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type).has_value();
+}
+
 void check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
                                      const SourceLocation& loc) {
     if (expr.binary_op == BinaryOp::Assign) return;
@@ -1795,6 +1857,22 @@ void check_binary_expr_operand_types(const Expr& expr, const Body& body, const S
     bool rhs_is_enum = rhs_type.has_value() && is_enum_type(binary_operand_type(*rhs_type), body.program);
     if ((lhs_is_enum || rhs_is_enum) && expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne) {
         throw DataflowError("enum class values only support '==' and '!=' in this version", loc);
+    }
+    bool arithmetic_op = expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub || expr.binary_op == BinaryOp::Mul ||
+                         expr.binary_op == BinaryOp::Div;
+    if (arithmetic_op) {
+        if (binary_expr_has_valid_arithmetic_types(expr, body, signatures)) return;
+        if (!lhs_type.has_value() || !rhs_type.has_value()) return;
+        const Type& lhs_operand = binary_operand_type(*lhs_type);
+        const Type& rhs_operand = binary_operand_type(*rhs_type);
+        if (lhs_operand.kind == TypeKind::Pointer || rhs_operand.kind == TypeKind::Pointer) {
+            throw DataflowError("pointer arithmetic requires 'pointer +/- integer' or 'pointer - pointer' with matching "
+                                "non-void pointer types",
+                loc);
+        }
+        throw DataflowError("binary operator requires operands of the same type; scpp has no implicit conversion between '" +
+                                lhs_operand.name + "' and '" + rhs_operand.name + "' (ch06)",
+            loc);
     }
     if (expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne && expr.binary_op != BinaryOp::Lt &&
         expr.binary_op != BinaryOp::Gt && expr.binary_op != BinaryOp::Le && expr.binary_op != BinaryOp::Ge) {

@@ -1,0 +1,2 @@
+contains: getelementptr i32, ptr
+contains: sdiv i64

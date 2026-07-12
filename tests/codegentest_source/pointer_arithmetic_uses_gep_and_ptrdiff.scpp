@@ -1,0 +1,7 @@
+int main() {
+    int values[4];
+    int* first = &values[0];
+    int* third = first + 2;
+    ptrdiff_t diff = third - first;
+    return diff == 2 ? 0 : 1;
+}
