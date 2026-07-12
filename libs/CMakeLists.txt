@@ -60,5 +60,6 @@ add_scpp_module_artifacts(scpp_scpp_artifacts
     "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
     scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/scpp.scpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/enum_cast/scpp_enum_cast.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/io/scpp_io.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/rand/scpp_rand.scpp")

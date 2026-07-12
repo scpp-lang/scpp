@@ -3973,15 +3973,34 @@ void run_cli_extension_tests() {
 
 void run_enum_tests() {
     {
-        std::string case_name = "enum_class_same_type_comparison_and_casts_compile_and_run";
+        std::string case_name = "enum_cast_returns_expected_value_for_declared_enumerator";
         cases_run++;
         RunResult result = compile_and_run(
+            "import std;\n"
+            "import scpp;\n"
             "enum class Color : uint8_t { red = 1, green = 2, blue = 3 };\n"
             "int main() {\n"
-            "    Color color = static_cast<Color>((uint8_t)2);\n"
-            "    if (color != Color::green) return 1;\n"
+            "    auto color = scpp::enum_cast<Color>((uint8_t)2);\n"
+            "    if (!color.has_value()) return 1;\n"
+            "    if (color.value() != Color::green) return 2;\n"
             "    uint8_t raw = static_cast<uint8_t>(Color::blue);\n"
             "    return (int)raw - 3;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "enum_cast_returns_invalid_value_error_for_unknown_enumerator";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "import std;\n"
+            "import scpp;\n"
+            "enum class Color : uint8_t { red = 1, green = 2, blue = 3 };\n"
+            "int main() {\n"
+            "    auto color = scpp::enum_cast<Color>((uint8_t)9);\n"
+            "    if (color.has_value()) return 1;\n"
+            "    return color.error() == scpp::enum_cast_error::invalid_value ? 0 : 2;\n"
             "}\n",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
@@ -4011,25 +4030,29 @@ void run_enum_tests() {
     }
 
     {
-        std::string case_name = "enum_class_implicit_int_to_enum_is_rejected";
+        std::string case_name = "enum_class_explicit_int_to_enum_cast_is_rejected";
         cases_run++;
         bool threw = false;
         try {
             scpp::Program program = scpp::parse(
                 "enum class Color { red };\n"
-                "int main() { Color color = 1; return 0; }\n");
+                "int main() { Color color = static_cast<Color>(1); return 0; }\n");
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
-        } catch (const scpp::DataflowError&) {
+        } catch (const scpp::DataflowError& e) {
             threw = true;
-        } catch (const scpp::CodegenError&) {
+            expect(std::string(e.what()).find("scpp::enum_cast<Color>(value)") != std::string::npos,
+                   case_name + ": expected enum_cast guidance in move-check diagnostic");
+        } catch (const scpp::CodegenError& e) {
             threw = true;
+            expect(std::string(e.what()).find("scpp::enum_cast<Color>(value)") != std::string::npos,
+                   case_name + ": expected enum_cast guidance in codegen diagnostic");
         } catch (const scpp::ParseError&) {
             threw = true;
         }
-        expect(threw, case_name + ": expected implicit int-to-enum conversion to be rejected");
+        expect(threw, case_name + ": expected explicit int-to-enum cast to be rejected");
     }
 
     {

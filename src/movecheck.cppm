@@ -391,6 +391,15 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return scalar_names.contains(name);
 }
 
+[[nodiscard]] bool is_integral_scalar_type_name(const std::string& name) {
+    static const std::unordered_set<std::string> integral_scalar_names = {
+        "char",      "int",          "long",         "unsigned int", "unsigned long", "int8_t",  "int16_t",
+        "int32_t",   "int64_t",      "uint8_t",      "uint16_t",     "uint32_t",      "uint64_t", "size_t",
+        "ptrdiff_t",
+    };
+    return integral_scalar_names.contains(name);
+}
+
 [[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name) {
     if (program == nullptr) return nullptr;
     for (const EnumDef& def : program->enums) {
@@ -3202,17 +3211,20 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 bool scalar_target = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
                 if (scalar_source && scalar_target) return;
 
+                bool integral_source = source_type.has_value() && source_type->kind == TypeKind::Named &&
+                                       is_integral_scalar_type_name(source_type->name);
+                bool target_is_enum = is_enum_type(expr.type, body.program);
+                if (integral_source && target_is_enum) {
+                    throw DataflowError("cannot cast an integer value to enum class '" + expr.type.name +
+                                            "'; use scpp::enum_cast<" + expr.type.name + ">(value) instead",
+                                        state.current_loc);
+                }
+
                 const Type* source_enum_underlying =
                     source_type.has_value() && source_type->kind == TypeKind::Named ? enum_underlying_type(*source_type, body.program)
                                                                                     : nullptr;
-                const Type* target_enum_underlying =
-                    expr.type.kind == TypeKind::Named ? enum_underlying_type(expr.type, body.program) : nullptr;
                 if (source_type.has_value() && source_enum_underlying != nullptr && expr.type.kind == TypeKind::Named &&
                     types_equal(*source_enum_underlying, expr.type)) {
-                    return;
-                }
-                if (source_type.has_value() && source_type->kind == TypeKind::Named && target_enum_underlying != nullptr &&
-                    types_equal(*source_type, *target_enum_underlying)) {
                     return;
                 }
 
@@ -3229,9 +3241,9 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 
                 {
                     throw DataflowError(
-                        "a cast is only supported between two builtin scalar types, between an enum class and its "
-                        "underlying integer type, or between two raw pointer types inside '[[scpp::unsafe]] { }', "
-                        "in this version",
+                        "a cast is only supported between two builtin scalar types, from an enum class to its "
+                        "underlying integer type, or between two raw pointer types inside '[[scpp::unsafe]] { }', in "
+                        "this version",
                         state.current_loc);
                 }
             }

@@ -1,0 +1,34 @@
+// scpp_enum_cast.scpp
+//
+// The `:enum_cast` partition of the "scpp" module: a checked integer-to-enum
+// conversion API whose validation step is lowered by the compiler using the
+// destination enum's declared enumerators.
+export module scpp:enum_cast;
+
+import std;
+
+namespace scpp {
+
+export enum class enum_cast_error {
+    invalid_value,
+};
+
+template<typename T, typename U>
+bool __enum_cast_store(U value, T& out) {
+    return false;
+}
+
+export template<typename T, typename U>
+std::expected<T, scpp::enum_cast_error> enum_cast(U value) {
+    T converted;
+    if (scpp::__enum_cast_store<T>(value, converted)) {
+        std::expected<T, scpp::enum_cast_error> result{converted};
+        return std::move(result);
+    }
+
+    std::unexpected<scpp::enum_cast_error> err{scpp::enum_cast_error::invalid_value};
+    std::expected<T, scpp::enum_cast_error> result{err};
+    return std::move(result);
+}
+
+} // namespace scpp
