@@ -9,7 +9,7 @@
 // principle §5.11/§5.14 both establish.
 class Num {
 public:
-    int v;
+    int v{};
     int doubled() {
         return this->v + this->v;
     }
@@ -19,17 +19,14 @@ template<typename T>
 class Holder {
     T item;
 public:
-    Holder(const T& x) {
-        this->item = x;
-        return;
-    }
+    Holder(const T& x) : item{x} { return; }
     int bad() {
         return this->item.doubled();
     }
 };
 
 int main() {
-    Num a;
+    Num a{};
     a.v = 21;
     Holder<Num> h{a};
     return h.bad();

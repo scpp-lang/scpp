@@ -5,7 +5,7 @@ public:
 };
 
 int main() {
-    Callable c;
+    Callable c{};
     print_int(c());
     print_int(std::move(c)());
     return 0;

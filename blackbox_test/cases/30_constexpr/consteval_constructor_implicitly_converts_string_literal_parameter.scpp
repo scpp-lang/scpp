@@ -1,6 +1,6 @@
 class Box {
 public:
-    int value;
+    int value{};
     consteval Box(const char* text) {
         this->value = 17;
         return;

@@ -534,6 +534,46 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return true;
 }
 
+[[nodiscard]] bool is_constructor_function(const Function& fn) {
+    if (fn.member_owner_class.empty() || !fn.name.ends_with("_new") || fn.params.empty()) return false;
+    const Type& this_param = fn.params[0].type;
+    return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
+           this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
+}
+
+void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def) {
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration) return;
+    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
+    std::unordered_set<std::string> direct_field_names;
+    for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
+    for (const MemberInitializer& init : ctor.member_initializers) {
+        if (!direct_field_names.contains(init.member_name)) {
+            throw DataflowError("constructor for class '" + def.name + "' names unknown member '" + init.member_name +
+                                    "' in its member-initializer-list",
+                                init.loc.is_known() ? init.loc : ctor.loc);
+        }
+    }
+    std::vector<std::string> missing;
+    for (const ClassField& field : def.fields) {
+        if (field.type.kind == TypeKind::Array) continue;
+        bool covered_by_ctor = std::any_of(ctor.member_initializers.begin(), ctor.member_initializers.end(),
+                                           [&](const MemberInitializer& init) { return init.member_name == field.name; });
+        if (!covered_by_ctor && !field.default_initializer.has_value()) missing.push_back(field.name);
+    }
+    if (!missing.empty()) {
+        std::string names;
+        for (size_t i = 0; i < missing.size(); i++) {
+            if (i > 0) names += ", ";
+            names += "'" + missing[i] + "'";
+        }
+        throw DataflowError("constructor for class '" + def.name + "' leaves member(s) " + names +
+                                " uninitialized; each constructor must initialize every non-static data member "
+                                "either via its own member-initializer-list or an in-class default member "
+                                "initializer (spec §6.1(4))",
+                            ctor.loc);
+    }
+}
+
 // spec §6.5(2): a class has an implicitly-defined copy constructor iff
 // it declares none of {copy constructor, copy assignment operator,
 // destructor} itself (ch08 Q15's "no mixed state" tightening) *and*
@@ -4502,6 +4542,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.template_params = fn.template_params;
     clone.generic_method_owner_id = fn.generic_method_owner_id;
     clone.member_owner_class = fn.member_owner_class;
+    clone.member_initializers = fn.member_initializers;
     clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
     clone.is_static = fn.is_static;
     clone.access = fn.access;
@@ -5624,6 +5665,28 @@ private:
                 np.type = resolve_generic_type(np.type, method_tmpl.loc);
                 clone.params.push_back(std::move(np));
             }
+            clone.member_initializers = method_tmpl.member_initializers;
+            for (MemberInitializer& init : clone.member_initializers) {
+                if (init.initializer.expr) {
+                    substitute_type_params_in_expr(*init.initializer.expr, type_replacements);
+                    substitute_type_packs_in_expr(*init.initializer.expr, pack_replacements);
+                    for (size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                        if (!template_params_copy[i].is_non_type) continue;
+                        substitute_non_type_param_in_expr(*init.initializer.expr, template_params_copy[i].name,
+                                                          non_type_args[i]);
+                    }
+                    resolve_generic_types_in_expr(*init.initializer.expr);
+                }
+                for (ExprPtr& arg : init.initializer.brace_args) {
+                    substitute_type_params_in_expr(*arg, type_replacements);
+                    substitute_type_packs_in_expr(*arg, pack_replacements);
+                    for (size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                        if (!template_params_copy[i].is_non_type) continue;
+                        substitute_non_type_param_in_expr(*arg, template_params_copy[i].name, non_type_args[i]);
+                    }
+                    resolve_generic_types_in_expr(*arg);
+                }
+            }
             clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
             if (clone.body) {
                 substitute_type_params_in_stmt(*clone.body, type_replacements);
@@ -6068,6 +6131,17 @@ private:
                     nf.name = f.name;
                     nf.access = f.access;
                     nf.type = substitute_type_params(f.type, type_replacements);
+                    if (f.default_initializer) {
+                        nf.default_initializer = f.default_initializer;
+                        if (nf.default_initializer->expr) {
+                            substitute_type_params_in_expr(*nf.default_initializer->expr, type_replacements);
+                            resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                        }
+                        for (const ExprPtr& arg : nf.default_initializer->brace_args) {
+                            substitute_type_params_in_expr(*arg, type_replacements);
+                            resolve_generic_types_in_expr(*arg);
+                        }
+                    }
                     field_types[nf.name] = nf.type;
                     check_class.fields.push_back(std::move(nf));
                 }
@@ -6527,6 +6601,17 @@ private:
                 nf.name = f.name;
                 nf.type = substitute_type_params(f.type, type_replacements);
                 nf.type = resolve_generic_type(nf.type, loc);
+                if (f.default_initializer) {
+                    nf.default_initializer = f.default_initializer;
+                    if (nf.default_initializer->expr) {
+                        substitute_type_params_in_expr(*nf.default_initializer->expr, type_replacements);
+                        resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                    }
+                    for (const ExprPtr& arg : nf.default_initializer->brace_args) {
+                        substitute_type_params_in_expr(*arg, type_replacements);
+                        resolve_generic_types_in_expr(*arg);
+                    }
+                }
                 concrete.fields.push_back(std::move(nf));
             }
             program_.structs.push_back(std::move(concrete));
@@ -6602,6 +6687,18 @@ private:
                 nf.type = instantiate_type_pattern(f.type, class_selection.bindings.type_replacements,
                                                    class_selection.bindings.type_pack_replacements);
                 nf.type = resolve_generic_type(nf.type, loc);
+                if (f.default_initializer) {
+                    nf.default_initializer = f.default_initializer;
+                    if (nf.default_initializer->expr) {
+                        substitute_type_params_in_expr(*nf.default_initializer->expr,
+                                                       class_selection.bindings.type_replacements);
+                        resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                    }
+                    for (const ExprPtr& arg : nf.default_initializer->brace_args) {
+                        substitute_type_params_in_expr(*arg, class_selection.bindings.type_replacements);
+                        resolve_generic_types_in_expr(*arg);
+                    }
+                }
                 concrete.fields.push_back(std::move(nf));
             }
             program_.classes.push_back(std::move(concrete));
@@ -6677,6 +6774,21 @@ private:
                                                        class_selection.bindings.type_pack_replacements);
                     np.type = resolve_generic_type(np.type, method_tmpl.loc);
                     clone.params.push_back(std::move(np));
+                }
+                clone.member_initializers = method_tmpl.member_initializers;
+                for (MemberInitializer& init : clone.member_initializers) {
+                    if (init.initializer.expr) {
+                        substitute_type_params_in_expr(*init.initializer.expr,
+                                                       class_selection.bindings.type_replacements);
+                        substitute_type_packs_in_expr(*init.initializer.expr,
+                                                      class_selection.bindings.type_pack_replacements);
+                        resolve_generic_types_in_expr(*init.initializer.expr);
+                    }
+                    for (ExprPtr& arg : init.initializer.brace_args) {
+                        substitute_type_params_in_expr(*arg, class_selection.bindings.type_replacements);
+                        substitute_type_packs_in_expr(*arg, class_selection.bindings.type_pack_replacements);
+                        resolve_generic_types_in_expr(*arg);
+                    }
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
@@ -6787,6 +6899,19 @@ private:
                         new_param.type = param.type;
                     }
                     clone.params.push_back(std::move(new_param));
+                }
+                clone.member_initializers = method_tmpl.member_initializers;
+                for (MemberInitializer& init : clone.member_initializers) {
+                    if (init.initializer.expr) {
+                        for (size_t i = 0; i < params_copy.size(); i++) {
+                            substitute_non_type_param_in_expr(*init.initializer.expr, params_copy[i].name, non_type_args[i]);
+                        }
+                    }
+                    for (ExprPtr& arg : init.initializer.brace_args) {
+                        for (size_t i = 0; i < params_copy.size(); i++) {
+                            substitute_non_type_param_in_expr(*arg, params_copy[i].name, non_type_args[i]);
+                        }
+                    }
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
@@ -6991,6 +7116,17 @@ private:
             nf.access = f.access;
             nf.type = instantiate_type_pattern(f.type, type_replacements, pack_replacements);
             nf.type = resolve_generic_type(nf.type, loc);
+            if (f.default_initializer) {
+                nf.default_initializer = f.default_initializer;
+                if (nf.default_initializer->expr) {
+                    substitute_type_params_in_expr(*nf.default_initializer->expr, type_replacements);
+                    resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                }
+                for (const ExprPtr& arg : nf.default_initializer->brace_args) {
+                    substitute_type_params_in_expr(*arg, type_replacements);
+                    resolve_generic_types_in_expr(*arg);
+                }
+            }
             concrete.fields.push_back(std::move(nf));
         }
         program_.classes.push_back(std::move(concrete));
@@ -9409,6 +9545,11 @@ void check_moves(const Program& program) {
     for (const ClassDef& def : program.classes) {
         if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
         if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
+    }
+    for (const ClassDef& def : program.classes) {
+        for (const Function& fn : program.functions) {
+            validate_constructor_member_initialization(fn, def);
+        }
     }
     // ch05 §5.11: every concept/bare-`auto` witness class (never a real,
     // user-written one) -- see ClassDef::is_concept_witness and

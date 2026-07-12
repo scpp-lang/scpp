@@ -5,7 +5,7 @@
 // assignment half of this same rule; this covers the construction half.
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int start) {
         this->value = start;

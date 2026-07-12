@@ -83,7 +83,7 @@ std::filesystem::path build_server_binary(const std::filesystem::path& root, int
     std::ofstream out(source);
     out << "import httpserver;\n\n"
         << "int main() {\n"
-        << "    httpserver::ServerBuilder builder;\n"
+        << "    httpserver::ServerBuilder builder{};\n"
         << "    builder.mount(\"/\", \"" << escape_c_string(root.string()) << "\");\n"
         << "    builder.set_port(" << port << ");\n"
         << "    builder.set_max_connections(32);\n"

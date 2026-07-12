@@ -4,7 +4,7 @@ class Box;
 template<>
 class Box<> {
 public:
-    int value;
+    int value{};
     consteval Box(const char* s) {
         this->value = 7;
         return;
@@ -15,7 +15,7 @@ public:
 template<typename Head, typename... Tail>
 class Box<Head, Tail...> : private Box<Tail...> {
 public:
-    int value;
+    int value{};
     consteval Box(const char* s) {
         this->value = 9;
         return;

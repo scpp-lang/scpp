@@ -4,7 +4,7 @@ import std;
 // [[scpp::unsafe]].
 class Box {
 public:
-    int value;
+    int value{};
 
     Box(int v) {
         this->value = v;
@@ -17,7 +17,7 @@ public:
 };
 
 int main() {
-    std::storage_for<Box> slot;
+    std::storage_for<Box> slot{};
     [[scpp::unsafe]] {
         Box* p = new ((Box*)&slot) Box(9);
         return p->get() - 9;

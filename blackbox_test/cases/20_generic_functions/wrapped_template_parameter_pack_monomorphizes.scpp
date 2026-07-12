@@ -14,7 +14,7 @@ int forward_tokens(const Token<Tail>&... tokens) {
 }
 
 int main() {
-    Token<int> a;
-    Token<char> b;
+    Token<int> a{};
+    Token<char> b{};
     return forward_tokens(a, b);
 }

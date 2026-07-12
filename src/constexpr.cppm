@@ -430,7 +430,11 @@ private:
                     ObjectValue object;
                     object.type_name = type.name;
                     for (const ClassField& field : collect_class_fields(*class_it->second)) {
-                        object.fields.emplace(field.name, make_default_cell(field.type, loc));
+                        if (field.type.kind == TypeKind::Reference && field.type.pointee) {
+                            object.fields.emplace(field.name, make_default_cell(*field.type.pointee, loc));
+                        } else {
+                            object.fields.emplace(field.name, make_default_cell(field.type, loc));
+                        }
                     }
                     cell->data = std::move(object);
                     return cell;
@@ -822,6 +826,145 @@ private:
         return false;
     }
 
+    [[nodiscard]] bool is_constructor_function(const Function& fn) const {
+        if (fn.member_owner_class.empty() || !fn.name.ends_with("_new") || fn.params.empty()) return false;
+        const Type& this_param = fn.params[0].type;
+        return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
+               this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
+    }
+
+    void apply_default_initializers_to_named_object(const std::shared_ptr<Cell>& object_cell, const Type& object_type,
+                                                    const SourceLocation& loc) {
+        if (object_type.kind != TypeKind::Named) return;
+        auto* object = std::get_if<ObjectValue>(&object_cell->data);
+        if (!object) return;
+        if (auto struct_it = structs_by_name_.find(object_type.name); struct_it != structs_by_name_.end()) {
+            for (const StructField& field : struct_it->second->fields) {
+                if (!field.default_initializer) continue;
+                auto field_it = object->fields.find(field.name);
+                if (field_it == object->fields.end()) continue;
+                apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+            }
+            return;
+        }
+        if (auto class_it = classes_by_name_.find(object_type.name); class_it != classes_by_name_.end()) {
+            for (const ClassField& field : collect_class_fields(*class_it->second)) {
+                if (!field.default_initializer) continue;
+                auto field_it = object->fields.find(field.name);
+                if (field_it == object->fields.end()) continue;
+                apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+            }
+        }
+    }
+
+    void apply_initializer_to_field(std::shared_ptr<Cell>& field_cell, const Type& field_type, const Initializer& init,
+                                    const SourceLocation& loc) {
+        if (field_type.kind == TypeKind::Reference) {
+            const Expr* ref_expr = init.expr.get();
+            if (init.has_brace_args) {
+                if (init.brace_args.size() != 1) {
+                    throw ConstexprError(loc, "a reference member must be initialized with exactly one expression");
+                }
+                ref_expr = init.brace_args[0].get();
+            }
+            if (ref_expr == nullptr) throw ConstexprError(loc, "a reference member must be initialized");
+            if (field_type.is_mutable_ref) {
+                field_cell = resolve_lvalue(*ref_expr).cell;
+            } else {
+                try {
+                    field_cell = resolve_lvalue(*ref_expr).cell;
+                } catch (const ConstexprError&) {
+                    field_cell = evaluate_expr(*ref_expr);
+                }
+            }
+            return;
+        }
+        if (field_type.kind == TypeKind::Span) {
+            const Expr* span_expr = init.expr.get();
+            if (init.has_brace_args) {
+                if (init.brace_args.size() != 1) {
+                    throw ConstexprError(loc, "a span member must be initialized with exactly one array expression");
+                }
+                span_expr = init.brace_args[0].get();
+            }
+            if (span_expr == nullptr) throw ConstexprError(loc, "a span member must be initialized");
+            field_cell = bind_read_only_span(field_type, *span_expr, loc);
+            return;
+        }
+        if (field_type.kind == TypeKind::Named &&
+            (is_class_name(field_type.name) || structs_by_name_.contains(field_type.name)) && init.has_brace_args) {
+            std::vector<std::shared_ptr<Cell>> arg_values;
+            arg_values.reserve(init.brace_args.size());
+            for (const ExprPtr& arg : init.brace_args) arg_values.push_back(evaluate_expr(*arg));
+            if (const Function* ctor = find_constructor(field_type.name, arg_values, /*require_constexpr=*/true)) {
+                std::vector<Binding> bindings;
+                bindings.reserve(ctor->params.size());
+                bindings.push_back(Binding{field_cell, false});
+                for (size_t i = 1; i < ctor->params.size(); ++i) {
+                    const Param& param = ctor->params[i];
+                    const Expr& arg_expr = *init.brace_args[i - 1];
+                    if (param.type.kind == TypeKind::Reference) {
+                        if (param.type.is_rvalue_ref) {
+                            bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+                        } else if (param.type.is_mutable_ref) {
+                            bindings.push_back(Binding{resolve_lvalue(arg_expr).cell, false});
+                        } else {
+                            try {
+                                bindings.push_back(Binding{resolve_lvalue(arg_expr).cell, true});
+                            } catch (const ConstexprError&) {
+                                bindings.push_back(Binding{evaluate_expr(arg_expr), true});
+                            }
+                        }
+                    } else {
+                        bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+                    }
+                }
+                static_cast<void>(call_function(*ctor, std::move(bindings), loc));
+                return;
+            }
+            if (init.brace_args.empty()) {
+                apply_default_initializers_to_named_object(field_cell, field_type, loc);
+                return;
+            }
+        }
+        if (init.has_brace_args) {
+            if (init.brace_args.empty()) return;
+            if (init.brace_args.size() != 1) {
+                throw ConstexprError(loc, "brace-initialization of this member requires exactly one expression");
+            }
+            copy_into(field_cell, evaluate_expr(*init.brace_args[0]), loc);
+            return;
+        }
+        if (init.expr) copy_into(field_cell, evaluate_expr(*init.expr), loc);
+    }
+
+    void execute_constructor_member_initializers(const Function& fn) {
+        if (!is_constructor_function(fn)) return;
+        Binding this_binding = lookup_binding("this", fn.loc);
+        auto* object = std::get_if<ObjectValue>(&this_binding.cell->data);
+        if (!object) throw ConstexprError(fn.loc, "constructor receiver is not an object during constant evaluation");
+        auto class_it = classes_by_name_.find(fn.member_owner_class);
+        if (class_it == classes_by_name_.end()) {
+            throw ConstexprError(fn.loc, "missing constexpr class definition for '" + fn.member_owner_class + "'");
+        }
+        for (const ClassField& field : class_it->second->fields) {
+            const Initializer* selected = nullptr;
+            for (const MemberInitializer& init : fn.member_initializers) {
+                if (init.member_name == field.name) {
+                    selected = &init.initializer;
+                    break;
+                }
+            }
+            if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
+            if (selected == nullptr) continue;
+            auto field_it = object->fields.find(field.name);
+            if (field_it == object->fields.end()) {
+                throw ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'");
+            }
+            apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc);
+        }
+    }
+
     [[nodiscard]] bool is_class_name(std::string_view name) const {
         return classes_by_name_.contains(std::string(name));
     }
@@ -927,6 +1070,7 @@ private:
         auto& frame = frames_.back();
         for (size_t i = 0; i < fn.params.size(); ++i) frame.emplace(fn.params[i].name, std::move(bindings[i]));
         try {
+            execute_constructor_member_initializers(fn);
             execute_stmt(*fn.body, fn.return_type);
         } catch (const ReturnSignal& signal) {
             frames_.pop_back();
@@ -1081,6 +1225,11 @@ private:
         for (const ExprPtr& arg : expr.args) arg_values.push_back(evaluate_expr(*arg));
         const Function* ctor = find_constructor(expr.name, arg_values, /*require_constexpr=*/true);
         if (!ctor) {
+            if (expr.args.empty() &&
+                (classes_by_name_.contains(expr.name) || structs_by_name_.contains(expr.name))) {
+                apply_default_initializers_to_named_object(object, object_type, expr.loc);
+                return object;
+            }
             if (has_runtime_only_match(expr.name + "_new", arg_values)) {
                 throw ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval constructors");
             }
@@ -1425,6 +1574,12 @@ private:
                     for (const ExprPtr& arg : stmt.ctor_args) arg_values.push_back(evaluate_expr(*arg));
                     const Function* ctor = find_callable(stmt.type.name + "_new", arg_values, /*require_constexpr=*/true);
                     if (!ctor) {
+                        if (stmt.ctor_args.empty() &&
+                            (classes_by_name_.contains(stmt.type.name) || structs_by_name_.contains(stmt.type.name))) {
+                            apply_default_initializers_to_named_object(cell, stmt.type, stmt.loc);
+                            frames_.back()[stmt.var_name] = Binding{cell, stmt.is_const || stmt.is_constexpr};
+                            return;
+                        }
                         throw ConstexprError(stmt.loc, "no constexpr/consteval constructor matches for type '" + stmt.type.name + "'");
                     }
                     for (size_t i = 1; i < ctor->params.size(); ++i) {

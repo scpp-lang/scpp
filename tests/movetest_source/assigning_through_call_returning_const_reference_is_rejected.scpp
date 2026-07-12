@@ -8,7 +8,7 @@ const int& get_x(const Point& p) {
 }
 
 int f() {
-    Point p;
+    Point p{};
     p.x = 1;
     get_x(p) = 42;
     return 0;

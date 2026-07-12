@@ -5,7 +5,7 @@ struct Pair {
 
 class Holder {
 public:
-    Pair pair_;
+    Pair pair_{};
 
     Holder(int value) {
         this->pair_.value = value;

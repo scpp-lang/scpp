@@ -7,7 +7,7 @@
 // (used in the final `return`) -- the two conflict.
 class Counter {
 public:
-    int value;
+    int value{};
     Counter(int v) {
         this->value = v;
         return;

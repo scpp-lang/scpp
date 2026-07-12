@@ -7,7 +7,7 @@ class NotThreadMovable {
 private:
     int& ref;
 public:
-    NotThreadMovable(int& x) : ref(x) {
+    NotThreadMovable(int& x) : ref{x} {
         return;
     }
 };

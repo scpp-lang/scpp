@@ -50,7 +50,7 @@ public:
 
 export class mt19937 {
 private:
-    void* handle_;
+    void* handle_{};
 
 public:
     mt19937(int seed) {

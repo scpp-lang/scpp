@@ -14,7 +14,7 @@ public:
 };
 
 int main() {
-    Holder<void()> empty;
-    Holder<void(int)> unary;
+    Holder<void()> empty{};
+    Holder<void(int)> unary{};
     return empty.size() + unary.size();
 }

@@ -3,7 +3,7 @@ import std;
 // contract; `Sig const` should call a `const` target.
 class Adder {
 private:
-    int delta;
+    int delta{};
 public:
     Adder(int n) {
         this->delta = n;

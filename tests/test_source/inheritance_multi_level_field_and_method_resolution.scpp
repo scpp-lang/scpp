@@ -11,7 +11,7 @@ public:
     int leg_count() const { return this.legs; }
     int sound() const { return 0; }
 private:
-    int legs;
+    int legs{};
 };
 
 class Dog : public Animal {

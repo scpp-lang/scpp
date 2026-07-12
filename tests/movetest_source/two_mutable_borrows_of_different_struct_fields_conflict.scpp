@@ -4,7 +4,7 @@ struct Point {
 };
 
 int f() {
-    Point p;
+    Point p{};
     int& rx = p.x;
     int& ry = p.y;
     rx = 1;

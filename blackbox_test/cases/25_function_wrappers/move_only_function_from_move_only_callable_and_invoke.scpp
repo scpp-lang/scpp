@@ -2,7 +2,7 @@ import std;
 // ch05 §5.18: `std::move_only_function<Sig>` accepts move-only targets.
 class MoveOnlyAdder {
 private:
-    std::unique_ptr<int> delta;
+    std::unique_ptr<int> delta{};
 public:
     MoveOnlyAdder(std::unique_ptr<int> p) {
         this->delta = std::move(p);

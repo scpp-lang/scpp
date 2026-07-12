@@ -16,7 +16,7 @@ public:
         return apply([this](int z) -> int { return this->scale(z); }, z);
     }
 private:
-    int factor;
+    int factor{};
 };
 
 int main() {

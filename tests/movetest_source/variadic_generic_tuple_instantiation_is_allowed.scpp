@@ -16,6 +16,6 @@ class Tuple<Head, Tail...> : private Tuple<Tail...> {
 };
 
 int main() {
-    Tuple<int, bool, char> t;
+    Tuple<int, bool, char> t{};
     return 0;
 }

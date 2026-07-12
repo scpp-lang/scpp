@@ -17,7 +17,7 @@ consteval int take(TagList<> tags) {
 }
 
 consteval int answer() {
-    TagList<int, bool> tags;
+    TagList<int, bool> tags{};
     return take(tags);
 }
 

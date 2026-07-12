@@ -2,7 +2,7 @@ import std;
 
 class Token {
 private:
-    std::unique_ptr<int> p;
+    std::unique_ptr<int> p{};
 public:
     Token(int value) {
         this->p = std::make_unique<int>(value);

@@ -3,8 +3,8 @@
 // when construction goes through a `constexpr` constructor.
 class Point {
 public:
-    int x;
-    int y;
+    int x{};
+    int y{};
 
     constexpr Point(int x, int y) {
         this->x = x;

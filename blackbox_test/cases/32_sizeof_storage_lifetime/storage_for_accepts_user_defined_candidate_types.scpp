@@ -3,8 +3,8 @@ import std;
 // types participate in the same max-size/max-alignment computation.
 class Widget {
 public:
-    char c;
-    long value;
+    char c{};
+    long value{};
 };
 
 struct Wrapper {

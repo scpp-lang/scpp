@@ -1,0 +1,13 @@
+class Mixed {
+    int x{};
+    int y;
+public:
+    Mixed() : y{1} {}
+    Mixed(int value) : x{value} {}
+};
+
+int main() {
+    Mixed a{};
+    Mixed b{2};
+    return 0;
+}

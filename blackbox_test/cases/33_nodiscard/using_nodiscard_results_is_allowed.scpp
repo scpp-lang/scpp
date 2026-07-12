@@ -13,7 +13,7 @@ struct [[nodiscard]] Status {
 };
 
 Status make_status() {
-    Status s;
+    Status s{};
     s.code = 5;
     return s;
 }

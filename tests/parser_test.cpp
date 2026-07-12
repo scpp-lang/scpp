@@ -37,6 +37,13 @@ const scpp::Function* find_function_named(const scpp::Program& program, std::str
     return nullptr;
 }
 
+const scpp::ClassDef* find_class_named(const scpp::Program& program, std::string_view name) {
+    for (const scpp::ClassDef& def : program.classes) {
+        if (def.name == name) return &def;
+    }
+    return nullptr;
+}
+
 std::string read_file(const std::string& path) {
     std::ifstream file(path);
     std::ostringstream buffer;
@@ -205,6 +212,105 @@ void test_class_var_decl_with_paren_init_is_rejected() {
                "class_var_decl_with_paren_init_is_rejected: expected brace-init guidance in error message");
     }
     expect(threw, "class_var_decl_with_paren_init_is_rejected: expected a ParseError");
+}
+
+void test_bare_local_var_decl_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int main() { int x; return 0; }");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(std::string(e.what()).find("explicit initializer") != std::string::npos,
+               "bare_local_var_decl_is_rejected: expected explicit-initializer guidance");
+    }
+    expect(threw, "bare_local_var_decl_is_rejected: expected a ParseError");
+}
+
+void test_valid_local_initializer_forms_parse() {
+    scpp::Program program = scpp::parse(
+        "struct Pair { int first; int second; };\n"
+        "int main() {\n"
+        "    int a{};\n"
+        "    Pair b{1, 2};\n"
+        "    int c = 3;\n"
+        "    return a + b.first + b.second + c;\n"
+        "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "valid_local_initializer_forms_parse: expected main");
+    if (main_fn == nullptr) return;
+    expect(main_fn->body->statements.size() == 4, "valid_local_initializer_forms_parse: expected 4 statements");
+    if (main_fn->body->statements.size() != 4) return;
+
+    const scpp::Stmt& empty_braces = *main_fn->body->statements[0];
+    expect(empty_braces.kind == scpp::StmtKind::VarDecl && empty_braces.has_ctor_args && empty_braces.ctor_args.empty(),
+           "valid_local_initializer_forms_parse: int a{} should parse as brace-init");
+
+    const scpp::Stmt& brace_args = *main_fn->body->statements[1];
+    expect(brace_args.kind == scpp::StmtKind::VarDecl && brace_args.has_ctor_args && brace_args.ctor_args.size() == 2,
+           "valid_local_initializer_forms_parse: Pair b{1, 2} should keep 2 brace args");
+
+    const scpp::Stmt& equals_init = *main_fn->body->statements[2];
+    expect(equals_init.kind == scpp::StmtKind::VarDecl && equals_init.init != nullptr &&
+               equals_init.init->kind == scpp::ExprKind::IntegerLiteral && equals_init.init->int_value == 3,
+           "valid_local_initializer_forms_parse: int c = 3 should keep '=' initializer");
+}
+
+void test_class_default_member_initializers_parse() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "    int a{};\n"
+        "    int b = 7;\n"
+        "public:\n"
+        "    Box() {}\n"
+        "};\n");
+    const scpp::ClassDef* box = find_class_named(program, "Box");
+    expect(box != nullptr, "class_default_member_initializers_parse: expected Box");
+    if (box == nullptr) return;
+    expect(box->fields.size() == 2, "class_default_member_initializers_parse: expected 2 fields");
+    if (box->fields.size() != 2) return;
+
+    expect(box->fields[0].default_initializer.has_value(),
+           "class_default_member_initializers_parse: first field should have brace default");
+    if (box->fields[0].default_initializer.has_value()) {
+        expect(box->fields[0].default_initializer->has_brace_args &&
+                   box->fields[0].default_initializer->brace_args.empty(),
+               "class_default_member_initializers_parse: int a{} should preserve empty brace-init");
+    }
+
+    expect(box->fields[1].default_initializer.has_value(),
+           "class_default_member_initializers_parse: second field should have '=' default");
+    if (box->fields[1].default_initializer.has_value()) {
+        expect(!box->fields[1].default_initializer->has_brace_args &&
+                   box->fields[1].default_initializer->expr != nullptr &&
+                   box->fields[1].default_initializer->expr->kind == scpp::ExprKind::IntegerLiteral &&
+                   box->fields[1].default_initializer->expr->int_value == 7,
+               "class_default_member_initializers_parse: int b = 7 should preserve expression initializer");
+    }
+}
+
+void test_constructor_member_initializer_list_parses() {
+    scpp::Program program = scpp::parse(
+        "class Holder {\n"
+        "    int value;\n"
+        "    int& ref;\n"
+        "public:\n"
+        "    Holder(int seed, int& input) : ref{input}, value{seed} {}\n"
+        "};\n");
+    const scpp::Function* ctor = find_function_named(program, "Holder_new");
+    expect(ctor != nullptr, "constructor_member_initializer_list_parses: expected constructor");
+    if (ctor == nullptr) return;
+    expect(ctor->member_initializers.size() == 2,
+           "constructor_member_initializer_list_parses: expected 2 member initializers");
+    if (ctor->member_initializers.size() != 2) return;
+
+    expect(ctor->member_initializers[0].member_name == "ref" &&
+               ctor->member_initializers[0].initializer.has_brace_args &&
+               ctor->member_initializers[0].initializer.brace_args.size() == 1,
+           "constructor_member_initializer_list_parses: ref{input} should be preserved");
+    expect(ctor->member_initializers[1].member_name == "value" &&
+               ctor->member_initializers[1].initializer.has_brace_args &&
+               ctor->member_initializers[1].initializer.brace_args.size() == 1,
+           "constructor_member_initializer_list_parses: value{seed} should be preserved");
 }
 
 void test_while_loop() {
@@ -779,7 +885,7 @@ void test_struct_variable_and_member_access() {
     scpp::Program program = scpp::parse(
         "struct Point { int x; int y; };"
         "int f() {"
-        "    Point p;"
+        "    Point p{};"
         "    p.x = 1;"
         "    return p.x + p.y;"
         "}");
@@ -788,7 +894,8 @@ void test_struct_variable_and_member_access() {
     expect(decl.kind == scpp::StmtKind::VarDecl, "struct_variable_and_member_access: statement 0 should be VarDecl");
     expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "Point" && decl.var_name == "p",
            "struct_variable_and_member_access: decl should be 'Point p'");
-    expect(decl.init == nullptr, "struct_variable_and_member_access: no initializer given");
+    expect(decl.has_ctor_args && decl.ctor_args.empty(),
+           "struct_variable_and_member_access: Point p{} should parse as empty brace-init");
 
     const scpp::Stmt& assign_stmt = *fn.body->statements[1];
     expect(assign_stmt.kind == scpp::StmtKind::ExprStmt,
@@ -815,7 +922,7 @@ void test_nested_member_access() {
         "struct Inner { int v; };"
         "struct Outer { Inner inner; };"
         "int f() {"
-        "    Outer o;"
+        "    Outer o{};"
         "    return o.inner.v;"
         "}");
     const scpp::Function& fn = program.functions[0];
@@ -842,7 +949,7 @@ void test_array_field_and_subscript() {
     scpp::Program program = scpp::parse(
         "struct Buffer { int values[4]; };"
         "int f() {"
-        "    Buffer b;"
+        "    Buffer b{};"
         "    b.values[0] = 1;"
         "    return b.values[0];"
         "}");
@@ -893,7 +1000,7 @@ void test_local_array_declaration() {
 void test_struct_before_use_is_required() {
     bool threw = false;
     try {
-        scpp::parse("int f() { Point p; return 0; } struct Point { int x; };");
+        scpp::parse("int f() { Point p{}; return 0; } struct Point { int x; };");
     } catch (const scpp::ParseError&) {
         threw = true;
     }
@@ -901,7 +1008,7 @@ void test_struct_before_use_is_required() {
 }
 
 void test_unique_ptr_type_declaration() {
-    scpp::Program program = parse_with_std_imports("import std;\nint f() { std::unique_ptr<int> a; return 0; }");
+    scpp::Program program = parse_with_std_imports("import std;\nint f() { std::unique_ptr<int> a{}; return 0; }");
     const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "unique_ptr_type_declaration: statement 0 should be VarDecl");
@@ -910,14 +1017,15 @@ void test_unique_ptr_type_declaration() {
     expect(decl.type.template_args.size() == 1 && is_named_type(decl.type.template_args[0], "int"),
            "unique_ptr_type_declaration: pointee should be 'int'");
     expect(decl.var_name == "a", "unique_ptr_type_declaration: variable name should be 'a'");
-    expect(decl.init == nullptr, "unique_ptr_type_declaration: no initializer given");
+    expect(decl.has_ctor_args && decl.ctor_args.empty(),
+           "unique_ptr_type_declaration: unique_ptr local should use empty brace-init");
 }
 
 void test_unique_ptr_of_struct_type() {
     scpp::Program program = parse_with_std_imports(
         "import std;\n"
         "struct Point { int x; int y; };"
-        "int f() { std::unique_ptr<Point> a; return 0; }");
+        "int f() { std::unique_ptr<Point> a{}; return 0; }");
     const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "std::unique_ptr",
@@ -949,7 +1057,7 @@ void test_span_of_const_element_type() {
 
 void test_storage_for_type_declaration() {
     scpp::Program program =
-        scpp::parse("int f() { std::storage_for<int, long> slot; return (int)sizeof(slot); }");
+        scpp::parse("int f() { std::storage_for<int, long> slot{}; return (int)sizeof(slot); }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "storage_for_type_declaration: statement 0 should be VarDecl");
@@ -964,7 +1072,7 @@ void test_move_expression() {
     scpp::Program program = parse_with_std_imports(
         "import std;\n"
         "int f() {"
-        "    std::unique_ptr<int> a;"
+        "    std::unique_ptr<int> a{};"
         "    std::unique_ptr<int> b = std::move(a);"
         "    return 0;"
         "}");
@@ -982,7 +1090,7 @@ void test_move_as_function_argument() {
         "import std;\n"
         "int consume(std::unique_ptr<int> p) { return 0; }"
         "int f() {"
-        "    std::unique_ptr<int> a;"
+        "    std::unique_ptr<int> a{};"
         "    return consume(std::move(a));"
         "}");
     const scpp::Function& consume_fn = *find_function_named(program, "consume");
@@ -1063,7 +1171,7 @@ void test_new_and_delete_parse() {
 
 void test_placement_new_parse() {
     scpp::Program program = scpp::parse(
-        "int f() { [[scpp::unsafe]] { std::storage_for<int> slot; int* p = new ((int*)&slot) int(7); } return 0; }");
+        "int f() { [[scpp::unsafe]] { std::storage_for<int> slot{}; int* p = new ((int*)&slot) int(7); } return 0; }");
     const scpp::Stmt& unsafe_block = *program.functions[0].body->statements[0];
     const scpp::Stmt& decl = *unsafe_block.statements[1];
     expect(decl.kind == scpp::StmtKind::VarDecl, "placement_new_parse: statement 1 should be VarDecl");
@@ -1076,7 +1184,7 @@ void test_placement_new_parse() {
 
 void test_explicit_destructor_parse() {
     scpp::Program program = scpp::parse(
-        "class Box { public: ~Box() { return; } }; int f() { [[scpp::unsafe]] { Box* p; p->~Box(); } return 0; }");
+        "class Box { public: ~Box() { return; } }; int f() { [[scpp::unsafe]] { Box* p = (Box*)0; p->~Box(); } return 0; }");
     const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& unsafe_block = *fn.body->statements[0];
     const scpp::Stmt& stmt = *unsafe_block.statements[1];
@@ -1281,7 +1389,7 @@ void test_void_return_and_void_pointer_types() {
 }
 
 void test_char_type_declaration() {
-    scpp::Program program = scpp::parse("int f() { char c; return 0; }");
+    scpp::Program program = scpp::parse("int f() { char c{}; return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "char_type_declaration: statement should be VarDecl");
@@ -1569,7 +1677,7 @@ void test_nested_namespace_one_liner_qualifies_function_name() {
 void test_qualified_type_reference_parses() {
     scpp::Program program =
         scpp::parse("namespace std { struct Point { int x; }; }\n"
-                     "int use_it() { std::Point p; return p.x; }");
+                     "int use_it() { std::Point p{}; return p.x; }");
     expect(program.functions.size() == 1, "qualified_type_reference_parses: expected 1 function");
     const scpp::Stmt& decl = *program.functions[0].body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "qualified_type_reference_parses: expected a VarDecl");
@@ -1881,7 +1989,7 @@ void test_rvalue_reference_rejected_outside_parameter_position() {
         "    int&& field;\n"
         "};\n",
         "class field");
-    expect_rejected("import std;\nint f() { std::unique_ptr<int&&> p; return 0; }", "unique_ptr element type");
+    expect_rejected("import std;\nint f() { std::unique_ptr<int&&> p{}; return 0; }", "unique_ptr element type");
 }
 
 // ch05 §5.11: `template<typename T> concept Name = requires(...) { ...
@@ -2394,7 +2502,7 @@ void test_function_pointer_declarators_parse() {
         "int main() {\n"
         "    int (*fp)(int, int) = add;\n"
         "    int (* [[scpp::unsafe]] up)(int, int) = add;\n"
-        "    Op op;\n"
+        "    Op op{};\n"
         "    op.fn = fp;\n"
         "    return op.fn(2, 3) + (*up)(1, 1);\n"
         "}\n");
@@ -2581,7 +2689,7 @@ void test_function_type_template_argument_parses() {
         "public:\n"
         "    int value;\n"
         "};\n"
-        "int main() { Holder<int(int, int)> h; return 0; }\n");
+        "int main() { Holder<int(int, int)> h{}; return 0; }\n");
     const scpp::Function* main_fn = nullptr;
     for (const scpp::Function& fn : program.functions) {
         if (fn.name == "main") main_fn = &fn;
@@ -2606,7 +2714,7 @@ void test_qualified_function_type_template_argument_parses() {
         "public:\n"
         "    int value;\n"
         "};\n"
-        "int main() { Holder<int(int) const &&> h; return 0; }\n");
+        "int main() { Holder<int(int) const &&> h{}; return 0; }\n");
     const scpp::Function* main_fn = nullptr;
     for (const scpp::Function& fn : program.functions) {
         if (fn.name == "main") main_fn = &fn;
@@ -2849,7 +2957,7 @@ void test_generic_type_instantiation_parses_with_template_args() {
         "    T item;\n"
         "};\n"
         "int main() {\n"
-        "    Vec<int> v;\n"
+        "    Vec<int> v{};\n"
         "    return 0;\n"
         "}\n");
     const scpp::Function* main_fn = nullptr;
@@ -3005,7 +3113,7 @@ void test_variadic_instantiation_with_multiple_args_parses() {
                                          "    Head head;\n"
                                          "};\n"
                                          "int main() {\n"
-                                         "    Tuple<int, bool, char> t;\n"
+                                         "    Tuple<int, bool, char> t{};\n"
                                          "    return 0;\n"
                                          "}\n");
     const scpp::Function* main_fn = nullptr;
@@ -3054,7 +3162,7 @@ void test_variadic_specialization_without_primary_is_rejected() {
 // is_generic_template.
 void test_generic_function_full_header_form_parses() {
     scpp::Program program = scpp::parse("template<typename T> T make() {\n"
-                                         "    T x;\n"
+                                         "    T x{};\n"
                                          "    return x;\n"
                                          "}\n"
                                          "int main() { return 0; }\n");
@@ -3115,7 +3223,7 @@ void test_explicit_type_template_argument_call_parses() {
                                          "    Circle() { return; }\n"
                                          "};\n"
                                          "template<typename T> T make() {\n"
-                                         "    T x;\n"
+                                         "    T x{};\n"
                                          "    return x;\n"
                                          "}\n"
                                          "int main() {\n"
@@ -3174,7 +3282,7 @@ void test_explicit_non_type_template_argument_call_parses() {
                                          "template<int I, typename Head, typename... Tail>\n"
                                          "Head& get(TupleImpl<I, Head, Tail...>& t) { return t.value; }\n"
                                          "int main() {\n"
-                                         "    TupleImpl<0, int, bool> t;\n"
+                                         "    TupleImpl<0, int, bool> t{};\n"
                                          "    int x = get<0>(t);\n"
                                          "    return 0;\n"
                                          "}\n");
@@ -3238,7 +3346,7 @@ void test_namespace_relative_qualified_generic_type_declaration_parses() {
         "};\n"
         "}\n"
         "int f() {\n"
-        "    detail::Pair<int, bool> pair;\n"
+        "    detail::Pair<int, bool> pair{};\n"
         "    return 0;\n"
         "}\n"
         "}\n"
@@ -3367,6 +3475,10 @@ int main() {
     test_var_decl_and_if_else();
     test_class_var_decl_with_brace_init_parses_ctor_args();
     test_class_var_decl_with_paren_init_is_rejected();
+    test_bare_local_var_decl_is_rejected();
+    test_valid_local_initializer_forms_parse();
+    test_class_default_member_initializers_parse();
+    test_constructor_member_initializer_list_parses();
     test_while_loop();
     test_break_and_continue_parse_inside_loop();
     test_break_outside_loop_is_rejected();

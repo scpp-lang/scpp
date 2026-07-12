@@ -3,11 +3,7 @@ class Pair {
     First first;
     Second second;
 public:
-    Pair(const First& a, const Second& b) {
-        this.first = a;
-        this.second = b;
-        return;
-    }
+    Pair(const First& a, const Second& b) : first{a}, second{b} { return; }
 
     const First& left() const { return this.first; }
     const Second& right() const { return this.second; }

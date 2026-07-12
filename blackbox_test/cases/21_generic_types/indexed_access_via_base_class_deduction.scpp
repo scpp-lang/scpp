@@ -22,7 +22,7 @@ Head& get(TupleImpl<I, Head, Tail...>& t) {
 }
 
 int main() {
-    TupleImpl<0, int, bool> t;
+    TupleImpl<0, int, bool> t{};
     t.value = 42;
     return get<0>(t);
 }

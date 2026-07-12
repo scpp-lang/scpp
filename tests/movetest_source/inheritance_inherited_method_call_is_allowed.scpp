@@ -8,7 +8,7 @@ public:
     Animal(int legs) { this.legs = legs; return; }
     int leg_count() const { return this.legs; }
 private:
-    int legs;
+    int legs{};
 };
 
 class Dog : public Animal {

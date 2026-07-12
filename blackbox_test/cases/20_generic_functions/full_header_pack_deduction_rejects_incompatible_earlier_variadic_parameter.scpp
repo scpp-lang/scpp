@@ -12,6 +12,6 @@ int use(const Box<Args...>& fmt, Args&&... args) {
 }
 
 int main() {
-    Box<int, bool> bad;
+    Box<int, bool> bad{};
     return use(bad, 1);
 }

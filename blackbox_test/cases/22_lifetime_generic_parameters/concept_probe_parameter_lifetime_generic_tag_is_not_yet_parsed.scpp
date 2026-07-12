@@ -10,7 +10,7 @@
 // lifetime_generic_tag_on_ordinary_parameter_is_accepted.scpp).
 class Token {
 public:
-    int value;
+    int value{};
 };
 
 template<typename T>

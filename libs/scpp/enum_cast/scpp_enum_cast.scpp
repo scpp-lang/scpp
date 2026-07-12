@@ -20,7 +20,7 @@ bool __enum_cast_store(U value, T& out) {
 
 export template<typename T, typename U>
 std::expected<T, scpp::enum_cast_error> enum_cast(U value) {
-    T converted;
+    T converted{};
     if (scpp::__enum_cast_store<T>(value, converted)) {
         std::expected<T, scpp::enum_cast_error> result{converted};
         return std::move(result);

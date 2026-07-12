@@ -2,7 +2,7 @@
 // returns a fresh rvalue via `std::move(local)`.
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int start) {
         this->value = start;

@@ -13,14 +13,14 @@ public:
     Circle(int r) { this.radius = r; return; }
     int magnitude() const { return this.radius; }
 private:
-    int radius;
+    int radius{};
 };
 
 template<typename T>
 class Vec {
     T item;
 public:
-    Vec(const T& x) { this.item = x; return; }
+    Vec(const T& x) : item{x} { return; }
     int describe() const requires Describable<T> {
         return this.item.magnitude();
     }

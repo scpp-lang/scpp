@@ -12,8 +12,8 @@ export template<typename T>
 class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shareable(T))]]
 unique_ptr {
 private:
-    T* ptr_;
-    bool owns_;
+    T* ptr_{};
+    bool owns_{};
 
 public:
     unique_ptr() {
@@ -52,7 +52,7 @@ public:
 
 export template<typename T, typename... Args>
 std::unique_ptr<T> make_unique(Args... args) {
-    T* raw;
+    T* raw{};
     [[scpp::unsafe]] {
         raw = new T(args...);
     }

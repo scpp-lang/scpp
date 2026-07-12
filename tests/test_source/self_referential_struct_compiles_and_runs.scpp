@@ -4,7 +4,7 @@ struct Node {
 };
 
 int main() {
-    Node n;
+    Node n{};
     n.value = 9;
     return n.value;
 }

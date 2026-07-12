@@ -8,7 +8,7 @@
 // for an ordinary synchronous read/write inside the function works.
 class Token {
 public:
-    int value;
+    int value{};
 };
 
 void consume(Token& t [[scpp::lifetime(generic)]]) {
@@ -17,7 +17,7 @@ void consume(Token& t [[scpp::lifetime(generic)]]) {
 }
 
 int main() {
-    Token tok;
+    Token tok{};
     tok.value = 1;
     consume(tok);
     return tok.value;

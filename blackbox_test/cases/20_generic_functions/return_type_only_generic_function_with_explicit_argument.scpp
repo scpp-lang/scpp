@@ -6,7 +6,7 @@
 // abbreviated form cannot express."
 template<typename T>
 T make_default() {
-    T x;
+    T x{};
     return x;
 }
 

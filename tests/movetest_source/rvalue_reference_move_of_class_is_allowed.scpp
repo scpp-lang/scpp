@@ -11,6 +11,6 @@ public:
 };
 int take(Widget&& w) { return w.get(); }
 int main() {
-    Widget w;
+    Widget w{};
     return take(std::move(w));
 }

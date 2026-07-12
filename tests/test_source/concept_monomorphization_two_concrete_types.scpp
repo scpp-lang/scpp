@@ -25,8 +25,8 @@ int print_area(const Shape auto& s) {
 }
 
 int main() {
-    Circle c;
-    Square sq;
+    Circle c{};
+    Square sq{};
     print_int(print_area(c));
     print_int(print_area(sq));
     return 0;

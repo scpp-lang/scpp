@@ -6,7 +6,7 @@
 // access goes through a method call instead of a direct field read.)
 class Counter {
 public:
-    int value;
+    int value{};
     Counter(int start) {
         this->value = start;
         return;

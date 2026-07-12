@@ -6,7 +6,7 @@ union IntOrChar {
 };
 
 int main() {
-    IntOrChar value;
+    IntOrChar value{};
     [[scpp::unsafe]] {
         value.number = 65;
         return static_cast<int>(value.byte);

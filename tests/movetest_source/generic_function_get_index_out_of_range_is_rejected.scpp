@@ -16,7 +16,7 @@ template<int I, typename Head, typename... Tail>
 Head& get(TupleImpl<I, Head, Tail...>& t) { return t.value; }
 
 int main() {
-    TupleImpl<0, int, bool, char> t;
+    TupleImpl<0, int, bool, char> t{};
     int a = get<5>(t);
     return 0;
 }

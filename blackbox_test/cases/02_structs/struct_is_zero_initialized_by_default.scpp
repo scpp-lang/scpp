@@ -6,6 +6,6 @@ struct Point {
 };
 
 int main() {
-    Point p;
+    Point p{};
     return p.x + p.y;
 }

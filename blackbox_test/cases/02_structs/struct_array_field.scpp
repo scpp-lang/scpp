@@ -5,7 +5,7 @@ struct Buffer {
 };
 
 int main() {
-    Buffer b;
+    Buffer b{};
     b.values[0] = 1;
     b.values[1] = 2;
     b.values[2] = 3;

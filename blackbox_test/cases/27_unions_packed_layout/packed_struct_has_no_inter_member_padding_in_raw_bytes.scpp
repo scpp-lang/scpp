@@ -14,7 +14,7 @@ struct [[scpp::packed]] Packet {
 };
 
 int main() {
-    Packet packet;
+    Packet packet{};
     int fds[2];
     char bytes[5];
     int i = 0;

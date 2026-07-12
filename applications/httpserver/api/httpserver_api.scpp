@@ -7,12 +7,12 @@ namespace httpserver {
 export class ServerBuilder {
 private:
     char root_[512];
-    int port_;
-    int max_connections_;
-    int worker_count_;
-    bool allow_index_html_;
-    bool deny_hidden_files_;
-    bool has_error_;
+    int port_{};
+    int max_connections_{};
+    int worker_count_{};
+    bool allow_index_html_{};
+    bool deny_hidden_files_{};
+    bool has_error_{};
 
     bool assign_root(const char* filesystem_root) {
         int i = 0;

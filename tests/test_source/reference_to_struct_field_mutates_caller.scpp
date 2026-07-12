@@ -9,7 +9,7 @@ int inc(int& v) {
 }
 
 int main() {
-    Point p;
+    Point p{};
     p.x = 10;
     p.y = 20;
     print_int(p.y);

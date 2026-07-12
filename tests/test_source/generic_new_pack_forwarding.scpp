@@ -4,8 +4,8 @@ public:
     ~Pair() { print_int(this.x + this.y); return; }
     int sum() { return this.x + this.y; }
 private:
-    int x;
-    int y;
+    int x{};
+    int y{};
 };
 
 template<typename T, typename... Args>

@@ -115,6 +115,8 @@ bool throws_move_error(std::string_view source) {
         // exercising either would otherwise never see it.
         scpp::monomorphize_generics(program);
         scpp::check_moves(program);
+    } catch (const scpp::ParseError&) {
+        return true;
     } catch (const scpp::DataflowError&) {
         return true;
     }

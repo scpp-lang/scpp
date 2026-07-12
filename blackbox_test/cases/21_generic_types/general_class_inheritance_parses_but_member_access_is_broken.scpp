@@ -11,16 +11,16 @@
 // nor a genuinely working inheritance feature.
 class Base {
 public:
-    int v;
+    int v{};
 };
 
 class Derived : public Base {
 public:
-    int w;
+    int w{};
 };
 
 int main() {
-    Derived d;
+    Derived d{};
     d.v = 3;
     d.w = 4;
     return d.v + d.w;

@@ -3,7 +3,7 @@
 // `const Counter&`/`Counter&` instead of by value.
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int start) {
         this->value = start;

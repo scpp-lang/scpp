@@ -14,11 +14,11 @@ public:
         this->val = other.val;
         return;
     }
-    int val;
+    int val{};
 };
 
 int main() {
-    Widget a;
+    Widget a{};
     Widget b = a;
     return 0;
 }

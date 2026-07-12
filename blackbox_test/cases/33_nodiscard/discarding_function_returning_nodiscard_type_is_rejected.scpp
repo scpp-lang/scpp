@@ -5,7 +5,7 @@ struct [[nodiscard("keep the status")]] Status {
 };
 
 Status make_status() {
-    Status s;
+    Status s{};
     s.code = 5;
     return s;
 }

@@ -13,7 +13,7 @@ public:
         this->val = other.val;
         return;
     }
-    int val;
+    int val{};
 };
 
 int main() {

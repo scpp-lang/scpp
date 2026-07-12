@@ -3,12 +3,12 @@
 namespace demo {
 class Helper {
 public:
-    int value;
+    int value{};
 };
 
 class Holder {
 public:
-    Helper helper;
+    Helper helper{};
     int read() {
         return this->helper.value;
     }
@@ -16,7 +16,7 @@ public:
 }
 
 int main() {
-    demo::Holder h;
+    demo::Holder h{};
     h.helper.value = 6;
     return h.read();
 }

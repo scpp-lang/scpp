@@ -692,6 +692,11 @@ private:
                 ctor_args.insert(ctor_args.begin(), temp);
                 builder_->CreateCall(ctor, ctor_args);
             }
+        } else if (args.empty()) {
+            const ClassDef* class_def = find_class_def(class_name);
+            if (class_def != nullptr && !class_has_any_constructor(class_name)) {
+                emit_default_initializers_for_class_storage(temp, *class_def);
+            }
         }
         return builder_->CreateLoad(llvm_type, temp, "classtmp.value");
     }
@@ -2213,6 +2218,7 @@ private:
             }
         }
 
+        emit_constructor_member_initializers(fn);
         codegen_stmt(*fn.body, llvm_fn);
 
         // Every well-formed M1 function must return on all paths; if the
@@ -2442,17 +2448,18 @@ private:
                     // real C++ itself already uses, so this needs no new
                     // storage-layout logic beyond what every other
                     // Named-type VarDecl already does above.
-                    if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
-                        throw CodegenError("'" + stmt.var_name +
-                                        "{...}' constructor-call syntax is only supported for a class type",
-                            current_loc_);
-                    }
                     zero_initialize_storage(slot, stmt.type);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
-                    locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                    if (stmt.type.kind == TypeKind::Named) {
+                        locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                    }
                     maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
+                    }
+                    if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
+                        initialize_storage_from_brace_args(LValue{slot, stmt.type, std::nullopt}, stmt.ctor_args);
+                        return;
                     }
                     // spec §6.4(2): `ClassName y{std::move(x)};` -- the
                     // compiler-synthesized move constructor -- dispatches
@@ -2497,6 +2504,14 @@ private:
                     // any other overloaded name.
                     const Function* ctor_def = resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
                     if (ctor_def == nullptr) {
+                        const ClassDef* class_def = find_class_def(stmt.type.name);
+                        if (stmt.ctor_args.empty() && class_def == nullptr) {
+                            return;
+                        }
+                        if (stmt.ctor_args.empty() && class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
+                            emit_default_initializers_for_class_storage(slot, *class_def);
+                            return;
+                        }
                         // spec §6.5: `ClassName y{x};` with no matching
                         // user-declared constructor found by ordinary
                         // resolution just above (which would already
@@ -2956,6 +2971,193 @@ private:
             builder_->CreateCall(ctor, {dest_ptr, src_ptr});
         } else {
             codegen_memberwise_copy_construct(dest_ptr, src_ptr, class_name);
+        }
+    }
+
+    [[nodiscard]] bool is_constructor_function(const Function& fn) const {
+        if (fn.member_owner_class.empty() || !fn.name.ends_with("_new") || fn.params.empty()) return false;
+        const Type& this_param = fn.params[0].type;
+        return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
+               this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
+    }
+
+    [[nodiscard]] llvm::Value* load_this_object_ptr() {
+        auto this_it = locals_.find("this");
+        if (this_it == locals_.end()) {
+            throw CodegenError("constructor/member initialization needs 'this' in scope", current_loc_);
+        }
+        return create_load(llvm::PointerType::getUnqual(*context_), this_it->second.alloca, std::nullopt, "this.obj");
+    }
+
+    [[nodiscard]] LValue codegen_raw_member_storage(llvm::Value* object_ptr, const std::string& class_name,
+                                                    const ClassField& field) {
+        auto info_it = structs_.find(class_name);
+        if (info_it == structs_.end()) {
+            throw CodegenError("unknown class '" + class_name + "'", current_loc_);
+        }
+        const StructInfo& info = info_it->second;
+        std::optional<size_t> field_index = info.find_field_index(field.name);
+        if (!field_index.has_value()) {
+            throw CodegenError("class '" + class_name + "' has no field '" + field.name + "'", current_loc_);
+        }
+        llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, object_ptr, *field_index, field.name);
+        return LValue{field_ptr, field.type, alignment_for_type(field.type)};
+    }
+
+    void initialize_reference_storage(const LValue& target, const Expr& expr) {
+        if (target.type.kind != TypeKind::Reference || target.type.pointee == nullptr) {
+            throw CodegenError("internal error: reference initializer target is not a reference", current_loc_);
+        }
+        validate_reference_pointee(*target.type.pointee);
+        llvm::Value* referent_addr =
+            !target.type.is_mutable_ref && produces_rvalue_of_type(expr, *target.type.pointee)
+                ? codegen_materialize_rvalue_reference_source(expr)
+                : codegen_lvalue(expr).ptr;
+        create_store(referent_addr, target.ptr, target.alignment);
+    }
+
+    void initialize_span_storage(const LValue& target, const Expr& expr) {
+        if (target.type.kind != TypeKind::Span || target.type.pointee == nullptr) {
+            throw CodegenError("internal error: span initializer target is not a span", current_loc_);
+        }
+        LValue source = codegen_lvalue(expr);
+        if (source.type.kind != TypeKind::Array) {
+            throw CodegenError("std::span<T> can currently only be constructed from a fixed-size array in this version",
+                               current_loc_);
+        }
+        if (to_llvm_type(*source.type.element) != to_llvm_type(*target.type.pointee)) {
+            throw CodegenError("array element type does not match the span's element type", current_loc_);
+        }
+        llvm::Type* span_type = to_llvm_type(target.type);
+        llvm::Value* size_value = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), source.type.array_size);
+        llvm::Value* span_value = llvm::UndefValue::get(span_type);
+        span_value = builder_->CreateInsertValue(span_value, source.ptr, {0});
+        span_value = builder_->CreateInsertValue(span_value, size_value, {1});
+        create_store(span_value, target.ptr, target.alignment);
+    }
+
+    void initialize_storage_from_expr(const LValue& target, const Expr& expr) {
+        if (target.type.kind == TypeKind::Reference) {
+            initialize_reference_storage(target, expr);
+            return;
+        }
+        if (target.type.kind == TypeKind::Span) {
+            initialize_span_storage(target, expr);
+            return;
+        }
+        if (target.type.kind == TypeKind::Named && find_class_def(target.type.name) != nullptr) {
+            llvm::Value* value = codegen_class_value_for_boundary(expr, target.type);
+            create_store(value, target.ptr, target.alignment);
+            return;
+        }
+        llvm::Value* init_value = codegen_value_for_target(expr, target.type);
+        check_store_type(init_value, to_llvm_type(target.type), "member initializer");
+        create_store(init_value, target.ptr, target.alignment);
+    }
+
+    void initialize_storage_from_brace_args(const LValue& target, const std::vector<ExprPtr>& args) {
+        if (target.type.kind == TypeKind::Reference) {
+            if (args.size() != 1) {
+                throw CodegenError("a reference member must be initialized with exactly one expression", current_loc_);
+            }
+            initialize_reference_storage(target, *args[0]);
+            return;
+        }
+        if (target.type.kind == TypeKind::Span) {
+            if (args.size() != 1) {
+                throw CodegenError("a span member must be initialized with exactly one array expression", current_loc_);
+            }
+            initialize_span_storage(target, *args[0]);
+            return;
+        }
+        if (target.type.kind == TypeKind::Named && find_class_def(target.type.name) != nullptr) {
+            zero_initialize_storage(target.ptr, target.type, target.alignment);
+            if (args.size() == 1 && produces_rvalue_of_type(*args[0], target.type)) {
+                create_store(codegen_expr(*args[0]), target.ptr, target.alignment);
+                return;
+            }
+            if (args.size() == 1 && is_bare_same_type_copy_source(*args[0], target.type) && is_copy_constructible(target.type.name)) {
+                LValue src = codegen_lvalue(*args[0]);
+                codegen_copy_construct_class(target.ptr, src.ptr, target.type.name);
+                return;
+            }
+            const Function* ctor_def = resolve_overload_by_type(target.type.name + "_new", args, /*param_offset=*/1);
+            if (ctor_def == nullptr) {
+                const ClassDef* class_def = find_class_def(target.type.name);
+                if (args.empty() && class_def != nullptr && !class_has_any_constructor(target.type.name)) {
+                    emit_default_initializers_for_class_storage(target.ptr, *class_def);
+                    return;
+                }
+                throw CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_);
+            }
+            if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+                llvm::Value* value = codegen_constructed_class_value(target.type.name, args, ctor_def);
+                create_store(value, target.ptr, target.alignment);
+                return;
+            }
+            llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
+            if (ctor == nullptr) {
+                throw CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_);
+            }
+            std::vector<llvm::Value*> ctor_args = codegen_call_args(args, ctor_def, /*param_offset=*/1);
+            ctor_args.insert(ctor_args.begin(), target.ptr);
+            builder_->CreateCall(ctor, ctor_args);
+            return;
+        }
+        if (args.empty()) {
+            zero_initialize_storage(target.ptr, target.type, target.alignment);
+            return;
+        }
+        if (args.size() != 1) {
+            throw CodegenError("brace-initialization of this member requires exactly one expression", current_loc_);
+        }
+        initialize_storage_from_expr(target, *args[0]);
+    }
+
+    void initialize_storage(const LValue& target, const Initializer& init) {
+        if (init.has_brace_args) {
+            initialize_storage_from_brace_args(target, init.brace_args);
+            return;
+        }
+        if (init.expr) {
+            initialize_storage_from_expr(target, *init.expr);
+            return;
+        }
+        zero_initialize_storage(target.ptr, target.type, target.alignment);
+    }
+
+    void emit_constructor_member_initializers(const Function& fn) {
+        if (!is_constructor_function(fn)) return;
+        const ClassDef* class_def = find_class_def(fn.member_owner_class);
+        if (class_def == nullptr) {
+            throw CodegenError("unknown constructor owner class '" + fn.member_owner_class + "'", current_loc_);
+        }
+        llvm::Value* object_ptr = load_this_object_ptr();
+        for (const ClassField& field : class_def->fields) {
+            const Initializer* selected_init = nullptr;
+            for (const MemberInitializer& init : fn.member_initializers) {
+                if (init.member_name == field.name) {
+                    selected_init = &init.initializer;
+                    break;
+                }
+            }
+            if (selected_init == nullptr && field.default_initializer) selected_init = &*field.default_initializer;
+            if (selected_init == nullptr) continue;
+            LValue field_storage = codegen_raw_member_storage(object_ptr, class_def->name, field);
+            initialize_storage(field_storage, *selected_init);
+        }
+    }
+
+    [[nodiscard]] bool class_has_any_constructor(const std::string& class_name) const {
+        return std::any_of(program_->functions.begin(), program_->functions.end(),
+                           [&](const Function& fn) { return is_constructor_function(fn) && fn.member_owner_class == class_name; });
+    }
+
+    void emit_default_initializers_for_class_storage(llvm::Value* object_ptr, const ClassDef& class_def) {
+        for (const ClassField& field : class_def.fields) {
+            if (!field.default_initializer) continue;
+            LValue field_storage = codegen_raw_member_storage(object_ptr, class_def.name, field);
+            initialize_storage(field_storage, *field.default_initializer);
         }
     }
 

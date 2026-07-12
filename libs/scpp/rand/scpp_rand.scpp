@@ -18,7 +18,7 @@ export int uniform_int_rand(int maxValue) {
         return 0;
     }
 
-    std::random_device seed_source;
+    std::random_device seed_source{};
     std::mt19937 generator{seed_source.call()};
     auto distribution_result = scpp::rand::uniform_int_distribution<int>::make(0, maxValue - 1);
     return distribution_result.value()(generator);
@@ -27,8 +27,8 @@ export int uniform_int_rand(int maxValue) {
 export template<>
 class uniform_int_distribution<int> {
 private:
-    int minimum_;
-    int maximum_;
+    int minimum_{};
+    int maximum_{};
 
     uniform_int_distribution(int minimum, int maximum) {
         this->minimum_ = minimum;

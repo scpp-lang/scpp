@@ -12,9 +12,9 @@ int read_value(Node* n) {
 }
 
 int main() {
-    Node a;
+    Node a{};
     a.value = 5;
-    Node b;
+    Node b{};
     b.value = 9;
     a.next = &b;
     return read_value(a.next);

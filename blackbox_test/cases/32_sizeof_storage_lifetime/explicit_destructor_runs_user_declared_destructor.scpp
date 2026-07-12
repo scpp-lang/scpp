@@ -4,7 +4,7 @@ import std;
 // and user destructor code still runs.
 class Box {
 public:
-    int* out;
+    int* out{};
 
     Box(int* p) {
         this->out = p;
@@ -21,7 +21,7 @@ public:
 
 int main() {
     int result = 0;
-    std::storage_for<Box> slot;
+    std::storage_for<Box> slot{};
     [[scpp::unsafe]] {
         Box* p = new ((Box*)&slot) Box(&result);
         p->~Box();

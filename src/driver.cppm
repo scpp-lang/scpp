@@ -43,7 +43,7 @@ struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 4;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 5;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -169,9 +169,27 @@ void collect_function_signature_types(const scpp::Function& fn, std::unordered_s
     for (const scpp::Param& param : fn.params) collect_type_names(param.type, type_names);
 }
 
+void collect_function_reachable_edges(const scpp::Function& fn, std::unordered_set<std::string>& function_names,
+                                     std::unordered_set<std::string>& type_names) {
+    collect_function_signature_types(fn, type_names);
+    for (const scpp::MemberInitializer& init : fn.member_initializers) {
+        if (init.initializer.expr) collect_expr_edges(*init.initializer.expr, function_names, type_names);
+        for (const scpp::ExprPtr& arg : init.initializer.brace_args) collect_expr_edges(*arg, function_names, type_names);
+    }
+    if (fn.body) collect_stmt_edges(*fn.body, function_names, type_names);
+}
+
 void collect_class_reachable_edges(const scpp::ClassDef& def, std::unordered_set<std::string>& function_names,
                                    std::unordered_set<std::string>& type_names) {
-    for (const scpp::ClassField& field : def.fields) collect_type_names(field.type, type_names);
+    for (const scpp::ClassField& field : def.fields) {
+        collect_type_names(field.type, type_names);
+        if (!field.default_initializer) continue;
+        if (field.default_initializer->expr) collect_expr_edges(*field.default_initializer->expr, function_names, type_names);
+        for (const scpp::ExprPtr& arg : field.default_initializer->brace_args) collect_expr_edges(*arg, function_names, type_names);
+        if (field.default_initializer->has_brace_args && field.type.kind == scpp::TypeKind::Named && !field.type.name.empty()) {
+            function_names.insert(field.type.name + "_new");
+        }
+    }
     if (!def.base_class_name.empty()) type_names.insert(def.base_class_name);
     if (def.base_non_type_arg) collect_expr_edges(*def.base_non_type_arg, function_names, type_names);
     for (const scpp::Type& arg : def.specialization_template_args) collect_type_names(arg, type_names);
@@ -258,8 +276,7 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
             const Function& fn = program.functions[worklist[next_function_index++]];
             std::unordered_set<std::string> local_function_names;
             std::unordered_set<std::string> local_type_names;
-            collect_function_signature_types(fn, local_type_names);
-            if (fn.body) collect_stmt_edges(*fn.body, local_function_names, local_type_names);
+            collect_function_reachable_edges(fn, local_function_names, local_type_names);
             for (const std::string& callee : local_function_names) enqueue_functions_by_name(callee);
             for (const std::string& type_name : local_type_names) enqueue_type(type_name);
         }
@@ -659,21 +676,60 @@ StmtPtr read_stmt(std::istream& in, const std::string& context) {
     return stmt;
 }
 
+void write_initializer(std::ostream& out, const Initializer& init) {
+    write_u8(out, init.expr ? 1u : 0u);
+    if (init.expr) write_expr(out, *init.expr);
+    write_u8(out, init.has_brace_args ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(init.brace_args.size()));
+    for (const ExprPtr& arg : init.brace_args) write_expr(out, *arg);
+}
+
+[[nodiscard]] Initializer read_initializer(std::istream& in, const std::string& context) {
+    Initializer init;
+    if (read_u8(in, context + " expr present") != 0u) init.expr = read_expr(in, context + " expr");
+    init.has_brace_args = read_u8(in, context + " brace args present") != 0u;
+    std::uint32_t arg_count = read_u32_le(in, context + " brace arg count");
+    init.brace_args.reserve(arg_count);
+    for (std::uint32_t i = 0; i < arg_count; i++) init.brace_args.push_back(read_expr(in, context + " brace arg"));
+    return init;
+}
+
+void write_member_initializer(std::ostream& out, const MemberInitializer& init) {
+    write_string(out, init.member_name);
+    write_initializer(out, init.initializer);
+    write_source_location(out, init.loc);
+}
+
+[[nodiscard]] MemberInitializer read_member_initializer(std::istream& in, const std::string& context) {
+    MemberInitializer init;
+    init.member_name = read_string(in, context + " member name");
+    init.initializer = read_initializer(in, context + " initializer");
+    init.loc = read_source_location(in, context + " loc");
+    return init;
+}
+
 void write_struct_field(std::ostream& out, const StructField& field) {
     write_type(out, field.type);
     write_string(out, field.name);
+    write_u8(out, field.default_initializer.has_value() ? 1u : 0u);
+    if (field.default_initializer) write_initializer(out, *field.default_initializer);
 }
 
 [[nodiscard]] StructField read_struct_field(std::istream& in, const std::string& context) {
     StructField field;
     field.type = read_type(in, context + " type");
     field.name = read_string(in, context + " name");
+    if (read_u8(in, context + " default initializer present") != 0u) {
+        field.default_initializer = read_initializer(in, context + " default initializer");
+    }
     return field;
 }
 
 void write_class_field(std::ostream& out, const ClassField& field) {
     write_type(out, field.type);
     write_string(out, field.name);
+    write_u8(out, field.default_initializer.has_value() ? 1u : 0u);
+    if (field.default_initializer) write_initializer(out, *field.default_initializer);
     write_enum(out, field.access);
 }
 
@@ -681,6 +737,9 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     ClassField field;
     field.type = read_type(in, context + " type");
     field.name = read_string(in, context + " name");
+    if (read_u8(in, context + " default initializer present") != 0u) {
+        field.default_initializer = read_initializer(in, context + " default initializer");
+    }
     field.access = read_enum<AccessSpecifier>(in, context + " access");
     return field;
 }
@@ -869,6 +928,8 @@ void write_function(std::ostream& out, const Function& fn) {
     for (const GenericTypeParam& param : fn.template_params) write_generic_type_param(out, param);
     write_string(out, fn.generic_method_owner_id);
     write_string(out, fn.member_owner_class);
+    write_u32_le(out, static_cast<std::uint32_t>(fn.member_initializers.size()));
+    for (const MemberInitializer& init : fn.member_initializers) write_member_initializer(out, init);
     write_enum(out, fn.receiver_ref_qualifier);
     write_u8(out, fn.is_static ? 1u : 0u);
     write_enum(out, fn.access);
@@ -903,6 +964,11 @@ void write_function(std::ostream& out, const Function& fn) {
     for (std::uint32_t i = 0; i < template_param_count; i++) fn.template_params.push_back(read_generic_type_param(in, context + " template param"));
     fn.generic_method_owner_id = read_string(in, context + " generic method owner");
     fn.member_owner_class = read_string(in, context + " member owner class");
+    std::uint32_t member_init_count = read_u32_le(in, context + " member initializer count");
+    fn.member_initializers.reserve(member_init_count);
+    for (std::uint32_t i = 0; i < member_init_count; i++) {
+        fn.member_initializers.push_back(read_member_initializer(in, context + " member initializer"));
+    }
     fn.receiver_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
     fn.is_static = read_u8(in, context + " is_static") != 0u;
     fn.access = read_enum<AccessSpecifier>(in, context + " access");
@@ -1415,10 +1481,82 @@ void create_archive(const std::string& object_path, const std::string& archive_p
     throw DriverError("failed to locate end of function body while writing module interface");
 }
 
+[[nodiscard]] std::optional<size_t> find_constructor_member_initializer_colon(std::string_view source,
+                                                                               size_t signature_begin,
+                                                                               size_t body_begin) {
+    bool in_string = false;
+    bool in_char = false;
+    bool in_line_comment = false;
+    bool in_block_comment = false;
+    int paren_depth = 0;
+    bool saw_param_list_end = false;
+    for (size_t i = signature_begin; i < body_begin; i++) {
+        char c = source[i];
+        char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = false;
+            continue;
+        }
+        if (in_block_comment) {
+            if (c == '*' && next == '/') {
+                in_block_comment = false;
+                i++;
+            }
+            continue;
+        }
+        if (in_string) {
+            if (c == '\\' && next != '\0') {
+                i++;
+                continue;
+            }
+            if (c == '"') in_string = false;
+            continue;
+        }
+        if (in_char) {
+            if (c == '\\' && next != '\0') {
+                i++;
+                continue;
+            }
+            if (c == '\'') in_char = false;
+            continue;
+        }
+        if (c == '/' && next == '/') {
+            in_line_comment = true;
+            i++;
+            continue;
+        }
+        if (c == '/' && next == '*') {
+            in_block_comment = true;
+            i++;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+        if (c == '\'') {
+            in_char = true;
+            continue;
+        }
+        if (c == '(') {
+            paren_depth++;
+            continue;
+        }
+        if (c == ')' && paren_depth > 0) {
+            paren_depth--;
+            if (paren_depth == 0) saw_param_list_end = true;
+            continue;
+        }
+        if (c == ':' && saw_param_list_end && paren_depth == 0) return i;
+    }
+    return std::nullopt;
+}
+
 std::string strip_concrete_function_bodies(const Program& program, const std::string& file_path, std::string source) {
     struct BodyRange {
         size_t begin;
         size_t end;
+        std::string replacement;
     };
     std::vector<BodyRange> ranges;
     for (const Function& fn : program.functions) {
@@ -1426,12 +1564,18 @@ std::string strip_concrete_function_bodies(const Program& program, const std::st
         if (absolute_source_path(fn.loc.source_path_text()) != file_path) continue;
         size_t begin = offset_for_loc(source, fn.body->loc);
         if (begin >= source.size() || source[begin] != '{') continue;
+        if (!fn.member_initializers.empty()) {
+            size_t signature_begin = offset_for_loc(source, fn.loc);
+            if (auto colon = find_constructor_member_initializer_colon(source, signature_begin, begin)) {
+                ranges.push_back(BodyRange{*colon, begin, ""});
+            }
+        }
         size_t end = find_matching_brace(source, begin);
-        ranges.push_back(BodyRange{begin, end + 1});
+        ranges.push_back(BodyRange{begin, end + 1, ";"});
     }
     std::sort(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) { return a.begin > b.begin; });
     for (const BodyRange& range : ranges) {
-        source.replace(range.begin, range.end - range.begin, ";");
+        source.replace(range.begin, range.end - range.begin, range.replacement);
     }
     return source;
 }

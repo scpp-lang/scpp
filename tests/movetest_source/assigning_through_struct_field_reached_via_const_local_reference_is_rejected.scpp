@@ -4,7 +4,7 @@ struct Point {
 };
 
 int f() {
-    Point p;
+    Point p{};
     p.x = 1;
     const Point& cp = p;
     cp.x = 999;

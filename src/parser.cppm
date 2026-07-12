@@ -1966,6 +1966,7 @@ private:
         clone.template_params = fn.template_params;
         clone.generic_method_owner_id = fn.generic_method_owner_id;
         clone.member_owner_class = fn.member_owner_class;
+        clone.member_initializers = fn.member_initializers;
         clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         clone.is_static = fn.is_static;
         clone.access = fn.access;
@@ -2731,9 +2732,11 @@ private:
             Type base = parse_type();
             if (starts_function_pointer_declarator()) {
                 field.type = parse_function_pointer_declarator(std::move(base), field.name);
+                field.default_initializer = parse_optional_default_initializer("a struct member declaration");
             } else {
                 field.name = std::string(expect(TokenKind::Identifier, "field name").text);
                 field.type = parse_array_suffix(base);
+                field.default_initializer = parse_optional_default_initializer("a struct member declaration");
             }
             expect(TokenKind::Semicolon, "';'");
             def.fields.push_back(std::move(field));
@@ -2779,9 +2782,11 @@ private:
             Type base = parse_type();
             if (starts_function_pointer_declarator()) {
                 field.type = parse_function_pointer_declarator(std::move(base), field.name);
+                field.default_initializer = parse_optional_default_initializer("a union member declaration");
             } else {
                 field.name = std::string(expect(TokenKind::Identifier, "field name").text);
                 field.type = parse_array_suffix(base);
+                field.default_initializer = parse_optional_default_initializer("a union member declaration");
             }
             expect(TokenKind::Semicolon, "';'");
             def.fields.push_back(std::move(field));
@@ -2879,6 +2884,66 @@ private:
         if (match(TokenKind::AmpAmp)) return ReceiverRefQualifier::RValue;
         if (match(TokenKind::Amp)) return ReceiverRefQualifier::LValue;
         return ReceiverRefQualifier::None;
+    }
+
+    std::vector<ExprPtr> parse_brace_initializer_args() {
+        expect(TokenKind::LBrace, "'{'");
+        std::vector<ExprPtr> args;
+        if (!check(TokenKind::RBrace)) {
+            do {
+                args.push_back(parse_expr());
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::RBrace, "'}'");
+        return args;
+    }
+
+    std::optional<Initializer> parse_optional_default_initializer(const std::string& thing_name) {
+        if (match(TokenKind::Assign)) {
+            Initializer init;
+            init.expr = parse_expr();
+            return init;
+        }
+        if (check(TokenKind::LBrace)) {
+            Initializer init;
+            init.has_brace_args = true;
+            init.brace_args = parse_brace_initializer_args();
+            return init;
+        }
+        if (match(TokenKind::LParen)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "parenthesized direct-initialization is not allowed for " + thing_name +
+                                 "; use brace-init instead");
+        }
+        return std::nullopt;
+    }
+
+    std::vector<MemberInitializer> parse_constructor_member_initializer_list() {
+        std::vector<MemberInitializer> initializers;
+        if (!match(TokenKind::Colon)) return initializers;
+        std::unordered_set<std::string> seen_members;
+        do {
+            const Token& name_tok = expect(TokenKind::Identifier, "member name");
+            MemberInitializer init;
+            init.member_name = std::string(name_tok.text);
+            init.loc = make_source_location(name_tok.line, name_tok.column, source_path_);
+            if (!seen_members.insert(init.member_name).second) {
+                throw ParseError(name_tok.line, name_tok.column,
+                                 "member '" + init.member_name +
+                                     "' cannot appear more than once in the same constructor member-initializer-list");
+            }
+            if (check(TokenKind::LParen)) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                 "parenthesized expression-lists are not allowed in a constructor member-initializer; "
+                                 "use brace-init instead");
+            }
+            init.initializer.has_brace_args = true;
+            init.initializer.brace_args = parse_brace_initializer_args();
+            initializers.push_back(std::move(init));
+        } while (match(TokenKind::Comma));
+        return initializers;
     }
 
     // ch05 §5.11: generic (concept-constrained) *methods* aren't
@@ -3996,7 +4061,14 @@ private:
                 }
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
+                if (!check(TokenKind::Semicolon)) {
+                    fn.member_initializers = parse_constructor_member_initializer_list();
+                }
                 fn.body = parse_member_body_or_declaration();
+                if (fn.body == nullptr && !fn.member_initializers.empty()) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                     "a constructor member-initializer-list is only allowed on a constructor definition");
+                }
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -4133,6 +4205,7 @@ private:
                 ClassField field;
                 field.type = parse_function_pointer_declarator(std::move(member_type), field.name);
                 field.access = current_access;
+                field.default_initializer = parse_optional_default_initializer("a class member declaration");
                 expect(TokenKind::Semicolon, "';'");
                 def.fields.push_back(std::move(field));
                 continue;
@@ -4204,6 +4277,7 @@ private:
             field.type = parse_array_suffix(member_type);
             field.name = member_name;
             field.access = current_access;
+            field.default_initializer = parse_optional_default_initializer("a class member declaration");
             expect(TokenKind::Semicolon, "';'");
             def.fields.push_back(std::move(field));
         }
@@ -4397,7 +4471,7 @@ private:
         }
         if (match(TokenKind::Assign)) {
             stmt->init = parse_expr();
-        } else if (match(TokenKind::LBrace)) {
+        } else if (check(TokenKind::LBrace)) {
             // `ClassName name{args};` (ch04 §4.2 / spec §6.1): direct-
             // initialization via an explicit constructor call -- the
             // concrete way a `class`-typed local is constructed in this
@@ -4408,12 +4482,7 @@ private:
             // `ClassName_new` from `stmt->type`, not from anything
             // recorded here.
             stmt->has_ctor_args = true;
-            if (!check(TokenKind::RBrace)) {
-                do {
-                    stmt->ctor_args.push_back(parse_expr());
-                } while (match(TokenKind::Comma));
-            }
-            expect(TokenKind::RBrace, "'}'");
+            stmt->ctor_args = parse_brace_initializer_args();
         } else if (match(TokenKind::LParen)) {
             const Token& tok = peek();
             throw ParseError(tok.line, tok.column,
@@ -4427,6 +4496,13 @@ private:
         // ever give it a value, unlike an ordinary mutable local, which
         // may be declared bare and assigned later. Matches real C++'s
         // own "default initialization of const variable" rejection.
+        if (stmt->type.kind != TypeKind::Array && !stmt->init && !stmt->has_ctor_args) {
+            throw ParseError(loc.line, loc.column,
+                             "a non-array local variable declaration must include an explicit initializer "
+                             "(write '" + stmt->type.name + " " + stmt->var_name +
+                                 "{};', '" + stmt->type.name + " " + stmt->var_name +
+                                 "{...};', or '" + stmt->type.name + " " + stmt->var_name + " = ...;')");
+        }
         if ((stmt->is_const || stmt->is_constexpr) && !stmt->init && !stmt->has_ctor_args) {
             throw ParseError(loc.line, loc.column,
                               "a constant variable must be initialized ('" +

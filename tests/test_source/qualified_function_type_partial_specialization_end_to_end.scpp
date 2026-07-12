@@ -8,7 +8,7 @@ public:
 };
 
 int main() {
-    Holder<int(int) const &&> h;
+    Holder<int(int) const &&> h{};
     print_int(h.arity());
     return 0;
 }

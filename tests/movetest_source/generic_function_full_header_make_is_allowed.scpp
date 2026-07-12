@@ -3,7 +3,7 @@
 // "return-type-only" generic) -- must be supplied explicitly at the
 // call site (`make<int>()`), since there is nothing to deduce it from.
 template<typename T> T make() {
-    T x;
+    T x{};
     return x;
 }
 

@@ -9,9 +9,9 @@ public:
 };
 
 int main() {
-    Box* p;
+    Box* p{};
     [[scpp::unsafe]] {
-        std::storage_for<Box> slot;
+        std::storage_for<Box> slot{};
         p = (Box*)&slot;
         new (p) Box();
     }

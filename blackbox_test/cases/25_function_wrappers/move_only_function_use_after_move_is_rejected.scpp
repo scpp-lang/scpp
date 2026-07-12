@@ -3,7 +3,7 @@ import std;
 // moved-out object, not a special still-usable empty state.
 class Adder {
 private:
-    int delta;
+    int delta{};
 public:
     Adder(int n) {
         this->delta = n;

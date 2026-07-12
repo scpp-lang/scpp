@@ -1,7 +1,7 @@
 import std;
 int f() {
-    std::unique_ptr<int> a;
-    std::unique_ptr<int> sink;
+    std::unique_ptr<int> a{};
+    std::unique_ptr<int> sink{};
     while (true) {
         sink = std::move(a);
     }

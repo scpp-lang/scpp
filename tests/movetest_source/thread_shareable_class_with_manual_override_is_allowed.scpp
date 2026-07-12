@@ -5,7 +5,7 @@ class [[scpp::thread_shareable]] RawHandle {
 public:
     RawHandle(int* d) { this.data = d; return; }
 private:
-    int* data;
+    int* data{};
 };
 
 template<typename T>

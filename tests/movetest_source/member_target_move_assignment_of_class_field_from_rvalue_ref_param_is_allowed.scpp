@@ -13,7 +13,7 @@ class Outer {
 public:
     Outer(Inner&& i) { this.inner = std::move(i); return; }
 private:
-    Inner inner;
+    Inner inner{};
 };
 int main() {
     Inner i{1};

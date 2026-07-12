@@ -160,18 +160,18 @@ void __format_emit_range(const char* s, int begin, int end) {
     int i = begin;
     while (i < end) {
         if (s[i] == '{' && s[i + 1] == '{') {
-            std::__format_printer<char> printer;
+            std::__format_printer<char> printer{};
             printer.write('{');
             i = i + 2;
             continue;
         }
         if (s[i] == '}' && s[i + 1] == '}') {
-            std::__format_printer<char> printer;
+            std::__format_printer<char> printer{};
             printer.write('}');
             i = i + 2;
             continue;
         }
-        std::__format_printer<char> printer;
+        std::__format_printer<char> printer{};
         printer.write(s[i]);
         i = i + 1;
     }
@@ -188,7 +188,7 @@ template<typename Head, typename... Tail>
 void __format_emit(const char* s, int i, const Head& head, const Tail&... tail) {
     int next = __format_next_field(s, i);
     __format_emit_range(s, i, next - 2);
-    std::__format_printer<Head> printer;
+    std::__format_printer<Head> printer{};
     printer.write(head);
     __format_emit(s, next, tail...);
     return;

@@ -9,7 +9,7 @@ struct RawBufferHandle {
 };
 
 RawBufferHandle make_handle(int* p, int n) {
-    RawBufferHandle h;
+    RawBufferHandle h{};
     h.data = p;
     h.len = n;
     return h;

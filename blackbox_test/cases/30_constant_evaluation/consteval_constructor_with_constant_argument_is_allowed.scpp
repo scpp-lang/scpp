@@ -3,7 +3,7 @@
 // a constant expression.
 class ImmediateBox {
 public:
-    int value;
+    int value{};
 
     consteval ImmediateBox(int x) {
         this->value = x * 2;

@@ -1,5 +1,5 @@
 int f() {
     int a = 1;
-    int& r;
+    int& r{};
     return 0;
 }

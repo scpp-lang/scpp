@@ -10,7 +10,7 @@ void spawn(T f [[scpp::thread_movable]]) {
 }
 
 RawPointerHolder make_holder(int* ptr) {
-    RawPointerHolder holder;
+    RawPointerHolder holder{};
     holder.ptr = ptr;
     return holder;
 }

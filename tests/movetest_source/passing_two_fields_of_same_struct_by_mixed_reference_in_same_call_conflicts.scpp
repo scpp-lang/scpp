@@ -9,7 +9,7 @@ int add_into(int& dst, const int& src) {
 }
 
 int f() {
-    Point p;
+    Point p{};
     p.x = 1;
     p.y = 2;
     add_into(p.x, p.y);

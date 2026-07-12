@@ -5,7 +5,7 @@ void f(char* p) {
     return;
 }
 int main() {
-    S s;
+    S s{};
     f(s.text);
     return 0;
 }

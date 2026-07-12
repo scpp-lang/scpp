@@ -2,7 +2,7 @@ import std;
 
 class MoveOnlyAdder {
 private:
-    std::unique_ptr<int> value;
+    std::unique_ptr<int> value{};
 public:
     MoveOnlyAdder(std::unique_ptr<int> value) {
         this->value = std::move(value);
@@ -16,7 +16,7 @@ public:
 
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int value) {
         this->value = value;
@@ -31,7 +31,7 @@ public:
 
 class Inspect {
 private:
-    int value;
+    int value{};
 public:
     Inspect(int value) {
         this->value = value;
@@ -45,7 +45,7 @@ public:
 
 class InspectLvalue {
 private:
-    int value;
+    int value{};
 public:
     InspectLvalue(int value) {
         this->value = value;
@@ -59,7 +59,7 @@ public:
 
 class Consume {
 private:
-    int value;
+    int value{};
 public:
     Consume(int value) {
         this->value = value;
@@ -73,7 +73,7 @@ public:
 
 class InspectRvalue {
 private:
-    int value;
+    int value{};
 public:
     InspectRvalue(int value) {
         this->value = value;

@@ -8,10 +8,7 @@ template<typename T>
 class Holder {
     T item;
 public:
-    Holder(const T& x) {
-        this->item = x;
-        return;
-    }
+    Holder(const T& x) : item{x} { return; }
     T get() {
         return this->item;
     }

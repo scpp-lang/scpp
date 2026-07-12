@@ -4,7 +4,7 @@ struct Point {
 };
 
 int f() {
-    Point p;
+    Point p{};
     Point& whole = p;
     int& rx = p.x;
     whole.x = 1;

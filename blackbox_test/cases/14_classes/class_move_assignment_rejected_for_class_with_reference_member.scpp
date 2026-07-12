@@ -4,7 +4,7 @@
 // re-seated by assignment)."
 class RefHolder {
 public:
-    RefHolder(int& r) {
+    RefHolder(int& r) : r{r} {
         return;
     }
 private:

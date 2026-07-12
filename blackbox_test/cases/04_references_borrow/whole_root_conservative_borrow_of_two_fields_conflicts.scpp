@@ -10,7 +10,7 @@ struct Point {
 };
 
 int f() {
-    Point p;
+    Point p{};
     p.x = 1;
     p.y = 2;
     int& rx = p.x;

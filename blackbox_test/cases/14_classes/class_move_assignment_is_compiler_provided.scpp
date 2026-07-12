@@ -4,7 +4,7 @@
 // `Counter` (not copy-eligible at all, ch08 Q15).
 class Counter {
 private:
-    int value;
+    int value{};
 public:
     Counter(int start) {
         this->value = start;

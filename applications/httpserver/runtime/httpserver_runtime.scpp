@@ -8,10 +8,10 @@ namespace httpserver {
 class [[scpp::thread_movable]] WorkerConfig {
 public:
     char root_[512];
-    int port_;
-    int max_connections_;
-    bool allow_index_html_;
-    bool deny_hidden_files_;
+    int port_{};
+    int max_connections_{};
+    bool allow_index_html_{};
+    bool deny_hidden_files_{};
 
     WorkerConfig() {
         this->root_[0] = '\0';
@@ -71,13 +71,13 @@ int classify_open_error(int err) {
 }
 
 bool open_index_from_directory(int dir_fd, int& out_file_fd, int& out_size, int& out_error) {
-    int file_fd;
+    int file_fd{};
     [[scpp::unsafe]] { file_fd = scpp_httpserver_open_file_readonly(dir_fd, "index.html"); }
     if (file_fd < 0) {
         out_error = 0 - file_fd;
         return false;
     }
-    int size;
+    int size{};
     [[scpp::unsafe]] { size = scpp_httpserver_file_size(file_fd); }
     if (size < 0) {
         out_error = 0 - size;
@@ -91,7 +91,7 @@ bool open_index_from_directory(int dir_fd, int& out_file_fd, int& out_size, int&
 
 bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidden_files, const char* relative_path,
                         int& out_file_fd, int& out_size, int& out_status_code, bool& out_served_directory_index) {
-    int root_fd;
+    int root_fd{};
     [[scpp::unsafe]] { root_fd = scpp_httpserver_open_root_directory(root); }
     if (root_fd < 0) {
         out_status_code = 403;
@@ -147,7 +147,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
             return false;
         }
         if (relative_path[end] == '\0') {
-            int final_dir_fd;
+            int final_dir_fd{};
             [[scpp::unsafe]] { final_dir_fd = scpp_httpserver_open_subdirectory(current_fd, segment); }
             if (final_dir_fd >= 0) {
                 if (!allow_index_html) {
@@ -177,7 +177,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
                 out_status_code = classify_open_error(dir_err);
                 return false;
             }
-            int file_fd;
+            int file_fd{};
             [[scpp::unsafe]] { file_fd = scpp_httpserver_open_file_readonly(current_fd, segment); }
             if (file_fd < 0) {
                 int err = 0 - file_fd;
@@ -185,7 +185,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
                 out_status_code = classify_open_error(err);
                 return false;
             }
-            int size;
+            int size{};
             [[scpp::unsafe]] { size = scpp_httpserver_file_size(file_fd); }
             if (size < 0) {
                 int err = 0 - size;
@@ -200,7 +200,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
             out_served_directory_index = false;
             return true;
         }
-        int next_fd;
+        int next_fd{};
         [[scpp::unsafe]] { next_fd = scpp_httpserver_open_subdirectory(current_fd, segment); }
         if (next_fd < 0) {
             int err = 0 - next_fd;
@@ -308,7 +308,7 @@ int find_free_slot(Connection connections[64], int max_connections) {
 
 void accept_ready_connections(int epoll_fd, int listener_fd, Connection connections[64], int max_connections) {
     while (true) {
-        int fd;
+        int fd{};
         [[scpp::unsafe]] { fd = scpp_httpserver_accept_nonblocking(listener_fd); }
         if (fd < 0) {
             int err = 0 - fd;
@@ -331,7 +331,7 @@ void handle_readable(int epoll_fd, Connection connections[64], int slot, const c
                      bool deny_hidden_files) {
     char buffer[2048];
     while (true) {
-        int n;
+        int n{};
         [[scpp::unsafe]] { n = scpp_httpserver_socket_read(connections[slot].fd_, buffer, 2048); }
         if (n == 0) {
             close_connection(epoll_fd, connections[slot]);
@@ -368,7 +368,7 @@ void handle_readable(int epoll_fd, Connection connections[64], int slot, const c
 
 void handle_writable(int epoll_fd, Connection connections[64], int slot) {
     while (connections[slot].response_sent_ < connections[slot].response_len_) {
-        int n;
+        int n{};
         [[scpp::unsafe]] {
             n = scpp_httpserver_socket_write(connections[slot].fd_,
                                              &connections[slot].response_[connections[slot].response_sent_],
@@ -389,7 +389,7 @@ void handle_writable(int epoll_fd, Connection connections[64], int slot) {
     if (connections[slot].use_sendfile_) {
         int remaining = connections[slot].file_size_ - connections[slot].file_offset_;
         if (remaining > 0) {
-            int sent;
+            int sent{};
             [[scpp::unsafe]] {
                 sent = scpp_httpserver_sendfile(connections[slot].fd_, connections[slot].file_fd_,
                                                 &connections[slot].file_offset_, remaining);
@@ -408,7 +408,7 @@ void handle_writable(int epoll_fd, Connection connections[64], int slot) {
             int remaining = connections[slot].file_size_ - connections[slot].file_offset_;
             int count = remaining;
             if (count > 4096) count = 4096;
-            int read_count;
+            int read_count{};
             [[scpp::unsafe]] {
                 read_count = scpp_httpserver_pread(connections[slot].file_fd_, connections[slot].file_buffer_, count,
                                                    connections[slot].file_offset_);
@@ -420,7 +420,7 @@ void handle_writable(int epoll_fd, Connection connections[64], int slot) {
             connections[slot].file_buffer_len_ = read_count;
             connections[slot].file_buffer_sent_ = 0;
         }
-        int wrote;
+        int wrote{};
         [[scpp::unsafe]] {
             wrote = scpp_httpserver_socket_write(connections[slot].fd_,
                                                  &connections[slot].file_buffer_[connections[slot].file_buffer_sent_],
@@ -445,16 +445,16 @@ int run_worker_loop(const char* root, int port, int max_connections, bool allow_
     PlatformEvent events[64];
     Connection connections[64];
     if (max_connections > 64) max_connections = 64;
-    int listener_fd;
+    int listener_fd{};
     [[scpp::unsafe]] { listener_fd = scpp_httpserver_listen_any(port, 128); }
     if (listener_fd < 0) return 1;
-    int epoll_fd;
+    int epoll_fd{};
     [[scpp::unsafe]] { epoll_fd = scpp_httpserver_epoll_create(); }
     if (epoll_fd < 0) {
         close_fd(listener_fd);
         return 1;
     }
-    int add_result;
+    int add_result{};
     [[scpp::unsafe]] { add_result = scpp_httpserver_epoll_add(epoll_fd, listener_fd, 0, 1, 0); }
     if (add_result < 0) {
         close_fd(epoll_fd);
@@ -467,7 +467,7 @@ int run_worker_loop(const char* root, int port, int max_connections, bool allow_
         init_i = init_i + 1;
     }
     while (true) {
-        int ready;
+        int ready{};
         [[scpp::unsafe]] { ready = scpp_httpserver_epoll_wait(epoll_fd, &events[0], 64, -1); }
         if (ready < 0) continue;
         int i = 0;
