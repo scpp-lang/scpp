@@ -17,7 +17,7 @@ public:
 };
 
 int main() {
-    MoveOnlyAdder add(std::make_unique<int>(2));
-    std::move_only_function<int(int)> f(std::move(add));
+    MoveOnlyAdder add{std::make_unique<int>(2)};
+    std::move_only_function<int(int)> f{std::move(add)};
     return f.call(3);
 }

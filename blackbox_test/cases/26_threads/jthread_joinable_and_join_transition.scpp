@@ -2,9 +2,9 @@ import std;
 // A jthread is joinable after construction and no longer joinable after
 // join().
 int main() {
-    std::jthread t([]() {
+    std::jthread t{[]() {
         return;
-    });
+    }};
     if (!t.joinable()) {
         return 1;
     }

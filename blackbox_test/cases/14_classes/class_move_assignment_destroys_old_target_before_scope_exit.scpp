@@ -26,8 +26,8 @@ private:
 };
 
 int main() {
-    Resource a(1);
-    Resource b(2);
+    Resource a{1};
+    Resource b{2};
     b = std::move(a);
     return b.get();
 }

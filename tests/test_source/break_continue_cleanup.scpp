@@ -16,7 +16,7 @@ public:
 int main() {
     int i = 0;
     while (i < 4) {
-        Guard g(i);
+        Guard g{i};
         if (i == 1) {
             i = i + 1;
             continue;

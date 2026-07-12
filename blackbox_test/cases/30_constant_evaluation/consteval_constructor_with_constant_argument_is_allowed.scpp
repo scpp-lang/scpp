@@ -12,7 +12,7 @@ public:
 };
 
 consteval int compute_box_value() {
-    ImmediateBox box(21);
+    ImmediateBox box{21};
     return box.value;
 }
 

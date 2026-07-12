@@ -1113,7 +1113,7 @@ private:
     // disagreement -- codegen falls back to the first candidate rather
     // than crashing, same conservative choice as movecheck's own. Takes
     // the raw argument list (not a whole Call Expr) so this is equally
-    // usable for an ordinary call (expr.args) and a `ClassName name(args);`
+    // usable for an ordinary call (expr.args) and a `ClassName name{args};`
     // constructor-call VarDecl (stmt.ctor_args), which has no Expr of its
     // own to hand over. `receiver_is_mutable` is the method-call
     // receiver's own mutability (ch05 §5.9's implicit `this`
@@ -2335,7 +2335,7 @@ private:
 
                 // ch05 §5.12: `auto f = [...];` -- the only spelling
                 // that gives a class-typed VarDecl a plain `= expr`
-                // initializer rather than `ClassName name(args);`'s own
+                // initializer rather than `ClassName name{args};`'s own
                 // constructor-call syntax (movecheck's closure-
                 // resolution pass gives a synthesized closure class no
                 // constructor at all). A Lambda literal's own codegen
@@ -2363,7 +2363,8 @@ private:
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
                 llvm::AllocaInst* slot = create_entry_block_alloca(llvm_type, stmt.var_name);
                 if (stmt.has_ctor_args) {
-                    // `ClassName name(args);` (ch04 §4.2): direct-
+                    // `ClassName name{args};` (ch04 §4.2 / spec §6.1):
+                    // direct-
                     // initialization via an explicit constructor call.
                     // Storage is zero-initialized first -- same as every
                     // other VarDecl with no initializer at all (scpp has
@@ -2376,7 +2377,7 @@ private:
                     // Named-type VarDecl already does above.
                     if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
                         throw CodegenError("'" + stmt.var_name +
-                                            "(...)' constructor-call syntax is only supported for a class type",
+                                        "{...}' constructor-call syntax is only supported for a class type",
                             current_loc_);
                     }
                     zero_initialize_storage(slot, stmt.type);
@@ -2386,7 +2387,7 @@ private:
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
-                    // spec §6.4(2): `ClassName y(std::move(x));` -- the
+                    // spec §6.4(2): `ClassName y{std::move(x)};` -- the
                     // compiler-synthesized move constructor -- dispatches
                     // directly to the existing Move-expression codegen
                     // (loads the source's whole aggregate value, nulls
@@ -2429,7 +2430,7 @@ private:
                     // any other overloaded name.
                     const Function* ctor_def = resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
                     if (ctor_def == nullptr) {
-                        // spec §6.5: `ClassName y(x);` with no matching
+                        // spec §6.5: `ClassName y{x};` with no matching
                         // user-declared constructor found by ordinary
                         // resolution just above (which would already
                         // have found a user-declared copy constructor,

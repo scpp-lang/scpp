@@ -25,7 +25,7 @@ public:
 };
 
 int f() {
-    Pair p(1, 2);
+    Pair p{1, 2};
     return p.sum_via_refs();
 }
 

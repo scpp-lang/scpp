@@ -131,7 +131,7 @@ public:
             int boom = 1 / zero;
             return;
         }
-        std::__format_validator<Tail...> tail(s, next);
+        std::__format_validator<Tail...> tail{s, next};
         return;
     }
 };
@@ -146,7 +146,7 @@ public:
 
     consteval format_string(const char* s) {
         this->text_ = s;
-        std::__format_validator<> validator(s, 0);
+        std::__format_validator<> validator{s, 0};
         return;
     }
 
@@ -162,7 +162,7 @@ public:
 
     consteval format_string(const char* s) {
         this->text_ = s;
-        std::__format_validator<Head, Tail...> validator(s, 0);
+        std::__format_validator<Head, Tail...> validator{s, 0};
         return;
     }
 

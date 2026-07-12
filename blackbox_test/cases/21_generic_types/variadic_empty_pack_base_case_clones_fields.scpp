@@ -13,6 +13,6 @@ public:
 };
 
 int main() {
-    Box<> b("hi");
+    Box<> b{"hi"};
     return b.get() - 7;
 }

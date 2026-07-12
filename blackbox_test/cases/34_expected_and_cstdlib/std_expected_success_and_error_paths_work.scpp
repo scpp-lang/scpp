@@ -5,13 +5,13 @@ import std;
 enum class calc_error { invalid };
 
 std::expected<int, calc_error> ok() {
-    std::expected<int, calc_error> result(42);
+    std::expected<int, calc_error> result{42};
     return std::move(result);
 }
 
 std::expected<int, calc_error> fail() {
-    std::unexpected<calc_error> err(calc_error::invalid);
-    std::expected<int, calc_error> result(err);
+    std::unexpected<calc_error> err{calc_error::invalid};
+    std::expected<int, calc_error> result{err};
     return std::move(result);
 }
 

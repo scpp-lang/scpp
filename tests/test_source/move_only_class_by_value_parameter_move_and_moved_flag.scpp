@@ -18,13 +18,13 @@ public:
 };
 
 void consume(Resource resource) {
-    Resource inner(std::move(resource));
+    Resource inner{std::move(resource)};
     print_int(inner.get());
     return;
 }
 
 int main() {
-    Resource resource(42);
+    Resource resource{42};
     consume(std::move(resource));
     return 0;
 }

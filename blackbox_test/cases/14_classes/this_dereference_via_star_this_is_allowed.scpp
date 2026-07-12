@@ -23,6 +23,6 @@ public:
 };
 
 int main() {
-    Widget a(9);
+    Widget a{9};
     return a.get();
 }

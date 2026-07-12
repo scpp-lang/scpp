@@ -35,7 +35,7 @@ void spawn(T&& value [[scpp::thread_movable]]) {
 
 int main() {
     int x = 0;
-    NotThreadMovable value(x);
+    NotThreadMovable value{x};
     Box<NotThreadMovable> box;
     spawn(std::move(box));
     return 0;

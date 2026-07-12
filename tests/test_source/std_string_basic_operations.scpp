@@ -12,7 +12,7 @@ void print_string(const std::string& s) {
 }
 
 int main() {
-    std::string greeting("Hello");
+    std::string greeting{"Hello"};
     greeting.append(", ");
     greeting.append("scpp");
     greeting.append("!");

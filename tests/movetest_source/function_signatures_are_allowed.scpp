@@ -44,9 +44,9 @@ public:
 };
 
 int main() {
-    std::function<int(int) const> add(Adder(5));
-    std::function<int() &> counter(Counter(3));
-    std::function<int() &&> consume(Consume(9));
+    std::function<int(int) const> add{Adder(5)};
+    std::function<int() &> counter{Counter(3)};
+    std::function<int() &&> consume{Consume(9)};
     std::function<int(int) const> copied = add;
     return copied(7) + counter() + std::move(consume)();
 }

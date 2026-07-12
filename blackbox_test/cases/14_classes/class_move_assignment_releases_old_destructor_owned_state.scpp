@@ -33,8 +33,8 @@ private:
 };
 
 int main() {
-    Resource a("new");
-    Resource b("old");
+    Resource a{"new"};
+    Resource b{"old"};
     b = std::move(a);
     return b.compare("new");
 }

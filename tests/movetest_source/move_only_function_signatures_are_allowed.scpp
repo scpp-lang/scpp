@@ -87,11 +87,11 @@ public:
 
 
 int main() {
-    std::move_only_function<int(int)> moved(MoveOnlyAdder(std::make_unique<int>(5)));
-    std::move_only_function<int() &> counter(Counter(3));
-    std::move_only_function<int() const> inspect(Inspect(11));
-    std::move_only_function<int() const &> inspect_lvalue(InspectLvalue(13));
-    std::move_only_function<int() &&> consume(Consume(9));
-    std::move_only_function<int() const &&> inspect_rvalue(InspectRvalue(20));
+    std::move_only_function<int(int)> moved{MoveOnlyAdder(std::make_unique<int>(5))};
+    std::move_only_function<int() &> counter{Counter(3)};
+    std::move_only_function<int() const> inspect{Inspect(11)};
+    std::move_only_function<int() const &> inspect_lvalue{InspectLvalue(13)};
+    std::move_only_function<int() &&> consume{Consume(9)};
+    std::move_only_function<int() const &&> inspect_rvalue{InspectRvalue(20)};
     return moved(7) + counter() + inspect() + inspect_lvalue() + std::move(consume)() + std::move(inspect_rvalue)();
 }

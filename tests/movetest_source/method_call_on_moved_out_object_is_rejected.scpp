@@ -14,6 +14,6 @@ public:
 int main() {
     Widget x;
     x.val = 5;
-    Widget y(std::move(x));
+    Widget y{std::move(x)};
     return x.get_val();
 }

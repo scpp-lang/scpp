@@ -16,9 +16,9 @@ public:
 };
 
 int main() {
-    std::expected<NoDefault, int> good(NoDefault(7));
-    std::unexpected<int> err(5);
-    std::expected<NoDefault, int> bad(err);
+    std::expected<NoDefault, int> good{NoDefault(7)};
+    std::unexpected<int> err{5};
+    std::expected<NoDefault, int> bad{err};
     if (!good.has_value()) return 1;
     if (good.value().get() != 7) return 2;
     if (bad.has_value()) return 3;

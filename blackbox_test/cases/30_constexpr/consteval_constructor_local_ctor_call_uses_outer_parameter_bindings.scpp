@@ -6,12 +6,12 @@ public:
 class Outer {
 public:
     consteval Outer(const char* s) {
-        Helper h(s, 0);
+        Helper h{s, 0};
         return;
     }
 };
 
 int main() {
-    Outer o("x");
+    Outer o{"x"};
     return 0;
 }

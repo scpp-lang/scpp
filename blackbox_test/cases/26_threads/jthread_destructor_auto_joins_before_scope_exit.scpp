@@ -4,12 +4,12 @@ extern "C" int puts(const char* s);
 // side effect must therefore complete before code after the scope runs.
 int main() {
     {
-        std::jthread t([]() {
+        std::jthread t{[]() {
             [[scpp::unsafe]] {
                 puts("worker");
             }
             return;
-        });
+        }};
     }
     [[scpp::unsafe]] {
         puts("after");

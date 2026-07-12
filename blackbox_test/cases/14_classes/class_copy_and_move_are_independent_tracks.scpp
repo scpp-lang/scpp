@@ -19,7 +19,7 @@ public:
 };
 
 int main() {
-    Widget a(5);
-    Widget b(std::move(a));
+    Widget a{5};
+    Widget b{std::move(a)};
     return b.val;
 }

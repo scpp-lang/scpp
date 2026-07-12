@@ -158,6 +158,55 @@ void test_var_decl_and_if_else() {
     expect(if_stmt.else_branch != nullptr, "var_decl_and_if_else: else_branch should be present");
 }
 
+void test_class_var_decl_with_brace_init_parses_ctor_args() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "public:\n"
+        "    Box(int value) {}\n"
+        "};\n"
+        "int main() {\n"
+        "    Box box{42};\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "class_var_decl_with_brace_init_parses_ctor_args: expected main");
+    if (main_fn == nullptr) return;
+    expect(main_fn->body->statements.size() == 2,
+           "class_var_decl_with_brace_init_parses_ctor_args: expected 2 statements in main");
+    const scpp::Stmt& decl = *main_fn->body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl,
+           "class_var_decl_with_brace_init_parses_ctor_args: first statement should be VarDecl");
+    expect(is_named_type(decl.type, "Box") && decl.var_name == "box",
+           "class_var_decl_with_brace_init_parses_ctor_args: decl should be 'Box box'");
+    expect(decl.has_ctor_args, "class_var_decl_with_brace_init_parses_ctor_args: expected ctor args");
+    expect(decl.ctor_args.size() == 1,
+           "class_var_decl_with_brace_init_parses_ctor_args: expected exactly 1 ctor arg");
+    if (decl.ctor_args.size() == 1) {
+        expect(decl.ctor_args[0]->kind == scpp::ExprKind::IntegerLiteral && decl.ctor_args[0]->int_value == 42,
+               "class_var_decl_with_brace_init_parses_ctor_args: ctor arg should be IntegerLiteral 42");
+    }
+}
+
+void test_class_var_decl_with_paren_init_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "class Box {\n"
+            "public:\n"
+            "    Box(int value) {}\n"
+            "};\n"
+            "int main() {\n"
+            "    Box box(42);\n"
+            "    return 0;\n"
+            "}\n");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(std::string(e.what()).find("use brace-init instead") != std::string::npos,
+               "class_var_decl_with_paren_init_is_rejected: expected brace-init guidance in error message");
+    }
+    expect(threw, "class_var_decl_with_paren_init_is_rejected: expected a ParseError");
+}
+
 void test_while_loop() {
     scpp::Program program = scpp::parse("int f() { while (true) { x = x - 1; } }");
     const scpp::Function& fn = program.functions[0];
@@ -3316,6 +3365,8 @@ int main() {
     test_int_main_return();
     test_function_with_params();
     test_var_decl_and_if_else();
+    test_class_var_decl_with_brace_init_parses_ctor_args();
+    test_class_var_decl_with_paren_init_is_rejected();
     test_while_loop();
     test_break_and_continue_parse_inside_loop();
     test_break_outside_loop_is_rejected();

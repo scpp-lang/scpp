@@ -17,7 +17,7 @@ public:
 };
 
 int main() {
-    Doubler a(5);
-    Doubler b(a);
+    Doubler a{5};
+    Doubler b{a};
     return b.val;
 }

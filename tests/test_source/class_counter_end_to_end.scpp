@@ -18,7 +18,7 @@ public:
     }
 };
 int main() {
-    Counter c(5);
+    Counter c{5};
     c.increment();
     c.increment();
     print_int(c.get());

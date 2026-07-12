@@ -2,6 +2,6 @@ import std;
 
 int main() {
     int x = 7;
-    std::jthread t([x]() { print_int(x); });
+    std::jthread t{[x]() { print_int(x); }};
     return 0;
 }

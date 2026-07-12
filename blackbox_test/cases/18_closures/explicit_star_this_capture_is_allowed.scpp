@@ -18,6 +18,6 @@ public:
 };
 
 int main() {
-    Box b(42);
+    Box b{42};
     return b.get_via_star_this_capture();
 }

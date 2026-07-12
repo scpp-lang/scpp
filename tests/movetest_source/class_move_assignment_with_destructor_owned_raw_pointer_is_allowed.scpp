@@ -26,8 +26,8 @@ private:
 };
 
 int main() {
-    RawOwner a(1);
-    RawOwner b(2);
+    RawOwner a{1};
+    RawOwner b{2};
     b = std::move(a);
     return 0;
 }

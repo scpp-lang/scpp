@@ -1044,8 +1044,8 @@ void run_generic_type_tests() {
             "    }\n"
             "};\n"
             "int main() {\n"
-            "    NoMagnitude n(1);\n"
-            "    Vec<NoMagnitude> vn(n);\n"
+            "    NoMagnitude n{1};\n"
+            "    Vec<NoMagnitude> vn{n};\n"
             "    return vn.describe();\n"
             "}\n";
         std::string case_name = "generic_class_constrained_method_unsatisfying_type_is_rejected";
@@ -1086,7 +1086,7 @@ void run_generic_type_tests() {
             "};\n"
             "\n"
             "int main() {\n"
-            "    Box<int, bool> b(\"hi\");\n"
+            "    Box<int, bool> b{\"hi\"};\n"
             "    return 0;\n"
             "}\n";
         std::string case_name = "variadic_generic_instantiation_clones_constructor";
@@ -1165,7 +1165,7 @@ void run_generic_type_tests() {
             "};\n"
             "\n"
             "int main() {\n"
-            "    Box<> b(\"hi\");\n"
+            "    Box<> b{\"hi\"};\n"
             "    return b.get() - 7;\n"
             "}\n";
         std::string case_name = "variadic_empty_pack_base_case_clones_fields";
@@ -1626,7 +1626,7 @@ void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
         "namespace math {\n"
         "    class Helper { public: constexpr Helper(int v) { value = v; } int value; };\n"
         "    int helper_value(const Helper& h) { return h.value; }\n"
-        "    export constexpr int answer() { Helper h(42); return helper_value(h); }\n"
+        "    export constexpr int answer() { Helper h{42}; return helper_value(h); }\n"
         "}\n");
     scpp::CompileTimePayloadPlan plan = scpp::plan_compile_time_payload(program);
     expect(plan.format_version == scpp::SCPPM_COMPILE_TIME_AST_VERSION,
@@ -1933,7 +1933,7 @@ void run_consteval_tests() {
             "    }\n"
             "};\n"
             "consteval int answer() {\n"
-            "    Box b(42);\n"
+            "    Box b{42};\n"
             "    return b.value;\n"
             "}\n"
             "int main() {\n"
@@ -2047,7 +2047,7 @@ void run_consteval_tests() {
             "    }\n"
             "};\n"
             "consteval int answer() {\n"
-            "    Box b(\"hi\");\n"
+            "    Box b{\"hi\"};\n"
             "    return b.value;\n"
             "}\n"
             "int main() {\n"
@@ -2083,7 +2083,7 @@ void run_consteval_tests() {
             "    }\n"
             "};\n"
             "consteval int answer() {\n"
-            "    Counter c(6);\n"
+            "    Counter c{6};\n"
             "    c.bump();\n"
             "    return c.get();\n"
             "}\n"
@@ -2111,12 +2111,12 @@ void run_consteval_tests() {
             "class Outer {\n"
             "public:\n"
             "    consteval Outer(const char* s) {\n"
-            "        Helper h(s, 0);\n"
+            "        Helper h{s, 0};\n"
             "        return;\n"
             "    }\n"
             "};\n"
             "int main() {\n"
-            "    Outer o(\"x\");\n"
+            "    Outer o{\"x\"};\n"
             "    return 0;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
@@ -2409,7 +2409,7 @@ void run_consteval_tests() {
                 "    }\n"
                 "};\n"
                 "constexpr int make_value() {\n"
-                "    NeedsDrop box(42);\n"
+                "    NeedsDrop box{42};\n"
                 "    return box.value;\n"
                 "}\n"
                 "int main() {\n"
@@ -2658,7 +2658,7 @@ void run_cli_extension_tests() {
                         "    export template<typename Head, typename... Tail>\n"
                         "    class Box<Head, Tail...> : private helper::Box<Tail...> {\n"
                         "    public:\n"
-                        "        consteval Box(const char* s) { helper::Box<Tail...> tail(s); return; }\n"
+                        "        consteval Box(const char* s) { helper::Box<Tail...> tail{s}; return; }\n"
                         "        int mark() const { return 11; }\n"
                         "    };\n"
                         "}\n");
@@ -2671,7 +2671,7 @@ void run_cli_extension_tests() {
         write_text_file(consumer_source,
                         "import helper;\n"
                         "int main() {\n"
-                        "    helper::Box<int, bool> box(\"ok\");\n"
+                        "    helper::Box<int, bool> box{\"ok\"};\n"
                         "    return box.mark() - 11;\n"
                         "}\n");
         RunResult build_result =
@@ -2711,7 +2711,7 @@ void run_cli_extension_tests() {
                         "    };\n"
                         "    export template<typename T>\n"
                         "    T roundtrip(const T& value) {\n"
-                        "        helper::Holder<T> holder(value);\n"
+                        "        helper::Holder<T> holder{value};\n"
                         "        return holder.get();\n"
                         "    }\n"
                         "}\n");
@@ -2766,7 +2766,7 @@ void run_cli_extension_tests() {
                         "        const char* text_;\n"
                         "        consteval CheckedString(const char* s) {\n"
                         "            this->text_ = s;\n"
-                        "            helper::HiddenValidator<T> validator(s);\n"
+                        "            helper::HiddenValidator<T> validator{s};\n"
                         "            return;\n"
                         "        }\n"
                         "        const char* c_str() const { return this->text_; }\n"
@@ -2782,7 +2782,7 @@ void run_cli_extension_tests() {
         write_text_file(consumer_source,
                         "import helper;\n"
                         "int main() {\n"
-                        "    helper::CheckedString<int> text(\"ok\");\n"
+                        "    helper::CheckedString<int> text{\"ok\"};\n"
                         "    const char* ptr = text.c_str();\n"
                         "    if (ptr[0] == 'o') return 0;\n"
                         "    return 1;\n"
@@ -2824,7 +2824,7 @@ void run_cli_extension_tests() {
                         "        const char* text_;\n"
                         "        consteval CheckedString(const char* s) {\n"
                         "            this->text_ = s;\n"
-                        "            helper::HiddenValidator<T> validator(s);\n"
+                        "            helper::HiddenValidator<T> validator{s};\n"
                         "            return;\n"
                         "        }\n"
                         "        const char* c_str() const { return this->text_; }\n"
@@ -2833,7 +2833,7 @@ void run_cli_extension_tests() {
         write_text_file(consumer_source,
                         "import helper;\n"
                         "int main() {\n"
-                        "    helper::CheckedString<int> text(\"ok\");\n"
+                        "    helper::CheckedString<int> text{\"ok\"};\n"
                         "    const char* ptr = text.c_str();\n"
                         "    if (ptr[0] == 'o') return 0;\n"
                         "    return 1;\n"
@@ -3167,7 +3167,7 @@ void run_cli_extension_tests() {
                         "    if (rd.max() != expected_max) {\n"
                         "        return 5;\n"
                         "    }\n"
-                        "    std::mt19937 seeded(rd());\n"
+                        "    std::mt19937 seeded{rd()};\n"
                         "    if (seeded.min() != static_cast<uint32_t>(0)) {\n"
                         "        return 6;\n"
                         "    }\n"
@@ -3182,7 +3182,7 @@ void run_cli_extension_tests() {
                         "    if (secret < 1 || secret > 100) {\n"
                         "        return 8;\n"
                         "    }\n"
-                        "    std::mt19937 gen(123);\n"
+                        "    std::mt19937 gen{123};\n"
                         "    uint32_t first = gen();\n"
                         "    uint32_t second = gen();\n"
                         "    if (first == second) {\n"
@@ -3231,7 +3231,7 @@ void run_cli_extension_tests() {
         write_text_file(source_path,
                         "import std;\n"
                         "int main() {\n"
-                        "    std::string s(\"relocated\");\n"
+                        "    std::string s{\"relocated\"};\n"
                         "    return s.length();\n"
                         "}\n");
         RunResult build_result =
@@ -4148,7 +4148,7 @@ int main() {
             R"SCPP(class Box {
 public:
     static int reveal(int value) {
-        Box box(value);
+        Box box{value};
         return box.secret;
     }
 private:
@@ -4174,7 +4174,7 @@ template<>
 class Box<int> {
 public:
     static Box<int> make(int value) {
-        Box<int> box(value);
+        Box<int> box{value};
         return box;
     }
 
@@ -4209,7 +4209,7 @@ int main() {
                 R"SCPP(class Box {
 public:
     static int reveal(int value) {
-        Box box(value);
+        Box box{value};
         return box.secret;
     }
 private:
@@ -4217,7 +4217,7 @@ private:
     Box(int value) { this.secret = value; return; }
 };
 int main() {
-    Box box(4);
+    Box box{4};
     return 0;
 }
 )SCPP",
@@ -4278,7 +4278,7 @@ import scpp;
 int main() {
     auto maybe_die = scpp::rand::uniform_int_distribution<int>::make(1, 6);
     if (!maybe_die.has_value()) return 1;
-    std::mt19937 gen(123);
+    std::mt19937 gen{123};
     int roll1 = maybe_die.value()(gen);
     int roll2 = maybe_die.value()(gen);
     if (roll1 < 1 || roll1 > 6) return 2;
@@ -4303,7 +4303,7 @@ int main() {
 import scpp;
 int main() {
     scpp::rand::uniform_int_distribution<int> die(1, 6);
-    std::mt19937 gen(123);
+    std::mt19937 gen{123};
     return die(gen);
 }
 )SCPP");
@@ -4344,8 +4344,8 @@ int main() {
                 R"SCPP(import std;
 enum class calc_error { invalid };
 std::expected<int, calc_error> fail() {
-    std::unexpected<calc_error> err(calc_error::invalid);
-    std::expected<int, calc_error> bad(err);
+    std::unexpected<calc_error> err{calc_error::invalid};
+    std::expected<int, calc_error> bad{err};
     return std::move(bad);
 }
 int main() {
@@ -4369,12 +4369,12 @@ int main() {
             R"SCPP(import std;
 enum class calc_error { invalid };
 std::expected<int, calc_error> ok() {
-    std::expected<int, calc_error> result(42);
+    std::expected<int, calc_error> result{42};
     return std::move(result);
 }
 std::expected<int, calc_error> fail() {
-    std::unexpected<calc_error> err(calc_error::invalid);
-    std::expected<int, calc_error> result(err);
+    std::unexpected<calc_error> err{calc_error::invalid};
+    std::expected<int, calc_error> result{err};
     return std::move(result);
 }
 int main() {
@@ -4398,7 +4398,7 @@ int main() {
             R"SCPP(import std;
 enum class calc_error { invalid };
 std::expected<int, calc_error> ok() {
-    std::expected<int, calc_error> result(42);
+    std::expected<int, calc_error> result{42};
     return std::move(result);
 }
 int main() {
@@ -4417,8 +4417,8 @@ int main() {
         RunResult result = compile_and_run(
             R"SCPP(import std;
 std::expected<std::string, int> make_text() {
-    std::string line("hello");
-    std::expected<std::string, int> result(std::move(line));
+    std::string line{"hello"};
+    std::expected<std::string, int> result{std::move(line)};
     return std::move(result);
 }
 int main() {
@@ -4449,9 +4449,9 @@ public:
     }
 };
 int main() {
-    std::expected<no_default, int> good(no_default(7));
-    std::unexpected<int> err(5);
-    std::expected<no_default, int> bad(err);
+    std::expected<no_default, int> good{no_default(7)};
+    std::unexpected<int> err{5};
+    std::expected<no_default, int> bad{err};
     if (!good.has_value()) return 1;
     if (good.value().get() != 7) return 2;
     if (bad.has_value()) return 3;
@@ -4472,8 +4472,8 @@ int main() {
             R"SCPP(import std;
 enum class calc_error { invalid };
 int main() {
-    std::unexpected<calc_error> err(calc_error::invalid);
-    std::expected<int, calc_error> bad(err);
+    std::unexpected<calc_error> err{calc_error::invalid};
+    std::expected<int, calc_error> bad{err};
     return bad.value();
 }
 )SCPP",
@@ -4797,7 +4797,7 @@ public:
     }
 };
 int main() {
-    Box<int> box(9);
+    Box<int> box{9};
     return box.value - 9;
 }
 )SCPP",
@@ -4868,6 +4868,28 @@ int main() {
     }
 }
 
+void run_brace_init_only_var_decl_tests() {
+    {
+        std::string case_name = "class_var_decl_brace_init_constructs_successfully";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(class Box {
+private:
+    int value_;
+public:
+    Box(int value) { this->value_ = value; return; }
+    int value() { return this->value_; }
+};
+int main() {
+    Box box{7};
+    return box.value() - 7;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -4896,6 +4918,7 @@ int main() {
     run_explicit_destructor_tests();
     run_consteval_tests();
     run_cli_extension_tests();
+    run_brace_init_only_var_decl_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

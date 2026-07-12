@@ -14,10 +14,10 @@ public:
 };
 
 int main() {
-    Box seed();
+    Box seed{};
     Box boxes[2];
     boxes[1] = seed;
-    Box copy(boxes[1]);
+    Box copy{boxes[1]};
     print_int(copy.first());
     return 0;
 }

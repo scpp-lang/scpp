@@ -16,7 +16,7 @@ public:
 };
 
 constexpr int make_value() {
-    NeedsDrop box(42);
+    NeedsDrop box{42};
     return box.value;
 }
 

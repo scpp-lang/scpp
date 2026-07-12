@@ -15,7 +15,7 @@ void broadcast(const T& x [[scpp::thread_shareable]]) {
 
 int main() {
     int v = 1;
-    RawHandle h(&v);
+    RawHandle h{&v};
     broadcast(h);
     return 0;
 }

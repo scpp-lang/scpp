@@ -515,11 +515,11 @@ export int run_server(const char* root, int port, int max_connections, bool allo
 
     int spawn_i = 1;
     while (spawn_i < worker_count) {
-        WorkerConfig config(worker_configs[spawn_i]);
-        std::thread worker([config]() {
+        WorkerConfig config{worker_configs[spawn_i]};
+        std::thread worker{[config]() {
             run_worker_loop(config.root_, config.port_, config.max_connections_, config.allow_index_html_,
                             config.deny_hidden_files_);
-        });
+        }};
         worker.detach();
         spawn_i = spawn_i + 1;
     }

@@ -92,12 +92,13 @@ struct MirStatement {
     // dataflow check.
     SourceLocation loc;
     // Declare only: non-null exactly when the originating VarDecl used
-    // constructor-call syntax (`ClassName name(args);`, ch04 §4.2,
+    // constructor-call syntax (`ClassName name{args};`, ch04 §4.2 /
+    // spec §6.1,
     // Stmt::has_ctor_args) -- a raw, non-owning pointer straight at the
     // original AST's own Stmt::ctor_args vector (which outlives this MIR
     // Body, exactly like `expr` above pointing into the same AST), so
     // the dataflow checker can process each argument's own move/borrow
-    // effects (e.g. `Outer y(std::move(x));` marking `x` moved-out) --
+    // effects (e.g. `Outer y{std::move(x)};` marking `x` moved-out) --
     // previously entirely invisible to movecheck, which only ever saw a
     // bare Declare with no way to reach the arguments at all. Placed
     // last (rather than next to `type` above, which might read more
@@ -307,7 +308,8 @@ private:
                     current().statements.push_back(
                         MirStatement{MirStatementKind::Assign, stmt.var_name, stmt.init.get(), stmt.type, stmt.loc});
                 } else if (stmt.has_ctor_args) {
-                    // ch04 §4.2: `ClassName name(args);` -- see
+                    // ch04 §4.2 / spec §6.1: `ClassName name{args};` --
+                    // see
                     // MirStatement::ctor_args' own comment for why this
                     // needs to carry the argument list (rather than
                     // falling into the plain, argument-blind Declare case

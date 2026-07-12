@@ -15,7 +15,7 @@ private:
 
 int main() {
     int a = 1;
-    RefHolder x(a);
-    RefHolder y(x);
+    RefHolder x{a};
+    RefHolder y{x};
     return 0;
 }

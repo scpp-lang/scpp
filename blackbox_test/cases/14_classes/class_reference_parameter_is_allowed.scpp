@@ -22,6 +22,6 @@ int take_by_reference(const Counter& c) {
 }
 
 int main() {
-    Counter a(5);
+    Counter a{5};
     return take_by_reference(a);
 }

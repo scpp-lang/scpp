@@ -11,6 +11,6 @@ private:
     std::unique_ptr<int> p;
 };
 int main() {
-    Holder h(std::make_unique<int>(9));
+    Holder h{std::make_unique<int>(9)};
     return 0;
 }

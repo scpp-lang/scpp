@@ -8,7 +8,7 @@ public:
 };
 
 int main() {
-    Sink s(1);
+    Sink s{1};
     print_int(s.call(2));
     [[scpp::unsafe]] {
         Sink* p = new Sink(3);

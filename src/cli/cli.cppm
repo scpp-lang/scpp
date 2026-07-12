@@ -437,7 +437,8 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
             std::cout << "VarDecl " << type_to_string(stmt.type) << " " << stmt.var_name << "\n";
             if (stmt.init) print_expr(*stmt.init, depth + 1);
             if (stmt.has_ctor_args) {
-                // `ClassName name(args);` (ch04 §4.2) -- printed under
+                // `ClassName name{args};` (ch04 §4.2 / spec §6.1) --
+                // printed under
                 // its own label, same reasoning as Call's Receiver above.
                 print_indent(depth + 1);
                 std::cout << "CtorArgs\n";

@@ -23,8 +23,8 @@ public:
 };
 
 int main() {
-    Doubler a(5);
-    Doubler b(1);
+    Doubler a{5};
+    Doubler b{1};
     b = a;
     return b.val;
 }

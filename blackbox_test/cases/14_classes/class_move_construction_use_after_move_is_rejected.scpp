@@ -17,7 +17,7 @@ public:
 };
 
 int main() {
-    Counter a(5);
-    Counter b(std::move(a));
+    Counter a{5};
+    Counter b{std::move(a)};
     return a.value;
 }

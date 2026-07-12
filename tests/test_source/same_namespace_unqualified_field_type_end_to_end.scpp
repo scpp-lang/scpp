@@ -19,7 +19,7 @@ public:
 }
 
 int main() {
-    demo::Holder holder(7);
+    demo::Holder holder{7};
     print_int(holder.get());
     return 0;
 }

@@ -12,7 +12,7 @@ public:
 };
 
 int main() {
-    Box b(42);
+    Box b{42};
     print_int(b.get_via_star_this_capture());
     return 0;
 }

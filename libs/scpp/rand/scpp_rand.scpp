@@ -37,12 +37,12 @@ public:
     static std::expected<uniform_int_distribution<int>, error> make(int minimum, int maximum) {
         if (minimum > maximum) {
             error code = scpp::rand::error::empty_range;
-            std::unexpected<error> error_value(code);
-            std::expected<uniform_int_distribution<int>, error> result(error_value);
+            std::unexpected<error> error_value{code};
+            std::expected<uniform_int_distribution<int>, error> result{error_value};
             return std::move(result);
         }
-        uniform_int_distribution<int> distribution(minimum, maximum);
-        std::expected<uniform_int_distribution<int>, error> result(std::move(distribution));
+        uniform_int_distribution<int> distribution{minimum, maximum};
+        std::expected<uniform_int_distribution<int>, error> result{std::move(distribution)};
         return std::move(result);
     }
 

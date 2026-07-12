@@ -20,7 +20,7 @@ private:
 };
 
 int main() {
-    Multiplier m(7);
+    Multiplier m{7};
     print_int(m.use_closure(3));
     return 0;
 }

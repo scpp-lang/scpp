@@ -19,8 +19,8 @@ public:
 };
 
 int main() {
-    Counter x(5);
-    Counter y(9);
+    Counter x{5};
+    Counter y{9};
     y = std::move(x);
     return y.get();
 }

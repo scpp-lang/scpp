@@ -27,6 +27,6 @@ int take_by_value(Counter c) {
 }
 
 int main() {
-    Counter c(7);
+    Counter c{7};
     return take_by_value(c);
 }

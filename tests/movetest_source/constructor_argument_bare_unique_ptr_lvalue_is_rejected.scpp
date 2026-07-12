@@ -10,6 +10,6 @@ public:
 };
 int main() {
     std::unique_ptr<int> p = std::make_unique<int>(5);
-    Holder h(p);
+    Holder h{p};
     return 0;
 }

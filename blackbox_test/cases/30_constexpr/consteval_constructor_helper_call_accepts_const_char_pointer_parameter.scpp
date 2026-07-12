@@ -13,7 +13,7 @@ public:
 };
 
 consteval int answer() {
-    Box b("hi");
+    Box b{"hi"};
     return b.value;
 }
 

@@ -29,11 +29,11 @@ public:
 
 int main() {
     int n = 5;
-    Vec<int> v(n);
+    Vec<int> v{n};
     print_int(v.get());
 
-    Circle c(9);
-    Vec<Circle> vc(c);
+    Circle c{9};
+    Vec<Circle> vc{c};
     print_int(vc.describe());
     return 0;
 }

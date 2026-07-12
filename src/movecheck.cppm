@@ -160,7 +160,7 @@ struct DataflowState {
     // declared or compiler-eligible) / copy assignment operator,
     // respectively -- built once by check_moves (mirrors class_names'
     // identical lifetime/non-null-once-set contract). Needed to decide
-    // whether `ClassName y = x;` / `y(x)` (copy construction) and
+    // whether `ClassName y = x;` / `y{x}` (copy construction) and
     // `y = x;` (copy assignment) are licensed at all for a given class,
     // and whether they dispatch to a user-declared function or the
     // compiler-synthesized memberwise one (see is_copy_constructible/
@@ -2852,7 +2852,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     }
 }
 
-// ch04 §4.2: checks every argument of a `ClassName name(args);`
+// ch04 §4.2 / spec §6.1: checks every argument of a
+// `ClassName name{args};`
 // constructor-call VarDecl (Stmt::ctor_args) -- mirrors
 // check_call_arguments' own per-argument dataflow processing/validation
 // (reference-argument borrowing, rvalue-reference genuine-rvalue
@@ -2868,7 +2869,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // to apply to, mirroring codegen's own resolve_overload_by_type default).
 // Previously, constructor arguments were entirely invisible to the
 // dataflow checker (a has_ctor_args VarDecl lowered to a bare,
-// argument-blind Declare, see mir.cppm) -- e.g. `Holder h(std::move(p));`
+// argument-blind Declare, see mir.cppm) -- e.g. `Holder h{std::move(p)};`
 // never marked `p` moved-out at all. Multiple candidates matching by
 // argument count alone (ambiguous, or none at all) leave `sig` null,
 // exactly like resolve_overload's own "let a more specific, later check

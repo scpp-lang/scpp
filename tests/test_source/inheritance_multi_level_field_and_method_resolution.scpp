@@ -26,11 +26,11 @@ public:
 };
 
 int main() {
-    Dog d(4);
+    Dog d{4};
     print_int(d.leg_count());
     print_int(d.sound());
 
-    Puppy p(4);
+    Puppy p{4};
     print_int(p.leg_count());
     print_int(p.sound());
     return 0;

@@ -14,6 +14,6 @@ public:
 };
 
 int main() {
-    std::move_only_function<int(int) &&> f(Adder(2));
+    std::move_only_function<int(int) &&> f{Adder(2)};
     return std::move(f).call(3);
 }
