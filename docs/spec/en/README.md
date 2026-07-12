@@ -29,6 +29,7 @@ is still designed (see the book) but not yet formalized in this document.
 7. [Constant evaluation](06-constant-evaluation.md)
 9. [The `constexpr` and `consteval` specifiers](07-constexpr-and-consteval.md)
 13. [Function template argument deduction](08-function-template-argument-deduction.md)
+14. [Enumeration conversions](09-enumeration-conversions.md)
 
 ## File-Format Specifications
 

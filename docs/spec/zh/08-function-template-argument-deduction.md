@@ -28,4 +28,4 @@
 
 ---
 
-[← 上一节：`constexpr` 与 `consteval` 说明符](07-constexpr-and-consteval.md) · [目录](README.md)
+[← 上一节：`constexpr` 与 `consteval` 说明符](07-constexpr-and-consteval.md) · [目录](README.md) · [下一节：枚举转换 →](09-enumeration-conversions.md)
