@@ -1,0 +1,11 @@
+import std;
+import scpp;
+// spec 14.1(4)-(5): `scpp::enum_cast<T>(value)` succeeds when `value`
+// matches one of `T`'s enumerators' underlying integer values.
+enum class Color : uint8_t { red = 1, green = 2, blue = 7 };
+
+int main() {
+    auto color = scpp::enum_cast<Color>((uint8_t)2);
+    if (!color.has_value()) return 1;
+    return color.value() == Color::green ? 0 : 2;
+}

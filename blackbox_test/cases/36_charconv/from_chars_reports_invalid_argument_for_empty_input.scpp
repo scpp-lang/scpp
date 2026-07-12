@@ -1,0 +1,21 @@
+import std;
+// Empty input is not a valid number: `std::from_chars` reports
+// `std::errc::invalid_argument` and leaves `ptr` at `first`.
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+
+int main() {
+    char text[3];
+    text[0] = '9';
+    text[1] = '9';
+    text[2] = '\0';
+    const char* first = &text[0];
+    int value = 77;
+    std::from_chars_result result = std::from_chars(first, first, value);
+    if (value != 77) return 1;
+    if (result.ec != std::errc::invalid_argument) return 2;
+    return same_ptr(result.ptr, first) ? 0 : 3;
+}
