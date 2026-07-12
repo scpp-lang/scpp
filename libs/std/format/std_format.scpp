@@ -4,7 +4,7 @@ export import :string;
 
 namespace std {
 
-export template<typename T>
+template<typename T>
 class __format_arg_supported {
 public:
     consteval __format_arg_supported() {
@@ -14,52 +14,52 @@ public:
     }
 };
 
-export template<>
+template<>
 class __format_arg_supported<int> {
 public:
     consteval __format_arg_supported() { return; }
 };
 
-export template<>
+template<>
 class __format_arg_supported<bool> {
 public:
     consteval __format_arg_supported() { return; }
 };
 
-export template<>
+template<>
 class __format_arg_supported<char> {
 public:
     consteval __format_arg_supported() { return; }
 };
 
-export template<>
+template<>
 class __format_arg_supported<double> {
 public:
     consteval __format_arg_supported() { return; }
 };
 
-export template<>
+template<>
 class __format_arg_supported<std::string> {
 public:
     consteval __format_arg_supported() { return; }
 };
 
-export template<>
+template<>
 class __format_arg_supported<const char*> {
 public:
     consteval __format_arg_supported() { return; }
 };
 
-export template<>
+template<>
 class __format_arg_supported<char*> {
 public:
     consteval __format_arg_supported() { return; }
 };
 
-export template<typename... Args>
+template<typename... Args>
 class __format_validator;
 
-export template<>
+template<>
 class __format_validator<> {
 public:
     consteval __format_validator(const char* s, int i) {
@@ -93,7 +93,7 @@ public:
     }
 };
 
-export template<typename Head, typename... Tail>
+template<typename Head, typename... Tail>
 class __format_validator<Head, Tail...> : private std::__format_validator<Tail...> {
 public:
     consteval __format_validator(const char* s, int i) {
