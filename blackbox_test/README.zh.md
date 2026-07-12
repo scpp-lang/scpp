@@ -118,6 +118,7 @@ cmake --build build
 | `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、placement-new，以及显式析构调用语法 |
 | `33_nodiscard` | 函数/类型上的 `[[nodiscard]]` / `[[nodiscard("reason")]]`，包括丢弃结果时报错，以及合法的非丢弃用法 |
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` 的状态行为、误用时 abort，以及 `std::abort()` 本身 |
+| `35_random` | `std::random_device`、`std::mt19937` 和 `scpp::rand::uniform_int_distribution<int>` |
 
 ## 测试理念
 
@@ -179,8 +180,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 306 个用例**
-- 运行器原始统计 **306/306 通过**
+- **总共 374 个用例**
+- 运行器原始统计 **374/374 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -214,6 +215,9 @@ cmake --build build
 - **`std::expected` / `std::abort` 现在也有直接黑盒覆盖**：
   success/error 构造、对非默认可构造值的内联存储、误用时的 abort，
   以及直接调用 `std::abort()` 的进程终止路径
+- **随机数支持现在也有直接黑盒覆盖**：
+  `std::mt19937` 的同种子可复现性，以及
+  `scpp::rand::uniform_int_distribution<int>::min()` / `.max()` 访问器
 - **CLI 调用方式现在也有直接黑盒覆盖**：
   裸 `scpp file.scpp`、`-o custom_name`、被移除的 `build` 关键字拒绝路径，
   以及 `lex`、`parse`、`build-module` 子命令仍然可用

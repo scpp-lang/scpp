@@ -1,0 +1,12 @@
+import std;
+import scpp;
+// `scpp::rand::uniform_int_distribution<int>::make(min, max)` preserves the
+// requested closed interval in the resulting distribution's `.min()`/`.max()`
+// accessors.
+int main() {
+    auto maybe = scpp::rand::uniform_int_distribution<int>::make(4, 9);
+    if (!maybe.has_value()) return 1;
+    if (maybe.value().min() != 4) return 2;
+    if (maybe.value().max() != 9) return 3;
+    return 0;
+}
