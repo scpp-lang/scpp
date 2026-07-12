@@ -39,7 +39,7 @@ that same result is what the member access in (1) operates on. — end note]
 
 ```cpp
 class Box {
-    int value;
+    int value{};
 public:
     int& operator*() { return value; }
     const int& operator*() const { return value; }

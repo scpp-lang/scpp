@@ -64,8 +64,8 @@ union [[scpp::packed]] epoll_data_t {
 };
 
 struct [[scpp::packed]] epoll_event {
-    uint32_t events;
-    epoll_data_t data;
+    uint32_t events{};
+    epoll_data_t data{};
 };
 ```
 

@@ -1,14 +1,64 @@
 # 6 所有权、初始化与 Move
 
-## 6.1 零初始化（Zero-initialization）[dcl.init]
+## 6.1 显式初始化要求与零初始化（Required initialization and zero-initialization）[dcl.init]
 
-(1) 一个自动、static、thread 或者成员存储期的对象，如果没有
-*initializer*（[dcl.init]），不管它是什么类型，都会被零初始化，而不是
-留下一个不确定的值：标量对象的值是它类型要求的 `0`、`false`或者
-`0.0`；指针对象的值是空指针值；数组类型或者 class 类型对象的每个
-子对象，都递归地按同一条规则被零初始化。
+(1) 一个非数组的局部变量定义，必须带有 *initializer*（[dcl.init]）。
+一个非数组类型的局部变量定义，如果没有 *initializer*，不管这个变量
+是什么类型、具有什么存储期，都是不合法（ill-formed）的。
 
-(2) 如果一个对象定义使用 *initializer*（[dcl.init]）来提供
+【注：`int x;` 和 `Counter c;` 都是不合法的；`int x{};`、
+`Counter c{};`、`Counter c{1, 2};` 和
+`Counter c = make_counter();` 都是合法的。这条规则是纯语法规则：
+SCPP26 不允许先写一个“无初始化的局部声明”，再靠流分析去验证它之后的赋值
+是否足够。——注释结束】
+
+(2) 一个 class 或者 struct 的非 static 数据成员，对某个特定构造函数来说，
+恰好通过下列两种路径之一完成初始化：
+
+  (2.1) 这个成员自己的声明上写了类内默认成员初始化器（in-class default
+  member initializer）；或者
+
+  (2.2) 这个构造函数的 member-initializer-list 里有一个给这个成员命名的
+  member-initializer。
+
+(3) 一个构造函数定义，可以在它的形参列表之后、function-body 之前，带一个
+member-initializer-list。member-initializer-list 由 `:` 引出，并由一个或
+多个 member-initializer 组成，彼此用 `,` 分隔。每个 member-initializer
+都必须：
+
+  (3.1) 命名该构造函数所属 class 或者 struct 类型的一个非 static 数据成员；
+  并且
+
+  (3.2) 用一个 *braced-init-list*（[dcl.init.list]）给这个成员提供初始值。
+
+在 member-initializer 里使用圆括号括起来的 *expression-list* 是不合法的
+（ill-formed）。
+
+(4) 对一个 class 或者 struct 的每一个构造函数定义来说，它的每一个
+非 static 数据成员，都必须通过下列两种方式之一完成初始化：
+
+  (4.1) 这个构造函数自己的 member-initializer-list 里，有一个给该成员
+  的 member-initializer；或者
+
+  (4.2) 这个成员自己的声明上，带有类内默认成员初始化器，并且该构造函数
+  的 member-initializer-list 没有给这个成员命名。
+
+如果对某个给定构造函数来说，一个成员既不满足 (4.1) 也不满足 (4.2)，那么
+这个构造函数就是不合法（ill-formed）的。一个成员在同一个
+member-initializer-list 里不得被命名超过一次。
+
+(5) 一个引用类型的非 static 数据成员，必须通过一个良定义的引用绑定来满足
+(4)。因为引用没有“空状态”，所以：如果一个 class 或者 struct 带有引用成员，
+那么它的某个构造函数，除非通过“能把该引用绑定到某个对象上的类内默认成员
+初始化器”或者该构造函数自己的 member-initializer-list 初始化了这个成员，
+否则这个构造函数就是不合法的。
+
+(6) 一个变量定义，如果没有 *initializer*（[dcl.init]），并且不因 (1) 而
+不合法，那么不管它是什么类型，都会被零初始化，而不是留下一个不确定的值：
+标量对象的值是它类型要求的 `0`、`false` 或者 `0.0`；指针对象的值是空指针
+值；数组类型或者 class 类型对象的每个子对象，都递归地按同一条规则被零初始化。
+
+(7) 如果一个对象定义使用 *initializer*（[dcl.init]）来提供
 direct-initialization 的实参，那么这个 *initializer* 必须是一个
 *braced-init-list*（[dcl.init.list]）。在这个位置使用圆括号括起来的
 *expression-list*，在 SCPP26 里不能用于初始化对象；程序不合法
@@ -18,13 +68,59 @@ direct-initialization 的实参，那么这个 *initializer* 必须是一个
 这条规则只影响对象定义，不修改构造函数声明（例如 `Widget(int, int)`）
 或者函数调用的语法。——注释结束】
 
+【注：不过，`Widget(int x) : value{x} {}` 是按 (3) 的构造函数
+member-initializer，不是按 (7) 的对象定义。——注释结束】
+
 【注：跟 C++ 标准不一样——C++ 标准下，一个自动存储期、没有
 initializer 的对象，会留下一个不确定的值（[dcl.init]），除非它的每个
-子对象都是带用户提供的默认构造函数的类型——本文档无条件要求零初始化，
-对每个类型都一样。因此，在一份 SCPP26 程序里，不存在"读取一个值不
-确定的对象"这回事：每个对象从它生命期开始的那一刻起就是良定义的
-（[basic.life]），不需要任何数据流分析去证明"每条执行路径都在使用
-之前先做了初始化"。——注释结束】
+子对象都是带用户提供的默认构造函数的类型——SCPP26 对这类局部声明会按
+(1) 直接拒绝，对成员则按 (4) 要求“每个构造函数都把成员初始化完整”，而在
+其它地方则按 (6) 要求零初始化。因此，在一份 SCPP26
+程序里，不存在"读取一个值不确定的对象"这回事，也不需要任何数据流分析
+去证明"每条执行路径都在使用一个局部对象之前先做了初始化"。——注释结束】
+
+【注：(1)-(5) 不修改 union 成员或者数组声明的规则；这些仍由别的条款或者
+未来的设计工作来处理。——注释结束】
+
+```cpp
+int x{};                         // OK：(1)
+int y = 1;                       // OK：(1)
+int z;                           // 不合法：(1)
+
+class Defaults {
+    int a{};
+    int b{5};
+};
+
+class CtorOnly {
+    int a;
+    int b;
+public:
+    CtorOnly(int x, int y) : a{x}, b{y} {}
+};
+
+class Mixed {
+    int a{1};
+    int b;
+public:
+    Mixed(int x) : b{x} {}
+};
+
+int global_target{};
+
+class RefBox {
+    int& ref;
+public:
+    RefBox(int& r) : ref{r} {}
+};
+
+class Bad {
+    int a{};
+    int b;
+public:
+    Bad(int x) : a{x} {}   // 不合法：(4)，b 没有通过任何一条路径初始化
+};
+```
 
 ## 6.2 所有权与 move 状态（Ownership and move state）[basic.life]
 

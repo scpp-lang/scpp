@@ -38,7 +38,7 @@ receiver 是 `E`。
 
 ```cpp
 class Box {
-    int value;
+    int value{};
 public:
     int& operator*() { return value; }
     const int& operator*() const { return value; }
