@@ -12,6 +12,7 @@ extern "C" {
 namespace std {
 
 export enum class errc : int {
+    io_error = 5,
     invalid_argument = 22,
     result_out_of_range = 34,
 };
@@ -28,9 +29,7 @@ std::errc decode_from_chars_errc(int ec_value) {
     }
     if (ec_value == 22) return std::errc::invalid_argument;
     if (ec_value == 34) return std::errc::result_out_of_range;
-    std::abort();
-    std::errc unreachable;
-    return unreachable;
+    return std::errc::io_error;
 }
 
 from_chars_result from_chars_impl(const char* first, const char* last, int& value, int base) {
