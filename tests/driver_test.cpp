@@ -4077,6 +4077,27 @@ int main() {
     }
 
     {
+        std::string case_name = "std_expected_string_success_path_moves_value";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+std::expected<std::string, int> make_text() {
+    std::string line("hello");
+    std::expected<std::string, int> result(std::move(line));
+    return std::move(result);
+}
+int main() {
+    std::expected<std::string, int> text = make_text();
+    if (!text.has_value()) return 1;
+    if (!text.value().equals("hello")) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
         std::string case_name = "std_expected_uses_inline_storage_without_default_constructibility";
         cases_run++;
         RunResult result = compile_and_run(
