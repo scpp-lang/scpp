@@ -16,6 +16,6 @@ public:
 };
 
 int main() {
-    Box b(42);
+    Box b{42};
     return b.get_via_this_capture();
 }

@@ -8,6 +8,6 @@ public:
 };
 
 int main() {
-    Sink s(1);
+    Sink s{1};
     return s.call(2);
 }

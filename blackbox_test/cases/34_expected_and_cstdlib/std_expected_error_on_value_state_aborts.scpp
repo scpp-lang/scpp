@@ -4,7 +4,7 @@ import std;
 enum class calc_error { invalid };
 
 int main() {
-    std::expected<int, calc_error> good(42);
+    std::expected<int, calc_error> good{42};
     calc_error err = good.error();
     return 0;
 }

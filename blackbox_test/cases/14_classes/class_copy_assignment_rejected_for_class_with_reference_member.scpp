@@ -16,8 +16,8 @@ private:
 int main() {
     int a = 1;
     int b = 2;
-    RefHolder x(a);
-    RefHolder y(b);
+    RefHolder x{a};
+    RefHolder y{b};
     y = x;
     return 0;
 }

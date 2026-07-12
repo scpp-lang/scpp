@@ -13,9 +13,9 @@ private:
     std::unique_ptr<int> p;
 };
 int main() {
-    Resource a(1);
-    Resource b(2);
-    Resource c(std::move(b));
+    Resource a{1};
+    Resource b{2};
+    Resource c{std::move(b)};
     b = std::move(a);
     print_int(b.get());
     return 0;

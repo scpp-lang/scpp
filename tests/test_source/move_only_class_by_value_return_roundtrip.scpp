@@ -18,7 +18,7 @@ public:
 };
 
 Resource make_resource(int value) {
-    Resource resource(value);
+    Resource resource{value};
     return std::move(resource);
 }
 

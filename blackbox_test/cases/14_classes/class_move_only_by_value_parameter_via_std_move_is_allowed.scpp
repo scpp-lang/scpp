@@ -22,6 +22,6 @@ int take_by_value(Counter c) {
 }
 
 int main() {
-    Counter c(9);
+    Counter c{9};
     return take_by_value(std::move(c));
 }

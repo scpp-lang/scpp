@@ -24,7 +24,7 @@ public:
 
 // Counter(5), then increment() twice -> 7.
 int f() {
-    Counter c(5);
+    Counter c{5};
     c.increment();
     c.increment();
     return c.get();

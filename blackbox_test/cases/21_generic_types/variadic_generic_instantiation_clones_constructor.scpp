@@ -14,6 +14,6 @@ public:
 };
 
 int main() {
-    Box<int, bool> b("hi");
+    Box<int, bool> b{"hi"};
     return 0;
 }

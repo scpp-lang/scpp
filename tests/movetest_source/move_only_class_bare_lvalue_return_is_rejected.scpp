@@ -11,6 +11,6 @@ public:
 };
 
 Resource make_resource() {
-    Resource resource(1);
+    Resource resource{1};
     return resource;
 }

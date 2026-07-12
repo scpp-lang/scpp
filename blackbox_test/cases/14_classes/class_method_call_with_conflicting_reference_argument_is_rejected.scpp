@@ -22,7 +22,7 @@ public:
 };
 
 int f() {
-    Adder a(5);
+    Adder a{5};
     int y = 3;
     int& r = y;
     a.add_ref(y);

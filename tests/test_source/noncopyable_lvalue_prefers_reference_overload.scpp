@@ -19,7 +19,7 @@ int choose(Token& token) {
 }
 
 int main() {
-    Token token(1);
+    Token token{1};
     print_int(choose(token));
     return 0;
 }

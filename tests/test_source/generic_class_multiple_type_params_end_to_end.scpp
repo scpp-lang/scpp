@@ -16,7 +16,7 @@ public:
 int main() {
     int n = 7;
     bool flag = true;
-    Pair<int, bool> pair(n, flag);
+    Pair<int, bool> pair{n, flag};
     print_int(pair.left());
     print_bool(pair.right());
     return 0;

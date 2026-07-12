@@ -18,6 +18,6 @@ public:
 };
 
 int main() {
-    constexpr Point p(19, 23);
+    constexpr Point p{19, 23};
     return p.sum();
 }

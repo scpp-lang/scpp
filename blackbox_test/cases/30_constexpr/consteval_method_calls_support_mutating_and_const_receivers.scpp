@@ -15,7 +15,7 @@ public:
 };
 
 consteval int answer() {
-    Counter c(6);
+    Counter c{6};
     c.bump();
     return c.get();
 }

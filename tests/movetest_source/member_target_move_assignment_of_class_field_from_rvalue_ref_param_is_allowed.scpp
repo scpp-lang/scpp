@@ -16,7 +16,7 @@ private:
     Inner inner;
 };
 int main() {
-    Inner i(1);
-    Outer o(std::move(i));
+    Inner i{1};
+    Outer o{std::move(i)};
     return 0;
 }

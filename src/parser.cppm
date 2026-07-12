@@ -4397,22 +4397,29 @@ private:
         }
         if (match(TokenKind::Assign)) {
             stmt->init = parse_expr();
-        } else if (match(TokenKind::LParen)) {
-            // `ClassName name(args);` (ch04 §4.2): direct-initialization
-            // via an explicit constructor call -- the concrete way a
-            // `class`-typed local is constructed in this version (there
-            // is no `=`-initializer form for a class type yet, only this
-            // or a bare, zero-initialized declaration calling no
-            // constructor at all, e.g. `ClassName name;`). Movecheck/
-            // codegen resolve the callee by recomputing `ClassName_new`
-            // from `stmt->type`, not from anything recorded here.
+        } else if (match(TokenKind::LBrace)) {
+            // `ClassName name{args};` (ch04 §4.2 / spec §6.1): direct-
+            // initialization via an explicit constructor call -- the
+            // concrete way a `class`-typed local is constructed in this
+            // version (there is no `=`-initializer form for a class type
+            // yet, only this or a bare, zero-initialized declaration
+            // calling no constructor at all, e.g. `ClassName name;`).
+            // Movecheck/codegen resolve the callee by recomputing
+            // `ClassName_new` from `stmt->type`, not from anything
+            // recorded here.
             stmt->has_ctor_args = true;
-            if (!check(TokenKind::RParen)) {
+            if (!check(TokenKind::RBrace)) {
                 do {
                     stmt->ctor_args.push_back(parse_expr());
                 } while (match(TokenKind::Comma));
             }
-            expect(TokenKind::RParen, "')'");
+            expect(TokenKind::RBrace, "'}'");
+        } else if (match(TokenKind::LParen)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "parenthesized direct-initialization is not allowed for object declarations; "
+                             "use brace-init instead ('" +
+                                 stmt->type.name + " " + stmt->var_name + "{...};')");
         }
         // A `const`-qualified local (Stmt::is_const, set above by
         // parse_type via its out_bare_const out-parameter) must be

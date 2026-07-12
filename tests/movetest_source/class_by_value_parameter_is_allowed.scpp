@@ -15,7 +15,7 @@ void take_by_value(Resource resource) {
 }
 
 int main() {
-    Resource resource(1);
+    Resource resource{1};
     take_by_value(std::move(resource));
     return 0;
 }

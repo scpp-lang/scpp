@@ -12,6 +12,6 @@ public:
 
 int main() {
     int n = 5;
-    Box<int> b(n);
+    Box<int> b{n};
     return b.get();
 }

@@ -16,6 +16,6 @@ private:
 };
 int main() {
     Foo f;
-    Bar b(std::move(f));
+    Bar b{std::move(f)};
     return b.get();
 }

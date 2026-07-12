@@ -19,7 +19,7 @@ int take_by_value(Counter c) {
     return c.get();
 }
 int main() {
-    Counter counter(7);
+    Counter counter{7};
     print_int(take_by_value(counter));
     return 0;
 }

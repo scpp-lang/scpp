@@ -18,6 +18,6 @@ public:
 };
 
 int main() {
-    Dog d(4);
+    Dog d{4};
     return d.leg_count() + d.bark_count();
 }

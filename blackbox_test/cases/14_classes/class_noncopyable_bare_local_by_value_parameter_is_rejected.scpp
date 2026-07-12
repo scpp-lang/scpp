@@ -23,7 +23,7 @@ void take_by_value(Counter c) {
 }
 
 int main() {
-    Counter c(5);
+    Counter c{5};
     take_by_value(c);
     return 0;
 }

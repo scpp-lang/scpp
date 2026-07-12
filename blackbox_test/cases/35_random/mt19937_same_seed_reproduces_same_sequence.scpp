@@ -3,8 +3,8 @@ import scpp;
 // std:random's `std::mt19937` is a deterministic engine: two fresh generator
 // instances seeded with the same value must reproduce the same draw sequence.
 int main() {
-    std::mt19937 a(123);
-    std::mt19937 b(123);
+    std::mt19937 a{123};
+    std::mt19937 b{123};
     if (a() != b()) return 1;
     if (a() != b()) return 2;
     return 0;

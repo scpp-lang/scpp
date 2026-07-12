@@ -10,6 +10,6 @@ public:
 };
 
 int f() {
-    Box<int> box(7);
+    Box<int> box{7};
     return box.value;
 }

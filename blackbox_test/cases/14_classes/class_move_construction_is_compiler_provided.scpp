@@ -20,7 +20,7 @@ public:
 };
 
 int main() {
-    Counter x(5);
-    Counter y(std::move(x));
+    Counter x{5};
+    Counter y{std::move(x)};
     return y.get();
 }

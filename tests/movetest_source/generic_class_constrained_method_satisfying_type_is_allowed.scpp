@@ -27,7 +27,7 @@ public:
 };
 
 int main() {
-    Circle c(3);
-    Vec<Circle> vc(c);
+    Circle c{3};
+    Vec<Circle> vc{c};
     return vc.describe();
 }

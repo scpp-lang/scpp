@@ -16,7 +16,7 @@ public:
 };
 
 int main() {
-    Adder add(2);
-    std::function<int(int)> f(add);
+    Adder add{2};
+    std::function<int(int)> f{add};
     return f.call(3);
 }

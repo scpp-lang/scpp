@@ -30,20 +30,20 @@ export std::expected<std::string, scpp::io::error> getline() {
         [[scpp::unsafe]] {
             text = ::scpp_string_c_str(handle);
         }
-        std::string line(text);
+        std::string line{text};
         [[scpp::unsafe]] {
             ::scpp_string_delete(handle);
         }
-        std::expected<std::string, scpp::io::error> result(std::move(line));
+        std::expected<std::string, scpp::io::error> result{std::move(line)};
         return std::move(result);
     }
     if (status == 1) {
-        std::unexpected<scpp::io::error> err(scpp::io::error::eof);
-        std::expected<std::string, scpp::io::error> result(err);
+        std::unexpected<scpp::io::error> err{scpp::io::error::eof};
+        std::expected<std::string, scpp::io::error> result{err};
         return std::move(result);
     }
-    std::unexpected<scpp::io::error> err(scpp::io::error::read_failed);
-    std::expected<std::string, scpp::io::error> result(err);
+    std::unexpected<scpp::io::error> err{scpp::io::error::read_failed};
+    std::expected<std::string, scpp::io::error> result{err};
     return std::move(result);
 }
 

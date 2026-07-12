@@ -31,6 +31,6 @@ public:
 int main() {
     Num a;
     a.v = 21;
-    Holder<Num> h(a);
+    Holder<Num> h{a};
     return h.bad();
 }

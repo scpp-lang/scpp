@@ -514,7 +514,7 @@ struct Stmt {
     ExprPtr init; // optional
 
     // VarDecl, scalar/struct/class (any non-reference, non-pointer)
-    // only: true for `const T name = expr;`/`const ClassName name(args);`
+    // only: true for `const T name = expr;`/`const ClassName name{args};`
     // -- an immutable local, initialized exactly once at declaration and
     // rejected by movecheck (its own MirStatementKind::Assign case) on
     // any subsequent reassignment attempt. Distinct from `const T&`/
@@ -528,15 +528,15 @@ struct Stmt {
     // the spelling; constant-evaluation semantics land later.
     bool is_constexpr = false;
 
-    // VarDecl, class-typed only (ch04 §4.2): `ClassName name(args);`,
-    // direct-initialization via an explicit constructor call --
-    // mutually exclusive with `init` above (a class type has no
-    // `=`-initializer form in this version, only this paren-args form or
-    // a bare, zero-initialized declaration calling no constructor at
-    // all). `has_ctor_args` is needed to tell an explicit-but-empty call
-    // (`ClassName name();`) apart from no call at all (a bare
-    // `ClassName name;`) -- `ctor_args` alone being empty can't
-    // distinguish those two.
+    // VarDecl, class-typed only (ch04 §4.2 / spec §6.1):
+    // `ClassName name{args};`, direct-initialization via an explicit
+    // constructor call -- mutually exclusive with `init` above (a class
+    // type has no `=`-initializer form in this version, only this
+    // brace-args form or a bare, zero-initialized declaration calling no
+    // constructor at all). `has_ctor_args` is needed to tell an
+    // explicit-but-empty call (`ClassName name{};`) apart from no call at
+    // all (a bare `ClassName name;`) -- `ctor_args` alone being empty
+    // can't distinguish those two.
     bool has_ctor_args = false;
     std::vector<ExprPtr> ctor_args;
 

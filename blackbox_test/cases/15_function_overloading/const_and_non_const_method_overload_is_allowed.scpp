@@ -34,7 +34,7 @@ int use_mutable(Counter& c) {
 // Counter(5); use_const reads 5 (no mutation); use_mutable increments to
 // 6 and returns 6. Sum = 11.
 int main() {
-    Counter c(5);
+    Counter c{5};
     int a = use_const(c);
     int b = use_mutable(c);
     return a + b;

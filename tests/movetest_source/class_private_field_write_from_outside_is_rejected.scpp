@@ -11,7 +11,7 @@ public:
     }
 };
 void f() {
-    Counter c(5);
+    Counter c{5};
     c.value = 99;
     return;
 }

@@ -11,8 +11,8 @@ public:
     }
 };
 void f() {
-    Counter a(5);
-    Counter b(10);
+    Counter a{5};
+    Counter b{10};
     a = b;
     return;
 }

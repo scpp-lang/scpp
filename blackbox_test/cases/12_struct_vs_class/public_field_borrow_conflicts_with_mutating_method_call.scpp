@@ -19,7 +19,7 @@ public:
 };
 
 int main() {
-    Counter c(5);
+    Counter c{5};
     int& r = c.value;
     c.increment();
     return r;

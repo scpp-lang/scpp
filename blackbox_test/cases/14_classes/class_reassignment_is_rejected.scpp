@@ -18,8 +18,8 @@ public:
 };
 
 int main() {
-    Counter a(5);
-    Counter b(9);
+    Counter a{5};
+    Counter b{9};
     a = b;
     return 0;
 }

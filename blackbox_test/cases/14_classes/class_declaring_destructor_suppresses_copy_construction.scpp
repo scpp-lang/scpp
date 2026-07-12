@@ -17,7 +17,7 @@ public:
 };
 
 int main() {
-    Counter a(5);
-    Counter b(a);
+    Counter a{5};
+    Counter b{a};
     return 0;
 }

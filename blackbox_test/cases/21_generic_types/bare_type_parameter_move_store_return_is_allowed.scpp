@@ -19,6 +19,6 @@ public:
 
 int main() {
     int val = 42;
-    Holder<int> h(val);
+    Holder<int> h{val};
     return h.get();
 }

@@ -17,7 +17,7 @@ public:
 };
 
 Counter make_counter() {
-    Counter c(9);
+    Counter c{9};
     return std::move(c);
 }
 

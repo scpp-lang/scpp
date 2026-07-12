@@ -15,6 +15,6 @@ public:
 };
 
 int main() {
-    const std::move_only_function<int(int) const> f(Adder(2));
+    const std::move_only_function<int(int) const> f{Adder(2)};
     return f.call(3);
 }

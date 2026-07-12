@@ -14,7 +14,7 @@ public:
 };
 
 int main() {
-    Counter c(5);
+    Counter c{5};
     c.value = 9;
     return 0;
 }

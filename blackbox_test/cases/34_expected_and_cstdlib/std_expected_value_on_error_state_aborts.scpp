@@ -4,7 +4,7 @@ import std;
 enum class calc_error { invalid };
 
 int main() {
-    std::unexpected<calc_error> err(calc_error::invalid);
-    std::expected<int, calc_error> bad(err);
+    std::unexpected<calc_error> err{calc_error::invalid};
+    std::expected<int, calc_error> bad{err};
     return bad.value();
 }

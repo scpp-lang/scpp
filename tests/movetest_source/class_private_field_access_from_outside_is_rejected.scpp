@@ -11,6 +11,6 @@ public:
     }
 };
 int f() {
-    Counter c(5);
+    Counter c{5};
     return c.value;
 }

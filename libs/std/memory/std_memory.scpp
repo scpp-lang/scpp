@@ -56,7 +56,7 @@ std::unique_ptr<T> make_unique(Args... args) {
     [[scpp::unsafe]] {
         raw = new T(args...);
     }
-    std::unique_ptr<T> result(raw);
+    std::unique_ptr<T> result{raw};
     return std::move(result);
 }
 

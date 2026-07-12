@@ -22,7 +22,7 @@ public:
 
 // Adder(5), add_ref(3) -> value becomes 8.
 int f() {
-    Adder a(5);
+    Adder a{5};
     int y = 3;
     a.add_ref(y);
     return a.get();

@@ -31,7 +31,7 @@ private:
 };
 
 int main() {
-    Resource a(7);
+    Resource a{7};
     a = std::move(a);
     return a.get();
 }

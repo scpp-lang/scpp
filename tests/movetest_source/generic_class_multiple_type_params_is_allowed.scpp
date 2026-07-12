@@ -16,6 +16,6 @@ public:
 int main() {
     int n = 3;
     bool flag = false;
-    Pair<int, bool> pair(n, flag);
+    Pair<int, bool> pair{n, flag};
     return 0;
 }
