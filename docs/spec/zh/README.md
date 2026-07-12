@@ -27,6 +27,7 @@
 7. [常量求值](06-constant-evaluation.md)
 9. [`constexpr` 与 `consteval` 说明符](07-constexpr-and-consteval.md)
 13. [函数模板实参推导](08-function-template-argument-deduction.md)
+14. [枚举转换](09-enumeration-conversions.md)
 
 ## 文件格式规范
 

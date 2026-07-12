@@ -34,4 +34,4 @@ pack; (2) still applies when deduction proceeds as in (4).
 
 ---
 
-[← Previous: The `constexpr` and `consteval` specifiers](07-constexpr-and-consteval.md) · [Table of Contents](README.md)
+[← Previous: The `constexpr` and `consteval` specifiers](07-constexpr-and-consteval.md) · [Table of Contents](README.md) · [Next: Enumeration conversions →](09-enumeration-conversions.md)
