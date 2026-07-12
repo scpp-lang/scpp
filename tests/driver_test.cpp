@@ -58,8 +58,8 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH must be defined by the build"
 #endif
-#ifndef SCPP_STDLIB_ATOI_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_ATOI_WRAPPER_LIB_PATH must be defined by the build"
+#ifndef SCPP_STDLIB_STRCONV_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_STRCONV_WRAPPER_LIB_PATH must be defined by the build"
 #endif
 namespace {
 
@@ -117,7 +117,7 @@ std::unordered_map<std::string, std::string> prebuilt_module_import_paths() {
 std::vector<std::string> std_link_inputs() {
     return {SCPP_STDLIB_IO_WRAPPER_LIB_PATH, SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
             SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH, SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH, SCPP_STDLIB_ATOI_WRAPPER_LIB_PATH};
+            SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH, SCPP_STDLIB_STRCONV_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -4236,16 +4236,16 @@ int main() {
 }
 
 
-void run_atoi_tests() {
+void run_strconv_tests() {
     {
-        std::string case_name = "scpp_atoi_parses_valid_positive_i32";
+        std::string case_name = "scpp_strconv_atoi_parses_valid_positive_i32";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
 import scpp;
 int main() {
     std::string text("12345");
-    auto parsed = scpp::atoi(text);
+    auto parsed = scpp::strconv::atoi(text);
     if (!parsed.has_value()) return 1;
     if (parsed.value() != static_cast<int32_t>(12345)) return 2;
     return 0;
@@ -4256,14 +4256,14 @@ int main() {
     }
 
     {
-        std::string case_name = "scpp_atoi_parses_valid_negative_i32";
+        std::string case_name = "scpp_strconv_atoi_parses_valid_negative_i32";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
 import scpp;
 int main() {
     std::string text("-214");
-    auto parsed = scpp::atoi(text);
+    auto parsed = scpp::strconv::atoi(text);
     if (!parsed.has_value()) return 1;
     if (parsed.value() != static_cast<int32_t>(-214)) return 2;
     return 0;
@@ -4274,16 +4274,16 @@ int main() {
     }
 
     {
-        std::string case_name = "scpp_atoi_rejects_empty_string";
+        std::string case_name = "scpp_strconv_atoi_rejects_empty_string";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
 import scpp;
 int main() {
     std::string text("");
-    auto parsed = scpp::atoi(text);
+    auto parsed = scpp::strconv::atoi(text);
     if (parsed.has_value()) return 1;
-    if (parsed.error() != scpp::atoi_error::empty) return 2;
+    if (parsed.error() != scpp::strconv::error::empty) return 2;
     return 0;
 }
 )SCPP",
@@ -4292,16 +4292,16 @@ int main() {
     }
 
     {
-        std::string case_name = "scpp_atoi_rejects_trailing_garbage_without_partial_parse";
+        std::string case_name = "scpp_strconv_atoi_rejects_trailing_garbage_without_partial_parse";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
 import scpp;
 int main() {
     std::string text("123abc");
-    auto parsed = scpp::atoi(text);
+    auto parsed = scpp::strconv::atoi(text);
     if (parsed.has_value()) return 1;
-    if (parsed.error() != scpp::atoi_error::invalid_digit) return 2;
+    if (parsed.error() != scpp::strconv::error::invalid_digit) return 2;
     return 0;
 }
 )SCPP",
@@ -4310,16 +4310,16 @@ int main() {
     }
 
     {
-        std::string case_name = "scpp_atoi_matches_rust_and_rejects_leading_plus";
+        std::string case_name = "scpp_strconv_atoi_matches_rust_and_rejects_leading_plus";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
 import scpp;
 int main() {
     std::string text("+42");
-    auto parsed = scpp::atoi(text);
+    auto parsed = scpp::strconv::atoi(text);
     if (parsed.has_value()) return 1;
-    if (parsed.error() != scpp::atoi_error::invalid_digit) return 2;
+    if (parsed.error() != scpp::strconv::error::invalid_digit) return 2;
     return 0;
 }
 )SCPP",
@@ -4328,16 +4328,16 @@ int main() {
     }
 
     {
-        std::string case_name = "scpp_atoi_reports_int32_overflow";
+        std::string case_name = "scpp_strconv_atoi_reports_int32_overflow";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
 import scpp;
 int main() {
     std::string text("2147483648");
-    auto parsed = scpp::atoi(text);
+    auto parsed = scpp::strconv::atoi(text);
     if (parsed.has_value()) return 1;
-    if (parsed.error() != scpp::atoi_error::overflow) return 2;
+    if (parsed.error() != scpp::strconv::error::overflow) return 2;
     return 0;
 }
 )SCPP",
@@ -4403,7 +4403,7 @@ int main() {
     run_nodiscard_tests();
     run_static_member_function_tests();
     run_random_tests();
-    run_atoi_tests();
+    run_strconv_tests();
     run_expected_tests();
     run_io_tests();
     run_enum_tests();

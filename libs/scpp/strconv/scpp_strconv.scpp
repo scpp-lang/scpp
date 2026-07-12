@@ -1,0 +1,46 @@
+// scpp_strconv.scpp
+//
+// The `:strconv` partition of the "scpp" module: string conversion helpers
+// that intentionally do not live in `std::`.
+export module scpp:strconv;
+
+import std;
+
+extern "C" {
+    int scpp_strconv_atoi_parse_i32(const char* text, int32_t* value);
+}
+
+namespace scpp::strconv {
+
+export enum class error {
+    empty,
+    invalid_digit,
+    overflow,
+};
+
+export std::expected<int32_t, error> atoi(const std::string& s) {
+    int32_t value = 0;
+    int status = 0;
+    [[scpp::unsafe]] {
+        status = ::scpp_strconv_atoi_parse_i32(s.c_str(), &value);
+    }
+    if (status == 0) {
+        std::expected<int32_t, error> result(value);
+        return std::move(result);
+    }
+    if (status == 1) {
+        std::unexpected<error> err(scpp::strconv::error::empty);
+        std::expected<int32_t, error> result(err);
+        return std::move(result);
+    }
+    if (status == 2) {
+        std::unexpected<error> err(scpp::strconv::error::invalid_digit);
+        std::expected<int32_t, error> result(err);
+        return std::move(result);
+    }
+    std::unexpected<error> err(scpp::strconv::error::overflow);
+    std::expected<int32_t, error> result(err);
+    return std::move(result);
+}
+
+} // namespace scpp::strconv

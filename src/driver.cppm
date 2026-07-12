@@ -1262,7 +1262,7 @@ void create_archive(const std::string& object_path, const std::string& archive_p
         append_if_exists(*lib_dir / "libscpp_thread_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_print_wrapper.a");
         append_if_exists(*lib_dir / "libscpp_random_wrapper.a");
-        append_if_exists(*lib_dir / "libscpp_atoi_wrapper.a");
+        append_if_exists(*lib_dir / "libscpp_strconv_wrapper.a");
     }
     return result;
 }

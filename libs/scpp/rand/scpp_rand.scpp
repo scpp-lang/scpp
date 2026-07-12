@@ -27,8 +27,8 @@ private:
 
 public:
     uniform_int_distribution(const uniform_int_distribution<int>& other) {
-        this->minimum_ = other.min();
-        this->maximum_ = other.max();
+        this->minimum_ = other.minimum_;
+        this->maximum_ = other.maximum_;
         return;
     }
 
