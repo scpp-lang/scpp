@@ -18,6 +18,25 @@ repository. 以下规则适用于在本仓库中工作的任何 Copilot agent（
   notification arrives.
 - 需要查看 sub agent 进度时，用非阻塞方式查询状态（如 `read_agent` 不带
   `wait` 或 `wait:false`），收到完成通知后再去读取结果。
+- `read_agent` must never be called with `wait: true` under any circumstance
+  — no exceptions. This includes immediately after a "finished processing" /
+  completion notification for that exact agent, and even when the agent's last
+  known status is already `idle`; there is no safe case for `wait: true`.
+- 在任何情况下都绝不能用 `wait: true` 调 `read_agent`——没有任何例外。这
+  包括：刚收到该 agent 自身的 “finished processing” / 完成通知之后，或该
+  agent 最近一次已知状态已经是 `idle` 的时候；`wait: true` 不存在所谓“安全
+  用法”。
+- When calling `read_agent`, either omit the `wait` parameter entirely (it
+  defaults to `false`) or pass `wait: false` explicitly.
+- 调 `read_agent` 时，要么完全省略 `wait` 参数（默认就是 `false`），要么显式
+  传 `wait:false`。
+- This rule is about responsiveness, not just long waits: even against an
+  already-idle agent, issuing the tool call itself can still keep the
+  assistant turn from ending immediately, which may cause the user's next
+  message to be queued instead of handled right away.
+- 这条规则针对的是响应连续性，而不只是避免“等很久”：即使目标 agent 已经是
+  `idle`，发起这次工具调用本身也可能让 assistant 当前回合不能立刻结束，进而
+  让用户下一条消息被排队，而不是马上得到处理。
 
 ## Manager agent role / Manager agent 角色定位
 
