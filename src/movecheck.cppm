@@ -3120,32 +3120,15 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             const std::string& name = expr.lhs->name;
             auto type_it = body.local_types.find(name);
-            // ch04 §4.2/spec §6.4: any class type (move
-            // construction/assignment, always the compiler-provided
-            // memberwise operation -- never a struct/scalar, which isn't
-            // move-restricted at all (always freely copyable). Also
-            // recognizes an rvalue-reference-*to*-class
-            // local/parameter (`Inner&& i`, ch03/ch05 §5.11): `i` itself
-            // is a name, like any other, that can appear as `std::move`'s
-            // own operand (mirrors real C++: a *named* rvalue reference
-            // is itself an lvalue, so moving out of what it refers to
-            // still needs an explicit std::move) -- moving out of `i`
-            // here moves out of *its own current referent* (whatever
-            // temporary/argument that rvalue-reference parameter is
-            // itself bound to), not `i`'s own (nonexistent, references
-            // are never owning) storage.
-            auto is_named_class = [&](const Type& t) {
-                return t.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(t.name);
-            };
-            bool is_movable_class =
-                type_it != body.local_types.end() &&
-                (is_named_class(type_it->second) ||
-                 (type_it->second.kind == TypeKind::Reference && type_it->second.pointee &&
-                  is_named_class(*type_it->second.pointee)));
-            if (type_it == body.local_types.end() || !is_movable_class) {
+            // spec §6.2(3): `std::move(E)` is a syntactic ownership-state
+            // transition on any named object `E`, not just on class types.
+            // The same named-object rule already covers an rvalue-
+            // reference local/parameter (`Inner&& i`, ch03/ch05 §5.11):
+            // `i` itself is still a name, and moving from it marks that
+            // local/parameter moved-out exactly like any other local name.
+            if (type_it == body.local_types.end()) {
                 if (report_errors) {
-                    throw DataflowError("std::move is only supported for class-typed variables in this version; '" +
-                                         name + "' is not one",
+                    throw DataflowError("unknown variable '" + name + "'",
                         state.current_loc);
                 }
                 return;
@@ -3166,7 +3149,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             state.locals[name] = LocalState::MovedOut;
             if (report_errors && !is_move_target_context) {
                 throw DataflowError("std::move(" + name + ") must be used to initialize, assign into, return, "
-                                                            "pass, or capture a same-typed class value",
+                                                            "pass, or capture a value",
                     state.current_loc);
             }
             return;
@@ -3392,7 +3375,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                          "licensed",
                         state.current_loc);
                 }
-                bool is_move_target = target_is_movable_class;
+                bool is_move_target = target_is_movable_class || expr.rhs->kind == ExprKind::Move;
                 apply_expr(*expr.rhs, is_move_target, state, body, signatures, report_errors);
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto it = body.local_types.find(expr.lhs->name);
@@ -3587,7 +3570,8 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     // `stmt.local` initialized.
     if (stmt.type.kind == TypeKind::Reference && !stmt.type.is_mutable_ref &&
         produces_rvalue_of_type(*stmt.expr, *stmt.type.pointee, body, signatures)) {
-        apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+        apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body, signatures,
+                   report_errors);
         state.locals[stmt.local] = LocalState::Initialized;
         return;
     }
@@ -3665,7 +3649,8 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
                 state.current_loc);
         }
     }
-    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+    apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+               signatures, report_errors);
 }
 
 // ch04 §4.2/spec §6.4: true exactly when `ctor_args` is the single-
@@ -3905,7 +3890,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                                 state.current_loc);
                         }
                     }
-                    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                    apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+                               signatures, report_errors);
                     state.locals[stmt.local] = LocalState::Initialized;
                     return;
                 }
@@ -3979,7 +3965,8 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 return;
             }
 
-            apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+                       signatures, report_errors);
             if (type_it != body.local_types.end()) {
                 check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
                                                   stmt.local, report_errors);
@@ -4115,8 +4102,9 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             bool return_is_class_value = is_named_class_type(fn.return_type, body);
             bool copyable_lvalue_source =
                 return_is_class_value && is_copyable_class_lvalue_boundary_source(*term.return_value, fn.return_type, body, signatures);
-            apply_expr(*term.return_value, return_is_class_value && !copyable_lvalue_source, state, body, signatures,
-                       /*report_errors=*/true);
+            bool move_target_context =
+                (return_is_class_value && !copyable_lvalue_source) || term.return_value->kind == ExprKind::Move;
+            apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true);
             if (return_is_class_value && !copyable_lvalue_source &&
                 !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures)) {
                 throw DataflowError("returning class '" + fn.return_type.name +

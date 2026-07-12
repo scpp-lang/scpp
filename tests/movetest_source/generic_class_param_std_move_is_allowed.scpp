@@ -1,0 +1,15 @@
+import std;
+template<typename T>
+class Box {
+public:
+    T value;
+    Box(T value) {
+        this->value = std::move(value);
+        return;
+    }
+};
+
+int f() {
+    Box<int> box(7);
+    return box.value;
+}
