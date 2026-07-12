@@ -12,3 +12,4 @@ export import :memory;
 export import :thread;
 export import :print;
 export import :random;
+export import :charconv;

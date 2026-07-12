@@ -1,0 +1,52 @@
+// std_charconv.scpp
+//
+// The `:charconv` interface partition of the "std" module: a thin wrapper
+// around a native helper that forwards to real C++ std::from_chars while
+// keeping the unsafe operations internal to the library implementation.
+export module std:charconv;
+
+extern "C" {
+    const char* scpp_std_from_chars_int(const char* first, const char* last, int* out_value, int* out_ec, int base);
+}
+
+namespace std {
+
+export enum class errc : int {
+    invalid_argument = 22,
+    result_out_of_range = 34,
+};
+
+export struct from_chars_result {
+    const char* ptr;
+    std::errc ec;
+};
+
+export from_chars_result from_chars(const char* first, const char* last, int& value, int base) {
+    int parsed = 0;
+    int ec_value = 0;
+    const char* ptr = first;
+    [[scpp::unsafe]] {
+        ptr = scpp_std_from_chars_int(first, last, &parsed, &ec_value, base);
+    }
+    if (ec_value == 0) value = parsed;
+    std::from_chars_result result;
+    result.ptr = ptr;
+    result.ec = static_cast<std::errc>(ec_value);
+    return result;
+}
+
+export from_chars_result from_chars(const char* first, const char* last, int& value) {
+    int parsed = 0;
+    int ec_value = 0;
+    const char* ptr = first;
+    [[scpp::unsafe]] {
+        ptr = scpp_std_from_chars_int(first, last, &parsed, &ec_value, 10);
+    }
+    if (ec_value == 0) value = parsed;
+    std::from_chars_result result;
+    result.ptr = ptr;
+    result.ec = static_cast<std::errc>(ec_value);
+    return result;
+}
+
+} // namespace std

@@ -43,6 +43,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_SCPP_INTERFACE_PATH
 #error "SCPP_STDLIB_SCPP_INTERFACE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_CHARCONV_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_CHARCONV_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
 #endif
@@ -112,7 +115,7 @@ std::unordered_map<std::string, std::string> prebuilt_module_import_paths() {
 }
 
 std::vector<std::string> std_link_inputs() {
-    return {SCPP_STDLIB_IO_WRAPPER_LIB_PATH, SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
+    return {SCPP_STDLIB_CHARCONV_WRAPPER_LIB_PATH, SCPP_STDLIB_IO_WRAPPER_LIB_PATH, SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
             SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH, SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH,
             SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH};
 }
@@ -4319,6 +4322,280 @@ int main() {
     }
 }
 
+void run_charconv_tests() {
+    {
+        std::string case_name = "std_from_chars_parses_full_decimal_range_without_unsafe_callsite";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    char text[6];
+    text[0] = '1';
+    text[1] = '2';
+    text[2] = '3';
+    text[3] = '4';
+    text[4] = '5';
+    text[5] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[5];
+    int value = 7;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != 12345) return 1;
+    if ((int)result.ec != 0) return 2;
+    bool consumed_all = same_ptr(result.ptr, last);
+    if (!consumed_all) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_from_chars_leaves_trailing_characters_unconsumed";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+char read_char(const char* ptr) {
+    [[scpp::unsafe]] {
+        return *ptr;
+    }
+}
+int main() {
+    char text[6];
+    text[0] = '4';
+    text[1] = '2';
+    text[2] = 'x';
+    text[3] = 'y';
+    text[4] = 'z';
+    text[5] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[5];
+    int value = 0;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != 42) return 1;
+    if ((int)result.ec != 0) return 2;
+    char trailing = read_char(result.ptr);
+    if (trailing != 'x') return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_from_chars_reports_invalid_argument_for_empty_range";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    char text[3];
+    text[0] = '9';
+    text[1] = '9';
+    text[2] = '\0';
+    const char* first = &text[0];
+    int value = 77;
+    std::from_chars_result result = std::from_chars(first, first, value);
+    if (value != 77) return 1;
+    if (result.ec != std::errc::invalid_argument) return 2;
+    bool stayed_at_first = same_ptr(result.ptr, first);
+    if (!stayed_at_first) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_from_chars_reports_invalid_argument_for_non_digit_start";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    char text[4];
+    text[0] = 'a';
+    text[1] = 'b';
+    text[2] = 'c';
+    text[3] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[3];
+    int value = 88;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != 88) return 1;
+    if (result.ec != std::errc::invalid_argument) return 2;
+    bool stayed_at_first = same_ptr(result.ptr, first);
+    if (!stayed_at_first) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_from_chars_reports_out_of_range_without_writing_value";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    char text[26];
+    text[0] = '9';
+    text[1] = '9';
+    text[2] = '9';
+    text[3] = '9';
+    text[4] = '9';
+    text[5] = '9';
+    text[6] = '9';
+    text[7] = '9';
+    text[8] = '9';
+    text[9] = '9';
+    text[10] = '9';
+    text[11] = '9';
+    text[12] = '9';
+    text[13] = '9';
+    text[14] = '9';
+    text[15] = '9';
+    text[16] = '9';
+    text[17] = '9';
+    text[18] = '9';
+    text[19] = '9';
+    text[20] = '9';
+    text[21] = '9';
+    text[22] = '9';
+    text[23] = '9';
+    text[24] = '9';
+    text[25] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[25];
+    int value = 55;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != 55) return 1;
+    if (result.ec != std::errc::result_out_of_range) return 2;
+    bool consumed_all = same_ptr(result.ptr, last);
+    if (!consumed_all) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_from_chars_accepts_negative_numbers";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    char text[4];
+    text[0] = '-';
+    text[1] = '1';
+    text[2] = '7';
+    text[3] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[3];
+    int value = 0;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != -17) return 1;
+    if ((int)result.ec != 0) return 2;
+    bool consumed_all = same_ptr(result.ptr, last);
+    if (!consumed_all) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_from_chars_rejects_leading_plus";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    char text[4];
+    text[0] = '+';
+    text[1] = '1';
+    text[2] = '7';
+    text[3] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[3];
+    int value = 91;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != 91) return 1;
+    if (result.ec != std::errc::invalid_argument) return 2;
+    bool stayed_at_first = same_ptr(result.ptr, first);
+    if (!stayed_at_first) return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_from_chars_supports_explicit_base_argument";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+char read_char(const char* ptr) {
+    [[scpp::unsafe]] {
+        return *ptr;
+    }
+}
+int main() {
+    char text[4];
+    text[0] = '7';
+    text[1] = 'f';
+    text[2] = '!';
+    text[3] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[3];
+    int value = 0;
+    std::from_chars_result result = std::from_chars(first, last, value, 16);
+    if (value != 127) return 1;
+    if ((int)result.ec != 0) return 2;
+    char trailing = read_char(result.ptr);
+    if (trailing != '!') return 3;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_std_move_tests() {
     {
         std::string case_name = "std_move_accepts_primitives_and_enums";
@@ -4443,6 +4720,7 @@ int main() {
     run_functional_tests();
     run_thread_tests();
     run_std_move_tests();
+    run_charconv_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
     run_static_member_function_tests();
