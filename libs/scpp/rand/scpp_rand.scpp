@@ -8,7 +8,7 @@ import std;
 
 namespace scpp::rand {
 
-export enum class uniform_int_distribution_error { empty_range };
+export enum class error { empty_range };
 
 export template<typename T>
 class uniform_int_distribution;
@@ -34,16 +34,15 @@ public:
 
     ~uniform_int_distribution() { return; }
 
-    static std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> make(int minimum,
-                                                                                              int maximum) {
+    static std::expected<uniform_int_distribution<int>, error> make(int minimum, int maximum) {
         if (minimum > maximum) {
-            uniform_int_distribution_error code = (uniform_int_distribution_error)0;
-            std::unexpected<uniform_int_distribution_error> error(code);
-            std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(error);
+            error code = (error)0;
+            std::unexpected<error> error_value(code);
+            std::expected<uniform_int_distribution<int>, error> result(error_value);
             return std::move(result);
         }
         uniform_int_distribution<int> distribution(minimum, maximum);
-        std::expected<uniform_int_distribution<int>, uniform_int_distribution_error> result(std::move(distribution));
+        std::expected<uniform_int_distribution<int>, error> result(std::move(distribution));
         return std::move(result);
     }
 
