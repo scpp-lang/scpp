@@ -1558,6 +1558,101 @@ void run_generic_function_overload_tests() {
     }
 }
 
+void run_reference_overload_forwarding_tests() {
+    {
+        std::string case_name = "reference_typed_local_forwards_to_overloaded_mutable_reference_parameter";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "namespace demo {\n"
+            "int f(int a, int& b, int c) {\n"
+            "    b = b + a + c;\n"
+            "    return b;\n"
+            "}\n"
+            "int f(int a, int& b) {\n"
+            "    return f(a, b, 10);\n"
+            "}\n"
+            "}\n"
+            "int main() {\n"
+            "    int x = 1;\n"
+            "    return demo::f(2, x) - 13;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "reference_typed_local_forwards_to_overloaded_value_parameter";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "namespace demo {\n"
+            "int f(int a, int b, int c) {\n"
+            "    return a + b + c;\n"
+            "}\n"
+            "int f(int a, int& b) {\n"
+            "    return f(a, b, 10);\n"
+            "}\n"
+            "}\n"
+            "int main() {\n"
+            "    int x = 1;\n"
+            "    return demo::f(2, x) - 13;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "mutable_reference_local_forwards_to_overloaded_const_reference_parameter";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "namespace demo {\n"
+            "int f(int a, const int& b, int c) {\n"
+            "    return a + b + c;\n"
+            "}\n"
+            "int f(int a, int& b) {\n"
+            "    return f(a, b, 10);\n"
+            "}\n"
+            "}\n"
+            "int main() {\n"
+            "    int x = 1;\n"
+            "    return demo::f(2, x) - 13;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "const_reference_local_does_not_forward_to_overloaded_mutable_reference_parameter";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(
+                "namespace demo {\n"
+                "int f(int a, int& b, int c) {\n"
+                "    return a + b + c;\n"
+                "}\n"
+                "int f(int a, const int& b) {\n"
+                "    return f(a, b, 10);\n"
+                "}\n"
+                "}\n"
+                "int main() {\n"
+                "    int x = 1;\n"
+                "    return demo::f(2, x) - 13;\n"
+                "}\n");
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+            scpp::Codegen codegen("test_module");
+            codegen.generate(program);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        } catch (const scpp::CodegenError&) {
+            threw = true;
+        } catch (const scpp::ParseError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected mutable-reference overload to remain unavailable");
+    }
+}
+
 void run_functional_tests() {
     std::string case_name = "std_function_rejects_move_only_target";
     cases_run++;
@@ -4938,6 +5033,7 @@ int main() {
     run_generic_type_tests();
     run_generic_pack_deduction_tests();
     run_generic_function_overload_tests();
+    run_reference_overload_forwarding_tests();
     run_functional_tests();
     run_thread_tests();
     run_std_move_tests();

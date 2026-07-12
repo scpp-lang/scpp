@@ -1015,6 +1015,20 @@ private:
     }
 
     bool argument_matches_parameter(const Expr& arg, const Type& param_type) {
+        auto argument_type_matches_parameter = [&](const Type& arg_type, const Type& candidate_param_type) {
+            if (candidate_param_type.kind == TypeKind::Reference) {
+                if (arg_type.kind == TypeKind::Reference) {
+                    if (arg_type.pointee == nullptr || candidate_param_type.pointee == nullptr) return false;
+                    return types_equal(*arg_type.pointee, *candidate_param_type.pointee) &&
+                           (!candidate_param_type.is_mutable_ref || arg_type.is_mutable_ref);
+                }
+                return candidate_param_type.pointee != nullptr && types_equal(arg_type, *candidate_param_type.pointee);
+            }
+            if (arg_type.kind == TypeKind::Reference) {
+                return arg_type.pointee != nullptr && types_equal(*arg_type.pointee, candidate_param_type);
+            }
+            return types_equal(arg_type, candidate_param_type);
+        };
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
             // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- mirror image of
             // the ordinary-reference case just below.
@@ -1035,11 +1049,11 @@ private:
                 return false;
             }
             std::optional<Type> arg_type = infer_type(arg);
-            return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
+            return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type);
         }
         std::optional<Type> arg_type = infer_type(arg);
         if (!arg_type.has_value()) return false;
-        if (!types_equal(*arg_type, param_type)) {
+        if (!argument_type_matches_parameter(*arg_type, param_type)) {
             if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr &&
                 find_single_argument_converting_constructor(param_type.name, arg) != nullptr) {
                 return true;
