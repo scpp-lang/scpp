@@ -56,9 +56,10 @@ This is enough for a first chapter:
 - you compiled a one-file program;
 - you built a manifest-based project with a named binary.
 
-The next chapter will stay hands-on, but switch from setup to a slightly larger
-program that uses ordinary variables, loops, and conditions together.
+The next chapter stays hands-on, but switches from setup to a slightly larger
+program: a guessing game that reads input, generates a secret number, and uses
+ordinary variables, loops, and conditions together.
 
 ---
 
-[← Previous: Hello, World!](ch01-02-hello-world.md) · [Table of Contents](README.md)
+[← Previous: Hello, World!](ch01-02-hello-world.md) · [Table of Contents](README.md) · [Next: Programming a Guessing Game →](ch02-00-guessing-game.md)

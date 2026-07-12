@@ -55,8 +55,9 @@ Hello from a project build!
 - 你构建了一个带 manifest、带具名二进制目标的项目。
 
 下一章会继续保持“动手做”的节奏，但重点会从“把工具跑起来”切换到“写一个稍微
-更完整一点的程序”，开始把变量、循环和条件组合起来使用。
+更完整一点的程序”：一个会读入输入、生成秘密数字，并把变量、循环和条件组合起来
+使用的猜数字游戏。
 
 ---
 
-[← 上一节：Hello, World!](ch01-02-hello-world.md) · [目录](README.md)
+[← 上一节：Hello, World!](ch01-02-hello-world.md) · [目录](README.md) · [下一节：做一个猜数字小游戏 →](ch02-00-guessing-game.md)
