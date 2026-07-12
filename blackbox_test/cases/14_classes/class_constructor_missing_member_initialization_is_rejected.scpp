@@ -1,0 +1,16 @@
+// spec 6.1(4): each constructor must initialize every member either through
+// its own member-initializer-list or through an in-class default.
+class Bad {
+private:
+    int a{};
+    int b;
+public:
+    Bad(int x) : a{x} {
+        return;
+    }
+};
+
+int main() {
+    Bad bad{1};
+    return 0;
+}

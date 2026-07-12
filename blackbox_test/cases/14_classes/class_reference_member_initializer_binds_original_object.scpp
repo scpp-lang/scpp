@@ -1,0 +1,21 @@
+// spec 6.1(5): a reference-typed member may be initialized through the
+// constructor member-initializer-list, and it binds the referenced object.
+class RefBox {
+private:
+    int& ref;
+public:
+    RefBox(int& r) : ref{r} {
+        return;
+    }
+    void set(int value) {
+        this->ref = value;
+        return;
+    }
+};
+
+int main() {
+    int target{3};
+    RefBox box{target};
+    box.set(9);
+    return target - 9;
+}
