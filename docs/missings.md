@@ -19,6 +19,18 @@ This file is an internal backlog, not reader-facing book content.
   compiler still implements only a small subset of that story.
 - No language-level enums, pattern matching, `if let`, or `let...else` yet, so
   TRPL-style chapters about tagged alternatives must be reframed or postponed.
+- No settled rule yet for enum zero-initialization / default-construction when an
+  enum has no declared `0` enumerator. Real C++ still permits a zero bit-pattern
+  value here (for example, `std::errc()` as the “success” idiom even though
+  `std::errc` has no explicit zero/success enumerator), but that now sits in
+  tension with scpp's stricter enum-safety direction: if int→enum conversion is
+  allowed only through checked `scpp::enum_cast<T>`, letting `SomeEnum{}` or an
+  equivalent zero-initialization path silently materialize a non-enumerator value
+  would be an inconsistent loophole. Rust's model is the opposite extreme: enums
+  have no implicit zero/default state at all, and any opted-in default must be a
+  real declared variant rather than an out-of-band sentinel. This needs a later
+  design decision, including what scpp should do with C++-style cases such as
+  `std::errc`.
 - No growable standard collections such as `std::vector`, `std::string`, or
   hash-map equivalents yet; the book currently has to teach fixed-size arrays
   and C-compatible buffers instead.
