@@ -116,11 +116,14 @@ namespace {
 }
 
 [[nodiscard]] bool is_compile_time_root(const scpp::Program& program, const scpp::Function& fn) {
+    if (!fn.member_owner_class.empty() && is_exported_generic_type_name(program, fn.member_owner_class)) {
+        return true;
+    }
     if (!fn.is_exported) return false;
     if (fn.eval_mode != scpp::FunctionEvalMode::RuntimeOnly || fn.is_generic_template || !fn.template_params.empty()) {
         return true;
     }
-    return !fn.member_owner_class.empty() && is_exported_generic_type_name(program, fn.member_owner_class);
+    return false;
 }
 
 void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>& out) {
@@ -1096,6 +1099,34 @@ struct GenericMethodOwnerRemap {
     return !plan.root_function_names.empty();
 }
 
+void mark_reachable_hidden_compile_time_dependencies(Program& program) {
+    CompileTimePayloadPlan plan = plan_compile_time_payload(program);
+    std::unordered_set<size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
+                                                          plan.reachable_function_indices.end());
+    std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
+    for (EnumDef& def : program.enums) {
+        if (!def.is_exported && def.owning_module.empty() && reachable_type_names.contains(def.name)) {
+            def.is_compile_time_dependency = true;
+        }
+    }
+    for (StructDef& def : program.structs) {
+        if (!def.is_exported && def.owning_module.empty() && reachable_type_names.contains(def.name)) {
+            def.is_compile_time_dependency = true;
+        }
+    }
+    for (ClassDef& def : program.classes) {
+        if (!def.is_exported && def.owning_module.empty() && reachable_type_names.contains(def.name)) {
+            def.is_compile_time_dependency = true;
+        }
+    }
+    for (size_t i = 0; i < program.functions.size(); i++) {
+        if (!program.functions[i].is_exported && program.functions[i].owning_module.empty() &&
+            reachable_function_indices.contains(i)) {
+            program.functions[i].is_compile_time_dependency = true;
+        }
+    }
+}
+
 void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&& payload) {
     std::vector<GenericMethodOwnerRemap> owner_remaps;
     for (EnumDef& def : payload.enums) {
@@ -1457,6 +1488,8 @@ public:
         if (loaded.has_compile_time_payload) {
             merge_compile_time_payload(imported,
                                        deserialize_compile_time_payload(loaded.compile_time_payload_bytes, resolved_path));
+        } else if (!loaded.is_scppm) {
+            mark_reachable_hidden_compile_time_dependencies(imported);
         } else if (loaded.is_scppm && program_requires_structured_payload(imported)) {
             throw DriverError("module interface '" + resolved_path +
                               "' lacks the required structured compile-time payload; rebuild it with a newer scpp "

@@ -2741,6 +2741,167 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_build_module_with_exported_generic_class_constructor_hidden_helper_roundtrips";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_build_module_with_exported_generic_class_constructor_hidden_helper_roundtrips";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    template<typename T>\n"
+                        "    class HiddenValidator {\n"
+                        "    public:\n"
+                        "        consteval HiddenValidator(const char* s) { return; }\n"
+                        "    };\n"
+                        "    export template<typename T>\n"
+                        "    class CheckedString {\n"
+                        "    public:\n"
+                        "        const char* text_;\n"
+                        "        consteval CheckedString(const char* s) {\n"
+                        "            this->text_ = s;\n"
+                        "            helper::HiddenValidator<T> validator(s);\n"
+                        "            return;\n"
+                        "        }\n"
+                        "        const char* c_str() const { return this->text_; }\n"
+                        "    };\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    helper::CheckedString<int> text(\"ok\");\n"
+                        "    const char* ptr = text.c_str();\n"
+                        "    if (ptr[0] == 'o') return 0;\n"
+                        "    return 1;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": exported generic class constructor should keep hidden helper reachable, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected exported generic class constructor payload-backed binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_raw_source_import_keeps_hidden_helper_for_exported_generic_class_constructor";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_raw_source_import_keeps_hidden_helper_for_exported_generic_class_constructor";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    template<typename T>\n"
+                        "    class HiddenValidator {\n"
+                        "    public:\n"
+                        "        consteval HiddenValidator(const char* s) { return; }\n"
+                        "    };\n"
+                        "    export template<typename T>\n"
+                        "    class CheckedString {\n"
+                        "    public:\n"
+                        "        const char* text_;\n"
+                        "        consteval CheckedString(const char* s) {\n"
+                        "            this->text_ = s;\n"
+                        "            helper::HiddenValidator<T> validator(s);\n"
+                        "            return;\n"
+                        "        }\n"
+                        "        const char* c_str() const { return this->text_; }\n"
+                        "    };\n"
+                        "}\n");
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    helper::CheckedString<int> text(\"ok\");\n"
+                        "    const char* ptr = text.c_str();\n"
+                        "    if (ptr[0] == 'o') return 0;\n"
+                        "    return 1;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + module_source.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": raw source import should keep hidden helper reachable, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected raw-source helper binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_private_import_does_not_hide_directly_imported_exported_surface";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_private_import_does_not_hide_directly_imported_exported_surface";
+        std::filesystem::path dep_source = root / "dep.scpp";
+        std::filesystem::path wrapper_source = root / "wrapper.scpp";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(dep_source,
+                        "export module dep;\n"
+                        "namespace dep {\n"
+                        "    export class Box {\n"
+                        "    public:\n"
+                        "        Box() { return; }\n"
+                        "        int call() { return 7; }\n"
+                        "    };\n"
+                        "}\n");
+        write_text_file(wrapper_source,
+                        "export module wrapper;\n"
+                        "import dep;\n"
+                        "namespace wrapper {\n"
+                        "    export int pass(dep::Box& box) {\n"
+                        "        return box.call();\n"
+                        "    }\n"
+                        "}\n");
+        write_text_file(consumer_source,
+                        "import dep;\n"
+                        "import wrapper;\n"
+                        "int main() {\n"
+                        "    dep::Box box;\n"
+                        "    if (box.call() != 7) return 1;\n"
+                        "    return wrapper::pass(box) - 7;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import dep=" + dep_source.string() +
+                                " --import wrapper=" + wrapper_source.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": private importer must not hide directly imported exported members, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected private-import visibility binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_compile_time_dependency_function_is_not_directly_callable";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_compile_time_dependency_function_is_not_directly_callable";
