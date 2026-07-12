@@ -111,7 +111,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `10_bool_and_char` | no implicit scalar conversions, short-circuit evaluation |
 | `12_struct_vs_class` | `struct` vs `class` access-control divergence |
 | `13_unsupported_robustness` | unsupported/not-yet-implemented syntax fails cleanly, never crashes |
-| `14_classes` | constructors/destructors, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
+| `14_classes` | constructors/destructors, default member initializers and constructor member-initializer lists, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup, and leading `::` global-scope lookup; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
@@ -216,8 +216,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **385 cases total**
-- **385/385 passing**
+- **393 cases total**
+- **393/393 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -233,6 +233,12 @@ re-run via `./build/run_tests`:
   - copyable classes passed/returned by value
   - move-only classes passed/returned by value via `std::move(...)`
   - non-copyable bare locals still rejected when a copy would be needed
+- **Required-initialization semantics now have dedicated black-box coverage**:
+  bare local declarations are rejected, valid local forms (`{}`, `{args}`,
+  and `= value`) succeed, constructors may mix in-class defaults with
+  member-initializer lists, reference members bind correctly, completeness
+  is checked per constructor, and member initialization follows declaration
+  order rather than initializer-list order
 - **Thread-trait overrides now cover the rewritten §5.15/§8 docs**:
   builtin trait predicates, conditional overrides on generic classes,
   unconditional generic override propagation, and `std::unique_ptr<T>`'s

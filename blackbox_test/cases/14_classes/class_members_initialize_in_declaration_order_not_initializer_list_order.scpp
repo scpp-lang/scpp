@@ -1,0 +1,20 @@
+// spec 6.1 + 6.4/6.5 declaration-order notes: member initialization follows
+// declaration order, not the textual order of the initializer list.
+
+class Pair {
+private:
+    int first;
+    int second;
+public:
+    Pair() : second{this->first + 1}, first{5} {
+        return;
+    }
+    int encode() const {
+        return this->first * 10 + this->second;
+    }
+};
+
+int main() {
+    Pair p{};
+    return p.encode() - 56;
+}

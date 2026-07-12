@@ -1,0 +1,20 @@
+// spec 6.1(4): completeness is per-constructor; one well-formed overload does
+// not excuse another constructor that leaves a member uninitialized.
+class Bad {
+private:
+    int a{1};
+    int b;
+    int c{3};
+public:
+    Bad() : b{2} {
+        return;
+    }
+    Bad(int x) : c{x} {
+        return;
+    }
+};
+
+int main() {
+    Bad ok{};
+    return 0;
+}

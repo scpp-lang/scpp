@@ -1,0 +1,24 @@
+// spec 6.1(4): each constructor is checked independently, so one overload may
+// rely on defaults while another explicitly initializes some members.
+class Widget {
+private:
+    int a{1};
+    int b{2};
+    int c;
+public:
+    Widget(int x) : c{x} {
+        return;
+    }
+    Widget(int x, int y) : b{y}, c{x + y} {
+        return;
+    }
+    int sum() const {
+        return this->a + this->b + this->c;
+    }
+};
+
+int main() {
+    Widget one{4};
+    Widget two{5, 6};
+    return one.sum() + two.sum() - 25;
+}
