@@ -132,6 +132,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`, `std::storage_for<T, ...>`, placement-new, and explicit destructor-call syntax |
 | `33_nodiscard` | `[[nodiscard]]` / `[[nodiscard("reason")]]` on functions and types, including discard diagnostics and allowed non-discarding uses |
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` state behavior, misuse aborts, and `std::abort()` itself |
+| `35_random` | `std::random_device`, `std::mt19937`, and `scpp::rand::uniform_int_distribution<int>` |
 
 ## Testing philosophy
 
@@ -214,8 +215,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **306 cases total**
-- **306/306 passing**
+- **374 cases total**
+- **374/374 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -258,6 +259,9 @@ re-run via `./build/run_tests`:
 - **`std::expected` / `std::abort` now have direct black-box coverage too**:
   success/error construction, inline storage with non-default-constructible
   values, bad-access aborts, and the direct `std::abort()` process abort path
+- **Random support now has direct black-box coverage too**:
+  `std::mt19937` same-seed reproducibility, and
+  `scpp::rand::uniform_int_distribution<int>::min()` / `.max()` accessors
 - **CLI invocation now has direct black-box coverage too**:
   bare `scpp file.scpp`, `-o custom_name`, rejection of the removed
   `build` keyword, and spot-checks that `lex`, `parse`, and
