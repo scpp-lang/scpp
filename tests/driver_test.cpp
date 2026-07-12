@@ -58,6 +58,9 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH
 #error "SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH must be defined by the build"
 #endif
+#ifndef SCPP_STDLIB_ATOI_WRAPPER_LIB_PATH
+#error "SCPP_STDLIB_ATOI_WRAPPER_LIB_PATH must be defined by the build"
+#endif
 namespace {
 
 int failures = 0;
@@ -114,7 +117,7 @@ std::unordered_map<std::string, std::string> prebuilt_module_import_paths() {
 std::vector<std::string> std_link_inputs() {
     return {SCPP_STDLIB_IO_WRAPPER_LIB_PATH, SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
             SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH, SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH};
+            SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH, SCPP_STDLIB_ATOI_WRAPPER_LIB_PATH};
 }
 
 class TestModuleCache {
@@ -4232,6 +4235,117 @@ int main() {
     }
 }
 
+
+void run_atoi_tests() {
+    {
+        std::string case_name = "scpp_atoi_parses_valid_positive_i32";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text("12345");
+    auto parsed = scpp::atoi(text);
+    if (!parsed.has_value()) return 1;
+    if (parsed.value() != static_cast<int32_t>(12345)) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_atoi_parses_valid_negative_i32";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text("-214");
+    auto parsed = scpp::atoi(text);
+    if (!parsed.has_value()) return 1;
+    if (parsed.value() != static_cast<int32_t>(-214)) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_atoi_rejects_empty_string";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text("");
+    auto parsed = scpp::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::atoi_error::empty) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_atoi_rejects_trailing_garbage_without_partial_parse";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text("123abc");
+    auto parsed = scpp::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::atoi_error::invalid_digit) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_atoi_matches_rust_and_rejects_leading_plus";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text("+42");
+    auto parsed = scpp::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::atoi_error::invalid_digit) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_atoi_reports_int32_overflow";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    std::string text("2147483648");
+    auto parsed = scpp::atoi(text);
+    if (parsed.has_value()) return 1;
+    if (parsed.error() != scpp::atoi_error::overflow) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_io_tests() {
     {
         std::string case_name = "scpp_io_getline_reads_one_line_without_newline";
@@ -4289,6 +4403,7 @@ int main() {
     run_nodiscard_tests();
     run_static_member_function_tests();
     run_random_tests();
+    run_atoi_tests();
     run_expected_tests();
     run_io_tests();
     run_enum_tests();

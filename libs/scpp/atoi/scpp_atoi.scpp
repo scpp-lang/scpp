@@ -1,0 +1,46 @@
+// scpp_atoi.scpp
+//
+// The `:atoi` partition of the "scpp" module: a standalone string-to-int32
+// conversion helper that mirrors Rust-style full-string parsing semantics.
+export module scpp:atoi;
+
+import std;
+
+extern "C" {
+    int scpp_atoi_parse_i32(const char* text, int32_t* value);
+}
+
+namespace scpp {
+
+export enum class atoi_error {
+    empty,
+    invalid_digit,
+    overflow,
+};
+
+export std::expected<int32_t, scpp::atoi_error> atoi(const std::string& s) {
+    int32_t value = 0;
+    int status = 0;
+    [[scpp::unsafe]] {
+        status = ::scpp_atoi_parse_i32(s.c_str(), &value);
+    }
+    if (status == 0) {
+        std::expected<int32_t, scpp::atoi_error> result(value);
+        return std::move(result);
+    }
+    if (status == 1) {
+        std::unexpected<scpp::atoi_error> err(scpp::atoi_error::empty);
+        std::expected<int32_t, scpp::atoi_error> result(err);
+        return std::move(result);
+    }
+    if (status == 2) {
+        std::unexpected<scpp::atoi_error> err(scpp::atoi_error::invalid_digit);
+        std::expected<int32_t, scpp::atoi_error> result(err);
+        return std::move(result);
+    }
+    std::unexpected<scpp::atoi_error> err(scpp::atoi_error::overflow);
+    std::expected<int32_t, scpp::atoi_error> result(err);
+    return std::move(result);
+}
+
+} // namespace scpp

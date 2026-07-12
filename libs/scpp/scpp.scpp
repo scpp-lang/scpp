@@ -7,3 +7,4 @@ export module scpp;
 
 export import :io;
 export import :rand;
+export import :atoi;

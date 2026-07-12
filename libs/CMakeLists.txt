@@ -20,6 +20,9 @@ target_compile_features(scpp_random_wrapper PRIVATE cxx_std_23)
 add_library(scpp_io_wrapper STATIC scpp/io/scpp_io_wrapper.cpp)
 target_compile_features(scpp_io_wrapper PRIVATE cxx_std_23)
 
+add_library(scpp_atoi_wrapper STATIC scpp/atoi/scpp_atoi_wrapper.cpp)
+target_compile_features(scpp_atoi_wrapper PRIVATE cxx_std_23)
+
 function(add_scpp_module_artifacts target_name source_path interface_path archive_path)
     get_filename_component(interface_dir "${interface_path}" DIRECTORY)
     add_custom_command(
@@ -56,4 +59,5 @@ add_scpp_module_artifacts(scpp_scpp_artifacts
     scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/scpp.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/io/scpp_io.scpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/rand/scpp_rand.scpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/rand/scpp_rand.scpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/atoi/scpp_atoi.scpp")
