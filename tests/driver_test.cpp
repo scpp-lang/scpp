@@ -2786,6 +2786,60 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_build_module_allows_local_extern_c_redeclaration_of_hidden_payload_helper";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_build_module_allows_local_extern_c_redeclaration_of_hidden_payload_helper";
+        std::filesystem::path base_source = root / "base.scpp";
+        std::filesystem::path base_interface = root / "base.scppm";
+        std::filesystem::path base_archive = root / "libbase.scppa";
+        std::filesystem::path mid_source = root / "mid.scpp";
+        std::filesystem::path mid_interface = root / "mid.scppm";
+        std::filesystem::path mid_archive = root / "libmid.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(base_source,
+                        "export module base;\n"
+                        "extern \"C\" {\n"
+                        "    void hidden_delete(void* handle);\n"
+                        "}\n"
+                        "namespace base {\n"
+                        "    export template<typename T>\n"
+                        "    void touch(const T& value) {\n"
+                        "        [[scpp::unsafe]] {\n"
+                        "            hidden_delete(nullptr);\n"
+                        "        }\n"
+                        "        return;\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_base =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + base_source.string() +
+                                " --interface-out " + base_interface.string() + " --archive-out " +
+                                base_archive.string() + " 2>&1");
+        expect(emit_base.exit_code == 0,
+               case_name + ": base build-module should succeed, got '" + emit_base.stdout_text + "'");
+        write_text_file(mid_source,
+                        "export module mid;\n"
+                        "import base;\n"
+                        "extern \"C\" {\n"
+                        "    void hidden_delete(void* handle);\n"
+                        "}\n"
+                        "namespace mid {\n"
+                        "    export int ok() {\n"
+                        "        return 0;\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_mid =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + mid_source.string() +
+                                " --interface-out " + mid_interface.string() + " --archive-out " +
+                                mid_archive.string() + " --import base=" + base_interface.string() + " 2>&1");
+        expect(emit_mid.exit_code == 0,
+               case_name + ": importing module should be allowed to redeclare identical extern C helper, got '" +
+                   emit_mid.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_rejects_legacy_scppm_missing_structured_payload_for_generic_exports";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_rejects_legacy_scppm_missing_structured_payload_for_generic_exports";
