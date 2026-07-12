@@ -228,10 +228,10 @@ other user-declared function. — end note]
 class RefCounted {
     int* count;
 public:
-    RefCounted(int* c) : count(c) {}
+    RefCounted(int* c) : count{c} {}
     // user-declared: this class has a destructor, so it would otherwise
     // have no copy constructor/assignment operator at all (2)/(3)
-    RefCounted(const RefCounted& other) : count(other.count) { ++(*count); }
+    RefCounted(const RefCounted& other) : count{other.count} { ++(*count); }
     RefCounted& operator=(const RefCounted& other) {
         if (this != &other) { count = other.count; ++(*count); }
         return *this;
