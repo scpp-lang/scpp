@@ -1,6 +1,7 @@
 // PR #122 parser/driver coverage: `enum class` supports an explicit
 // underlying integral type, explicit enumerator values, and explicit
-// `static_cast` both to and from that underlying type.
+// `static_cast` from the enum to that underlying type. The reverse
+// direction is now rejected; use `scpp::enum_cast<T>(value)` instead.
 enum class Color : int { Red = 1, Green = 2, Blue = 7 };
 
 int main() {
