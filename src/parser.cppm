@@ -101,6 +101,7 @@ public:
         parse_module_declaration(program);
         parse_import_declarations(program);
         parse_top_level_items(program);
+        reconcile_identical_extern_c_declarations(program);
         reconcile_ordinary_forward_declarations(program);
         qualify_same_namespace_function_calls(program);
         // ch05 §5.11: a reserved, globally-shared witness class for a
@@ -1057,6 +1058,49 @@ private:
     [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Program& program, const Function& fn) const {
         return program.module_name.empty() && fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c &&
                !fn.is_module_extern && !fn.is_exported && (fn.params.empty() || fn.params[0].name != "this");
+    }
+
+    [[nodiscard]] static bool is_bodyless_extern_c_declaration(const Function& fn) {
+        return fn.is_extern_c && fn.body == nullptr;
+    }
+
+    // Multiple identical bodyless `extern "C"` declarations all describe
+    // the same global C-linkage symbol, even if one arrived via an
+    // imported module's hidden compile-time payload and another was
+    // written locally. Keep just one declaration so later overload-table
+    // construction doesn't treat that redeclaration as a conflicting
+    // overload.
+    void reconcile_identical_extern_c_declarations(Program& program) {
+        std::vector<Function> reconciled;
+        reconciled.reserve(program.functions.size());
+        std::vector<bool> consumed(program.functions.size(), false);
+        for (size_t i = 0; i < program.functions.size(); i++) {
+            if (consumed[i]) continue;
+            Function merged = std::move(program.functions[i]);
+            consumed[i] = true;
+            if (!is_bodyless_extern_c_declaration(merged)) {
+                reconciled.push_back(std::move(merged));
+                continue;
+            }
+            for (size_t j = i + 1; j < program.functions.size(); j++) {
+                Function& candidate = program.functions[j];
+                if (consumed[j] || !is_bodyless_extern_c_declaration(candidate) ||
+                    !same_function_signature(merged, candidate)) {
+                    continue;
+                }
+                if (merged.is_compile_time_dependency && !candidate.is_compile_time_dependency) {
+                    Function local = std::move(candidate);
+                    local.is_exported = local.is_exported || merged.is_exported;
+                    merged = std::move(local);
+                } else {
+                    merged.is_exported = merged.is_exported || candidate.is_exported;
+                }
+                merged.is_compile_time_dependency = merged.is_compile_time_dependency && candidate.is_compile_time_dependency;
+                consumed[j] = true;
+            }
+            reconciled.push_back(std::move(merged));
+        }
+        program.functions = std::move(reconciled);
     }
 
     void reconcile_ordinary_forward_declarations(Program& program) {
