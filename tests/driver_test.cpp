@@ -4294,6 +4294,44 @@ int main() {
     }
 
     {
+        std::string case_name = "scpp_rand_uniform_int_rand_returns_zero_for_non_positive_max";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    if (scpp::rand::uniform_int_rand(0) != 0) return 1;
+    if (scpp::rand::uniform_int_rand(-7) != 0) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "scpp_rand_uniform_int_rand_stays_within_half_open_range";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    int max_value = 7;
+    int i = 0;
+    while (i < 200) {
+        int value = scpp::rand::uniform_int_rand(max_value);
+        if (value < 0) return 1;
+        if (value >= max_value) return 2;
+        i = i + 1;
+    }
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
         std::string case_name = "scpp_rand_uniform_int_distribution_direct_constructor_is_not_public";
         std::filesystem::path source_path = std::filesystem::current_path() / (case_name + ".scpp");
         std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
