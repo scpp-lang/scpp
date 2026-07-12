@@ -4984,6 +4984,33 @@ int main() {
     }
 }
 
+void run_string_tests() {
+    {
+        std::string case_name = "std_string_size_matches_length";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::string empty{""};
+    if (empty.length() != 0) return 1;
+    if (empty.size() != empty.length()) return 2;
+
+    std::string abc{"abc"};
+    if (abc.length() != 3) return 3;
+    if (abc.size() != abc.length()) return 4;
+
+    std::string greeting{"hello, scpp"};
+    if (greeting.length() != 11) return 5;
+    if (greeting.size() != greeting.length()) return 6;
+
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_io_tests() {
     {
         std::string case_name = "scpp_io_getline_reads_one_line_without_newline";
@@ -5060,6 +5087,7 @@ int main() {
     run_functional_tests();
     run_thread_tests();
     run_std_move_tests();
+    run_string_tests();
     run_charconv_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();

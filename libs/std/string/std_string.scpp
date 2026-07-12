@@ -54,11 +54,15 @@ public:
         return;
     }
 
-    // Number of bytes currently stored (std::string::size()).
+    // Number of bytes currently stored (std::string::size()/length()).
     int length() const {
         [[scpp::unsafe]] {
             return scpp_string_length(this->handle);
         }
+    }
+
+    int size() const {
+        return this->length();
     }
 
     // The string's content as a nul-terminated C string, e.g. to hand to
