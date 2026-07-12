@@ -282,6 +282,10 @@ private:
                                      // required a matching LLVM function to exist)
     };
 
+    [[nodiscard]] static bool is_enum_cast_store_builtin_name(const std::string& name) {
+        return name == "scpp::__enum_cast_store" || name.rfind("scpp::__enum_cast_store.", 0) == 0;
+    }
+
     struct LocalSlot {
         llvm::AllocaInst* alloca;
         Type type;
@@ -2783,6 +2787,10 @@ private:
             return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
         }
         if (expr.lhs == nullptr) {
+            if (const Function* builtin_callee = resolve_overload_by_type(expr.name, expr.args, /*param_offset=*/0);
+                builtin_callee != nullptr && is_enum_cast_store_builtin_name(builtin_callee->name)) {
+                return codegen_enum_cast_store_builtin(expr, *builtin_callee);
+            }
             if (find_class_def(expr.name) != nullptr) {
                 const Function* ctor_def = nullptr;
                 if (!expr.args.empty() || expr.has_paren_init) {
@@ -3065,6 +3073,81 @@ private:
         return builder_->CreateZExt(v, llvm::Type::getInt8Ty(*context_), "boolext");
     }
 
+    [[nodiscard]] bool enum_value_fits_source_type(const Type& source_type, long long enum_value) {
+        if (source_type.kind != TypeKind::Named || !is_integral_scalar_type_name(source_type.name)) return false;
+        auto* integer_type = llvm::dyn_cast<llvm::IntegerType>(to_llvm_type(source_type));
+        if (integer_type == nullptr) return false;
+        unsigned bits = integer_type->getBitWidth();
+        bool source_is_unsigned = is_unsigned_for_cast(source_type.name);
+        if (source_is_unsigned) {
+            if (enum_value < 0) return false;
+            if (bits >= 64) return true;
+            std::uint64_t max_value = (std::uint64_t{1} << bits) - 1;
+            return static_cast<std::uint64_t>(enum_value) <= max_value;
+        }
+        if (bits >= 64) return true;
+        long long min_value = -(std::int64_t{1} << (bits - 1));
+        long long max_value = (std::int64_t{1} << (bits - 1)) - 1;
+        return enum_value >= min_value && enum_value <= max_value;
+    }
+
+    llvm::Value* build_integral_enum_match(llvm::Value* source, const Type& source_type, long long enum_value) {
+        auto* source_integer_type = llvm::dyn_cast<llvm::IntegerType>(source->getType());
+        if (source_integer_type == nullptr || !enum_value_fits_source_type(source_type, enum_value)) {
+            return llvm::ConstantInt::getFalse(*context_);
+        }
+        if (is_unsigned_for_cast(source_type.name)) {
+            return builder_->CreateICmpEQ(
+                source, llvm::ConstantInt::get(source_integer_type, static_cast<std::uint64_t>(enum_value), false),
+                "enumcastcmp");
+        }
+        return builder_->CreateICmpEQ(source, llvm::ConstantInt::getSigned(source_integer_type, enum_value),
+                                      "enumcastcmp");
+    }
+
+    llvm::ConstantInt* enum_variant_constant(llvm::Type* enum_storage_type, const Type& underlying_type, long long enum_value) {
+        auto* integer_type = llvm::cast<llvm::IntegerType>(enum_storage_type);
+        if (is_unsigned_for_cast(underlying_type.name)) {
+            return llvm::ConstantInt::get(integer_type, static_cast<std::uint64_t>(enum_value), false);
+        }
+        return llvm::ConstantInt::getSigned(integer_type, enum_value);
+    }
+
+    CallResult codegen_enum_cast_store_builtin(const Expr& expr, const Function& callee_def) {
+        if (expr.args.size() != 2 || callee_def.params.size() != 2) {
+            throw CodegenError("internal error: malformed scpp::__enum_cast_store call", current_loc_);
+        }
+        const Type& source_type = callee_def.params[0].type;
+        const Type& out_param_type = callee_def.params[1].type;
+        if (source_type.kind != TypeKind::Named || !is_integral_scalar_type_name(source_type.name)) {
+            throw CodegenError("scpp::enum_cast<T>(value) requires an integral source value", current_loc_);
+        }
+        if (out_param_type.kind != TypeKind::Reference || out_param_type.pointee == nullptr ||
+            out_param_type.pointee->kind != TypeKind::Named) {
+            throw CodegenError("scpp::enum_cast<T>(value) requires T to be an enum class", current_loc_);
+        }
+        const EnumDef* enum_def = find_enum_def(program_, out_param_type.pointee->name);
+        if (enum_def == nullptr) {
+            throw CodegenError("scpp::enum_cast<T>(value) requires T to be an enum class", current_loc_);
+        }
+
+        llvm::Value* source_value = codegen_value_for_target(*expr.args[0], source_type);
+        LValue out = codegen_lvalue(*expr.args[1]);
+        llvm::Type* enum_storage_type = to_llvm_type(*out_param_type.pointee);
+        llvm::Value* matched = llvm::ConstantInt::getFalse(*context_);
+        llvm::Value* selected =
+            enum_variant_constant(enum_storage_type, enum_def->underlying_type, 0);
+        for (const EnumVariant& variant : enum_def->variants) {
+            llvm::Value* variant_matches = build_integral_enum_match(source_value, source_type, variant.value);
+            matched = builder_->CreateOr(matched, variant_matches, "enumcastmatch");
+            selected = builder_->CreateSelect(
+                variant_matches, enum_variant_constant(enum_storage_type, enum_def->underlying_type, variant.value), selected,
+                "enumcastselect");
+        }
+        create_store(selected, out.ptr, out.alignment);
+        return CallResult{i1_to_bool(matched), &callee_def};
+    }
+
     // ch06 §6: a bare numeric literal (Integer/Float) has no fixed type
     // of its own the way a named variable does -- exactly like real
     // C++'s own literal-suffix rules (and, more directly, how Rust
@@ -3253,6 +3336,11 @@ private:
                 }
                 if (source_type->kind != TypeKind::Named || expr.type.kind != TypeKind::Named) {
                     throw CodegenError("cast is only supported between scalar types or raw pointer types in this version",
+                                       current_loc_);
+                }
+                if (is_integral_scalar_type_name(source_type->name) && find_enum_def(program_, expr.type.name) != nullptr) {
+                    throw CodegenError("cannot cast an integer value to enum class '" + expr.type.name +
+                                           "'; use scpp::enum_cast<" + expr.type.name + ">(value) instead",
                                        current_loc_);
                 }
                 bool source_is_scalar_or_enum =
@@ -3994,6 +4082,12 @@ private:
     // checked.
     [[nodiscard]] static bool is_float_scalar_type_name(const std::string& name) {
         return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
+    }
+    [[nodiscard]] static bool is_integral_scalar_type_name(const std::string& name) {
+        return name == "char" || name == "int" || name == "long" || name == "unsigned int" ||
+               name == "unsigned long" || name == "int8_t" || name == "int16_t" || name == "int32_t" ||
+               name == "int64_t" || name == "uint8_t" || name == "uint16_t" || name == "uint32_t" ||
+               name == "uint64_t" || name == "size_t" || name == "ptrdiff_t";
     }
     [[nodiscard]] static bool is_unsigned_scalar_type_name(const std::string& name) {
         return name == "unsigned int" || name == "unsigned long" || name == "uint8_t" || name == "uint16_t" ||

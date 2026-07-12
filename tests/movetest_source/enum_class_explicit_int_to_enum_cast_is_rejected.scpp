@@ -1,0 +1,6 @@
+enum class Color : int { red = 1, green = 2 };
+
+int main() {
+    Color color = static_cast<Color>(1);
+    return color == Color::red ? 0 : 1;
+}
