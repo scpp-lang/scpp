@@ -8,6 +8,9 @@
 add_library(scpp_string_wrapper STATIC std/string/scpp_string_wrapper.cpp)
 target_compile_features(scpp_string_wrapper PRIVATE cxx_std_23)
 
+add_library(scpp_charconv_wrapper STATIC std/charconv/scpp_charconv_wrapper.cpp)
+target_compile_features(scpp_charconv_wrapper PRIVATE cxx_std_23)
+
 add_library(scpp_thread_wrapper STATIC std/thread/scpp_thread_wrapper.cpp)
 target_compile_features(scpp_thread_wrapper PRIVATE cxx_std_23)
 
@@ -37,6 +40,8 @@ add_scpp_module_artifacts(scpp_std_artifacts
     "${CMAKE_CURRENT_SOURCE_DIR}/std/std.scpp"
     "${SCPP_STDLIB_STD_INTERFACE_PATH}"
     "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
+    scpp_charconv_wrapper
+    "${CMAKE_CURRENT_SOURCE_DIR}/std/charconv/std_charconv.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/std/cstdlib/std_cstdlib.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/std/expected/std_expected.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/std/functional/std_functional.scpp"
