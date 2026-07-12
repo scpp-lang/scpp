@@ -117,4 +117,4 @@ and actions into named functions.
 
 ---
 
-[← Previous: Variables and Explicit Initialization](ch03-01-variables-and-explicit-initialization.md) · [Table of Contents](README.md)
+[← Previous: Variables and Explicit Initialization](ch03-01-variables-and-explicit-initialization.md) · [Table of Contents](README.md) · [Next: Functions →](ch03-03-functions.md)
