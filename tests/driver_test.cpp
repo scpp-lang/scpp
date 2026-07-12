@@ -1631,11 +1631,14 @@ void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
     expect(std::find(plan.root_function_names.begin(), plan.root_function_names.end(), "math::answer") !=
                plan.root_function_names.end(),
            case_name + ": expected exported constexpr function root");
-    expect(std::find(plan.reachable_function_names.begin(), plan.reachable_function_names.end(), "math::helper_value") !=
-               plan.reachable_function_names.end(),
+    auto reachable_function = [&](std::string_view name) {
+        return std::find_if(plan.reachable_function_indices.begin(), plan.reachable_function_indices.end(),
+                            [&](size_t index) { return index < program.functions.size() && program.functions[index].name == name; }) !=
+               plan.reachable_function_indices.end();
+    };
+    expect(reachable_function("math::helper_value"),
            case_name + ": expected private helper function to be reachable");
-    expect(std::find(plan.reachable_function_names.begin(), plan.reachable_function_names.end(), "math::Helper_new") !=
-               plan.reachable_function_names.end(),
+    expect(reachable_function("math::Helper_new"),
            case_name + ": expected constexpr constructor to be reachable");
     expect(std::find(plan.reachable_type_names.begin(), plan.reachable_type_names.end(), "math::Helper") !=
                plan.reachable_type_names.end(),
@@ -2678,6 +2681,107 @@ void run_cli_extension_tests() {
         expect(run_result.exit_code == 0,
                case_name + ": expected prebuilt variadic binary to exit 0, got " +
                    std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_build_module_with_hidden_class_methods_roundtrips_without_sources";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_with_hidden_class_methods_roundtrips_without_sources";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    template<typename T>\n"
+                        "    class Holder {\n"
+                        "    public:\n"
+                        "        T value_;\n"
+                        "        Holder(const T& value) { this->value_ = value; return; }\n"
+                        "        T get() const { return this->value_; }\n"
+                        "    };\n"
+                        "    export template<typename T>\n"
+                        "    T roundtrip(const T& value) {\n"
+                        "        helper::Holder<T> holder(value);\n"
+                        "        return holder.get();\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    return helper::roundtrip(41) - 41;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": hidden class helper consumer build should succeed from .scppm payload, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected hidden-class payload-backed binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_compile_time_dependency_function_is_not_directly_callable";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_compile_time_dependency_function_is_not_directly_callable";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    template<typename T>\n"
+                        "    T hidden_add_one(const T& value) {\n"
+                        "        return value + 1;\n"
+                        "    }\n"
+                        "    export template<typename T>\n"
+                        "    T add_one(const T& value) {\n"
+                        "        return helper::hidden_add_one(value);\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    return helper::hidden_add_one(4) - 5;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code != 0,
+               case_name + ": direct call to hidden compile-time dependency should fail");
+        expect(build_result.stdout_text.find("no overload of 'helper::hidden_add_one' matches these argument types") !=
+                   std::string::npos,
+               case_name + ": expected hidden compile-time dependency failure to reject the direct call, got '" +
+                   build_result.stdout_text + "'");
         std::filesystem::remove_all(root);
     }
 

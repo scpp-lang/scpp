@@ -49,7 +49,7 @@ inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 struct CompileTimePayloadPlan {
     std::uint32_t format_version = SCPPM_COMPILE_TIME_AST_VERSION;
     std::vector<std::string> root_function_names;
-    std::vector<std::string> reachable_function_names;
+    std::vector<size_t> reachable_function_indices;
     std::vector<std::string> reachable_type_names;
 };
 
@@ -166,6 +166,20 @@ void collect_function_signature_types(const scpp::Function& fn, std::unordered_s
     for (const scpp::Param& param : fn.params) collect_type_names(param.type, type_names);
 }
 
+void collect_class_reachable_edges(const scpp::ClassDef& def, std::unordered_set<std::string>& function_names,
+                                   std::unordered_set<std::string>& type_names) {
+    for (const scpp::ClassField& field : def.fields) collect_type_names(field.type, type_names);
+    if (!def.base_class_name.empty()) type_names.insert(def.base_class_name);
+    if (def.base_non_type_arg) collect_expr_edges(*def.base_non_type_arg, function_names, type_names);
+    for (const scpp::Type& arg : def.specialization_template_args) collect_type_names(arg, type_names);
+    if (def.thread_movable_if_movable_expr) {
+        collect_expr_edges(*def.thread_movable_if_movable_expr, function_names, type_names);
+    }
+    if (def.thread_movable_if_shareable_expr) {
+        collect_expr_edges(*def.thread_movable_if_shareable_expr, function_names, type_names);
+    }
+}
+
 void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
     std::function<void(const Stmt&)> walk_stmt = [&](const Stmt& stmt) {
         if (stmt.init) {
@@ -184,19 +198,25 @@ void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
 
 CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     CompileTimePayloadPlan plan;
-    std::unordered_map<std::string, const Function*> functions_by_name;
+    std::unordered_map<std::string, std::vector<size_t>> function_indices_by_name;
     std::unordered_map<std::string, const EnumDef*> enums_by_name;
     std::unordered_map<std::string, const StructDef*> structs_by_name;
     std::unordered_map<std::string, const ClassDef*> classes_by_name;
-    for (const Function& fn : program.functions) functions_by_name.emplace(fn.name, &fn);
+    std::unordered_multimap<std::string, size_t> methods_by_owner;
+    for (size_t i = 0; i < program.functions.size(); i++) {
+        function_indices_by_name[program.functions[i].name].push_back(i);
+        if (!program.functions[i].member_owner_class.empty()) {
+            methods_by_owner.emplace(program.functions[i].member_owner_class, i);
+        }
+    }
     for (const EnumDef& def : program.enums) enums_by_name.emplace(def.name, &def);
     for (const StructDef& def : program.structs) structs_by_name.emplace(def.name, &def);
     for (const ClassDef& def : program.classes) classes_by_name.emplace(def.name, &def);
 
-    std::unordered_set<std::string> visited_functions;
+    std::unordered_set<size_t> visited_function_indices;
     std::unordered_set<std::string> visited_types;
     std::unordered_set<std::string> pending_types;
-    std::vector<std::string> worklist;
+    std::vector<size_t> worklist;
 
     auto enqueue_type = [&](const std::string& name) {
         if (name.empty()) return;
@@ -206,35 +226,42 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
         }
     };
 
-    auto enqueue_function = [&](const std::string& name, bool is_root = false) {
-        if (name.empty()) return;
-        auto it = functions_by_name.find(name);
-        if (it == functions_by_name.end()) return;
-        if (visited_functions.insert(name).second) {
-            plan.reachable_function_names.push_back(name);
-            worklist.push_back(name);
+    auto enqueue_function_index = [&](size_t index, bool is_root = false) {
+        if (index >= program.functions.size()) return;
+        const Function& fn = program.functions[index];
+        if (visited_function_indices.insert(index).second) {
+            plan.reachable_function_indices.push_back(index);
+            worklist.push_back(index);
         }
-        if (is_root && std::find(plan.root_function_names.begin(), plan.root_function_names.end(), name) ==
+        if (is_root && std::find(plan.root_function_names.begin(), plan.root_function_names.end(), fn.name) ==
                            plan.root_function_names.end()) {
-            plan.root_function_names.push_back(name);
+            plan.root_function_names.push_back(fn.name);
         }
     };
+    auto enqueue_functions_by_name = [&](const std::string& name) {
+        if (name.empty()) return;
+        auto it = function_indices_by_name.find(name);
+        if (it == function_indices_by_name.end()) return;
+        for (size_t index : it->second) enqueue_function_index(index);
+    };
 
-    for (const Function& fn : program.functions) {
-        if (is_compile_time_root(program, fn)) enqueue_function(fn.name, true);
+    for (size_t i = 0; i < program.functions.size(); i++) {
+        if (is_compile_time_root(program, program.functions[i])) enqueue_function_index(i, true);
     }
 
-    for (size_t i = 0; i < worklist.size(); i++) {
-        const Function& fn = *functions_by_name.at(worklist[i]);
-        std::unordered_set<std::string> local_function_names;
-        std::unordered_set<std::string> local_type_names;
-        collect_function_signature_types(fn, local_type_names);
-        if (fn.body) collect_stmt_edges(*fn.body, local_function_names, local_type_names);
-        for (const std::string& callee : local_function_names) enqueue_function(callee);
-        for (const std::string& type_name : local_type_names) enqueue_type(type_name);
-    }
+    size_t next_function_index = 0;
+    while (next_function_index < worklist.size() || !pending_types.empty()) {
+        while (next_function_index < worklist.size()) {
+            const Function& fn = program.functions[worklist[next_function_index++]];
+            std::unordered_set<std::string> local_function_names;
+            std::unordered_set<std::string> local_type_names;
+            collect_function_signature_types(fn, local_type_names);
+            if (fn.body) collect_stmt_edges(*fn.body, local_function_names, local_type_names);
+            for (const std::string& callee : local_function_names) enqueue_functions_by_name(callee);
+            for (const std::string& type_name : local_type_names) enqueue_type(type_name);
+        }
 
-    while (!pending_types.empty()) {
+        if (pending_types.empty()) continue;
         std::vector<std::string> batch(pending_types.begin(), pending_types.end());
         pending_types.clear();
         for (const std::string& type_name : batch) {
@@ -251,10 +278,14 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
                 }
             }
             if (auto it = classes_by_name.find(type_name); it != classes_by_name.end()) {
-                for (const ClassField& field : it->second->fields) {
-                    std::unordered_set<std::string> nested;
-                    collect_type_names(field.type, nested);
-                    for (const std::string& nested_name : nested) enqueue_type(nested_name);
+                std::unordered_set<std::string> nested_function_names;
+                std::unordered_set<std::string> nested_type_names;
+                collect_class_reachable_edges(*it->second, nested_function_names, nested_type_names);
+                for (const std::string& nested_name : nested_type_names) enqueue_type(nested_name);
+                for (const std::string& function_name : nested_function_names) enqueue_functions_by_name(function_name);
+                auto [begin, end] = methods_by_owner.equal_range(type_name);
+                for (auto method = begin; method != end; ++method) {
+                    enqueue_function_index(method->second);
                 }
             }
         }
@@ -989,8 +1020,8 @@ struct GenericMethodOwnerRemap {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
     if (plan.root_function_names.empty()) return {};
 
-    std::unordered_set<std::string> reachable_function_names(plan.reachable_function_names.begin(),
-                                                             plan.reachable_function_names.end());
+    std::unordered_set<size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
+                                                          plan.reachable_function_indices.end());
     std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
     std::vector<const StructDef*> structs;
     std::vector<const ClassDef*> classes;
@@ -1007,9 +1038,10 @@ struct GenericMethodOwnerRemap {
     for (const ClassDef& def : program.classes) {
         if (is_local_module_class(def) && reachable_type_names.contains(def.name)) classes.push_back(&def);
     }
-    for (const Function& fn : program.functions) {
+    for (size_t i = 0; i < program.functions.size(); i++) {
+        const Function& fn = program.functions[i];
         if (!is_local_module_function(fn)) continue;
-        if (reachable_function_names.contains(fn.name)) functions.push_back(&fn);
+        if (reachable_function_indices.contains(i)) functions.push_back(&fn);
     }
 
     std::ostringstream payload(std::ios::binary);
