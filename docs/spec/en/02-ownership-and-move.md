@@ -10,6 +10,17 @@ object's value is a null pointer value; and each subobject of an object
 of array or class type is, recursively, zero-initialized by this same
 rule.
 
+(2) If an object definition uses an *initializer* ([dcl.init]) to supply
+arguments for direct-initialization, that *initializer* shall be a
+*braced-init-list* ([dcl.init.list]). A parenthesized
+*expression-list* in that position does not initialize an object in
+SCPP26; the program is ill-formed.
+
+[Note: `Widget x{1, 2};` is well-formed; `Widget x(1, 2);` is
+ill-formed. This rule affects object definitions only; it does not
+modify the syntax of a constructor declaration such as `Widget(int,
+int)` or of a function call. — end note]
+
 [Note: unlike the C++ standard, under which an object of automatic
 storage duration and no initializer is left with an indeterminate value
 ([dcl.init]) unless every subobject is of a type with a user-provided
@@ -131,8 +142,8 @@ public:
     Outer(int* p, int b_) : a{p}, b(b_) {}
 };
 
-Outer x(new int(1), 2);
-Outer y(std::move(x));   // (4): memberwise move-constructs y.a, y.b from x.a, x.b;
+Outer x{new int(1), 2};
+Outer y{std::move(x)};   // (4): memberwise move-constructs y.a, y.b from x.a, x.b;
                           // x is thereafter in the moved-out state (§6.2) and its
                           // destructor, if declared, is not invoked for it (§6.3)
 ```

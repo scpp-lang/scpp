@@ -8,6 +8,16 @@
 `0.0`；指针对象的值是空指针值；数组类型或者 class 类型对象的每个
 子对象，都递归地按同一条规则被零初始化。
 
+(2) 如果一个对象定义使用 *initializer*（[dcl.init]）来提供
+direct-initialization 的实参，那么这个 *initializer* 必须是一个
+*braced-init-list*（[dcl.init.list]）。在这个位置使用圆括号括起来的
+*expression-list*，在 SCPP26 里不能用于初始化对象；程序不合法
+（ill-formed）。
+
+【注：`Widget x{1, 2};` 是合法的；`Widget x(1, 2);` 是不合法的。
+这条规则只影响对象定义，不修改构造函数声明（例如 `Widget(int, int)`）
+或者函数调用的语法。——注释结束】
+
 【注：跟 C++ 标准不一样——C++ 标准下，一个自动存储期、没有
 initializer 的对象，会留下一个不确定的值（[dcl.init]），除非它的每个
 子对象都是带用户提供的默认构造函数的类型——本文档无条件要求零初始化，
@@ -110,8 +120,8 @@ public:
     Outer(int* p, int b_) : a{p}, b(b_) {}
 };
 
-Outer x(new int(1), 2);
-Outer y(std::move(x));   // (4)：逐字段 move 构造 y.a、y.b，来自 x.a、x.b；
+Outer x{new int(1), 2};
+Outer y{std::move(x)};   // (4)：逐字段 move 构造 y.a、y.b，来自 x.a、x.b；
                           // 此后 x 处于 moved-out 状态（§6.2），如果它
                           // 声明了析构函数，也不会为它调用（§6.3）
 ```
