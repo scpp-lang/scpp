@@ -1,0 +1,12 @@
+import std;
+// ch05 §5.11 + §5.1: the universal baseline for an unconstrained type
+// parameter includes moving/storing/passing values through; `std::move(x)`
+// therefore remains valid even before `T` is instantiated to a concrete type.
+template<typename T>
+T pass_through(T x) {
+    return std::move(x);
+}
+
+int main() {
+    return pass_through(42);
+}

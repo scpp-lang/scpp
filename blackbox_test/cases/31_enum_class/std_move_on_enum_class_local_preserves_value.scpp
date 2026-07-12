@@ -1,0 +1,11 @@
+import std;
+// ch05 §5.1 + PR #122's enum-class semantics: `std::move(x)` is generic over
+// value categories, so a scoped-enum local can be moved into a new variable
+// just like any other type.
+enum class Choice { A, B };
+
+int main() {
+    Choice x = Choice::B;
+    Choice y = std::move(x);
+    return static_cast<int>(y);
+}

@@ -214,8 +214,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **371 cases total**
-- **371/371 passing**
+- **306 cases total**
+- **306/306 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -231,14 +231,6 @@ re-run via `./build/run_tests`:
   - copyable classes passed/returned by value
   - move-only classes passed/returned by value via `std::move(...)`
   - non-copyable bare locals still rejected when a copy would be needed
-- **`std::move(...)` local-variable coverage now spans both the stable
-  class path and today's implementation-limited non-class rejections**:
-  - class-typed locals already have positive-path and moved-from-reuse
-    rejection cases
-  - primitive, enum-class, and pointer locals are each now covered by a
-    `COMPILE_ERROR` case documenting current `main` behavior
-  - those three non-class cases should be revisited if the separate
-    `std::move` genericity investigation lifts the current restriction
 - **Thread-trait overrides now cover the rewritten §5.15/§8 docs**:
   builtin trait predicates, conditional overrides on generic classes,
   unconditional generic override propagation, and `std::unique_ptr<T>`'s
