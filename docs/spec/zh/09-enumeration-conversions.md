@@ -29,11 +29,6 @@
 除这一条之外，不提供任何别的“从整数值到枚举类型”的未检查转换，也不提供
 任何基于普通 cast 的转换路径。
 
-【注：这与 Rust 的做法相呼应：`as` 允许“枚举到整数”的转换，但不允许
-“整数到枚举”的转换；带检查的路径使用 `TryFrom` 并返回 `Result`，而未检查
-构造则要求 `unsafe`。SCPP26 只提供 `scpp::enum_cast` 这一条带检查路径；
-不提供未检查的 escape hatch。——注释结束】
-
 ---
 
 [← 上一节：函数模板实参推导](08-function-template-argument-deduction.md) · [目录](README.md)
