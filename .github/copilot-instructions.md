@@ -42,3 +42,36 @@ repository. 以下规则适用于在本仓库中工作的任何 Copilot agent（
   responsive is the whole point of the manager/sub-agent split.
 - 如果 manager 自己下场做事，就会对用户失去及时响应；而用户随时都可能发出新
   指令或提出问题。保持随时可响应，正是 manager / sub-agent 分工的意义所在。
+
+## Testing philosophy / 测试原则
+
+- All tests in this repository—especially `blackbox_test/`, but the principle
+  applies generally—must be written against the spec / intended design, never
+  against whatever the current implementation happens to do.
+- 本仓库中的所有测试——尤其是 `blackbox_test/`，但这一原则同样适用于其他测
+  试——都必须依据规范 / 预期设计来编写，绝不能按当前实现“碰巧在做什么”来写。
+- The whole purpose of tests here is to catch implementation bugs by checking
+  behavior against the documented or intended contract. A test written to match
+  current (possibly buggy) behavior cannot catch a bug; it only tautologically
+  confirms that the code does what the code currently does.
+- 这里写测试的根本目的，是把程序行为与文档化的 / 预期的契约进行比对，从而暴
+  露实现 bug。如果测试只是去迎合当前实现（而当前实现本身可能有 bug），那它就不
+  可能发现 bug；它只是在同义反复地证明“代码会做它现在正在做的事”。
+- If the spec says one thing and the current implementation does another, the
+  test must assert the spec / intended behavior, even if that means the test is
+  red today. In that situation, the failing test is doing its job by exposing a
+  real bug; do not "fix" the test by weakening it to accommodate the buggy
+  implementation.
+- 如果规范要求的是一种行为，而当前实现表现出另一种行为，测试也必须断言规范 /
+  预期行为，即使这意味着它在今天会是红的。在这种情况下，测试失败恰恰说明它正确
+  地完成了职责：它暴露了一个真实 bug；不要为了迁就有 bug 的实现而把测试“修
+  软”。
+- Concrete example: if asked to add a test for `std::move()` on primitive or
+  enum types, it is wrong to encode today's actual rejection behavior just
+  because the current compiler rejects it. The correct test asserts the
+  spec-conforming behavior—that such code should work—and is expected to remain
+  red until the compiler bug is fixed.
+- 具体例子：如果有人要求为 primitive / enum 类型上的 `std::move()` 补测试，
+  那么因为“当前编译器今天会拒绝它”就把这种拒绝行为写进测试，是错误的。正确做法
+  是断言符合规范的行为——这种代码本来就应该工作——并接受该测试在编译器 bug 被修
+  复之前持续保持红灯。
