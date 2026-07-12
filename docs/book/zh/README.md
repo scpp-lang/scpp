@@ -9,7 +9,7 @@
 
 - 常见编程概念
   - [变量与显式初始化](ch03-01-variables-and-explicit-initialization.md)
-  - 数据类型
+  - [标量数据类型](ch03-02-scalar-data-types.md)
   - 函数
   - 注释
   - 控制流

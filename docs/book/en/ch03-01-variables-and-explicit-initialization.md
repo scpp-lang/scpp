@@ -115,4 +115,4 @@ the data types that these variables hold.
 
 ---
 
-[← Previous: Programming a Guessing Game](ch02-00-guessing-game.md) · [Table of Contents](README.md)
+[← Previous: Programming a Guessing Game](ch02-00-guessing-game.md) · [Table of Contents](README.md) · [Next: Scalar Data Types →](ch03-02-scalar-data-types.md)
