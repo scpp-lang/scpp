@@ -3926,7 +3926,7 @@ import scpp;
 int main() {
     auto bad = scpp::rand::uniform_int_distribution<int>::make(9, 3);
     if (bad.has_value()) return 1;
-    if (bad.error() != scpp::rand::uniform_int_distribution_error::empty_range) return 2;
+    if (bad.error() != scpp::rand::error::empty_range) return 2;
     return 0;
 }
 )SCPP",
