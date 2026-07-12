@@ -1,0 +1,6 @@
+import std;
+int f() {
+    int x = 1;
+    int y = std::move(x);
+    return y;
+}

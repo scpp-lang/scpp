@@ -4127,6 +4127,77 @@ int main() {
     }
 }
 
+void run_std_move_tests() {
+    {
+        std::string case_name = "std_move_accepts_primitives_and_enums";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+enum class tag { ok = 7 };
+int move_int(int value) {
+    int moved = std::move(value);
+    return moved;
+}
+tag move_tag(tag value) {
+    tag moved = std::move(value);
+    return std::move(moved);
+}
+int main() {
+    if (move_int(5) != 5) return 1;
+    if (move_tag(tag::ok) != tag::ok) return 2;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_move_accepts_generic_class_value_param";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+template<typename T>
+class Box {
+public:
+    T value;
+    Box(T value) {
+        this->value = std::move(value);
+        return;
+    }
+};
+int main() {
+    Box<int> box(9);
+    return box.value - 9;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_move_accepts_unused_generic_class_value_param";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+template<typename T>
+class Box {
+public:
+    T value;
+    Box(T value) {
+        this->value = std::move(value);
+        return;
+    }
+};
+int main() {
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -4139,6 +4210,7 @@ int main() {
     run_generic_function_overload_tests();
     run_functional_tests();
     run_thread_tests();
+    run_std_move_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
     run_static_member_function_tests();

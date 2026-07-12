@@ -1,0 +1,6 @@
+import std;
+enum class tag { ok };
+tag f() {
+    tag value = tag::ok;
+    return std::move(value);
+}
