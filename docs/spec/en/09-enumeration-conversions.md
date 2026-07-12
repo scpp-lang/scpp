@@ -33,12 +33,6 @@ shall return an error value of type `scpp::enum_cast_error`, whose
 ordinary cast-based conversion from an integer value to an enumeration
 type is provided.
 
-[Note: This mirrors Rust: `as` permits enum-to-integer conversion, but
-not integer-to-enum conversion; the checked path uses `TryFrom` and
-returns `Result`, while unchecked construction requires `unsafe`. SCPP26
-provides only the checked path via `scpp::enum_cast`; it does not
-provide an unchecked escape hatch. — end note]
-
 ---
 
 [← Previous: Function template argument deduction](08-function-template-argument-deduction.md) · [Table of Contents](README.md)
