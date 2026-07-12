@@ -3252,7 +3252,8 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 return;
             }
             for (const auto& arg : expr.args) {
-                apply_expr(*arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                apply_expr(*arg, /*is_move_target_context=*/arg->kind == ExprKind::Move, state, body, signatures,
+                           report_errors);
             }
             return;
 

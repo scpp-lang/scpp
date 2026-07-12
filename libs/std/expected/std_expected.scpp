@@ -12,7 +12,7 @@ private:
 public:
     unexpected(E error) {
         [[scpp::unsafe]] {
-            new ((E*)&this->error_storage_) E(error);
+            new ((E*)&this->error_storage_) E(std::move(error));
         }
         return;
     }
@@ -47,7 +47,7 @@ public:
     expected(T value) {
         this->has_value_ = true;
         [[scpp::unsafe]] {
-            new ((T*)&this->storage_) T(value);
+            new ((T*)&this->storage_) T(std::move(value));
         }
         return;
     }
