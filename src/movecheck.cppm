@@ -937,6 +937,21 @@ struct NodiscardInfo {
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
     const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures);
 
+[[nodiscard]] bool argument_type_matches_parameter(const Type& arg_type, const Type& param_type) {
+    if (is_reference(param_type)) {
+        if (arg_type.kind == TypeKind::Reference) {
+            if (arg_type.pointee == nullptr || param_type.pointee == nullptr) return false;
+            return types_equal(*arg_type.pointee, *param_type.pointee) &&
+                   (!param_type.is_mutable_ref || arg_type.is_mutable_ref);
+        }
+        return param_type.pointee != nullptr && types_equal(arg_type, *param_type.pointee);
+    }
+    if (arg_type.kind == TypeKind::Reference) {
+        return arg_type.pointee != nullptr && types_equal(*arg_type.pointee, param_type);
+    }
+    return types_equal(arg_type, param_type);
+}
+
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
                                                 const Signatures& signatures) {
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
@@ -966,11 +981,11 @@ struct NodiscardInfo {
             return false;
         }
         std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-        return arg_type.has_value() && types_equal(*arg_type, *param_type.pointee);
+        return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type);
     }
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
     if (!arg_type.has_value()) return false;
-    if (!types_equal(*arg_type, param_type)) {
+    if (!argument_type_matches_parameter(*arg_type, param_type)) {
         if (is_named_class_type(param_type, body) &&
             find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr) {
             return true;
