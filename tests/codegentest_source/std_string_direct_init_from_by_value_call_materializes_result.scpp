@@ -1,0 +1,11 @@
+import std;
+
+std::string make_word() {
+    std::string local{"hi"};
+    return std::move(local);
+}
+
+int main() {
+    std::string word{make_word()};
+    return word.length();
+}

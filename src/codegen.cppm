@@ -667,7 +667,11 @@ private:
                                                  const Function* ctor_def, const Expr* original_expr = nullptr) {
         llvm::Type* llvm_type = to_llvm_type(named_type(class_name));
         llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtmp");
-        zero_initialize_storage(temp, named_type(class_name));
+        LValue target{temp, named_type(class_name), std::nullopt};
+        zero_initialize_storage(target.ptr, target.type, target.alignment);
+        if (try_initialize_class_storage_from_same_type_source(target, args)) {
+            return builder_->CreateLoad(llvm_type, temp, "classtmp.value");
+        }
         if (ctor_def != nullptr) {
             if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
                 ExprPtr ctor_expr;
@@ -682,20 +686,20 @@ private:
                     for (const ExprPtr& arg : args) ctor_expr->args.push_back(clone_expr(*arg));
                 }
                 ConstexprValue value = evaluate_immediate_expr(*program_, *ctor_expr);
-                store_constexpr_value_into(temp, named_type(class_name), value);
+                store_constexpr_value_into(target.ptr, target.type, value);
             } else {
                 llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
                 if (ctor == nullptr) {
                     throw CodegenError("class '" + class_name + "' has no constructor matching this call", current_loc_);
                 }
                 std::vector<llvm::Value*> ctor_args = codegen_call_args(args, ctor_def, /*param_offset=*/1);
-                ctor_args.insert(ctor_args.begin(), temp);
+                ctor_args.insert(ctor_args.begin(), target.ptr);
                 builder_->CreateCall(ctor, ctor_args);
             }
         } else if (args.empty()) {
             const ClassDef* class_def = find_class_def(class_name);
             if (class_def != nullptr && !class_has_any_constructor(class_name)) {
-                emit_default_initializers_for_class_storage(temp, *class_def);
+                emit_default_initializers_for_class_storage(target.ptr, *class_def);
             }
         }
         return builder_->CreateLoad(llvm_type, temp, "classtmp.value");
@@ -2467,41 +2471,9 @@ private:
                         initialize_storage_from_brace_args(LValue{slot, stmt.type, std::nullopt}, stmt.ctor_args);
                         return;
                     }
-                    // spec §6.4(2): `ClassName y{std::move(x)};` -- the
-                    // compiler-synthesized move constructor -- dispatches
-                    // directly to the existing Move-expression codegen
-                    // (loads the source's whole aggregate value, nulls
-                    // the source slot -- see codegen_expr's Move case)
-                    // rather than resolving against any user-declared
-                    // constructor (spec §6.4(1) forbids declaring a move
-                    // constructor at all, enforced at parse time). This is
-                    // byte-for-byte equivalent to a recursive memberwise
-                    // move: every field kind bottoms out in either a
-                    // plain bitwise value (scalar/struct/pointer/
-                    // reference, unaffected either way) or a
-                    // std::unique_ptr, whose own move semantics --
-                    // capture the pointer, null the source -- the
-                    // whole-aggregate load+null already performs
-                    // correctly and transitively, however deeply nested.
-                    if (stmt.ctor_args.size() == 1 && stmt.ctor_args[0]->kind == ExprKind::Move &&
-                        stmt.ctor_args[0]->lhs->kind == ExprKind::Identifier) {
-                        auto src_it = locals_.find(stmt.ctor_args[0]->lhs->name);
-                        if (src_it != locals_.end() && types_equal(src_it->second.type, stmt.type)) {
-                            llvm::Value* moved = codegen_expr(*stmt.ctor_args[0]);
-                            builder_->CreateStore(moved, slot);
-                            return;
-                        }
-                    }
-                    if (stmt.ctor_args.size() == 1 && find_user_declared_copy_ctor_ast(stmt.type.name) == nullptr &&
-                        is_bare_same_type_copy_source(*stmt.ctor_args[0], stmt.type) &&
-                        is_copy_constructible(stmt.type.name)) {
-                        LValue src = codegen_lvalue(*stmt.ctor_args[0]);
-                        if (types_equal(src.type, stmt.type)) {
-                            codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name);
-                            locals_[stmt.var_name].moved_flag =
-                                create_moved_flag_if_has_destructor(stmt.type.name);
-                            return;
-                        }
+                    if (try_initialize_class_storage_from_same_type_source(LValue{slot, stmt.type, std::nullopt},
+                                                                           stmt.ctor_args)) {
+                        return;
                     }
                     std::string ctor_name = stmt.type.name + "_new";
                     // ch05 §5.10: a class may declare multiple
@@ -3042,6 +3014,27 @@ private:
         create_store(span_value, target.ptr, target.alignment);
     }
 
+    // Direct-initializing a fresh class object from another prvalue of the
+    // exact same type (`T x{f()};`, `new T(f())`, `T(f())`) materializes the
+    // source object directly into the destination storage instead of routing
+    // back through ordinary constructor overload resolution.
+    bool try_initialize_class_storage_from_same_type_source(const LValue& target, const std::vector<ExprPtr>& args) {
+        if (target.type.kind != TypeKind::Named || find_class_def(target.type.name) == nullptr || args.size() != 1) {
+            return false;
+        }
+        if (produces_rvalue_of_type(*args[0], target.type)) {
+            create_store(codegen_expr(*args[0]), target.ptr, target.alignment);
+            return true;
+        }
+        if (!is_bare_same_type_copy_source(*args[0], target.type) || !is_copy_constructible(target.type.name)) {
+            return false;
+        }
+        LValue src = codegen_lvalue(*args[0]);
+        if (!types_equal(src.type, target.type)) return false;
+        codegen_copy_construct_class(target.ptr, src.ptr, target.type.name);
+        return true;
+    }
+
     void initialize_storage_from_expr(const LValue& target, const Expr& expr) {
         if (target.type.kind == TypeKind::Reference) {
             initialize_reference_storage(target, expr);
@@ -3078,15 +3071,7 @@ private:
         }
         if (target.type.kind == TypeKind::Named && find_class_def(target.type.name) != nullptr) {
             zero_initialize_storage(target.ptr, target.type, target.alignment);
-            if (args.size() == 1 && produces_rvalue_of_type(*args[0], target.type)) {
-                create_store(codegen_expr(*args[0]), target.ptr, target.alignment);
-                return;
-            }
-            if (args.size() == 1 && is_bare_same_type_copy_source(*args[0], target.type) && is_copy_constructible(target.type.name)) {
-                LValue src = codegen_lvalue(*args[0]);
-                codegen_copy_construct_class(target.ptr, src.ptr, target.type.name);
-                return;
-            }
+            if (try_initialize_class_storage_from_same_type_source(target, args)) return;
             const Function* ctor_def = resolve_overload_by_type(target.type.name + "_new", args, /*param_offset=*/1);
             if (ctor_def == nullptr) {
                 const ClassDef* class_def = find_class_def(target.type.name);
@@ -3865,25 +3850,10 @@ private:
         }
 
         if (expr.type.kind == TypeKind::Named && structs_.contains(expr.type.name)) {
-            zero_initialize_storage(heap_ptr, expr.type);
+            LValue target{heap_ptr, expr.type, std::nullopt};
+            zero_initialize_storage(target.ptr, target.type, target.alignment);
             if (!expr.args.empty() || expr.has_paren_init) {
-                if (expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move) {
-                    std::optional<Type> moved_type = infer_type(*expr.args[0]);
-                    if (moved_type.has_value() && types_equal(*moved_type, expr.type)) {
-                        llvm::Value* moved = codegen_expr(*expr.args[0]);
-                        builder_->CreateStore(moved, heap_ptr);
-                        return heap_ptr;
-                    }
-                }
-                if (expr.args.size() == 1 && find_user_declared_copy_ctor_ast(expr.type.name) == nullptr &&
-                    is_bare_same_type_copy_source(*expr.args[0], expr.type) &&
-                    is_copy_constructible(expr.type.name)) {
-                    LValue src = codegen_lvalue(*expr.args[0]);
-                    if (types_equal(src.type, expr.type)) {
-                        codegen_memberwise_copy_construct(heap_ptr, src.ptr, expr.type.name);
-                        return heap_ptr;
-                    }
-                }
+                if (try_initialize_class_storage_from_same_type_source(target, expr.args)) return heap_ptr;
                 std::string ctor_name = expr.type.name + "_new";
                 const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
                 if (ctor_def == nullptr) {
@@ -3903,7 +3873,7 @@ private:
                         current_loc_);
                 }
                 std::vector<llvm::Value*> args = codegen_call_args(expr.args, ctor_def, /*param_offset=*/1);
-                args.insert(args.begin(), heap_ptr);
+                args.insert(args.begin(), target.ptr);
                 builder_->CreateCall(ctor, args);
             }
             return heap_ptr;
