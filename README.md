@@ -57,11 +57,15 @@ int legacy(int* p) {
 
 ## Documentation
 
-The full language specification is "The SCPP Programming Language" book,
-maintained in both languages:
+The full language specification is "The SCPP Programming Language" book. The
+book currently has three maintained editions:
 
 - English: [`docs/book/en/README.md`](docs/book/en/README.md)
-- 中文: [`docs/book/zh/README.md`](docs/book/zh/README.md)
+- 简体中文: [`docs/book/zh/README.md`](docs/book/zh/README.md)
+- 繁體中文（台灣）: [`docs/book/zh-TW/README.md`](docs/book/zh-TW/README.md)
+
+Other documentation trees, such as the spec and design documents, are still
+published only in English and Simplified Chinese today.
 
 ## Building
 

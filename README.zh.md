@@ -45,10 +45,13 @@ int legacy(int* p) {
 
 ## 文档
 
-完整语言规范是《The SCPP Programming Language》一书，采用中英双语维护：
+完整语言规范是《The SCPP Programming Language》一书。当前书籍部分维护三种版本：
 
 - English: [`docs/book/en/README.md`](docs/book/en/README.md)
-- 中文: [`docs/book/zh/README.md`](docs/book/zh/README.md)
+- 简体中文: [`docs/book/zh/README.md`](docs/book/zh/README.md)
+- 繁體中文（台灣）: [`docs/book/zh-TW/README.md`](docs/book/zh-TW/README.md)
+
+其他文档树（例如 spec 与 design documents）目前仍只提供英文和简体中文版。
 
 ## 构建
 
