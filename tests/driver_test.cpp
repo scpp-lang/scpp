@@ -5087,6 +5087,181 @@ int main() {
     }
 }
 
+void run_for_loop_tests() {
+    {
+        std::string case_name = "classic_for_counts_up";
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int sum = 0;\n"
+            "    for (int i = 0; i < 4; i = i + 1) {\n"
+            "        sum = sum + i;\n"
+            "    }\n"
+            "    return sum - 6;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "classic_for_counts_down";
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int sum = 0;\n"
+            "    for (int i = 3; i >= 0; i = i - 1) {\n"
+            "        sum = sum + i;\n"
+            "    }\n"
+            "    return sum - 6;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "classic_for_initially_false_skips_body";
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int ran = 0;\n"
+            "    for (int i = 0; i < 0; i = i + 1) {\n"
+            "        ran = 1;\n"
+            "    }\n"
+            "    return ran;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "nested_for_loops";
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int count = 0;\n"
+            "    for (int i = 0; i < 3; i = i + 1) {\n"
+            "        for (int j = 0; j < 2; j = j + 1) {\n"
+            "            count = count + 1;\n"
+            "        }\n"
+            "    }\n"
+            "    return count - 6;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "classic_for_existing_var_and_scoped_decl";
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int i = 10;\n"
+            "    for (i = 0; i < 2; i = i + 1) {\n"
+            "    }\n"
+            "    int sum = 0;\n"
+            "    for (int j = 0; j < 3; j = j + 1) {\n"
+            "        sum = sum + j;\n"
+            "    }\n"
+            "    return i + sum - 5;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "classic_for_init_decl_is_out_of_scope_after_loop";
+        bool threw = false;
+        try {
+            (void)compile_and_run(
+                "int main() {\n"
+                "    for (int j = 0; j < 2; j = j + 1) {\n"
+                "    }\n"
+                "    return j;\n"
+                "}\n",
+                case_name);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected loop-init declaration to be out of scope after the loop");
+    }
+    {
+        std::string case_name = "range_for_array_by_value_does_not_mutate_source";
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int values[3];\n"
+            "    values[0] = 1;\n"
+            "    values[1] = 2;\n"
+            "    values[2] = 3;\n"
+            "    for (int value : values) {\n"
+            "        value = value + 10;\n"
+            "    }\n"
+            "    return values[0] + values[1] + values[2] - 6;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "range_for_array_by_reference_mutates_source";
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int values[3];\n"
+            "    values[0] = 1;\n"
+            "    values[1] = 2;\n"
+            "    values[2] = 3;\n"
+            "    for (auto& value : values) {\n"
+            "        value = value + 1;\n"
+            "    }\n"
+            "    return values[0] + values[1] + values[2] - 9;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "range_for_span_by_reference_mutates_source";
+        RunResult result = compile_and_run(
+            "import std;\n"
+            "int main() {\n"
+            "    int values[3];\n"
+            "    values[0] = 1;\n"
+            "    values[1] = 2;\n"
+            "    values[2] = 3;\n"
+            "    std::span<int> s = values;\n"
+            "    for (auto& value : s) {\n"
+            "        value = value + 2;\n"
+            "    }\n"
+            "    return values[0] + values[1] + values[2] - 12;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "range_for_span_by_value_does_not_mutate_source";
+        RunResult result = compile_and_run(
+            "import std;\n"
+            "int main() {\n"
+            "    int values[3];\n"
+            "    values[0] = 1;\n"
+            "    values[1] = 2;\n"
+            "    values[2] = 3;\n"
+            "    std::span<int> s = values;\n"
+            "    for (int value : s) {\n"
+            "        value = value + 10;\n"
+            "    }\n"
+            "    return values[0] + values[1] + values[2] - 6;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "range_for_const_reference_rejects_mutation";
+        bool threw = false;
+        try {
+            (void)compile_and_run(
+                "int main() {\n"
+                "    int values[2];\n"
+                "    for (const auto& value : values) {\n"
+                "        value = 1;\n"
+                "    }\n"
+                "    return 0;\n"
+                "}\n",
+                case_name);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected mutation through const auto& to be rejected");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -5118,6 +5293,7 @@ int main() {
     run_consteval_tests();
     run_cli_extension_tests();
     run_brace_init_only_var_decl_tests();
+    run_for_loop_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

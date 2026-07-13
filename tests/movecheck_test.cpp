@@ -103,7 +103,7 @@ scpp::Program parse_with_std_imports(std::string_view source) {
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
 }
 
-bool throws_move_error(std::string_view source) {
+std::optional<std::string> move_error_message(std::string_view source) {
     try {
         scpp::Program program = parse_with_std_imports(source);
         // ch05 §5.11: monomorphize_generics must run before check_moves,
@@ -115,12 +115,16 @@ bool throws_move_error(std::string_view source) {
         // exercising either would otherwise never see it.
         scpp::monomorphize_generics(program);
         scpp::check_moves(program);
-    } catch (const scpp::ParseError&) {
-        return true;
-    } catch (const scpp::DataflowError&) {
-        return true;
+    } catch (const scpp::ParseError& e) {
+        return e.what();
+    } catch (const scpp::DataflowError& e) {
+        return e.what();
     }
-    return false;
+    return std::nullopt;
+}
+
+bool throws_move_error(std::string_view source) {
+    return move_error_message(source).has_value();
 }
 
 // Runs every `<name>.scpp` case file under SCPP_MOVETEST_SOURCE_DIR against
@@ -164,10 +168,120 @@ void run_test_case_files() {
     }
 }
 
+void test_range_for_const_reference_rejects_mutation() {
+    cases_run++;
+    expect(throws_move_error(
+               "int main() {\n"
+               "    int values[2];\n"
+               "    for (const auto& value : values) {\n"
+               "        value = 1;\n"
+               "    }\n"
+               "    return 0;\n"
+               "}\n"),
+           "range_for_const_reference_rejects_mutation: expected mutation through const auto& to be rejected");
+}
+
+void test_mutable_reborrow_is_allowed_while_nested() {
+    cases_run++;
+    expect(!throws_move_error(
+               "int main() {\n"
+               "    int values[2];\n"
+               "    int& whole = values[0];\n"
+               "    {\n"
+               "        int& nested = whole;\n"
+               "        nested = 1;\n"
+               "    }\n"
+               "    whole = 2;\n"
+               "    return 0;\n"
+               "}\n"),
+           "mutable_reborrow_is_allowed_while_nested: expected nested reborrow to pass");
+}
+
+void test_mutable_reborrow_allows_parent_read_while_live() {
+    cases_run++;
+    expect(!throws_move_error(
+               "int main() {\n"
+               "    int value = 1;\n"
+               "    int& whole = value;\n"
+               "    const int& nested = whole;\n"
+               "    return whole + nested;\n"
+               "}\n"),
+           "mutable_reborrow_allows_parent_read_while_live: expected reads through lender and child to be allowed");
+}
+
+void test_mutable_reborrow_rejects_parent_write_while_live() {
+    cases_run++;
+    expect(throws_move_error(
+               "int main() {\n"
+               "    int values[2];\n"
+               "    int& whole = values[0];\n"
+               "    int& nested = whole;\n"
+               "    whole = 1;\n"
+               "    return nested;\n"
+               "}\n"),
+           "mutable_reborrow_rejects_parent_write_while_live: expected parent write during live reborrow to be rejected");
+}
+
+void test_mutable_reborrow_parent_becomes_usable_after_scope() {
+    cases_run++;
+    expect(!throws_move_error(
+               "import std;\n"
+               "int main() {\n"
+               "    int values[2];\n"
+               "    std::span<int> s = values;\n"
+               "    {\n"
+               "        int& nested = s[0];\n"
+               "        nested = 1;\n"
+               "    }\n"
+               "    s[0] = 2;\n"
+               "    return 0;\n"
+               "}\n"),
+           "mutable_reborrow_parent_becomes_usable_after_scope: expected lender to become usable after child scope ends");
+}
+
+void test_range_for_mutable_reference_over_span_is_accepted() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "int main() {\n"
+        "    int values[2];\n"
+        "    std::span<int> s = values;\n"
+        "    for (auto& value : s) {\n"
+        "        value = 1;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(!error.has_value(),
+           "range_for_mutable_reference_over_span_is_accepted: expected mutable span iteration to pass movecheck" +
+               (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
+void test_range_for_const_reference_over_span_rejects_mutation() {
+    cases_run++;
+    expect(throws_move_error(
+               "import std;\n"
+               "int main() {\n"
+               "    int values[2];\n"
+               "    std::span<int> s = values;\n"
+               "    for (const auto& value : s) {\n"
+               "        value = 1;\n"
+               "    }\n"
+               "    return 0;\n"
+               "}\n"),
+           "range_for_const_reference_over_span_rejects_mutation: expected const span iteration mutation to be rejected");
+}
+
 } // namespace
 
 int main() {
     run_test_case_files();
+    test_mutable_reborrow_is_allowed_while_nested();
+    test_mutable_reborrow_allows_parent_read_while_live();
+    test_mutable_reborrow_rejects_parent_write_while_live();
+    test_mutable_reborrow_parent_becomes_usable_after_scope();
+    test_range_for_const_reference_rejects_mutation();
+    test_range_for_mutable_reference_over_span_is_accepted();
+    test_range_for_const_reference_over_span_rejects_mutation();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

@@ -714,6 +714,10 @@ private:
     // must happen *before* generating its arguments (codegen_call_args
     // needs to already know the callee to decide value-vs-address per
     // parameter).
+    [[nodiscard]] bool is_for_range_size_builtin(const Expr& expr) const {
+        return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1;
+    }
+
     std::optional<Type> infer_type(const Expr& expr) {
         switch (expr.kind) {
             case ExprKind::IntegerLiteral: return named_type("int");
@@ -795,9 +799,10 @@ private:
             case ExprKind::Subscript: {
                 std::optional<Type> base = infer_type(*expr.lhs);
                 if (!base) return std::nullopt;
-                if (base->kind == TypeKind::Array) return *base->element;
-                if (base->kind == TypeKind::Span) return *base->pointee;
-                if (base->kind == TypeKind::Pointer) return *base->pointee;
+                const Type& effective = base->kind == TypeKind::Reference && base->pointee ? *base->pointee : *base;
+                if (effective.kind == TypeKind::Array) return *effective.element;
+                if (effective.kind == TypeKind::Span) return *effective.pointee;
+                if (effective.kind == TypeKind::Pointer) return *effective.pointee;
                 return std::nullopt;
             }
 
@@ -902,6 +907,7 @@ private:
                 return std::nullopt;
 
             case ExprKind::Call: {
+                if (is_for_range_size_builtin(expr)) return named_type("int");
                 if (expr.lhs == nullptr) {
                     if (structs_.contains(expr.name)) return named_type(expr.name);
                 }
@@ -3704,6 +3710,27 @@ private:
                 return codegen_binary(expr);
 
             case ExprKind::Call: {
+                if (is_for_range_size_builtin(expr)) {
+                    std::optional<Type> range_type = infer_type(*expr.args[0]);
+                    if (!range_type.has_value()) {
+                        throw CodegenError("cannot determine range-for operand type", current_loc_);
+                    }
+                    const Type& unwrapped = range_type->kind == TypeKind::Reference && range_type->pointee != nullptr
+                                                ? *range_type->pointee
+                                                : *range_type;
+                    if (unwrapped.kind == TypeKind::Array) {
+                        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), unwrapped.array_size);
+                    }
+                    if (unwrapped.kind == TypeKind::Span) {
+                        auto size_expr = std::make_unique<Expr>();
+                        size_expr->kind = ExprKind::Member;
+                        size_expr->loc = expr.loc;
+                        size_expr->lhs = clone_expr(*expr.args[0]);
+                        size_expr->name = "size";
+                        return codegen_expr(*size_expr);
+                    }
+                    throw CodegenError("range-for requires a fixed-size array or std::span operand", current_loc_);
+                }
                 if (expr.name == "print_int" || expr.name == "print_bool" || expr.name == "print_char") {
                     return codegen_builtin_print(expr);
                 }

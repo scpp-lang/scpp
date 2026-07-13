@@ -1,0 +1,3 @@
+contains: while.cond
+contains: while.body
+sequence: store i32 0 | br label %while.cond

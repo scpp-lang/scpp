@@ -246,6 +246,7 @@ private:
     std::vector<GenericTypeParam> current_class_template_params_;
     size_t generic_template_owner_counter_ = 0;
     size_t parser_instance_id_ = 0;
+    size_t synthesized_for_temp_counter_ = 0;
     int loop_depth_ = 0;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
@@ -591,6 +592,191 @@ private:
         expr->loc = loc;
         expr->bool_value = value;
         return expr;
+    }
+
+    [[nodiscard]] ExprPtr make_integer_literal_expr(SourceLocation loc, long long value) {
+        auto expr = std::make_unique<Expr>();
+        expr->kind = ExprKind::IntegerLiteral;
+        expr->loc = loc;
+        expr->int_value = value;
+        return expr;
+    }
+
+    [[nodiscard]] ExprPtr make_identifier_expr(SourceLocation loc, std::string name) {
+        auto expr = std::make_unique<Expr>();
+        expr->kind = ExprKind::Identifier;
+        expr->loc = loc;
+        expr->name = std::move(name);
+        return expr;
+    }
+
+    [[nodiscard]] ExprPtr make_binary_expr(SourceLocation loc, BinaryOp op, ExprPtr lhs, ExprPtr rhs) {
+        auto expr = std::make_unique<Expr>();
+        expr->kind = ExprKind::Binary;
+        expr->loc = loc;
+        expr->binary_op = op;
+        expr->lhs = std::move(lhs);
+        expr->rhs = std::move(rhs);
+        return expr;
+    }
+
+    [[nodiscard]] ExprPtr make_member_expr(SourceLocation loc, ExprPtr lhs, std::string name) {
+        auto expr = std::make_unique<Expr>();
+        expr->kind = ExprKind::Member;
+        expr->loc = loc;
+        expr->lhs = std::move(lhs);
+        expr->name = std::move(name);
+        return expr;
+    }
+
+    [[nodiscard]] ExprPtr make_subscript_expr(SourceLocation loc, ExprPtr lhs, ExprPtr rhs) {
+        auto expr = std::make_unique<Expr>();
+        expr->kind = ExprKind::Subscript;
+        expr->loc = loc;
+        expr->lhs = std::move(lhs);
+        expr->rhs = std::move(rhs);
+        return expr;
+    }
+
+    [[nodiscard]] ExprPtr make_call_expr(SourceLocation loc, std::string name, std::vector<ExprPtr> args) {
+        auto expr = std::make_unique<Expr>();
+        expr->kind = ExprKind::Call;
+        expr->loc = loc;
+        expr->name = std::move(name);
+        expr->args = std::move(args);
+        return expr;
+    }
+
+    [[nodiscard]] StmtPtr make_expr_stmt(SourceLocation loc, ExprPtr expr) {
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::ExprStmt;
+        stmt->loc = loc;
+        stmt->expr = std::move(expr);
+        return stmt;
+    }
+
+    [[nodiscard]] StmtPtr make_continue_stmt(SourceLocation loc) {
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::Continue;
+        stmt->loc = loc;
+        return stmt;
+    }
+
+    [[nodiscard]] StmtPtr make_block_stmt(SourceLocation loc) {
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::Block;
+        stmt->loc = loc;
+        return stmt;
+    }
+
+    [[nodiscard]] std::string fresh_for_temp_name(std::string_view stem) {
+        return "$for_" + std::string(stem) + "_" + std::to_string(synthesized_for_temp_counter_++);
+    }
+
+    [[nodiscard]] bool is_range_for_decl_start() const {
+        return check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto) ||
+               looks_like_type_start();
+    }
+
+    [[nodiscard]] StmtPtr rewrite_loop_continue_with_epilogue(StmtPtr stmt, const Expr& epilogue) {
+        switch (stmt->kind) {
+            case StmtKind::Continue: {
+                auto block = make_block_stmt(stmt->loc);
+                block->statements.push_back(make_expr_stmt(epilogue.loc, clone_initializer_expr(epilogue)));
+                block->statements.push_back(make_continue_stmt(stmt->loc));
+                return block;
+            }
+            case StmtKind::If:
+                if (stmt->then_branch) {
+                    stmt->then_branch = rewrite_loop_continue_with_epilogue(std::move(stmt->then_branch), epilogue);
+                }
+                if (stmt->else_branch) {
+                    stmt->else_branch = rewrite_loop_continue_with_epilogue(std::move(stmt->else_branch), epilogue);
+                }
+                return stmt;
+            case StmtKind::Block:
+                for (StmtPtr& child : stmt->statements) {
+                    child = rewrite_loop_continue_with_epilogue(std::move(child), epilogue);
+                }
+                return stmt;
+            case StmtKind::While:
+                return stmt;
+            case StmtKind::VarDecl:
+            case StmtKind::Return:
+            case StmtKind::Break:
+            case StmtKind::ExprStmt:
+                return stmt;
+        }
+        return stmt;
+    }
+
+    [[nodiscard]] StmtPtr desugar_classic_for(SourceLocation loc, StmtPtr init_stmt, ExprPtr condition, ExprPtr increment,
+                                              StmtPtr body) {
+        auto outer_block = make_block_stmt(loc);
+        if (init_stmt) outer_block->statements.push_back(std::move(init_stmt));
+
+        auto while_stmt = std::make_unique<Stmt>();
+        while_stmt->kind = StmtKind::While;
+        while_stmt->loc = loc;
+        while_stmt->condition = std::move(condition);
+
+        auto body_block = make_block_stmt(body->loc);
+        if (increment) body = rewrite_loop_continue_with_epilogue(std::move(body), *increment);
+        body_block->statements.push_back(std::move(body));
+        if (increment) body_block->statements.push_back(make_expr_stmt(increment->loc, std::move(increment)));
+        while_stmt->then_branch = std::move(body_block);
+
+        outer_block->statements.push_back(std::move(while_stmt));
+        return outer_block;
+    }
+
+    [[nodiscard]] StmtPtr desugar_range_for(SourceLocation loc, StmtPtr loop_var, ExprPtr range_expr, StmtPtr body) {
+        std::string range_name = fresh_for_temp_name("range");
+        std::string index_name = fresh_for_temp_name("index");
+
+        auto outer_block = make_block_stmt(loc);
+
+        auto range_decl = std::make_unique<Stmt>();
+        range_decl->kind = StmtKind::VarDecl;
+        range_decl->loc = loc;
+        range_decl->type = named_type("auto");
+        range_decl->var_name = range_name;
+        range_decl->init = std::move(range_expr);
+        outer_block->statements.push_back(std::move(range_decl));
+
+        auto index_decl = std::make_unique<Stmt>();
+        index_decl->kind = StmtKind::VarDecl;
+        index_decl->loc = loc;
+        index_decl->type = named_type("int");
+        index_decl->var_name = index_name;
+        index_decl->init = make_integer_literal_expr(loc, 0);
+        outer_block->statements.push_back(std::move(index_decl));
+
+        auto while_stmt = std::make_unique<Stmt>();
+        while_stmt->kind = StmtKind::While;
+        while_stmt->loc = loc;
+        std::vector<ExprPtr> size_args;
+        size_args.push_back(make_identifier_expr(loc, range_name));
+        while_stmt->condition =
+            make_binary_expr(loc, BinaryOp::Lt, make_identifier_expr(loc, index_name),
+                             make_call_expr(loc, "$for_range_size", std::move(size_args)));
+
+        auto increment = make_binary_expr(
+            loc, BinaryOp::Assign, make_identifier_expr(loc, index_name),
+            make_binary_expr(loc, BinaryOp::Add, make_identifier_expr(loc, index_name), make_integer_literal_expr(loc, 1)));
+
+        loop_var->init =
+            make_subscript_expr(loc, make_identifier_expr(loc, range_name), make_identifier_expr(loc, index_name));
+
+        auto body_block = make_block_stmt(body->loc);
+        body = rewrite_loop_continue_with_epilogue(std::move(body), *increment);
+        body_block->statements.push_back(std::move(loop_var));
+        body_block->statements.push_back(std::move(body));
+        body_block->statements.push_back(make_expr_stmt(loc, std::move(increment)));
+        while_stmt->then_branch = std::move(body_block);
+
+        outer_block->statements.push_back(std::move(while_stmt));
+        return outer_block;
     }
 
     // Checks (without consuming) for the 3-token sequence `std :: <member>`.
@@ -4427,12 +4613,13 @@ private:
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
         if (check(TokenKind::KwWhile)) return parse_while();
+        if (check(TokenKind::KwFor)) return parse_for();
         if (check(TokenKind::KwBreak)) return parse_break();
         if (check(TokenKind::KwContinue)) return parse_continue();
         return parse_expr_stmt();
     }
 
-    StmtPtr parse_var_decl() {
+    StmtPtr parse_var_decl(bool require_semicolon = true) {
         SourceLocation loc = current_loc();
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
@@ -4459,7 +4646,7 @@ private:
                                   "way to know what concrete type to infer");
             }
             stmt->init = parse_expr();
-            expect(TokenKind::Semicolon, "';'");
+            if (require_semicolon) expect(TokenKind::Semicolon, "';'");
             return stmt;
         }
         Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
@@ -4509,7 +4696,41 @@ private:
                                   std::string(stmt->is_constexpr ? "constexpr " : "const ") + stmt->type.name +
                                   " " + stmt->var_name + " = ...;') -- it can never be given a value afterward");
         }
-        expect(TokenKind::Semicolon, "';'");
+        if (require_semicolon) expect(TokenKind::Semicolon, "';'");
+        return stmt;
+    }
+
+    StmtPtr parse_for_range_decl() {
+        SourceLocation loc = current_loc();
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::VarDecl;
+        stmt->loc = loc;
+
+        if (check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto)) {
+            bool has_const = match(TokenKind::KwConst);
+            expect(TokenKind::KwAuto, "'auto'");
+            Type declared = named_type("auto");
+            if (match(TokenKind::Amp)) {
+                auto pointee = std::make_shared<Type>(std::move(declared));
+                declared = Type{};
+                declared.kind = TypeKind::Reference;
+                declared.pointee = std::move(pointee);
+                declared.is_mutable_ref = !has_const;
+            } else if (has_const) {
+                stmt->is_const = true;
+            }
+            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            stmt->type = std::move(declared);
+            return stmt;
+        }
+
+        Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
+        if (starts_function_pointer_declarator()) {
+            stmt->type = parse_function_pointer_declarator(std::move(base), stmt->var_name);
+        } else {
+            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            stmt->type = std::move(base);
+        }
         return stmt;
     }
 
@@ -4564,6 +4785,51 @@ private:
         stmt->then_branch = parse_statement();
         loop_depth_--;
         return stmt;
+    }
+
+    StmtPtr parse_for() {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwFor, "'for'");
+        expect(TokenKind::LParen, "'('");
+
+        if (is_range_for_decl_start()) {
+            size_t saved_pos = pos_;
+            try {
+                StmtPtr loop_var = parse_for_range_decl();
+                if (match(TokenKind::Colon)) {
+                    ExprPtr range_expr = parse_expr();
+                    expect(TokenKind::RParen, "')'");
+                    loop_depth_++;
+                    StmtPtr body = parse_statement();
+                    loop_depth_--;
+                    return desugar_range_for(loc, std::move(loop_var), std::move(range_expr), std::move(body));
+                }
+            } catch (const ParseError&) {
+            }
+            pos_ = saved_pos;
+        }
+
+        StmtPtr init_stmt;
+        if (!check(TokenKind::Semicolon)) {
+            if (looks_like_type_start()) {
+                init_stmt = parse_var_decl(/*require_semicolon=*/false);
+            } else {
+                init_stmt = make_expr_stmt(current_loc(), parse_expr());
+            }
+        }
+        expect(TokenKind::Semicolon, "';'");
+
+        ExprPtr condition = check(TokenKind::Semicolon) ? make_bool_literal_expr(loc, true) : parse_expr();
+        expect(TokenKind::Semicolon, "';'");
+
+        ExprPtr increment;
+        if (!check(TokenKind::RParen)) increment = parse_expr();
+        expect(TokenKind::RParen, "')'");
+
+        loop_depth_++;
+        StmtPtr body = parse_statement();
+        loop_depth_--;
+        return desugar_classic_for(loc, std::move(init_stmt), std::move(condition), std::move(increment), std::move(body));
     }
 
     StmtPtr parse_break() {

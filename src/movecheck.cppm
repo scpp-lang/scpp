@@ -69,9 +69,24 @@ struct BorrowState {
 
 using BorrowMap = std::unordered_map<std::string, BorrowState>;
 
-// Maps a currently-bound reference local/parameter's name directly to the
-// *root* place it (transitively) borrows -- see `resolve_root_place`.
-using RefTargetMap = std::unordered_map<std::string, std::string>;
+struct RefTarget {
+    std::string root;
+    // Non-empty when this binding is a reborrow derived from an already-live
+    // reference/span local or parameter rather than a direct borrow of the
+    // root place itself. While such a child binding is live, the lender may
+    // still be read, but writes through it and further reborrows from it are
+    // blocked until the child ends.
+    std::string lender;
+
+    [[nodiscard]] bool is_reborrow() const { return !lender.empty(); }
+
+    bool operator==(const RefTarget&) const = default;
+};
+
+// Maps a currently-bound reference/span local's name to the ultimate root
+// place it aliases, and, when applicable, the live lender it reborrows from.
+using RefTargetMap = std::unordered_map<std::string, RefTarget>;
+using ReborrowSuspensionMap = std::unordered_map<std::string, int>;
 
 struct ClosureCaptureBorrow {
     std::string root;
@@ -105,6 +120,7 @@ struct DataflowState {
     StateMap locals;
     BorrowMap borrows;
     RefTargetMap ref_targets;
+    ReborrowSuspensionMap suspended_reborrows;
     ClosureCaptureBorrowMap closure_capture_borrows;
     // Ch01 §1.3's nesting counter: incremented by UnsafeEnter, decremented
     // by UnsafeExit (see apply_statement). Zero means "not currently
@@ -182,6 +198,7 @@ struct DataflowState {
 
     [[nodiscard]] bool operator==(const DataflowState& other) const {
         return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
+               suspended_reborrows == other.suspended_reborrows &&
                closure_capture_borrows == other.closure_capture_borrows &&
                unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
                class_names == other.class_names && class_field_types == other.class_field_types &&
@@ -298,8 +315,17 @@ BorrowMap join_borrow_maps(const BorrowMap& a, const BorrowMap& b) {
 // iteration computes along the way.
 RefTargetMap join_ref_targets(const RefTargetMap& a, const RefTargetMap& b) {
     RefTargetMap result = a;
-    for (const auto& [ref_name, root] : b) {
-        result.insert_or_assign(ref_name, root);
+    for (const auto& [ref_name, target] : b) {
+        result.insert_or_assign(ref_name, target);
+    }
+    return result;
+}
+
+ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a, const ReborrowSuspensionMap& b) {
+    ReborrowSuspensionMap result = a;
+    for (const auto& [name, count] : b) {
+        auto it = result.find(name);
+        result[name] = it == result.end() ? count : std::max(it->second, count);
     }
     return result;
 }
@@ -317,6 +343,7 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         join_maps(a.locals, b.locals),
         join_borrow_maps(a.borrows, b.borrows),
         join_ref_targets(a.ref_targets, b.ref_targets),
+        join_suspended_reborrows(a.suspended_reborrows, b.suspended_reborrows),
         join_closure_capture_borrows(a.closure_capture_borrows, b.closure_capture_borrows),
         // In a well-formed program every incoming path agrees on the
         // unsafe nesting depth at a given program point (see
@@ -372,6 +399,15 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
 [[nodiscard]] bool is_function_pointer(const Type& type) { return type.kind == TypeKind::FunctionPointer; }
+[[nodiscard]] bool is_for_range_size_builtin(const Expr& expr) {
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1;
+}
+[[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name) { return name.rfind("$for_range_", 0) == 0; }
+[[nodiscard]] bool is_reborrowable_local_type(const Type& type) { return is_reference(type) || is_span(type); }
+[[nodiscard]] bool local_is_suspended_for_reborrow(std::string_view name, const DataflowState& state) {
+    auto it = state.suspended_reborrows.find(std::string(name));
+    return it != state.suspended_reborrows.end() && it->second > 0;
+}
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr) {
     return expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr &&
            expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this";
@@ -1781,6 +1817,15 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             return infer_expr_type(*expr.lhs, body, signatures);
 
         case ExprKind::Call: {
+            if (is_for_range_size_builtin(expr)) {
+                std::optional<Type> range_type = infer_expr_type(*expr.args[0], body, signatures);
+                if (!range_type.has_value()) return std::nullopt;
+                const Type& unwrapped = range_type->kind == TypeKind::Reference && range_type->pointee != nullptr
+                                            ? *range_type->pointee
+                                            : *range_type;
+                if (unwrapped.kind == TypeKind::Array || unwrapped.kind == TypeKind::Span) return named_type("int");
+                return std::nullopt;
+            }
             CalleeSignature callee = resolve_callee_signature(expr, body);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig != nullptr) return sig->return_type;
@@ -1829,9 +1874,10 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Subscript: {
             std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
             if (!base) return std::nullopt;
-            if (base->kind == TypeKind::Array) return *base->element;
-            if (base->kind == TypeKind::Span) return *base->pointee;
-            if (base->kind == TypeKind::Pointer) return *base->pointee;
+            const Type& effective = base->kind == TypeKind::Reference && base->pointee ? *base->pointee : *base;
+            if (effective.kind == TypeKind::Array) return *effective.element;
+            if (effective.kind == TypeKind::Span) return *effective.pointee;
+            if (effective.kind == TypeKind::Pointer) return *effective.pointee;
             return std::nullopt;
         }
     }
@@ -2073,7 +2119,64 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
 // caller-side place is checked instead, at each call site).
 std::string resolve_root_place(const std::string& name, const DataflowState& state) {
     auto it = state.ref_targets.find(name);
-    return it == state.ref_targets.end() ? name : it->second;
+    return it == state.ref_targets.end() ? name : it->second.root;
+}
+
+std::optional<std::string> resolve_reborrow_lender(const Expr& expr, const Body& body, const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::Identifier: {
+            auto it = body.local_types.find(expr.name);
+            if (it != body.local_types.end() && is_reborrowable_local_type(it->second)) return expr.name;
+            return std::nullopt;
+        }
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+        case ExprKind::Cast:
+            return expr.lhs ? resolve_reborrow_lender(*expr.lhs, body, signatures) : std::nullopt;
+        case ExprKind::Unary:
+            return expr.lhs ? resolve_reborrow_lender(*expr.lhs, body, signatures) : std::nullopt;
+        case ExprKind::Call: {
+            CalleeSignature callee = resolve_callee_signature(expr, body);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            bool returns_reference = sig != nullptr && sig->elided_param_index.has_value();
+            if (!returns_reference) return std::nullopt;
+            size_t elided_index = *sig->elided_param_index;
+            if (expr.name == "operator_deref" && expr.lhs != nullptr && elided_index < callee.param_offset) {
+                return resolve_reborrow_lender(*expr.lhs, body, signatures);
+            }
+            if (elided_index < callee.param_offset) {
+                return expr.lhs ? resolve_reborrow_lender(*expr.lhs, body, signatures) : std::nullopt;
+            }
+            return resolve_reborrow_lender(*expr.args[elided_index - callee.param_offset], body, signatures);
+        }
+        default:
+            return std::nullopt;
+    }
+}
+
+void validate_reborrow_lender(const std::string& lender, bool child_is_mutable, const DataflowState& state,
+                              const Body& body, bool report_errors) {
+    if (!report_errors) return;
+    const Type& lender_type = body.local_types.at(lender);
+    if (child_is_mutable && !lender_type.is_mutable_ref) {
+        throw DataflowError("cannot reborrow '" + lender + "' as mutable: it is itself only a shared (const) "
+                            "reference/view",
+            state.current_loc);
+    }
+    if (local_is_suspended_for_reborrow(lender, state)) {
+        throw DataflowError("cannot form another reborrow from '" + lender +
+                                 "' while a nested reborrow derived from it is still live",
+            state.current_loc);
+    }
+}
+
+void validate_reborrow_lender_write(const std::string& lender, const DataflowState& state, bool report_errors) {
+    if (!report_errors) return;
+    if (local_is_suspended_for_reborrow(lender, state)) {
+        throw DataflowError("cannot write through '" + lender +
+                                 "' while a nested reborrow derived from it is still live",
+            state.current_loc);
+    }
 }
 
 // Releases the borrow (if any) that reference-typed local `name` holds
@@ -2092,15 +2195,27 @@ std::string resolve_root_place(const std::string& name, const DataflowState& sta
 void release_reference_borrow(const std::string& name, DataflowState& state, const Body& body) {
     auto ref_it = state.ref_targets.find(name);
     if (ref_it == state.ref_targets.end()) return;
-    auto borrow_it = state.borrows.find(ref_it->second);
-    if (borrow_it != state.borrows.end()) {
-        if (body.local_types.at(name).is_mutable_ref) {
-            borrow_it->second.mutable_borrow = false;
-        } else if (borrow_it->second.shared_count > 0) {
-            borrow_it->second.shared_count--;
+    RefTarget target = ref_it->second;
+    if (target.is_reborrow()) {
+        auto suspension_it = state.suspended_reborrows.find(target.lender);
+        if (suspension_it != state.suspended_reborrows.end()) {
+            if (suspension_it->second > 1) {
+                suspension_it->second--;
+            } else {
+                state.suspended_reborrows.erase(suspension_it);
+            }
         }
-        if (!borrow_it->second.mutable_borrow && borrow_it->second.shared_count == 0) {
-            state.borrows.erase(borrow_it);
+    } else {
+        auto borrow_it = state.borrows.find(target.root);
+        if (borrow_it != state.borrows.end()) {
+            if (body.local_types.at(name).is_mutable_ref) {
+                borrow_it->second.mutable_borrow = false;
+            } else if (borrow_it->second.shared_count > 0) {
+                borrow_it->second.shared_count--;
+            }
+            if (!borrow_it->second.mutable_borrow && borrow_it->second.shared_count == 0) {
+                state.borrows.erase(borrow_it);
+            }
         }
     }
     state.ref_targets.erase(ref_it);
@@ -2476,6 +2591,15 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // any other read; the array base contributes the (whole-)
             // root, same as Member above.
             apply_expr(*expr.rhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (expr.lhs->kind == ExprKind::Identifier) {
+                auto it = body.local_types.find(expr.lhs->name);
+                if (it != body.local_types.end()) {
+                    const Type& local_type = it->second.kind == TypeKind::Reference && it->second.pointee != nullptr
+                                                 ? *it->second.pointee
+                                                 : it->second;
+                    if (local_type.kind == TypeKind::Span) return expr.lhs->name;
+                }
+            }
             return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
         case ExprKind::Unary: {
@@ -2741,14 +2865,11 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     // satisfy a `T&` parameter (that would manufacture a mutable alias
     // out of a shared one), but a mutable reference may always be lent
     // out as either mutable or shared.
-    bool is_reborrow_of_live_reference = arg.kind == ExprKind::Identifier && state.ref_targets.contains(arg.name);
-    if (is_reborrow_of_live_reference) {
-        bool source_is_mutable = body.local_types.at(arg.name).is_mutable_ref;
-        if (is_mutable && !source_is_mutable) {
-            throw DataflowError("cannot pass '" + arg.name + "' by mutable reference: it is itself only a "
-                                                              "shared (const) reference",
-                state.current_loc);
-        }
+    std::optional<std::string> lender = resolve_reborrow_lender(arg, body, signatures);
+    bool lender_is_mutable =
+        lender.has_value() && is_reborrowable_local_type(body.local_types.at(*lender)) && body.local_types.at(*lender).is_mutable_ref;
+    if (lender.has_value() && lender_is_mutable) {
+        validate_reborrow_lender(*lender, is_mutable, state, body, report_errors);
     } else {
         // The general case: `arg` isn't itself a directly-named, locally-
         // bound reference (that narrower case is handled above), so it
@@ -3576,6 +3697,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                                  "read-only (const) reference",
                                 state.current_loc);
                         }
+                        if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures);
+                            lender.has_value()) {
+                            validate_reborrow_lender_write(*lender, state, report_errors);
+                        }
                         if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
                             auto borrow_it = state.borrows.find(*root);
                             if (borrow_it != state.borrows.end() &&
@@ -3595,6 +3720,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             return;
 
         case ExprKind::Call:
+            if (is_for_range_size_builtin(expr)) {
+                apply_expr(*expr.args[0], false, state, body, signatures, report_errors);
+                return;
+            }
             check_call_arguments(expr, state, body, signatures, report_errors);
             return;
 
@@ -3751,6 +3880,12 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     }
 
     bool is_mutable = stmt.type.is_mutable_ref;
+    std::optional<std::string> lender = resolve_reborrow_lender(*stmt.expr, body, signatures);
+    bool lender_is_mutable =
+        lender.has_value() && is_reborrowable_local_type(body.local_types.at(*lender)) && body.local_types.at(*lender).is_mutable_ref;
+    if (lender.has_value() && lender_is_mutable) {
+        validate_reborrow_lender(*lender, is_mutable, state, body, report_errors);
+    }
 
     // Reject manufacturing a mutable `T&`/`std::span<T>` out of a place
     // that's only reachable read-only (e.g. `int& r = p.x;`/
@@ -3766,23 +3901,27 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
             state.current_loc);
     }
 
-    BorrowState& borrow = state.borrows[root];
-    if (report_errors) {
-        if (is_mutable && (borrow.mutable_borrow || borrow.shared_count > 0)) {
-            throw DataflowError("cannot mutably borrow '" + root + "': it is already borrowed",
-                state.current_loc);
+    if (!(lender.has_value() && lender_is_mutable)) {
+        BorrowState& borrow = state.borrows[root];
+        if (report_errors) {
+            if (is_mutable && (borrow.mutable_borrow || borrow.shared_count > 0)) {
+                throw DataflowError("cannot mutably borrow '" + root + "': it is already borrowed",
+                    state.current_loc);
+            }
+            if (!is_mutable && borrow.mutable_borrow) {
+                throw DataflowError("cannot borrow '" + root + "': it is already mutably borrowed",
+                    state.current_loc);
+            }
         }
-        if (!is_mutable && borrow.mutable_borrow) {
-            throw DataflowError("cannot borrow '" + root + "': it is already mutably borrowed",
-                state.current_loc);
+        if (is_mutable) {
+            borrow.mutable_borrow = true;
+        } else {
+            borrow.shared_count++;
         }
-    }
-    if (is_mutable) {
-        borrow.mutable_borrow = true;
     } else {
-        borrow.shared_count++;
+        state.suspended_reborrows[*lender]++;
     }
-    state.ref_targets[stmt.local] = root;
+    state.ref_targets[stmt.local] = RefTarget{root, lender.value_or("")};
     state.locals[stmt.local] = LocalState::Initialized;
 }
 
@@ -3799,6 +3938,7 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
                                     const Signatures& signatures, bool report_errors) {
     const Type& ref_type = body.local_types.at(stmt.local);
     if (report_errors) {
+        validate_reborrow_lender_write(stmt.local, state, report_errors);
         if (!ref_type.is_mutable_ref) {
             throw DataflowError("cannot assign through '" + stmt.local +
                                  "': it is a read-only (const) reference",
@@ -8446,8 +8586,30 @@ private:
                             "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer",
                             stmt.loc);
                     }
-                    stmt.type = *inferred;
-                    body.local_types[stmt.var_name] = *inferred;
+                    if (is_synthesized_for_range_storage(stmt.var_name) &&
+                        (inferred->kind == TypeKind::Array || inferred->kind == TypeKind::Span)) {
+                        Type inferred_ref;
+                        inferred_ref.kind = TypeKind::Reference;
+                        inferred_ref.pointee = std::make_shared<Type>(*inferred);
+                        inferred_ref.is_mutable_ref = inferred->kind == TypeKind::Span ? inferred->is_mutable_ref : true;
+                        stmt.type = inferred_ref;
+                        body.local_types[stmt.var_name] = inferred_ref;
+                    } else {
+                        stmt.type = *inferred;
+                        body.local_types[stmt.var_name] = *inferred;
+                    }
+                } else if (stmt.type.kind == TypeKind::Reference && stmt.type.pointee != nullptr &&
+                           stmt.type.pointee->kind == TypeKind::Named && stmt.type.pointee->name == "auto") {
+                    if (!stmt.init) {
+                        throw DataflowError("'auto' requires an initializer", stmt.loc);
+                    }
+                    std::optional<Type> inferred = infer_expr_type(*stmt.init, body, signatures_);
+                    if (!inferred.has_value()) {
+                        throw DataflowError(
+                            "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer", stmt.loc);
+                    }
+                    stmt.type.pointee = std::make_shared<Type>(*inferred);
+                    body.local_types[stmt.var_name] = stmt.type;
                 }
                 return;
             case StmtKind::Return:

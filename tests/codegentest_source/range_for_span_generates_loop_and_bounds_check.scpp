@@ -1,0 +1,10 @@
+import std;
+
+int f() {
+    int values[2];
+    std::span<int> s = values;
+    for (auto& value : s) {
+        value = 1;
+    }
+    return values[0];
+}

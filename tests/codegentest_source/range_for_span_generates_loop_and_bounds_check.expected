@@ -1,0 +1,4 @@
+contains: while.cond
+contains: while.body
+contains: icmp sge i64
+contains: call void @abort()
