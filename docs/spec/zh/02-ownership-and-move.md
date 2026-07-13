@@ -341,7 +341,12 @@ public:
   (3.1) 一个形如 `std::move(E)` 的表达式，其中 `E` 指代一个类型为 `T`
   的对象；或者
 
-  (3.2) 一个类型为 `T` 的调用表达式。
+  (3.2) 一个类型为 `T` 的调用表达式；或者
+
+  (3.3) 在
+  [§6.7](02-ownership-and-move.md#67-class-类型的按值返回by-value-return-of-class-typestmt.return)
+  所约束的 `return` 语句里，一个形如 `T{a1, ..., an}` 的表达式，只要它在
+  该操作数位置直接构造出一个类型为 `T` 的临时对象。
 
 (4) 如果既不满足 (2)，也不满足 (3)，程序就不合法（ill-formed）。
 
@@ -358,9 +363,18 @@ public:
 (1) 如果一个函数的返回类型是 class 类型 `T`，那么一条 `return` 语句的
 操作数，按本小节去初始化被返回的对象。
 
-(2) 如果这个操作数是一个 *id-expression*，指代某个局部对象（包括一个
-参数），并且它的类型恰好就是 `T`，同时 `T` 拥有 copy 构造函数（6.5），
-那么被返回的对象就从那个局部对象 copy 构造出来。
+(2) 如果这个操作数恰好就是一个**没加括号的** *id-expression*，它指代的
+是最内层外围函数里的某个局部对象，或者那个函数里某个**非引用**参数对象，
+并且它的类型恰好就是 `T`，那么对本小节来说，这个操作数会被当作一个类型为
+`T` 的新鲜值。被返回的对象会从那个对象 move 构造出来。
+
+【注：按
+[§6.4](02-ownership-and-move.md#64-move-构造与-move-赋值move-construction-and-move-assignmentclasscopyctorclasscopyassign)，
+每个 class 类型总是拥有一个隐式定义的 move 构造函数。所以对满足 (2) 的
+操作数，本小节总会选中 move 构造，不存在再退回去选 copy 构造函数的分支。
+(2) 里的这个特殊待遇只适用于 `return` 的操作数；它不会让这种
+*id-expression* 对 [§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
+来说也变成新鲜值。——注释结束】
 
 (3) 否则，这个操作数必须是一个类型为 `T` 的新鲜值，定义见
 [§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
@@ -368,9 +382,38 @@ public:
 
 (4) 如果既不满足 (2)，也不满足 (3)，程序就不合法（ill-formed）。
 
-(5) 一个类型为 class 类型 `T` 的调用表达式，对本小节和
+(5) 一个类型为 class 类型 `T` 的调用表达式，以及一个满足
 [§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
-来说，本身就是一个类型为 `T` 的新鲜值。
+(3.3) 的形如 `T{a1, ..., an}` 的表达式，对本小节来说，都本身是一个类型为
+`T` 的新鲜值。
+
+```cpp
+struct MoveOnly {
+    MoveOnly() = default;
+    MoveOnly(const MoveOnly&) = delete;
+};
+
+struct Box {
+    int value;
+};
+
+MoveOnly make_move_only() {
+    MoveOnly local{};
+    return local;                  // OK：6.7(2)，从 local move 构造返回对象
+}
+
+MoveOnly pass_through(MoveOnly param) {
+    return param;                  // OK：6.7(2)，从 param move 构造返回对象
+}
+
+std::string greet() {
+    return std::string{"hello"};   // OK：6.6(3.3), 6.7(3)
+}
+
+Box make_box() {
+    return Box{42};                // OK：6.6(3.3), 6.7(3)
+}
+```
 
 ---
 
