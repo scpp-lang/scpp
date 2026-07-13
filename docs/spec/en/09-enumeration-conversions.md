@@ -35,4 +35,4 @@ type is provided.
 
 ---
 
-[← Previous: Function template argument deduction](08-function-template-argument-deduction.md) · [Table of Contents](README.md)
+[← Previous: Function template argument deduction](08-function-template-argument-deduction.md) · [Table of Contents](README.md) · [Next: Iteration statements →](10-iteration-statements.md)

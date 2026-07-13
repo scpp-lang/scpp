@@ -91,11 +91,13 @@ support evaluation of:
 
   (5.5) `while` statements;
 
-  (5.6) `return` statements;
+  (5.6) classic `for` statements and range-based `for` statements;
 
-  (5.7) recursive calls; and
+  (5.7) `return` statements;
 
-  (5.8) pack-expanded expressions and statements after template
+  (5.8) recursive calls; and
+
+  (5.9) pack-expanded expressions and statements after template
   substitution.
 
 (6) During required constant evaluation, the implementation shall
