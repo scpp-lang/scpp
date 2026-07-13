@@ -84,7 +84,7 @@ ordinary reference declaration would.
 obtained through a live mutable reference or mutable `std::span<T>`
 local variable or parameter, that binding is a reborrow governed by
 [§6.2](02-ownership-and-move.md#62-ownership-move-state-and-reborrows-basiclife)
-(7)-(9).
+(7)-(10).
 
 ```cpp
 int values[3]{1, 2, 3};
