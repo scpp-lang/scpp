@@ -1,0 +1,21 @@
+import std;
+
+class Box {
+private:
+    int value{};
+
+public:
+    Box(int v) : value{v} { return; }
+    ~Box() { return; }
+    int get() const { return this->value; }
+};
+
+Box make_box() {
+    Box local{42};
+    return std::move(local);
+}
+
+int main() {
+    Box box{make_box()};
+    return box.get();
+}

@@ -1,0 +1,30 @@
+import std;
+
+class Resource {
+private:
+    std::unique_ptr<int> p{};
+
+public:
+    Resource(int value) {
+        this->p = std::make_unique<int>(value);
+        return;
+    }
+    ~Resource() {
+        print_int(999);
+        return;
+    }
+    int get() {
+        return *this->p;
+    }
+};
+
+Resource make_resource(int value) {
+    Resource resource{value};
+    return std::move(resource);
+}
+
+int main() {
+    Resource resource{make_resource(77)};
+    print_int(resource.get());
+    return 0;
+}
