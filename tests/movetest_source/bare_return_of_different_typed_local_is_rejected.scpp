@@ -1,0 +1,14 @@
+class Source {
+public:
+    Source() { return; }
+};
+
+class Dest {
+public:
+    Dest() { return; }
+};
+
+Dest make_dest() {
+    Source source{};
+    return source;
+}

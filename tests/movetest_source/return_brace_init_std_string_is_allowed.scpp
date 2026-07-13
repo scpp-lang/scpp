@@ -1,0 +1,5 @@
+import std;
+
+std::string make_text() {
+    return std::string{"hello"};
+}

@@ -1,0 +1,5 @@
+import std;
+
+std::string echo(std::string& text) {
+    return text;
+}

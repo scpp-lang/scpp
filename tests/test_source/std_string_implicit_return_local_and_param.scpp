@@ -1,0 +1,23 @@
+import std;
+
+std::string make_local() {
+    std::string text{"hello"};
+    return text;
+}
+
+std::string passthrough(std::string text) {
+    return text;
+}
+
+std::string make_world() {
+    std::string text{"world"};
+    return text;
+}
+
+int main() {
+    std::string first = make_local();
+    print_bool(first.equals("hello"));
+    std::string second = passthrough(make_world());
+    print_bool(second.equals("world"));
+    return 0;
+}

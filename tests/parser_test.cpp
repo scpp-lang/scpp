@@ -1198,6 +1198,23 @@ void test_move_as_function_argument() {
            "move_as_function_argument: call argument should be a Move expression");
 }
 
+void test_brace_init_return_expression() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "std::string make_text() {"
+        "    return std::string{\"hello\"};"
+        "}");
+    const scpp::Function& fn = *find_function_named(program, "make_text");
+    const scpp::Stmt& ret = *fn.body->statements[0];
+    expect(ret.kind == scpp::StmtKind::Return && ret.expr != nullptr,
+           "brace_init_return_expression: expected Return with an expression");
+    expect(ret.expr->kind == scpp::ExprKind::Call && ret.expr->name == "std::string",
+           "brace_init_return_expression: return expr should parse as a class-construction Call");
+    expect(ret.expr->args.size() == 1 && ret.expr->args[0]->kind == scpp::ExprKind::StringLiteral &&
+               ret.expr->args[0]->name == "hello",
+           "brace_init_return_expression: expected one string literal constructor argument");
+}
+
 void test_make_unique_zero_args() {
     scpp::Program program =
         parse_with_std_imports("import std;\nint f() { std::unique_ptr<int> a = std::make_unique<int>(); return 0; }");
@@ -3634,6 +3651,7 @@ int main() {
     test_storage_for_type_declaration();
     test_move_expression();
     test_move_as_function_argument();
+    test_brace_init_return_expression();
     test_make_unique_zero_args();
     test_make_unique_with_arg();
     test_make_unique_of_struct_type();

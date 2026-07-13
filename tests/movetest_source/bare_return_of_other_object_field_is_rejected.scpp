@@ -1,0 +1,11 @@
+import std;
+
+class Holder {
+public:
+    std::string text{"hello"};
+};
+
+std::string get() {
+    Holder holder{};
+    return holder.text;
+}

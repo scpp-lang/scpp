@@ -1,0 +1,7 @@
+import std;
+
+std::string global_text{"hello"};
+
+std::string get_text() {
+    return global_text;
+}

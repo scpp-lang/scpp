@@ -1,0 +1,50 @@
+import std;
+
+class Counter {
+private:
+    int value{};
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    Counter(const Counter& other) {
+        print_int(111);
+        this->value = other.value;
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+};
+
+Counter explicit_move() {
+    Counter counter{10};
+    return std::move(counter);
+}
+
+Counter implicit_move() {
+    Counter counter{20};
+    return counter;
+}
+
+Counter make_source() {
+    Counter counter{30};
+    return std::move(counter);
+}
+
+Counter call_return() {
+    return make_source();
+}
+
+int main() {
+    Counter first{explicit_move()};
+    print_int(first.get());
+
+    Counter second{implicit_move()};
+    print_int(second.get());
+
+    Counter third{call_return()};
+    print_int(third.get());
+    return 0;
+}
