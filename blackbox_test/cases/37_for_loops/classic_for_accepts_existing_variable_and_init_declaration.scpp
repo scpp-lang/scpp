@@ -1,0 +1,12 @@
+// spec 8.2(3)-(4): the init-clause may either use an existing variable or
+// declare a new loop variable scoped to that `for` statement.
+int main() {
+    int i = 10;
+    for (i = 0; i < 2; i = i + 1) {
+    }
+    int sum{};
+    for (int j = 0; j < 3; j = j + 1) {
+        sum = sum + j;
+    }
+    return i + sum - 5;
+}

@@ -1,0 +1,10 @@
+// spec 8.2(1): classic `for` executes its init-statement once, checks the
+// condition before each iteration, and runs the iteration expression after
+// each completed body iteration.
+int main() {
+    int sum{};
+    for (int i = 0; i < 4; i = i + 1) {
+        sum = sum + i;
+    }
+    return sum - 6;
+}

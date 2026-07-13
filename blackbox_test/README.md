@@ -134,6 +134,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` state behavior, misuse aborts, and `std::abort()` itself |
 | `35_random` | `std::random_device`, `std::mt19937`, and `scpp::rand::uniform_int_distribution<int>` |
 | `36_charconv` | `std::from_chars` integer parsing: success, partial consumption, errors, signs, and explicit base |
+| `37_for_loops` | classic `for` loops, range-based `for` over arrays/`std::span`, and iteration-mode mutation rules |
 
 ## Testing philosophy
 
@@ -216,8 +217,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **393 cases total**
-- **393/393 passing**
+- **408 cases total**
+- **408/408 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -239,6 +240,13 @@ re-run via `./build/run_tests`:
   member-initializer lists, reference members bind correctly, completeness
   is checked per constructor, and member initialization follows declaration
   order rather than initializer-list order
+- **`for` loops and reborrows now have dedicated black-box coverage too**:
+  classic `for` loops count up/down, skip when initially false, nest, and
+  accept both existing-variable and declaration init-clauses; range-based
+  `for` covers arrays and `std::span` in by-value / `auto&` / `const auto&`
+  forms; and reborrows now directly cover the lender-read-allowed rule, the
+  lender-write/further-reborrow rejections, and lender reuse after the
+  child borrow's last use
 - **Thread-trait overrides now cover the rewritten §5.15/§8 docs**:
   builtin trait predicates, conditional overrides on generic classes,
   unconditional generic override propagation, and `std::unique_ptr<T>`'s

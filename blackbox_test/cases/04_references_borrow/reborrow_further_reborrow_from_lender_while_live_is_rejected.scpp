@@ -1,0 +1,13 @@
+// spec 6.2(9.2): while a reborrow derived from a mutable lender is live, a
+// further reborrow from that same lender is ill-formed.
+int f() {
+    int value = 5;
+    int& lender = value;
+    const int& child = lender;
+    int& second = lender;
+    return child + second;
+}
+
+int main() {
+    return f();
+}
