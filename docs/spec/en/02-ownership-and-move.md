@@ -134,7 +134,7 @@ public:
 };
 ```
 
-## 6.2 Ownership and move state [basic.life]
+## 6.2 Ownership, move state, and reborrows [basic.life]
 
 (1) At every point in a program's execution, an object of automatic,
 static, thread, or member storage duration is in exactly one of two
@@ -171,12 +171,30 @@ places *obj* in the initialized state holding the newly assigned value.
 program's execution where that object is in the moved-out state is
 ill-formed.
 
+(7) If a local variable or parameter of reference type, `std::span<T>`,
+or `std::span<const T>` is used to initialize another local variable of
+reference or span type, or to satisfy a parameter of reference or span
+type, the new binding is a reborrow if it aliases the same underlying
+object or range through that existing binding.
+
+(8) A mutable reborrow is well-formed only if the existing binding from
+which it is formed is itself mutable. While a reborrow formed from a
+mutable existing binding is live, that existing binding shall not be
+used or reborrowed again. Once the reborrow ends, the existing binding
+may again be used.
+
+(9) A shared reborrow does not make the program more permissive than the
+binding from which it is formed: it may not be used to mutate an object
+or range that is reachable only through a shared or `const` binding.
+
 [Note: this document does not, in this clause, define a state for a
 subobject (a class member, an array element) independent of its
 complete object's own state (2)-(4): whether, and under what
 conditions, a program may move a subobject out while its complete
 object remains otherwise initialized is not yet specified by this
-document. — end note]
+document. Reborrowing under (7)-(9) is about aliases formed through an
+already-existing reference or span binding; it does not by itself place
+the complete object in the moved-out state. — end note]
 
 ## 6.3 Destruction [class.dtor]
 

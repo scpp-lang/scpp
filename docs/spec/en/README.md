@@ -30,6 +30,7 @@ is still designed (see the book) but not yet formalized in this document.
 9. [The `constexpr` and `consteval` specifiers](07-constexpr-and-consteval.md)
 13. [Function template argument deduction](08-function-template-argument-deduction.md)
 14. [Enumeration conversions](09-enumeration-conversions.md)
+8. [Iteration statements](10-iteration-statements.md)
 
 ## File-Format Specifications
 
