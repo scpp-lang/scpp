@@ -1,0 +1,31 @@
+import std;
+
+class Resource {
+private:
+    std::unique_ptr<int> p{};
+public:
+    Resource(int value) {
+        this->p = std::make_unique<int>(value);
+        return;
+    }
+    int get() const {
+        return *this->p;
+    }
+};
+
+Resource make_local(int value) {
+    Resource resource{value};
+    return resource;
+}
+
+Resource passthrough(Resource resource) {
+    return resource;
+}
+
+int main() {
+    Resource first{make_local(77)};
+    print_int(first.get());
+    Resource second{passthrough(make_local(88))};
+    print_int(second.get());
+    return 0;
+}

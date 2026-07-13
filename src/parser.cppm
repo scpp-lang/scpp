@@ -4742,6 +4742,16 @@ private:
         stmt->loc = loc;
         if (!check(TokenKind::Semicolon)) {
             stmt->expr = parse_expr();
+            if (stmt->expr != nullptr && stmt->expr->kind == ExprKind::Identifier && check(TokenKind::LBrace)) {
+                auto call = std::make_unique<Expr>();
+                call->kind = ExprKind::Call;
+                call->loc = stmt->expr->loc;
+                call->name = stmt->expr->name;
+                call->explicit_global_qualification = stmt->expr->explicit_global_qualification;
+                call->explicit_template_args = std::move(stmt->expr->explicit_template_args);
+                call->args = parse_brace_initializer_args();
+                stmt->expr = std::move(call);
+            }
         }
         expect(TokenKind::Semicolon, "';'");
         return stmt;

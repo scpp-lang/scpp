@@ -1046,6 +1046,12 @@ struct NodiscardInfo {
            is_copy_constructible(target_type.name, *body.program);
 }
 
+[[nodiscard]] bool is_implicit_move_return_source(const Expr& expr, const Type& target_type, const Body& body) {
+    if (expr.kind != ExprKind::Identifier || expr.explicit_global_qualification) return false;
+    auto it = body.local_types.find(expr.name);
+    return it != body.local_types.end() && types_equal(it->second, target_type);
+}
+
 // Whether `arg` is a legitimate argument for a candidate overload's
 // parameter declared as `param_type`, for exact-type-match overload
 // resolution (ch05 §5.10) -- not a full validity check (that's
@@ -4401,15 +4407,14 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 return;
             }
             bool return_is_class_value = is_named_class_type(fn.return_type, body);
-            bool copyable_lvalue_source =
-                return_is_class_value && is_copyable_class_lvalue_boundary_source(*term.return_value, fn.return_type, body, signatures);
-            bool move_target_context =
-                (return_is_class_value && !copyable_lvalue_source) || term.return_value->kind == ExprKind::Move;
+            bool implicit_move_source =
+                return_is_class_value && is_implicit_move_return_source(*term.return_value, fn.return_type, body);
+            bool move_target_context = return_is_class_value || term.return_value->kind == ExprKind::Move;
             apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true);
-            if (return_is_class_value && !copyable_lvalue_source &&
+            if (return_is_class_value && !implicit_move_source &&
                 !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures)) {
                 throw DataflowError("returning class '" + fn.return_type.name +
-                                     "' by value requires either a copyable bare local of that exact type or "
+                                     "' by value requires either a bare same-type local/parameter or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc);
             }

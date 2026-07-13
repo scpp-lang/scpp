@@ -1033,6 +1033,12 @@ private:
                expr_type->pointee != nullptr && types_equal(*expr_type->pointee, target_type);
     }
 
+    [[nodiscard]] bool is_implicit_move_return_source(const Expr& expr, const Type& target_type) {
+        if (expr.kind != ExprKind::Identifier || expr.explicit_global_qualification) return false;
+        auto it = locals_.find(expr.name);
+        return it != locals_.end() && types_equal(it->second.type, target_type);
+    }
+
     // Whether `arg` is a legitimate argument for a candidate overload's
     // parameter declared as `param_type` -- mirrors movecheck's own
     // argument_matches_parameter (ch05 §5.10) exactly, just phrased over
@@ -2600,6 +2606,16 @@ private:
                     } else {
                         value = current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
                                     ? codegen_lvalue(*stmt.expr).ptr
+                                    : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
+                                          find_class_def(current_function_def_->return_type.name) != nullptr &&
+                                          is_implicit_move_return_source(*stmt.expr, current_function_def_->return_type)
+                                          ? [&]() {
+                                                Expr implicit_move;
+                                                implicit_move.kind = ExprKind::Move;
+                                                implicit_move.loc = stmt.expr->loc;
+                                                implicit_move.lhs = clone_expr(*stmt.expr);
+                                                return codegen_expr(implicit_move);
+                                            }()
                                     : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
                                           find_class_def(current_function_def_->return_type.name) != nullptr
                                           ? codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type)

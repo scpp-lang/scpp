@@ -1,0 +1,11 @@
+import std;
+
+std::string make_text() {
+    return std::string{"brace"};
+}
+
+int main() {
+    std::string text = make_text();
+    print_bool(text.equals("brace"));
+    return 0;
+}
