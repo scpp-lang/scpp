@@ -1,0 +1,8 @@
+// spec 8.2: a classic `for` loop works equally for descending counters.
+int main() {
+    int sum{};
+    for (int i = 3; i >= 0; i = i - 1) {
+        sum = sum + i;
+    }
+    return sum - 6;
+}

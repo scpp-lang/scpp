@@ -1,0 +1,12 @@
+// spec 6.2(9): a live reborrow blocks writes and further reborrows through
+// its lender, but an ordinary read through the lender remains allowed.
+int f() {
+    int value = 5;
+    int& lender = value;
+    const int& child = lender;
+    return lender + child;
+}
+
+int main() {
+    return f() - 10;
+}

@@ -1,0 +1,13 @@
+import std;
+// spec 8.3(7)-(8): `const auto&` over a span is a shared reborrow of each
+// element, so mutating through it is ill-formed.
+int main() {
+    int values[2];
+    values[0] = 1;
+    values[1] = 2;
+    std::span<int> s = values;
+    for (const auto& value : s) {
+        value = 1;
+    }
+    return 0;
+}

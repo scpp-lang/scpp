@@ -120,6 +120,7 @@ cmake --build build
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` 的状态行为、误用时 abort，以及 `std::abort()` 本身 |
 | `35_random` | `std::random_device`、`std::mt19937` 和 `scpp::rand::uniform_int_distribution<int>` |
 | `36_charconv` | `std::from_chars` 整数解析：成功路径、部分消费、错误码、符号和显式进制 |
+| `37_for_loops` | 经典 `for`、基于范围的 `for`（数组/`std::span`）以及不同迭代绑定模式下的可变性规则 |
 
 ## 测试理念
 
@@ -181,8 +182,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 393 个用例**
-- 运行器原始统计 **393/393 通过**
+- **总共 408 个用例**
+- 运行器原始统计 **408/408 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -200,6 +201,12 @@ cmake --build build
   会通过；构造函数可以混合使用类内默认成员初始化器和成员初始化列表；
   引用成员会正确绑定；完整性按构造函数逐个检查；成员初始化顺序遵循声明顺序，
   而不是初始化列表书写顺序
+- **`for` 循环和 reborrow 现在也有专门的黑盒覆盖**：
+  经典 `for` 覆盖递增/递减、初始条件为假、嵌套循环，以及使用已有变量或新声明
+  作为 init-clause；基于范围的 `for` 覆盖数组和 `std::span` 的 by-value /
+  `auto&` / `const auto&` 三种形式；reborrow 则直接覆盖“允许经由 lender 读取、
+  但禁止经由 lender 写入/再次 reborrow”，以及 child 最后一次使用之后 lender
+  可恢复使用的规则
 - **线程 trait override** 现在覆盖了重写后的 §5.15/§8 文档：
   内建 trait 谓词、泛型类上的条件 override、无条件泛型 override 的传播，以及
   `std::unique_ptr<T>` 的 trait 转发行为

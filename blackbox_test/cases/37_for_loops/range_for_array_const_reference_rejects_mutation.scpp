@@ -1,0 +1,11 @@
+// spec 8.3(7): `const auto&` binds the current array element as a shared
+// reference, so mutating through it is ill-formed.
+int main() {
+    int values[2];
+    values[0] = 1;
+    values[1] = 2;
+    for (const auto& value : values) {
+        value = 1;
+    }
+    return 0;
+}

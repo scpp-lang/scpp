@@ -1,0 +1,14 @@
+import std;
+// spec 8.3(3.2)/(6): range-for over `std::span<T>` by value copies each
+// element into the loop variable, leaving the source span elements unchanged.
+int main() {
+    int values[3];
+    values[0] = 1;
+    values[1] = 2;
+    values[2] = 3;
+    std::span<int> s = values;
+    for (int value : s) {
+        value = value + 10;
+    }
+    return values[0] + values[1] + values[2] - 6;
+}

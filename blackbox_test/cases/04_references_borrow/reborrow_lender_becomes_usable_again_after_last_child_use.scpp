@@ -1,0 +1,16 @@
+// spec 6.2(8)-(9): once a reborrow's last use is past, the lender may be
+// written through and reborrowed again.
+int f() {
+    int value = 5;
+    int& lender = value;
+    const int& child = lender;
+    int before = child;
+    lender = 7;
+    int& second = lender;
+    second = second + 1;
+    return before + second;
+}
+
+int main() {
+    return f() - 13;
+}
