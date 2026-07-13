@@ -1,0 +1,12 @@
+import std;
+// spec §6.7(2)-(4): the implicit-move rule is for a bare id-expression only;
+// returning another object's field is still not a fresh value.
+class Holder {
+public:
+    std::string text{"hello"};
+};
+
+std::string get() {
+    Holder holder{};
+    return holder.text;
+}

@@ -1,0 +1,29 @@
+// spec §6.7(2)-(4): the implicit-move return rule is limited to a local or
+// by-value parameter of the innermost enclosing function, not a global object.
+class Counter {
+private:
+    int value{};
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    Counter(const Counter& other) {
+        this->value = other.value;
+        return;
+    }
+    int get() {
+        return this->value;
+    }
+};
+
+Counter global_counter{5};
+
+Counter make_counter() {
+    return global_counter;
+}
+
+int main() {
+    Counter counter = make_counter();
+    return counter.get();
+}

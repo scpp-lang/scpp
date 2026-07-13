@@ -1,0 +1,12 @@
+import std;
+// spec §6.7(2)-(4): the implicit-move rule applies only to an exact bare
+// local object or non-reference parameter object of the innermost function;
+// a member access like `this->text` is still rejected.
+class Holder {
+private:
+    std::string text{"hello"};
+public:
+    std::string get() {
+        return this->text;
+    }
+};

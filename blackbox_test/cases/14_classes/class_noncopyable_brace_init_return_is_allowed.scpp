@@ -1,0 +1,25 @@
+import std;
+// spec §6.6(3.3)/§6.7(3): `return T{...};` directly constructs a fresh
+// temporary of the function's return type, so the returned object is allowed
+// to move-construct from that temporary.
+class Counter {
+private:
+    std::unique_ptr<int> value{};
+public:
+    Counter(int start) {
+        this->value = std::make_unique<int>(start);
+        return;
+    }
+    int get() const {
+        return *this->value;
+    }
+};
+
+Counter make_counter(int start) {
+    return Counter{start};
+}
+
+int main() {
+    Counter counter = make_counter(55);
+    return counter.get();
+}

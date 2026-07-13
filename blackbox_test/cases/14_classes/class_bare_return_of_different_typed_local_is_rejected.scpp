@@ -1,0 +1,21 @@
+// spec §6.7(2)-(4): the bare-id implicit-move rule still requires the local
+// to have exactly the function's return type; it does not widen to a
+// differently-typed local that would need a conversion.
+class Source {
+public:
+    Source() {
+        return;
+    }
+};
+
+class Dest {
+public:
+    Dest() {
+        return;
+    }
+};
+
+Dest make_dest() {
+    Source source{};
+    return source;
+}
