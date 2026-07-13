@@ -1,0 +1,28 @@
+import std;
+// spec §6.7(2): an exact-type by-value parameter object may also be returned
+// as the bare operand of `return`, and the result is move-constructed.
+class Counter {
+private:
+    std::unique_ptr<int> value{};
+public:
+    Counter(int start) {
+        this->value = std::make_unique<int>(start);
+        return;
+    }
+    int get() const {
+        return *this->value;
+    }
+};
+
+Counter passthrough(Counter counter) {
+    return counter;
+}
+
+Counter make_counter(int start) {
+    return Counter{start};
+}
+
+int main() {
+    Counter counter = passthrough(make_counter(11));
+    return counter.get();
+}

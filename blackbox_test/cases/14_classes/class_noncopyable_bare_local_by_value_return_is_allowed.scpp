@@ -1,0 +1,26 @@
+import std;
+// spec §6.7(2): returning an exact-type bare local from the innermost
+// function now implicitly move-constructs the by-value result, even for a
+// move-only class.
+class Counter {
+private:
+    std::unique_ptr<int> value{};
+public:
+    Counter(int start) {
+        this->value = std::make_unique<int>(start);
+        return;
+    }
+    int get() const {
+        return *this->value;
+    }
+};
+
+Counter make_counter(int start) {
+    Counter counter{start};
+    return counter;
+}
+
+int main() {
+    Counter counter = make_counter(9);
+    return counter.get();
+}

@@ -1,0 +1,35 @@
+import std;
+// spec §6.7(2): an exact-type bare local in `return` is treated as a fresh
+// value and move-constructs the result even when the class is copyable. If a
+// copy happened here, this user-defined copy constructor would print.
+extern "C" int puts(const char* s);
+
+class Counter {
+private:
+    std::unique_ptr<int> value{};
+public:
+    Counter(int start) {
+        this->value = std::make_unique<int>(start);
+        return;
+    }
+    Counter(const Counter& other) {
+        [[scpp::unsafe]] {
+            puts("copy");
+        }
+        this->value = std::make_unique<int>(*other.value);
+        return;
+    }
+    int get() const {
+        return *this->value;
+    }
+};
+
+Counter make_counter(int start) {
+    Counter counter{start};
+    return counter;
+}
+
+int main() {
+    Counter counter = make_counter(42);
+    return counter.get();
+}

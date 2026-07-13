@@ -217,8 +217,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **408 cases total**
-- **408/408 passing**
+- **417 cases total**
+- **417/417 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -233,7 +233,12 @@ re-run via `./build/run_tests`:
   negative shapes**:
   - copyable classes passed/returned by value
   - move-only classes passed/returned by value via `std::move(...)`
-  - non-copyable bare locals still rejected when a copy would be needed
+  - move-only class returns now also cover `return T{...};`, bare local
+    implicit move, and bare by-value-parameter passthrough
+  - `std::string` now has dedicated fresh-value return coverage too
+  - the new implicit-move rule's scope boundaries stay pinned down:
+    member access, reference parameters, differently-typed locals, and
+    globals still reject as required
 - **Required-initialization semantics now have dedicated black-box coverage**:
   bare local declarations are rejected, valid local forms (`{}`, `{args}`,
   and `= value`) succeed, constructors may mix in-class defaults with
