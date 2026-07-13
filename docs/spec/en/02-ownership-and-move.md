@@ -177,13 +177,28 @@ reference or span type, or to satisfy a parameter of reference or span
 type, the new binding is a reborrow if it aliases the same underlying
 object or range through that existing binding.
 
-(8) A mutable reborrow is well-formed only if the existing binding from
-which it is formed is itself mutable. While a reborrow formed from a
-mutable existing binding is live, that existing binding shall not be
-used or reborrowed again. Once the reborrow ends, the existing binding
-may again be used.
+(8) For the purposes of (9), a reborrow is *live* at a program point if
+the binding introduced by (7) may still be used on some control-flow
+path forward from that point. A reborrow's liveness is not required to
+extend to the end of its lexical scope if no further such use can occur.
 
-(9) A shared reborrow does not make the program more permissive than the
+(9) A mutable reborrow is well-formed only if the existing binding from
+which it is formed is itself mutable. While a reborrow formed from a
+mutable existing binding is live:
+
+  (9.1) an operation that writes through that existing binding is
+  ill-formed; and
+
+  (9.2) a further reborrow formed from that existing binding is
+  ill-formed.
+
+A read through that existing binding is not, by itself, ill-formed
+solely because the reborrow is live, provided that read does not mutate
+the underlying object or range and does not violate any other rule of
+this document. Once the reborrow is no longer live, the existing binding
+may again be used for writes or reborrows.
+
+(10) A shared reborrow does not make the program more permissive than the
 binding from which it is formed: it may not be used to mutate an object
 or range that is reachable only through a shared or `const` binding.
 
@@ -192,7 +207,7 @@ subobject (a class member, an array element) independent of its
 complete object's own state (2)-(4): whether, and under what
 conditions, a program may move a subobject out while its complete
 object remains otherwise initialized is not yet specified by this
-document. Reborrowing under (7)-(9) is about aliases formed through an
+document. Reborrowing under (7)-(10) is about aliases formed through an
 already-existing reference or span binding; it does not by itself place
 the complete object in the moved-out state. — end note]
 

@@ -71,7 +71,7 @@
 引用或者 mutable `std::span<T>` 局部变量或参数取得的，那么这个绑定就是一个
 受
 [§6.2](02-ownership-and-move.md#62-所有权move-状态与-reborrowbasiclife)
-(7)-(9) 约束的 reborrow。
+(7)-(10) 约束的 reborrow。
 
 ```cpp
 int values[3]{1, 2, 3};
