@@ -11,7 +11,7 @@
   - [Variables and Explicit Initialization](ch03-01-variables-and-explicit-initialization.md)
   - [Scalar Data Types](ch03-02-scalar-data-types.md)
   - [Functions](ch03-03-functions.md)
-  - Comments
+  - [Comments](ch03-04-comments.md)
   - Control Flow
 
 - Understanding Ownership
