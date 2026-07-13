@@ -62,6 +62,7 @@ lang_label() {
   case "$1" in
     en) printf 'English' ;;
     zh) printf '中文' ;;
+    zh-TW) printf '繁中（台灣）' ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -69,6 +70,7 @@ lang_label() {
 theme_prefix_label() {
   case "$1" in
     zh) printf '主题' ;;
+    zh-TW) printf '佈景主題' ;;
     *) printf 'Theme' ;;
   esac
 }
@@ -80,6 +82,9 @@ theme_state_label() {
     auto:zh) printf '跟随系统' ;;
     light:zh) printf '浅色' ;;
     dark:zh) printf '深色' ;;
+    auto:zh-TW) printf '跟隨系統' ;;
+    light:zh-TW) printf '淺色' ;;
+    dark:zh-TW) printf '深色' ;;
     auto:*) printf 'Auto' ;;
     light:*) printf 'Light' ;;
     dark:*) printf 'Dark' ;;
@@ -90,6 +95,7 @@ theme_state_label() {
 site_note_text() {
   case "$1" in
     zh) printf '本网站由使用 scpp 编写的 HTTP server 提供服务。' ;;
+    zh-TW) printf '本網站由以 scpp 撰寫的 HTTP server 提供服務。' ;;
     en) printf 'This site is served by an HTTP server written in scpp.' ;;
     *) printf 'This site is served by an HTTP server written in scpp. / 本网站由使用 scpp 编写的 HTTP server 提供服务。' ;;
   esac
@@ -102,6 +108,9 @@ section_label() {
     book:zh) printf 'Book' ;;
     spec:zh) printf 'Spec' ;;
     design:zh) printf '设计文档' ;;
+    book:zh-TW) printf '書籍' ;;
+    spec:zh-TW) printf '規格' ;;
+    design:zh-TW) printf '設計文件' ;;
     book:*) printf 'Book' ;;
     spec:*) printf 'Spec' ;;
     design:*) printf 'Design Docs' ;;
@@ -119,6 +128,40 @@ has_section() {
     design) design_source_root >/dev/null 2>&1 ;;
     *) return 1 ;;
   esac
+}
+
+section_has_lang() {
+  local section="$1"
+  local lang="$2"
+  [ -d "$(section_source_dir "$section" "$lang")" ]
+}
+
+section_languages() {
+  local section="$1"
+  local lang
+  for lang in en zh zh-TW; do
+    if section_has_lang "$section" "$lang"; then
+      printf '%s\n' "$lang"
+    fi
+  done
+}
+
+fallback_lang_for_section() {
+  local section="$1"
+  local requested="$2"
+  if section_has_lang "$section" "$requested"; then
+    printf '%s' "$requested"
+    return
+  fi
+  if [ "$requested" = 'zh-TW' ] && section_has_lang "$section" zh; then
+    printf 'zh'
+    return
+  fi
+  if section_has_lang "$section" en; then
+    printf 'en'
+    return
+  fi
+  section_languages "$section" | head -n 1
 }
 
 section_source_dir() {
@@ -143,6 +186,9 @@ ensure_design_index() {
     if [ "$lang" = 'zh' ]; then
       printf '# %s\n\n' "$(section_label design "$lang")"
       printf '浏览当前已公开的 SCPP 设计文档。\n\n'
+    elif [ "$lang" = 'zh-TW' ]; then
+      printf '# %s\n\n' "$(section_label design "$lang")"
+      printf '瀏覽目前已公開的 SCPP 設計文件。\n\n'
     else
       printf '# %s\n\n' "$(section_label design "$lang")"
       printf 'Browse the currently published SCPP design documents.\n\n'
@@ -150,6 +196,8 @@ ensure_design_index() {
     printf '## '
     if [ "$lang" = 'zh' ]; then
       printf '文档列表\n\n'
+    elif [ "$lang" = 'zh-TW' ]; then
+      printf '文件列表\n\n'
     else
       printf 'Available documents\n\n'
     fi
@@ -250,6 +298,9 @@ build_sidebar() {
       if [ "$lang" = 'zh' ]; then
         standard_group_label='语言标准'
         format_group_label='文件格式规范'
+      elif [ "$lang" = 'zh-TW' ]; then
+        standard_group_label='語言標準'
+        format_group_label='檔案格式規格'
       else
         standard_group_label='Language Standard'
         format_group_label='File-Format Specifications'
@@ -279,6 +330,8 @@ build_sidebar() {
       local group_label
       if [ "$lang" = 'zh' ]; then
         group_label='设计文档'
+      elif [ "$lang" = 'zh-TW' ]; then
+        group_label='設計文件'
       else
         group_label='Design Documents'
       fi
@@ -320,7 +373,9 @@ build_top_nav() {
       if ! has_section "$section"; then
         continue
       fi
-      href="${prefix}${section}/${current_lang}/index.html"
+      local nav_lang
+      nav_lang="$(fallback_lang_for_section "$section" "$current_lang")"
+      href="${prefix}${section}/${nav_lang}/index.html"
       class_name=''
       if [ "$section" = "$current_section" ]; then
         class_name=' class="current"'
@@ -338,23 +393,28 @@ build_lang_switcher() {
   local current_source_name="$3"
   local prefix="$4"
   local file="$5"
-  local other_lang='en'
-  [ "$lang" = 'en' ] && other_lang='zh'
-  local other_source
-  other_source="$(source_path_for "$section" "$other_lang" "$current_source_name")"
-  local other_target="$prefix$section/$other_lang/$(output_name_for "$current_source_name")"
-  if [ ! -f "$other_source" ]; then
-    other_target="$prefix$section/$other_lang/index.html"
-  fi
   {
     printf '<div class="lang-switcher">\n'
-    if [ "$lang" = 'en' ]; then
-      printf '  <span class="current">EN</span>\n'
-      printf '  <a href="%s">中文</a>\n' "$other_target"
-    else
-      printf '  <a href="%s">EN</a>\n' "$other_target"
-      printf '  <span class="current">中文</span>\n'
-    fi
+    local switch_lang source target label
+    while IFS= read -r switch_lang; do
+      [ -n "$switch_lang" ] || continue
+      case "$switch_lang" in
+        en) label='EN' ;;
+        zh) label='中文' ;;
+        zh-TW) label='繁中' ;;
+        *) label="$switch_lang" ;;
+      esac
+      if [ "$switch_lang" = "$lang" ]; then
+        printf '  <span class="current">%s</span>\n' "$label"
+      else
+        source="$(source_path_for "$section" "$switch_lang" "$current_source_name")"
+        target="$prefix$section/$switch_lang/$(output_name_for "$current_source_name")"
+        if [ ! -f "$source" ]; then
+          target="$prefix$section/$switch_lang/index.html"
+        fi
+        printf '  <a href="%s">%s</a>\n' "$target" "$label"
+      fi
+    done < <(section_languages "$section")
     printf '</div>\n'
   } > "$file"
 }
@@ -568,7 +628,8 @@ build_section() {
 
 build_landing() {
   local md="$TMP_DIR/index.md"
-  cat > "$md" <<'LANDING'
+  {
+    cat <<'LANDING'
 # SCPP Documentation Site
 
 Browse the language book, the formal specifications, and the published design documents under <code>docs/design/</code>.
@@ -577,8 +638,12 @@ Browse the language book, the formal specifications, and the published design do
   <section class="card">
     <h2>Book</h2>
     <ul>
-      <li><a href="book/en/index.html">English</a></li>
-      <li><a href="book/zh/index.html">中文</a></li>
+LANDING
+    while IFS= read -r lang; do
+      [ -n "$lang" ] || continue
+      printf '      <li><a href="book/%s/index.html">%s</a></li>\n' "$lang" "$(lang_label "$lang")"
+    done < <(section_languages book)
+    cat <<'LANDING'
     </ul>
   </section>
   <section class="card">
@@ -597,6 +662,7 @@ Browse the language book, the formal specifications, and the published design do
   </section>
 </div>
 LANDING
+  } > "$md"
   local before="$TMP_DIR/before-home.html"
   local after="$TMP_DIR/after-home.html"
   local head="$TMP_DIR/head-home.html"
@@ -614,8 +680,19 @@ LANDING
       <a href="https://github.com/scpp-lang/scpp">GitHub</a>
     </nav>
     <div class="lang-switcher">
-      <a href="book/en/index.html">EN</a>
-      <a href="book/zh/index.html">中文</a>
+EOF2
+  while IFS= read -r lang; do
+    [ -n "$lang" ] || continue
+    local label
+    case "$lang" in
+      en) label='EN' ;;
+      zh) label='中文' ;;
+      zh-TW) label='繁中' ;;
+      *) label="$lang" ;;
+    esac
+    printf '      <a href="book/%s/index.html">%s</a>\n' "$lang" "$label" >> "$before"
+  done < <(section_languages book)
+  cat >> "$before" <<'EOF2'
     </div>
 EOF2
   cat "$theme_toggle" >> "$before"
@@ -645,12 +722,14 @@ EOF2
 }
 
 build_landing
-for lang in en zh; do
-  build_section book "$lang"
-  build_section spec "$lang"
-  if has_section design; then
-    build_section design "$lang"
+for section in book spec design; do
+  if ! has_section "$section"; then
+    continue
   fi
+  while IFS= read -r lang; do
+    [ -n "$lang" ] || continue
+    build_section "$section" "$lang"
+  done < <(section_languages "$section")
 done
 
 echo "Done. Output in $OUT_DIR/"
