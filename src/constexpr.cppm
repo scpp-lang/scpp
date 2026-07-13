@@ -1368,8 +1368,11 @@ private:
             case ExprKind::Subscript: {
                 std::optional<Type> base = infer_unevaluated_expr_type(*expr.lhs);
                 if (!base.has_value()) return std::nullopt;
-                if (base->kind == TypeKind::Array && base->element) return *base->element;
-                if ((base->kind == TypeKind::Pointer || base->kind == TypeKind::Span) && base->pointee) return *base->pointee;
+                const Type& effective = base->kind == TypeKind::Reference && base->pointee ? *base->pointee : *base;
+                if (effective.kind == TypeKind::Array && effective.element) return *effective.element;
+                if ((effective.kind == TypeKind::Pointer || effective.kind == TypeKind::Span) && effective.pointee) {
+                    return *effective.pointee;
+                }
                 return std::nullopt;
             }
             case ExprKind::Unary:
@@ -1402,6 +1405,15 @@ private:
                 }
                 return infer_unevaluated_expr_type(*expr.lhs);
             case ExprKind::Call:
+                if (expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1) {
+                    std::optional<Type> range_type = infer_unevaluated_expr_type(*expr.args[0]);
+                    if (!range_type.has_value()) return std::nullopt;
+                    const Type& unwrapped = range_type->kind == TypeKind::Reference && range_type->pointee != nullptr
+                                                ? *range_type->pointee
+                                                : *range_type;
+                    if (unwrapped.kind == TypeKind::Array || unwrapped.kind == TypeKind::Span) return named_type("int");
+                    return std::nullopt;
+                }
                 if (expr.lhs) {
                     std::optional<Type> receiver = infer_unevaluated_expr_type(*expr.lhs);
                     const Type& receiver_named = receiver.has_value() && receiver->kind == TypeKind::Reference ? *receiver->pointee
@@ -1467,7 +1479,23 @@ private:
                 return clone_cell(resolve_lvalue(expr).cell);
             }
             case ExprKind::Subscript: return clone_cell(resolve_lvalue(expr).cell);
-            case ExprKind::Call: return evaluate_call_expr(expr);
+            case ExprKind::Call:
+                if (expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1) {
+                    std::optional<Type> range_type = infer_unevaluated_expr_type(*expr.args[0]);
+                    if (!range_type.has_value()) throw ConstexprError(expr.loc, "cannot determine range-for operand type");
+                    const Type& unwrapped = range_type->kind == TypeKind::Reference && range_type->pointee != nullptr
+                                                ? *range_type->pointee
+                                                : *range_type;
+                    if (unwrapped.kind == TypeKind::Array) return make_checked_int_cell(unwrapped.array_size, expr.loc);
+                    if (unwrapped.kind == TypeKind::Span) {
+                        std::shared_ptr<Cell> value = evaluate_expr(*expr.args[0]);
+                        if (auto* span = std::get_if<SpanValue>(&value->data)) {
+                            return make_checked_int_cell(span->size, expr.loc);
+                        }
+                    }
+                    throw ConstexprError(expr.loc, "range-for requires a fixed-size array or std::span operand");
+                }
+                return evaluate_call_expr(expr);
             case ExprKind::Cast: return cast_value(expr.type, evaluate_expr(*expr.lhs), expr.loc);
             case ExprKind::Binary:
                 if (expr.binary_op == BinaryOp::Assign) {

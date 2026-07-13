@@ -328,6 +328,98 @@ void test_while_loop() {
            "while_loop: expr should be an Assign");
 }
 
+void test_classic_for_loop_desugars_with_scoped_init() {
+    scpp::Program program = scpp::parse(
+        "int main() { for (int i = 0; i < 3; i = i + 1) { x = i; } return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.body->statements.size() == 2, "classic_for_loop_desugars_with_scoped_init: expected loop + return");
+    const scpp::Stmt& outer_block = *fn.body->statements[0];
+    expect(outer_block.kind == scpp::StmtKind::Block,
+           "classic_for_loop_desugars_with_scoped_init: loop should desugar to a block");
+    expect(outer_block.statements.size() == 2,
+           "classic_for_loop_desugars_with_scoped_init: expected init decl + while");
+    if (outer_block.statements.size() != 2) return;
+    expect(outer_block.statements[0]->kind == scpp::StmtKind::VarDecl &&
+               outer_block.statements[0]->var_name == "i",
+           "classic_for_loop_desugars_with_scoped_init: first block stmt should declare i");
+    const scpp::Stmt& while_stmt = *outer_block.statements[1];
+    expect(while_stmt.kind == scpp::StmtKind::While,
+           "classic_for_loop_desugars_with_scoped_init: second block stmt should be While");
+    expect(while_stmt.then_branch != nullptr && while_stmt.then_branch->kind == scpp::StmtKind::Block,
+           "classic_for_loop_desugars_with_scoped_init: while body should be a block");
+    if (while_stmt.then_branch == nullptr || while_stmt.then_branch->statements.size() != 2) return;
+    expect(while_stmt.then_branch->statements[1]->kind == scpp::StmtKind::ExprStmt &&
+               while_stmt.then_branch->statements[1]->expr != nullptr &&
+               while_stmt.then_branch->statements[1]->expr->kind == scpp::ExprKind::Binary &&
+               while_stmt.then_branch->statements[1]->expr->binary_op == scpp::BinaryOp::Assign,
+           "classic_for_loop_desugars_with_scoped_init: while body should end with increment assignment");
+}
+
+void test_classic_for_loop_with_expression_init_desugars() {
+    scpp::Program program = scpp::parse(
+        "int main() { int i = 5; for (i = 3; i > 0; i = i - 1) i = i - 1; return i; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.body->statements.size() == 3,
+           "classic_for_loop_with_expression_init_desugars: expected decl + loop + return");
+    const scpp::Stmt& outer_block = *fn.body->statements[1];
+    expect(outer_block.kind == scpp::StmtKind::Block,
+           "classic_for_loop_with_expression_init_desugars: loop should desugar to a block");
+    expect(outer_block.statements.size() == 2,
+           "classic_for_loop_with_expression_init_desugars: expected init expr + while");
+    if (outer_block.statements.size() != 2) return;
+    expect(outer_block.statements[0]->kind == scpp::StmtKind::ExprStmt,
+           "classic_for_loop_with_expression_init_desugars: first block stmt should be init expr");
+    expect(outer_block.statements[1]->kind == scpp::StmtKind::While,
+           "classic_for_loop_with_expression_init_desugars: second block stmt should be While");
+}
+
+void test_range_for_loop_desugars_over_array() {
+    scpp::Program program = scpp::parse(
+        "int main() { int values[3]; for (auto& value : values) { value = 1; } return 0; }");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.body->statements.size() == 3, "range_for_loop_desugars_over_array: expected decl + loop + return");
+    const scpp::Stmt& outer_block = *fn.body->statements[1];
+    expect(outer_block.kind == scpp::StmtKind::Block,
+           "range_for_loop_desugars_over_array: loop should desugar to a block");
+    expect(outer_block.statements.size() == 3,
+           "range_for_loop_desugars_over_array: expected hidden range + hidden index + while");
+    if (outer_block.statements.size() != 3) return;
+    expect(outer_block.statements[0]->kind == scpp::StmtKind::VarDecl &&
+               outer_block.statements[0]->type.kind == scpp::TypeKind::Named &&
+               outer_block.statements[0]->type.name == "auto" &&
+               outer_block.statements[0]->var_name.rfind("$for_range_", 0) == 0,
+           "range_for_loop_desugars_over_array: first hidden decl should store the range");
+    expect(outer_block.statements[1]->kind == scpp::StmtKind::VarDecl &&
+               outer_block.statements[1]->var_name.rfind("$for_index_", 0) == 0,
+           "range_for_loop_desugars_over_array: second hidden decl should store the index");
+    const scpp::Stmt& while_stmt = *outer_block.statements[2];
+    expect(while_stmt.kind == scpp::StmtKind::While,
+           "range_for_loop_desugars_over_array: third block stmt should be While");
+    if (while_stmt.then_branch == nullptr || while_stmt.then_branch->statements.empty()) return;
+    const scpp::Stmt& loop_var = *while_stmt.then_branch->statements[0];
+    expect(loop_var.kind == scpp::StmtKind::VarDecl && loop_var.var_name == "value" &&
+               loop_var.type.kind == scpp::TypeKind::Reference && loop_var.init != nullptr &&
+               loop_var.init->kind == scpp::ExprKind::Subscript,
+           "range_for_loop_desugars_over_array: first while-body stmt should bind loop variable from subscript");
+}
+
+void test_range_for_loop_desugars_over_span() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "int main() { int values[3]; std::span<int> s = values; for (const auto& value : s) { x = value; } return 0; }");
+    const scpp::Function& fn = program.functions.back();
+    expect(fn.body->statements.size() == 4,
+           "range_for_loop_desugars_over_span: expected array decl + span decl + loop + return");
+    const scpp::Stmt& outer_block = *fn.body->statements[2];
+    expect(outer_block.kind == scpp::StmtKind::Block,
+           "range_for_loop_desugars_over_span: loop should desugar to a block");
+    if (outer_block.statements.size() != 3) return;
+    const scpp::Stmt& loop_var = *outer_block.statements[2]->then_branch->statements[0];
+    expect(loop_var.kind == scpp::StmtKind::VarDecl && loop_var.var_name == "value" &&
+               loop_var.type.kind == scpp::TypeKind::Reference && !loop_var.type.is_mutable_ref,
+           "range_for_loop_desugars_over_span: loop variable should be const reference");
+}
+
 void test_unsafe_block_sets_is_unsafe_flag() {
     // `[[scpp::unsafe]] { }` (ch01 §1.3) is an ordinary Block statement
     // with is_unsafe set -- see parse_statement's attribute handling.
@@ -3480,6 +3572,10 @@ int main() {
     test_class_default_member_initializers_parse();
     test_constructor_member_initializer_list_parses();
     test_while_loop();
+    test_classic_for_loop_desugars_with_scoped_init();
+    test_classic_for_loop_with_expression_init_desugars();
+    test_range_for_loop_desugars_over_array();
+    test_range_for_loop_desugars_over_span();
     test_break_and_continue_parse_inside_loop();
     test_break_outside_loop_is_rejected();
     test_continue_outside_loop_is_rejected();
