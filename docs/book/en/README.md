@@ -15,7 +15,7 @@
   - [Control Flow](ch03-05-control-flow.md)
 
 - Understanding Ownership
-  - What Is Ownership?
+  - [What Is Ownership?](ch04-01-what-is-ownership.md)
   - References and Borrowing
   - `std::span` and Other Non-Owning Views
 

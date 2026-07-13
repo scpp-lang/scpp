@@ -15,7 +15,7 @@
   - [控制流](ch03-05-control-flow.md)
 
 - 理解所有权
-  - 什么是所有权
+  - [什么是所有权？](ch04-01-what-is-ownership.md)
   - 引用与借用
   - `std::span` 与其它非拥有视图
 
