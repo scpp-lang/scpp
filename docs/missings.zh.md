@@ -22,7 +22,6 @@
   是一个真实声明出来的 variant，而不是某个带外哨兵值。这个问题需要以后专门做设计
   决策，其中也包括：scpp 应该如何处理像 `std::errc` 这样的 C++ 风格场景。
 - 还没有像 `std::vector`、`std::string` 或哈希映射等价物这样的可增长标准容器；本书目前只能讲解定长数组和与 C 兼容的缓冲区。
-- 还没有 `for` / range-for 循环；面向学习者的迭代讲解目前仍必须以 `while` 和显式索引为中心。
 - `const T&` 形参绑定仍然拒绝 `double` 字面量，因此希望对标量调用也友好的泛型 API 目前不得不优先使用按值传参；一个明显的后果是，`std::print`/`std::println` 现在只有通过 `std::move(s)` 或新建一个临时值，才能接受裸 `std::string` 左值。
 - v0.1 中没有继承或基于虚函数的动态分发，因此无法直接翻译 TRPL 中关于面向对象 / trait object 的讨论。
 - 还没有 async/await、future 或 stream 相关叙事，所以 TRPL 的 async 章节目前在 scpp 中没有直接对应内容。

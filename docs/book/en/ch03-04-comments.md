@@ -106,4 +106,4 @@ paths with `if` and repeating work with `while`.
 
 ---
 
-[← Previous: Functions](ch03-03-functions.md) · [Table of Contents](README.md)
+[← Previous: Functions](ch03-03-functions.md) · [Table of Contents](README.md) · [Next: Control Flow →](ch03-05-control-flow.md)

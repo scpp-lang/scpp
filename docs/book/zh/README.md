@@ -12,7 +12,7 @@
   - [标量数据类型](ch03-02-scalar-data-types.md)
   - [函数](ch03-03-functions.md)
   - [注释](ch03-04-comments.md)
-  - 控制流
+  - [控制流](ch03-05-control-flow.md)
 
 - 理解所有权
   - 什么是所有权

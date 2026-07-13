@@ -100,4 +100,4 @@ score = 12
 
 ---
 
-[← 上一章：函式](ch03-03-functions.md) · [目錄](README.md)
+[← 上一章：函式](ch03-03-functions.md) · [目錄](README.md) · [下一章：控制流程 →](ch03-05-control-flow.md)

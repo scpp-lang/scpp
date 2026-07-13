@@ -34,8 +34,6 @@ This file is an internal backlog, not reader-facing book content.
 - No growable standard collections such as `std::vector`, `std::string`, or
   hash-map equivalents yet; the book currently has to teach fixed-size arrays
   and C-compatible buffers instead.
-- No `for` / range-for loops yet; learner-facing iteration still has to center
-  on `while` and explicit indices.
 - `const T&` parameter binding still rejects `double` literals, so generic APIs that
   want literal-friendly scalar calls currently have to prefer by-value parameters;
   one visible consequence is that `std::print`/`std::println` accept a bare
