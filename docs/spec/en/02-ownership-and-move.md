@@ -394,7 +394,12 @@ is:
   (3.1) an expression of the form `std::move(E)` where `E` designates an
   object of type `T`; or
 
-  (3.2) a call expression whose type is `T`.
+  (3.2) a call expression whose type is `T`; or
+
+  (3.3) in a `return` statement governed by
+  [§6.7](02-ownership-and-move.md#67-by-value-return-of-class-type-stmtreturn),
+  an expression of the form `T{a1, ..., an}` that directly constructs a
+  temporary object of type `T`.
 
 (4) If neither (2) nor (3) is satisfied, the program is ill-formed.
 
@@ -412,10 +417,20 @@ resolution.
 (1) If a function's return type is class type `T`, a `return` statement's
 operand initializes the returned object according to this subclause.
 
-(2) If the operand is an *id-expression* designating a local object,
-including a parameter, whose type is exactly `T`, and `T` has a copy
-constructor (6.5), the returned object is copy-constructed from that
-local object.
+(2) If the operand is exactly an unparenthesized *id-expression*
+designating a local object, or a non-reference parameter object, of the
+innermost enclosing function, whose type is exactly `T`, the operand is
+treated, for the purposes of this subclause, as a fresh value of type
+`T`. The returned object is move-constructed from that object.
+
+[Note: under [§6.4](02-ownership-and-move.md#64-move-construction-and-move-assignment-classcopyctor-classcopyassign),
+every class type has an implicitly-defined move constructor. Therefore,
+for an operand satisfying (2), this subclause always selects move
+construction; there is no copy-constructor fallback. The special
+treatment in (2) applies only to `return` operands and does not make
+such an *id-expression* a fresh value for the purposes of
+[§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall).
+— end note]
 
 (3) Otherwise, the operand shall be a fresh value of type `T` as defined
 by [§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)
@@ -423,9 +438,39 @@ by [§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcal
 
 (4) If neither (2) nor (3) is satisfied, the program is ill-formed.
 
-(5) A call expression whose type is class type `T` is itself a fresh
-value of type `T` for the purposes of both this subclause and
-[§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall).
+(5) A call expression whose type is class type `T`, and an expression of
+the form `T{a1, ..., an}` satisfying
+[§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)
+(3.3), are each themselves fresh values of type `T` for the purposes of
+this subclause.
+
+```cpp
+struct MoveOnly {
+    MoveOnly() = default;
+    MoveOnly(const MoveOnly&) = delete;
+};
+
+struct Box {
+    int value;
+};
+
+MoveOnly make_move_only() {
+    MoveOnly local{};
+    return local;                 // OK: 6.7(2), move-constructs from local
+}
+
+MoveOnly pass_through(MoveOnly param) {
+    return param;                 // OK: 6.7(2), move-constructs from param
+}
+
+std::string greet() {
+    return std::string{"hello"};   // OK: 6.6(3.3), 6.7(3)
+}
+
+Box make_box() {
+    return Box{42};                // OK: 6.6(3.3), 6.7(3)
+}
+```
 
 ---
 
