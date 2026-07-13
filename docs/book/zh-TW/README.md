@@ -12,7 +12,7 @@
   - [純量資料型別](ch03-02-scalar-data-types.md)
   - [函式](ch03-03-functions.md)
   - [註解](ch03-04-comments.md)
-  - 控制流程
+  - [控制流程](ch03-05-control-flow.md)
 
 - 理解所有權
   - 什麼是所有權

@@ -12,7 +12,7 @@
   - [Scalar Data Types](ch03-02-scalar-data-types.md)
   - [Functions](ch03-03-functions.md)
   - [Comments](ch03-04-comments.md)
-  - Control Flow
+  - [Control Flow](ch03-05-control-flow.md)
 
 - Understanding Ownership
   - What Is Ownership?

@@ -100,4 +100,4 @@ score = 12
 
 ---
 
-[← 上一章：函数](ch03-03-functions.md) · [目录](README.md)
+[← 上一章：函数](ch03-03-functions.md) · [目录](README.md) · [下一章：控制流 →](ch03-05-control-flow.md)
