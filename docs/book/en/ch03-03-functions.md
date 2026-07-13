@@ -121,4 +121,4 @@ to explain code to human readers without changing what the compiler sees.
 
 ---
 
-[← Previous: Scalar Data Types](ch03-02-scalar-data-types.md) · [Table of Contents](README.md)
+[← Previous: Scalar Data Types](ch03-02-scalar-data-types.md) · [Table of Contents](README.md) · [Next: Comments →](ch03-04-comments.md)
