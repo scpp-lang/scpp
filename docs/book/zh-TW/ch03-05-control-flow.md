@@ -223,4 +223,4 @@ int main() {
 
 ---
 
-[← 上一章：註解](ch03-04-comments.md) · [目錄](README.md)
+[← 上一章：註解](ch03-04-comments.md) · [目錄](README.md) · [下一章：什麼是所有權？→](ch04-01-what-is-ownership.md)

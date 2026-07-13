@@ -232,4 +232,4 @@ sequence element by element.
 
 ---
 
-[← Previous: Comments](ch03-04-comments.md) · [Table of Contents](README.md)
+[← Previous: Comments](ch03-04-comments.md) · [Table of Contents](README.md) · [Next: What Is Ownership? →](ch04-01-what-is-ownership.md)

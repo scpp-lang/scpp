@@ -15,7 +15,7 @@
   - [控制流程](ch03-05-control-flow.md)
 
 - 理解所有權
-  - 什麼是所有權
+  - [什麼是所有權？](ch04-01-what-is-ownership.md)
   - 參照與借用
   - `std::span` 與其他非擁有視圖
 

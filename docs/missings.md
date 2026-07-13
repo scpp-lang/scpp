@@ -8,8 +8,8 @@ This file is an internal backlog, not reader-facing book content.
   teach Rust-like “borrowed slice of text” examples.
 - No ordinary member-call syntax such as `.size()` yet; the book currently has
   to explain `.size` as a computed field on `std::span`.
-- `std::span` can currently be constructed only from fixed-size arrays, not from
-  richer owned containers the way Rust can teach slices from `Vec<T>` or arrays.
+- `std::span` can currently be constructed only from fixed-size arrays; there is
+  no broader construction path from other container types yet.
 - `std::span` cannot be rebound after construction, so it behaves more like a
   permanently-bound borrow than a freely reassignable view value.
 - No separate `operator->` model; `x->y` is only sugar through `operator*` /
@@ -31,9 +31,8 @@ This file is an internal backlog, not reader-facing book content.
   real declared variant rather than an out-of-band sentinel. This needs a later
   design decision, including what scpp should do with C++-style cases such as
   `std::errc`.
-- No growable standard collections such as `std::vector`, `std::string`, or
-  hash-map equivalents yet; the book currently has to teach fixed-size arrays
-  and C-compatible buffers instead.
+- No growable standard collections such as `std::vector` or hash-map
+  equivalents yet.
 - `const T&` parameter binding still rejects `double` literals, so generic APIs that
   want literal-friendly scalar calls currently have to prefer by-value parameters;
   one visible consequence is that `std::print`/`std::println` accept a bare
