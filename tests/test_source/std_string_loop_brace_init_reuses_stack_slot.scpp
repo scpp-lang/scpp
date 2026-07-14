@@ -1,0 +1,13 @@
+import std;
+
+int main() {
+    int i = 0;
+    int total = 0;
+    while (i < 2000000) {
+        std::string local{"literal"};
+        total = total + local.length();
+        i = i + 1;
+    }
+    print_int(total);
+    return 0;
+}

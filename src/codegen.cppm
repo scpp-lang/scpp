@@ -524,12 +524,15 @@ private:
         llvm::BasicBlock* current_block = builder_->GetInsertBlock();
         if (current_block == nullptr) return builder_->CreateAlloca(type, nullptr, name);
         llvm::IRBuilderBase::InsertPoint saved_ip = builder_->saveIP();
+        llvm::DebugLoc saved_dbg = builder_->getCurrentDebugLocation();
         llvm::BasicBlock& entry = current_block->getParent()->getEntryBlock();
         llvm::BasicBlock::iterator insert_it = entry.getFirstInsertionPt();
         while (insert_it != entry.end() && llvm::isa<llvm::AllocaInst>(*insert_it)) ++insert_it;
         builder_->SetInsertPoint(&entry, insert_it);
+        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
         llvm::AllocaInst* slot = builder_->CreateAlloca(type, nullptr, name);
         builder_->restoreIP(saved_ip);
+        builder_->SetCurrentDebugLocation(saved_dbg);
         return slot;
     }
 
@@ -657,7 +660,7 @@ private:
     llvm::Value* codegen_consteval_class_value(const Expr& expr, const std::string& class_name) {
         ConstexprValue value = evaluate_immediate_expr(*program_, expr);
         llvm::Type* llvm_type = to_llvm_type(named_type(class_name));
-        llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "constevalclasstmp");
+        llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "constevalclasstmp");
         zero_initialize_storage(temp, named_type(class_name));
         store_constexpr_value_into(temp, named_type(class_name), value);
         return builder_->CreateLoad(llvm_type, temp, "constevalclass.value");
@@ -666,7 +669,7 @@ private:
     llvm::Value* codegen_constructed_class_value(const std::string& class_name, const std::vector<ExprPtr>& args,
                                                  const Function* ctor_def, const Expr* original_expr = nullptr) {
         llvm::Type* llvm_type = to_llvm_type(named_type(class_name));
-        llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtmp");
+        llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "classtmp");
         LValue target{temp, named_type(class_name), std::nullopt};
         zero_initialize_storage(target.ptr, target.type, target.alignment);
         if (try_initialize_class_storage_from_same_type_source(target, args)) {
@@ -2954,7 +2957,7 @@ private:
         // "null out the source slot" side effect when the moved value is
         // itself a std::unique_ptr/class.
         llvm::Value* value = codegen_expr(expr);
-        llvm::AllocaInst* temp = builder_->CreateAlloca(value->getType(), nullptr, "rvaluetmp");
+        llvm::AllocaInst* temp = create_entry_block_alloca(value->getType(), "rvaluetmp");
         builder_->CreateStore(value, temp);
         return temp;
     }
@@ -3172,7 +3175,7 @@ private:
         llvm::Type* llvm_type = to_llvm_type(target_type);
         if (is_bare_same_type_copy_source(expr, target_type) && is_copy_constructible(target_type.name)) {
             auto src_it = locals_.find(expr.name);
-            llvm::AllocaInst* temp = builder_->CreateAlloca(llvm_type, nullptr, "classtransport");
+            llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "classtransport");
             codegen_copy_construct_class(temp, src_it->second.alloca, target_type.name);
             return builder_->CreateLoad(llvm_type, temp, "classtransport.value");
         }
@@ -3818,7 +3821,7 @@ private:
     llvm::AllocaInst* codegen_construct_lambda(const Expr& expr, llvm::AllocaInst* existing_storage = nullptr) {
         const StructInfo& info = structs_.at(expr.name);
         llvm::AllocaInst* closure =
-            existing_storage != nullptr ? existing_storage : builder_->CreateAlloca(info.llvm_type, nullptr, "lambdatmp");
+            existing_storage != nullptr ? existing_storage : create_entry_block_alloca(info.llvm_type, "lambdatmp");
         for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
             const LambdaCapture& capture = expr.lambda_captures[i];
             const Type& field_type = info.field_types[i];
@@ -4121,7 +4124,7 @@ private:
     // always was).
     llvm::AllocaInst* create_moved_flag_if_has_destructor(const std::string& class_name) {
         if (find_destructor(class_name) == nullptr) return nullptr;
-        llvm::AllocaInst* flag = builder_->CreateAlloca(llvm::Type::getInt1Ty(*context_), nullptr, "movedflag");
+        llvm::AllocaInst* flag = create_entry_block_alloca(llvm::Type::getInt1Ty(*context_), "movedflag");
         builder_->CreateStore(llvm::ConstantInt::getFalse(*context_), flag);
         return flag;
     }

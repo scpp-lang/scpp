@@ -1,0 +1,10 @@
+import std;
+
+int main() {
+    int i = 0;
+    while (i < 3) {
+        std::string local{"hi"};
+        i = i + local.length();
+    }
+    return i;
+}
