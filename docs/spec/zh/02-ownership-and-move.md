@@ -236,25 +236,37 @@ object，因为它没有别名化任何预先存在的对象或范围。
 static 数据成员，这种情况下它没有 move 赋值运算符——这一点和 C++
 标准自己的条件（[class.copy.assign]）已经规定的完全一样。
 
-(4) 一个 class X 隐式定义的 move 构造函数，会用构造函数参数对应的
-非 static 数据成员，以适合该成员类型的方式 move 过来，按声明顺序，
-初始化被构造对象的每一个非 static 数据成员。
+(4) 一个 class X 隐式定义的 move 构造函数，会按 C++ 标准对构造 X
+本来要求的顺序，用构造函数参数里对应的 base-class subobject，以适合该
+base 类型的方式 move 过来，完成被构造对象中每个 base-class subobject 的
+move 构造。如果 X 是一个 most-derived class，且它带有 virtual base
+class，那么这个 virtual base subobject 会像普通 C++ 构造那样，由 X 恰好
+move 构造一次。
 
-(5) 一个 class X 隐式定义的 move 赋值运算符，会用运算符参数对应的
-非 static 数据成员，以适合该成员类型的方式 move 过来，按声明顺序，
-替换 `*this` 所指代的对象的每一个非 static 数据成员的值，然后返回
-`*this`。
+(5) 在 (4) 要求的 base-class subobject 之后，一个 class X 隐式定义的
+move 构造函数，会用构造函数参数对应的非 static 数据成员，以适合该成员
+类型的方式 move 过来，按声明顺序，初始化被构造对象的每一个非 static
+数据成员。
 
-【注：如果一个非 static 数据成员本身是 class 类型，(4)、(5) 会递归
-地对它适用：(2)/(3) 给这个成员自己的类型也配了一个隐式定义的 move
-构造函数/move 赋值运算符，(1) 保证这不是本文档还要跟用户声明去协调
-的那种声明。——注释结束】
+(6) 一个 class X 隐式定义的 move 赋值运算符，会按 C++ 标准对 X
+本来要求的方式，把 `*this` 所指代对象里的各个 base-class subobject，
+用运算符参数里对应的 base-class subobject 完成 move 赋值。
+
+(7) 在 (6) 要求的 base-class subobject 之后，一个 class X 隐式定义的
+move 赋值运算符，会用运算符参数对应的非 static 数据成员，以适合该成员
+类型的方式 move 过来，按声明顺序，替换 `*this` 所指代的对象的每一个
+非 static 数据成员的值，然后返回 `*this`。
+
+【注：如果一个 base-class subobject 或者一个非 static 数据成员本身是
+class 类型，(4)-(7) 会递归地对它适用：(2)/(3) 给这个 subobject 或成员
+自己的类型也配了一个隐式定义的 move 构造函数/move 赋值运算符，(1)
+保证这不是本文档还要跟用户声明去协调的那种声明。——注释结束】
 
 【注：[§6.2](02-ownership-and-move.md#62-所有权与-move-状态ownership-and-move-statebasiclife)
 已经规定了，一个形如 `std::move(E)` 的表达式，一旦求值，就会把它所
 指代的对象置于 moved-out 状态；[§6.3](02-ownership-and-move.md#63-析构destructionclassdtor)
 已经规定了，一个处于 moved-out 状态的对象会被免除析构——对于用作
-初始化 (4)、(5) 参数的实参的对象，本条款不为这两个效果之一另外引入
+初始化 (4)、(6) 参数的实参的对象，本条款不为这两个效果之一另外引入
 新规则。——注释结束】
 
 ```cpp
@@ -267,7 +279,7 @@ public:
 };
 
 Outer x{new int{1}, 2};
-Outer y{std::move(x)};   // (4)：逐字段 move 构造 y.a、y.b，来自 x.a、x.b；
+Outer y{std::move(x)};   // (5): memberwise move-constructs y.a, y.b from x.a, x.b;
                           // 此后 x 处于 moved-out 状态（§6.2），如果它
                           // 声明了析构函数，也不会为它调用（§6.3）
 ```
@@ -298,24 +310,37 @@ copy 赋值运算符。
 声明的 copy 赋值运算符，是两件互不相干的事；程序可以只声明其中一个，
 不声明另一个。
 
-(5) 一个 class X 隐式定义的 copy 构造函数，会用构造函数参数对应的
-非 static 数据成员，以适合该成员类型的方式 copy 过来，按声明顺序，
-初始化被构造对象的每一个非 static 数据成员。
+(5) 一个 class X 隐式定义的 copy 构造函数，会按 C++ 标准对构造 X
+本来要求的顺序，用构造函数参数里对应的 base-class subobject，以适合该
+base 类型的方式 copy 过来，完成被构造对象中每个 base-class subobject 的
+copy 构造。如果 X 是一个 most-derived class，且它带有 virtual base
+class，那么这个 virtual base subobject 会像普通 C++ 构造那样，由 X 恰好
+copy 构造一次。
 
-(6) 一个 class X 隐式定义的 copy 赋值运算符，会用运算符参数对应的
-非 static 数据成员，以适合该成员类型的方式 copy 过来，按声明顺序，
-替换 `*this` 所指代的对象的每一个非 static 数据成员的值，然后返回
-`*this`。
+(6) 在 (5) 要求的 base-class subobject 之后，一个 class X 隐式定义的
+copy 构造函数，会用构造函数参数对应的非 static 数据成员，以适合该成员
+类型的方式 copy 过来，按声明顺序，初始化被构造对象的每一个非 static
+数据成员。
 
-【注：如果一个非 static 数据成员本身是 class 类型，(5)、(6) 会递归
-地对它适用：按本条款，这个成员自己的类型要么有一个隐式定义的 copy
-构造函数/copy 赋值运算符，要么有一个用户声明的，要么压根没有——最后
-这种情况下，(5) 或者 (6)（视情况而定）对 X 就没法满足，X 也就跟着
-没有隐式定义的 copy 构造函数或者 copy 赋值运算符。——注释结束】
+(7) 一个 class X 隐式定义的 copy 赋值运算符，会按 C++ 标准对 X
+本来要求的方式，把 `*this` 所指代对象里的各个 base-class subobject，
+用运算符参数里对应的 base-class subobject 完成 copy 赋值。
+
+(8) 在 (7) 要求的 base-class subobject 之后，一个 class X 隐式定义的
+copy 赋值运算符，会用运算符参数对应的非 static 数据成员，以适合该成员
+类型的方式 copy 过来，按声明顺序，替换 `*this` 所指代的对象的每一个
+非 static 数据成员的值，然后返回 `*this`。
+
+【注：如果一个 base-class subobject 或者一个非 static 数据成员本身是
+class 类型，(5)-(8) 会递归地对它适用：按本条款，这个 subobject 或成员
+自己的类型要么有一个隐式定义的 copy 构造函数/copy 赋值运算符，要么有
+一个用户声明的，要么压根没有——最后这种情况下，(5)/(6) 或者 (7)/(8)
+（视情况而定）对 X 就没法满足，X 也就跟着没有隐式定义的 copy 构造函数
+或者 copy 赋值运算符。——注释结束】
 
 【注：跟 [§6.4](02-ownership-and-move.md#64-move-构造与-move-赋值move-construction-and-move-assignmentclasscopyctorclasscopyassign)
 不一样，本条款不禁止用户声明 copy 构造函数或者 copy 赋值运算符，而且
-(5)、(6) 都完全不影响构造函数或者运算符参数所指代的那个对象——copy
+(5)-(8) 都完全不影响构造函数或者运算符参数所指代的那个对象——copy
 跟 move 不一样，不管调用的是用户声明的还是隐式定义的，永远不会改变
 被 copy 的那个对象的状态。——注释结束】
 
@@ -325,7 +350,7 @@ copy 赋值运算符。
 而不是压根没有的那些情形（[depr.impldec]）。——注释结束】
 
 【注：因为 (2)、(3) 在那里给出的情形下排除了 class 类型拥有隐式
-定义的 copy 构造函数/copy 赋值运算符的可能性，而且 (5)、(6) 从不
+定义的 copy 构造函数/copy 赋值运算符的可能性，而且 (5)-(8) 从不
 修改参数所指代的对象，所以通过一个隐式定义的 copy 赋值运算符（3）
 做的形如 `x = x` 的赋值，无条件是良定义的；本文档对一个用户声明的
 copy 赋值运算符（1）不作此保证——这种赋值的行为完全由它自己的定义
