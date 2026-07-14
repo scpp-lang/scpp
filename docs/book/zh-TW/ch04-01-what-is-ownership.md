@@ -292,4 +292,4 @@ ticket
 
 ---
 
-[← 上一章：控制流程](ch03-05-control-flow.md) · [目錄](README.md)
+[← 上一章：控制流程](ch03-05-control-flow.md) · [目錄](README.md) · [下一章：參照與借用 →](ch04-02-references-and-borrowing.md)
