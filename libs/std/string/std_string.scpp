@@ -21,6 +21,7 @@ export module std:string;
 // whole: only `std::string` itself is part of the public surface.
 extern "C" {
     void* scpp_string_new(const char* s);
+    void* scpp_string_copy(const void* handle);
     void scpp_string_delete(void* handle);
     int scpp_string_length(void* handle);
     const char* scpp_string_c_str(void* handle);
@@ -45,6 +46,22 @@ public:
             this->handle = scpp_string_new(s);
         }
         return;
+    }
+
+    string(const string& other) {
+        [[scpp::unsafe]] {
+            this->handle = scpp_string_copy(other.handle);
+        }
+        return;
+    }
+
+    string& operator=(const string& other) {
+        [[scpp::unsafe]] {
+            void* copied = scpp_string_copy(other.handle);
+            scpp_string_delete(this->handle);
+            this->handle = copied;
+        }
+        return *this;
     }
 
     ~string() {

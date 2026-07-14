@@ -13,12 +13,15 @@
 namespace {
 
 std::string* as_string(void* handle) { return static_cast<std::string*>(handle); }
+const std::string* as_string(const void* handle) { return static_cast<const std::string*>(handle); }
 
 } // namespace
 
 extern "C" {
 
 void* scpp_string_new(const char* s) { return new std::string(s != nullptr ? s : ""); }
+
+void* scpp_string_copy(const void* handle) { return new std::string(*as_string(handle)); }
 
 void scpp_string_delete(void* handle) { delete as_string(handle); }
 

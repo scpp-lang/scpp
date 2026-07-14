@@ -26,6 +26,11 @@ extern "C" {
 // pass it to scpp_string_delete exactly once.
 void* scpp_string_new(const char* s);
 
+// Allocates a new std::string whose content is a deep copy of `handle`'s
+// string value. Returns a distinct owning handle that the caller must later
+// pass to scpp_string_delete exactly once.
+void* scpp_string_copy(const void* handle);
+
 // Destroys a handle previously returned by scpp_string_new. `handle` must
 // not be used again afterward (matches std::string's own destructor
 // semantics -- this *is* that destructor, just called through a plain

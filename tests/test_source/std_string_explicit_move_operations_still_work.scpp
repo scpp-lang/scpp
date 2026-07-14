@@ -1,0 +1,10 @@
+import std;
+
+int main() {
+    std::string source{"hi"};
+    std::string moved{std::move(source)};
+    std::string target{"bye"};
+    target = std::move(moved);
+    print_bool(target.equals("hi"));
+    return 0;
+}
