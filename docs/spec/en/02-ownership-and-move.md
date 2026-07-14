@@ -202,14 +202,39 @@ may again be used for writes or reborrows.
 binding from which it is formed: it may not be used to mutate an object
 or range that is reachable only through a shared or `const` binding.
 
+[Note: reborrowing under (7)-(10) requires an already-existing object or
+range that is being aliased through an already-existing reference or span
+binding. A binding that instead materializes a temporary under (11) does
+not have such a lender object. — end note]
+
+(11) If a local variable or parameter of type `const T&` is initialized
+from either:
+
+  (11.1) an expression that is an rvalue of type `T`, including a fresh
+  value of type `T`; or
+
+  (11.2) an expression from which a temporary object of type `T` is
+  directly constructed by selecting a constructor of `T` that takes that
+  expression as its single argument,
+
+a temporary object of type `T` is materialized and the reference binds to
+that temporary.
+
+(12) A temporary materialized under (11) remains alive for the lifetime
+of that reference binding. Such a binding is not a reborrow under
+(7)-(10), and introduces no lender object for those rules, because it
+aliases no pre-existing object or range.
+
 [Note: this document does not, in this clause, define a state for a
 subobject (a class member, an array element) independent of its
 complete object's own state (2)-(4): whether, and under what
 conditions, a program may move a subobject out while its complete
 object remains otherwise initialized is not yet specified by this
 document. Reborrowing under (7)-(10) is about aliases formed through an
-already-existing reference or span binding; it does not by itself place
-the complete object in the moved-out state. — end note]
+already-existing reference or span binding; a binding that instead
+materializes a temporary under (11)-(12) is not such an alias. Neither
+kind of binding, by itself, places the complete object in the moved-out
+state. — end note]
 
 ## 6.3 Destruction [class.dtor]
 
@@ -376,41 +401,84 @@ public:
 };
 ```
 
-## 6.6 By-value parameters of class type [expr.call]
+## 6.6 Fresh values and function parameter binding [expr.call]
 
-(1) If a function parameter has class type `T` and is not of reference
-type, the parameter object is initialized at each call according to this
-subclause.
+(1) For the purposes of this document, a **fresh value** of type `T` is:
 
-(2) If the corresponding argument is an *id-expression* designating a
+  (1.1) an expression of the form `std::move(E)` where `E` designates an
+  object of type `T`; or
+
+  (1.2) a call expression whose type is `T`; or
+
+  (1.3) an expression of the form `T{a1, ..., an}` that directly
+  constructs a temporary object of type `T`.
+
+(2) A fresh value of type `T` may be used wherever this document
+requires a fresh value of type `T`, including this subclause and §6.7.
+
+(3) If a function parameter has class type `T` and is not of reference
+type, the parameter object is initialized at each call according to
+(4)-(7).
+
+(4) If the corresponding argument is an *id-expression* designating a
 local object, including a parameter, whose type is exactly `T`, and `T`
 has a copy constructor (6.5), the parameter object is copy-constructed
 from that local object.
 
-(3) Otherwise, the corresponding argument shall be a **fresh value** of
-type `T`. For the purposes of this document, a fresh value of type `T`
-is:
+(5) Otherwise, the corresponding argument shall be a fresh value of type
+`T`.
 
-  (3.1) an expression of the form `std::move(E)` where `E` designates an
-  object of type `T`; or
+(6) If neither (4) nor (5) is satisfied, the program is ill-formed.
 
-  (3.2) a call expression whose type is `T`; or
-
-  (3.3) in a `return` statement governed by
-  [§6.7](02-ownership-and-move.md#67-by-value-return-of-class-type-stmtreturn),
-  an expression of the form `T{a1, ..., an}` that directly constructs a
-  temporary object of type `T`.
-
-(4) If neither (2) nor (3) is satisfied, the program is ill-formed.
-
-(5) After its initialization under (2) or (3), the parameter object is
+(7) After its initialization under (4) or (5), the parameter object is
 an ordinary automatic object of type `T` within the callee, governed by
-[§6.2](02-ownership-and-move.md#62-ownership-and-move-state-basiclife)-[§6.5](02-ownership-and-move.md#65-copy-construction-and-copy-assignment-classcopyctor-classcopyassign)
-exactly as any other local object of class type is governed.
+§6.2-§6.5 exactly as any other local object of class type is governed.
 
-(6) A candidate function whose by-value class parameter cannot be
-initialized as required by this subclause is not viable for overload
+(8) A candidate function whose by-value class parameter cannot be
+initialized as required by (3)-(7) is not viable for overload
 resolution.
+
+(9) If a function parameter has type `const T&` and the corresponding
+argument satisfies either §6.2(11.1) or §6.2(11.2), the parameter binds
+to the temporary materialized by §6.2(11), and that temporary's
+lifetime is governed by §6.2(12).
+
+(10) Otherwise, a function parameter of type `const T&` binds directly
+to the argument's designated object under the ordinary rules for
+reference binding. If that direct binding aliases an already-existing
+reference or span binding, it is a reborrow governed by
+§6.2(7)-(10).
+
+(11) If neither (9) nor (10) is satisfied, the program is ill-formed.
+
+(12) A candidate function whose `const T&` parameter cannot be
+initialized as required by (9)-(11) is not viable for overload
+resolution.
+
+```cpp
+class Box {
+public:
+    int value;
+
+    Box(int v) : value{v} {}
+};
+
+void consume(Box value);
+int read_double(const double& x) { return x == 3.5 ? 0 : 1; }
+int read_box(const Box& x) { return x.value; }
+int read_text(const std::string& text) { return text.length(); }
+
+int call_examples() {
+    std::string greeting{"hello"};
+
+    consume(Box{1});                        // OK: 6.6(1.3), 6.6(5)
+    if (read_double(3.5) != 0) return 1;   // OK: 6.2(11.1), 6.6(9)
+    if (read_box(Box{42}) != 42) return 2; // OK: 6.2(11.1), 6.6(9)
+    if (read_text("hi") != 2) return 3;    // OK: 6.2(11.2), 6.6(9)
+    if (read_text(std::move(greeting)) != 5) return 4; // OK: 6.2(11.1), 6.6(9)
+    return 0;
+}
+```
 
 ## 6.7 By-value return of class type [stmt.return]
 
@@ -428,21 +496,14 @@ every class type has an implicitly-defined move constructor. Therefore,
 for an operand satisfying (2), this subclause always selects move
 construction; there is no copy-constructor fallback. The special
 treatment in (2) applies only to `return` operands and does not make
-such an *id-expression* a fresh value for the purposes of
-[§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall).
+such an *id-expression* a fresh value for the purposes of §6.6.
 — end note]
 
 (3) Otherwise, the operand shall be a fresh value of type `T` as defined
-by [§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)
-(3). The returned object is move-constructed from that fresh value.
+by §6.6(1). The returned object is move-constructed from that fresh
+value.
 
 (4) If neither (2) nor (3) is satisfied, the program is ill-formed.
-
-(5) A call expression whose type is class type `T`, and an expression of
-the form `T{a1, ..., an}` satisfying
-[§6.6](02-ownership-and-move.md#66-by-value-parameters-of-class-type-exprcall)
-(3.3), are each themselves fresh values of type `T` for the purposes of
-this subclause.
 
 ```cpp
 struct MoveOnly {
@@ -464,11 +525,11 @@ MoveOnly pass_through(MoveOnly param) {
 }
 
 std::string greet() {
-    return std::string{"hello"};   // OK: 6.6(3.3), 6.7(3)
+    return std::string{"hello"};   // OK: 6.6(1.3), 6.7(3)
 }
 
 Box make_box() {
-    return Box{42};                // OK: 6.6(3.3), 6.7(3)
+    return Box{42};                // OK: 6.6(1.3), 6.7(3)
 }
 ```
 
