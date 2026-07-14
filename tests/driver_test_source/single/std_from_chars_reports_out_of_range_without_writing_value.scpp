@@ -1,0 +1,44 @@
+import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    char text[26];
+    text[0] = '9';
+    text[1] = '9';
+    text[2] = '9';
+    text[3] = '9';
+    text[4] = '9';
+    text[5] = '9';
+    text[6] = '9';
+    text[7] = '9';
+    text[8] = '9';
+    text[9] = '9';
+    text[10] = '9';
+    text[11] = '9';
+    text[12] = '9';
+    text[13] = '9';
+    text[14] = '9';
+    text[15] = '9';
+    text[16] = '9';
+    text[17] = '9';
+    text[18] = '9';
+    text[19] = '9';
+    text[20] = '9';
+    text[21] = '9';
+    text[22] = '9';
+    text[23] = '9';
+    text[24] = '9';
+    text[25] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[25];
+    int value = 55;
+    std::from_chars_result result = std::from_chars(first, last, value);
+    if (value != 55) return 1;
+    if (result.ec != std::errc::result_out_of_range) return 2;
+    bool consumed_all = same_ptr(result.ptr, last);
+    if (!consumed_all) return 3;
+    return 0;
+}

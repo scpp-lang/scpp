@@ -1,0 +1,22 @@
+import std;
+char read_char(const char* ptr) {
+    [[scpp::unsafe]] {
+        return *ptr;
+    }
+}
+int main() {
+    char text[4];
+    text[0] = '7';
+    text[1] = 'f';
+    text[2] = '!';
+    text[3] = '\0';
+    const char* first = &text[0];
+    const char* last = &text[3];
+    int value = 0;
+    std::from_chars_result result = std::from_chars(first, last, value, 16);
+    if (value != 127) return 1;
+    if ((int)result.ec != 0) return 2;
+    char trailing = read_char(result.ptr);
+    if (trailing != '!') return 3;
+    return 0;
+}

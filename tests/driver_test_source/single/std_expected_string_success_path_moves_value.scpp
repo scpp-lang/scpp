@@ -1,0 +1,12 @@
+import std;
+std::expected<std::string, int> make_text() {
+    std::string line{"hello"};
+    std::expected<std::string, int> result{std::move(line)};
+    return std::move(result);
+}
+int main() {
+    std::expected<std::string, int> text = make_text();
+    if (!text.has_value()) return 1;
+    if (!text.value().equals("hello")) return 2;
+    return 0;
+}

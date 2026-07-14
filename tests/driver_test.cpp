@@ -21,10 +21,13 @@ import scpp.ast;
 #include <unordered_map>
 #include <vector>
 
-// SCPP_TEST_SOURCE_DIR is injected by CMake (see the driver_test target in
-// the top-level CMakeLists.txt) and points at tests/test_source, so this
-// binary finds its fixtures regardless of the working directory it's run
-// from.
+// SCPP_TEST_SOURCE_DIR and SCPP_DRIVER_TEST_SOURCE_DIR are injected by CMake
+// (see the driver_test target in the top-level CMakeLists.txt) and point at
+// tests/test_source and tests/driver_test_source respectively, so this binary
+// finds its fixtures regardless of the working directory it's run from.
+#ifndef SCPP_DRIVER_TEST_SOURCE_DIR
+#error "SCPP_DRIVER_TEST_SOURCE_DIR must be defined by the build"
+#endif
 #ifndef SCPP_TEST_SOURCE_DIR
 #error "SCPP_TEST_SOURCE_DIR must be defined by the build"
 #endif
@@ -304,12 +307,11 @@ ExpectedResult parse_expected(const std::string& content) {
     return ExpectedResult{std::stoi(exit_code_line), stdout_text};
 }
 
-// Runs every `<name>.scpp` case file under SCPP_TEST_SOURCE_DIR against its
-// paired `<name>.expected` file (see parse_expected). Adding a new test case
-// is just dropping in 2 new files -- no changes to this file or a rebuild of
-// the test harness are needed, just re-running the already-built binary.
-void run_test_case_files() {
-    std::filesystem::path dir(SCPP_TEST_SOURCE_DIR);
+// Runs every `<name>.scpp` case file under `dir` against its paired
+// `<name>.expected` file (see parse_expected). Adding a new test case is just
+// dropping in 2 new files -- no changes to this file or a rebuild of the test
+// harness are needed, just re-running the already-built binary.
+void run_runtime_test_case_files(const std::filesystem::path& dir) {
     std::vector<std::filesystem::path> source_files;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (entry.path().extension() == ".scpp") {
@@ -343,6 +345,14 @@ void run_test_case_files() {
             expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
     }
+}
+
+void run_test_case_files() {
+    run_runtime_test_case_files(SCPP_TEST_SOURCE_DIR);
+}
+
+void run_driver_single_test_case_files() {
+    run_runtime_test_case_files(std::filesystem::path(SCPP_DRIVER_TEST_SOURCE_DIR) / "single");
 }
 
 // Regression coverage for the clang/gcc-style diagnostic location plumbing
@@ -4487,106 +4497,6 @@ int main() {
     }
 
     {
-        std::string case_name = "std_expected_success_and_error_paths_work";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-enum class calc_error { invalid };
-std::expected<int, calc_error> ok() {
-    std::expected<int, calc_error> result{42};
-    return std::move(result);
-}
-std::expected<int, calc_error> fail() {
-    std::unexpected<calc_error> err{calc_error::invalid};
-    std::expected<int, calc_error> result{err};
-    return std::move(result);
-}
-int main() {
-    std::expected<int, calc_error> good = ok();
-    if (!good.has_value()) return 1;
-    if (good.value() != 42) return 2;
-    std::expected<int, calc_error> bad = fail();
-    if (bad.has_value()) return 3;
-    if (bad.error() != calc_error::invalid) return 4;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_expected_used_result_is_allowed_with_nodiscard";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-enum class calc_error { invalid };
-std::expected<int, calc_error> ok() {
-    std::expected<int, calc_error> result{42};
-    return std::move(result);
-}
-int main() {
-    std::expected<int, calc_error> result = ok();
-    if (!result.has_value()) return 1;
-    return result.value() - 42;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_expected_string_success_path_moves_value";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-std::expected<std::string, int> make_text() {
-    std::string line{"hello"};
-    std::expected<std::string, int> result{std::move(line)};
-    return std::move(result);
-}
-int main() {
-    std::expected<std::string, int> text = make_text();
-    if (!text.has_value()) return 1;
-    if (!text.value().equals("hello")) return 2;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_expected_uses_inline_storage_without_default_constructibility";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-class no_default {
-public:
-    int value{};
-    no_default(int v) : value{v} { return; }
-    int get() const {
-        return this->value;
-    }
-};
-int main() {
-    std::expected<no_default, int> good{no_default(7)};
-    std::unexpected<int> err{5};
-    std::expected<no_default, int> bad{err};
-    if (!good.has_value()) return 1;
-    if (good.value().get() != 7) return 2;
-    if (bad.has_value()) return 3;
-    if (bad.error() != 5) return 4;
-    if ((int)sizeof(std::unexpected<long>) != 8) return 5;
-    if ((int)sizeof(std::expected<int, long>) != 16) return 6;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
         std::string case_name = "std_expected_bad_access_aborts_via_std_abort";
         cases_run++;
         RunResult result = compile_and_run(
@@ -4604,433 +4514,13 @@ int main() {
     }
 }
 
-void run_charconv_tests() {
-    {
-        std::string case_name = "std_from_chars_parses_full_decimal_range_without_unsafe_callsite";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-int main() {
-    char text[6];
-    text[0] = '1';
-    text[1] = '2';
-    text[2] = '3';
-    text[3] = '4';
-    text[4] = '5';
-    text[5] = '\0';
-    const char* first = &text[0];
-    const char* last = &text[5];
-    int value = 7;
-    std::from_chars_result result = std::from_chars(first, last, value);
-    if (value != 12345) return 1;
-    if ((int)result.ec != 0) return 2;
-    bool consumed_all = same_ptr(result.ptr, last);
-    if (!consumed_all) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_from_chars_leaves_trailing_characters_unconsumed";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-char read_char(const char* ptr) {
-    [[scpp::unsafe]] {
-        return *ptr;
-    }
-}
-int main() {
-    char text[6];
-    text[0] = '4';
-    text[1] = '2';
-    text[2] = 'x';
-    text[3] = 'y';
-    text[4] = 'z';
-    text[5] = '\0';
-    const char* first = &text[0];
-    const char* last = &text[5];
-    int value = 0;
-    std::from_chars_result result = std::from_chars(first, last, value);
-    if (value != 42) return 1;
-    if ((int)result.ec != 0) return 2;
-    char trailing = read_char(result.ptr);
-    if (trailing != 'x') return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_from_chars_reports_invalid_argument_for_empty_range";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-int main() {
-    char text[3];
-    text[0] = '9';
-    text[1] = '9';
-    text[2] = '\0';
-    const char* first = &text[0];
-    int value = 77;
-    std::from_chars_result result = std::from_chars(first, first, value);
-    if (value != 77) return 1;
-    if (result.ec != std::errc::invalid_argument) return 2;
-    bool stayed_at_first = same_ptr(result.ptr, first);
-    if (!stayed_at_first) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_from_chars_reports_invalid_argument_for_non_digit_start";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-int main() {
-    char text[4];
-    text[0] = 'a';
-    text[1] = 'b';
-    text[2] = 'c';
-    text[3] = '\0';
-    const char* first = &text[0];
-    const char* last = &text[3];
-    int value = 88;
-    std::from_chars_result result = std::from_chars(first, last, value);
-    if (value != 88) return 1;
-    if (result.ec != std::errc::invalid_argument) return 2;
-    bool stayed_at_first = same_ptr(result.ptr, first);
-    if (!stayed_at_first) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_from_chars_reports_out_of_range_without_writing_value";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-int main() {
-    char text[26];
-    text[0] = '9';
-    text[1] = '9';
-    text[2] = '9';
-    text[3] = '9';
-    text[4] = '9';
-    text[5] = '9';
-    text[6] = '9';
-    text[7] = '9';
-    text[8] = '9';
-    text[9] = '9';
-    text[10] = '9';
-    text[11] = '9';
-    text[12] = '9';
-    text[13] = '9';
-    text[14] = '9';
-    text[15] = '9';
-    text[16] = '9';
-    text[17] = '9';
-    text[18] = '9';
-    text[19] = '9';
-    text[20] = '9';
-    text[21] = '9';
-    text[22] = '9';
-    text[23] = '9';
-    text[24] = '9';
-    text[25] = '\0';
-    const char* first = &text[0];
-    const char* last = &text[25];
-    int value = 55;
-    std::from_chars_result result = std::from_chars(first, last, value);
-    if (value != 55) return 1;
-    if (result.ec != std::errc::result_out_of_range) return 2;
-    bool consumed_all = same_ptr(result.ptr, last);
-    if (!consumed_all) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_from_chars_accepts_negative_numbers";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-int main() {
-    char text[4];
-    text[0] = '-';
-    text[1] = '1';
-    text[2] = '7';
-    text[3] = '\0';
-    const char* first = &text[0];
-    const char* last = &text[3];
-    int value = 0;
-    std::from_chars_result result = std::from_chars(first, last, value);
-    if (value != -17) return 1;
-    if ((int)result.ec != 0) return 2;
-    bool consumed_all = same_ptr(result.ptr, last);
-    if (!consumed_all) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_from_chars_rejects_leading_plus";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-int main() {
-    char text[4];
-    text[0] = '+';
-    text[1] = '1';
-    text[2] = '7';
-    text[3] = '\0';
-    const char* first = &text[0];
-    const char* last = &text[3];
-    int value = 91;
-    std::from_chars_result result = std::from_chars(first, last, value);
-    if (value != 91) return 1;
-    if (result.ec != std::errc::invalid_argument) return 2;
-    bool stayed_at_first = same_ptr(result.ptr, first);
-    if (!stayed_at_first) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_from_chars_supports_explicit_base_argument";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-char read_char(const char* ptr) {
-    [[scpp::unsafe]] {
-        return *ptr;
-    }
-}
-int main() {
-    char text[4];
-    text[0] = '7';
-    text[1] = 'f';
-    text[2] = '!';
-    text[3] = '\0';
-    const char* first = &text[0];
-    const char* last = &text[3];
-    int value = 0;
-    std::from_chars_result result = std::from_chars(first, last, value, 16);
-    if (value != 127) return 1;
-    if ((int)result.ec != 0) return 2;
-    char trailing = read_char(result.ptr);
-    if (trailing != '!') return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "pointer_addition_inline_call_argument_uses_gep";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-int main() {
-    std::string line{"12345"};
-    int value = 0;
-    std::from_chars_result parsed = std::from_chars(line.c_str(), line.c_str() + line.size(), value);
-    if (value != 12345) return 1;
-    if ((int)parsed.ec != 0) return 2;
-    if (!same_ptr(parsed.ptr, line.c_str() + line.length())) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "pointer_subtraction_and_difference_work_for_string_ranges";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-bool same_ptr(const char* lhs, const char* rhs) {
-    [[scpp::unsafe]] {
-        return lhs == rhs;
-    }
-}
-char read_char(const char* ptr) {
-    [[scpp::unsafe]] {
-        return *ptr;
-    }
-}
-int main() {
-    std::string line{"scpp"};
-    const char* first = line.c_str();
-    const char* end = first + line.size();
-    const char* second = end - 3;
-    ptrdiff_t distance = end - first;
-    if (!same_ptr(second, first + 1)) return 1;
-    if (read_char(second) != 'c') return 2;
-    if (distance != 4) return 3;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-}
-
-void run_std_move_tests() {
-    {
-        std::string case_name = "std_move_accepts_primitives_and_enums";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-enum class tag { ok = 7 };
-int move_int(int value) {
-    int moved = std::move(value);
-    return moved;
-}
-tag move_tag(tag value) {
-    tag moved = std::move(value);
-    return std::move(moved);
-}
-int main() {
-    if (move_int(5) != 5) return 1;
-    if (move_tag(tag::ok) != tag::ok) return 2;
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_move_accepts_generic_class_value_param";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-template<typename T>
-class Box {
-public:
-    T value;
-    Box(T value) : value{std::move(value)} { return; }
-};
-int main() {
-    Box<int> box{9};
-    return box.value - 9;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-
-    {
-        std::string case_name = "std_move_accepts_unused_generic_class_value_param";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-template<typename T>
-class Box {
-public:
-    T value;
-    Box(T value) : value{std::move(value)} { return; }
-};
-int main() {
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-}
-
-void run_string_tests() {
-    {
-        std::string case_name = "std_string_size_matches_length";
-        cases_run++;
-        RunResult result = compile_and_run(
-            R"SCPP(import std;
-int main() {
-    std::string empty{""};
-    if (empty.length() != 0) return 1;
-    if (empty.size() != empty.length()) return 2;
-
-    std::string abc{"abc"};
-    if (abc.length() != 3) return 3;
-    if (abc.size() != abc.length()) return 4;
-
-    std::string greeting{"hello, scpp"};
-    if (greeting.length() != 11) return 5;
-    if (greeting.size() != greeting.length()) return 6;
-
-    return 0;
-}
-)SCPP",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-}
-
 void run_io_tests() {
     {
         std::string case_name = "scpp_io_getline_reads_one_line_without_newline";
         cases_run++;
-        RunResult result = compile_and_run_with_input(
-            R"SCPP(import std;
+        RunResult result =
+            compile_and_run_with_input(
+                R"SCPP(import std;
 import scpp;
 int main() {
     // getline follows the prior read_line behavior and strips the trailing newline.
@@ -5041,7 +4531,7 @@ int main() {
     return 0;
 }
 )SCPP",
-            case_name, "hello world\nsecond line\n");
+                case_name, "hello world\nsecond line\n");
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
         expect(result.stdout_text.empty(),
                case_name + ": expected empty stdout, got '" + result.stdout_text + "'");
@@ -5089,85 +4579,16 @@ int main() {
 
 void run_for_loop_tests() {
     {
-        std::string case_name = "classic_for_counts_up";
-        RunResult result = compile_and_run(
-            "int main() {\n"
-            "    int sum = 0;\n"
-            "    for (int i = 0; i < 4; i = i + 1) {\n"
-            "        sum = sum + i;\n"
-            "    }\n"
-            "    return sum - 6;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
-        std::string case_name = "classic_for_counts_down";
-        RunResult result = compile_and_run(
-            "int main() {\n"
-            "    int sum = 0;\n"
-            "    for (int i = 3; i >= 0; i = i - 1) {\n"
-            "        sum = sum + i;\n"
-            "    }\n"
-            "    return sum - 6;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
-        std::string case_name = "classic_for_initially_false_skips_body";
-        RunResult result = compile_and_run(
-            "int main() {\n"
-            "    int ran = 0;\n"
-            "    for (int i = 0; i < 0; i = i + 1) {\n"
-            "        ran = 1;\n"
-            "    }\n"
-            "    return ran;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
-        std::string case_name = "nested_for_loops";
-        RunResult result = compile_and_run(
-            "int main() {\n"
-            "    int count = 0;\n"
-            "    for (int i = 0; i < 3; i = i + 1) {\n"
-            "        for (int j = 0; j < 2; j = j + 1) {\n"
-            "            count = count + 1;\n"
-            "        }\n"
-            "    }\n"
-            "    return count - 6;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
-        std::string case_name = "classic_for_existing_var_and_scoped_decl";
-        RunResult result = compile_and_run(
-            "int main() {\n"
-            "    int i = 10;\n"
-            "    for (i = 0; i < 2; i = i + 1) {\n"
-            "    }\n"
-            "    int sum = 0;\n"
-            "    for (int j = 0; j < 3; j = j + 1) {\n"
-            "        sum = sum + j;\n"
-            "    }\n"
-            "    return i + sum - 5;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
         std::string case_name = "classic_for_init_decl_is_out_of_scope_after_loop";
         bool threw = false;
         try {
             (void)compile_and_run(
-                "int main() {\n"
-                "    for (int j = 0; j < 2; j = j + 1) {\n"
-                "    }\n"
-                "    return j;\n"
-                "}\n",
+                R"SCPP(int main() {
+    for (int j = 0; j < 2; j = j + 1) {
+    }
+    return j;
+}
+)SCPP",
                 case_name);
         } catch (const std::exception&) {
             threw = true;
@@ -5175,85 +4596,18 @@ void run_for_loop_tests() {
         expect(threw, case_name + ": expected loop-init declaration to be out of scope after the loop");
     }
     {
-        std::string case_name = "range_for_array_by_value_does_not_mutate_source";
-        RunResult result = compile_and_run(
-            "int main() {\n"
-            "    int values[3];\n"
-            "    values[0] = 1;\n"
-            "    values[1] = 2;\n"
-            "    values[2] = 3;\n"
-            "    for (int value : values) {\n"
-            "        value = value + 10;\n"
-            "    }\n"
-            "    return values[0] + values[1] + values[2] - 6;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
-        std::string case_name = "range_for_array_by_reference_mutates_source";
-        RunResult result = compile_and_run(
-            "int main() {\n"
-            "    int values[3];\n"
-            "    values[0] = 1;\n"
-            "    values[1] = 2;\n"
-            "    values[2] = 3;\n"
-            "    for (auto& value : values) {\n"
-            "        value = value + 1;\n"
-            "    }\n"
-            "    return values[0] + values[1] + values[2] - 9;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
-        std::string case_name = "range_for_span_by_reference_mutates_source";
-        RunResult result = compile_and_run(
-            "import std;\n"
-            "int main() {\n"
-            "    int values[3];\n"
-            "    values[0] = 1;\n"
-            "    values[1] = 2;\n"
-            "    values[2] = 3;\n"
-            "    std::span<int> s = values;\n"
-            "    for (auto& value : s) {\n"
-            "        value = value + 2;\n"
-            "    }\n"
-            "    return values[0] + values[1] + values[2] - 12;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
-        std::string case_name = "range_for_span_by_value_does_not_mutate_source";
-        RunResult result = compile_and_run(
-            "import std;\n"
-            "int main() {\n"
-            "    int values[3];\n"
-            "    values[0] = 1;\n"
-            "    values[1] = 2;\n"
-            "    values[2] = 3;\n"
-            "    std::span<int> s = values;\n"
-            "    for (int value : s) {\n"
-            "        value = value + 10;\n"
-            "    }\n"
-            "    return values[0] + values[1] + values[2] - 6;\n"
-            "}\n",
-            case_name);
-        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
-    }
-    {
         std::string case_name = "range_for_const_reference_rejects_mutation";
         bool threw = false;
         try {
             (void)compile_and_run(
-                "int main() {\n"
-                "    int values[2];\n"
-                "    for (const auto& value : values) {\n"
-                "        value = 1;\n"
-                "    }\n"
-                "    return 0;\n"
-                "}\n",
+                R"SCPP(int main() {
+    int values[2];
+    for (const auto& value : values) {
+        value = 1;
+    }
+    return 0;
+}
+)SCPP",
                 case_name);
         } catch (const std::exception&) {
             threw = true;
@@ -5266,6 +4620,7 @@ void run_for_loop_tests() {
 
 int main() {
     run_test_case_files();
+    run_driver_single_test_case_files();
     run_error_location_tests();
     run_module_system_tests();
     run_concept_tests();
@@ -5275,9 +4630,6 @@ int main() {
     run_reference_overload_forwarding_tests();
     run_functional_tests();
     run_thread_tests();
-    run_std_move_tests();
-    run_string_tests();
-    run_charconv_tests();
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
     run_static_member_function_tests();

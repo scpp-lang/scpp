@@ -1,0 +1,22 @@
+import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+char read_char(const char* ptr) {
+    [[scpp::unsafe]] {
+        return *ptr;
+    }
+}
+int main() {
+    std::string line{"scpp"};
+    const char* first = line.c_str();
+    const char* end = first + line.size();
+    const char* second = end - 3;
+    ptrdiff_t distance = end - first;
+    if (!same_ptr(second, first + 1)) return 1;
+    if (read_char(second) != 'c') return 2;
+    if (distance != 4) return 3;
+    return 0;
+}

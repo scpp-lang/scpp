@@ -1,0 +1,15 @@
+import std;
+enum class tag { ok = 7 };
+int move_int(int value) {
+    int moved = std::move(value);
+    return moved;
+}
+tag move_tag(tag value) {
+    tag moved = std::move(value);
+    return std::move(moved);
+}
+int main() {
+    if (move_int(5) != 5) return 1;
+    if (move_tag(tag::ok) != tag::ok) return 2;
+    return 0;
+}
