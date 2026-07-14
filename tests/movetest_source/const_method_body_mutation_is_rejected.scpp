@@ -1,0 +1,18 @@
+class Counter {
+private:
+    int value{};
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    int get() const {
+        this->value = this->value + 1;
+        return this->value;
+    }
+};
+
+int main() {
+    Counter c{0};
+    return c.get();
+}

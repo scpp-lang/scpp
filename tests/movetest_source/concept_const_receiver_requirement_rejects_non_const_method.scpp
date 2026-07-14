@@ -1,0 +1,18 @@
+template<typename T>
+concept HasGet = requires(const T& t) { t.get(); };
+
+class Num {
+public:
+    int get() {
+        return 1;
+    }
+};
+
+int f(const HasGet auto& x) {
+    return 0;
+}
+
+int main() {
+    Num n{};
+    return f(n);
+}

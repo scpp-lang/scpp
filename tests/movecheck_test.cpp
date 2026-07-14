@@ -271,6 +271,45 @@ void test_range_for_const_reference_over_span_rejects_mutation() {
            "range_for_const_reference_over_span_rejects_mutation: expected const span iteration mutation to be rejected");
 }
 
+void test_non_const_method_call_through_const_reference_reports_clear_diagnostic() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "class Counter {\n"
+        "private:\n"
+        "    int value{};\n"
+        "public:\n"
+        "    Counter(int start) {\n"
+        "        this->value = start;\n"
+        "        return;\n"
+        "    }\n"
+        "    void bump() {\n"
+        "        this->value = this->value + 1;\n"
+        "        return;\n"
+        "    }\n"
+        "};\n"
+        "void mutate(const Counter& c) {\n"
+        "    c.bump();\n"
+        "    return;\n"
+        "}\n");
+    expect(error.has_value() && error->find("cannot call non-const member function 'bump'") != std::string::npos,
+           "non_const_method_call_through_const_reference_reports_clear_diagnostic: expected a const receiver "
+           "diagnostic, got '" +
+              (error.has_value() ? *error : std::string("<no error>")) + "'");
+}
+
+void test_std_string_const_reference_mutation_reports_clear_diagnostic() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "void mutate(const std::string& text) {\n"
+        "    text.append(\"!\");\n"
+        "    return;\n"
+        "}\n");
+    expect(error.has_value() && error->find("cannot call non-const member function 'append'") != std::string::npos,
+           "std_string_const_reference_mutation_reports_clear_diagnostic: expected a const receiver diagnostic, got '" +
+              (error.has_value() ? *error : std::string("<no error>")) + "'");
+}
+
 } // namespace
 
 int main() {
@@ -282,6 +321,8 @@ int main() {
     test_range_for_const_reference_rejects_mutation();
     test_range_for_mutable_reference_over_span_is_accepted();
     test_range_for_const_reference_over_span_rejects_mutation();
+    test_non_const_method_call_through_const_reference_reports_clear_diagnostic();
+    test_std_string_const_reference_mutation_reports_clear_diagnostic();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
