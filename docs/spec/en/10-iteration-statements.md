@@ -109,4 +109,4 @@ for (auto& value : view) {
 
 ---
 
-[← Previous: Enumeration conversions](09-enumeration-conversions.md) · [Table of Contents](README.md)
+[← Previous: Enumeration conversions](09-enumeration-conversions.md) · [Table of Contents](README.md) · [Next: Inheritance and Interfaces →](11-inheritance-and-interfaces.md)

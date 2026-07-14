@@ -96,4 +96,4 @@ for (auto& value : view) {
 
 ---
 
-[← 上一节：枚举转换](09-enumeration-conversions.md) · [目录](README.md)
+[← 上一节：枚举转换](09-enumeration-conversions.md) · [目录](README.md) · [下一节：继承与接口 →](11-inheritance-and-interfaces.md)
