@@ -75,8 +75,9 @@ interface is not part of the dynamic dispatch contract of that
 interface; it is called exactly as an ordinary non-virtual member
 function.
 
-(5) A program is ill-formed if it would form an object of interface
-type in any object-forming context, including:
+(5) A program is ill-formed if it would form a complete object whose
+most-derived type is an interface in any object-forming context,
+including:
 
   (5.1) a variable definition by value;
 
@@ -100,7 +101,13 @@ implementations is still not directly instantiable.
 objects into standalone interface objects. Passing or returning an
 interface by reference or pointer remains well-formed, subject to the
 ordinary C++ rules for reference binding, pointer conversion, and
-access control. — end note]
+access control. An interface base subobject within a larger most-derived
+object is not, by itself, a complete object under (5). — end note]
+
+[Note: copying or moving a most-derived object that contains interface
+base subobjects is governed by [§6.4](02-ownership-and-move.md#64-move-construction-and-move-assignment-classcopyctor-classcopyassign)
+and [§6.5](02-ownership-and-move.md#65-copy-construction-and-copy-assignment-classcopyctor-classcopyassign),
+including those subclauses' treatment of base-class subobjects. — end note]
 
 ```cpp
 class [[scpp::interface]] ILogger {

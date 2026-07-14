@@ -227,7 +227,8 @@ definition of the non-interface class or struct, using that type's own
 thread-movable and thread-shareable values as determined under 8.1,
 8.2, and 8.4.
 
-(6) If a parameter of interface type is annotated with
+(6) If a parameter of reference-to-interface type or
+pointer-to-interface type is annotated with
 `[[scpp::thread_movable]]` or `[[scpp::thread_shareable]]`, 8.1(3) and
 8.1(4) apply unchanged. The actual argument type supplied at each call
 site shall satisfy the requested property, whether or not the interface

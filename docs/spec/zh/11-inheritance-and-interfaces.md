@@ -45,7 +45,7 @@ public:
 class Bad : public FileReader, public TagOnly {
 public:
     ~Bad() override = default;
-};  // 不合法：按 (3) 同时有两个普通直接 base class
+};  // ill-formed: two ordinary direct base classes under (3)
 ```
 
 ## 11.2 接口声明 [dcl.attr.scpp.interface]
@@ -66,8 +66,8 @@ public:
 virtual 成员函数，不属于该接口的动态派发契约；对它的调用，和普通非
 virtual 成员函数完全一样。
 
-(5) 如果一个程序会在任何“形成对象”的语境里形成接口类型的对象，那么
-它就是不合法的；这类语境包括：
+(5) 如果一个程序会在任何“形成对象”的语境里形成一个完整对象，并且它的
+most-derived type 就是接口，那么它就是不合法的；这类语境包括：
 
   (5.1) 一个按值变量定义；
 
@@ -88,7 +88,13 @@ virtual 成员函数完全一样。
 
 【注：(5) 防止把实现了接口的对象切片（slicing）成一个独立的接口对象。
 通过引用或指针传递、返回接口，仍然是合法的，但仍受普通 C++ 关于引用
-绑定、指针转换和访问控制的规则约束。——注释结束】
+绑定、指针转换和访问控制的规则约束。一个更大的 most-derived object
+内部的接口 base subobject，本身不属于 (5) 所说的完整对象。——注释结束】
+
+【注：一个含有接口 base subobject 的 most-derived object，在 copy 或 move
+时，受 [§6.4](02-ownership-and-move.md#64-move-构造与-move-赋值move-construction-and-move-assignmentclasscopyctorclasscopyassign)
+与 [§6.5](02-ownership-and-move.md#65-copy-构造与-copy-赋值copy-construction-and-copy-assignmentclasscopyctorclasscopyassign)
+约束；这些小节对 base-class subobject 的处理，也同样适用于这里。——注释结束】
 
 ```cpp
 class [[scpp::interface]] ILogger {
@@ -105,18 +111,18 @@ class [[scpp::interface]] IBadState {
     int counter{};
 public:
     virtual ~IBadState() = default;
-};  // 不合法：按 (1) 声明了非 static 数据成员
+};  // ill-formed: non-static data member under (1)
 
 class Storage {};
 
 class [[scpp::interface]] IBadBase : public virtual Storage {
 public:
     virtual ~IBadBase() = default;
-};  // 不合法：按 (3) 接口继承了普通 class
+};  // ill-formed: interface inheriting an ordinary class under (3)
 
-void consume(ILogger& ref);   // 合法
-void copy(ILogger value);     // 不合法：按 (5.6)
-ILogger make_logger();        // 不合法：按 (5.7)
+void consume(ILogger& ref);   // OK
+void copy(ILogger value);     // ill-formed: (5.6)
+ILogger make_logger();        // ill-formed: (5.7)
 ```
 
 ## 11.3 Base-specifier 与接口身份 [class.mi]
@@ -174,20 +180,20 @@ public:
 class BadDuck : public IFlyable {
 public:
     ~BadDuck() override = default;
-};  // 不合法：直接接口 base 缺少 `virtual`
+};  // ill-formed: direct interface base lacks `virtual`
 
 class SecretMover : private virtual IMovable {
 public:
     ~SecretMover() override = default;
     void move_it() override {}
-    IMovable& expose_inside() { return *this; }   // 合法：这里允许该转换
+    IMovable& expose_inside() { return *this; }   // OK: conversion allowed here
 };
 
 void take_movable(IMovable&);
 
 void demo(Duck& duck, SecretMover& secret) {
-    take_movable(duck);      // 合法：public 接口继承
-    // take_movable(secret); // 不合法：private base 转换被拒绝
+    take_movable(duck);      // OK: public interface inheritance
+    // take_movable(secret); // ill-formed: private base conversion denied
 }
 ```
 
@@ -244,7 +250,7 @@ public:
 class Tool : public virtual IPrintable, public virtual IDebuggable {
 public:
     ~Tool() override = default;
-    // void print() override {}   // 这是一个可行的显式消解方式
+    // void print() override {}   // one valid explicit resolution
 };
 
 class Worker {
@@ -261,7 +267,7 @@ public:
 class Machine : public Worker, public virtual IStartable {
 public:
     ~Machine() override = default;
-    // Machine m; m.start();      // 按 (3.2) 歧义
+    // Machine m; m.start();      // ambiguous under (3.2)
 };
 
 class [[scpp::interface]] IIntOps {
@@ -359,12 +365,12 @@ public:
 class MissingDtor : public Base {
 public:
     void run() override {}
-};  // 不合法：多态 class 缺少显式 virtual 析构函数
+};  // ill-formed: polymorphic class lacks an explicit virtual destructor
 
 class MissingOverride : public Base {
 public:
-    virtual ~MissingOverride() = default;   // 不合法：重写了 `Base::~Base` 却省略 `override`
-    void run() {}                           // 不合法：重写了 `Base::run` 却省略 `override`
+    virtual ~MissingOverride() = default;   // ill-formed: overrides `Base::~Base` but omits `override`
+    void run() {}                           // ill-formed: overrides `Base::run` but omits `override`
 };
 ```
 

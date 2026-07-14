@@ -213,10 +213,10 @@ class 模板上的用法完全一样。——注释结束】
 判断时使用这个类型自己在 8.1、8.2 和 8.4 下被确定出来的 thread-movable 与
 thread-shareable 值。
 
-(6) 如果一个接口类型的形参被标注了 `[[scpp::thread_movable]]` 或
-`[[scpp::thread_shareable]]`，那么 8.1(3) 与 8.1(4) 原样适用。在每个调用点
-提供的实际实参类型，都必须满足所请求的性质；这条规则与该接口自己是否按
-(2) 或 (3) 声明了 class-level 要求无关。
+(6) 如果一个“到接口的引用类型”或者“到接口的指针类型”的形参被标注了
+`[[scpp::thread_movable]]` 或 `[[scpp::thread_shareable]]`，那么 8.1(3)
+与 8.1(4) 原样适用。在每个调用点提供的实际实参类型，都必须满足所请求的
+性质；这条规则与该接口自己是否按 (2) 或 (3) 声明了 class-level 要求无关。
 
 【注：(2)-(5) 提供的是“在接口定义处声明、对全部实现者生效”的 blanket
 contract；而 (6) 提供的则是“某个特定形参在某个特定使用点所要求”的约束。
@@ -240,12 +240,12 @@ class BadView : public virtual IView {
 public:
     ~BadView() override = default;
     void render() const override {}
-};  // 不合法：违反了从 IView 继承来的 thread-shareable 契约
+};  // ill-formed: violates IView's inherited thread-shareable contract
 
 void publish([[scpp::thread_shareable]] IView& view);
 
 GoodView good{};
-publish(good);   // 合法
+publish(good);   // OK
 ```
 
 ---
