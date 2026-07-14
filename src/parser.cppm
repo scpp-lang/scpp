@@ -5233,6 +5233,15 @@ private:
                 }
                 expect(TokenKind::RParen, "')'");
                 expr = std::move(node);
+            } else if (check(TokenKind::LBrace) && expr->kind == ExprKind::Identifier) {
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Call;
+                node->loc = expr->loc;
+                node->name = expr->name;
+                node->explicit_global_qualification = expr->explicit_global_qualification;
+                node->explicit_template_args = std::move(expr->explicit_template_args);
+                node->args = parse_brace_initializer_args();
+                expr = std::move(node);
             } else {
                 break;
             }

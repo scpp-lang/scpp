@@ -1,0 +1,33 @@
+import std;
+
+class Box {
+public:
+    int value;
+
+    Box(int value) : value{value} { return; }
+};
+
+int take_double(const double& x) {
+    return x == 3.5 ? 0 : 1;
+}
+
+int take_box(const Box& x) {
+    return x.value == 42 ? 0 : 1;
+}
+
+int take_string_length(const std::string& text) {
+    return text.length();
+}
+
+int main() {
+    double value = 3.5;
+    std::string greeting{"hello"};
+
+    if (take_double(3.5) != 0) return 1;
+    if (take_double(value) != 0) return 2;
+    if (take_box(Box{42}) != 0) return 3;
+    if (take_string_length("hello") != 5) return 4;
+    if (take_string_length(std::string{"hi"}) != 2) return 5;
+    if (take_string_length(std::move(greeting)) != 5) return 6;
+    return 0;
+}
