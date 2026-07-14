@@ -1,0 +1,10 @@
+int main() {
+    int values[3];
+    values[0] = 1;
+    values[1] = 2;
+    values[2] = 3;
+    for (int value : values) {
+        value = value + 10;
+    }
+    return values[0] + values[1] + values[2] - 6;
+}

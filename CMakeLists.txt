@@ -187,6 +187,7 @@ target_link_libraries(driver_test PRIVATE scpp_driver scpp_codegen scpp_movechec
 target_compile_features(driver_test PRIVATE cxx_std_23)
 target_compile_definitions(driver_test PRIVATE
     SCPP_BINARY_PATH="$<TARGET_FILE:scpp>"
+    SCPP_DRIVER_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/driver_test_source"
     SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source"
     SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
     SCPP_STDLIB_STD_INTERFACE_PATH="${SCPP_STDLIB_STD_INTERFACE_PATH}"

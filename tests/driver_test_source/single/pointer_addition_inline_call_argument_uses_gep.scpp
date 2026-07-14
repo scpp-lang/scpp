@@ -1,0 +1,15 @@
+import std;
+bool same_ptr(const char* lhs, const char* rhs) {
+    [[scpp::unsafe]] {
+        return lhs == rhs;
+    }
+}
+int main() {
+    std::string line{"12345"};
+    int value = 0;
+    std::from_chars_result parsed = std::from_chars(line.c_str(), line.c_str() + line.size(), value);
+    if (value != 12345) return 1;
+    if ((int)parsed.ec != 0) return 2;
+    if (!same_ptr(parsed.ptr, line.c_str() + line.length())) return 3;
+    return 0;
+}

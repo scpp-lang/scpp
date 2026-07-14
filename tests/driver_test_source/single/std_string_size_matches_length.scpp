@@ -1,0 +1,16 @@
+import std;
+int main() {
+    std::string empty{""};
+    if (empty.length() != 0) return 1;
+    if (empty.size() != empty.length()) return 2;
+
+    std::string abc{"abc"};
+    if (abc.length() != 3) return 3;
+    if (abc.size() != abc.length()) return 4;
+
+    std::string greeting{"hello, scpp"};
+    if (greeting.length() != 11) return 5;
+    if (greeting.size() != greeting.length()) return 6;
+
+    return 0;
+}

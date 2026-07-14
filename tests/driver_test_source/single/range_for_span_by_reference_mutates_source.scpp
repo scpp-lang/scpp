@@ -1,0 +1,12 @@
+import std;
+int main() {
+    int values[3];
+    values[0] = 1;
+    values[1] = 2;
+    values[2] = 3;
+    std::span<int> s = values;
+    for (auto& value : s) {
+        value = value + 2;
+    }
+    return values[0] + values[1] + values[2] - 12;
+}
