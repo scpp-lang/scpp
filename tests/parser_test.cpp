@@ -313,6 +313,28 @@ void test_constructor_member_initializer_list_parses() {
            "constructor_member_initializer_list_parses: value{seed} should be preserved");
 }
 
+void test_constructor_base_initializer_list_parses() {
+    scpp::Program program = scpp::parse(
+        "class Base {\n"
+        "public:\n"
+        "    Base(int seed) { return; }\n"
+        "};\n"
+        "class Derived : public Base {\n"
+        "public:\n"
+        "    Derived(int seed) : Base{seed} { return; }\n"
+        "};\n");
+    const scpp::Function* ctor = find_function_named(program, "Derived_new");
+    expect(ctor != nullptr, "constructor_base_initializer_list_parses: expected constructor");
+    if (ctor == nullptr) return;
+    expect(ctor->member_initializers.size() == 1,
+           "constructor_base_initializer_list_parses: expected 1 initializer");
+    if (ctor->member_initializers.size() != 1) return;
+    expect(ctor->member_initializers[0].member_name == "Base" &&
+               ctor->member_initializers[0].initializer.has_brace_args &&
+               ctor->member_initializers[0].initializer.brace_args.size() == 1,
+           "constructor_base_initializer_list_parses: Base{seed} should be preserved");
+}
+
 void test_while_loop() {
     scpp::Program program = scpp::parse("int f() { while (true) { x = x - 1; } }");
     const scpp::Function& fn = program.functions[0];
@@ -3591,6 +3613,7 @@ int main() {
     test_valid_local_initializer_forms_parse();
     test_class_default_member_initializers_parse();
     test_constructor_member_initializer_list_parses();
+    test_constructor_base_initializer_list_parses();
     test_while_loop();
     test_classic_for_loop_desugars_with_scoped_init();
     test_classic_for_loop_with_expression_init_desugars();

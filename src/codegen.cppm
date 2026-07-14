@@ -1275,6 +1275,45 @@ private:
         return unique_best ? best : matches[0];
     }
 
+    const Function* resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args) {
+        std::vector<const Function*> matches;
+        for (const Function& fn : program_->functions) {
+            if (fn.name != class_name + "_new") continue;
+            if (fn.params.size() != args.size() + 1) continue;
+            bool all_match = true;
+            for (size_t i = 0; all_match && i < args.size(); i++) {
+                all_match = argument_matches_parameter(*args[i], fn.params[i + 1].type);
+            }
+            if (all_match) matches.push_back(&fn);
+        }
+        if (matches.empty()) return nullptr;
+        if (matches.size() == 1) return matches[0];
+        auto mutable_ref_score = [&](const Function* fn) {
+            int score = 0;
+            for (size_t i = 0; i < args.size(); i++) {
+                const Type& param_type = fn->params[i + 1].type;
+                if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref && !is_read_only_place(*args[i])) {
+                    score++;
+                }
+            }
+            return score;
+        };
+        const Function* best = matches[0];
+        int best_score = mutable_ref_score(best);
+        bool unique_best = true;
+        for (size_t i = 1; i < matches.size(); i++) {
+            int score = mutable_ref_score(matches[i]);
+            if (score > best_score) {
+                best = matches[i];
+                best_score = score;
+                unique_best = true;
+            } else if (score == best_score) {
+                unique_best = false;
+            }
+        }
+        return unique_best ? best : matches[0];
+    }
+
     // Recursively verifies a type is trivial per the language spec (ch04):
     // scalars, raw pointers (any pointee), fixed-size arrays of trivial
     // types, and structs/unions whose fields are themselves all trivial.
@@ -3015,6 +3054,19 @@ private:
                this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
     }
 
+    [[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name) const {
+        size_t scope = class_name.rfind("::");
+        std::string_view tail = scope == std::string_view::npos ? class_name : class_name.substr(scope + 2);
+        size_t dot = tail.find('.');
+        if (dot != std::string_view::npos) tail = tail.substr(0, dot);
+        return std::string(tail);
+    }
+
+    [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def) const {
+        if (def.base_class_name.empty()) return false;
+        return member_name == def.base_class_name || member_name == unqualified_template_base_name(def.base_class_name);
+    }
+
     [[nodiscard]] llvm::Value* load_this_object_ptr() {
         auto this_it = locals_.find("this");
         if (this_it == locals_.end()) {
@@ -3180,6 +3232,36 @@ private:
             throw CodegenError("unknown constructor owner class '" + fn.member_owner_class + "'", current_loc_);
         }
         llvm::Value* object_ptr = load_this_object_ptr();
+        if (!class_def->base_class_name.empty()) {
+            const MemberInitializer* explicit_base_init = nullptr;
+            for (const MemberInitializer& init : fn.member_initializers) {
+                if (names_direct_base(init.member_name, *class_def)) {
+                    explicit_base_init = &init;
+                    break;
+                }
+            }
+            const ClassDef* base_def = find_class_def(class_def->base_class_name);
+            if (base_def == nullptr) {
+                throw CodegenError("unknown base class '" + class_def->base_class_name + "'", current_loc_);
+            }
+            static const std::vector<ExprPtr> no_base_args;
+            const std::vector<ExprPtr>* base_args = explicit_base_init != nullptr ? &explicit_base_init->initializer.brace_args
+                                                                                  : nullptr;
+            const Function* base_ctor =
+                resolve_constructor_overload_exact(class_def->base_class_name, base_args != nullptr ? *base_args : no_base_args);
+            if (base_ctor != nullptr) {
+                std::vector<llvm::Value*> ctor_args =
+                    codegen_call_args(base_args != nullptr ? *base_args : no_base_args, base_ctor, /*param_offset=*/1);
+                ctor_args.insert(ctor_args.begin(), object_ptr);
+                builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), ctor_args);
+            } else if (base_args == nullptr || base_args->empty()) {
+                emit_default_initializers_for_class_storage(object_ptr, *base_def);
+            } else {
+                throw CodegenError("base-class initializer for '" + class_def->base_class_name +
+                                       "' does not match any constructor of that class",
+                                   current_loc_);
+            }
+        }
         for (const ClassField& field : class_def->fields) {
             const Initializer* selected_init = nullptr;
             for (const MemberInitializer& init : fn.member_initializers) {
@@ -3201,6 +3283,22 @@ private:
     }
 
     void emit_default_initializers_for_class_storage(llvm::Value* object_ptr, const ClassDef& class_def) {
+        if (!class_def.base_class_name.empty()) {
+            const ClassDef* base_def = find_class_def(class_def.base_class_name);
+            if (base_def == nullptr) {
+                throw CodegenError("unknown base class '" + class_def.base_class_name + "'", current_loc_);
+            }
+            const Function* base_ctor = resolve_constructor_overload_exact(class_def.base_class_name, {});
+            if (base_ctor != nullptr) {
+                builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), {object_ptr});
+            } else if (!class_has_any_constructor(class_def.base_class_name)) {
+                emit_default_initializers_for_class_storage(object_ptr, *base_def);
+            } else {
+                throw CodegenError("class '" + class_def.name + "' cannot be implicitly default-constructed because base class '" +
+                                       class_def.base_class_name + "' has no accessible default constructor",
+                                   current_loc_);
+            }
+        }
         for (const ClassField& field : class_def.fields) {
             if (!field.default_initializer) continue;
             LValue field_storage = codegen_raw_member_storage(object_ptr, class_def.name, field);
@@ -3959,8 +4057,8 @@ private:
         }
         const Type& pointee = *operand_type->pointee;
         if (pointee.kind == TypeKind::Named) {
-            if (llvm::Function* dtor = find_destructor(pointee.name)) {
-                codegen_call_destructor_unless_moved(dtor, ptr, nullptr);
+            if (class_has_destructor_in_chain(pointee.name)) {
+                codegen_call_destructor_chain_unless_moved(pointee.name, ptr, nullptr);
             }
         }
         builder_->CreateCall(get_or_declare_free(), {ptr});
@@ -3973,8 +4071,8 @@ private:
         }
         llvm::Value* ptr = codegen_expr(*expr.lhs);
         if (expr.type.kind == TypeKind::Named) {
-            if (llvm::Function* dtor = find_destructor(expr.type.name)) {
-                codegen_call_destructor_unless_moved(dtor, ptr, nullptr);
+            if (class_has_destructor_in_chain(expr.type.name)) {
+                codegen_call_destructor_chain_unless_moved(expr.type.name, ptr, nullptr);
             }
         }
     }
@@ -4152,34 +4250,49 @@ private:
         }
     }
 
+    [[nodiscard]] bool class_has_destructor_in_chain(const std::string& class_name) {
+        std::string current = class_name;
+        while (!current.empty()) {
+            if (find_destructor(current) != nullptr) return true;
+            const ClassDef* def = find_class_def(current);
+            if (def == nullptr) break;
+            current = def->base_class_name;
+        }
+        return false;
+    }
+
+    void emit_destructor_chain_calls(const std::string& class_name, llvm::Value* object_ptr) {
+        if (llvm::Function* dtor = find_destructor(class_name)) {
+            builder_->CreateCall(dtor, {object_ptr});
+        }
+        const ClassDef* def = find_class_def(class_name);
+        if (def != nullptr && !def->base_class_name.empty()) {
+            emit_destructor_chain_calls(def->base_class_name, object_ptr);
+        }
+    }
+
     // spec §6.4: a fresh, zero-initialized (`false`) `i1` slot for
     // tracking whether a class-typed local has been moved-out, so
-    // scope-exit cleanup (codegen_call_destructor_unless_moved) can
-    // correctly skip invoking its destructor if so (spec §6.3/§6.4:
+    // scope-exit cleanup (codegen_call_destructor_chain_unless_moved) can
+    // correctly skip invoking its destructor chain if so (spec §6.3/§6.4:
     // "its destructor, if declared, is not invoked for it"). Returns
-    // null when `class_name` has no destructor at all -- nothing to
-    // conditionally skip, so no tracking is needed (kept minimal: this
-    // local's scope-exit path stays the plain, unconditional call it
-    // always was).
+    // null when neither the class nor any of its bases declares a
+    // destructor at all.
     llvm::AllocaInst* create_moved_flag_if_has_destructor(const std::string& class_name) {
-        if (find_destructor(class_name) == nullptr) return nullptr;
+        if (!class_has_destructor_in_chain(class_name)) return nullptr;
         llvm::AllocaInst* flag = create_entry_block_alloca(llvm::Type::getInt1Ty(*context_), "movedflag");
         builder_->CreateStore(llvm::ConstantInt::getFalse(*context_), flag);
         return flag;
     }
 
-    // spec §6.3/§6.4: emits `dtor(slot.alloca)` guarded by `!moved_flag`
-    // when `slot` has one (a moved-out object's destructor is never
-    // invoked for it), or an unconditional call when it doesn't (either
-    // this class has no destructor at all -- callers only reach here
-    // once find_destructor has already confirmed one exists -- or this
-    // particular local predates move-tracking, which doesn't arise in
-    // practice: every class-typed local with a destructor always gets a
-    // moved_flag at declaration).
-    void codegen_call_destructor_unless_moved(llvm::Function* dtor, llvm::Value* object_ptr,
-                                              llvm::AllocaInst* moved_flag) {
+    // spec §6.3/§6.4/ch05 §5.14: emits the whole most-derived-to-base
+    // destructor chain guarded by `!moved_flag` when present, matching
+    // real C++'s reverse-of-construction destruction order for a derived
+    // object's base subobjects.
+    void codegen_call_destructor_chain_unless_moved(const std::string& class_name, llvm::Value* object_ptr,
+                                                    llvm::AllocaInst* moved_flag) {
         if (moved_flag == nullptr) {
-            builder_->CreateCall(dtor, {object_ptr});
+            emit_destructor_chain_calls(class_name, object_ptr);
             return;
         }
         llvm::Value* was_moved = builder_->CreateLoad(llvm::Type::getInt1Ty(*context_), moved_flag, "wasmoved");
@@ -4188,7 +4301,7 @@ private:
         llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(*context_, "dtorskip", current_fn);
         builder_->CreateCondBr(was_moved, merge_bb, then_bb);
         builder_->SetInsertPoint(then_bb);
-        builder_->CreateCall(dtor, {object_ptr});
+        emit_destructor_chain_calls(class_name, object_ptr);
         builder_->CreateBr(merge_bb);
         builder_->SetInsertPoint(merge_bb);
     }
@@ -4211,8 +4324,8 @@ private:
     // correctly becomes a no-op exactly as the spec/book require.
     void codegen_destroy_old_class_state_for_move_assign(llvm::Value* ptr, const std::string& class_name,
                                                          llvm::AllocaInst* moved_flag = nullptr) {
-        if (llvm::Function* dtor = find_destructor(class_name)) {
-            codegen_call_destructor_unless_moved(dtor, ptr, moved_flag);
+        if (class_has_destructor_in_chain(class_name)) {
+            codegen_call_destructor_chain_unless_moved(class_name, ptr, moved_flag);
             return;
         }
         auto struct_it = structs_.find(class_name);
@@ -4250,8 +4363,8 @@ private:
     void free_unique_ptr_locals() {
         for (const auto& [name, slot] : locals_) {
             if (slot.type.kind == TypeKind::Named) {
-                if (llvm::Function* dtor = find_destructor(slot.type.name)) {
-                    codegen_call_destructor_unless_moved(dtor, slot.alloca, slot.moved_flag);
+                if (class_has_destructor_in_chain(slot.type.name)) {
+                    codegen_call_destructor_chain_unless_moved(slot.type.name, slot.alloca, slot.moved_flag);
                 }
             }
         }
@@ -4281,8 +4394,9 @@ private:
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.type.kind == TypeKind::Named) {
-                    if (llvm::Function* dtor = find_destructor(slot_it->second.type.name)) {
-                        codegen_call_destructor_unless_moved(dtor, slot_it->second.alloca, slot_it->second.moved_flag);
+                    if (class_has_destructor_in_chain(slot_it->second.type.name)) {
+                        codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
+                                                                   slot_it->second.moved_flag);
                     }
                 }
             }
@@ -4299,8 +4413,9 @@ private:
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.type.kind == TypeKind::Named) {
-                    if (llvm::Function* dtor = find_destructor(slot_it->second.type.name)) {
-                        codegen_call_destructor_unless_moved(dtor, slot_it->second.alloca, slot_it->second.moved_flag);
+                    if (class_has_destructor_in_chain(slot_it->second.type.name)) {
+                        codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
+                                                                   slot_it->second.moved_flag);
                     }
                 }
             }

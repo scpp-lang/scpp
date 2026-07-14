@@ -16,13 +16,13 @@ private:
 
 class Dog : public Animal {
 public:
-    Dog(int legs) { this.legs = legs; return; }
+    Dog(int legs) : Animal{legs} { return; }
     int sound() const { return 1; }
 };
 
 class Puppy : public Dog {
 public:
-    Puppy(int legs) { this.legs = legs; return; }
+    Puppy(int legs) : Dog{legs} { return; }
 };
 
 int main() {

@@ -831,11 +831,12 @@ struct Function {
     // Member functions only: the owning class's own fully-qualified name.
     // Empty for a free function.
     std::string member_owner_class;
-    // Constructors only: `Ctor(...) : field{...}, other{...} { ... }`
-    // parsed exactly as written (still in source order). Codegen applies
-    // them in field declaration order, matching real C++'s rule that the
-    // member-initializer-list's textual order does not control actual
-    // construction order.
+    // Constructors only: `Ctor(...) : Base{...}, field{...}, other{...}
+    // { ... }` parsed exactly as written (still in source order). Entries
+    // may name the direct base class itself or a direct field. Codegen
+    // still applies the direct base first and then fields in declaration
+    // order, matching real C++'s construction-order rule rather than the
+    // list's textual order.
     std::vector<MemberInitializer> member_initializers;
     // Member functions only: trailing ref-qualifier after the parameter
     // list (`&` / `&&`). `None` means unqualified, so the method is

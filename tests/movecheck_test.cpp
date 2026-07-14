@@ -310,6 +310,39 @@ void test_std_string_const_reference_mutation_reports_clear_diagnostic() {
               (error.has_value() ? *error : std::string("<no error>")) + "'");
 }
 
+void test_derived_constructor_requires_explicit_base_initializer_without_default_base_ctor() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "class Base {\n"
+        "public:\n"
+        "    Base(int seed) { return; }\n"
+        "};\n"
+        "class Derived : public Base {\n"
+        "public:\n"
+        "    Derived() { return; }\n"
+        "};\n");
+    expect(error.has_value() && error->find("must initialize its direct base class 'Base'") != std::string::npos,
+           "derived_constructor_requires_explicit_base_initializer_without_default_base_ctor: expected base-init "
+           "diagnostic, got '" +
+              (error.has_value() ? *error : std::string("<no error>")) + "'");
+}
+
+void test_explicit_base_initializer_satisfies_nondefault_base_ctor() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "class Base {\n"
+        "public:\n"
+        "    Base(int seed) { return; }\n"
+        "};\n"
+        "class Derived : public Base {\n"
+        "public:\n"
+        "    Derived(int seed) : Base{seed} { return; }\n"
+        "};\n");
+    expect(!error.has_value(),
+           "explicit_base_initializer_satisfies_nondefault_base_ctor: expected program to pass movecheck" +
+              (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
 } // namespace
 
 int main() {
@@ -323,6 +356,8 @@ int main() {
     test_range_for_const_reference_over_span_rejects_mutation();
     test_non_const_method_call_through_const_reference_reports_clear_diagnostic();
     test_std_string_const_reference_mutation_reports_clear_diagnostic();
+    test_derived_constructor_requires_explicit_base_initializer_without_default_base_ctor();
+    test_explicit_base_initializer_satisfies_nondefault_base_ctor();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
