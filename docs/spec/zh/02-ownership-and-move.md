@@ -181,12 +181,33 @@ public:
 它不得被用来修改一个只能通过 shared 或者 `const` 绑定才能触达的对象
 或者范围。
 
+【注：(7)-(10) 里的 reborrow，要求存在一个已经存在的对象或者范围，并且新的
+绑定是通过一个已经存在的引用或 span 绑定去别名化它。相反，如果一个绑定是按
+(11) 去物化（materialize）一个临时对象，那么它就没有这样的 lender object。
+——注释结束】
+
+(11) 如果一个类型为 `const T&` 的局部变量或者参数，用下列任一方式完成
+初始化：
+
+  (11.1) 用一个类型为 `T` 的右值表达式，其中也包括一个类型为 `T` 的
+  新鲜值（fresh value）；或者
+
+  (11.2) 用一个表达式，并且通过选中 `T` 的某个“恰好接收这一个表达式作为
+  单个参数”的构造函数，可以直接构造出一个类型为 `T` 的临时对象，
+
+那么会物化出一个类型为 `T` 的临时对象，并让该引用绑定到这个临时对象上。
+
+(12) 按 (11) 物化出来的临时对象，会在该引用绑定的整个生命期内保持存活。
+这种绑定不是 (7)-(10) 里的 reborrow，并且对这些规则来说它不会引入 lender
+object，因为它没有别名化任何预先存在的对象或范围。
+
 【注：本条款没有给子对象（一个类成员、一个数组元素）定义独立于它
 所属的完整对象自己的状态 (2)-(4)：一个子对象能不能被单独移出、而
 它所属的完整对象其它部分依然保持 initialized，在什么条件下能这样，
 本条款目前还没有规定。(7)-(10) 里的 reborrow 讨论的是：通过一个已经
-存在的引用或 span 绑定，再形成别名；它本身不会让完整对象进入
-moved-out 状态。——注释结束】
+存在的引用或 span 绑定，再形成别名；而按 (11)-(12) 去物化临时对象的绑定
+并不是这种别名。无论哪一种绑定，本身都不会让完整对象进入 moved-out
+状态。——注释结束】
 
 ## 6.3 析构（Destruction）[class.dtor]
 
@@ -326,37 +347,76 @@ public:
 };
 ```
 
-## 6.6 class 类型的按值参数（By-value parameters of class type）[expr.call]
+## 6.6 新鲜值与函数形参绑定（Fresh values and function parameter binding）[expr.call]
 
-(1) 如果一个函数参数的类型是 class 类型 `T`，并且它不是引用类型，那么每次
-调用时，这个参数对象都按本小节初始化。
+(1) 就本文档而言，一个类型为 `T` 的**新鲜值（fresh value）**是：
 
-(2) 如果对应的实参是一个 *id-expression*，指代的是某个局部对象（包括一个
+  (1.1) 一个形如 `std::move(E)` 的表达式，其中 `E` 指代一个类型为 `T`
+  的对象；或者
+
+  (1.2) 一个类型为 `T` 的调用表达式；或者
+
+  (1.3) 一个形如 `T{a1, ..., an}` 的表达式，只要它直接构造出一个类型为
+  `T` 的临时对象。
+
+(2) 一个类型为 `T` 的新鲜值，可以用于本文档任何“要求一个类型为 `T` 的
+新鲜值”的位置，包括本小节以及 §6.7。
+
+(3) 如果一个函数参数的类型是 class 类型 `T`，并且它不是引用类型，那么每次
+调用时，这个参数对象都按 (4)-(7) 初始化。
+
+(4) 如果对应的实参是一个 *id-expression*，指代的是某个局部对象（包括一个
 参数），并且它的类型恰好就是 `T`，同时 `T` 拥有 copy 构造函数（6.5），
 那么这个参数对象就从那个局部对象 copy 构造出来。
 
-(3) 否则，对应的实参必须是一个类型为 `T` 的**新鲜值（fresh value）**。
-就本文档而言，一个类型为 `T` 的新鲜值是：
+(5) 否则，对应的实参必须是一个类型为 `T` 的新鲜值。
 
-  (3.1) 一个形如 `std::move(E)` 的表达式，其中 `E` 指代一个类型为 `T`
-  的对象；或者
+(6) 如果既不满足 (4)，也不满足 (5)，程序就不合法（ill-formed）。
 
-  (3.2) 一个类型为 `T` 的调用表达式；或者
+(7) 一旦按 (4) 或者 (5) 完成初始化，这个参数对象在被调用函数体内部就是一
+个普通的、类型为 `T` 的自动对象，完全按 §6.2-§6.5 去约束，跟任何别的
+class 类型局部对象没有区别。
 
-  (3.3) 在
-  [§6.7](02-ownership-and-move.md#67-class-类型的按值返回by-value-return-of-class-typestmt.return)
-  所约束的 `return` 语句里，一个形如 `T{a1, ..., an}` 的表达式，只要它在
-  该操作数位置直接构造出一个类型为 `T` 的临时对象。
+(8) 一个候选函数，如果它那个按值 class 参数没法按 (3)-(7) 的要求完成
+初始化，那么它对重载决议来说就不是可行候选（viable）。
 
-(4) 如果既不满足 (2)，也不满足 (3)，程序就不合法（ill-formed）。
+(9) 如果一个函数参数的类型是 `const T&`，并且对应的实参满足 §6.2(11.1)
+或者 §6.2(11.2)，那么这个参数会绑定到 §6.2(11) 所物化出来的那个临时
+对象上，而这个临时对象的生命期由 §6.2(12) 约束。
 
-(5) 一旦按 (2) 或者 (3) 完成初始化，这个参数对象在被调用函数体内部就是一
-个普通的、类型为 `T` 的自动对象，完全按
-[§6.2](02-ownership-and-move.md#62-所有权与-move-状态ownership-and-move-statebasiclife)-[§6.5](02-ownership-and-move.md#65-copy-构造与-copy-赋值copy-construction-and-copy-assignmentclass.copy.ctorclass.copy.assign)
-去约束，跟任何别的 class 类型局部对象没有区别。
+(10) 否则，一个类型为 `const T&` 的函数参数，会按通常的引用绑定规则，直接
+绑定到实参所指代的对象上。如果这个直接绑定别名化了某个已经存在的引用或
+span 绑定，那么它就是一个受 §6.2(7)-(10) 约束的 reborrow。
 
-(6) 一个候选函数，如果它那个按值 class 参数没法按本小节要求完成初始化，
-那么它对重载决议来说就不是可行候选（viable）。
+(11) 如果既不满足 (9)，也不满足 (10)，程序就不合法（ill-formed）。
+
+(12) 一个候选函数，如果它那个 `const T&` 参数没法按 (9)-(11) 的要求完成
+初始化，那么它对重载决议来说就不是可行候选（viable）。
+
+```cpp
+class Box {
+public:
+    int value;
+
+    Box(int v) : value{v} {}
+};
+
+void consume(Box value);
+int read_double(const double& x) { return x == 3.5 ? 0 : 1; }
+int read_box(const Box& x) { return x.value; }
+int read_text(const std::string& text) { return text.length(); }
+
+int call_examples() {
+    std::string greeting{"hello"};
+
+    consume(Box{1});                        // OK：6.6(1.3), 6.6(5)
+    if (read_double(3.5) != 0) return 1;   // OK：6.2(11.1), 6.6(9)
+    if (read_box(Box{42}) != 42) return 2; // OK：6.2(11.1), 6.6(9)
+    if (read_text("hi") != 2) return 3;    // OK：6.2(11.2), 6.6(9)
+    if (read_text(std::move(greeting)) != 5) return 4; // OK：6.2(11.1), 6.6(9)
+    return 0;
+}
+```
 
 ## 6.7 class 类型的按值返回（By-value return of class type）[stmt.return]
 
@@ -373,19 +433,12 @@ public:
 每个 class 类型总是拥有一个隐式定义的 move 构造函数。所以对满足 (2) 的
 操作数，本小节总会选中 move 构造，不存在再退回去选 copy 构造函数的分支。
 (2) 里的这个特殊待遇只适用于 `return` 的操作数；它不会让这种
-*id-expression* 对 [§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
-来说也变成新鲜值。——注释结束】
+*id-expression* 对 §6.6 来说也变成新鲜值。——注释结束】
 
 (3) 否则，这个操作数必须是一个类型为 `T` 的新鲜值，定义见
-[§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
-(3)。被返回的对象会从这个新鲜值 move 构造出来。
+§6.6(1)。被返回的对象会从这个新鲜值 move 构造出来。
 
 (4) 如果既不满足 (2)，也不满足 (3)，程序就不合法（ill-formed）。
-
-(5) 一个类型为 class 类型 `T` 的调用表达式，以及一个满足
-[§6.6](02-ownership-and-move.md#66-class-类型的按值参数by-value-parameters-of-class-typeexpr.call)
-(3.3) 的形如 `T{a1, ..., an}` 的表达式，对本小节来说，都本身是一个类型为
-`T` 的新鲜值。
 
 ```cpp
 struct MoveOnly {
@@ -407,11 +460,11 @@ MoveOnly pass_through(MoveOnly param) {
 }
 
 std::string greet() {
-    return std::string{"hello"};   // OK：6.6(3.3), 6.7(3)
+    return std::string{"hello"};   // OK：6.6(1.3), 6.7(3)
 }
 
 Box make_box() {
-    return Box{42};                // OK：6.6(3.3), 6.7(3)
+    return Box{42};                // OK：6.6(1.3), 6.7(3)
 }
 ```
 
