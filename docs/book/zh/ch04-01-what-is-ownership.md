@@ -292,4 +292,4 @@ ticket
 
 ---
 
-[← 上一章：控制流](ch03-05-control-flow.md) · [目录](README.md)
+[← 上一章：控制流](ch03-05-control-flow.md) · [目录](README.md) · [下一章：引用与借用 →](ch04-02-references-and-borrowing.md)

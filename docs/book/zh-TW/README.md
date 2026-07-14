@@ -16,7 +16,7 @@
 
 - 理解所有權
   - [什麼是所有權？](ch04-01-what-is-ownership.md)
-  - 參照與借用
+  - [參照與借用](ch04-02-references-and-borrowing.md)
   - `std::span` 與其他非擁有視圖
 
 - 用 struct 與 class 組織相關資料

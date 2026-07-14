@@ -16,7 +16,7 @@
 
 - Understanding Ownership
   - [What Is Ownership?](ch04-01-what-is-ownership.md)
-  - References and Borrowing
+  - [References and Borrowing](ch04-02-references-and-borrowing.md)
   - `std::span` and Other Non-Owning Views
 
 - Using Structs and Classes to Structure Related Data
