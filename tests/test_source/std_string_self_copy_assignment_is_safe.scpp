@@ -1,0 +1,9 @@
+import std;
+
+int main() {
+    std::string text{"self"};
+    text = text;
+    text.append("!");
+    print_bool(text.equals("self!"));
+    return 0;
+}

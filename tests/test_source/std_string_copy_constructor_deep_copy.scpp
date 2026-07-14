@@ -1,0 +1,10 @@
+import std;
+
+int main() {
+    std::string original{"hi"};
+    std::string copy{original};
+    copy.append(" there");
+    print_bool(original.equals("hi"));
+    print_bool(copy.equals("hi there"));
+    return 0;
+}

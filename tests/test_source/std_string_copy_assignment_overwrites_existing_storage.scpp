@@ -1,0 +1,11 @@
+import std;
+
+int main() {
+    std::string source{"hi"};
+    std::string target{"bye"};
+    target = source;
+    target.append("!");
+    print_bool(source.equals("hi"));
+    print_bool(target.equals("hi!"));
+    return 0;
+}
