@@ -31,6 +31,7 @@ is still designed (see the book) but not yet formalized in this document.
 13. [Function template argument deduction](08-function-template-argument-deduction.md)
 14. [Enumeration conversions](09-enumeration-conversions.md)
 8. [Iteration statements](10-iteration-statements.md)
+11. [Inheritance and Interfaces](11-inheritance-and-interfaces.md)
 
 ## File-Format Specifications
 

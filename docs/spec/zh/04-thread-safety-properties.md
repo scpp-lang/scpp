@@ -38,7 +38,9 @@ thread-movable。
 thread-shareable。
 
 【注：用在参数形式时，这个 attribute 约束的是调用点处参数类型的使用；
-用在 class/struct 形式时，它是对被声明类型本身的显式覆盖。——注释结束】
+用在 class/struct 形式时，它是对被声明类型本身的显式覆盖。如果被声明的
+类型是 [§11](11-inheritance-and-interfaces.md) 下的接口，那么同一个 class-level
+attribute 还可能按 8.5 额外施加对实现者的要求。——注释结束】
 
 ## 8.2 结构化推导（Structural derivation）[meta.thread.struct]
 
@@ -185,6 +187,66 @@ class [[scpp::thread_movable_if(
 
 在这两个例子里，这个 attribute 的使用方式，都跟它在任何别的用户声明
 class 模板上的用法完全一样。——注释结束】
+
+
+## 8.5 接口契约与接口类型形参 [dcl.attr.scpp.thread.interface]
+
+(1) 本小节适用于这样一种接口：它是一个按
+[§11.2](11-inheritance-and-interfaces.md)
+用 `[[scpp::interface]]` 声明出来的 class。
+
+(2) 如果 `[[scpp::thread_movable]]` 附着于某个接口 `I` 的声明，那么除了
+按 8.1(5) 让 `I` 自己成为 thread-movable 之外，任何完整对象类型直接或传递
+地继承了 `I` 的非接口 class 或 struct `D`，也都必须是 thread-movable。
+如果 `D` 不是 thread-movable，那么 `D` 就是不合法的。
+
+(3) 如果 `[[scpp::thread_shareable]]` 附着于某个接口 `I` 的声明，那么除了
+按 8.1(6) 让 `I` 自己成为 thread-shareable 之外，任何完整对象类型直接或传递
+地继承了 `I` 的非接口 class 或 struct `D`，也都必须是 thread-shareable。
+如果 `D` 不是 thread-shareable，那么 `D` 就是不合法的。
+
+(4) 如果某个非接口 class 或 struct 直接或传递地继承了多个接口，而这些接口
+都按 (2) 或 (3) 带有要求，那么所有这些要求都按合取（conjunction）的方式同
+时生效。只有在这个 class 或 struct 满足每一条继承来的要求时，它才是合法的。
+
+(5) (2)-(4) 所要求的检查，都在该非接口 class 或 struct 的完整定义处执行；
+判断时使用这个类型自己在 8.1、8.2 和 8.4 下被确定出来的 thread-movable 与
+thread-shareable 值。
+
+(6) 如果一个接口类型的形参被标注了 `[[scpp::thread_movable]]` 或
+`[[scpp::thread_shareable]]`，那么 8.1(3) 与 8.1(4) 原样适用。在每个调用点
+提供的实际实参类型，都必须满足所请求的性质；这条规则与该接口自己是否按
+(2) 或 (3) 声明了 class-level 要求无关。
+
+【注：(2)-(5) 提供的是“在接口定义处声明、对全部实现者生效”的 blanket
+contract；而 (6) 提供的则是“某个特定形参在某个特定使用点所要求”的约束。
+这两种机制是互补关系，而不是互斥关系。——注释结束】
+
+```cpp
+class [[scpp::interface, scpp::thread_shareable]] IView {
+public:
+    virtual ~IView() = default;
+    virtual void render() const = 0;
+};
+
+class GoodView : public virtual IView {
+public:
+    ~GoodView() override = default;
+    void render() const override {}
+};
+
+class BadView : public virtual IView {
+    int* raw_{};
+public:
+    ~BadView() override = default;
+    void render() const override {}
+};  // 不合法：违反了从 IView 继承来的 thread-shareable 契约
+
+void publish([[scpp::thread_shareable]] IView& view);
+
+GoodView good{};
+publish(good);   // 合法
+```
 
 ---
 

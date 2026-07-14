@@ -41,7 +41,10 @@ result structural derivation would otherwise produce for that property.
 
 [Note: in the parameter form, the attribute constrains a use of the
 parameter's type at a call site; in the class/struct form, it is an
-explicit override on the declared type itself. — end note]
+explicit override on the declared type itself. If the declared type is
+an interface under [§11](11-inheritance-and-interfaces.md), the same
+class-level attribute may additionally impose implementor requirements
+under 8.5. — end note]
 
 ## 8.2 Structural derivation [meta.thread.struct]
 
@@ -194,6 +197,72 @@ class [[scpp::thread_movable_if(
 
 In both examples, the attribute is used exactly as it may be on any
 other user-declared class template. — end note]
+
+
+## 8.5 Interface contracts and interface-typed parameters [dcl.attr.scpp.thread.interface]
+
+(1) This subclause applies where an interface is a class declared with
+`[[scpp::interface]]` under [§11.2](11-inheritance-and-interfaces.md).
+
+(2) If `[[scpp::thread_movable]]` appertains to the declaration of an
+interface `I`, then, in addition to making `I` itself thread-movable
+under 8.1(5), every non-interface class or struct `D` whose complete
+object type directly or transitively inherits from `I` shall be
+thread-movable. If `D` is not thread-movable, `D` is ill-formed.
+
+(3) If `[[scpp::thread_shareable]]` appertains to the declaration of an
+interface `I`, then, in addition to making `I` itself
+thread-shareable under 8.1(6), every non-interface class or struct `D`
+whose complete object type directly or transitively inherits from `I`
+shall be thread-shareable. If `D` is not thread-shareable, `D` is
+ill-formed.
+
+(4) If a non-interface class or struct directly or transitively inherits
+from more than one interface carrying requirements under (2) or (3),
+all such requirements apply conjunctively. The class or struct is
+well-formed only if it satisfies every inherited requirement.
+
+(5) The checks required by (2)-(4) are performed at the complete
+definition of the non-interface class or struct, using that type's own
+thread-movable and thread-shareable values as determined under 8.1,
+8.2, and 8.4.
+
+(6) If a parameter of interface type is annotated with
+`[[scpp::thread_movable]]` or `[[scpp::thread_shareable]]`, 8.1(3) and
+8.1(4) apply unchanged. The actual argument type supplied at each call
+site shall satisfy the requested property, whether or not the interface
+itself declares a class-level requirement under (2) or (3).
+
+[Note: (2)-(5) provide a declaration-time blanket contract on every
+implementor of an interface. Rule (6) is instead a per-use-site
+constraint on a particular parameter. The two mechanisms are
+complementary, not mutually exclusive. — end note]
+
+```cpp
+class [[scpp::interface, scpp::thread_shareable]] IView {
+public:
+    virtual ~IView() = default;
+    virtual void render() const = 0;
+};
+
+class GoodView : public virtual IView {
+public:
+    ~GoodView() override = default;
+    void render() const override {}
+};
+
+class BadView : public virtual IView {
+    int* raw_{};
+public:
+    ~BadView() override = default;
+    void render() const override {}
+};  // ill-formed: violates IView's inherited thread-shareable contract
+
+void publish([[scpp::thread_shareable]] IView& view);
+
+GoodView good{};
+publish(good);   // OK
+```
 
 ---
 
