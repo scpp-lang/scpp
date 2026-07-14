@@ -969,6 +969,7 @@ private:
             case ExprKind::Move:
             case ExprKind::New:
             case ExprKind::IntegerLiteral:
+            case ExprKind::FloatLiteral:
             case ExprKind::BoolLiteral:
             case ExprKind::CharLiteral:
             case ExprKind::StringLiteral:
@@ -990,6 +991,16 @@ private:
             return types_equal(*arg_type->pointee, expected_type);
         }
         return false;
+    }
+
+    bool const_reference_binds_materialized_temporary(const Expr& arg, const Type& param_type) {
+        if (param_type.kind != TypeKind::Reference || param_type.is_rvalue_ref || param_type.is_mutable_ref ||
+            param_type.pointee == nullptr) {
+            return false;
+        }
+        if (produces_rvalue_of_type(arg, *param_type.pointee)) return true;
+        return param_type.pointee->kind == TypeKind::Named && find_class_def(param_type.pointee->name) != nullptr &&
+               find_single_argument_converting_constructor(param_type.pointee->name, arg) != nullptr;
     }
 
     [[nodiscard]] TargetLayoutInfo current_target_layout_info() const {
@@ -1052,7 +1063,12 @@ private:
         std::vector<const Function*> matches;
         for (const Function& fn : program_->functions) {
             if (fn.name != class_name + "_new" || fn.params.size() != 2) continue;
-            if (fn.eval_mode != FunctionEvalMode::Consteval) continue;
+            const Type& ctor_param_type = fn.params[1].type;
+            if (types_equal(ctor_param_type, named_type(class_name)) ||
+                (ctor_param_type.kind == TypeKind::Reference && ctor_param_type.pointee != nullptr &&
+                 types_equal(*ctor_param_type.pointee, named_type(class_name)))) {
+                continue;
+            }
             if (argument_matches_parameter(arg, fn.params[1].type)) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
@@ -1080,16 +1096,17 @@ private:
             return produces_rvalue_of_type(arg, *param_type.pointee);
         }
         if (param_type.kind == TypeKind::Reference) {
-            // ch05 §5.x: a *const* reference may bind directly to a
-            // fresh rvalue argument -- exactly like the `T&&` case just
-            // above, just gated to only a non-mutable reference (real
-            // C++ forbids binding a *mutable* lvalue reference to a
-            // temporary).
-            if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee)) {
+            // ch05 §5.x: a *const* reference may bind either to a
+            // genuine rvalue of the exact pointee type, or to a freshly
+            // materialized temporary built through a converting
+            // constructor such as `std::string{"..."}` from a string
+            // literal.
+            if (const_reference_binds_materialized_temporary(arg, param_type)) {
                 return true;
             }
             if (arg.kind == ExprKind::Move || arg.kind == ExprKind::New ||
-                arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::BoolLiteral ||
+                arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
+                arg.kind == ExprKind::BoolLiteral ||
                 arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
                 return false;
             }
@@ -2968,6 +2985,20 @@ private:
         return temp;
     }
 
+    llvm::Value* codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type) {
+        if (produces_rvalue_of_type(expr, target_type)) {
+            return codegen_materialize_rvalue_reference_source(expr);
+        }
+        llvm::Type* llvm_type = to_llvm_type(target_type);
+        llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "constreftmp");
+        if (target_type.kind == TypeKind::Named && find_class_def(target_type.name) != nullptr) {
+            create_store(codegen_class_value_for_boundary(expr, target_type), temp, alignment_for_type(target_type));
+        } else {
+            create_store(codegen_value_for_target(expr, target_type), temp, alignment_for_type(target_type));
+        }
+        return temp;
+    }
+
     void codegen_copy_construct_class(llvm::Value* dest_ptr, llvm::Value* src_ptr, const std::string& class_name) {
         if (const Function* user_ctor = find_user_declared_copy_ctor_ast(class_name)) {
             llvm::Function* ctor = module_->getFunction(overload_names_.at(user_ctor));
@@ -3013,8 +3044,8 @@ private:
         }
         validate_reference_pointee(*target.type.pointee);
         llvm::Value* referent_addr =
-            !target.type.is_mutable_ref && produces_rvalue_of_type(expr, *target.type.pointee)
-                ? codegen_materialize_rvalue_reference_source(expr)
+            const_reference_binds_materialized_temporary(expr, target.type)
+                ? codegen_materialize_const_reference_source(expr, *target.type.pointee)
                 : codegen_lvalue(expr).ptr;
         create_store(referent_addr, target.ptr, target.alignment);
     }
@@ -3219,15 +3250,16 @@ private:
             // (real C++ itself forbids binding a *mutable* lvalue
             // reference to a temporary).
             bool param_is_const_reference_bound_to_rvalue =
-                param_is_reference && !param_is_rvalue_reference && !ref_param_type->is_mutable_ref &&
-                produces_rvalue_of_type(*args[i], *ref_param_type->pointee);
+                param_is_reference && const_reference_binds_materialized_temporary(*args[i], *ref_param_type);
             if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
                 // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the move
                 // checker has already verified this argument produces a
                 // genuine rvalue (produces_rvalue_of_type), which may not
                 // itself be an addressable place (a literal, a fresh
                 // std::make_unique<T>(...)/call result, ...).
-                result.push_back(codegen_materialize_rvalue_reference_source(*args[i]));
+                result.push_back(param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(*args[i])
+                                                           : codegen_materialize_const_reference_source(
+                                                                 *args[i], *ref_param_type->pointee));
             } else if (param_is_reference) {
                 // Bind the reference parameter to the argument's address
                 // rather than passing its value, exactly like a local
@@ -3264,10 +3296,11 @@ private:
             const Type* ref_param_type = param_is_reference ? &param_types[i] : nullptr;
             bool param_is_rvalue_reference = param_is_reference && ref_param_type->is_rvalue_ref;
             bool param_is_const_reference_bound_to_rvalue =
-                param_is_reference && !param_is_rvalue_reference && !ref_param_type->is_mutable_ref &&
-                produces_rvalue_of_type(*args[i], *ref_param_type->pointee);
+                param_is_reference && const_reference_binds_materialized_temporary(*args[i], *ref_param_type);
             if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
-                result.push_back(codegen_materialize_rvalue_reference_source(*args[i]));
+                result.push_back(param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(*args[i])
+                                                           : codegen_materialize_const_reference_source(
+                                                                 *args[i], *ref_param_type->pointee));
             } else if (param_is_reference) {
                 result.push_back(codegen_lvalue(*args[i]).ptr);
             } else if (i < param_types.size()) {

@@ -1,0 +1,11 @@
+void mutate(int& x) {
+    x = 7;
+    return;
+}
+
+int main() {
+    int value = 1;
+    const int& alias = value;
+    mutate(value);
+    return alias;
+}

@@ -1076,6 +1076,16 @@ struct NodiscardInfo {
     return types_equal(arg_type, param_type);
 }
 
+[[nodiscard]] bool const_reference_binds_materialized_temporary(const Expr& arg, const Type& param_type,
+                                                                const Body& body, const Signatures& signatures) {
+    if (!is_reference(param_type) || param_type.is_rvalue_ref || param_type.is_mutable_ref || param_type.pointee == nullptr) {
+        return false;
+    }
+    if (produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) return true;
+    return is_named_class_type(*param_type.pointee, body) &&
+           find_single_argument_converting_constructor_signature(*param_type.pointee, arg, body, signatures) != nullptr;
+}
+
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
                                                 const Signatures& signatures) {
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
@@ -1085,11 +1095,11 @@ struct NodiscardInfo {
         return produces_rvalue_of_type(arg, *param_type.pointee, body, signatures);
     }
     if (is_reference(param_type)) {
-        // ch05 §5.x: a *const* reference may bind directly to a fresh
-        // rvalue argument -- exactly like the `T&&` case just above,
-        // just gated to only a non-mutable reference (real C++ forbids
-        // binding a *mutable* lvalue reference to a temporary).
-        if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
+        // ch05 §5.x: a *const* reference may bind either to a genuine
+        // rvalue of the exact pointee type, or to a freshly
+        // materialized temporary built from a converting constructor
+        // such as `std::string{"..."}` from a string literal.
+        if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) {
             return true;
         }
         // A bare lvalue-like place (Identifier/Member/Subscript/a
@@ -1132,6 +1142,12 @@ struct NodiscardInfo {
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
         if (candidate.param_types.size() != 2) continue;
+        const Type& ctor_param_type = candidate.param_types[1];
+        if (types_equal(ctor_param_type, class_type) ||
+            (is_reference(ctor_param_type) && ctor_param_type.pointee != nullptr &&
+             types_equal(*ctor_param_type.pointee, class_type))) {
+            continue;
+        }
         if (argument_matches_parameter(arg, candidate.param_types[1], body, signatures)) return &candidate;
     }
     return nullptr;
@@ -2874,8 +2890,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     // effects (e.g. std::move's move-out bookkeeping) and return, skipping
     // resolve_borrow_source_root/every borrow-conflict check below
     // entirely (there is no "root" at all for a temporary).
-    if (!param_type.is_mutable_ref && produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
-        apply_expr(arg, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+    if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) {
+        apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors);
         return;
     }
 
@@ -3901,8 +3917,7 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     // no "root" to track in state.borrows/state.ref_targets at all --
     // just evaluate the initializer for its own side effects and mark
     // `stmt.local` initialized.
-    if (stmt.type.kind == TypeKind::Reference && !stmt.type.is_mutable_ref &&
-        produces_rvalue_of_type(*stmt.expr, *stmt.type.pointee, body, signatures)) {
+    if (const_reference_binds_materialized_temporary(*stmt.expr, stmt.type, body, signatures)) {
         apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body, signatures,
                    report_errors);
         state.locals[stmt.local] = LocalState::Initialized;
