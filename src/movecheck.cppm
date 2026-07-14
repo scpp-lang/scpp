@@ -1200,6 +1200,10 @@ struct NodiscardInfo {
         const FunctionSignature& only = it->second[0];
         if (!compile_time_dependency_visible_in_body(only, body)) return nullptr;
         if (callee.param_offset == 1 && call_expr.lhs) {
+            if (!only.param_types.empty() && is_reference(only.param_types[0]) && only.param_types[0].is_mutable_ref &&
+                is_read_only_reachable(*call_expr.lhs, body, signatures)) {
+                return nullptr;
+            }
             if (!receiver_matches_method_qualifier(*call_expr.lhs, only, body, signatures)) return nullptr;
         }
         return &only;
@@ -1276,6 +1280,32 @@ struct NodiscardInfo {
         }
     }
     return unique_best ? best : matches[0];
+}
+
+[[nodiscard]] const FunctionSignature* find_const_blocked_method_candidate(const Expr& call_expr,
+                                                                           const CalleeSignature& callee,
+                                                                           const Body& body,
+                                                                           const Signatures& signatures) {
+    if (callee.param_offset != 1 || !call_expr.lhs || !is_read_only_reachable(*call_expr.lhs, body, signatures)) {
+        return nullptr;
+    }
+    auto it = signatures.find(callee.key);
+    if (it == signatures.end()) return nullptr;
+    for (const FunctionSignature& candidate : it->second) {
+        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+        if (candidate.param_types.size() != call_expr.args.size() + 1) continue;
+        if (!is_reference(candidate.param_types[0]) || candidate.param_types[0].is_rvalue_ref ||
+            !candidate.param_types[0].is_mutable_ref) {
+            continue;
+        }
+        if (!receiver_matches_method_qualifier(*call_expr.lhs, candidate, body, signatures)) continue;
+        bool all_match = true;
+        for (size_t i = 0; all_match && i < call_expr.args.size(); i++) {
+            all_match = argument_matches_parameter(*call_expr.args[i], candidate.param_types[i + 1], body, signatures);
+        }
+        if (all_match) return &candidate;
+    }
+    return nullptr;
 }
 
 [[nodiscard]] Type function_pointer_type_from_signature(const FunctionSignature& sig) {
@@ -1456,8 +1486,9 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
     switch (expr.kind) {
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
-            return it != body.local_types.end() && (is_reference(it->second) || is_span(it->second)) &&
-                   !it->second.is_mutable_ref;
+            return it != body.local_types.end() &&
+                   (body.const_locals.contains(expr.name) ||
+                    ((is_reference(it->second) || is_span(it->second)) && !it->second.is_mutable_ref));
         }
         case ExprKind::Member:
         case ExprKind::Subscript:
@@ -2738,6 +2769,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
             if (it == body.local_types.end()) return false; // unknown name: left to codegen's own check
+            if (body.const_locals.contains(expr.name)) return true;
             if (is_reference(it->second) || is_span(it->second)) {
                 return !it->second.is_mutable_ref;
             }
@@ -2996,6 +3028,11 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     // rejected itself (left to codegen's own "call to unknown function"
     // check; preserved here unchanged).
     if (report_errors && name_it != signatures.end() && sig == nullptr) {
+        if (find_const_blocked_method_candidate(expr, callee, body, signatures) != nullptr) {
+            throw DataflowError("cannot call non-const member function '" + callee_display +
+                                    "' through a read-only (const) receiver",
+                state.current_loc);
+        }
         throw DataflowError("no overload of '" + expr.name +
                              "' matches these argument types (spec ch05.10 -- overload resolution is exact "
                              "type match only; an explicit cast may be required)",
@@ -4716,6 +4753,10 @@ StmtPtr clone_stmt(const Stmt& stmt) {
         for (const Function& fn : program.functions) {
             if (fn.name != method_name || fn.params.empty()) continue;
             if (fn.params.size() != req.arg_types.size() + 1) continue;
+            if (concept_def.requires_param_is_const &&
+                (!is_reference(fn.params[0].type) || fn.params[0].type.is_mutable_ref)) {
+                continue;
+            }
             bool args_match = true;
             for (size_t i = 0; args_match && i < req.arg_types.size(); i++) {
                 args_match = types_equal(fn.params[i + 1].type, req.arg_types[i]);

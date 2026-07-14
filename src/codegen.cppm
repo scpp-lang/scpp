@@ -289,6 +289,7 @@ private:
     struct LocalSlot {
         llvm::AllocaInst* alloca;
         Type type;
+        bool is_const = false;
         // spec §6.4: non-null only for a class-typed local whose own
         // class has a destructor (see create_moved_flag_if_has_destructor)
         // -- an extra `i1` slot, initialized false at declaration, set
@@ -1123,7 +1124,7 @@ private:
             case ExprKind::Identifier: {
                 auto it = locals_.find(expr.name);
                 if (it == locals_.end()) return false;
-                return it->second.type.kind == TypeKind::Reference && !it->second.type.is_mutable_ref;
+                return it->second.is_const || (it->second.type.kind == TypeKind::Reference && !it->second.type.is_mutable_ref);
             }
             case ExprKind::Member:
             case ExprKind::Subscript:
@@ -1189,6 +1190,10 @@ private:
         if (candidates.empty()) return nullptr;
         if (candidates.size() == 1) {
             if (param_offset == 1 && receiver_expr != nullptr) {
+                if (candidates[0]->params.size() > 0 && candidates[0]->params[0].type.kind == TypeKind::Reference &&
+                    candidates[0]->params[0].type.is_mutable_ref && !receiver_is_mutable) {
+                    return nullptr;
+                }
                 if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) return nullptr;
             }
             return candidates[0];
@@ -1219,10 +1224,6 @@ private:
         // parameters (including `this`) among positions where the
         // argument/receiver is itself a mutable place. Falls back to the
         // first match if that still doesn't produce a unique winner.
-        auto is_read_only_arg = [&](const Expr& arg) {
-            std::optional<Type> t = infer_type(arg);
-            return t.has_value() && t->kind == TypeKind::Reference && !t->is_mutable_ref;
-        };
         auto mutable_ref_score = [&](const Function* fn) {
             int score = 0;
             if (param_offset == 1 && fn->params[0].type.is_mutable_ref && receiver_is_mutable) score++;
@@ -1235,8 +1236,7 @@ private:
             }
             for (size_t i = 0; i < args.size(); i++) {
                 const Type& param_type = fn->params[i + param_offset].type;
-                if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref &&
-                    !is_read_only_arg(*args[i])) {
+                if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref && !is_read_only_place(*args[i])) {
                     score++;
                 }
             }
@@ -2374,6 +2374,7 @@ private:
                         create_entry_block_alloca(llvm::PointerType::getUnqual(*context_), stmt.var_name);
                     builder_->CreateStore(referent_addr, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
@@ -2411,6 +2412,7 @@ private:
                     llvm::AllocaInst* slot = create_entry_block_alloca(span_type, stmt.var_name);
                     builder_->CreateStore(span_value, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
@@ -2445,6 +2447,7 @@ private:
                     llvm::AllocaInst* closure_ptr = create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name);
                     codegen_construct_lambda(*stmt.init, closure_ptr);
                     locals_[stmt.var_name] = LocalSlot{closure_ptr, stmt.type};
+                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     maybe_emit_local_debug_decl(stmt.var_name, stmt.type, closure_ptr, stmt.loc);
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
@@ -2469,6 +2472,7 @@ private:
                     // Named-type VarDecl already does above.
                     zero_initialize_storage(slot, stmt.type);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     if (stmt.type.kind == TypeKind::Named) {
                         locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                     }
@@ -2549,6 +2553,7 @@ private:
                             codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name);
                         }
                         locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                        locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                         locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                         maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
                         if (!scope_stack_.empty()) {
@@ -2575,6 +2580,7 @@ private:
                     zero_initialize_storage(slot, stmt.type);
                 }
                 locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                 if (stmt.type.kind == TypeKind::Named) {
                     locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                 }

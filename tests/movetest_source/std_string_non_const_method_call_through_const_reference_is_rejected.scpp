@@ -1,0 +1,12 @@
+import std;
+
+void mutate(const std::string& text) {
+    text.append("!");
+    return;
+}
+
+int main() {
+    std::string s{"x"};
+    mutate(s);
+    return 0;
+}

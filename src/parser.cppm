@@ -3446,14 +3446,12 @@ private:
         // list: exactly one parameter's declared type must be
         // (optionally const-qualified) the template parameter itself --
         // e.g. `const T& t` -- identifying it as the constrained
-        // placeholder (def.requires_param_name), with its const-ness
-        // driving the witness methods' own `this` mutability (mirroring
-        // make_this_param). Every other parameter is an ordinary,
+        // placeholder (def.requires_param_name). Every other parameter is
+        // an ordinary,
         // already-declared concrete type (e.g. `int x`), tracked only
         // transiently to resolve a requirement's own argument types.
         std::unordered_map<std::string, Type> helper_param_types;
         bool found_placeholder = false;
-        bool placeholder_is_const = false;
         if (!check(TokenKind::RParen)) {
             do {
                 size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
@@ -3467,11 +3465,11 @@ private:
                                           "the constrained type '" +
                                               template_param_name + "'");
                     }
-                    placeholder_is_const = match(TokenKind::KwConst);
+                    def.requires_param_is_const = match(TokenKind::KwConst);
                     advance(); // the template parameter name itself (e.g. "T")
                     match(TokenKind::Amp); // optional trailing '&' -- ref-ness itself
-                                            // doesn't affect witness synthesis, only
-                                            // const-ness does
+                                            // doesn't affect this v0.1
+                                            // concept model
                     def.requires_param_name =
                         std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
                     found_placeholder = true;
@@ -3516,7 +3514,18 @@ private:
             fn.member_owner_class = def.name;
             fn.return_type =
                 req.has_return_constraint ? req.return_type : named_type("void");
-            fn.params.push_back(make_this_param(def.name, placeholder_is_const));
+            // The witness class exists only for one-time abstract body
+            // checking of a constrained generic before monomorphization.
+            // A `requires(T t) { t.get(); }` simple requirement does not
+            // itself guarantee const-callability, but real C++ still
+            // permits a generic body to compile and later lets the
+            // concrete instantiation decide whether a `const` access path
+            // is valid. Model that the same way here by giving the witness
+            // the read-only-capable shape; concrete monomorphized clones
+            // are still checked again against the real type and will
+            // reject an actually non-const-only method when instantiated
+            // through a const access path.
+            fn.params.push_back(make_this_param(def.name, /*is_const=*/true));
             for (size_t i = 0; i < req.arg_types.size(); i++) {
                 Param p;
                 p.type = req.arg_types[i];

@@ -1,0 +1,29 @@
+class Counter {
+private:
+    int value{};
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    void bump() {
+        this->value = this->value + 1;
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+};
+
+void mutate(const Counter* c) {
+    [[scpp::unsafe]] {
+        c->bump();
+    }
+    return;
+}
+
+int main() {
+    Counter c{0};
+    mutate(&c);
+    return c.get();
+}

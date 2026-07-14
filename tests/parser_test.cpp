@@ -2175,6 +2175,8 @@ void test_concept_simple_direct_invocation_requirement_synthesizes_call_method()
     const scpp::ConceptDef& def = program.concepts[0];
     expect(def.requires_param_name == "f",
            "concept_simple_direct_invocation_requirement_synthesizes_call_method: requires_param_name should be 'f'");
+    expect(!def.requires_param_is_const,
+           "concept_simple_direct_invocation_requirement_synthesizes_call_method: requires parameter should not be const");
     expect(def.requirements.size() == 1,
            "concept_simple_direct_invocation_requirement_synthesizes_call_method: expected 1 requirement");
     expect(def.requirements[0].method_name == "call",
@@ -2194,9 +2196,10 @@ void test_concept_simple_direct_invocation_requirement_synthesizes_call_method()
             expect(fn.params.size() == 2,
                    "concept_simple_direct_invocation_requirement_synthesizes_call_method: expected 2 params "
                    "(this + x)");
-            expect(fn.params[0].type.is_mutable_ref,
-                   "concept_simple_direct_invocation_requirement_synthesizes_call_method: 'this' should be mutable "
-                   "('T f' has no const)");
+            expect(!fn.params[0].type.is_mutable_ref,
+                   "concept_simple_direct_invocation_requirement_synthesizes_call_method: witness 'this' should be "
+                   "read-only-capable so later concrete instantiations, not the abstract witness, decide const "
+                   "receiver validity");
             expect(is_named_type(fn.params[1].type, "int"),
                    "concept_simple_direct_invocation_requirement_synthesizes_call_method: param 1 should be 'int'");
         }

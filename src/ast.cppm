@@ -1187,6 +1187,12 @@ struct ConceptDef {
     // "t" in `requires(const T& t) { ... }` -- every requirement's
     // method calls are written against this name.
     std::string requires_param_name;
+    // True exactly when the requires-expression declared that placeholder
+    // as `const` (e.g. `requires(const T& t) { ... }`) rather than a
+    // mutable placeholder (`requires(T t) { ... }`). Used when deciding
+    // whether a concrete candidate method really satisfies the concept's
+    // own requirement on a const receiver.
+    bool requires_param_is_const = false;
     std::vector<ConceptRequirement> requirements;
     // See Function::namespace_path/is_exported/owning_module above --
     // same meaning, applied to a concept declaration (ch11 §11.3's

@@ -1,0 +1,24 @@
+class Counter {
+private:
+    int value{};
+public:
+    Counter(int start) {
+        this->value = start;
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+    int get() {
+        this->value = this->value + 1;
+        return this->value;
+    }
+};
+
+int main() {
+    Counter mutable_counter{1};
+    const Counter frozen{5};
+    print_int(mutable_counter.get());
+    print_int(frozen.get());
+    return 0;
+}
