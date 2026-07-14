@@ -13,7 +13,7 @@ private:
 
 class Dog : public Animal {
 public:
-    Dog(int legs) { this.legs = legs; return; }
+    Dog(int legs) : Animal{legs} { return; }
     int bark_count() const { return 3; }
 };
 

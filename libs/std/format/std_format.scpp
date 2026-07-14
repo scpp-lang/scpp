@@ -62,6 +62,7 @@ class __format_validator;
 template<>
 class __format_validator<> {
 public:
+    consteval __format_validator() { return; }
     consteval __format_validator(const char* s, int i) {
         while (s[i] != '\0') {
             if (s[i] == '{') {
@@ -96,6 +97,7 @@ public:
 template<typename Head, typename... Tail>
 class __format_validator<Head, Tail...> : private std::__format_validator<Tail...> {
 public:
+    consteval __format_validator() { return; }
     consteval __format_validator(const char* s, int i) {
         std::__format_arg_supported<Head> ok{};
         int next = i;
@@ -144,6 +146,7 @@ class format_string<> {
 public:
     const char* text_{};
 
+    consteval format_string() { return; }
     consteval format_string(const char* s) {
         this->text_ = s;
         std::__format_validator<> validator{s, 0};
@@ -160,6 +163,7 @@ class format_string<Head, Tail...> : private std::format_string<Tail...> {
 public:
     const char* text_{};
 
+    consteval format_string() { return; }
     consteval format_string(const char* s) {
         this->text_ = s;
         std::__format_validator<Head, Tail...> validator{s, 0};

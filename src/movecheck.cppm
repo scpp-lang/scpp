@@ -577,12 +577,54 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
            this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
 }
 
+[[nodiscard]] const ClassDef* find_class_def(const Program& program, const std::string& class_name) {
+    for (const ClassDef& def : program.classes) {
+        if (def.name == class_name) return &def;
+    }
+    return nullptr;
+}
+
+[[nodiscard]] bool class_has_any_constructor(const std::string& class_name, const Program& program) {
+    return std::any_of(program.functions.begin(), program.functions.end(), [&](const Function& fn) {
+        return is_constructor_function(fn) && fn.member_owner_class == class_name;
+    });
+}
+
+[[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name) {
+    size_t scope = class_name.rfind("::");
+    std::string_view tail = scope == std::string_view::npos ? class_name : class_name.substr(scope + 2);
+    size_t dot = tail.find('.');
+    if (dot != std::string_view::npos) tail = tail.substr(0, dot);
+    return std::string(tail);
+}
+
+[[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def) {
+    if (def.base_class_name.empty()) return false;
+    return member_name == def.base_class_name || member_name == unqualified_template_base_name(def.base_class_name);
+}
+
+[[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def) {
+    if (def.base_class_name.empty()) return nullptr;
+    for (const MemberInitializer& init : ctor.member_initializers) {
+        if (names_direct_base(init.member_name, def)) return &init;
+    }
+    return nullptr;
+}
+
 void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def) {
     if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration) return;
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     std::unordered_set<std::string> direct_field_names;
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
+    const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
+    if (explicit_base_init != nullptr && direct_field_names.contains(def.base_class_name)) {
+        throw DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + def.base_class_name +
+                                "' in its member-initializer-list because that name matches both a direct field and "
+                                "the direct base class",
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+    }
     for (const MemberInitializer& init : ctor.member_initializers) {
+        if (&init == explicit_base_init) continue;
         if (!direct_field_names.contains(init.member_name)) {
             throw DataflowError("constructor for class '" + def.name + "' names unknown member '" + init.member_name +
                                     "' in its member-initializer-list",
@@ -609,6 +651,15 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
                             ctor.loc);
     }
 }
+
+[[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
+                                                                     const std::vector<ExprPtr>& ctor_args,
+                                                                     const Body& body, const Signatures& signatures);
+void ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
+                                                   const Body& body, const Signatures& signatures,
+                                                   const SourceLocation& loc, std::string_view context_message);
+void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
+                                              const Signatures& signatures);
 
 // spec §6.5(2): a class has an implicitly-defined copy constructor iff
 // it declares none of {copy constructor, copy assignment operator,
@@ -1296,6 +1347,122 @@ struct NodiscardInfo {
         }
     }
     return unique_best ? best : matches[0];
+}
+
+[[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
+                                                                     const std::vector<ExprPtr>& ctor_args,
+                                                                     const Body& body, const Signatures& signatures) {
+    auto it = signatures.find(class_name + "_new");
+    if (it == signatures.end()) return nullptr;
+    std::vector<const FunctionSignature*> matches;
+    for (const FunctionSignature& candidate : it->second) {
+        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+        if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+        bool all_match = true;
+        for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
+            all_match = argument_matches_parameter(*ctor_args[i], candidate.param_types[i + 1], body, signatures);
+        }
+        if (all_match) matches.push_back(&candidate);
+    }
+    if (matches.empty()) return nullptr;
+    if (matches.size() == 1) return matches[0];
+    auto mutable_ref_score = [&](const FunctionSignature& candidate) {
+        int score = 0;
+        for (size_t i = 0; i < ctor_args.size(); i++) {
+            const Type& param_type = candidate.param_types[i + 1];
+            if (is_reference(param_type) && param_type.is_mutable_ref &&
+                !is_read_only_reachable(*ctor_args[i], body, signatures)) {
+                score++;
+            }
+        }
+        return score;
+    };
+    const FunctionSignature* best = matches[0];
+    int best_score = mutable_ref_score(*best);
+    bool unique_best = true;
+    for (size_t i = 1; i < matches.size(); i++) {
+        int score = mutable_ref_score(*matches[i]);
+        if (score > best_score) {
+            best = matches[i];
+            best_score = score;
+            unique_best = true;
+        } else if (score == best_score) {
+            unique_best = false;
+        }
+    }
+    return unique_best ? best : matches[0];
+}
+
+void ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
+                                                   const Body& body, const Signatures& signatures,
+                                                   const SourceLocation& loc, std::string_view context_message) {
+    if (body.program == nullptr) return;
+    const ClassDef* class_def = find_class_def(*body.program, class_name);
+    if (class_def == nullptr) return;
+    if (class_has_any_constructor(class_name, *body.program)) {
+        static const std::vector<ExprPtr> no_ctor_args;
+        const FunctionSignature* sig = resolve_constructor_signature(class_name, no_ctor_args, body, signatures);
+        if (sig == nullptr) {
+            throw DataflowError(std::string(context_message) + ": base class '" + class_name +
+                                    "' has no default constructor; write an explicit base-class initializer",
+                                loc);
+        }
+        if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() &&
+            current_class != sig->member_owner_class) {
+            throw DataflowError(std::string(context_message) + ": base class '" + class_name +
+                                    "' default constructor is private; write an explicit base-class initializer "
+                                    "calling an accessible constructor",
+                                loc);
+        }
+        if (sig->is_unsafe) {
+            throw DataflowError(std::string(context_message) + ": base class '" + class_name +
+                                    "' default constructor is [[scpp::unsafe]]",
+                                loc);
+        }
+        return;
+    }
+    if (!class_def->base_class_name.empty()) {
+        ensure_implicit_default_construction_is_valid(class_def->base_class_name, current_class, body, signatures, loc,
+                                                      context_message);
+    }
+}
+
+void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
+                                              const Signatures& signatures) {
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.base_class_name.empty()) return;
+    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
+    const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
+    std::string context_message =
+        "constructor for class '" + def.name + "' must initialize its direct base class '" + def.base_class_name + "'";
+    if (explicit_base_init == nullptr) {
+        ensure_implicit_default_construction_is_valid(def.base_class_name, def.name, body, signatures, ctor.loc,
+                                                      context_message);
+        return;
+    }
+    const FunctionSignature* sig =
+        resolve_constructor_signature(def.base_class_name, explicit_base_init->initializer.brace_args, body, signatures);
+    if (sig == nullptr) {
+        if (body.program != nullptr && !class_has_any_constructor(def.base_class_name, *body.program) &&
+            explicit_base_init->initializer.brace_args.empty()) {
+            ensure_implicit_default_construction_is_valid(def.base_class_name, def.name, body, signatures,
+                                                          explicit_base_init->loc, context_message);
+            return;
+        }
+        throw DataflowError("base-class initializer for '" + def.base_class_name +
+                                "' does not match any constructor of that class",
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+    }
+    if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() && def.name != sig->member_owner_class) {
+        throw DataflowError("cannot call private constructor of base class '" + def.base_class_name +
+                                "' from derived class '" + def.name + "'",
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+    }
+    if (sig->is_unsafe) {
+        throw DataflowError("cannot call base class '" + def.base_class_name +
+                                "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
+                                "'[[scpp::unsafe]]'",
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+    }
 }
 
 [[nodiscard]] const FunctionSignature* find_const_blocked_method_candidate(const Expr& call_expr,
@@ -3222,6 +3389,13 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             if (matches.size() == 1) sig = matches[0];
         }
     }
+    if (sig == nullptr && report_errors && ctor_args.empty() && body.program != nullptr &&
+        !class_has_any_constructor(class_name, *body.program)) {
+        ensure_implicit_default_construction_is_valid(class_name, state.current_class, body, signatures,
+                                                     state.current_loc, "implicit default construction of class '" +
+                                                                            class_name + "' is ill-formed");
+        return;
+    }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
         !sig->member_owner_class.empty() && state.current_class != sig->member_owner_class) {
         throw DataflowError("cannot call private constructor of class '" + class_name +
@@ -4551,6 +4725,12 @@ void check_function(const Function& fn, const Program& program, const Signatures
     std::vector<DataflowState> in_states(n);
     std::vector<DataflowState> out_states(n);
     if (n > 0) in_states[0] = entry_state;
+
+    if (is_constructor_function(fn)) {
+        if (const ClassDef* owner = find_class_def(program, fn.member_owner_class)) {
+            validate_constructor_base_initialization(fn, *owner, body, signatures);
+        }
+    }
 
     std::deque<size_t> worklist;
     std::vector<bool> queued(n, false);
@@ -6149,14 +6329,11 @@ private:
     // in program_.functions, exactly like an ordinary, non-inherited
     // method -- no separate inheritance-aware fallback logic needed
     // anywhere else. A constructor/destructor ("_new"/"_delete") is
-    // never forwarded: a derived class with no constructor of its own
-    // already zero-initializes its whole (flattened, base-first)
-    // layout by default, which already correctly zero-initializes the
-    // inherited base fields too (see declare_class); synthesizing a
-    // same-named forwarding constructor would just redundantly re-run
-    // the base's own initialization a second time over the exact same
-    // `this`, and would get in the way of a derived class later
-    // defining its own constructor with a different parameter list.
+    // never forwarded here: constructor/base-destructor chaining is
+    // handled directly by dedicated validation/codegen logic instead,
+    // and synthesizing a same-named forwarding constructor would get in
+    // the way of a derived class later defining its own constructor with
+    // a different parameter list.
     void synthesize_inherited_method_forwards() {
         size_t original_class_count = program_.classes.size();
         for (size_t i = 0; i < original_class_count; i++) {

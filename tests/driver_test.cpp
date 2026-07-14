@@ -1086,12 +1086,14 @@ void run_generic_type_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
+            "    Box() { return; }\n"
             "    Box(const char* s) { return; }\n"
             "};\n"
             "\n"
             "template<typename Head, typename... Tail>\n"
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
+            "    Box() { return; }\n"
             "    Box(const char* s) { return; }\n"
             "};\n"
             "\n"
@@ -1401,12 +1403,14 @@ void run_generic_pack_deduction_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
+            "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) { return; }\n"
             "};\n"
             "\n"
             "template<typename Head, typename... Tail>\n"
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
+            "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) { return; }\n"
             "};\n"
             "\n"
@@ -1446,6 +1450,7 @@ void run_generic_pack_deduction_tests() {
             "class Box<> {\n"
             "public:\n"
             "    int value{};\n"
+            "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) : value{7} { return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
@@ -1454,6 +1459,7 @@ void run_generic_pack_deduction_tests() {
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
             "    int value{};\n"
+            "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) : value{9} { return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
@@ -2729,6 +2735,7 @@ void run_cli_extension_tests() {
                         "    export template<>\n"
                         "    class Box<> {\n"
                         "    public:\n"
+                        "        consteval Box() { return; }\n"
                         "        consteval Box(const char* s) { return; }\n"
                         "        int mark() const { return 7; }\n"
                         "    };\n"
@@ -2736,7 +2743,8 @@ void run_cli_extension_tests() {
                         "    export template<typename Head, typename... Tail>\n"
                         "    class Box<Head, Tail...> : private helper::Box<Tail...> {\n"
                         "    public:\n"
-                        "        consteval Box(const char* s) { helper::Box<Tail...> tail{s}; return; }\n"
+                        "        consteval Box() { return; }\n"
+                        "        consteval Box(const char* s) { return; }\n"
                         "        int mark() const { return 11; }\n"
                         "    };\n"
                         "}\n");
@@ -4616,6 +4624,175 @@ void run_for_loop_tests() {
     }
 }
 
+void run_inheritance_constructor_and_destructor_tests() {
+    {
+        std::string case_name = "derived_constructor_runs_base_constructor_first";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Base {\n"
+            "private:\n"
+            "    int value{};\n"
+            "public:\n"
+            "    Base() { print_int(100); this->value = 7; return; }\n"
+            "    int get() const { return this->value; }\n"
+            "};\n"
+            "class Derived : public Base {\n"
+            "public:\n"
+            "    Derived() { print_int(200); return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Derived d{};\n"
+            "    print_int(d.get());\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "100\n200\n7\n",
+               case_name + ": expected stdout '100\\n200\\n7\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "multilevel_inheritance_constructs_base_chain_in_order";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Grand {\n"
+            "public:\n"
+            "    Grand() { print_int(10); return; }\n"
+            "};\n"
+            "class Parent : public Grand {\n"
+            "public:\n"
+            "    Parent() { print_int(20); return; }\n"
+            "};\n"
+            "class Child : public Parent {\n"
+            "public:\n"
+            "    Child() { print_int(30); return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Child child{};\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "10\n20\n30\n",
+               case_name + ": expected stdout '10\\n20\\n30\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "explicit_base_initializer_invokes_nondefault_base_constructor";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Base {\n"
+            "private:\n"
+            "    int value{};\n"
+            "public:\n"
+            "    Base(int seed) { print_int(seed); this->value = seed; return; }\n"
+            "    int get() const { return this->value; }\n"
+            "};\n"
+            "class Derived : public Base {\n"
+            "public:\n"
+            "    Derived(int seed) : Base{seed} { print_int(seed + 1); return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Derived d{7};\n"
+            "    print_int(d.get());\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "7\n8\n7\n",
+               case_name + ": expected stdout '7\\n8\\n7\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "implicit_default_construction_without_derived_ctor_still_runs_base_ctor";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Base {\n"
+            "public:\n"
+            "    Base() { print_int(11); return; }\n"
+            "};\n"
+            "class Derived : public Base {\n"
+            "};\n"
+            "int main() {\n"
+            "    Derived d{};\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "11\n",
+               case_name + ": expected stdout '11\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "derived_destructor_runs_before_base_destructor";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Base {\n"
+            "public:\n"
+            "    Base() { print_int(1); return; }\n"
+            "    ~Base() { print_int(4); return; }\n"
+            "};\n"
+            "class Derived : public Base {\n"
+            "public:\n"
+            "    Derived() { print_int(2); return; }\n"
+            "    ~Derived() { print_int(3); return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Derived d{};\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "1\n2\n3\n4\n",
+               case_name + ": expected stdout '1\\n2\\n3\\n4\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "base_destructor_still_runs_without_derived_destructor";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Base {\n"
+            "public:\n"
+            "    ~Base() { print_int(9); return; }\n"
+            "};\n"
+            "class Derived : public Base {\n"
+            "};\n"
+            "int main() {\n"
+            "    Derived d{};\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "9\n",
+               case_name + ": expected stdout '9\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "missing_required_base_initializer_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            (void)compile_and_run(
+                "class Base {\n"
+                "public:\n"
+                "    Base(int seed) { return; }\n"
+                "};\n"
+                "class Derived : public Base {\n"
+                "public:\n"
+                "    Derived() { return; }\n"
+                "};\n"
+                "int main() {\n"
+                "    Derived d{};\n"
+                "    return 0;\n"
+                "}\n",
+                case_name);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected missing base initializer to be rejected");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -4646,6 +4823,7 @@ int main() {
     run_cli_extension_tests();
     run_brace_init_only_var_decl_tests();
     run_for_loop_tests();
+    run_inheritance_constructor_and_destructor_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

@@ -10,7 +10,7 @@ public:
 template<typename Head, typename... Tail>
 class Box<Head, Tail...> : private Box<Tail...> {
 public:
-    Box(const char* s) { return; }
+    Box(const char* s) : Box{s} { return; }
 };
 
 int main() {
