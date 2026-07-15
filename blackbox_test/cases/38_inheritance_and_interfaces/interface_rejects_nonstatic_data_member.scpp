@@ -1,0 +1,10 @@
+// spec §11.2(1): an interface may not declare any non-static data member.
+class [[scpp::interface]] IBadState {
+    int counter{};
+public:
+    virtual ~IBadState() = default;
+};
+
+int main() {
+    return 0;
+}

@@ -1,0 +1,27 @@
+// spec §8.5(3),(5): a shareable concrete implementor satisfies the inherited
+// interface contract and remains usable through that interface.
+class [[scpp::interface, scpp::thread_shareable]] IView {
+public:
+    virtual ~IView() = default;
+    virtual int render() const = 0;
+};
+
+class GoodView : public virtual IView {
+private:
+    int value{};
+public:
+    GoodView(int value_) : value{value_} {
+        return;
+    }
+
+    ~GoodView() override = default;
+
+    int render() const override {
+        return this->value;
+    }
+};
+
+int main() {
+    GoodView view{5};
+    return view.render();
+}

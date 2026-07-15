@@ -1,0 +1,14 @@
+// spec §11.2(5.3),(6): an interface type cannot be used as an array element
+// type.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+int main() {
+    IValue values[2];
+    return 0;
+}

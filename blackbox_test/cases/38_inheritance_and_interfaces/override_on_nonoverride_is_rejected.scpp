@@ -1,0 +1,22 @@
+// spec §11.5(5): `override` on a non-overriding declaration is ill-formed.
+class Base {
+public:
+    virtual ~Base() = default;
+
+    void run() {
+        return;
+    }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override = default;
+
+    void run() override {
+        return;
+    }
+};
+
+int main() {
+    return 0;
+}

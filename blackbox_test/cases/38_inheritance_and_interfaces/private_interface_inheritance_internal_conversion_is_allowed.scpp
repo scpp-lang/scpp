@@ -1,0 +1,28 @@
+// spec §11.3(5): private interface inheritance is still permitted, and
+// the corresponding derived-to-base conversion remains usable inside the
+// deriving class's own member functions.
+class [[scpp::interface]] IReader {
+public:
+    virtual ~IReader() = default;
+    virtual int read() = 0;
+};
+
+class SecretReader : private virtual IReader {
+public:
+    ~SecretReader() override = default;
+
+    int read() override {
+        return 9;
+    }
+
+    void expose_inside() {
+        IReader& base = *this;
+        return;
+    }
+};
+
+int main() {
+    SecretReader reader{};
+    reader.expose_inside();
+    return 0;
+}

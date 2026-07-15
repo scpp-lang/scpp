@@ -1,0 +1,10 @@
+// spec §11.5(2),(3): an interface is polymorphic if it declares a virtual
+// member, so it must declare an explicit virtual destructor.
+class [[scpp::interface]] IRunner {
+public:
+    virtual void run() = 0;
+};
+
+int main() {
+    return 0;
+}

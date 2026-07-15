@@ -1,0 +1,20 @@
+// spec §11.5(5): a declaration that truly overrides a base virtual function
+// is ill-formed unless it spells `override`.
+class [[scpp::interface]] IRunner {
+public:
+    virtual ~IRunner() = default;
+    virtual void run() = 0;
+};
+
+class Runner : public virtual IRunner {
+public:
+    ~Runner() override = default;
+
+    void run() {
+        return;
+    }
+};
+
+int main() {
+    return 0;
+}

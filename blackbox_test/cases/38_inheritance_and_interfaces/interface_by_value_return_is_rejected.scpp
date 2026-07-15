@@ -1,0 +1,16 @@
+// spec §11.2(5.7),(6): a function may not return an interface by value.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+IValue make_value() {
+    return IValue{};
+}
+
+int main() {
+    return 0;
+}

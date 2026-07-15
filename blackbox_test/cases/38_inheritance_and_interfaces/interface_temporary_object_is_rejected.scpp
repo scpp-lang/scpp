@@ -1,0 +1,17 @@
+// spec §11.2(5.5),(6): a temporary object of interface type may not be
+// formed, even for a simple by-reference call.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+int consume(IValue& value) {
+    return value.value();
+}
+
+int main() {
+    return consume(IValue{});
+}

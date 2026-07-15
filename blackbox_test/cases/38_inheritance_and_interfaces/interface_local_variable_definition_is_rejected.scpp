@@ -1,0 +1,14 @@
+// spec §11.2(5.1),(6): even a non-abstract interface cannot be formed as a
+// local object by value.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+int main() {
+    IValue value{};
+    return value.value();
+}

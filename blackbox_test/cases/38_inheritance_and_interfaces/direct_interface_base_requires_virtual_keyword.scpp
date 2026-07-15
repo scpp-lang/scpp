@@ -1,0 +1,20 @@
+// spec §11.3(1): every direct interface base must be inherited with
+// `virtual`.
+class [[scpp::interface]] IReader {
+public:
+    virtual ~IReader() = default;
+    virtual int read() = 0;
+};
+
+class FileReader : public IReader {
+public:
+    ~FileReader() override = default;
+    int read() override {
+        return 1;
+    }
+};
+
+int main() {
+    FileReader reader{};
+    return reader.read();
+}

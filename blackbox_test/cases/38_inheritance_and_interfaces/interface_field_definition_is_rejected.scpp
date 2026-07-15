@@ -1,0 +1,19 @@
+// spec §11.2(5.2),(6): an interface type may not appear as a non-static
+// data member, even when it has only default virtual implementations.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+class Holder {
+public:
+    virtual ~Holder() = default;
+    IValue value;
+};
+
+int main() {
+    return 0;
+}

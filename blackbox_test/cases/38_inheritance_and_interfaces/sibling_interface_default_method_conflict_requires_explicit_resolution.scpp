@@ -1,0 +1,27 @@
+// spec §11.4(3.1): two sibling interfaces providing same-signature default
+// virtuals are ambiguous until the derived class resolves them explicitly.
+class [[scpp::interface]] ILeftScore {
+public:
+    virtual ~ILeftScore() = default;
+    virtual int score() {
+        return 1;
+    }
+};
+
+class [[scpp::interface]] IRightScore {
+public:
+    virtual ~IRightScore() = default;
+    virtual int score() {
+        return 2;
+    }
+};
+
+class Tool : public virtual ILeftScore, public virtual IRightScore {
+public:
+    ~Tool() override = default;
+};
+
+int main() {
+    Tool tool{};
+    return tool.score();
+}

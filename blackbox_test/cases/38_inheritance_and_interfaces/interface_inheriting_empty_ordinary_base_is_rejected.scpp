@@ -1,0 +1,15 @@
+// spec §11.1(2) and §11.2(3): even an empty, unannotated base class is an
+// ordinary class, so an interface may not inherit it.
+class EmptyTag {
+public:
+    virtual ~EmptyTag() = default;
+};
+
+class [[scpp::interface]] IBadBase : public EmptyTag {
+public:
+    ~IBadBase() override = default;
+};
+
+int main() {
+    return 0;
+}
