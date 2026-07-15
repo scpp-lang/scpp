@@ -2,11 +2,15 @@
 // another class in that same namespace by its unqualified name.
 namespace demo {
 class Helper {
+    public:
+        virtual ~Helper() { return; }
 public:
     int value{};
 };
 
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 public:
     Helper helper{};
     int read() {

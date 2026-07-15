@@ -8,6 +8,8 @@
 // parsed.scpp -- so the concept here checks plain callability only,
 // without itself requiring the generic tag).
 class Token {
+    public:
+        virtual ~Token() { return; }
 public:
     int value{};
 };

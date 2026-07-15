@@ -3,6 +3,8 @@
 // constraint) fails structural satisfaction -- rejected at the call
 // site, before ever reaching a monomorphized clone.
 class NotAShape {
+    public:
+        virtual ~NotAShape() { return; }
 public:
     NotAShape() { return; }
     int perimeter() const { return 0; }

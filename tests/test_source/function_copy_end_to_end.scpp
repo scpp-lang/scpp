@@ -1,11 +1,18 @@
 import std;
 
 class Adder {
+    public:
+        virtual ~Adder() { return; }
 private:
     int value{};
 public:
     Adder(int value) {
         this->value = value;
+        return;
+    }
+
+    Adder(const Adder& other) {
+        this->value = other.value;
         return;
     }
 
@@ -15,11 +22,18 @@ public:
 };
 
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{};
 public:
     Counter(int value) {
         this->value = value;
+        return;
+    }
+
+    Counter(const Counter& other) {
+        this->value = other.value;
         return;
     }
 
@@ -30,11 +44,18 @@ public:
 };
 
 class Consume {
+    public:
+        virtual ~Consume() { return; }
 private:
     int value{};
 public:
     Consume(int value) {
         this->value = value;
+        return;
+    }
+
+    Consume(const Consume& other) {
+        this->value = other.value;
         return;
     }
 

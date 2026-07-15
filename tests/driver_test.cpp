@@ -990,6 +990,7 @@ void run_concept_tests() {
         std::string source =
             "class Circle {\n"
             "public:\n"
+            "    virtual ~Circle() = default;\n"
             "    Circle() { return; }\n"
             "    int area() const { return 314; }\n"
             "};\n"
@@ -1040,6 +1041,7 @@ void run_generic_type_tests() {
             "};\n"
             "class NoMagnitude {\n"
             "public:\n"
+            "    virtual ~NoMagnitude() = default;\n"
             "    NoMagnitude(int v) : value{v} { return; }\n"
             "private:\n"
             "    int value{};\n"
@@ -1048,6 +1050,7 @@ void run_generic_type_tests() {
             "class Vec {\n"
             "    T item;\n"
             "public:\n"
+            "    virtual ~Vec() = default;\n"
             "    Vec(const T& x) : item{x} { return; }\n"
             "    int describe() const requires Describable<T> {\n"
             "        return this.item.magnitude();\n"
@@ -1086,6 +1089,7 @@ void run_generic_type_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
+            "    virtual ~Box() { return; }\n"
             "    Box() { return; }\n"
             "    Box(const char* s) { return; }\n"
             "};\n"
@@ -1093,6 +1097,7 @@ void run_generic_type_tests() {
             "template<typename Head, typename... Tail>\n"
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
+            "    virtual ~Box() override { return; }\n"
             "    Box() { return; }\n"
             "    Box(const char* s) { return; }\n"
             "};\n"
@@ -1128,12 +1133,14 @@ void run_generic_type_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
+            "    virtual ~Box() { return; }\n"
             "    int size() const { return 10; }\n"
             "};\n"
             "\n"
             "template<typename Head, typename... Tail>\n"
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
+            "    virtual ~Box() override { return; }\n"
             "    int size() const { return 50; }\n"
             "};\n"
             "\n"
@@ -1168,6 +1175,7 @@ void run_generic_type_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
+            "    virtual ~Box() { return; }\n"
             "    int value{};\n"
             "    consteval Box(const char* s) : value{7} { return; }\n"
             "    int get() const { return this->value; }\n"
@@ -1208,6 +1216,7 @@ void run_generic_pack_deduction_tests() {
             "template<typename R, typename... Params>\n"
             "class Holder<R(Params...)> {\n"
             "public:\n"
+            "    virtual ~Holder() { return; }\n"
             "    R (*fn_)(Params...);\n"
             "};\n"
             "\n"
@@ -1251,6 +1260,7 @@ void run_generic_pack_deduction_tests() {
             "template<typename R, typename... Params>\n"
             "class Holder<R(Params...)> {\n"
             "public:\n"
+            "    virtual ~Holder() { return; }\n"
             "    R (*fn_)(Params...);\n"
             "};\n"
             "\n"
@@ -1328,10 +1338,10 @@ void run_generic_pack_deduction_tests() {
         std::string source =
             "template<typename... Args> class Box;\n"
             "\n"
-            "template<> class Box<> {};\n"
+            "template<> class Box<> { public: virtual ~Box() { return; } };\n"
             "\n"
             "template<typename Head, typename... Tail>\n"
-            "class Box<Head, Tail...> : private Box<Tail...> {};\n"
+            "class Box<Head, Tail...> : private Box<Tail...> { public: virtual ~Box() override { return; } };\n"
             "\n"
             "template<typename... Args>\n"
             "int use(const Box<Args...>& fmt, Args&&... args) {\n"
@@ -1365,10 +1375,10 @@ void run_generic_pack_deduction_tests() {
         std::string source =
             "template<typename... Args> class Box;\n"
             "\n"
-            "template<> class Box<> {};\n"
+            "template<> class Box<> { public: virtual ~Box() { return; } };\n"
             "\n"
             "template<typename Head, typename... Tail>\n"
-            "class Box<Head, Tail...> : private Box<Tail...> {};\n"
+            "class Box<Head, Tail...> : private Box<Tail...> { public: virtual ~Box() override { return; } };\n"
             "\n"
             "template<typename... Args>\n"
             "int use(const Box<Args...>& fmt, Args&&... args) {\n"
@@ -1403,6 +1413,7 @@ void run_generic_pack_deduction_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
+            "    virtual ~Box() { return; }\n"
             "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) { return; }\n"
             "};\n"
@@ -1410,6 +1421,7 @@ void run_generic_pack_deduction_tests() {
             "template<typename Head, typename... Tail>\n"
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
+            "    virtual ~Box() override { return; }\n"
             "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) { return; }\n"
             "};\n"
@@ -1449,6 +1461,7 @@ void run_generic_pack_deduction_tests() {
             "template<>\n"
             "class Box<> {\n"
             "public:\n"
+            "    virtual ~Box() { return; }\n"
             "    int value{};\n"
             "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) : value{7} { return; }\n"
@@ -1458,6 +1471,7 @@ void run_generic_pack_deduction_tests() {
             "template<typename Head, typename... Tail>\n"
             "class Box<Head, Tail...> : private Box<Tail...> {\n"
             "public:\n"
+            "    virtual ~Box() override { return; }\n"
             "    int value{};\n"
             "    consteval Box() { return; }\n"
             "    consteval Box(const char* s) : value{9} { return; }\n"
@@ -1669,6 +1683,7 @@ void run_functional_tests() {
         "private:\n"
         "    std::unique_ptr<int> value;\n"
         "public:\n"
+        "    virtual ~MoveOnlyAdder() = default;\n"
         "    MoveOnlyAdder(std::unique_ptr<int> value) : value{std::move(value)} { return; }\n"
         "    int call(int x) const { return x + *this->value; }\n"
         "};\n"
@@ -1840,6 +1855,7 @@ void run_storage_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
+            "    virtual ~Box() = default;\n"
             "    std::storage_for<int, long> slot;\n"
             "    int payload_size() const { return (int)sizeof(this->slot); }\n"
             "};\n"
@@ -1871,6 +1887,7 @@ void run_storage_tests() {
         scpp::compile_to_executable(
             "class Widget {\n"
             "public:\n"
+            "    virtual ~Widget() = default;\n"
             "    char c;\n"
             "    long value;\n"
             "};\n"
@@ -1922,6 +1939,7 @@ void run_placement_new_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
+            "    virtual ~Box() = default;\n"
             "    int value{};\n"
             "    Box(int v) : value{v} { return; }\n"
             "    int get() const { return this->value; }\n"
@@ -1953,7 +1971,7 @@ void run_explicit_destructor_tests() {
             "public:\n"
             "    int* out{};\n"
             "    Box(int* p) : out{p} { return; }\n"
-            "    ~Box() { [[scpp::unsafe]] { *this->out = 9; } return; }\n"
+            "    virtual ~Box() { [[scpp::unsafe]] { *this->out = 9; } return; }\n"
             "};\n"
             "int main() {\n"
             "    int result = 0;\n"
@@ -1978,7 +1996,7 @@ void run_explicit_destructor_tests() {
         bool threw = false;
         try {
             scpp::Program program = scpp::parse(
-                "class Box { public: ~Box() { return; } }; int main() { Box b{}; [[scpp::unsafe]] { b.~Box(); } return 0; }");
+                "class Box { public: virtual ~Box() { return; } }; int main() { Box b{}; [[scpp::unsafe]] { b.~Box(); } return 0; }");
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -2028,6 +2046,7 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
+            "    virtual ~Box() = default;\n"
             "    int value{};\n"
             "    consteval Box(int v) : value{v} { return; }\n"
             "};\n"
@@ -2054,6 +2073,7 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
+            "    virtual ~Box() = default;\n"
             "    int value{};\n"
             "    consteval Box(const char* text) : value{17} { return; }\n"
             "};\n"
@@ -2079,6 +2099,7 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
+            "    virtual ~Box() = default;\n"
             "    int value{};\n"
             "    consteval Box(const char* text) : value{23} { return; }\n"
             "};\n"
@@ -2133,6 +2154,7 @@ void run_consteval_tests() {
             "}\n"
             "class Box {\n"
             "public:\n"
+            "    virtual ~Box() = default;\n"
             "    int value{};\n"
             "    consteval Box(const char* s) : value{size1(s)} { return; }\n"
             "};\n"
@@ -2159,6 +2181,7 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Counter {\n"
             "public:\n"
+            "    virtual ~Counter() = default;\n"
             "    int value{};\n"
             "    consteval Counter(int v) : value{v} { return; }\n"
             "    consteval void bump() {\n"
@@ -2193,10 +2216,12 @@ void run_consteval_tests() {
         scpp::compile_to_executable(
             "class Helper {\n"
             "public:\n"
+            "    virtual ~Helper() = default;\n"
             "    consteval Helper(const char* s, int i) { return; }\n"
             "};\n"
             "class Outer {\n"
             "public:\n"
+            "    virtual ~Outer() = default;\n"
             "    consteval Outer(const char* s) {\n"
             "        Helper h{s, 0};\n"
             "        return;\n"
@@ -2224,11 +2249,13 @@ void run_consteval_tests() {
             "template<>\n"
             "class TagList<> {\n"
             "public:\n"
+            "    virtual ~TagList() = default;\n"
             "    TagList() { return; }\n"
             "};\n"
             "template<typename Head, typename... Tail>\n"
             "class TagList<Head, Tail...> : private TagList<Tail...> {\n"
             "public:\n"
+            "    virtual ~TagList() override = default;\n"
             "    TagList() { return; }\n"
             "};\n"
             "consteval int take(TagList<> tags) {\n"
@@ -2259,11 +2286,13 @@ void run_consteval_tests() {
             "template<>\n"
             "class TagList<> {\n"
             "public:\n"
+            "    virtual ~TagList() = default;\n"
             "    TagList() { return; }\n"
             "};\n"
             "template<typename Head, typename... Tail>\n"
             "class TagList<Head, Tail...> : private TagList<Tail...> {\n"
             "public:\n"
+            "    virtual ~TagList() override = default;\n"
             "    TagList() { return; }\n"
             "};\n"
             "consteval int take_ref(const TagList<>& tags) {\n"
@@ -2488,7 +2517,7 @@ void run_consteval_tests() {
                 "public:\n"
                 "    int value{};\n"
                 "    constexpr NeedsDrop(int x) : value{x} { return; }\n"
-                "    ~NeedsDrop() {\n"
+                "    virtual ~NeedsDrop() {\n"
                 "        return;\n"
                 "    }\n"
                 "};\n"
@@ -2735,6 +2764,7 @@ void run_cli_extension_tests() {
                         "    export template<>\n"
                         "    class Box<> {\n"
                         "    public:\n"
+                        "        virtual ~Box() = default;\n"
                         "        consteval Box() { return; }\n"
                         "        consteval Box(const char* s) { return; }\n"
                         "        int mark() const { return 7; }\n"
@@ -2743,6 +2773,7 @@ void run_cli_extension_tests() {
                         "    export template<typename Head, typename... Tail>\n"
                         "    class Box<Head, Tail...> : private helper::Box<Tail...> {\n"
                         "    public:\n"
+                        "        virtual ~Box() override = default;\n"
                         "        consteval Box() { return; }\n"
                         "        consteval Box(const char* s) { return; }\n"
                         "        int mark() const { return 11; }\n"
@@ -2791,6 +2822,7 @@ void run_cli_extension_tests() {
                         "    template<typename T>\n"
                         "    class Holder {\n"
                         "    public:\n"
+                        "        virtual ~Holder() = default;\n"
                         "        T value_{};\n"
                         "        Holder(const T& value) : value_{value} { return; }\n"
                         "        T get() const { return this->value_; }\n"
@@ -2844,11 +2876,13 @@ void run_cli_extension_tests() {
                         "    template<typename T>\n"
                         "    class HiddenValidator {\n"
                         "    public:\n"
+                        "        virtual ~HiddenValidator() = default;\n"
                         "        consteval HiddenValidator(const char* s) { return; }\n"
                         "    };\n"
                         "    export template<typename T>\n"
                         "    class CheckedString {\n"
                         "    public:\n"
+                        "        virtual ~CheckedString() = default;\n"
                         "        const char* text_{};\n"
                         "        consteval CheckedString(const char* s) : text_{s} {\n"
                         "            helper::HiddenValidator<T> validator{s};\n"
@@ -2901,11 +2935,13 @@ void run_cli_extension_tests() {
                         "    template<typename T>\n"
                         "    class HiddenValidator {\n"
                         "    public:\n"
+                        "        virtual ~HiddenValidator() = default;\n"
                         "        consteval HiddenValidator(const char* s) { return; }\n"
                         "    };\n"
                         "    export template<typename T>\n"
                         "    class CheckedString {\n"
                         "    public:\n"
+                        "        virtual ~CheckedString() = default;\n"
                         "        const char* text_{};\n"
                         "        consteval CheckedString(const char* s) : text_{s} {\n"
                         "            helper::HiddenValidator<T> validator{s};\n"
@@ -2951,6 +2987,7 @@ void run_cli_extension_tests() {
                         "namespace dep {\n"
                         "    export class Box {\n"
                         "    public:\n"
+                        "        virtual ~Box() = default;\n"
                         "        Box() { return; }\n"
                         "        int call() { return 7; }\n"
                         "    };\n"
@@ -4238,6 +4275,7 @@ void run_static_member_function_tests() {
         RunResult result = compile_and_run(
             R"SCPP(class Math {
 public:
+    virtual ~Math() { return; }
     static int add_one(int value) { return value + 1; }
 };
 int main() {
@@ -4254,9 +4292,10 @@ int main() {
         RunResult result = compile_and_run(
             R"SCPP(class Box {
 public:
-    static int reveal(int value) {
-        Box box{value};
-        return box.secret;
+                virtual ~Box() = default;
+                static int reveal(int value) {
+                    Box box{value};
+                    return box.secret;
     }
 private:
     int secret{};
@@ -4280,6 +4319,7 @@ class Box;
 template<>
 class Box<int> {
 public:
+    virtual ~Box() { return; }
     static Box<int> make(int value) {
         Box<int> box{value};
         return box;
@@ -4312,6 +4352,7 @@ int main() {
             scpp::compile_to_executable(
                 R"SCPP(class Box {
 public:
+    virtual ~Box() = default;
     static int reveal(int value) {
         Box box{value};
         return box.secret;
@@ -4340,6 +4381,7 @@ int main() {
             scpp::compile_to_executable(
                 R"SCPP(class Box {
 public:
+    virtual ~Box() = default;
     int secret;
     static int broken() {
         return this->secret;
@@ -4572,9 +4614,10 @@ void run_brace_init_only_var_decl_tests() {
 private:
     int value_{};
 public:
-    Box(int value) : value_{value} { return; }
-    int value() { return this->value_; }
-};
+                virtual ~Box() = default;
+                Box(int value) : value_{value} { return; }
+                int value() { return this->value_; }
+            };
 int main() {
     Box box{7};
     return box.value() - 7;
@@ -4633,11 +4676,13 @@ void run_inheritance_constructor_and_destructor_tests() {
             "private:\n"
             "    int value{};\n"
             "public:\n"
+            "    virtual ~Base() = default;\n"
             "    Base() { print_int(100); this->value = 7; return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
             "class Derived : public Base {\n"
             "public:\n"
+            "    virtual ~Derived() override = default;\n"
             "    Derived() { print_int(200); return; }\n"
             "};\n"
             "int main() {\n"
@@ -4657,14 +4702,17 @@ void run_inheritance_constructor_and_destructor_tests() {
         RunResult result = compile_and_run(
             "class Grand {\n"
             "public:\n"
+            "    virtual ~Grand() = default;\n"
             "    Grand() { print_int(10); return; }\n"
             "};\n"
             "class Parent : public Grand {\n"
             "public:\n"
+            "    virtual ~Parent() override = default;\n"
             "    Parent() { print_int(20); return; }\n"
             "};\n"
             "class Child : public Parent {\n"
             "public:\n"
+            "    virtual ~Child() override = default;\n"
             "    Child() { print_int(30); return; }\n"
             "};\n"
             "int main() {\n"
@@ -4685,11 +4733,13 @@ void run_inheritance_constructor_and_destructor_tests() {
             "private:\n"
             "    int value{};\n"
             "public:\n"
+            "    virtual ~Base() = default;\n"
             "    Base(int seed) { print_int(seed); this->value = seed; return; }\n"
             "    int get() const { return this->value; }\n"
             "};\n"
             "class Derived : public Base {\n"
             "public:\n"
+            "    virtual ~Derived() override = default;\n"
             "    Derived(int seed) : Base{seed} { print_int(seed + 1); return; }\n"
             "};\n"
             "int main() {\n"
@@ -4709,9 +4759,12 @@ void run_inheritance_constructor_and_destructor_tests() {
         RunResult result = compile_and_run(
             "class Base {\n"
             "public:\n"
+            "    virtual ~Base() = default;\n"
             "    Base() { print_int(11); return; }\n"
             "};\n"
             "class Derived : public Base {\n"
+            "public:\n"
+            "    virtual ~Derived() override = default;\n"
             "};\n"
             "int main() {\n"
             "    Derived d{};\n"
@@ -4730,12 +4783,12 @@ void run_inheritance_constructor_and_destructor_tests() {
             "class Base {\n"
             "public:\n"
             "    Base() { print_int(1); return; }\n"
-            "    ~Base() { print_int(4); return; }\n"
+            "    virtual ~Base() { print_int(4); return; }\n"
             "};\n"
             "class Derived : public Base {\n"
             "public:\n"
             "    Derived() { print_int(2); return; }\n"
-            "    ~Derived() { print_int(3); return; }\n"
+            "    ~Derived() override { print_int(3); return; }\n"
             "};\n"
             "int main() {\n"
             "    Derived d{};\n"
@@ -4753,9 +4806,11 @@ void run_inheritance_constructor_and_destructor_tests() {
         RunResult result = compile_and_run(
             "class Base {\n"
             "public:\n"
-            "    ~Base() { print_int(9); return; }\n"
+            "    virtual ~Base() { print_int(9); return; }\n"
             "};\n"
             "class Derived : public Base {\n"
+            "public:\n"
+            "    ~Derived() override { return; }\n"
             "};\n"
             "int main() {\n"
             "    Derived d{};\n"
@@ -4775,6 +4830,7 @@ void run_inheritance_constructor_and_destructor_tests() {
             (void)compile_and_run(
                 "class Base {\n"
                 "public:\n"
+                "    virtual ~Base() = default;\n"
                 "    Base(int seed) { return; }\n"
                 "};\n"
                 "class Derived : public Base {\n"

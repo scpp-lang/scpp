@@ -81,7 +81,7 @@ public:
         return;
     }
 
-    ~move_only_function() {
+    virtual ~move_only_function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -111,7 +111,7 @@ public:
         return;
     }
 
-    ~move_only_function() {
+    virtual ~move_only_function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -141,7 +141,7 @@ public:
         return;
     }
 
-    ~move_only_function() {
+    virtual ~move_only_function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -171,7 +171,7 @@ public:
         return;
     }
 
-    ~move_only_function() {
+    virtual ~move_only_function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -201,7 +201,7 @@ public:
         return;
     }
 
-    ~move_only_function() {
+    virtual ~move_only_function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -231,7 +231,7 @@ public:
         return;
     }
 
-    ~move_only_function() {
+    virtual ~move_only_function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -283,7 +283,7 @@ public:
         return *this;
     }
 
-    ~function() {
+    virtual ~function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -335,7 +335,7 @@ public:
         return *this;
     }
 
-    ~function() {
+    virtual ~function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -387,7 +387,7 @@ public:
         return *this;
     }
 
-    ~function() {
+    virtual ~function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -439,7 +439,7 @@ public:
         return *this;
     }
 
-    ~function() {
+    virtual ~function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -491,7 +491,7 @@ public:
         return *this;
     }
 
-    ~function() {
+    virtual ~function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }
@@ -543,7 +543,7 @@ public:
         return *this;
     }
 
-    ~function() {
+    virtual ~function() {
         [[scpp::unsafe]] {
             this->destroy_(this->object_);
         }

@@ -6,6 +6,8 @@
 // (`template<typename T> class X { ... };`).
 template<typename T>
 class Holder {
+    public:
+        virtual ~Holder() { return; }
     T item;
 public:
     Holder(const T& x) : item{x} { return; }

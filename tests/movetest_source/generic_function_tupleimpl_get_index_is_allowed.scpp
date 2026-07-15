@@ -6,10 +6,15 @@
 // `Tail` are deduced from that matched level's own concrete arguments.
 template<int Idx, typename... Ts> class TupleImpl;
 
-template<int Idx> class TupleImpl<Idx> {};
+template<int Idx> class TupleImpl<Idx> {
+public:
+    virtual ~TupleImpl() { return; }
+};
 
 template<int Idx, typename Head, typename... Tail>
 class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {
+    public:
+        virtual ~TupleImpl() override { return; }
 public:
     Head value;
 };

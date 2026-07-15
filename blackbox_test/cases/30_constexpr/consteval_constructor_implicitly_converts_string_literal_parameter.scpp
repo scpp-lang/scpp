@@ -1,4 +1,6 @@
 class Box {
+    public:
+        virtual ~Box() { return; }
 public:
     int value{};
     consteval Box(const char* text) {

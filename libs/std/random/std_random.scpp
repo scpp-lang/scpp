@@ -27,7 +27,7 @@ export class random_device {
 public:
     random_device() { return; }
 
-    ~random_device() { return; }
+    virtual ~random_device() { return; }
 
     uint32_t call() {
         [[scpp::unsafe]] {
@@ -67,7 +67,7 @@ public:
         return;
     }
 
-    ~mt19937() {
+    virtual ~mt19937() {
         [[scpp::unsafe]] {
             scpp_mt19937_delete(this->handle_);
         }

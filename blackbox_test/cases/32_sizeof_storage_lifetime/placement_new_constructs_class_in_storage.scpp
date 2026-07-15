@@ -3,6 +3,8 @@ import std;
 // constructs an object at a raw address without allocating, but only inside
 // [[scpp::unsafe]].
 class Box {
+    public:
+        virtual ~Box() { return; }
 public:
     int value{};
 

@@ -1,6 +1,8 @@
 import std;
 
 class Adder {
+    public:
+        virtual ~Adder() { return; }
 private:
     int value{};
 public:
@@ -15,6 +17,8 @@ public:
 };
 
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{};
 public:
@@ -30,6 +34,8 @@ public:
 };
 
 class Consume {
+    public:
+        virtual ~Consume() { return; }
 private:
     int value{};
 public:

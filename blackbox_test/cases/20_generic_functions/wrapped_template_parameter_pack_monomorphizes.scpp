@@ -1,5 +1,7 @@
 template<typename T>
 class Token {
+    public:
+        virtual ~Token() { return; }
 public:
     Token() { return; }
 };

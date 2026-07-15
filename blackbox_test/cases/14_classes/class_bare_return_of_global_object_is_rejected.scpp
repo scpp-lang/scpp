@@ -1,6 +1,8 @@
 // spec §6.7(2)-(4): the implicit-move return rule is limited to a local or
 // by-value parameter of the innermost enclosing function, not a global object.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{};
 public:

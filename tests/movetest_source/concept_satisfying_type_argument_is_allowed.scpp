@@ -1,4 +1,6 @@
 class Circle {
+    public:
+        virtual ~Circle() { return; }
 public:
     Circle() { return; }
     int area() const { return 314; }

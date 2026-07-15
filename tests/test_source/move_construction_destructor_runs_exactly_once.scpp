@@ -9,7 +9,7 @@ import std;
 class Resource {
 public:
     Resource(int v) { this.p = std::make_unique<int>(v); return; }
-    ~Resource() { print_int(999); return; }
+    virtual ~Resource() { print_int(999); return; }
     int get() { return *this.p; }
 private:
     std::unique_ptr<int> p{};

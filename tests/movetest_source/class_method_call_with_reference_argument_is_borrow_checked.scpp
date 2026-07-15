@@ -6,7 +6,7 @@ public:
         this->value = start;
         return;
     }
-    ~Adder() {
+    virtual ~Adder() {
         return;
     }
     void add_ref(int& x) {

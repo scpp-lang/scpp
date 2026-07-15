@@ -1,0 +1,11 @@
+class [[scpp::interface]] IRun {
+public:
+    virtual ~IRun() { return; }
+    virtual void run() = 0;
+};
+
+class Task : public IRun {
+public:
+    ~Task() override { return; }
+    void run() override { return; }
+};

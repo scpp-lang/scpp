@@ -27,7 +27,7 @@ public:
         return;
     }
 
-    ~unique_ptr() {
+    virtual ~unique_ptr() {
         if (this->owns_) {
             [[scpp::unsafe]] {
                 T* raw = this->ptr_;

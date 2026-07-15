@@ -2,6 +2,8 @@ import std;
 // Current `std::expected<T, E>` semantics: value/error storage is inline, so
 // neither branch needs `T` to be default-constructible first.
 class NoDefault {
+    public:
+        virtual ~NoDefault() { return; }
 public:
     int value{};
 

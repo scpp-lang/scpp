@@ -14,7 +14,7 @@ public:
         return;
     }
 
-    ~RawOwner() {
+    virtual ~RawOwner() {
         [[scpp::unsafe]] {
             free(this->p);
         }

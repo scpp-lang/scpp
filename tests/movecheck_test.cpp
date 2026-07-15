@@ -282,6 +282,7 @@ void test_non_const_method_call_through_const_reference_reports_clear_diagnostic
         "        this->value = start;\n"
         "        return;\n"
         "    }\n"
+        "    virtual ~Counter() { return; }\n"
         "    void bump() {\n"
         "        this->value = this->value + 1;\n"
         "        return;\n"
@@ -316,9 +317,11 @@ void test_derived_constructor_requires_explicit_base_initializer_without_default
         "class Base {\n"
         "public:\n"
         "    Base(int seed) { return; }\n"
+        "    virtual ~Base() { return; }\n"
         "};\n"
         "class Derived : public Base {\n"
         "public:\n"
+        "    ~Derived() override { return; }\n"
         "    Derived() { return; }\n"
         "};\n");
     expect(error.has_value() && error->find("must initialize its direct base class 'Base'") != std::string::npos,
@@ -333,9 +336,11 @@ void test_explicit_base_initializer_satisfies_nondefault_base_ctor() {
         "class Base {\n"
         "public:\n"
         "    Base(int seed) { return; }\n"
+        "    virtual ~Base() { return; }\n"
         "};\n"
         "class Derived : public Base {\n"
         "public:\n"
+        "    ~Derived() override { return; }\n"
         "    Derived(int seed) : Base{seed} { return; }\n"
         "};\n");
     expect(!error.has_value(),

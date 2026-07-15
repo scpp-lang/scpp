@@ -2,6 +2,8 @@
 // be copied into the parameter object, after which the callee may use it
 // normally.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{};
 public:

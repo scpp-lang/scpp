@@ -1,0 +1,5 @@
+class [[scpp::interface]] IBadState {
+public:
+    virtual ~IBadState() { return; }
+    int state{};
+};

@@ -1,4 +1,6 @@
 class Multi {
+    public:
+        virtual ~Multi() { return; }
     int x{};
     int y = 3;
 public:

@@ -1,0 +1,9 @@
+class Base {
+public:
+    virtual ~Base() { return; }
+};
+
+class Derived : public virtual Base {
+public:
+    ~Derived() override { return; }
+};

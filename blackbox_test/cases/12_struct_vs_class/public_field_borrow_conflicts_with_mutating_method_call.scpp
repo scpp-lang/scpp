@@ -6,6 +6,8 @@
 // mutable borrow of `c` via `this` (ch05 §5.9) while `r` is still alive
 // (used in the final `return`) -- the two conflict.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 public:
     int value{};
     Counter(int v) {

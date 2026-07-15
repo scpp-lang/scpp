@@ -1,4 +1,6 @@
 class Pair {
+    public:
+        virtual ~Pair() { return; }
     int x{};
     int y{4};
 public:

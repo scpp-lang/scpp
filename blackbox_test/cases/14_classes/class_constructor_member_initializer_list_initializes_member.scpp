@@ -1,6 +1,8 @@
 // spec 6.1(3)-(4): a constructor member-initializer-list may initialize a
 // member with braces before the function body runs.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value;
 public:

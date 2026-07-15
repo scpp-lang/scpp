@@ -3,6 +3,8 @@
 // (only move *assignment* is conditionally suppressed for such a class,
 // spec §6.4(3) -- construction is unaffected).
 class RefHolder {
+    public:
+        virtual ~RefHolder() { return; }
 public:
     RefHolder(int& r) : r{r} { return; }
 private:

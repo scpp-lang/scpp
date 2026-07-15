@@ -9,6 +9,8 @@ concept Describable = requires(const T& t) {
 };
 
 class Circle {
+    public:
+        virtual ~Circle() { return; }
 public:
     Circle(int r) { this.radius = r; return; }
     int magnitude() const { return this.radius; }
@@ -18,6 +20,8 @@ private:
 
 template<typename T>
 class Vec {
+    public:
+        virtual ~Vec() { return; }
     T item;
 public:
     Vec(const T& x) : item{x} { return; }

@@ -5,6 +5,8 @@ import std;
 extern "C" int puts(const char* s);
 
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     std::unique_ptr<int> value{};
 public:

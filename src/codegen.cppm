@@ -196,6 +196,8 @@ public:
             if (is_never_compiled(fn)) continue;
             if (fn.body != nullptr) {
                 define_function(fn);
+            } else if (fn.is_defaulted) {
+                define_defaulted_function(fn);
             } else if (!fn.forwards_to.empty()) {
                 // ch05 §5.14: an inherited method's own forwarding stub
                 // (synthesize_inherited_method_forwards) -- has no
@@ -2157,8 +2159,8 @@ private:
                 continue;
             }
             bool recovered_from_elsewhere = !fns[0]->owning_module.empty();
-            bool exported_from_this_module = program_->module_name.empty() ? false : fns[0]->is_exported;
-            if (recovered_from_elsewhere || exported_from_this_module) {
+            bool defined_in_this_module = !program_->module_name.empty();
+            if (recovered_from_elsewhere || defined_in_this_module) {
                 for (const Function* fn : fns) {
                     overload_names_[fn] = mangle_exported_symbol(*fn);
                 }
@@ -2243,7 +2245,7 @@ private:
         // real, defined body too (define_forwarding_function), just
         // never an scpp-level AST one -- eligible for the same internal
         // linkage as an ordinary defined function.
-        bool has_definition = fn.body != nullptr || !fn.forwards_to.empty();
+        bool has_definition = fn.body != nullptr || fn.is_defaulted || !fn.forwards_to.empty();
         if (has_definition && !fn.is_exported && !fn.is_extern_c &&
             (!fn.owning_module.empty() || !program_->module_name.empty() || fn.is_compile_time_dependency)) {
             linkage = llvm::Function::InternalLinkage;
@@ -2303,6 +2305,70 @@ private:
             throw CodegenError("function '" + fn.name + "' does not return on all paths",
                 current_loc_);
         }
+        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        current_debug_scope_ = nullptr;
+        current_subprogram_ = nullptr;
+    }
+
+    void define_defaulted_function(const Function& fn) {
+        if (!fn.is_defaulted) {
+            throw CodegenError("internal error: asked to define a non-defaulted function without a body", current_loc_);
+        }
+        if (!fn.name.ends_with("_delete") || fn.params.size() != 1) {
+            throw CodegenError("only defaulted destructors are code-generated in this version", fn.loc);
+        }
+
+        llvm::Function* llvm_fn = module_->getFunction(overload_names_.at(&fn));
+        if (llvm_fn == nullptr) {
+            throw CodegenError("function '" + fn.name + "' was not declared before definition", fn.loc);
+        }
+
+        current_function_def_ = &fn;
+        unsafe_depth_ = fn.is_unsafe ? 1 : 0;
+        attach_debug_subprogram(llvm_fn, fn);
+        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
+        builder_->SetInsertPoint(entry);
+        current_loc_ = fn.loc;
+        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+
+        locals_.clear();
+        scope_stack_.clear();
+        size_t index = 0;
+        for (auto& arg : llvm_fn->args()) {
+            const Param& param = fn.params[index++];
+            arg.setName(param.name);
+            llvm::AllocaInst* slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
+            builder_->CreateStore(&arg, slot);
+            locals_[param.name] = LocalSlot{slot, param.type};
+            maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index));
+            if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
+                locals_[param.name].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
+            }
+        }
+
+        const Type& this_type = fn.params[0].type;
+        if (this_type.kind != TypeKind::Reference || this_type.pointee == nullptr || this_type.pointee->kind != TypeKind::Named) {
+            throw CodegenError("defaulted destructor '" + fn.name + "' has an invalid this parameter", fn.loc);
+        }
+        const std::string& class_name = this_type.pointee->name;
+        auto info_it = structs_.find(class_name);
+        if (info_it == structs_.end()) {
+            throw CodegenError("defaulted destructor '" + fn.name + "' names unknown class '" + class_name + "'", fn.loc);
+        }
+
+        llvm::Type* this_llvm_type = to_llvm_type(fn.params[0].type);
+        llvm::Value* this_ptr = builder_->CreateLoad(this_llvm_type, locals_.at("this").alloca, "thisptr");
+        const StructInfo& info = info_it->second;
+        for (size_t i = info.field_types.size(); i > 0; --i) {
+            const Type& field_type = info.field_types[i - 1];
+            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+                llvm::Value* field_ptr =
+                    builder_->CreateStructGEP(info.llvm_type, this_ptr, i - 1, info.field_names[i - 1]);
+                codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
+            }
+        }
+
+        builder_->CreateRetVoid();
         builder_->SetCurrentDebugLocation(llvm::DebugLoc());
         current_debug_scope_ = nullptr;
         current_subprogram_ = nullptr;

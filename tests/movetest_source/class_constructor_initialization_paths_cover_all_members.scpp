@@ -1,4 +1,6 @@
 class Good {
+    public:
+        virtual ~Good() { return; }
     int x{};
     int y = 3;
 public:

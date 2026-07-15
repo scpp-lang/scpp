@@ -9,10 +9,15 @@ concept Describable = requires(const T& t) {
 
 template<typename... Ts> class Tuple;
 
-template<> class Tuple<> {};
+template<> class Tuple<> {
+public:
+    virtual ~Tuple() { return; }
+};
 
 template<Describable Head, typename... Tail>
 class Tuple<Head, Tail...> : private Tuple<Tail...> {
+    public:
+        virtual ~Tuple() override { return; }
     Head head;
 };
 

@@ -5,6 +5,8 @@
 // too, even though `Widget` declares no copy constructor of its own
 // either.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() {
         this->val = 0;

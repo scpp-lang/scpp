@@ -4,8 +4,14 @@
 // copy constructor. `Widget b = a;` (the bare copy-init syntax) is
 // licensed.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() { return; }
+    Widget(const Widget& other) {
+        this->val = other.val;
+        return;
+    }
     int val{};
 };
 int main() {

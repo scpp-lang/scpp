@@ -3,12 +3,16 @@ class Box;
 
 template<>
 class Box<> {
+    public:
+        virtual ~Box() { return; }
 public:
     Box(const char* s) { return; }
 };
 
 template<typename Head, typename... Tail>
 class Box<Head, Tail...> : private Box<Tail...> {
+    public:
+        virtual ~Box() override { return; }
 public:
     Box(const char* s) : Box{s} { return; }
 };

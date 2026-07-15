@@ -1,6 +1,8 @@
 import std;
 
 class Box {
+    public:
+        virtual ~Box() { return; }
 public:
     int value;
 

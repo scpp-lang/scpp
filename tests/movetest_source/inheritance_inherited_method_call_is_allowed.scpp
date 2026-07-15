@@ -4,6 +4,8 @@
 // forwards), reusing the exact same method-call machinery as an
 // ordinary, non-inherited call.
 class Animal {
+    public:
+        virtual ~Animal() { return; }
 public:
     Animal(int legs) { this.legs = legs; return; }
     int leg_count() const { return this.legs; }
@@ -12,6 +14,8 @@ private:
 };
 
 class Dog : public Animal {
+    public:
+        virtual ~Dog() override { return; }
 public:
     Dog(int legs) : Animal{legs} { return; }
     int bark_count() const { return 3; }

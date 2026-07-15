@@ -61,7 +61,7 @@ public:
         return;
     }
 
-    ~thread() {
+    virtual ~thread() {
         if (this->joinable_) {
             std::__thread_detach_and_delete(this->handle_);
         }
@@ -111,7 +111,7 @@ public:
         return;
     }
 
-    ~jthread() {
+    virtual ~jthread() {
         if (this->joinable_) {
             std::__thread_join_and_delete(this->handle_);
         }

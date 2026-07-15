@@ -17,7 +17,7 @@ public:
         this->p = std::make_unique<int>(v);
         return;
     }
-    ~Resource() {
+    virtual ~Resource() {
         [[scpp::unsafe]] {
             printf("dtor\n");
         }

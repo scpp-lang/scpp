@@ -1,6 +1,8 @@
 import std;
 // ch05 §5.18: an `Sig &&` wrapper promises an rvalue-callable target.
 class Adder {
+    public:
+        virtual ~Adder() { return; }
 private:
     int delta{};
 public:

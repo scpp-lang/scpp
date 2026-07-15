@@ -2,6 +2,8 @@
 // a class instance is rejected (codegen has no meaningful conversion
 // instruction to emit for it).
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() { return; }
     int val{};

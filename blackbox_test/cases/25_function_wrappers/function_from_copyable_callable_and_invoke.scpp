@@ -3,6 +3,8 @@ import std;
 // A plainly copyable callable class should therefore be constructible and
 // invocable through the wrapper.
 class Adder {
+    public:
+        virtual ~Adder() { return; }
 private:
     int delta{};
 public:
@@ -10,6 +12,7 @@ public:
         this->delta = n;
         return;
     }
+    Adder(const Adder& other) : delta{other.delta} { return; }
     int call(int x) {
         return x + this->delta;
     }

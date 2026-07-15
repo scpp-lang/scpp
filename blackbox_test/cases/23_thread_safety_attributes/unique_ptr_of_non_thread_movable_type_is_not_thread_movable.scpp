@@ -4,6 +4,8 @@ import std;
 // reference member is not thread-movable, so this constrained call must
 // be rejected.
 class NotThreadMovable {
+    public:
+        virtual ~NotThreadMovable() { return; }
 private:
     int& ref;
 public:

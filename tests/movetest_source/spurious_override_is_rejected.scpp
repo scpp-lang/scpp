@@ -1,0 +1,10 @@
+class Base {
+public:
+    virtual ~Base() { return; }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override { return; }
+    void run() override { return; }
+};

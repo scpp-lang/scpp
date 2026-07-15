@@ -5,6 +5,8 @@ import :runtime;
 namespace httpserver {
 
 export class ServerBuilder {
+    public:
+        virtual ~ServerBuilder() { return; }
 private:
     char root_[512];
     int port_{};

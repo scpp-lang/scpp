@@ -7,6 +7,8 @@
 // attribute is legal on an ordinary reference parameter, and using it
 // for an ordinary synchronous read/write inside the function works.
 class Token {
+    public:
+        virtual ~Token() { return; }
 public:
     int value{};
 };

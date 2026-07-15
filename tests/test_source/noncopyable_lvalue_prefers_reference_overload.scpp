@@ -1,6 +1,8 @@
 import std;
 
 class Token {
+    public:
+        virtual ~Token() { return; }
 private:
     std::unique_ptr<int> p{};
 public:

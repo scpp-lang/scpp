@@ -10,6 +10,8 @@
 // that unrelated gap while still exercising the copy-assignment rule
 // this test is actually about.
 class Doubler {
+    public:
+        virtual ~Doubler() { return; }
 public:
     Doubler(int v) {
         this->val = v;

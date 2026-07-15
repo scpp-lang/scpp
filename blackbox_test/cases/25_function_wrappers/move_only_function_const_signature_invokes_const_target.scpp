@@ -2,6 +2,8 @@ import std;
 // ch05 §5.18: cv-qualified signatures are part of the stored callable
 // contract; `Sig const` should call a `const` target.
 class Adder {
+    public:
+        virtual ~Adder() { return; }
 private:
     int delta{};
 public:

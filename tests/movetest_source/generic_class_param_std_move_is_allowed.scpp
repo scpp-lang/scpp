@@ -1,6 +1,8 @@
 import std;
 template<typename T>
 class Box {
+    public:
+        virtual ~Box() { return; }
 public:
     T value;
     Box(T value) : value{std::move(value)} { return; }

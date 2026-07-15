@@ -4,6 +4,8 @@
 // `[[scpp::thread_movable_if(...)]]` instantiation must therefore still
 // fail a `[[scpp::thread_movable]]` parameter constraint.
 class NotThreadMovable {
+    public:
+        virtual ~NotThreadMovable() { return; }
 private:
     int& ref;
 public:
@@ -17,6 +19,8 @@ class [[scpp::thread_movable_if(
     scpp::is_thread_movable(T),
     scpp::is_thread_shareable(T)
 )]] Box {
+    public:
+        virtual ~Box() { return; }
 private:
     int* p{};
 public:

@@ -1,4 +1,6 @@
 class Buffer {
+    public:
+        virtual ~Buffer() { return; }
 public:
     char bytes_[1024];
     int value_{};

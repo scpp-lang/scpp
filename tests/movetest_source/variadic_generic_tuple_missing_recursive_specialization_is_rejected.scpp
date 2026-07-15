@@ -4,7 +4,10 @@
 // pattern to match a non-empty argument list against.
 template<typename... Ts> class Tuple;
 
-template<> class Tuple<> {};
+template<> class Tuple<> {
+public:
+    virtual ~Tuple() { return; }
+};
 
 int main() {
     Tuple<int> t{};

@@ -8,10 +8,15 @@
 // instantiation chain itself resolves and passes movecheck cleanly.
 template<typename... Ts> class Tuple;
 
-template<> class Tuple<> {};
+template<> class Tuple<> {
+public:
+    virtual ~Tuple() { return; }
+};
 
 template<typename Head, typename... Tail>
 class Tuple<Head, Tail...> : private Tuple<Tail...> {
+    public:
+        virtual ~Tuple() override { return; }
     Head head;
 };
 

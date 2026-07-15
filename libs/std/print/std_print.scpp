@@ -81,6 +81,8 @@ class __format_printer;
 
 template<>
 class __format_printer<int> {
+    public:
+        virtual ~__format_printer() { return; }
 public:
     void write(const int& value) {
         [[scpp::unsafe]] {
@@ -92,6 +94,8 @@ public:
 
 template<>
 class __format_printer<bool> {
+    public:
+        virtual ~__format_printer() { return; }
 public:
     void write(const bool& value) {
         [[scpp::unsafe]] {
@@ -103,6 +107,8 @@ public:
 
 template<>
 class __format_printer<char> {
+    public:
+        virtual ~__format_printer() { return; }
 public:
     void write(const char& value) {
         [[scpp::unsafe]] {
@@ -114,6 +120,8 @@ public:
 
 template<>
 class __format_printer<double> {
+    public:
+        virtual ~__format_printer() { return; }
 public:
     void write(const double& value) {
         [[scpp::unsafe]] {
@@ -125,6 +133,8 @@ public:
 
 template<>
 class __format_printer<const char*> {
+    public:
+        virtual ~__format_printer() { return; }
 public:
     void write(const char* value) {
         [[scpp::unsafe]] {
@@ -136,6 +146,8 @@ public:
 
 template<>
 class __format_printer<char*> {
+    public:
+        virtual ~__format_printer() { return; }
 public:
     void write(char* value) {
         [[scpp::unsafe]] {
@@ -147,6 +159,8 @@ public:
 
 template<>
 class __format_printer<std::string> {
+    public:
+        virtual ~__format_printer() { return; }
 public:
     void write(const std::string& value) {
         [[scpp::unsafe]] {

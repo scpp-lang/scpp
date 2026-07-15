@@ -4,6 +4,8 @@
 // runs (not silently replaced by a memberwise copy): this constructor
 // doubles the source's value instead of copying it verbatim.
 class Doubler {
+    public:
+        virtual ~Doubler() { return; }
 public:
     Doubler(int v) {
         this->val = v;

@@ -5,6 +5,8 @@
 // public member variable is checked exactly like a struct field access
 // (whole-root conservative, ch05 §5.2).
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     int value{};
 };

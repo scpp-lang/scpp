@@ -8,6 +8,8 @@
 // successfully -- the ch08 Q14 rejection is wired up for
 // `ClassName(ClassName&&)` but not for `operator=(ClassName&&)`.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() {
         this->val = 0;

@@ -5,6 +5,8 @@
 // suppressed for it, per
 // class_copy_assignment_rejected_for_class_with_reference_member.scpp).
 class RefHolder {
+    public:
+        virtual ~RefHolder() { return; }
 public:
     RefHolder(int& r) : r{r} {
         return;

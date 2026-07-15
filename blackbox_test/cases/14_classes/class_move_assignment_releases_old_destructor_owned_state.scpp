@@ -16,7 +16,7 @@ public:
         }
         return;
     }
-    ~Resource() {
+    virtual ~Resource() {
         [[scpp::unsafe]] {
             puts(this->p);
             free(this->p);

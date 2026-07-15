@@ -2,6 +2,8 @@ template<typename T>
 concept HasGet = requires(const T& t) { t.get(); };
 
 class Num {
+    public:
+        virtual ~Num() { return; }
 public:
     int get() {
         return 1;

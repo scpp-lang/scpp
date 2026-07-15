@@ -6,7 +6,7 @@ private:
 
 public:
     Box(int v) : value{v} { return; }
-    ~Box() { return; }
+    virtual ~Box() { return; }
     int get() const { return this->value; }
 };
 

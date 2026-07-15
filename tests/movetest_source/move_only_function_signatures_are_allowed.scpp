@@ -1,6 +1,8 @@
 import std;
 
 class MoveOnlyAdder {
+    public:
+        virtual ~MoveOnlyAdder() { return; }
 private:
     std::unique_ptr<int> value{};
 public:
@@ -15,6 +17,8 @@ public:
 };
 
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{};
 public:
@@ -30,6 +34,8 @@ public:
 };
 
 class Inspect {
+    public:
+        virtual ~Inspect() { return; }
 private:
     int value{};
 public:
@@ -44,6 +50,8 @@ public:
 };
 
 class InspectLvalue {
+    public:
+        virtual ~InspectLvalue() { return; }
 private:
     int value{};
 public:
@@ -58,6 +66,8 @@ public:
 };
 
 class Consume {
+    public:
+        virtual ~Consume() { return; }
 private:
     int value{};
 public:
@@ -72,6 +82,8 @@ public:
 };
 
 class InspectRvalue {
+    public:
+        virtual ~InspectRvalue() { return; }
 private:
     int value{};
 public:

@@ -5,6 +5,8 @@
 // private field through `this->` is the basic, intended way to expose
 // class data.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{};
 public:

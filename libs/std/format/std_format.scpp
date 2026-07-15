@@ -6,6 +6,8 @@ namespace std {
 
 template<typename T>
 class __format_arg_supported {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() {
         int zero = 0;
@@ -16,42 +18,56 @@ public:
 
 template<>
 class __format_arg_supported<int> {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() { return; }
 };
 
 template<>
 class __format_arg_supported<bool> {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() { return; }
 };
 
 template<>
 class __format_arg_supported<char> {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() { return; }
 };
 
 template<>
 class __format_arg_supported<double> {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() { return; }
 };
 
 template<>
 class __format_arg_supported<std::string> {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() { return; }
 };
 
 template<>
 class __format_arg_supported<const char*> {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() { return; }
 };
 
 template<>
 class __format_arg_supported<char*> {
+    public:
+        virtual ~__format_arg_supported() = default;
 public:
     consteval __format_arg_supported() { return; }
 };
@@ -61,6 +77,8 @@ class __format_validator;
 
 template<>
 class __format_validator<> {
+    public:
+        virtual ~__format_validator() = default;
 public:
     consteval __format_validator() { return; }
     consteval __format_validator(const char* s, int i) {
@@ -96,6 +114,8 @@ public:
 
 template<typename Head, typename... Tail>
 class __format_validator<Head, Tail...> : private std::__format_validator<Tail...> {
+    public:
+        virtual ~__format_validator() override = default;
 public:
     consteval __format_validator() { return; }
     consteval __format_validator(const char* s, int i) {
@@ -143,6 +163,8 @@ class format_string;
 
 export template<>
 class format_string<> {
+    public:
+        virtual ~format_string() = default;
 public:
     const char* text_{};
 
@@ -160,6 +182,8 @@ public:
 
 export template<typename Head, typename... Tail>
 class format_string<Head, Tail...> : private std::format_string<Tail...> {
+    public:
+        virtual ~format_string() override = default;
 public:
     const char* text_{};
 

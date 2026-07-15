@@ -7,7 +7,7 @@ public:
         return;
     }
 
-    ~Guard() {
+    virtual ~Guard() {
         print_int(this->id_);
         return;
     }

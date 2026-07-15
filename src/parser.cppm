@@ -3005,6 +3005,11 @@ private:
         ParsedAttributes attrs = parse_attribute_specifier_seq();
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
+        if (attrs.has("interface")) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "a declaration introduced by 'struct' shall not be marked '[[scpp::interface]]' (spec §11.1(2.2))");
+        }
         def.is_packed = attrs.has("packed");
         def.is_nodiscard = attrs.has_nodiscard;
         def.nodiscard_reason = attrs.nodiscard_reason;
