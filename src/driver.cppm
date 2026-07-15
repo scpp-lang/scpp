@@ -43,7 +43,7 @@ struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 5;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 6;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -190,8 +190,12 @@ void collect_class_reachable_edges(const scpp::ClassDef& def, std::unordered_set
             function_names.insert(field.type.name + "_new");
         }
     }
-    if (!def.base_class_name.empty()) type_names.insert(def.base_class_name);
-    if (def.base_non_type_arg) collect_expr_edges(*def.base_non_type_arg, function_names, type_names);
+    for (const scpp::BaseSpecifier& base : def.base_specifiers) {
+        collect_type_names(base.base_type, type_names);
+        for (const std::shared_ptr<scpp::Expr>& arg : base.base_type.non_type_args) {
+            if (arg) collect_expr_edges(*arg, function_names, type_names);
+        }
+    }
     for (const scpp::Type& arg : def.specialization_template_args) collect_type_names(arg, type_names);
     if (def.thread_movable_if_movable_expr) {
         collect_expr_edges(*def.thread_movable_if_movable_expr, function_names, type_names);
@@ -744,6 +748,38 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     return field;
 }
 
+void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
+    write_type(out, base.base_type);
+    write_enum(out, base.access);
+    write_u8(out, base.is_virtual ? 1u : 0u);
+    write_enum(out, base.kind);
+    write_string(out, base.pack_arg_name);
+}
+
+[[nodiscard]] BaseSpecifier read_base_specifier(std::istream& in, const std::string& context) {
+    BaseSpecifier base;
+    base.base_type = read_type(in, context + " type");
+    base.access = read_enum<AccessSpecifier>(in, context + " access");
+    base.is_virtual = read_u8(in, context + " is_virtual") != 0u;
+    base.kind = read_enum<BaseClassKind>(in, context + " kind");
+    base.pack_arg_name = read_string(in, context + " pack arg");
+    return base;
+}
+
+void write_class_using_declaration(std::ostream& out, const ClassUsingDeclaration& decl) {
+    write_string(out, decl.base_name);
+    write_string(out, decl.member_name);
+    write_enum(out, decl.access);
+}
+
+[[nodiscard]] ClassUsingDeclaration read_class_using_declaration(std::istream& in, const std::string& context) {
+    ClassUsingDeclaration decl;
+    decl.base_name = read_string(in, context + " base name");
+    decl.member_name = read_string(in, context + " member name");
+    decl.access = read_enum<AccessSpecifier>(in, context + " access");
+    return decl;
+}
+
 void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
     write_string(out, variant.name);
     write_i64_le(out, variant.value);
@@ -839,21 +875,21 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     write_u8(out, def.is_compile_time_dependency ? 1u : 0u);
     write_string(out, def.owning_module);
     write_u8(out, def.is_concept_witness ? 1u : 0u);
+    write_u8(out, def.is_interface ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(def.base_specifiers.size()));
+    for (const BaseSpecifier& base : def.base_specifiers) write_base_specifier(out, base);
+    write_u32_le(out, static_cast<std::uint32_t>(def.using_declarations.size()));
+    for (const ClassUsingDeclaration& decl : def.using_declarations) write_class_using_declaration(out, decl);
     write_u32_le(out, static_cast<std::uint32_t>(def.template_params.size()));
     for (const GenericTypeParam& param : def.template_params) write_generic_type_param(out, param);
     write_string(out, def.template_owner_id);
     write_u8(out, def.is_forward_declaration ? 1u : 0u);
     write_u8(out, def.is_synthetic_check_only ? 1u : 0u);
-    write_string(out, def.base_class_name);
-    write_enum(out, def.base_access);
     write_u8(out, def.is_variadic_primary_template ? 1u : 0u);
     write_u8(out, def.is_variadic_specialization ? 1u : 0u);
     write_u8(out, def.is_partial_specialization ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(def.specialization_template_args.size()));
     for (const Type& arg : def.specialization_template_args) write_type(out, arg);
-    write_string(out, def.base_pack_arg_name);
-    write_u8(out, def.base_non_type_arg ? 1u : 0u);
-    if (def.base_non_type_arg) write_expr(out, *def.base_non_type_arg);
     write_u8(out, def.thread_movable_override ? 1u : 0u);
     write_u8(out, def.thread_shareable_override ? 1u : 0u);
     write_u8(out, def.thread_movable_if_movable_expr ? 1u : 0u);
@@ -877,22 +913,27 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     def.is_compile_time_dependency = read_u8(in, context + " is_compile_time_dependency") != 0u;
     def.owning_module = read_string(in, context + " owning_module");
     def.is_concept_witness = read_u8(in, context + " is_concept_witness") != 0u;
+    def.is_interface = read_u8(in, context + " is_interface") != 0u;
+    std::uint32_t base_count = read_u32_le(in, context + " base count");
+    def.base_specifiers.reserve(base_count);
+    for (std::uint32_t i = 0; i < base_count; i++) def.base_specifiers.push_back(read_base_specifier(in, context + " base"));
+    std::uint32_t using_count = read_u32_le(in, context + " using count");
+    def.using_declarations.reserve(using_count);
+    for (std::uint32_t i = 0; i < using_count; i++) {
+        def.using_declarations.push_back(read_class_using_declaration(in, context + " using"));
+    }
     std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
     def.template_params.reserve(template_param_count);
     for (std::uint32_t i = 0; i < template_param_count; i++) def.template_params.push_back(read_generic_type_param(in, context + " template param"));
     def.template_owner_id = read_string(in, context + " template owner id");
     def.is_forward_declaration = read_u8(in, context + " is_forward_declaration") != 0u;
     def.is_synthetic_check_only = read_u8(in, context + " is_synthetic_check_only") != 0u;
-    def.base_class_name = read_string(in, context + " base class");
-    def.base_access = read_enum<AccessSpecifier>(in, context + " base access");
     def.is_variadic_primary_template = read_u8(in, context + " is_variadic_primary") != 0u;
     def.is_variadic_specialization = read_u8(in, context + " is_variadic_specialization") != 0u;
     def.is_partial_specialization = read_u8(in, context + " is_partial_specialization") != 0u;
     std::uint32_t spec_arg_count = read_u32_le(in, context + " specialization arg count");
     def.specialization_template_args.reserve(spec_arg_count);
     for (std::uint32_t i = 0; i < spec_arg_count; i++) def.specialization_template_args.push_back(read_type(in, context + " specialization arg"));
-    def.base_pack_arg_name = read_string(in, context + " base pack arg");
-    if (read_u8(in, context + " base non-type present") != 0u) def.base_non_type_arg = std::shared_ptr<Expr>(read_expr(in, context + " base non-type").release());
     def.thread_movable_override = read_u8(in, context + " thread movable override") != 0u;
     def.thread_shareable_override = read_u8(in, context + " thread shareable override") != 0u;
     if (read_u8(in, context + " movable_if expr present") != 0u) {
@@ -933,6 +974,10 @@ void write_function(std::ostream& out, const Function& fn) {
     write_enum(out, fn.receiver_ref_qualifier);
     write_u8(out, fn.is_static ? 1u : 0u);
     write_enum(out, fn.access);
+    write_u8(out, fn.is_virtual ? 1u : 0u);
+    write_u8(out, fn.is_override ? 1u : 0u);
+    write_u8(out, fn.is_pure ? 1u : 0u);
+    write_u8(out, fn.is_defaulted ? 1u : 0u);
     write_string(out, fn.forwards_to);
     write_u32_le(out, static_cast<std::uint32_t>(fn.namespace_path.size()));
     for (const std::string& segment : fn.namespace_path) write_string(out, segment);
@@ -972,6 +1017,10 @@ void write_function(std::ostream& out, const Function& fn) {
     fn.receiver_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
     fn.is_static = read_u8(in, context + " is_static") != 0u;
     fn.access = read_enum<AccessSpecifier>(in, context + " access");
+    fn.is_virtual = read_u8(in, context + " is_virtual") != 0u;
+    fn.is_override = read_u8(in, context + " is_override") != 0u;
+    fn.is_pure = read_u8(in, context + " is_pure") != 0u;
+    fn.is_defaulted = read_u8(in, context + " is_defaulted") != 0u;
     fn.forwards_to = read_string(in, context + " forwards_to");
     std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
     fn.namespace_path.reserve(ns_count);
@@ -1027,7 +1076,9 @@ void write_function(std::ostream& out, const Function& fn) {
     return a.name == b.name && types_equal_for_payload_merge(a.return_type, b.return_type) &&
            params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
            a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason &&
-           a.member_owner_class == b.member_owner_class && a.is_static == b.is_static && a.access == b.access;
+           a.member_owner_class == b.member_owner_class && a.is_static == b.is_static && a.access == b.access &&
+           a.is_virtual == b.is_virtual && a.is_override == b.is_override && a.is_pure == b.is_pure &&
+           a.is_defaulted == b.is_defaulted;
 }
 
 [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,

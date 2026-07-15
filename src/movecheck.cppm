@@ -599,12 +599,14 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
 }
 
 [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def) {
-    if (def.base_class_name.empty()) return false;
-    return member_name == def.base_class_name || member_name == unqualified_template_base_name(def.base_class_name);
+    const BaseSpecifier* base = def.direct_ordinary_base();
+    if (base == nullptr || base->base_type.name.empty()) return false;
+    return member_name == base->base_type.name || member_name == unqualified_template_base_name(base->base_type.name);
 }
 
 [[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def) {
-    if (def.base_class_name.empty()) return nullptr;
+    const BaseSpecifier* base = def.direct_ordinary_base();
+    if (base == nullptr) return nullptr;
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (names_direct_base(init.member_name, def)) return &init;
     }
@@ -617,8 +619,9 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
     std::unordered_set<std::string> direct_field_names;
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
-    if (explicit_base_init != nullptr && direct_field_names.contains(def.base_class_name)) {
-        throw DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + def.base_class_name +
+    const BaseSpecifier* base = def.direct_ordinary_base();
+    if (explicit_base_init != nullptr && base != nullptr && direct_field_names.contains(base->base_type.name)) {
+        throw DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + base->base_type.name +
                                 "' in its member-initializer-list because that name matches both a direct field and "
                                 "the direct base class",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
@@ -1421,44 +1424,45 @@ void ensure_implicit_default_construction_is_valid(const std::string& class_name
         }
         return;
     }
-    if (!class_def->base_class_name.empty()) {
-        ensure_implicit_default_construction_is_valid(class_def->base_class_name, current_class, body, signatures, loc,
+    if (const BaseSpecifier* base = class_def->direct_ordinary_base()) {
+        ensure_implicit_default_construction_is_valid(base->base_type.name, current_class, body, signatures, loc,
                                                       context_message);
     }
 }
 
 void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                               const Signatures& signatures) {
-    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.base_class_name.empty()) return;
+    const BaseSpecifier* base = def.direct_ordinary_base();
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || base == nullptr) return;
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
     std::string context_message =
-        "constructor for class '" + def.name + "' must initialize its direct base class '" + def.base_class_name + "'";
+        "constructor for class '" + def.name + "' must initialize its direct base class '" + base->base_type.name + "'";
     if (explicit_base_init == nullptr) {
-        ensure_implicit_default_construction_is_valid(def.base_class_name, def.name, body, signatures, ctor.loc,
+        ensure_implicit_default_construction_is_valid(base->base_type.name, def.name, body, signatures, ctor.loc,
                                                       context_message);
         return;
     }
     const FunctionSignature* sig =
-        resolve_constructor_signature(def.base_class_name, explicit_base_init->initializer.brace_args, body, signatures);
+        resolve_constructor_signature(base->base_type.name, explicit_base_init->initializer.brace_args, body, signatures);
     if (sig == nullptr) {
-        if (body.program != nullptr && !class_has_any_constructor(def.base_class_name, *body.program) &&
+        if (body.program != nullptr && !class_has_any_constructor(base->base_type.name, *body.program) &&
             explicit_base_init->initializer.brace_args.empty()) {
-            ensure_implicit_default_construction_is_valid(def.base_class_name, def.name, body, signatures,
+            ensure_implicit_default_construction_is_valid(base->base_type.name, def.name, body, signatures,
                                                           explicit_base_init->loc, context_message);
             return;
         }
-        throw DataflowError("base-class initializer for '" + def.base_class_name +
+        throw DataflowError("base-class initializer for '" + base->base_type.name +
                                 "' does not match any constructor of that class",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
     }
     if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() && def.name != sig->member_owner_class) {
-        throw DataflowError("cannot call private constructor of base class '" + def.base_class_name +
+        throw DataflowError("cannot call private constructor of base class '" + base->base_type.name +
                                 "' from derived class '" + def.name + "'",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
     }
     if (sig->is_unsafe) {
-        throw DataflowError("cannot call base class '" + def.base_class_name +
+        throw DataflowError("cannot call base class '" + base->base_type.name +
                                 "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                                 "'[[scpp::unsafe]]'",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
@@ -6315,7 +6319,7 @@ private:
         return primary_selection;
     }
 
-    // ch05 §5.14: for every class with a base (ClassDef::base_class_name),
+    // ch05 §5.14: for every class with an ordinary direct base
     // synthesizes a "forwarding stub" Function (Function::forwards_to)
     // for every method the base class defines (recursively -- including
     // any forward the base class itself already synthesized from *its*
@@ -6337,8 +6341,9 @@ private:
     void synthesize_inherited_method_forwards() {
         size_t original_class_count = program_.classes.size();
         for (size_t i = 0; i < original_class_count; i++) {
-            if (program_.classes[i].base_class_name.empty()) continue;
-            // ch05 §5.14: a variadic specialization's own base_class_name
+            const BaseSpecifier* base = program_.classes[i].direct_ordinary_base();
+            if (base == nullptr) continue;
+            // ch05 §5.14: a variadic specialization's own base-specifier
             // (e.g. "Tuple", set by parse_variadic_specialization's base-
             // clause handling) names the *template*, not a real,
             // concrete base class -- there is nothing to forward yet
@@ -6354,7 +6359,7 @@ private:
                 continue;
             }
             std::string derived_name = program_.classes[i].name;
-            std::string base_name = program_.classes[i].base_class_name;
+            std::string base_name = base->base_type.name;
             std::vector<std::string> namespace_path_copy = program_.classes[i].namespace_path;
             bool is_exported_copy = program_.classes[i].is_exported;
 
@@ -7001,8 +7006,7 @@ private:
             const ClassDef& tmpl = *class_selection.def;
             std::string tmpl_owner_id = tmpl.template_owner_id;
             std::vector<std::string> tmpl_namespace_path = tmpl.namespace_path;
-            std::string tmpl_base_class_name = tmpl.base_class_name;
-            AccessSpecifier tmpl_base_access = tmpl.base_access;
+            std::vector<BaseSpecifier> tmpl_base_specifiers = tmpl.base_specifiers;
             bool tmpl_thread_movable_override = tmpl.thread_movable_override;
             bool tmpl_thread_shareable_override = tmpl.thread_shareable_override;
             ExprPtr tmpl_thread_movable_if_movable_expr =
@@ -7040,8 +7044,9 @@ private:
             ClassDef concrete;
             concrete.name = cache_key;
             concrete.namespace_path = tmpl_namespace_path;
-            concrete.base_class_name = tmpl_base_class_name;
-            concrete.base_access = tmpl_base_access;
+            concrete.is_interface = tmpl.is_interface;
+            concrete.base_specifiers = std::move(tmpl_base_specifiers);
+            concrete.using_declarations = tmpl.using_declarations;
             concrete.thread_movable_override = tmpl_thread_movable_override;
             concrete.thread_shareable_override = tmpl_thread_shareable_override;
             concrete.is_nodiscard = tmpl.is_nodiscard;
@@ -7314,7 +7319,7 @@ private:
     // instantiation of a variadic generic type's own recursive-
     // inheritance chain -- one concrete ClassDef per level, from
     // `type_args[0]` down to the terminal empty-pack base case, each
-    // level's own base_class_name pointing at the next level's own
+    // level's own ordinary direct base pointing at the next level's own
     // synthesized name (mirroring exactly how the doc's own
     // `Tuple<Head, Tail...> : private Tuple<Tail...>` recursive
     // specialization is meant to expand). `non_type_args` holds every
@@ -7422,15 +7427,20 @@ private:
         std::vector<GenericTypeParam> leading_non_type_params(
             recursive_tmpl->template_params.begin(), recursive_tmpl->template_params.begin() + leading_non_type_count);
         GenericTypeParam head_param = recursive_tmpl->template_params[leading_non_type_count];
-        std::string base_template_name = recursive_tmpl->base_class_name;
-        AccessSpecifier base_access = recursive_tmpl->base_access;
+        const BaseSpecifier* recursive_base = recursive_tmpl->direct_ordinary_base();
+        std::string base_template_name = recursive_base != nullptr ? recursive_base->base_type.name : std::string();
+        AccessSpecifier base_access = recursive_base != nullptr ? recursive_base->access : AccessSpecifier::Private;
         bool thread_movable_override = recursive_tmpl->thread_movable_override;
         bool thread_shareable_override = recursive_tmpl->thread_shareable_override;
         bool is_nodiscard = recursive_tmpl->is_nodiscard;
         std::string nodiscard_reason = recursive_tmpl->nodiscard_reason;
+        bool is_interface = recursive_tmpl->is_interface;
+        std::vector<ClassUsingDeclaration> using_declarations = recursive_tmpl->using_declarations;
         std::vector<ClassField> fields_copy = recursive_tmpl->fields;
         std::vector<std::string> namespace_path_copy = recursive_tmpl->namespace_path;
-        std::shared_ptr<Expr> base_non_type_arg_expr = recursive_tmpl->base_non_type_arg;
+        std::shared_ptr<Expr> base_non_type_arg_expr =
+            recursive_base != nullptr && !recursive_base->base_type.non_type_args.empty() ? recursive_base->base_type.non_type_args.front()
+                                                                                           : nullptr;
         ExprPtr thread_movable_if_movable_expr_copy = recursive_tmpl->thread_movable_if_movable_expr
                                                           ? clone_expr(*recursive_tmpl->thread_movable_if_movable_expr)
                                                           : nullptr;
@@ -7472,8 +7482,15 @@ private:
         ClassDef concrete;
         concrete.name = cache_key;
         concrete.namespace_path = namespace_path_copy;
-        concrete.base_class_name = base_concrete_name;
-        concrete.base_access = base_access;
+        if (!base_concrete_name.empty()) {
+            BaseSpecifier base;
+            base.base_type = named_type(base_concrete_name);
+            base.access = base_access;
+            base.kind = BaseClassKind::OrdinaryClass;
+            concrete.base_specifiers.push_back(std::move(base));
+        }
+        concrete.is_interface = is_interface;
+        concrete.using_declarations = std::move(using_declarations);
         concrete.thread_movable_override = thread_movable_override;
         concrete.thread_shareable_override = thread_shareable_override;
         concrete.is_nodiscard = is_nodiscard;
@@ -7569,7 +7586,7 @@ private:
     // own, less-derived concrete type when calling the monomorphized
     // clone -- codegen needs no actual conversion instruction for this,
     // since every level's own flattened layout is already byte-
-    // compatible with its base, see ClassDef::base_class_name's own
+    // compatible with its base, see ClassDef::base_specifiers' own
     // comment; this is purely a scpp-level type-compatibility fact).
     void deduce_via_base_class_chain(const Expr& expr, size_t arg_index, const Type& pattern, Body& body,
                                       std::unordered_map<std::string, Type>& type_bindings,
@@ -7607,8 +7624,9 @@ private:
                     break;
                 }
             }
-            if (!cd || cd->base_class_name.empty()) break;
-            current_name = cd->base_class_name;
+            const BaseSpecifier* base = cd != nullptr ? cd->direct_ordinary_base() : nullptr;
+            if (base == nullptr) break;
+            current_name = base->base_type.name;
         }
         if (!matched) {
             throw DataflowError("no base class (direct or indirect) of the argument's own type matches the "
@@ -7913,8 +7931,9 @@ private:
                     break;
                 }
             }
-            if (!cd || cd->base_class_name.empty()) break;
-            current_name = cd->base_class_name;
+            const BaseSpecifier* base = cd != nullptr ? cd->direct_ordinary_base() : nullptr;
+            if (base == nullptr) break;
+            current_name = base->base_type.name;
         }
         return false;
     }

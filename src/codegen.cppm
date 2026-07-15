@@ -1446,7 +1446,7 @@ private:
     // ownership/lifetime semantics), so this skips validate_trivial
     // entirely.
     //
-    // ch05 §5.14: a class with a base (ClassDef::base_class_name) gets a
+    // ch05 §5.14: a class with an ordinary direct base gets a
     // *flattened* layout -- the base's own StructInfo (already
     // registered: the parser requires a base to be declared, and
     // `generate()`'s own declare_class loop processes program.classes in
@@ -1465,8 +1465,8 @@ private:
         if (declaring_aggregates_.contains(def.name)) return;
         declaring_aggregates_.insert(def.name);
         StructInfo info;
-        if (!def.base_class_name.empty()) {
-            const StructInfo& base_info = structs_.at(def.base_class_name);
+        if (const BaseSpecifier* base = def.direct_ordinary_base()) {
+            const StructInfo& base_info = structs_.at(base->base_type.name);
             info.field_names = base_info.field_names;
             info.field_types = base_info.field_types;
         }
@@ -3063,8 +3063,9 @@ private:
     }
 
     [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def) const {
-        if (def.base_class_name.empty()) return false;
-        return member_name == def.base_class_name || member_name == unqualified_template_base_name(def.base_class_name);
+        const BaseSpecifier* base = def.direct_ordinary_base();
+        if (base == nullptr || base->base_type.name.empty()) return false;
+        return member_name == base->base_type.name || member_name == unqualified_template_base_name(base->base_type.name);
     }
 
     [[nodiscard]] llvm::Value* load_this_object_ptr() {
@@ -3232,7 +3233,7 @@ private:
             throw CodegenError("unknown constructor owner class '" + fn.member_owner_class + "'", current_loc_);
         }
         llvm::Value* object_ptr = load_this_object_ptr();
-        if (!class_def->base_class_name.empty()) {
+        if (const BaseSpecifier* base = class_def->direct_ordinary_base()) {
             const MemberInitializer* explicit_base_init = nullptr;
             for (const MemberInitializer& init : fn.member_initializers) {
                 if (names_direct_base(init.member_name, *class_def)) {
@@ -3240,15 +3241,15 @@ private:
                     break;
                 }
             }
-            const ClassDef* base_def = find_class_def(class_def->base_class_name);
+            const ClassDef* base_def = find_class_def(base->base_type.name);
             if (base_def == nullptr) {
-                throw CodegenError("unknown base class '" + class_def->base_class_name + "'", current_loc_);
+                throw CodegenError("unknown base class '" + base->base_type.name + "'", current_loc_);
             }
             static const std::vector<ExprPtr> no_base_args;
             const std::vector<ExprPtr>* base_args = explicit_base_init != nullptr ? &explicit_base_init->initializer.brace_args
                                                                                   : nullptr;
             const Function* base_ctor =
-                resolve_constructor_overload_exact(class_def->base_class_name, base_args != nullptr ? *base_args : no_base_args);
+                resolve_constructor_overload_exact(base->base_type.name, base_args != nullptr ? *base_args : no_base_args);
             if (base_ctor != nullptr) {
                 std::vector<llvm::Value*> ctor_args =
                     codegen_call_args(base_args != nullptr ? *base_args : no_base_args, base_ctor, /*param_offset=*/1);
@@ -3257,7 +3258,7 @@ private:
             } else if (base_args == nullptr || base_args->empty()) {
                 emit_default_initializers_for_class_storage(object_ptr, *base_def);
             } else {
-                throw CodegenError("base-class initializer for '" + class_def->base_class_name +
+                throw CodegenError("base-class initializer for '" + base->base_type.name +
                                        "' does not match any constructor of that class",
                                    current_loc_);
             }
@@ -3283,19 +3284,19 @@ private:
     }
 
     void emit_default_initializers_for_class_storage(llvm::Value* object_ptr, const ClassDef& class_def) {
-        if (!class_def.base_class_name.empty()) {
-            const ClassDef* base_def = find_class_def(class_def.base_class_name);
+        if (const BaseSpecifier* base = class_def.direct_ordinary_base()) {
+            const ClassDef* base_def = find_class_def(base->base_type.name);
             if (base_def == nullptr) {
-                throw CodegenError("unknown base class '" + class_def.base_class_name + "'", current_loc_);
+                throw CodegenError("unknown base class '" + base->base_type.name + "'", current_loc_);
             }
-            const Function* base_ctor = resolve_constructor_overload_exact(class_def.base_class_name, {});
+            const Function* base_ctor = resolve_constructor_overload_exact(base->base_type.name, {});
             if (base_ctor != nullptr) {
                 builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), {object_ptr});
-            } else if (!class_has_any_constructor(class_def.base_class_name)) {
+            } else if (!class_has_any_constructor(base->base_type.name)) {
                 emit_default_initializers_for_class_storage(object_ptr, *base_def);
             } else {
                 throw CodegenError("class '" + class_def.name + "' cannot be implicitly default-constructed because base class '" +
-                                       class_def.base_class_name + "' has no accessible default constructor",
+                                      base->base_type.name + "' has no accessible default constructor",
                                    current_loc_);
             }
         }
@@ -4256,7 +4257,9 @@ private:
             if (find_destructor(current) != nullptr) return true;
             const ClassDef* def = find_class_def(current);
             if (def == nullptr) break;
-            current = def->base_class_name;
+            const BaseSpecifier* base = def->direct_ordinary_base();
+            if (base == nullptr) break;
+            current = base->base_type.name;
         }
         return false;
     }
@@ -4266,8 +4269,8 @@ private:
             builder_->CreateCall(dtor, {object_ptr});
         }
         const ClassDef* def = find_class_def(class_name);
-        if (def != nullptr && !def->base_class_name.empty()) {
-            emit_destructor_chain_calls(def->base_class_name, object_ptr);
+        if (def != nullptr) {
+            if (const BaseSpecifier* base = def->direct_ordinary_base()) emit_destructor_chain_calls(base->base_type.name, object_ptr);
         }
     }
 

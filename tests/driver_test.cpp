@@ -1732,7 +1732,7 @@ void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
         "}\n");
     scpp::CompileTimePayloadPlan plan = scpp::plan_compile_time_payload(program);
     expect(plan.format_version == scpp::SCPPM_COMPILE_TIME_AST_VERSION,
-           case_name + ": expected compile-time payload format version 1");
+           case_name + ": expected current compile-time payload format version");
     expect(std::find(plan.root_function_names.begin(), plan.root_function_names.end(), "math::answer") !=
                plan.root_function_names.end(),
            case_name + ": expected exported constexpr function root");
@@ -2692,7 +2692,7 @@ void run_cli_extension_tests() {
                            "SAST",
                        case_name + ": expected structured payload magic");
                 expect(read_u32_le(interface_bytes, payload_offset + 4) == scpp::SCPPM_COMPILE_TIME_AST_VERSION,
-                       case_name + ": expected structured payload version 1");
+                       case_name + ": expected current structured payload version");
             }
         }
         std::filesystem::remove(module_source);
