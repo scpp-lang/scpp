@@ -3190,6 +3190,131 @@ void test_interface_attribute_sets_class_flag() {
            "interface_attribute_sets_class_flag: expected [[scpp::interface]] to set ClassDef::is_interface");
 }
 
+void test_multiple_base_specifiers_parse_with_access_and_virtual_flags() {
+    scpp::Program program = scpp::parse(
+        "class Base1 { public: Base1() { return; } };\n"
+        "class [[scpp::interface]] IFoo { public: virtual ~IFoo() = default; };\n"
+        "class [[scpp::interface]] IBar { public: virtual ~IBar() = default; };\n"
+        "class Derived : public Base1, public virtual IFoo, private virtual IBar {\n"
+        "public:\n"
+        "    Derived() { return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* derived = find_class_named(program, "Derived");
+    expect(derived != nullptr,
+           "multiple_base_specifiers_parse_with_access_and_virtual_flags: expected a ClassDef named 'Derived'");
+    expect(derived != nullptr && derived->base_specifiers.size() == 3,
+           "multiple_base_specifiers_parse_with_access_and_virtual_flags: expected 3 base specifiers");
+    expect(derived != nullptr && derived->base_specifiers[0].base_type.name == "Base1" &&
+               derived->base_specifiers[0].access == scpp::AccessSpecifier::Public &&
+               !derived->base_specifiers[0].is_virtual &&
+               derived->base_specifiers[0].kind == scpp::BaseClassKind::OrdinaryClass,
+           "multiple_base_specifiers_parse_with_access_and_virtual_flags: expected public non-virtual Base1");
+    expect(derived != nullptr && derived->base_specifiers[1].base_type.name == "IFoo" &&
+               derived->base_specifiers[1].access == scpp::AccessSpecifier::Public &&
+               derived->base_specifiers[1].is_virtual &&
+               derived->base_specifiers[1].kind == scpp::BaseClassKind::Interface,
+           "multiple_base_specifiers_parse_with_access_and_virtual_flags: expected public virtual IFoo");
+    expect(derived != nullptr && derived->base_specifiers[2].base_type.name == "IBar" &&
+               derived->base_specifiers[2].access == scpp::AccessSpecifier::Private &&
+               derived->base_specifiers[2].is_virtual &&
+               derived->base_specifiers[2].kind == scpp::BaseClassKind::Interface,
+           "multiple_base_specifiers_parse_with_access_and_virtual_flags: expected private virtual IBar");
+}
+
+void test_class_scope_using_declaration_parses() {
+    scpp::Program program = scpp::parse(
+        "class Base {\n"
+        "public:\n"
+        "    void work() { return; }\n"
+        "};\n"
+        "class Derived : public Base {\n"
+        "public:\n"
+        "    using Base::work;\n"
+        "private:\n"
+        "    using Base::work;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* derived = find_class_named(program, "Derived");
+    expect(derived != nullptr, "class_scope_using_declaration_parses: expected a ClassDef named 'Derived'");
+    expect(derived != nullptr && derived->using_declarations.size() == 2,
+           "class_scope_using_declaration_parses: expected 2 using declarations");
+    expect(derived != nullptr && derived->using_declarations[0].base_name == "Base" &&
+               derived->using_declarations[0].member_name == "work" &&
+               derived->using_declarations[0].access == scpp::AccessSpecifier::Public,
+           "class_scope_using_declaration_parses: expected public using Base::work");
+    expect(derived != nullptr && derived->using_declarations[1].base_name == "Base" &&
+               derived->using_declarations[1].member_name == "work" &&
+               derived->using_declarations[1].access == scpp::AccessSpecifier::Private,
+           "class_scope_using_declaration_parses: expected private using Base::work");
+}
+
+void test_virtual_override_pure_and_defaulted_member_flags_parse() {
+    scpp::Program program = scpp::parse(
+        "class [[scpp::interface]] IBase {\n"
+        "public:\n"
+        "    virtual ~IBase() = default;\n"
+        "    virtual void run() = 0;\n"
+        "};\n"
+        "class Derived : public virtual IBase {\n"
+        "public:\n"
+        "    virtual ~Derived() override = default;\n"
+        "    virtual void run() override;\n"
+        "    virtual void helper() = 0;\n"
+        "    Derived() = default;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* iface_dtor = find_function_named(program, "IBase_delete");
+    const scpp::Function* iface_run = find_function_named(program, "IBase_run");
+    const scpp::Function* derived_dtor = find_function_named(program, "Derived_delete");
+    const scpp::Function* derived_run = find_function_named(program, "Derived_run");
+    const scpp::Function* derived_helper = find_function_named(program, "Derived_helper");
+    const scpp::Function* derived_ctor = find_function_named(program, "Derived_new");
+    expect(iface_dtor != nullptr && iface_dtor->is_virtual && iface_dtor->is_defaulted,
+           "virtual_override_pure_and_defaulted_member_flags_parse: expected IBase destructor to be virtual and defaulted");
+    expect(iface_run != nullptr && iface_run->is_virtual && iface_run->is_pure,
+           "virtual_override_pure_and_defaulted_member_flags_parse: expected IBase::run to be virtual and pure");
+    expect(derived_dtor != nullptr && derived_dtor->is_virtual && derived_dtor->is_override &&
+               derived_dtor->is_defaulted,
+           "virtual_override_pure_and_defaulted_member_flags_parse: expected Derived destructor virtual/override/defaulted");
+    expect(derived_run != nullptr && derived_run->is_virtual && derived_run->is_override &&
+               !derived_run->is_pure && !derived_run->is_defaulted,
+           "virtual_override_pure_and_defaulted_member_flags_parse: expected Derived::run virtual/override only");
+    expect(derived_helper != nullptr && derived_helper->is_virtual && derived_helper->is_pure,
+           "virtual_override_pure_and_defaulted_member_flags_parse: expected Derived::helper virtual and pure");
+    expect(derived_ctor != nullptr && derived_ctor->is_defaulted,
+           "virtual_override_pure_and_defaulted_member_flags_parse: expected Derived constructor defaulted");
+}
+
+void test_override_without_virtual_member_flags_parse() {
+    scpp::Program program = scpp::parse(
+        "class Base {\n"
+        "public:\n"
+        "    virtual ~Base() = default;\n"
+        "    virtual void run() = 0;\n"
+        "    virtual int operator*() = 0;\n"
+        "};\n"
+        "class Derived : public Base {\n"
+        "public:\n"
+        "    ~Derived() override = default;\n"
+        "    void run() override;\n"
+        "    int operator*() override;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* derived_dtor = find_function_named(program, "Derived_delete");
+    const scpp::Function* derived_run = find_function_named(program, "Derived_run");
+    const scpp::Function* derived_deref = find_function_named(program, "Derived_operator_deref");
+    expect(derived_dtor != nullptr && derived_dtor->is_override && !derived_dtor->is_virtual &&
+               derived_dtor->is_defaulted,
+           "override_without_virtual_member_flags_parse: expected destructor override/defaulted without virtual flag");
+    expect(derived_run != nullptr && derived_run->is_override && !derived_run->is_virtual &&
+               !derived_run->is_pure && !derived_run->is_defaulted,
+           "override_without_virtual_member_flags_parse: expected method override without virtual flag");
+    expect(derived_deref != nullptr && derived_deref->is_override && !derived_deref->is_virtual &&
+               !derived_deref->is_pure && !derived_deref->is_defaulted,
+           "override_without_virtual_member_flags_parse: expected operator* override without virtual flag");
+}
+
 // ch05 §5.14: `template<typename... Ts> class Tuple;` -- a variadic
 // primary template's own bodyless forward declaration -- marks the
 // ClassDef is_variadic_primary_template, records its single pack
@@ -3858,6 +3983,10 @@ int main() {
     test_class_inheritance_defaults_to_private();
     test_class_inheritance_from_undeclared_class_is_rejected();
     test_interface_attribute_sets_class_flag();
+    test_multiple_base_specifiers_parse_with_access_and_virtual_flags();
+    test_class_scope_using_declaration_parses();
+    test_virtual_override_pure_and_defaulted_member_flags_parse();
+    test_override_without_virtual_member_flags_parse();
     test_variadic_primary_template_decl_parses();
     test_variadic_empty_pack_specialization_parses();
     test_variadic_recursive_specialization_parses();

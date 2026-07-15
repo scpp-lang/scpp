@@ -86,6 +86,10 @@ enum class TokenKind {
                // `struct` (trivial aggregate, always-public fields).
     KwStatic,  // class member function specifier: no implicit `this`,
                // callable as `ClassName::method(...)`.
+    KwVirtual, // class member/base-specifier `virtual`.
+    KwOverride, // trailing virt-specifier on a member function.
+    KwUsing,   // class-scope `using Base::member;`.
+    KwDefault, // `= default` on a member declaration.
     KwPublic,  // Only legal directly above a member *function* -- ch04
                // §4.2 permanently forbids a public member variable
                // (including a class-level constant).
@@ -271,6 +275,10 @@ private:
         if (text == "consteval") return TokenKind::KwConsteval;
         if (text == "class") return TokenKind::KwClass;
         if (text == "static") return TokenKind::KwStatic;
+        if (text == "virtual") return TokenKind::KwVirtual;
+        if (text == "override") return TokenKind::KwOverride;
+        if (text == "using") return TokenKind::KwUsing;
+        if (text == "default") return TokenKind::KwDefault;
         if (text == "public") return TokenKind::KwPublic;
         if (text == "private") return TokenKind::KwPrivate;
         if (text == "this") return TokenKind::KwThis;
