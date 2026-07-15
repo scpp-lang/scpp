@@ -608,6 +608,10 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return member_name == base->base_type.name || member_name == unqualified_template_base_name(base->base_type.name);
 }
 
+[[nodiscard]] bool names_base(const std::string& member_name, const BaseSpecifier& base) {
+    return member_name == base.base_type.name || member_name == unqualified_template_base_name(base.base_type.name);
+}
+
 [[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def) {
     const BaseSpecifier* base = def.direct_ordinary_base();
     if (base == nullptr) return nullptr;
@@ -632,6 +636,15 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
     }
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (&init == explicit_base_init) continue;
+        bool names_direct_interface_base = false;
+        for (const BaseSpecifier& direct_base : def.base_specifiers) {
+            if (direct_base.kind != BaseClassKind::Interface) continue;
+            if (names_base(init.member_name, direct_base)) {
+                names_direct_interface_base = true;
+                break;
+            }
+        }
+        if (names_direct_interface_base) continue;
         if (!direct_field_names.contains(init.member_name)) {
             throw DataflowError("constructor for class '" + def.name + "' names unknown member '" + init.member_name +
                                     "' in its member-initializer-list",
@@ -3092,6 +3105,19 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     // computation to observe).
     std::string root = resolve_borrow_source_root(arg, state, body, signatures, report_errors);
     if (!report_errors) return;
+
+    if (body.program != nullptr && param_type.pointee != nullptr && param_type.pointee->kind == TypeKind::Named) {
+        const ClassDef* param_interface = find_class_def(*body.program, param_type.pointee->name);
+        if (param_interface != nullptr && param_interface->is_interface) {
+        std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
+        if (source_type.has_value() &&
+            !types_equal(*source_type, param_type) &&
+            !types_compatible_with_interface_conversion(*source_type, param_type, *body.program, enclosing_class_name(body))) {
+            throw DataflowError("cannot bind interface-typed reference parameter from an incompatible source type",
+                                state.current_loc);
+        }
+        }
+    }
 
     bool is_mutable = param_type.is_mutable_ref;
 
@@ -7136,30 +7162,27 @@ private:
         return primary_selection;
     }
 
-    // ch05 §5.14: for every class with an ordinary direct base
-    // synthesizes a "forwarding stub" Function (Function::forwards_to)
-    // for every method the base class defines (recursively -- including
-    // any forward the base class itself already synthesized from *its*
-    // own base, since classes are processed in the same declaration
-    // order the parser already requires: a base is always fully
-    // declared -- and thus already has its own forwards synthesized --
-    // before a class inheriting from it) that the derived class doesn't
-    // itself override. This means every other pass in this file (and
-    // every codegen call-resolution path) resolves an inherited method
-    // call by simply finding "DerivedClass_methodName" already present
-    // in program_.functions, exactly like an ordinary, non-inherited
-    // method -- no separate inheritance-aware fallback logic needed
-    // anywhere else. A constructor/destructor ("_new"/"_delete") is
-    // never forwarded here: constructor/base-destructor chaining is
-    // handled directly by dedicated validation/codegen logic instead,
-    // and synthesizing a same-named forwarding constructor would get in
-    // the way of a derived class later defining its own constructor with
-    // a different parameter list.
+    // ch05 §5.14 / ch11: for every class with any direct base (ordinary
+    // or interface), synthesizes a "forwarding stub"
+    // Function (Function::forwards_to) for every inherited method the
+    // base defines (recursively -- including any forward the base class
+    // or interface itself already synthesized from *its* own bases,
+    // since declarations are processed in source order and every base is
+    // already complete before a derived class naming it). This means
+    // every other pass in this file (and every codegen call-resolution
+    // path) resolves an inherited method call by simply finding
+    // "DerivedClass_methodName" already present in program_.functions,
+    // exactly like an ordinary, non-inherited method -- no separate
+    // inheritance-aware fallback logic needed anywhere else. A
+    // constructor/destructor ("_new"/"_delete") is never forwarded
+    // here: constructor/base-destructor chaining is handled directly by
+    // dedicated validation/codegen logic instead, and synthesizing a
+    // same-named forwarding constructor would get in the way of a
+    // derived class later defining its own constructor with a different
+    // parameter list.
     void synthesize_inherited_method_forwards() {
         size_t original_class_count = program_.classes.size();
         for (size_t i = 0; i < original_class_count; i++) {
-            const BaseSpecifier* base = program_.classes[i].direct_ordinary_base();
-            if (base == nullptr) continue;
             // ch05 §5.14: a variadic specialization's own base-specifier
             // (e.g. "Tuple", set by parse_variadic_specialization's base-
             // clause handling) names the *template*, not a real,
@@ -7176,51 +7199,57 @@ private:
                 continue;
             }
             std::string derived_name = program_.classes[i].name;
-            std::string base_name = base->base_type.name;
             std::vector<std::string> namespace_path_copy = program_.classes[i].namespace_path;
             bool is_exported_copy = program_.classes[i].is_exported;
-
-            std::vector<Function> base_methods = methods_of_type_name(base_name);
-            for (const Function& base_method : base_methods) {
-                if (base_method.is_static) continue;
-                // e.g. "_foo" out of "Circle_foo" -- see
-                // method_templates_of's exact-name-match filter, which
-                // guarantees this is always a clean prefix.
-                std::string suffix = base_method.name.substr(base_name.size());
-                if (suffix == "_new" || suffix == "_delete") continue;
-                std::string derived_method_name = derived_name + suffix;
-                bool already_defined = false;
-                for (const Function& fn : program_.functions) {
-                    if (fn.name == derived_method_name) {
-                        already_defined = true;
-                        break;
+            for (const BaseSpecifier& base : program_.classes[i].base_specifiers) {
+                std::string base_name = base.base_type.name;
+                std::vector<Function> base_methods = methods_of_type_name(base_name);
+                for (const Function& base_method : base_methods) {
+                    if (base_method.is_static) continue;
+                    std::string suffix = base_method.name.substr(base_name.size());
+                    if (suffix == "_new" || suffix == "_delete") continue;
+                    std::string derived_method_name = derived_name + suffix;
+                    bool already_defined = false;
+                    for (const Function& fn : program_.functions) {
+                        if (fn.name != derived_method_name || fn.params.size() != base_method.params.size()) continue;
+                        bool same_signature = true;
+                        for (size_t p = 1; p < fn.params.size(); ++p) {
+                            if (!types_equal(fn.params[p].type, base_method.params[p].type)) {
+                                same_signature = false;
+                                break;
+                            }
+                        }
+                        if (same_signature) {
+                            already_defined = true;
+                            break;
+                        }
                     }
-                }
-                if (already_defined) continue; // the derived class overrides this one itself
+                    if (already_defined) continue;
 
-                Function forward;
-                forward.name = derived_method_name;
-                forward.loc = base_method.loc;
-                forward.return_type = base_method.return_type;
-                forward.namespace_path = namespace_path_copy;
-                forward.is_exported = is_exported_copy;
-                forward.member_owner_class = derived_name;
-                forward.receiver_ref_qualifier = base_method.receiver_ref_qualifier;
-                forward.access = base_method.access;
-                forward.forwards_to = base_method.name;
-                forward.body = nullptr; // purely a codegen-level wrapper -- see Function::forwards_to's own comment
-                Param this_param;
-                this_param.name = "this";
-                Type this_type;
-                this_type.kind = TypeKind::Reference;
-                this_type.pointee = std::make_shared<Type>(named_type(derived_name));
-                this_type.is_mutable_ref = base_method.params[0].type.is_mutable_ref;
-                this_param.type = std::move(this_type);
-                forward.params.push_back(std::move(this_param));
-                for (size_t p = 1; p < base_method.params.size(); p++) {
-                    forward.params.push_back(base_method.params[p]);
+                    Function forward;
+                    forward.name = derived_method_name;
+                    forward.loc = base_method.loc;
+                    forward.return_type = base_method.return_type;
+                    forward.namespace_path = namespace_path_copy;
+                    forward.is_exported = is_exported_copy;
+                    forward.member_owner_class = derived_name;
+                    forward.receiver_ref_qualifier = base_method.receiver_ref_qualifier;
+                    forward.access = base_method.access;
+                    forward.forwards_to = base_method.name;
+                    forward.body = nullptr;
+                    Param this_param;
+                    this_param.name = "this";
+                    Type this_type;
+                    this_type.kind = TypeKind::Reference;
+                    this_type.pointee = std::make_shared<Type>(named_type(derived_name));
+                    this_type.is_mutable_ref = base_method.params[0].type.is_mutable_ref;
+                    this_param.type = std::move(this_type);
+                    forward.params.push_back(std::move(this_param));
+                    for (size_t p = 1; p < base_method.params.size(); p++) {
+                        forward.params.push_back(base_method.params[p]);
+                    }
+                    program_.functions.push_back(std::move(forward));
                 }
-                program_.functions.push_back(std::move(forward));
             }
         }
     }

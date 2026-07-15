@@ -2792,6 +2792,17 @@ private:
             dispatch_args.push_back(extract_interface_object_ptr(receiver_value));
             for (size_t i = 1; i < args.size(); ++i) dispatch_args.push_back(args[i]);
             call_result = builder_->CreateCall(interface_dispatch_function_type(*target), target_ptr, dispatch_args);
+        } else if (!fn.params.empty() && !target->params.empty() && is_interface_reference_type(target->params.front().type)) {
+            const std::string& concrete_class_name = fn.params.front().type.pointee->name;
+            const std::string& target_interface_name = target->params.front().type.pointee->name;
+            llvm::Value* fat_receiver =
+                build_interface_value(args.front(), get_or_create_interface_dispatch_table(concrete_class_name,
+                                                                                           target_interface_name));
+            std::vector<llvm::Value*> direct_args;
+            direct_args.reserve(args.size());
+            direct_args.push_back(fat_receiver);
+            for (size_t i = 1; i < args.size(); ++i) direct_args.push_back(args[i]);
+            call_result = builder_->CreateCall(target_llvm, direct_args);
         } else {
             call_result = builder_->CreateCall(target_llvm, args);
         }
@@ -3291,6 +3302,12 @@ private:
                                            current_loc_);
                     }
                     llvm::Value* receiver_value = codegen_expr(*expr.lhs);
+                    if (!callee->is_virtual) {
+                        llvm::Function* target = module_->getFunction(overload_names_.at(callee));
+                        std::vector<llvm::Value*> args = codegen_call_args(expr.args, callee, /*param_offset=*/1);
+                        args.insert(args.begin(), receiver_value);
+                        return CallResult{builder_->CreateCall(target, args), callee};
+                    }
                     std::optional<size_t> slot_index = interface_method_slot_index(receiver_named.name, *callee);
                     if (!slot_index.has_value()) {
                         throw CodegenError("missing interface dispatch slot for '" + callee->name + "'", current_loc_);
@@ -3555,6 +3572,10 @@ private:
         return member_name == base->base_type.name || member_name == unqualified_template_base_name(base->base_type.name);
     }
 
+    [[nodiscard]] bool names_base(const std::string& member_name, const BaseSpecifier& base) const {
+        return member_name == base.base_type.name || member_name == unqualified_template_base_name(base.base_type.name);
+    }
+
     [[nodiscard]] llvm::Value* load_this_object_ptr() {
         auto this_it = locals_.find("this");
         if (this_it == locals_.end()) {
@@ -3753,6 +3774,30 @@ private:
                                        "' does not match any constructor of that class",
                                    current_loc_);
             }
+        }
+        for (const BaseSpecifier& base : class_def->base_specifiers) {
+            if (base.kind != BaseClassKind::Interface) continue;
+            const MemberInitializer* explicit_base_init = nullptr;
+            for (const MemberInitializer& init : fn.member_initializers) {
+                if (names_base(init.member_name, base)) {
+                    explicit_base_init = &init;
+                    break;
+                }
+            }
+            if (explicit_base_init == nullptr) continue;
+            const Function* base_ctor = resolve_constructor_overload_exact(base.base_type.name,
+                                                                           explicit_base_init->initializer.brace_args);
+            if (base_ctor == nullptr) {
+                throw CodegenError("base-class initializer for '" + base.base_type.name +
+                                       "' does not match any constructor of that class",
+                                   current_loc_);
+            }
+            std::vector<llvm::Value*> ctor_args =
+                codegen_call_args(explicit_base_init->initializer.brace_args, base_ctor, /*param_offset=*/1);
+            llvm::Value* fat_this =
+                build_interface_value(object_ptr, get_or_create_interface_dispatch_table(class_def->name, base.base_type.name));
+            ctor_args.insert(ctor_args.begin(), fat_this);
+            builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), ctor_args);
         }
         for (const ClassField& field : class_def->fields) {
             const Initializer* selected_init = nullptr;
