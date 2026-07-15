@@ -1,0 +1,38 @@
+// spec §11.4(5),(6): when two intermediate bases each override the same
+// shared virtual-base function, the most-derived class must provide the
+// unique final overrider. One override may satisfy both paths.
+class [[scpp::interface]] ITick {
+public:
+    virtual ~ITick() = default;
+    virtual int tick() = 0;
+};
+
+class [[scpp::interface]] ILeftTick : public virtual ITick {
+public:
+    ~ILeftTick() override = default;
+    int tick() override {
+        return 2;
+    }
+};
+
+class [[scpp::interface]] IRightTick : public virtual ITick {
+public:
+    ~IRightTick() override = default;
+    int tick() override {
+        return 3;
+    }
+};
+
+class Clock : public virtual ILeftTick, public virtual IRightTick {
+public:
+    ~Clock() override = default;
+
+    int tick() override {
+        return 7;
+    }
+};
+
+int main() {
+    Clock clock{};
+    return clock.tick();
+}

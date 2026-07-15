@@ -1,0 +1,28 @@
+// spec §11.4(2),(3.2): an ordinary-base member does not silently win over
+// an interface member with the same name.
+class Worker {
+public:
+    virtual ~Worker() = default;
+
+    int start() {
+        return 1;
+    }
+};
+
+class [[scpp::interface]] IStartable {
+public:
+    virtual ~IStartable() = default;
+    virtual int start() {
+        return 2;
+    }
+};
+
+class Machine : public Worker, public virtual IStartable {
+public:
+    ~Machine() override = default;
+};
+
+int main() {
+    Machine machine{};
+    return machine.start();
+}

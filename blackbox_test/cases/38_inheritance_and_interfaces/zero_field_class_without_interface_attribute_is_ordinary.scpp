@@ -1,0 +1,16 @@
+// spec §11.1(2): an unannotated zero-field class is still an ordinary class,
+// not an interface inferred from shape alone. It remains directly
+// instantiable as an ordinary class.
+class TagOnly {
+public:
+    virtual ~TagOnly() = default;
+
+    int ping() {
+        return 0;
+    }
+};
+
+int main() {
+    TagOnly tag{};
+    return tag.ping();
+}

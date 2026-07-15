@@ -1,0 +1,38 @@
+// spec §11.2 and ordinary C++ virtual-base rules referenced by §11.1(1):
+// the most-derived concrete class must initialize a virtual interface base
+// that has no accessible default constructor.
+class [[scpp::interface]] ITagged {
+public:
+    ITagged(int tag) {
+        return;
+    }
+
+    virtual ~ITagged() = default;
+    virtual int id() = 0;
+};
+
+class [[scpp::interface]] ILeaf : public virtual ITagged {
+public:
+    ILeaf() : ITagged(1) {
+        return;
+    }
+
+    ~ILeaf() override = default;
+    int id() override {
+        return 1;
+    }
+};
+
+class Tagged : public virtual ILeaf {
+public:
+    Tagged() {
+        return;
+    }
+
+    ~Tagged() override = default;
+};
+
+int main() {
+    Tagged tagged{};
+    return tagged.id();
+}

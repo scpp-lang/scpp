@@ -1,0 +1,33 @@
+// spec §11.4(5) and §11.5(8): a `using`-declaration is not an overriding
+// declaration and cannot satisfy the unique-final-overrider requirement.
+class [[scpp::interface]] ITick {
+public:
+    virtual ~ITick() = default;
+    virtual int tick() = 0;
+};
+
+class [[scpp::interface]] ILeftTick : public virtual ITick {
+public:
+    ~ILeftTick() override = default;
+    int tick() override {
+        return 2;
+    }
+};
+
+class [[scpp::interface]] IRightTick : public virtual ITick {
+public:
+    ~IRightTick() override = default;
+    int tick() override {
+        return 3;
+    }
+};
+
+class Clock : public virtual ILeftTick, public virtual IRightTick {
+public:
+    ~Clock() override = default;
+    using ILeftTick::tick;
+};
+
+int main() {
+    return 0;
+}

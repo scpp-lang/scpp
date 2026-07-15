@@ -1,0 +1,15 @@
+// spec §11.2(5.4),(6): a `new`-expression may not form an interface object.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+int main() {
+    [[scpp::unsafe]] {
+        IValue* value = new IValue();
+        return value->value();
+    }
+}

@@ -1,0 +1,20 @@
+// spec §11.3(4): an interface base may be inherited only `public` or
+// `private`, so `protected` interface inheritance is ill-formed.
+class [[scpp::interface]] IReader {
+public:
+    virtual ~IReader() = default;
+    virtual int read() = 0;
+};
+
+class GuardedReader : protected virtual IReader {
+public:
+    ~GuardedReader() override = default;
+
+    int read() override {
+        return 8;
+    }
+};
+
+int main() {
+    return 0;
+}

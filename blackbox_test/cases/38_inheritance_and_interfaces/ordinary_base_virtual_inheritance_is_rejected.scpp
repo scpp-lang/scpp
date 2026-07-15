@@ -1,0 +1,15 @@
+// spec §11.3(2): a direct ordinary-class base may not be inherited with
+// the `virtual` keyword.
+class OrdinaryBase {
+public:
+    virtual ~OrdinaryBase() = default;
+};
+
+class BadVirtualOrdinary : public virtual OrdinaryBase {
+public:
+    ~BadVirtualOrdinary() override = default;
+};
+
+int main() {
+    return 0;
+}

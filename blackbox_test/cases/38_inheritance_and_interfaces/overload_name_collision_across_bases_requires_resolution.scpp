@@ -1,0 +1,27 @@
+// spec §11.4(3.3),(4): overload resolution does not even begin until name
+// lookup has been made unambiguous.
+class [[scpp::interface]] IIntOps {
+public:
+    virtual ~IIntOps() = default;
+    int f(int value) {
+        return value;
+    }
+};
+
+class [[scpp::interface]] IRangeOps {
+public:
+    virtual ~IRangeOps() = default;
+    int f(int left, int right) {
+        return left + right;
+    }
+};
+
+class CombinedOps : public virtual IIntOps, public virtual IRangeOps {
+public:
+    ~CombinedOps() override = default;
+};
+
+int main() {
+    CombinedOps ops{};
+    return ops.f(1);
+}

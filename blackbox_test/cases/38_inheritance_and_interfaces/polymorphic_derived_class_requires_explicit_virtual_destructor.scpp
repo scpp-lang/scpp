@@ -1,0 +1,23 @@
+// spec §11.5(2),(3): a class that merely inherits a virtual function is
+// still polymorphic and must explicitly declare a virtual destructor.
+class Base {
+public:
+    virtual void run() {
+        return;
+    }
+
+    virtual ~Base() = default;
+};
+
+class Derived : public Base {
+public:
+    void run() override {
+        return;
+    }
+};
+
+int main() {
+    Derived value{};
+    value.run();
+    return 0;
+}

@@ -1,0 +1,21 @@
+// spec §11.1(2),(3): a zero-field class without [[scpp::interface]] is still
+// an ordinary class, so pairing it with any other ordinary base exceeds the
+// "at most one ordinary base" rule.
+class WorkerBase {
+public:
+    virtual ~WorkerBase() = default;
+};
+
+class EmptyTag {
+public:
+    virtual ~EmptyTag() = default;
+};
+
+class Bad : public WorkerBase, public EmptyTag {
+public:
+    virtual ~Bad() = default;
+};
+
+int main() {
+    return 0;
+}

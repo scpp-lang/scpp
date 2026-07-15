@@ -1,0 +1,33 @@
+// spec §8.5(2)-(4): inherited interface requirements combine conjunctively.
+// This class satisfies the thread-movable contract but still fails because a
+// mutable member violates the inherited thread-shareable contract.
+class [[scpp::interface, scpp::thread_movable]] IMoveOnly {
+public:
+    virtual ~IMoveOnly() = default;
+    virtual void move_it() = 0;
+};
+
+class [[scpp::interface, scpp::thread_shareable]] IShareOnly {
+public:
+    virtual ~IShareOnly() = default;
+    virtual void share() const = 0;
+};
+
+class BothContracts : public virtual IMoveOnly, public virtual IShareOnly {
+private:
+    mutable int counter{};
+public:
+    ~BothContracts() override = default;
+
+    void move_it() override {
+        return;
+    }
+
+    void share() const override {
+        return;
+    }
+};
+
+int main() {
+    return 0;
+}

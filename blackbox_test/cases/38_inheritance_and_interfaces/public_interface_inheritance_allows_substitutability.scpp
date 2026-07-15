@@ -1,0 +1,26 @@
+// spec §11.3(5): public interface inheritance preserves ordinary
+// derived-to-base substitutability.
+class [[scpp::interface]] IReader {
+public:
+    virtual ~IReader() = default;
+    virtual int read() = 0;
+};
+
+class FileReader : public virtual IReader {
+public:
+    ~FileReader() override = default;
+
+    int read() override {
+        return 6;
+    }
+};
+
+void take_reader(IReader& reader) {
+    return;
+}
+
+int main() {
+    FileReader reader{};
+    take_reader(reader);
+    return 0;
+}

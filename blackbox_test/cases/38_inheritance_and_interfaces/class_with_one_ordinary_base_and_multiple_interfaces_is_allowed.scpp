@@ -1,0 +1,36 @@
+// spec §11.1(3): one ordinary base plus any number of interface bases is
+// well-formed.
+class WorkerBase {
+public:
+    virtual ~WorkerBase() = default;
+
+    int base_value() {
+        return 2;
+    }
+};
+
+class [[scpp::interface]] ILeft {
+public:
+    virtual ~ILeft() = default;
+    virtual int left() {
+        return 3;
+    }
+};
+
+class [[scpp::interface]] IRight {
+public:
+    virtual ~IRight() = default;
+    virtual int right() {
+        return 5;
+    }
+};
+
+class Robot : public WorkerBase, public virtual ILeft, public virtual IRight {
+public:
+    ~Robot() override = default;
+};
+
+int main() {
+    Robot robot{};
+    return robot.base_value();
+}
