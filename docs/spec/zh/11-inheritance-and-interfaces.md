@@ -133,14 +133,14 @@ base，程序都不合法。
 
 (2) (1) 同时适用于“接口继承接口”和“普通 class 继承接口”这两种情况。
 
-(3) 对接口 base 的 access-specifier，本规范不再额外施加别的限制。
-`public`、`protected` 和 `private` 接口继承，都保留它们在普通 C++
-里的原有含义。
+(3) 一个接口 base 只能用 `public` 或 `private` 作为 access-specifier
+来继承。
 
 (4) 如果某个接口 base 以 `public` 方式继承，那么只要访问控制允许，
-到该接口类型的普通 C++ derived-to-base 转换就可用。如果某个接口 base
-以 `protected` 或 `private` 方式继承，那么相应的转换是否允许，完全按
-普通 C++ 的访问控制规则决定。
+到该接口类型的 derived-to-base 转换，对普通外部代码以及派生类内部都
+可用，但仍受程序中其他访问规则约束。如果某个接口 base 以 `private`
+方式继承，那么这种转换只在该派生类自己的成员函数内可用；任意外部
+代码若尝试做对应的转换，程序都不合法。
 
 (5) 对于一个从某个 most-derived object 出发、经由一个或多个继承路径可达
 的接口 base `I`，只要这些路径按 (1) 都是 virtual 的，那么它的可观察
