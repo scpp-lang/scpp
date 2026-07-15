@@ -1,5 +1,7 @@
 class Box {
 public:
+    virtual ~Box() = default;
+public:
     int value{};
     consteval Box(const char* text) {
         this->value = 23;

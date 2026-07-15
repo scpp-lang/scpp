@@ -1,5 +1,7 @@
 template<typename First, typename Second>
 class Pair {
+    public:
+        virtual ~Pair() { return; }
     First first;
     Second second;
 public:

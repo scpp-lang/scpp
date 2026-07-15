@@ -2,6 +2,8 @@ import std;
 // Current `std::storage_for<T, U, ...>` semantics: raw storage is sized and
 // aligned to hold whichever candidate type is largest.
 class Box {
+    public:
+        virtual ~Box() { return; }
 public:
     std::storage_for<int, long> slot{};
 

@@ -1,10 +1,16 @@
 template<typename... Args> class Box;
 
 template<>
-class Box<> {};
+class Box<> {
+public:
+    virtual ~Box() = default;
+};
 
 template<typename Head, typename... Tail>
-class Box<Head, Tail...> : private Box<Tail...> {};
+class Box<Head, Tail...> : private Box<Tail...> {
+public:
+    virtual ~Box() override = default;
+};
 
 template<typename... Args>
 int use(const Box<Args...>& fmt, Args&&... args) {

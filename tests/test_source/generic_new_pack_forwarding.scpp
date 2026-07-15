@@ -1,7 +1,7 @@
 class Pair {
 public:
     Pair(int x, int y) { this.x = x; this.y = y; return; }
-    ~Pair() { print_int(this.x + this.y); return; }
+    virtual ~Pair() { print_int(this.x + this.y); return; }
     int sum() { return this.x + this.y; }
 private:
     int x{};

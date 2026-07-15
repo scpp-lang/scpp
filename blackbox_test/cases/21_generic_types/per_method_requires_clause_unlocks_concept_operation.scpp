@@ -8,8 +8,12 @@ template<typename T>
 concept HasDoubled = requires(T t) { t.doubled(); };
 
 class Num {
+    public:
+        virtual ~Num() { return; }
 public:
     int v{};
+    Num() { return; }
+    Num(const Num& other) : v{other.v} { return; }
     int doubled() {
         return this->v + this->v;
     }
@@ -17,6 +21,8 @@ public:
 
 template<typename T>
 class Holder {
+    public:
+        virtual ~Holder() { return; }
     T item;
 public:
     Holder(const T& x) : item{x} { return; }

@@ -3,6 +3,8 @@
 // method that explicitly captures `this` and reads a member through it
 // is ordinary, accepted syntax.
 class Box {
+    public:
+        virtual ~Box() { return; }
 private:
     int value{};
 public:

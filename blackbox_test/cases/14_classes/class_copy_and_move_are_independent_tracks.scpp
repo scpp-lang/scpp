@@ -6,6 +6,8 @@
 // `std::move` still works on it via the compiler-synthesized move
 // constructor.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget(int v) {
         this->val = v;

@@ -2,6 +2,8 @@
 // declaration order, not the textual order of the initializer list.
 
 class Pair {
+    public:
+        virtual ~Pair() { return; }
 private:
     int first;
     int second;

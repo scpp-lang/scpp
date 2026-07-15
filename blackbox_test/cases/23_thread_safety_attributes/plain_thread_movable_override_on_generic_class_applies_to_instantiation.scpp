@@ -4,6 +4,8 @@
 // non-thread-movable.
 template<typename T>
 class [[scpp::thread_movable]] RawBox {
+    public:
+        virtual ~RawBox() { return; }
 private:
     int* p{};
 public:

@@ -1,6 +1,8 @@
 // spec 6.1(1)/(7): locals must have an initializer, and the valid local
 // object-definition forms include `{}`, `{args}`, and `= value`.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{1};
 public:

@@ -1,7 +1,7 @@
 class Box {
 public:
     Box(int v) { this.v = v; return; }
-    ~Box() { print_int(this.v); return; }
+    virtual ~Box() { print_int(this.v); return; }
 private:
     int v{};
 };

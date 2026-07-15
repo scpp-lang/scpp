@@ -6,11 +6,14 @@
 // accidentally aliased instead of copying, `a.val` would also become
 // 100 and the result would be 200 instead of 101.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() {
         this->val = 0;
         return;
     }
+    Widget(const Widget& other) : val{other.val} { return; }
     int val{};
 };
 

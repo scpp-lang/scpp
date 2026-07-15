@@ -3,12 +3,16 @@ class Holder;
 
 template<>
 class Holder<void()> {
+    public:
+        virtual ~Holder() { return; }
 public:
     int size() const { return 1; }
 };
 
 template<typename Head, typename... Tail>
 class Holder<void(Head, Tail...)> {
+    public:
+        virtual ~Holder() { return; }
 public:
     int size() const { return 2; }
 };

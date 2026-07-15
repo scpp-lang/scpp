@@ -10,11 +10,15 @@
 // rejection at the declaration (as the "deferred" wording would suggest)
 // nor a genuinely working inheritance feature.
 class Base {
+    public:
+        virtual ~Base() { return; }
 public:
     int v{};
 };
 
 class Derived : public Base {
+    public:
+        virtual ~Derived() override { return; }
 public:
     int w{};
 };

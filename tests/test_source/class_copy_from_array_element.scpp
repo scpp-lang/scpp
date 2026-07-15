@@ -1,10 +1,22 @@
 class Box {
+    public:
+        virtual ~Box() { return; }
 private:
     int value{};
 
 public:
     Box() {
         this->value = 7;
+        return;
+    }
+
+    Box(const Box& other) {
+        this->value = other.value;
+        return;
+    }
+
+    void operator=(const Box& other) {
+        this->value = other.value;
         return;
     }
 

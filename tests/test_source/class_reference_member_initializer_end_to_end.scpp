@@ -1,4 +1,6 @@
 class RefBox {
+    public:
+        virtual ~RefBox() { return; }
     int& ref;
 public:
     RefBox(int& input) : ref{input} { return; }

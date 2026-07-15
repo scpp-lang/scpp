@@ -3,11 +3,15 @@
 // spec §6.4(1) only forbids that specific shape) continues to resolve
 // and check normally via check_constructor_arguments.
 class Foo {
+    public:
+        virtual ~Foo() { return; }
 public:
     Foo() { return; }
     int get() const { return 7; }
 };
 class Bar {
+    public:
+        virtual ~Bar() { return; }
 public:
     Bar(Foo&& f) { this.v = f.get(); return; }
     int get() const { return this.v; }

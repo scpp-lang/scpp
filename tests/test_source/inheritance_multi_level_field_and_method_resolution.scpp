@@ -6,6 +6,8 @@
 // `sound` shadows Animal's; Puppy inherits Dog's override, not
 // Animal's original).
 class Animal {
+    public:
+        virtual ~Animal() { return; }
 public:
     Animal(int legs) { this.legs = legs; return; }
     int leg_count() const { return this.legs; }
@@ -15,12 +17,16 @@ private:
 };
 
 class Dog : public Animal {
+    public:
+        virtual ~Dog() override { return; }
 public:
     Dog(int legs) : Animal{legs} { return; }
     int sound() const { return 1; }
 };
 
 class Puppy : public Dog {
+    public:
+        virtual ~Puppy() override { return; }
 public:
     Puppy(int legs) : Dog{legs} { return; }
 };

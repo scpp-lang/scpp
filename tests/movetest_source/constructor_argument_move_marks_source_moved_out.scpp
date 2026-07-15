@@ -6,6 +6,8 @@ import std;
 // moved-out by being passed to Holder's constructor, so reading it
 // afterward is ill-formed.
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 public:
     Holder(std::unique_ptr<int> p) { return; }
 };

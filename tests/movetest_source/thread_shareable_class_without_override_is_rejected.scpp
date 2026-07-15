@@ -1,6 +1,8 @@
 // ch05 §5.15: without a manual override, a class containing a raw
 // pointer field is never thread-shareable by the structural rule.
 class PlainHandle {
+    public:
+        virtual ~PlainHandle() { return; }
 public:
     PlainHandle(int* d) { this.data = d; return; }
 private:

@@ -1,4 +1,6 @@
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget(int v) {
         this->val = v;

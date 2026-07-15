@@ -11,6 +11,8 @@ import std;
 // class_user_defined_copy_assignment_is_allowed.scpp, which works
 // around this gap with a `void` return instead.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget(int v) {
         this->val = v;

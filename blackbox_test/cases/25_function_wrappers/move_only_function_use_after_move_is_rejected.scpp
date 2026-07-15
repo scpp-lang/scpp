@@ -2,6 +2,8 @@ import std;
 // ch05 §5.18: after moving a wrapper, the source wrapper is an ordinary
 // moved-out object, not a special still-usable empty state.
 class Adder {
+    public:
+        virtual ~Adder() { return; }
 private:
     int delta{};
 public:

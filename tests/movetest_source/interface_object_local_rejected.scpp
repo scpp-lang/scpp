@@ -1,0 +1,16 @@
+class [[scpp::interface]] ILogger {
+public:
+    virtual ~ILogger() { return; }
+    virtual void log() = 0;
+};
+
+class ConsoleLogger : public virtual ILogger {
+public:
+    ~ConsoleLogger() override { return; }
+    void log() override { return; }
+};
+
+int main() {
+    ILogger logger{};
+    return 0;
+}

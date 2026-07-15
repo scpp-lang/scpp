@@ -1,4 +1,6 @@
 class Box {
+    public:
+        virtual ~Box() { return; }
 private:
     int value{};
 public:

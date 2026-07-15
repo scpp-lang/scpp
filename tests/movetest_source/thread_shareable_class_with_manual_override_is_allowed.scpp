@@ -2,6 +2,8 @@
 // own declaration overrides the structural derivation entirely, even
 // though the class contains a raw pointer field.
 class [[scpp::thread_shareable]] RawHandle {
+    public:
+        virtual ~RawHandle() { return; }
 public:
     RawHandle(int* d) { this.data = d; return; }
 private:

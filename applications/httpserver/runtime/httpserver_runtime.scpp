@@ -6,6 +6,8 @@ import :platform;
 namespace httpserver {
 
 class [[scpp::thread_movable]] WorkerConfig {
+    public:
+        virtual ~WorkerConfig() { return; }
 public:
     char root_[512];
     int port_{};
@@ -19,6 +21,19 @@ public:
         this->max_connections_ = 0;
         this->allow_index_html_ = false;
         this->deny_hidden_files_ = false;
+        return;
+    }
+
+    WorkerConfig(const WorkerConfig& other) {
+        int i = 0;
+        while (i < 512) {
+            this->root_[i] = other.root_[i];
+            i = i + 1;
+        }
+        this->port_ = other.port_;
+        this->max_connections_ = other.max_connections_;
+        this->allow_index_html_ = other.allow_index_html_;
+        this->deny_hidden_files_ = other.deny_hidden_files_;
         return;
     }
 };

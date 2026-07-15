@@ -1,4 +1,6 @@
 class Sink {
+    public:
+        virtual ~Sink() { return; }
 public:
     template<typename T>
     Sink(T&& x) { return; }

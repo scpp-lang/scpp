@@ -6,6 +6,8 @@
 // just proving the declaration shape itself and an ordinary method call
 // both work.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 private:
     int value{};
 public:

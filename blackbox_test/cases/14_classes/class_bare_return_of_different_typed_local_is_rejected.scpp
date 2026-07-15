@@ -2,6 +2,8 @@
 // to have exactly the function's return type; it does not widen to a
 // differently-typed local that would need a conversion.
 class Source {
+    public:
+        virtual ~Source() { return; }
 public:
     Source() {
         return;
@@ -9,6 +11,8 @@ public:
 };
 
 class Dest {
+    public:
+        virtual ~Dest() { return; }
 public:
     Dest() {
         return;

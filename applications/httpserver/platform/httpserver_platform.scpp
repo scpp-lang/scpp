@@ -478,6 +478,8 @@ export const char* content_type_for(const char* relative_path) {
 }
 
 export class Connection {
+    public:
+        virtual ~Connection() { return; }
 public:
     int fd_{};
     int request_len_{};

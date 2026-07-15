@@ -9,7 +9,7 @@ public:
         this->delta = std::move(p);
         return;
     }
-    ~MoveOnlyAdder() {
+    virtual ~MoveOnlyAdder() {
         return;
     }
     int call(int x) {

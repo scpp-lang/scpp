@@ -1,5 +1,7 @@
 template<typename T>
 class [[scpp::thread_movable]] MyOwningBox {
+    public:
+        virtual ~MyOwningBox() { return; }
 public:
     T* ptr_{};
 };

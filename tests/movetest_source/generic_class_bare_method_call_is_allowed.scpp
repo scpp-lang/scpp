@@ -4,6 +4,8 @@
 // clause is always allowed, regardless of the concrete type argument.
 template<typename T>
 class Box {
+    public:
+        virtual ~Box() { return; }
     T value;
 public:
     Box(const T& v) : value{v} { return; }

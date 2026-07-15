@@ -6,6 +6,8 @@
 // (even this read-only `const` getter) on a moved-out class-typed variable
 // went completely unchecked.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() { return; }
     int get_val() const { return this->val; }

@@ -3,6 +3,8 @@
 // ([class.copy.assign]), since a reference cannot be re-seated by
 // assignment.
 class RefHolder {
+    public:
+        virtual ~RefHolder() { return; }
 public:
     RefHolder(int& r) : r{r} { return; }
 private:

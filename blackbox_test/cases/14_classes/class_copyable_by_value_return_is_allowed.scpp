@@ -1,6 +1,8 @@
 // spec §6.7(2): a copyable class may still be returned by value from an
 // exact-type bare local; the caller receives the local's value intact.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{};
 public:

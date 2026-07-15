@@ -6,6 +6,8 @@
 // (the "bare Call sugar" for a closure literal itself is separate,
 // still-pending work).
 class Doubler {
+    public:
+        virtual ~Doubler() { return; }
 public:
     Doubler() { return; }
     int call(int x) { return x * 2; }

@@ -1,15 +1,19 @@
 // ch05 §5.14: "Parameter packs (typename... Ts) are supported ... but
 // only via recursive inheritance ... Exactly two, fixed patterns are
 // supported for a variadic generic type": the empty-pack base case
-// (`template<> class Tuple<> {};`) and the recursive head-and-tail case
+// (`template<> class Tuple<> { };`) and the recursive head-and-tail case
 // (`class Tuple<Head, Tail...> : private Tuple<Tail...> { Head head; };`).
 template<typename... Ts> class Tuple;
 
-template<> class Tuple<> {};
+template<> class Tuple<> {
+public:
+    virtual ~Tuple() = default;
+};
 
 template<typename Head, typename... Tail>
 class Tuple<Head, Tail...> : private Tuple<Tail...> {
 public:
+    virtual ~Tuple() override = default;
     Head head;
 };
 

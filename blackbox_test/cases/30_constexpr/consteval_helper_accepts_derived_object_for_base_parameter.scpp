@@ -2,13 +2,15 @@ template<typename... Ts> class TagList;
 
 template<>
 class TagList<> {
-public:
+    public:
+        virtual ~TagList() = default;
     TagList() { return; }
 };
 
 template<typename Head, typename... Tail>
 class TagList<Head, Tail...> : private TagList<Tail...> {
-public:
+    public:
+        virtual ~TagList() override = default;
     TagList() { return; }
 };
 

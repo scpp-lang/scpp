@@ -1,6 +1,8 @@
 // spec 6.1(5): a reference-typed member may be initialized through the
 // constructor member-initializer-list, and it binds the referenced object.
 class RefBox {
+    public:
+        virtual ~RefBox() { return; }
 private:
     int& ref;
 public:

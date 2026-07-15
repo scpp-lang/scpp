@@ -2,6 +2,8 @@ namespace m {
 namespace detail {
 template<typename Left, typename Right>
 class Pair {
+    public:
+        virtual ~Pair() { return; }
 public:
     Pair() { return; }
 };

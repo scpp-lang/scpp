@@ -3,7 +3,7 @@ import std;
 // lifetime operation and must be rejected outside [[scpp::unsafe]].
 class Box {
 public:
-    ~Box() {
+    virtual ~Box() {
         return;
     }
 };

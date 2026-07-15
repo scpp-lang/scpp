@@ -5,6 +5,8 @@ import std;
 // recognized a std::unique_ptr-typed field as a legitimate std::move
 // target).
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 public:
     Holder(std::unique_ptr<int> p) { this.p = std::move(p); return; }
 private:

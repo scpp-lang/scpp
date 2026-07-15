@@ -2,6 +2,8 @@ import std;
 // Current `std::storage_for<T, U, ...>` semantics: user-defined candidate
 // types participate in the same max-size/max-alignment computation.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     char c{};
     long value{};

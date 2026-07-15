@@ -4,12 +4,16 @@
 // Square) both satisfying the same concept correctly dispatch to their
 // own type's own method.
 class Circle {
+    public:
+        virtual ~Circle() { return; }
 public:
     Circle() { return; }
     int area() const { return 314; }
 };
 
 class Square {
+    public:
+        virtual ~Square() { return; }
 public:
     Square() { return; }
     int area() const { return 100; }

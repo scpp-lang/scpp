@@ -1,9 +1,13 @@
 class Helper {
 public:
+    virtual ~Helper() = default;
+public:
     consteval Helper(const char* s, int i) { return; }
 };
 
 class Outer {
+public:
+    virtual ~Outer() = default;
 public:
     consteval Outer(const char* s) {
         Helper h{s, 0};

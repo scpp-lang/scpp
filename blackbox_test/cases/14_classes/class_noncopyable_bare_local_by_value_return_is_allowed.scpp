@@ -3,6 +3,8 @@ import std;
 // function now implicitly move-constructs the by-value result, even for a
 // move-only class.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     std::unique_ptr<int> value{};
 public:

@@ -3,8 +3,14 @@
 // operator under the same conditions. `b = a;` (bare reassignment) is
 // licensed.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() { return; }
+    void operator=(const Widget& other) {
+        this->val = other.val;
+        return;
+    }
     int val{};
 };
 int main() {

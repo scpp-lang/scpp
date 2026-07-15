@@ -1,5 +1,7 @@
 class Counter {
 public:
+    virtual ~Counter() = default;
+public:
     int value{};
     consteval Counter(int v) {
         this->value = v;

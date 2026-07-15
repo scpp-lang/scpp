@@ -3,6 +3,8 @@ class Holder;
 
 template<typename R, typename... Args>
 class Holder<R(Args...) const &&> {
+    public:
+        virtual ~Holder() { return; }
 public:
     int arity() const { return 1; }
 };

@@ -1,4 +1,6 @@
 class Bad {
+    public:
+        virtual ~Bad() { return; }
     int x;
     int y{};
 public:

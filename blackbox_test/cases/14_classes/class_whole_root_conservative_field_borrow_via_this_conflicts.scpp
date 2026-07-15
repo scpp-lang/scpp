@@ -14,7 +14,7 @@ public:
         this->b = y;
         return;
     }
-    ~Pair() {
+    virtual ~Pair() {
         return;
     }
     int sum_via_refs() {

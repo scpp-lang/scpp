@@ -1,6 +1,8 @@
 // spec 6.1(4): completeness is per-constructor; one well-formed overload does
 // not excuse another constructor that leaves a member uninitialized.
 class Bad {
+    public:
+        virtual ~Bad() { return; }
 private:
     int a{1};
     int b;

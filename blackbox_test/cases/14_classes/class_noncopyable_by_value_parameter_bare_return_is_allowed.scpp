@@ -2,6 +2,8 @@ import std;
 // spec §6.7(2): an exact-type by-value parameter object may also be returned
 // as the bare operand of `return`, and the result is move-constructed.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     std::unique_ptr<int> value{};
 public:

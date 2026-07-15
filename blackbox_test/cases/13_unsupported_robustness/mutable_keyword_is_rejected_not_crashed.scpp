@@ -10,7 +10,7 @@ public:
         this->cache = 0;
         return;
     }
-    ~Counter() {
+    virtual ~Counter() {
         return;
     }
     int get() const {

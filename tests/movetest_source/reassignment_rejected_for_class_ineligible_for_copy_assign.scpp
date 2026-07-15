@@ -11,7 +11,7 @@
 class Widget {
 public:
     Widget() { return; }
-    ~Widget() { return; }
+    virtual ~Widget() { return; }
     int val{};
 };
 int main() {

@@ -3,6 +3,8 @@ import std;
 // local object or non-reference parameter object of the innermost function;
 // a member access like `this->text` is still rejected.
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 private:
     std::string text{"hello"};
 public:

@@ -1,5 +1,7 @@
 import std;
 class no_default {
+    public:
+        virtual ~no_default() { return; }
 public:
     int value{};
     no_default(int v) : value{v} { return; }

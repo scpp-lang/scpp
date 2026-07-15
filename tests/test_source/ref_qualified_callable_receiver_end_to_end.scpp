@@ -1,4 +1,6 @@
 class Callable {
+    public:
+        virtual ~Callable() { return; }
 public:
     int call() & { return 1; }
     int call() && { return 2; }

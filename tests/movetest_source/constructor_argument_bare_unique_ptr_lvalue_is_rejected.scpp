@@ -5,6 +5,8 @@ import std;
 // legitimate by-value constructor argument, exactly like an ordinary
 // function call (ch05 §5.1).
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 public:
     Holder(std::unique_ptr<int> p) { return; }
 };

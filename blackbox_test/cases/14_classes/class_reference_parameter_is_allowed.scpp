@@ -9,7 +9,7 @@ public:
         this->value = start;
         return;
     }
-    ~Counter() {
+    virtual ~Counter() {
         return;
     }
     int get() const {

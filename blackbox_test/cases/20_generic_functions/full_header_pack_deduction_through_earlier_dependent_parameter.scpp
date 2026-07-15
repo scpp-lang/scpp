@@ -3,6 +3,8 @@ class Holder;
 
 template<typename R, typename... Params>
 class Holder<R(Params...)> {
+    public:
+        virtual ~Holder() { return; }
 public:
     R (*fn_)(Params...){};
 };

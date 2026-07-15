@@ -15,7 +15,7 @@ public:
         return;
     }
 
-    ~RawOwner() {
+    virtual ~RawOwner() {
         [[scpp::unsafe]] {
             printf("dtor %d\n", *this->p);
             free(this->p);

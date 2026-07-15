@@ -4,6 +4,8 @@
 // a class... construction is unaffected)" -- contrast
 // class_move_assignment_rejected_for_class_with_reference_member.scpp.
 class RefHolder {
+    public:
+        virtual ~RefHolder() { return; }
 public:
     RefHolder(int& r) : r{r} {
         return;

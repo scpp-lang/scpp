@@ -11,7 +11,7 @@ public:
         return;
     }
 
-    ~Box() {
+    virtual ~Box() {
         [[scpp::unsafe]] {
             *this->out = 9;
         }

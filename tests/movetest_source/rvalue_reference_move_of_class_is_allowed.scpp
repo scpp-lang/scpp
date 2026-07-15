@@ -5,6 +5,8 @@ import std;
 // std::unique_ptr always could -- `std::move(w)` marks `w` moved-out and
 // hands `take` a fresh rvalue of the same class type.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() { return; }
     int get() const { return 1; }

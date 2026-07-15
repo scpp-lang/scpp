@@ -3,6 +3,8 @@
 // a constant expression.
 class ImmediateBox {
 public:
+    virtual ~ImmediateBox() = default;
+public:
     int value{};
 
     consteval ImmediateBox(int x) {

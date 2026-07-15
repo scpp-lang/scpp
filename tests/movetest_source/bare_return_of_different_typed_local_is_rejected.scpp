@@ -1,9 +1,13 @@
 class Source {
+    public:
+        virtual ~Source() { return; }
 public:
     Source() { return; }
 };
 
 class Dest {
+    public:
+        virtual ~Dest() { return; }
 public:
     Dest() { return; }
 };

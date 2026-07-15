@@ -1,5 +1,7 @@
 template<typename Sig>
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 public:
     int value{};
 };

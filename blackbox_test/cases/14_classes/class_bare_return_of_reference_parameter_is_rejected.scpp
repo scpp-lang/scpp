@@ -2,6 +2,8 @@ import std;
 // spec §6.7(2)-(4): a reference parameter is not itself a non-reference
 // parameter object, so `return param;` stays ill-formed here.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     std::unique_ptr<int> value{};
 public:

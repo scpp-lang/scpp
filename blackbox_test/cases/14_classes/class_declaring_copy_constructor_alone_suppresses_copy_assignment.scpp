@@ -6,6 +6,8 @@
 // either. This is deliberately stricter than real C++, which would
 // still (deprecatedly) generate the copy assignment operator here.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() {
         this->val = 0;

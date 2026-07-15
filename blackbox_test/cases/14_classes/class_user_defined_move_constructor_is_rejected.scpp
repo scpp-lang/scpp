@@ -4,6 +4,8 @@
 // constructor instead, so authors have no hook to get it wrong (real
 // C++'s classic "forgot to null out the source" footgun class).
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() {
         this->val = 0;

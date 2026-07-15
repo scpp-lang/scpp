@@ -4,6 +4,8 @@ struct Pair {
 };
 
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 public:
     Pair pair_{};
 

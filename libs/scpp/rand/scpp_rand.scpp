@@ -43,7 +43,7 @@ public:
         return;
     }
 
-    ~uniform_int_distribution() { return; }
+    virtual ~uniform_int_distribution() { return; }
 
     static std::expected<uniform_int_distribution<int>, error> make(int minimum, int maximum) {
         if (minimum > maximum) {

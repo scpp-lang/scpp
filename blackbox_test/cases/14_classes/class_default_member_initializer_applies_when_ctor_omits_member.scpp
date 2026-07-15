@@ -1,6 +1,8 @@
 // spec 6.1(2.1)/(4.2): an in-class default member initializer supplies the
 // member value for a constructor that does not name that member itself.
 class Counter {
+    public:
+        virtual ~Counter() { return; }
 private:
     int value{5};
 public:

@@ -17,7 +17,7 @@ public:
         return;
     }
 
-    ~unexpected() {
+    virtual ~unexpected() {
         [[scpp::unsafe]] {
             ((E*)&this->error_storage_)->~E();
         }
@@ -60,7 +60,7 @@ public:
         return;
     }
 
-    ~expected() {
+    virtual ~expected() {
         if (this->has_value_) {
             [[scpp::unsafe]] {
                 ((T*)&this->storage_)->~T();

@@ -9,6 +9,8 @@ int apply(IntTransform auto&& f, int z) {
 }
 
 class Multiplier {
+    public:
+        virtual ~Multiplier() { return; }
 public:
     Multiplier(int factor) { this->factor = factor; return; }
     int scale(int x) const { return x * this->factor; }

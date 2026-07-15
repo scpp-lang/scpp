@@ -4,9 +4,15 @@
 // Same independence proof as the copy-construction case: mutating `b`
 // afterward must not affect `a`.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 public:
     Widget() {
         this->val = 0;
+        return;
+    }
+    void operator=(const Widget& other) {
+        this->val = other.val;
         return;
     }
     int val{};

@@ -5,6 +5,8 @@
 // this doesn't depend on resolving whether `this` inside the lambda body
 // then refers to the copy or the original.
 class Box {
+    public:
+        virtual ~Box() { return; }
 private:
     int value{};
 public:

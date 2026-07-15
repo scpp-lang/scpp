@@ -1,5 +1,7 @@
 template<int N>
 class FixedValue {
+    public:
+        virtual ~FixedValue() { return; }
 public:
     int get_n() {
         return N;

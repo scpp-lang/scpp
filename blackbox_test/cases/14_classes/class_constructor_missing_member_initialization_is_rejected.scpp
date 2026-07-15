@@ -1,6 +1,8 @@
 // spec 6.1(4): each constructor must initialize every member either through
 // its own member-initializer-list or through an in-class default.
 class Bad {
+    public:
+        virtual ~Bad() { return; }
 private:
     int a{};
     int b;

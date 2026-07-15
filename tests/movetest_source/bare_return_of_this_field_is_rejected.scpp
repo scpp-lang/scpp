@@ -1,6 +1,8 @@
 import std;
 
 class Holder {
+    public:
+        virtual ~Holder() { return; }
 private:
     std::string text{"hello"};
 public:

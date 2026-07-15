@@ -8,6 +8,8 @@
 // worth double-checking against ch05 §5.9's current scope if this fails
 // to be rejected.
 class Box {
+    public:
+        virtual ~Box() { return; }
 private:
     int value{};
 public:

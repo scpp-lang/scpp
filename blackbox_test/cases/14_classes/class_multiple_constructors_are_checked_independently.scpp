@@ -1,6 +1,8 @@
 // spec 6.1(4): each constructor is checked independently, so one overload may
 // rely on defaults while another explicitly initializes some members.
 class Widget {
+    public:
+        virtual ~Widget() { return; }
 private:
     int a{1};
     int b{2};
