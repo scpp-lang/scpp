@@ -1,0 +1,20 @@
+class [[scpp::interface]] IRun {
+public:
+    virtual ~IRun() { return; }
+    virtual void run() = 0;
+};
+
+class Runner : public virtual IRun {
+public:
+    ~Runner() override { return; }
+    void run() override { return; }
+};
+
+int main() {
+    Runner runner{};
+    IRun* iface = &runner;
+    [[scpp::unsafe]] {
+        void* erased = static_cast<void*>(iface);
+    }
+    return 0;
+}

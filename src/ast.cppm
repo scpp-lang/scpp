@@ -1402,6 +1402,13 @@ struct TypeLayoutInfo {
                 case TypeKind::Reference:
                 case TypeKind::FunctionPointer: {
                     std::uint64_t align = std::max<std::uint64_t>(target.pointer_align_bytes, 1);
+                    if ((current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference) && current.pointee &&
+                        current.pointee->kind == TypeKind::Named) {
+                        if (const ClassDef* referent = find_class(current.pointee->name);
+                            referent != nullptr && referent->is_interface) {
+                            return TypeLayoutInfo{target.pointer_size_bytes * 2, align};
+                        }
+                    }
                     return TypeLayoutInfo{target.pointer_size_bytes, align};
                 }
                 case TypeKind::Function:
