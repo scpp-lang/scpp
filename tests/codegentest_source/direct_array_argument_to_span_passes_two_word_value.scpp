@@ -1,0 +1,9 @@
+void touch(std::span<int> view) {
+    return;
+}
+
+int main() {
+    int arr[2];
+    touch(arr);
+    return 0;
+}

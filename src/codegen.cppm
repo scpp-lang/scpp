@@ -2894,23 +2894,8 @@ private:
                                             "' must be initialized (bound to an array) at declaration",
                             current_loc_);
                     }
-                    LValue source = codegen_lvalue(*stmt.init);
-                    if (source.type.kind != TypeKind::Array) {
-                        throw CodegenError("std::span<T> can currently only be constructed from a "
-                                            "fixed-size array in this version",
-                            current_loc_);
-                    }
-                    if (to_llvm_type(*source.type.element) != to_llvm_type(*stmt.type.pointee)) {
-                        throw CodegenError("cannot construct span '" + stmt.var_name +
-                                            "': array element type does not match the span's element type",
-                            current_loc_);
-                    }
                     llvm::Type* span_type = to_llvm_type(stmt.type);
-                    llvm::Value* size_value =
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), source.type.array_size);
-                    llvm::Value* span_value = llvm::UndefValue::get(span_type);
-                    span_value = builder_->CreateInsertValue(span_value, source.ptr, {0});
-                    span_value = builder_->CreateInsertValue(span_value, size_value, {1});
+                    llvm::Value* span_value = codegen_span_value_for_target(*stmt.init, stmt.type);
                     llvm::AllocaInst* slot = create_entry_block_alloca(span_type, stmt.var_name);
                     builder_->CreateStore(span_value, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
@@ -3598,19 +3583,7 @@ private:
         if (target.type.kind != TypeKind::Span || target.type.pointee == nullptr) {
             throw CodegenError("internal error: span initializer target is not a span", current_loc_);
         }
-        LValue source = codegen_lvalue(expr);
-        if (source.type.kind != TypeKind::Array) {
-            throw CodegenError("std::span<T> can currently only be constructed from a fixed-size array in this version",
-                               current_loc_);
-        }
-        if (to_llvm_type(*source.type.element) != to_llvm_type(*target.type.pointee)) {
-            throw CodegenError("array element type does not match the span's element type", current_loc_);
-        }
-        llvm::Type* span_type = to_llvm_type(target.type);
-        llvm::Value* size_value = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), source.type.array_size);
-        llvm::Value* span_value = llvm::UndefValue::get(span_type);
-        span_value = builder_->CreateInsertValue(span_value, source.ptr, {0});
-        span_value = builder_->CreateInsertValue(span_value, size_value, {1});
+        llvm::Value* span_value = codegen_span_value_for_target(expr, target.type);
         create_store(span_value, target.ptr, target.alignment);
     }
 
@@ -3864,6 +3837,29 @@ private:
             return codegen_expr(expr);
         }
         throw CodegenError("unsupported interface conversion at code generation time", current_loc_);
+    }
+
+    llvm::Value* codegen_span_value_for_target(const Expr& expr, const Type& target_type) {
+        if (target_type.kind != TypeKind::Span || target_type.pointee == nullptr) {
+            throw CodegenError("internal error: span conversion target is not a span", current_loc_);
+        }
+        if (std::optional<Type> source_type = infer_type(expr); source_type.has_value() && types_equal(*source_type, target_type)) {
+            return codegen_expr(expr);
+        }
+        LValue source = codegen_lvalue(expr);
+        if (source.type.kind != TypeKind::Array) {
+            throw CodegenError("std::span<T> can currently only be constructed from a fixed-size array in this version",
+                               current_loc_);
+        }
+        if (to_llvm_type(*source.type.element) != to_llvm_type(*target_type.pointee)) {
+            throw CodegenError("array element type does not match the span's element type", current_loc_);
+        }
+        llvm::Type* span_type = to_llvm_type(target_type);
+        llvm::Value* size_value = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), source.type.array_size);
+        llvm::Value* span_value = llvm::UndefValue::get(span_type);
+        span_value = builder_->CreateInsertValue(span_value, source.ptr, {0});
+        span_value = builder_->CreateInsertValue(span_value, size_value, {1});
+        return span_value;
     }
 
     llvm::Value* codegen_contextual_bool_value(const Expr& expr) {
@@ -4164,6 +4160,9 @@ private:
         }
         if (target_type.kind == TypeKind::FunctionPointer) {
             if (llvm::Value* fn = codegen_function_pointer_value_for_target(expr, target_type)) return fn;
+        }
+        if (target_type.kind == TypeKind::Span) {
+            return codegen_span_value_for_target(expr, target_type);
         }
         return codegen_expr(expr);
     }
