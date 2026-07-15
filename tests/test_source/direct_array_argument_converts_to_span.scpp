@@ -1,0 +1,45 @@
+import std;
+
+struct Pair {
+    int first;
+    int second;
+};
+
+void touch_ints(std::span<int> view) {
+    view[0] = 7;
+    return;
+}
+
+int sum_const_ints(std::span<const int> view) {
+    return view[0] + view[1] + view.size;
+}
+
+void touch_pairs(std::span<Pair> view) {
+    view[0].second = 4;
+    view[1].first = 9;
+    return;
+}
+
+int sum_const_pairs(std::span<const Pair> view) {
+    return view[0].first + view[0].second + view[1].first + view[1].second + view.size;
+}
+
+int main() {
+    int values[2];
+    values[0] = 1;
+    values[1] = 2;
+    touch_ints(values);
+    if (values[0] != 7) return 1;
+    if (sum_const_ints(values) != 11) return 2;
+
+    Pair pairs[2];
+    pairs[0].first = 3;
+    pairs[0].second = 5;
+    pairs[1].first = 7;
+    pairs[1].second = 11;
+    touch_pairs(pairs);
+    if (pairs[0].second != 4) return 3;
+    if (pairs[1].first != 9) return 4;
+    if (sum_const_pairs(pairs) != 29) return 5;
+    return 0;
+}
