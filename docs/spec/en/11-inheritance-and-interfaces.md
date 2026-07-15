@@ -75,6 +75,11 @@ interface is not part of the dynamic dispatch contract of that
 interface; it is called exactly as an ordinary non-virtual member
 function.
 
+[Note: this clause adds no special rule for constructors of an
+interface. An interface may declare constructors exactly as an ordinary
+class may, and the ordinary C++ rules for base-class and virtual-base
+initialization apply unchanged. — end note]
+
 (5) A program is ill-formed if it would form a complete object whose
 most-derived type is an interface in any object-forming context,
 including:
@@ -144,30 +149,45 @@ ILogger make_logger();        // ill-formed: (5.7)
 base-specifier naming `I` shall include the `virtual` keyword. A direct
 interface base specified without `virtual` is ill-formed.
 
-(2) Rule (1) applies whether `D` is itself an interface or an ordinary
+(2) If a class `D` directly inherits from an ordinary class `B`, the
+base-specifier naming `B` shall not include the `virtual` keyword. A
+direct ordinary-class base specified with `virtual` is ill-formed.
+
+(3) Rule (1) applies whether `D` is itself an interface or an ordinary
 class.
 
-(3) An interface base may be inherited only with the access-specifier
+[Note: rule (2) removes no useful expressiveness in SCPP26. By
+[§11.1](11-inheritance-and-interfaces.md#111-general-classderived) (3),
+a class has at most one ordinary direct base class, and by
+[§11.2](11-inheritance-and-interfaces.md#112-interface-declarations-dclattrscppinterface)
+(3), an interface may inherit only other interfaces. The ordinary-base
+relationship therefore cannot branch into, or reconverge from, multiple
+paths, so the duplicate-subobject problem that ordinary C++ virtual
+inheritance solves cannot arise for an ordinary base in SCPP26. — end
+note]
+
+(4) An interface base may be inherited only with the access-specifier
 `public` or `private`.
 
-(4) If an interface base is inherited `public`, the derived-to-base
+(5) If an interface base is inherited `public`, the derived-to-base
 conversion to that interface type is available to ordinary external code
 as well as within the deriving class, subject to any other access rule
 of the program. If an interface base is inherited `private`, that
 conversion is available only within the deriving class's own member
-functions; a program is ill-formed if arbitrary external code attempts
-the corresponding conversion.
+functions; for this rule, a member function of a nested class is not a
+member function of the deriving class. A program is ill-formed if
+arbitrary external code attempts the corresponding conversion.
 
-(5) For each interface base `I` that is reachable from a most-derived
+(6) For each interface base `I` that is reachable from a most-derived
 object through one or more inheritance paths, all of which are virtual
 because of (1), the observable semantics shall match those of ordinary
 C++ virtual inheritance for that same source: all valid conversions of
 that most-derived object to `I` denote one shared `I` base identity,
 and virtual dispatch through `I` selects the unique final overrider.
 
-(6) SCPP26 need not realize the guarantee in (5) with the same ABI or
+(7) SCPP26 need not realize the guarantee in (6) with the same ABI or
 object layout mechanism used by any particular C++ compiler. It is
-sufficient that the observable semantics named in (5) are preserved.
+sufficient that the observable semantics named in (6) are preserved.
 This permission applies only to SCPP26's implementation of the
 required-virtual interface inheritance rules in this clause; it does
 not alter the observable semantics required for other C++ constructs.
@@ -199,6 +219,13 @@ class BadDuck : public IFlyable {
 public:
     ~BadDuck() override = default;
 };  // ill-formed: direct interface base lacks `virtual`
+
+class OrdinaryBase {};
+
+class BadVirtualOrdinary : public virtual OrdinaryBase {
+public:
+    ~BadVirtualOrdinary() = default;
+};  // ill-formed: direct ordinary-class base uses `virtual`
 
 class SecretMover : private virtual IMovable {
 public:

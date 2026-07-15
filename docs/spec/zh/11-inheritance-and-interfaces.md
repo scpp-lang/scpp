@@ -66,6 +66,10 @@ public:
 virtual 成员函数，不属于该接口的动态派发契约；对它的调用，和普通非
 virtual 成员函数完全一样。
 
+【注：本条款没有为接口的构造函数额外引入任何特殊规则。接口可以像普通
+class 一样声明构造函数，而 base-class 与 virtual-base 初始化仍然原样
+遵循普通 C++ 规则。——注释结束】
+
 (5) 如果一个程序会在任何“形成对象”的语境里形成一个完整对象，并且它的
 most-derived type 就是接口，那么它就是不合法的；这类语境包括：
 
@@ -131,26 +135,40 @@ ILogger make_logger();        // ill-formed: (5.7)
 base-specifier 必须带 `virtual` 关键字。凡是没有写 `virtual` 的直接接口
 base，程序都不合法。
 
-(2) (1) 同时适用于“接口继承接口”和“普通 class 继承接口”这两种情况。
+(2) 如果某个 class `D` 直接继承普通 class `B`，那么命名 `B` 的那个
+base-specifier 不得带 `virtual` 关键字。凡是给直接普通 class base 写了
+`virtual` 的程序，都是不合法的。
 
-(3) 一个接口 base 只能用 `public` 或 `private` 作为 access-specifier
+(3) (1) 同时适用于“接口继承接口”和“普通 class 继承接口”这两种情况。
+
+【注：(2) 在 SCPP26 中并没有拿走任何有用的表达能力。按
+[§11.1](11-inheritance-and-interfaces.md#111-总则-classderived) (3)，一个
+class 至多只有一个普通直接 base class；而按
+[§11.2](11-inheritance-and-interfaces.md#112-接口声明-dclattrscppinterface)
+(3)，接口又只能继承别的接口。因此，普通 base 之间的关系不可能分叉成
+多条路径，也不可能再从多条路径重新汇合，所以普通 C++ 里 virtual
+inheritance 用来解决的那种“重复 subobject”问题，在 SCPP26 中从结构上
+就不可能出现在普通 base 上。——注释结束】
+
+(4) 一个接口 base 只能用 `public` 或 `private` 作为 access-specifier
 来继承。
 
-(4) 如果某个接口 base 以 `public` 方式继承，那么只要访问控制允许，
+(5) 如果某个接口 base 以 `public` 方式继承，那么只要访问控制允许，
 到该接口类型的 derived-to-base 转换，对普通外部代码以及派生类内部都
 可用，但仍受程序中其他访问规则约束。如果某个接口 base 以 `private`
-方式继承，那么这种转换只在该派生类自己的成员函数内可用；任意外部
+方式继承，那么这种转换只在该派生类自己的成员函数内可用；就本规则而
+言，某个嵌套 class 的成员函数不算该派生类自己的成员函数。任意外部
 代码若尝试做对应的转换，程序都不合法。
 
-(5) 对于一个从某个 most-derived object 出发、经由一个或多个继承路径可达
+(6) 对于一个从某个 most-derived object 出发、经由一个或多个继承路径可达
 的接口 base `I`，只要这些路径按 (1) 都是 virtual 的，那么它的可观察
 语义必须与同样源码下普通 C++ virtual inheritance 的语义一致：把这个
 most-derived object 通过任意合法路径转换到 `I`，得到的都表示同一个共享
 的 `I` base 身份；并且，经由 `I` 进行 virtual dispatch 时，必须选中唯一
 的 final overrider。
 
-(6) SCPP26 不要求一定用某个特定 C++ 编译器所采用的 ABI 或对象布局机制，
-去实现 (5) 的保证。只要 (5) 中点名的那些可观察语义被保留下来，就已经
+(7) SCPP26 不要求一定用某个特定 C++ 编译器所采用的 ABI 或对象布局机制，
+去实现 (6) 的保证。只要 (6) 中点名的那些可观察语义被保留下来，就已经
 足够。这项许可只适用于本条款里“接口继承必须写 `virtual`”这一机制在
 SCPP26 中的实现方式；它不会改变其他任何 C++ 构造所要求的可观察语义。
 
@@ -181,6 +199,13 @@ class BadDuck : public IFlyable {
 public:
     ~BadDuck() override = default;
 };  // ill-formed: direct interface base lacks `virtual`
+
+class OrdinaryBase {};
+
+class BadVirtualOrdinary : public virtual OrdinaryBase {
+public:
+    ~BadVirtualOrdinary() = default;
+};  // ill-formed: direct ordinary-class base uses `virtual`
 
 class SecretMover : private virtual IMovable {
 public:
