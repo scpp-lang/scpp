@@ -1146,14 +1146,14 @@ struct ClassDef {
         for (const BaseSpecifier& base : base_specifiers) {
             if (base.kind != BaseClassKind::Interface) return &base;
         }
-        return base_specifiers.empty() ? nullptr : &base_specifiers.front();
+        return nullptr;
     }
 
     [[nodiscard]] BaseSpecifier* direct_ordinary_base() {
         for (BaseSpecifier& base : base_specifiers) {
             if (base.kind != BaseClassKind::Interface) return &base;
         }
-        return base_specifiers.empty() ? nullptr : &base_specifiers.front();
+        return nullptr;
     }
 };
 
