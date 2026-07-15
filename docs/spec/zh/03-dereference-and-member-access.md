@@ -37,7 +37,7 @@ receiver 是 `E`。
 是良定义的，那么 (1) 里的成员访问操作的，就是那个同样的结果。——注释结束】
 
 ```cpp
-class Box {
+struct Box {
     int value{};
 public:
     int& operator*() { return value; }
@@ -45,8 +45,8 @@ public:
 };
 
 int f(Box& b) {
-    *b = 1;          // (3)：等价于 b.operator*() = 1;
-    return *b;       // (3)：等价于 b.operator*();
+    *b = 1;          // (3): equivalent to b.operator*() = 1;
+    return *b;       // (3): equivalent to b.operator*();
 }
 ```
 

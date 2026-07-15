@@ -38,7 +38,7 @@ type and `*E1` is well-formed by [§7.1](03-dereference-and-member-access.md#71-
 that same result is what the member access in (1) operates on. — end note]
 
 ```cpp
-class Box {
+struct Box {
     int value{};
 public:
     int& operator*() { return value; }

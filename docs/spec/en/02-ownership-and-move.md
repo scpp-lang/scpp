@@ -99,19 +99,19 @@ int x{};                         // OK: (1)
 int y = 1;                       // OK: (1)
 int z;                           // ill-formed: (1)
 
-class Defaults {
+struct Defaults {
     int a{};
     int b{5};
 };
 
-class CtorOnly {
+struct CtorOnly {
     int a;
     int b;
 public:
     CtorOnly(int x, int y) : a{x}, b{y} {}
 };
 
-class Mixed {
+struct Mixed {
     int a{1};
     int b;
 public:
@@ -120,13 +120,13 @@ public:
 
 int global_target{};
 
-class RefBox {
+struct RefBox {
     int& ref;
 public:
     RefBox(int& r) : ref{r} {}
 };
 
-class Bad {
+struct Bad {
     int a{};
     int b;
 public:
@@ -311,7 +311,7 @@ initializing (4)'s or (6)'s parameter. — end note]
 
 ```cpp
 struct Inner { int* p; };
-class Outer {
+struct Outer {
     Inner a;
     int b;
 public:
@@ -416,7 +416,7 @@ assignment is exactly what its own definition gives it, as for any
 other user-declared function. — end note]
 
 ```cpp
-class RefCounted {
+struct RefCounted {
     int* count;
 public:
     RefCounted(int* c) : count{c} {}
@@ -486,7 +486,7 @@ initialized as required by (9)-(11) is not viable for overload
 resolution.
 
 ```cpp
-class Box {
+struct Box {
 public:
     int value;
 

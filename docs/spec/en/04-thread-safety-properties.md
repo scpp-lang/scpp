@@ -174,7 +174,7 @@ properties as `T`, independently:
 
 ```cpp
 template<typename T>
-class [[scpp::thread_movable_if(
+struct [[scpp::thread_movable_if(
     scpp::is_thread_movable(T),
     scpp::is_thread_shareable(T)
 )]] unique_ptr {
@@ -187,7 +187,7 @@ when `T` is both thread-movable and thread-shareable:
 
 ```cpp
 template<typename T>
-class [[scpp::thread_movable_if(
+struct [[scpp::thread_movable_if(
     scpp::is_thread_movable(T) && scpp::is_thread_shareable(T),
     scpp::is_thread_movable(T) && scpp::is_thread_shareable(T)
 )]] shared_ptr {
@@ -206,24 +206,24 @@ other user-declared class template. — end note]
 
 (2) If `[[scpp::thread_movable]]` appertains to the declaration of an
 interface `I`, then, in addition to making `I` itself thread-movable
-under 8.1(5), every non-interface class or struct `D` whose complete
-object type directly or transitively inherits from `I` shall be
+under 8.1(5), every non-interface class `D` whose complete object type
+directly or transitively inherits from `I` shall be
 thread-movable. If `D` is not thread-movable, `D` is ill-formed.
 
 (3) If `[[scpp::thread_shareable]]` appertains to the declaration of an
 interface `I`, then, in addition to making `I` itself
-thread-shareable under 8.1(6), every non-interface class or struct `D`
-whose complete object type directly or transitively inherits from `I`
+thread-shareable under 8.1(6), every non-interface class `D` whose
+complete object type directly or transitively inherits from `I`
 shall be thread-shareable. If `D` is not thread-shareable, `D` is
 ill-formed.
 
-(4) If a non-interface class or struct directly or transitively inherits
-from more than one interface carrying requirements under (2) or (3),
-all such requirements apply conjunctively. The class or struct is
+(4) If a non-interface class directly or transitively inherits from more
+than one interface carrying requirements under (2) or (3), all such
+requirements apply conjunctively. The class is
 well-formed only if it satisfies every inherited requirement.
 
 (5) The checks required by (2)-(4) are performed at the complete
-definition of the non-interface class or struct, using that type's own
+definition of the non-interface class, using that type's own
 thread-movable and thread-shareable values as determined under 8.1,
 8.2, and 8.4.
 

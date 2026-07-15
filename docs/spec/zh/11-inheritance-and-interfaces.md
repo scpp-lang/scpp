@@ -7,17 +7,33 @@
 关于访问控制与 derived-to-base 转换的普通规则，都原样适用于 SCPP26
 程序中的继承。
 
-(2) 当且仅当定义某个 class 的那个声明，在附着于该 class 定义的
+(2) 任何用关键字 `struct` 引入的声明，都不得：
+
+  (2.1) 带有 *base-clause*（[class.derived]）；
+
+  (2.2) 被 attribute-token `scpp::interface` 标记；或者
+
+  (2.3) 声明 virtual 成员函数或 virtual 析构函数。
+
+(3) 任何命名了某个用关键字 `struct` 声明出来的类型的 *base-specifier*，
+都是不合法的（ill-formed）。
+
+(4) (2) 与 (3) 不会对 `struct` 施加其他限制。`struct` 仍然可以像普通 C++
+规则所允许的那样，声明构造函数、access-specifier、非 static 数据成员
+以及非 virtual 成员函数。
+
+(5) 当且仅当定义某个 class 的那个声明，在附着于该 class 定义的
 *attribute-specifier-seq*（[dcl.attr.grammar]）里带有
 attribute-token `scpp::interface` 时，这个 class 才是一个**接口**
-（interface）。没有这样标记的 class 是一个**普通 class**（ordinary
-class），即使它恰好没有声明任何非 static 数据成员，也仍然如此。
+（interface）。凡是用关键字 `class` 引入、但没有这样标记的声明，都是
+一个**普通 class**（ordinary class），即使它恰好没有声明任何非 static
+数据成员，也仍然如此。
 
-(3) 如果一个 class 定义的直接 base-specifier-list 中含有多于一个普通
+(6) 如果一个 class 定义的直接 base-specifier-list 中含有多于一个普通
 class，那么程序不合法（ill-formed）。一个 class 除了至多一个普通直接
 base class 之外，还可以额外拥有任意多个作为直接 base class 的接口。
 
-(4) 本条款只通过 (2) 里的接口引入多重继承。它不会以其他方式放宽
+(7) 本条款只通过 (5) 里的接口引入多重继承。它不会以其他方式放宽
 SCPP26 现有的“普通实现继承仍然是单继承”的规则。
 
 【注：作为一种风格约定，SCPP26 源码里被 `[[scpp::interface]]` 标记的
@@ -31,8 +47,17 @@ public:
     virtual void read() = 0;
 };
 
+struct PlainData {
+private:
+    int value{};
+public:
+    PlainData(int v) : value{v} {}
+    int read() const { return value; }
+};
+
 class TagOnly {
 public:
+    virtual ~TagOnly() = default;
     void ping();
 };
 
@@ -45,7 +70,9 @@ public:
 class Bad : public FileReader, public TagOnly {
 public:
     ~Bad() override = default;
-};  // ill-formed: two ordinary direct base classes under (3)
+};  // ill-formed: two ordinary direct base classes under (6)
+
+struct BadStruct : public TagOnly {};  // ill-formed: a struct shall not inherit
 ```
 
 ## 11.2 接口声明 [dcl.attr.scpp.interface]
@@ -117,7 +144,10 @@ public:
     virtual ~IBadState() = default;
 };  // ill-formed: non-static data member under (1)
 
-class Storage {};
+class Storage {
+public:
+    virtual ~Storage() = default;
+};
 
 class [[scpp::interface]] IBadBase : public virtual Storage {
 public:
@@ -142,7 +172,7 @@ base-specifier 不得带 `virtual` 关键字。凡是给直接普通 class base 
 (3) (1) 同时适用于“接口继承接口”和“普通 class 继承接口”这两种情况。
 
 【注：(2) 在 SCPP26 中并没有拿走任何有用的表达能力。按
-[§11.1](11-inheritance-and-interfaces.md#111-总则-classderived) (3)，一个
+[§11.1](11-inheritance-and-interfaces.md#111-总则-classderived)，一个
 class 至多只有一个普通直接 base class；而按
 [§11.2](11-inheritance-and-interfaces.md#112-接口声明-dclattrscppinterface)
 (3)，接口又只能继承别的接口。因此，普通 base 之间的关系不可能分叉成
@@ -200,11 +230,14 @@ public:
     ~BadDuck() override = default;
 };  // ill-formed: direct interface base lacks `virtual`
 
-class OrdinaryBase {};
+class OrdinaryBase {
+public:
+    virtual ~OrdinaryBase() = default;
+};
 
 class BadVirtualOrdinary : public virtual OrdinaryBase {
 public:
-    ~BadVirtualOrdinary() = default;
+    ~BadVirtualOrdinary() override = default;
 };  // ill-formed: direct ordinary-class base uses `virtual`
 
 class SecretMover : private virtual IMovable {
@@ -280,6 +313,7 @@ public:
 
 class Worker {
 public:
+    virtual ~Worker() = default;
     void start() {}
 };
 
@@ -297,16 +331,19 @@ public:
 
 class [[scpp::interface]] IIntOps {
 public:
+    virtual ~IIntOps() = default;
     void f(int) {}
 };
 
 class [[scpp::interface]] IDoubleOps {
 public:
+    virtual ~IDoubleOps() = default;
     void f(double) {}
 };
 
 class CombinedOps : public virtual IIntOps, public virtual IDoubleOps {
 public:
+    ~CombinedOps() override = default;
     using IIntOps::f;
     using IDoubleOps::f;
 };
@@ -336,39 +373,46 @@ public:
 };
 ```
 
-## 11.5 多态析构与显式 override [class.dtor], [class.virtual]
+## 11.5 Virtual 析构与显式 override [class.dtor], [class.virtual]
 
-(1) 就本小节而言，只要某个 class 声明了任意 virtual 成员函数，或者继承了
-任意 virtual 成员函数，它就是**多态的**（polymorphic）。
-
-(2) 一个多态 class 必须显式声明析构函数，并且这个析构函数必须是
+(1) 每一个 class 都必须显式声明析构函数，并且这个析构函数必须是
 virtual。凡是违背这条规则的完整 class 定义，都是不合法的。
 
-(3) (2) 对接口和普通 class 一体适用；即便某个 class 只是“继承了一个
-virtual 成员函数，而自己没有再声明新的 virtual 成员函数”，它也同样
-适用。
+(2) (1) 一体适用于以下所有情形：该 class 不论是否声明或继承任何其他
+virtual 成员函数，不论是否实现任何接口，也不论是否已经被立即拿去当作
+base class 使用。
 
-(4) SCPP26 不会仅仅因为某个 class 是多态的，就去隐式合成、提升或者
-重新解释一个析构函数使之成为 virtual。如果程序员没有显式声明这个
-virtual 析构函数，那么程序就是不合法的。
+(3) SCPP26 不会隐式合成、提升或者重新解释一个析构函数使之成为
+virtual。如果程序员没有显式声明这个 virtual 析构函数，那么程序就是
+不合法的。
 
-(5) 如果某个成员函数声明或析构函数声明重写（override）了任意 base
+(4) 如果某个成员函数声明或析构函数声明重写（override）了任意 base
 class 的 virtual 成员函数或析构函数，那么这个声明必须带
 `override` virt-specifier。凡是真正发生了 override 却省略了
 `override` 的程序，都是不合法的。
 
-(6) 如果某个声明写了 `override` virt-specifier，但它事实上并没有重写
+(5) 如果某个声明写了 `override` virt-specifier，但它事实上并没有重写
 任何 base virtual 成员函数或析构函数，那么程序就像在普通 C++ 中那样
 不合法。
 
-(7) (5) 对析构函数没有任何例外。凡是重写了 virtual base 析构函数的
+(6) (4) 对析构函数没有任何例外。凡是重写了 virtual base 析构函数的
 派生类析构函数，都必须写成类似 `~D() override = default;` 或者
 `~D() override { ... }` 这样的形式。
 
-(8) `using`-declaration 不是一个 overriding 声明；它本身既不会满足，
-也不会违反 (5)。
+(7) `using`-declaration 不是一个 overriding 声明；它本身既不会满足，
+也不会违反 (4)。
 
-【注：按 (2) 必须显式写出的析构函数，是一个 user-declared destructor。
+【注：通过对每个 class 都要求满足 (1)，SCPP26 消除了“某个 class 以后
+才被拿去当作 base class 使用、却缺少 virtual 析构函数”这种潜伏缺陷。
+而 [§11.1](11-inheritance-and-interfaces.md#111-总则-classderived) 下的
+`struct`，则是那个永远不参与继承和 virtual dispatch 的构造；它仍然可
+以封装数据与行为，但不会引入隐藏的 virtual-dispatch 状态。凡是某个
+class 在强制性的析构函数之外还额外声明 virtual 成员函数时，它就是在
+做一个有意识的、与继承有关的设计选择。一个附带的结果是：对已经满足
+(1) 的 class 来说，后续再添加 virtual 成员函数或接口 base，也不会
+“新引入”这类状态。——注释结束】
+
+【注：按 (1) 必须显式写出的析构函数，是一个 user-declared destructor。
 因而，SCPP26 已经在其他地方规定给“user-declared destructor”带来的
 隐式 copy 构造和 copy 赋值后果，会对接口像对其他任何 class 一样照常
 生效；见 [§6.5](02-ownership-and-move.md)。本条款不会为接口引入任何
@@ -387,16 +431,28 @@ public:
     void run() override {}
 };
 
-class MissingDtor : public Base {
+class MissingDtor {
 public:
-    void run() override {}
-};  // ill-formed: polymorphic class lacks an explicit virtual destructor
+    void ping() {}
+};  // ill-formed: every class needs an explicit virtual destructor
 
 class MissingOverride : public Base {
 public:
     virtual ~MissingOverride() = default;   // ill-formed: overrides `Base::~Base` but omits `override`
     void run() {}                           // ill-formed: overrides `Base::run` but omits `override`
 };
+
+struct Packet {
+private:
+    int value{};
+public:
+    Packet(int v) : value{v} {}
+    int read() const { return value; }
+};
+
+struct BadStructVirtual {
+    virtual ~BadStructVirtual() = default;
+};  // ill-formed: a struct shall not declare virtual members
 ```
 
 ---

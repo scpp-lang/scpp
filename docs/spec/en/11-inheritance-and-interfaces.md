@@ -7,20 +7,37 @@
 ordinary C++ rules for access control and derived-to-base conversion
 apply unchanged to inheritance in an SCPP26 program.
 
-(2) A class is an **interface** if and only if the declaration that
-defines it is marked with the attribute-token `scpp::interface` in an
-*attribute-specifier-seq* ([dcl.attr.grammar]) appertaining to that
-class definition. A class whose definition is not so marked is an
-**ordinary class**, even if it happens to declare no non-static data
-members.
+(2) A declaration introduced by the keyword `struct` shall not:
 
-(3) A class definition is ill-formed if its direct base-specifier-list
+  (2.1) have a *base-clause* ([class.derived]);
+
+  (2.2) be marked with the attribute-token `scpp::interface`; or
+
+  (2.3) declare a virtual member function or virtual destructor.
+
+(3) A *base-specifier* is ill-formed if it names a type declared with
+the keyword `struct`.
+
+(4) Rules (2) and (3) do not otherwise restrict a `struct`. A `struct`
+may declare constructors, access-specifiers, non-static data members,
+and non-virtual member functions exactly as the ordinary C++ rules
+permit.
+
+(5) A declaration introduced by the keyword `class` is an **interface**
+if and only if the declaration that defines it is marked with the
+attribute-token `scpp::interface` in an *attribute-specifier-seq*
+([dcl.attr.grammar]) appertaining to that class definition. A
+declaration introduced by the keyword `class` whose definition is not so
+marked is an **ordinary class**, even if it happens to declare no
+non-static data members.
+
+(6) A class definition is ill-formed if its direct base-specifier-list
 contains more than one ordinary class. A class may, in addition to at
 most one ordinary direct base class, have any number of direct base
 classes that are interfaces.
 
-(4) This clause adds multiple inheritance only through interfaces under
-(2). It does not otherwise relax SCPP26's existing rule that ordinary
+(7) This clause adds multiple inheritance only through interfaces under
+(5). It does not otherwise relax SCPP26's existing rule that ordinary
 implementation inheritance is single inheritance.
 
 [Note: as a style convention, SCPP26 source code is encouraged to name
@@ -36,8 +53,17 @@ public:
     virtual void read() = 0;
 };
 
+struct PlainData {
+private:
+    int value{};
+public:
+    PlainData(int v) : value{v} {}
+    int read() const { return value; }
+};
+
 class TagOnly {
 public:
+    virtual ~TagOnly() = default;
     void ping();
 };
 
@@ -50,7 +76,9 @@ public:
 class Bad : public FileReader, public TagOnly {
 public:
     ~Bad() override = default;
-};  // ill-formed: two ordinary direct base classes under (3)
+};  // ill-formed: two ordinary direct base classes under (6)
+
+struct BadStruct : public TagOnly {};  // ill-formed: a struct shall not inherit
 ```
 
 ## 11.2 Interface declarations [dcl.attr.scpp.interface]
@@ -131,7 +159,10 @@ public:
     virtual ~IBadState() = default;
 };  // ill-formed: non-static data member under (1)
 
-class Storage {};
+class Storage {
+public:
+    virtual ~Storage() = default;
+};
 
 class [[scpp::interface]] IBadBase : public virtual Storage {
 public:
@@ -157,7 +188,7 @@ direct ordinary-class base specified with `virtual` is ill-formed.
 class.
 
 [Note: rule (2) removes no useful expressiveness in SCPP26. By
-[§11.1](11-inheritance-and-interfaces.md#111-general-classderived) (3),
+[§11.1](11-inheritance-and-interfaces.md#111-general-classderived),
 a class has at most one ordinary direct base class, and by
 [§11.2](11-inheritance-and-interfaces.md#112-interface-declarations-dclattrscppinterface)
 (3), an interface may inherit only other interfaces. The ordinary-base
@@ -220,11 +251,14 @@ public:
     ~BadDuck() override = default;
 };  // ill-formed: direct interface base lacks `virtual`
 
-class OrdinaryBase {};
+class OrdinaryBase {
+public:
+    virtual ~OrdinaryBase() = default;
+};
 
 class BadVirtualOrdinary : public virtual OrdinaryBase {
 public:
-    ~BadVirtualOrdinary() = default;
+    ~BadVirtualOrdinary() override = default;
 };  // ill-formed: direct ordinary-class base uses `virtual`
 
 class SecretMover : private virtual IMovable {
@@ -311,6 +345,7 @@ public:
 
 class Worker {
 public:
+    virtual ~Worker() = default;
     void start() {}
 };
 
@@ -328,16 +363,19 @@ public:
 
 class [[scpp::interface]] IIntOps {
 public:
+    virtual ~IIntOps() = default;
     void f(int) {}
 };
 
 class [[scpp::interface]] IDoubleOps {
 public:
+    virtual ~IDoubleOps() = default;
     void f(double) {}
 };
 
 class CombinedOps : public virtual IIntOps, public virtual IDoubleOps {
 public:
+    ~CombinedOps() override = default;
     using IIntOps::f;
     using IDoubleOps::f;
 };
@@ -367,43 +405,50 @@ public:
 };
 ```
 
-## 11.5 Polymorphic destruction and explicit overriding [class.dtor], [class.virtual]
+## 11.5 Virtual destruction and explicit overriding [class.dtor], [class.virtual]
 
-(1) A class is **polymorphic**, for the purposes of this subclause, if
-it declares any virtual member function or inherits any virtual member
-function.
-
-(2) A polymorphic class shall declare a destructor explicitly, and that
+(1) Every class shall declare a destructor explicitly, and that
 destructor shall be virtual. A complete class definition that violates
 this rule is ill-formed.
 
-(3) Rule (2) applies uniformly to interfaces and ordinary classes
-alike, including a class that merely inherits a virtual member function
-and declares no new virtual member function of its own.
+(2) Rule (1) applies whether or not the class declares or inherits any
+other virtual member function, whether or not it implements any
+interface, and whether or not it is immediately used as a base class.
 
-(4) SCPP26 does not implicitly synthesize, promote, or reinterpret a
-destructor as virtual merely because the class is polymorphic. If the
-programmer does not declare the virtual destructor explicitly, the
-program is ill-formed.
+(3) SCPP26 does not implicitly synthesize, promote, or reinterpret a
+destructor as virtual. If the programmer does not declare a virtual
+destructor explicitly, the program is ill-formed.
 
-(5) If a member function declaration or destructor declaration
+(4) If a member function declaration or destructor declaration
 overrides a virtual member function or destructor of any base class,
 the declaration shall include the `override` virt-specifier. A program
 is ill-formed if such an overriding declaration omits `override`.
 
-(6) If a declaration includes the `override` virt-specifier but does
+(5) If a declaration includes the `override` virt-specifier but does
 not in fact override any base virtual member function or destructor,
 the program is ill-formed exactly as in ordinary C++.
 
-(7) Rule (5) applies to destructors with no exception. A destructor of
+(6) Rule (4) applies to destructors with no exception. A destructor of
 a derived class that overrides a virtual base destructor shall be
 declared, for example, as `~D() override = default;` or
 `~D() override { ... }`.
 
-(8) A `using`-declaration is not an overriding declaration and neither
-satisfies nor violates (5) by itself.
+(7) A `using`-declaration is not an overriding declaration and neither
+satisfies nor violates (4) by itself.
 
-[Note: an explicit destructor required by (2) is a user-declared
+[Note: by requiring (1) for every class, SCPP26 eliminates the latent
+defect of a class later being used as a base without a virtual
+destructor. A `struct` under [§11.1](11-inheritance-and-interfaces.md#111-general-classderived)
+is instead the construct that never participates in inheritance or
+virtual dispatch; it may still encapsulate data and behavior, but it
+adds no hidden virtual-dispatch state. A class that declares virtual
+member functions beyond the mandatory destructor is therefore making a
+deliberate inheritance-related design choice. As a side effect, adding
+further virtual member functions or interface bases later does not
+newly introduce such state into a class that already satisfies (1). —
+end note]
+
+[Note: an explicit destructor required by (1) is a user-declared
 destructor. The consequences that SCPP26 already assigns to a
 user-declared destructor for implicit copy construction and copy
 assignment therefore apply to interfaces exactly as they apply to any
@@ -423,16 +468,28 @@ public:
     void run() override {}
 };
 
-class MissingDtor : public Base {
+class MissingDtor {
 public:
-    void run() override {}
-};  // ill-formed: polymorphic class lacks an explicit virtual destructor
+    void ping() {}
+};  // ill-formed: every class needs an explicit virtual destructor
 
 class MissingOverride : public Base {
 public:
     virtual ~MissingOverride() = default;   // ill-formed: overrides `Base::~Base` but omits `override`
     void run() {}                           // ill-formed: overrides `Base::run` but omits `override`
 };
+
+struct Packet {
+private:
+    int value{};
+public:
+    Packet(int v) : value{v} {}
+    int read() const { return value; }
+};
+
+struct BadStructVirtual {
+    virtual ~BadStructVirtual() = default;
+};  // ill-formed: a struct shall not declare virtual members
 ```
 
 ---
