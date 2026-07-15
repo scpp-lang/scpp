@@ -1,0 +1,41 @@
+class [[scpp::interface]] IAdd {
+public:
+    virtual ~IAdd() { return; }
+    virtual int add(int x) const = 0;
+};
+
+class [[scpp::interface]] IMul {
+public:
+    virtual ~IMul() { return; }
+    virtual int mul(int x) const = 0;
+};
+
+class Plain {
+public:
+    virtual ~Plain() { return; }
+    int value_{};
+};
+
+class Both : public virtual IAdd, public virtual IMul {
+public:
+    Both(int value) : value_{value} { return; }
+    ~Both() override { return; }
+    int add(int x) const override { return this->value_ + x; }
+    int mul(int x) const override { return this->value_ * x; }
+
+private:
+    int value_{};
+};
+
+int main() {
+    if ((int)sizeof(Both) != (int)sizeof(Plain)) return 1;
+    if ((int)sizeof(IAdd*) != 16) return 2;
+    if ((int)sizeof(const IAdd&) != 16) return 3;
+
+    Both both{7};
+    const IAdd& add = both;
+    const IMul& mul = both;
+    print_int(add.add(5));
+    print_int(mul.mul(3));
+    return 0;
+}

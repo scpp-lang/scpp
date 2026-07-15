@@ -1,0 +1,32 @@
+class [[scpp::interface]] IRun {
+public:
+    virtual ~IRun() { return; }
+    virtual int run() const = 0;
+};
+
+class Runner : public virtual IRun {
+public:
+    Runner(int value) : value_{value} { return; }
+    ~Runner() override { return; }
+    int run() const override { return this->value_; }
+
+private:
+    int value_{};
+};
+
+int main() {
+    IRun* p{};
+    IRun* q{};
+    if (p) return 1;
+    if (!!p) return 2;
+    if (p != q) return 3;
+    if (!p) print_int(1);
+
+    Runner runner{33};
+    IRun* live = &runner;
+    if (!live) return 4;
+    [[scpp::unsafe]] {
+        print_int((*live).run());
+    }
+    return 0;
+}

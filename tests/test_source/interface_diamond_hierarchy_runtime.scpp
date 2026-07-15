@@ -1,0 +1,54 @@
+class [[scpp::interface]] IBase {
+public:
+    virtual ~IBase() { return; }
+    virtual int value() const = 0;
+};
+
+class [[scpp::interface]] ILeft : public virtual IBase {
+public:
+    virtual ~ILeft() override { return; }
+    virtual int left() const = 0;
+};
+
+class [[scpp::interface]] IRight : public virtual IBase {
+public:
+    virtual ~IRight() override { return; }
+    virtual int right() const = 0;
+};
+
+class [[scpp::interface]] IDiamond : public virtual ILeft, public virtual IRight {
+public:
+    virtual ~IDiamond() override { return; }
+    virtual int value() const override = 0;
+    virtual int sum() const = 0;
+};
+
+class Impl : public virtual IDiamond {
+public:
+    Impl(int value) : value_{value} { return; }
+    ~Impl() override { return; }
+    int value() const override { return this->value_; }
+    int left() const override { return this->value_ + 1; }
+    int right() const override { return this->value_ + 2; }
+    int sum() const override { return this->value() + this->left() + this->right(); }
+
+private:
+    int value_{};
+};
+
+int read_base(const IBase& base) {
+    return base.value();
+}
+
+int main() {
+    Impl impl{9};
+    const IDiamond& diamond = impl;
+    const ILeft& left = impl;
+    const IRight& right = impl;
+    const IBase& base = impl;
+    print_int(read_base(base));
+    print_int(left.value());
+    print_int(right.value());
+    print_int(diamond.sum());
+    return 0;
+}

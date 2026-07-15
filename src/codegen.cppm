@@ -373,6 +373,12 @@ private:
     std::vector<LoopFrame> loop_stack_;
     std::unordered_map<std::string, llvm::DIType*> debug_type_cache_;
     std::unordered_map<std::string, llvm::DIFile*> debug_file_cache_;
+    llvm::StructType* interface_representation_llvm_type_ = nullptr;
+    std::unordered_map<std::string, llvm::ArrayType*> interface_dispatch_table_types_;
+    std::unordered_map<std::string, std::vector<const Function*>> interface_dispatch_methods_cache_;
+    std::unordered_map<std::string, std::unordered_map<std::string, size_t>> interface_slot_indices_cache_;
+    std::unordered_map<std::string, llvm::GlobalVariable*> interface_dispatch_tables_;
+    std::unordered_map<std::string, llvm::Function*> interface_dispatch_thunks_;
 
     [[nodiscard]] std::string default_debug_source_path() const {
         return source_path_.empty() ? (std::filesystem::current_path() / "memory.scpp").string() : source_path_;
@@ -444,6 +450,11 @@ private:
             }
             case TypeKind::Pointer:
             case TypeKind::Reference: {
+                if (is_interface_representation_type(type)) {
+                    result = dibuilder_->createUnspecifiedType(type.kind == TypeKind::Pointer ? "interface_ptr"
+                                                                                             : "interface_ref");
+                    break;
+                }
                 llvm::DIType* pointee = type.pointee ? debug_type_for(*type.pointee) : nullptr;
                 result = dibuilder_->createPointerType(
                     pointee, module_->getDataLayout().getPointerSizeInBits(),
@@ -574,6 +585,100 @@ private:
             if (fn.name == name) return &fn;
         }
         return nullptr;
+    }
+
+    [[nodiscard]] bool type_names_interface(const std::string& name) const {
+        const ClassDef* def = find_class_def(name);
+        return def != nullptr && def->is_interface;
+    }
+
+    [[nodiscard]] bool is_interface_named_type(const Type& type) const {
+        return type.kind == TypeKind::Named && type_names_interface(type.name);
+    }
+
+    [[nodiscard]] bool is_interface_pointer_type(const Type& type) const {
+        return type.kind == TypeKind::Pointer && type.pointee != nullptr && is_interface_named_type(*type.pointee);
+    }
+
+    [[nodiscard]] bool is_interface_reference_type(const Type& type) const {
+        return type.kind == TypeKind::Reference && type.pointee != nullptr && is_interface_named_type(*type.pointee);
+    }
+
+    [[nodiscard]] bool is_interface_representation_type(const Type& type) const {
+        return is_interface_pointer_type(type) || is_interface_reference_type(type);
+    }
+
+    [[nodiscard]] std::string current_enclosing_class_name() const {
+        return current_function_def_ == nullptr ? std::string() : current_function_def_->member_owner_class;
+    }
+
+    [[nodiscard]] llvm::StructType* interface_representation_type() {
+        if (interface_representation_llvm_type_ != nullptr) return interface_representation_llvm_type_;
+        llvm::Type* ptr_type = llvm::PointerType::getUnqual(*context_);
+        interface_representation_llvm_type_ =
+            llvm::StructType::get(*context_, {ptr_type, ptr_type});
+        return interface_representation_llvm_type_;
+    }
+
+    [[nodiscard]] llvm::Value* build_interface_value(llvm::Value* object_ptr, llvm::Value* dispatch_ptr) {
+        llvm::Value* value = llvm::UndefValue::get(interface_representation_type());
+        value = builder_->CreateInsertValue(value, object_ptr, {0}, "iface.obj");
+        value = builder_->CreateInsertValue(value, dispatch_ptr, {1}, "iface.dispatch");
+        return value;
+    }
+
+    [[nodiscard]] llvm::Value* extract_interface_object_ptr(llvm::Value* interface_value) {
+        return builder_->CreateExtractValue(interface_value, {0}, "iface.obj");
+    }
+
+    [[nodiscard]] llvm::Value* extract_interface_dispatch_ptr(llvm::Value* interface_value) {
+        return builder_->CreateExtractValue(interface_value, {1}, "iface.dispatch");
+    }
+
+    [[nodiscard]] bool has_accessible_interface_base_conversion(const std::string& source_name, const std::string& target_name,
+                                                                std::string_view current_class) const {
+        if (source_name == target_name) return true;
+        const ClassDef* def = find_class_def(source_name);
+        if (def == nullptr) return false;
+        for (const BaseSpecifier& base : def->base_specifiers) {
+            if (base.kind == BaseClassKind::Interface && base.access == AccessSpecifier::Private &&
+                current_class != source_name) {
+                continue;
+            }
+            if (base.base_type.name == target_name) return true;
+            if (has_accessible_interface_base_conversion(base.base_type.name, target_name, current_class)) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool types_compatible_with_interface_conversion(const Type& source_type, const Type& target_type,
+                                                                  std::string_view current_class) const {
+        if (types_equal(source_type, target_type)) return true;
+        if (target_type.kind == TypeKind::Reference && source_type.kind == TypeKind::Reference &&
+            !target_type.is_rvalue_ref && !source_type.is_rvalue_ref && target_type.pointee && source_type.pointee) {
+            if (target_type.is_mutable_ref && !source_type.is_mutable_ref) return false;
+            if (types_equal(*source_type.pointee, *target_type.pointee)) return true;
+            return target_type.pointee->kind == TypeKind::Named && source_type.pointee->kind == TypeKind::Named &&
+                   type_names_interface(target_type.pointee->name) &&
+                   has_accessible_interface_base_conversion(source_type.pointee->name, target_type.pointee->name,
+                                                            current_class);
+        }
+        if (target_type.kind == TypeKind::Reference && source_type.kind != TypeKind::Reference && target_type.pointee) {
+            if (types_equal(source_type, *target_type.pointee)) return true;
+            return target_type.pointee->kind == TypeKind::Named && source_type.kind == TypeKind::Named &&
+                   type_names_interface(target_type.pointee->name) &&
+                   has_accessible_interface_base_conversion(source_type.name, target_type.pointee->name, current_class);
+        }
+        if (target_type.kind == TypeKind::Pointer && source_type.kind == TypeKind::Pointer && target_type.pointee &&
+            source_type.pointee) {
+            if (target_type.is_mutable_pointee && !source_type.is_mutable_pointee) return false;
+            if (types_equal(*source_type.pointee, *target_type.pointee)) return true;
+            return target_type.pointee->kind == TypeKind::Named && source_type.pointee->kind == TypeKind::Named &&
+                   type_names_interface(target_type.pointee->name) &&
+                   has_accessible_interface_base_conversion(source_type.pointee->name, target_type.pointee->name,
+                                                            current_class);
+        }
+        return false;
     }
 
     ExprPtr clone_expr(const Expr& expr) const {
@@ -1092,6 +1197,10 @@ private:
             }
             return types_equal(arg_type, candidate_param_type);
         };
+        auto argument_type_matches_or_converts = [&](const Type& arg_type, const Type& candidate_param_type) {
+            return argument_type_matches_parameter(arg_type, candidate_param_type) ||
+                   types_compatible_with_interface_conversion(arg_type, candidate_param_type, current_enclosing_class_name());
+        };
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
             // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- mirror image of
             // the ordinary-reference case just below.
@@ -1113,11 +1222,11 @@ private:
                 return false;
             }
             std::optional<Type> arg_type = infer_type(arg);
-            return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type);
+            return arg_type.has_value() && argument_type_matches_or_converts(*arg_type, param_type);
         }
         std::optional<Type> arg_type = infer_type(arg);
         if (!arg_type.has_value()) return false;
-        if (!argument_type_matches_parameter(*arg_type, param_type)) {
+        if (!argument_type_matches_or_converts(*arg_type, param_type)) {
             if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr &&
                 find_single_argument_converting_constructor(param_type.name, arg) != nullptr) {
                 return true;
@@ -1523,6 +1632,9 @@ private:
                                    current_loc_);
             case TypeKind::Pointer:
             case TypeKind::Reference:
+                if (is_interface_representation_type(type)) {
+                    return interface_representation_type();
+                }
                 // A unique_ptr is just a possibly-null owning pointer at the
                 // ABI/codegen level in v0.1: no destructor/drop codegen
                 // exists yet (that's M3's "drop insertion"), so it lowers
@@ -1776,6 +1888,12 @@ private:
     // those -- see ch02 §2.1's own note on this).
     void validate_c_abi_compatible(const Type& type, const std::string& fn_name,
                                     const std::string& context_description) {
+        if (is_interface_representation_type(type)) {
+            throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                                " cannot be an interface-typed pointer or reference -- it has no defined C "
+                                "representation (spec ch02 §2.1 / §11.3)",
+                current_loc_);
+        }
         switch (type.kind) {
             case TypeKind::Function:
                 throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
@@ -1859,12 +1977,12 @@ private:
         return type.kind == TypeKind::Named && type.name != "bool" && is_integral_scalar_type_name(type.name);
     }
 
-    [[nodiscard]] static bool pointer_supports_arithmetic(const Type& type) {
-        return type.kind == TypeKind::Pointer && type.pointee != nullptr &&
+    [[nodiscard]] bool pointer_supports_arithmetic(const Type& type) const {
+        return type.kind == TypeKind::Pointer && type.pointee != nullptr && !is_interface_pointer_type(type) &&
                !(type.pointee->kind == TypeKind::Named && type.pointee->name == "void");
     }
 
-    [[nodiscard]] static std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs) {
+    [[nodiscard]] std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs) const {
         const Type& lhs_operand = binary_operand_type(lhs);
         const Type& rhs_operand = binary_operand_type(rhs);
         if (op == BinaryOp::Add) {
@@ -1927,6 +2045,214 @@ private:
             case TypeKind::Array: return mangle_type(*type.element) + "_arr" + std::to_string(type.array_size);
         }
         return "?";
+    }
+
+    [[nodiscard]] static std::string method_lookup_name(const Function& fn) {
+        if (fn.name.ends_with("_delete")) return "~";
+        if (fn.name.ends_with("_operator_deref")) return "operator*";
+        if (fn.name.ends_with("_operator_assign")) return "operator=";
+        if (!fn.member_owner_class.empty() && fn.name.rfind(fn.member_owner_class + "_", 0) == 0) {
+            return fn.name.substr(fn.member_owner_class.size() + 1);
+        }
+        return fn.name;
+    }
+
+    [[nodiscard]] static std::string interface_method_slot_key(const Function& fn) {
+        std::string key = method_lookup_name(fn);
+        key += "(";
+        size_t start = fn.member_owner_class.empty() ? 0 : 1;
+        for (size_t i = start; i < fn.params.size(); i++) {
+            if (i != start) key += ",";
+            key += mangle_type(fn.params[i].type);
+        }
+        key += ")";
+        if (!fn.member_owner_class.empty() && !fn.params.empty()) {
+            key += fn.params[0].type.is_mutable_ref ? "&mut" : "&const";
+        }
+        switch (fn.receiver_ref_qualifier) {
+            case ReceiverRefQualifier::LValue: key += "&"; break;
+            case ReceiverRefQualifier::RValue: key += "&&"; break;
+            case ReceiverRefQualifier::None: break;
+        }
+        return key;
+    }
+
+    [[nodiscard]] const std::vector<const Function*>& interface_dispatch_methods(const std::string& interface_name) {
+        auto cached = interface_dispatch_methods_cache_.find(interface_name);
+        if (cached != interface_dispatch_methods_cache_.end()) return cached->second;
+        const ClassDef* def = find_class_def(interface_name);
+        if (def == nullptr || !def->is_interface) {
+            throw CodegenError("unknown interface '" + interface_name + "' for dispatch table generation", current_loc_);
+        }
+        std::vector<const Function*> methods;
+        std::unordered_map<std::string, size_t> slot_indices;
+        for (const BaseSpecifier& base : def->base_specifiers) {
+            if (base.kind != BaseClassKind::Interface) continue;
+            for (const Function* method : interface_dispatch_methods(base.base_type.name)) {
+                std::string slot_key = interface_method_slot_key(*method);
+                if (!slot_indices.contains(slot_key)) {
+                    slot_indices.emplace(slot_key, methods.size());
+                    methods.push_back(method);
+                }
+            }
+        }
+        for (const Function& fn : program_->functions) {
+            if (fn.member_owner_class != interface_name || fn.is_static || !fn.is_virtual || !fn.forwards_to.empty()) continue;
+            if (fn.name.ends_with("_new") || fn.name.ends_with("_delete")) continue;
+            std::string slot_key = interface_method_slot_key(fn);
+            auto slot_it = slot_indices.find(slot_key);
+            if (slot_it == slot_indices.end()) {
+                slot_indices.emplace(slot_key, methods.size());
+                methods.push_back(&fn);
+            } else {
+                methods[slot_it->second] = &fn;
+            }
+        }
+        interface_slot_indices_cache_.emplace(interface_name, std::move(slot_indices));
+        auto [it, _] = interface_dispatch_methods_cache_.emplace(interface_name, std::move(methods));
+        return it->second;
+    }
+
+    [[nodiscard]] llvm::ArrayType* interface_dispatch_table_type(const std::string& interface_name) {
+        auto it = interface_dispatch_table_types_.find(interface_name);
+        if (it != interface_dispatch_table_types_.end()) return it->second;
+        llvm::ArrayType* type =
+            llvm::ArrayType::get(llvm::PointerType::getUnqual(*context_),
+                                 interface_dispatch_methods(interface_name).size());
+        interface_dispatch_table_types_.emplace(interface_name, type);
+        return type;
+    }
+
+    [[nodiscard]] std::optional<size_t> interface_method_slot_index(const std::string& interface_name,
+                                                                    const Function& method) {
+        (void)interface_dispatch_methods(interface_name);
+        auto cache_it = interface_slot_indices_cache_.find(interface_name);
+        if (cache_it == interface_slot_indices_cache_.end()) return std::nullopt;
+        auto slot_it = cache_it->second.find(interface_method_slot_key(method));
+        if (slot_it == cache_it->second.end()) return std::nullopt;
+        return slot_it->second;
+    }
+
+    [[nodiscard]] const Function* find_direct_method_by_slot(const std::string& class_name, const std::string& slot_key) const {
+        for (const Function& fn : program_->functions) {
+            if (fn.member_owner_class != class_name || fn.is_static || !fn.forwards_to.empty()) continue;
+            if (interface_method_slot_key(fn) == slot_key) return &fn;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const Function* resolve_interface_slot_provider(const std::string& class_name, const std::string& slot_key) const {
+        if (const Function* direct = find_direct_method_by_slot(class_name, slot_key)) return direct;
+        const ClassDef* def = find_class_def(class_name);
+        if (def == nullptr) return nullptr;
+        const Function* chosen = nullptr;
+        for (const BaseSpecifier& base : def->base_specifiers) {
+            const Function* candidate = resolve_interface_slot_provider(base.base_type.name, slot_key);
+            if (candidate == nullptr) continue;
+            if (chosen == nullptr) {
+                chosen = candidate;
+                continue;
+            }
+            if (chosen != candidate && overload_names_.at(chosen) != overload_names_.at(candidate)) {
+                throw CodegenError("ambiguous interface dispatch provider for slot '" + slot_key + "' in class '" + class_name + "'",
+                                   current_loc_);
+            }
+        }
+        return chosen;
+    }
+
+    [[nodiscard]] llvm::FunctionType* interface_dispatch_function_type(const Function& method) {
+        std::vector<llvm::Type*> params;
+        params.reserve(method.params.size());
+        params.push_back(llvm::PointerType::getUnqual(*context_));
+        for (size_t i = 1; i < method.params.size(); i++) {
+            params.push_back(to_llvm_type(method.params[i].type));
+        }
+        return llvm::FunctionType::get(to_llvm_type(method.return_type), params, /*isVarArg=*/false);
+    }
+
+    [[nodiscard]] bool interface_destructor_uses_raw_this(const Function& fn) const {
+        return fn.name.ends_with("_delete") && !fn.member_owner_class.empty() && type_names_interface(fn.member_owner_class);
+    }
+
+    [[nodiscard]] llvm::Type* llvm_param_type_for_function(const Function& fn, const Param& param, size_t index) {
+        if (index == 0 && interface_destructor_uses_raw_this(fn)) {
+            return llvm::PointerType::getUnqual(*context_);
+        }
+        return to_llvm_type(param.type);
+    }
+
+    [[nodiscard]] llvm::Function* get_or_create_interface_dispatch_thunk(const std::string& concrete_class_name,
+                                                                         const Function& target) {
+        std::string cache_key = concrete_class_name + "|" + overload_names_.at(&target);
+        auto it = interface_dispatch_thunks_.find(cache_key);
+        if (it != interface_dispatch_thunks_.end()) return it->second;
+        const Type& this_type = target.params.front().type;
+        const std::string interface_name = this_type.pointee->name;
+        llvm::FunctionType* thunk_type = interface_dispatch_function_type(target);
+        llvm::Function* thunk = llvm::Function::Create(thunk_type, llvm::GlobalValue::PrivateLinkage,
+                                                       "__scpp_iface_thunk." + cache_key, *module_);
+        interface_dispatch_thunks_.emplace(cache_key, thunk);
+        llvm::IRBuilderBase::InsertPoint saved_ip = builder_->saveIP();
+        llvm::DebugLoc saved_dbg = builder_->getCurrentDebugLocation();
+        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", thunk);
+        builder_->SetInsertPoint(entry);
+        llvm::Value* raw_this = thunk->arg_begin();
+        llvm::Value* dispatch_ptr = get_or_create_interface_dispatch_table(concrete_class_name, interface_name);
+        llvm::Value* fat_this = build_interface_value(raw_this, dispatch_ptr);
+        std::vector<llvm::Value*> args;
+        args.reserve(target.params.size());
+        args.push_back(fat_this);
+        for (auto arg_it = std::next(thunk->arg_begin()); arg_it != thunk->arg_end(); ++arg_it) {
+            args.push_back(&*arg_it);
+        }
+        llvm::Function* target_fn = module_->getFunction(overload_names_.at(&target));
+        llvm::Value* result = builder_->CreateCall(target_fn, args);
+        if (target.return_type.kind == TypeKind::Named && target.return_type.name == "void") {
+            builder_->CreateRetVoid();
+        } else {
+            builder_->CreateRet(result);
+        }
+        builder_->restoreIP(saved_ip);
+        builder_->SetCurrentDebugLocation(saved_dbg);
+        return thunk;
+    }
+
+    [[nodiscard]] llvm::Constant* interface_dispatch_entry_for(const std::string& concrete_class_name, const Function& method) {
+        const Function* provider = resolve_interface_slot_provider(concrete_class_name, interface_method_slot_key(method));
+        if (provider == nullptr) {
+            throw CodegenError("class '" + concrete_class_name + "' has no final overrider for interface method '" +
+                               method_lookup_name(method) + "'",
+                current_loc_);
+        }
+        if (is_interface_reference_type(provider->params.front().type)) {
+            return get_or_create_interface_dispatch_thunk(concrete_class_name, *provider);
+        }
+        llvm::Function* fn = module_->getFunction(overload_names_.at(provider));
+        if (fn == nullptr) {
+            throw CodegenError("missing LLVM declaration for interface dispatch target '" + provider->name + "'",
+                current_loc_);
+        }
+        return fn;
+    }
+
+    [[nodiscard]] llvm::GlobalVariable* get_or_create_interface_dispatch_table(const std::string& concrete_class_name,
+                                                                               const std::string& interface_name) {
+        std::string cache_key = concrete_class_name + "->" + interface_name;
+        auto it = interface_dispatch_tables_.find(cache_key);
+        if (it != interface_dispatch_tables_.end()) return it->second;
+        llvm::ArrayType* table_type = interface_dispatch_table_type(interface_name);
+        auto* global = new llvm::GlobalVariable(*module_, table_type, /*isConstant=*/true,
+                                                llvm::GlobalValue::PrivateLinkage,
+                                                llvm::ConstantAggregateZero::get(table_type),
+                                                "__scpp_iface_table." + cache_key);
+        interface_dispatch_tables_.emplace(cache_key, global);
+        std::vector<llvm::Constant*> entries;
+        for (const Function* method : interface_dispatch_methods(interface_name)) {
+            entries.push_back(interface_dispatch_entry_for(concrete_class_name, *method));
+        }
+        global->setInitializer(llvm::ConstantArray::get(table_type, entries));
+        return global;
     }
 
     [[nodiscard]] static Type function_pointer_type_from_signature(const Type& return_type,
@@ -2208,7 +2534,8 @@ private:
         }
         std::vector<llvm::Type*> param_types;
         param_types.reserve(fn.params.size());
-        for (const Param& param : fn.params) {
+        for (size_t i = 0; i < fn.params.size(); ++i) {
+            const Param& param = fn.params[i];
             if (param.type.kind == TypeKind::Reference) {
                 validate_reference_pointee(*param.type.pointee);
             }
@@ -2221,7 +2548,7 @@ private:
                                     "-- 'void*' -- may be 'void')",
                     current_loc_);
             }
-            param_types.push_back(to_llvm_type(param.type));
+            param_types.push_back(llvm_param_type_for_function(fn, param, i));
         }
         llvm::FunctionType* fn_type =
             llvm::FunctionType::get(to_llvm_type(fn.return_type), param_types, fn.has_varargs);
@@ -2286,8 +2613,16 @@ private:
         for (auto& arg : llvm_fn->args()) {
             const Param& param = fn.params[index++];
             arg.setName(param.name);
-            llvm::AllocaInst* slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
-            builder_->CreateStore(&arg, slot);
+            llvm::AllocaInst* slot = nullptr;
+            if (index == 1 && interface_destructor_uses_raw_this(fn)) {
+                slot = builder_->CreateAlloca(to_llvm_type(param.type), nullptr, param.name);
+                llvm::Value* fat_this = build_interface_value(
+                    &arg, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)));
+                create_store(fat_this, slot, alignment_for_type(param.type));
+            } else {
+                slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
+                builder_->CreateStore(&arg, slot);
+            }
             locals_[param.name] = LocalSlot{slot, param.type};
             maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index));
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
@@ -2337,8 +2672,16 @@ private:
         for (auto& arg : llvm_fn->args()) {
             const Param& param = fn.params[index++];
             arg.setName(param.name);
-            llvm::AllocaInst* slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
-            builder_->CreateStore(&arg, slot);
+            llvm::AllocaInst* slot = nullptr;
+            if (index == 1 && interface_destructor_uses_raw_this(fn)) {
+                slot = builder_->CreateAlloca(to_llvm_type(param.type), nullptr, param.name);
+                llvm::Value* fat_this = build_interface_value(
+                    &arg, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)));
+                create_store(fat_this, slot, alignment_for_type(param.type));
+            } else {
+                slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
+                builder_->CreateStore(&arg, slot);
+            }
             locals_[param.name] = LocalSlot{slot, param.type};
             maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index));
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
@@ -2425,7 +2768,33 @@ private:
         std::vector<llvm::Value*> args;
         args.reserve(llvm_fn->arg_size());
         for (auto& arg : llvm_fn->args()) args.push_back(&arg);
-        llvm::Value* call_result = builder_->CreateCall(target_llvm, args);
+        llvm::Value* call_result = nullptr;
+        if (!fn.params.empty() && is_interface_reference_type(fn.params.front().type)) {
+            std::optional<size_t> slot_index = interface_method_slot_index(fn.member_owner_class, fn);
+            if (!slot_index.has_value()) {
+                throw CodegenError("missing interface dispatch slot for forwarding stub '" + fn.name + "'", current_loc_);
+            }
+            llvm::Value* receiver_value = args.front();
+            llvm::Value* dispatch_ptr = extract_interface_dispatch_ptr(receiver_value);
+            llvm::ArrayType* table_type = interface_dispatch_table_type(fn.member_owner_class);
+            llvm::Value* table_ptr = builder_->CreateBitCast(dispatch_ptr, llvm::PointerType::get(*context_, 0),
+                                                             "ifacetable");
+            llvm::Value* slot_ptr =
+                builder_->CreateGEP(table_type, table_ptr,
+                                    {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0),
+                                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_),
+                                                           static_cast<unsigned>(*slot_index))},
+                                    "ifaceslot");
+            llvm::Value* target_ptr =
+                create_load(llvm::PointerType::getUnqual(*context_), slot_ptr, std::nullopt, "ifacemethod");
+            std::vector<llvm::Value*> dispatch_args;
+            dispatch_args.reserve(args.size());
+            dispatch_args.push_back(extract_interface_object_ptr(receiver_value));
+            for (size_t i = 1; i < args.size(); ++i) dispatch_args.push_back(args[i]);
+            call_result = builder_->CreateCall(interface_dispatch_function_type(*target), target_ptr, dispatch_args);
+        } else {
+            call_result = builder_->CreateCall(target_llvm, args);
+        }
         if (is_bare_void(fn.return_type)) {
             builder_->CreateRetVoid();
         } else {
@@ -2472,6 +2841,17 @@ private:
                         throw CodegenError("reference '" + stmt.var_name +
                                             "' must be initialized (bound to a variable) at declaration",
                             current_loc_);
+                    }
+                    if (is_interface_reference_type(stmt.type)) {
+                        llvm::AllocaInst* slot = create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name);
+                        create_store(codegen_interface_value_for_target(*stmt.init, stmt.type), slot, alignment_for_type(stmt.type));
+                        locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
+                        locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                        maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
+                        if (!scope_stack_.empty()) {
+                            scope_stack_.back().push_back(stmt.var_name);
+                        }
+                        return;
                     }
                     validate_reference_pointee(*stmt.type.pointee);
                     // ch05 §5.x: a *const* reference may bind directly to
@@ -2735,7 +3115,9 @@ private:
                         current_function_def_->return_type.name == "void") {
                         codegen_expr(*stmt.expr);
                     } else {
-                        value = current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
+                        value = current_function_def_ != nullptr && is_interface_reference_type(current_function_def_->return_type)
+                                    ? codegen_interface_value_for_target(*stmt.expr, current_function_def_->return_type)
+                                : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
                                     ? codegen_lvalue(*stmt.expr).ptr
                                     : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
                                           find_class_def(current_function_def_->return_type.name) != nullptr &&
@@ -2780,7 +3162,7 @@ private:
                 // `stmt.condition` is a `bool` expression, stored/passed
                 // as i8 (see to_llvm_type) -- CreateCondBr needs a 1-bit
                 // condition, so narrow it right here (see bool_to_i1).
-                llvm::Value* cond = bool_to_i1(codegen_expr(*stmt.condition));
+                llvm::Value* cond = codegen_contextual_bool_i1(*stmt.condition);
                 llvm::BasicBlock* then_block = llvm::BasicBlock::Create(*context_, "if.then", current_function);
                 llvm::BasicBlock* else_block = llvm::BasicBlock::Create(*context_, "if.else", current_function);
                 llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(*context_, "if.end", current_function);
@@ -2832,7 +3214,7 @@ private:
 
                 builder_->SetInsertPoint(cond_block);
                 // Same bool_to_i1 narrowing as the If case above.
-                llvm::Value* cond = bool_to_i1(codegen_expr(*stmt.condition));
+                llvm::Value* cond = codegen_contextual_bool_i1(*stmt.condition);
                 builder_->CreateCondBr(cond, body_block, end_block);
 
                 // The body's scope is popped (and its unique_ptr locals
@@ -2896,6 +3278,40 @@ private:
     // implicit first (`this`) argument, ahead of the explicit ones.
     CallResult codegen_call(const Expr& expr) {
         if (expr.lhs != nullptr && !expr.name.empty() && expr.lhs->kind != ExprKind::Lambda) {
+            std::optional<Type> receiver_type = infer_type(*expr.lhs);
+            if (receiver_type.has_value()) {
+                const Type& receiver_named =
+                    receiver_type->kind == TypeKind::Reference && receiver_type->pointee ? *receiver_type->pointee : *receiver_type;
+                if (receiver_named.kind == TypeKind::Named && type_names_interface(receiver_named.name)) {
+                    const Function* callee =
+                        resolve_overload_by_type(receiver_named.name + "_" + expr.name, expr.args, /*param_offset=*/1,
+                                                 !is_read_only_place(*expr.lhs), expr.lhs.get());
+                    if (callee == nullptr) {
+                        throw CodegenError("call to unknown function '" + receiver_named.name + "_" + expr.name + "'",
+                                           current_loc_);
+                    }
+                    llvm::Value* receiver_value = codegen_expr(*expr.lhs);
+                    std::optional<size_t> slot_index = interface_method_slot_index(receiver_named.name, *callee);
+                    if (!slot_index.has_value()) {
+                        throw CodegenError("missing interface dispatch slot for '" + callee->name + "'", current_loc_);
+                    }
+                    llvm::Value* dispatch_ptr = extract_interface_dispatch_ptr(receiver_value);
+                    llvm::ArrayType* table_type = interface_dispatch_table_type(receiver_named.name);
+                    llvm::Value* table_ptr =
+                        builder_->CreateBitCast(dispatch_ptr, llvm::PointerType::get(*context_, 0), "ifacetable");
+                    llvm::Value* slot_ptr =
+                        builder_->CreateGEP(table_type, table_ptr,
+                                            {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0),
+                                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_),
+                                                                   static_cast<unsigned>(*slot_index))},
+                                            "ifaceslot");
+                    llvm::Value* target_ptr =
+                        create_load(llvm::PointerType::getUnqual(*context_), slot_ptr, std::nullopt, "ifacemethod");
+                    std::vector<llvm::Value*> args = codegen_call_args(expr.args, callee, /*param_offset=*/1);
+                    args.insert(args.begin(), extract_interface_object_ptr(receiver_value));
+                    return CallResult{builder_->CreateCall(interface_dispatch_function_type(*callee), target_ptr, args), callee};
+                }
+            }
             LValue base = codegen_lvalue(*expr.lhs);
             if (base.type.kind == TypeKind::Named && structs_.contains(base.type.name)) {
                 const StructInfo& info = structs_.at(base.type.name);
@@ -2933,7 +3349,6 @@ private:
                     return CallResult{builder_->CreateCall(fn_type, callee_value, args), nullptr};
                 }
             }
-            std::optional<Type> receiver_type = infer_type(*expr.lhs);
             if (receiver_type.has_value() && receiver_type->kind == TypeKind::FunctionPointer) {
                 llvm::Value* callee_value = codegen_expr(*expr.lhs);
                 std::vector<llvm::Value*> args = codegen_call_args_for_types(expr.args, receiver_type->function_params);
@@ -3048,7 +3463,13 @@ private:
                 current_loc_);
         }
         std::vector<llvm::Value*> args = codegen_call_args(expr.args, callee_def, param_offset);
-        if (this_arg != nullptr) args.insert(args.begin(), this_arg);
+        if (this_arg != nullptr) {
+            if (!callee_def->params.empty() && is_interface_reference_type(callee_def->params.front().type)) {
+                args.insert(args.begin(), codegen_interface_value_for_target(*expr.lhs, callee_def->params.front().type));
+            } else {
+                args.insert(args.begin(), this_arg);
+            }
+        }
         return CallResult{builder_->CreateCall(callee, args), callee_def};
     }
 
@@ -3160,6 +3581,10 @@ private:
     void initialize_reference_storage(const LValue& target, const Expr& expr) {
         if (target.type.kind != TypeKind::Reference || target.type.pointee == nullptr) {
             throw CodegenError("internal error: reference initializer target is not a reference", current_loc_);
+        }
+        if (is_interface_reference_type(target.type)) {
+            create_store(codegen_interface_value_for_target(expr, target.type), target.ptr, target.alignment);
+            return;
         }
         validate_reference_pointee(*target.type.pointee);
         llvm::Value* referent_addr =
@@ -3397,6 +3822,65 @@ private:
         return codegen_expr(expr);
     }
 
+    llvm::Value* codegen_interface_value_for_target(const Expr& expr, const Type& target_type) {
+        std::optional<Type> source_type = infer_type(expr);
+        if (!source_type.has_value()) {
+            throw CodegenError("cannot determine interface conversion source type", current_loc_);
+        }
+        if (types_equal(*source_type, target_type)) return codegen_expr(expr);
+        if (target_type.kind == TypeKind::Reference && target_type.pointee != nullptr &&
+            target_type.pointee->kind == TypeKind::Named) {
+            if (source_type->kind == TypeKind::Named) {
+                if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {
+                    std::optional<Type> operand_type = infer_type(*expr.lhs);
+                    if (operand_type.has_value() && is_interface_pointer_type(*operand_type)) return codegen_expr(expr);
+                }
+                llvm::Value* object_ptr = codegen_lvalue(expr).ptr;
+                llvm::Value* table_ptr =
+                    get_or_create_interface_dispatch_table(source_type->name, target_type.pointee->name);
+                return build_interface_value(object_ptr, table_ptr);
+            }
+            if (source_type->kind == TypeKind::Reference && source_type->pointee != nullptr &&
+                source_type->pointee->kind == TypeKind::Named && !type_names_interface(source_type->pointee->name)) {
+                llvm::Value* object_ptr = codegen_lvalue(expr).ptr;
+                llvm::Value* table_ptr =
+                    get_or_create_interface_dispatch_table(source_type->pointee->name, target_type.pointee->name);
+                return build_interface_value(object_ptr, table_ptr);
+            }
+        }
+        if (target_type.kind == TypeKind::Pointer && target_type.pointee != nullptr &&
+            target_type.pointee->kind == TypeKind::Named) {
+            if (source_type->kind == TypeKind::Pointer && source_type->pointee != nullptr &&
+                source_type->pointee->kind == TypeKind::Named && !type_names_interface(source_type->pointee->name)) {
+                llvm::Value* object_ptr = codegen_expr(expr);
+                llvm::Value* table_ptr =
+                    get_or_create_interface_dispatch_table(source_type->pointee->name, target_type.pointee->name);
+                return build_interface_value(object_ptr, table_ptr);
+            }
+        }
+        if (source_type->kind == TypeKind::Reference && source_type->pointee != nullptr &&
+            target_type.kind == TypeKind::Reference && target_type.pointee != nullptr &&
+            types_equal(*source_type->pointee, *target_type.pointee)) {
+            return codegen_expr(expr);
+        }
+        throw CodegenError("unsupported interface conversion at code generation time", current_loc_);
+    }
+
+    llvm::Value* codegen_contextual_bool_value(const Expr& expr) {
+        std::optional<Type> expr_type = infer_type(expr);
+        if (expr_type.has_value() && is_interface_pointer_type(*expr_type)) {
+            llvm::Value* interface_value = codegen_expr(expr);
+            llvm::Value* object_ptr = extract_interface_object_ptr(interface_value);
+            return i1_to_bool(builder_->CreateICmpNE(
+                object_ptr, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)), "ifacenotnull"));
+        }
+        return codegen_expr(expr);
+    }
+
+    llvm::Value* codegen_contextual_bool_i1(const Expr& expr) {
+        return bool_to_i1(codegen_contextual_bool_value(expr));
+    }
+
     std::vector<llvm::Value*> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
                                                   size_t param_offset) {
         std::vector<llvm::Value*> result;
@@ -3406,6 +3890,7 @@ private:
                                        callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
             const Type* ref_param_type =
                 param_is_reference ? &callee_def->params[i + param_offset].type : nullptr;
+            bool param_is_interface_reference = param_is_reference && is_interface_reference_type(*ref_param_type);
             bool param_is_rvalue_reference = param_is_reference && ref_param_type->is_rvalue_ref;
             // ch05 §5.x: a *const* (non-rvalue, non-mutable) reference
             // parameter may also bind directly to a fresh rvalue argument
@@ -3416,7 +3901,9 @@ private:
             // reference to a temporary).
             bool param_is_const_reference_bound_to_rvalue =
                 param_is_reference && const_reference_binds_materialized_temporary(*args[i], *ref_param_type);
-            if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
+            if (param_is_interface_reference) {
+                result.push_back(codegen_interface_value_for_target(*args[i], *ref_param_type));
+            } else if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
                 // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the move
                 // checker has already verified this argument produces a
                 // genuine rvalue (produces_rvalue_of_type), which may not
@@ -3459,10 +3946,13 @@ private:
         for (size_t i = 0; i < args.size(); i++) {
             bool param_is_reference = i < param_types.size() && param_types[i].kind == TypeKind::Reference;
             const Type* ref_param_type = param_is_reference ? &param_types[i] : nullptr;
+            bool param_is_interface_reference = param_is_reference && is_interface_reference_type(*ref_param_type);
             bool param_is_rvalue_reference = param_is_reference && ref_param_type->is_rvalue_ref;
             bool param_is_const_reference_bound_to_rvalue =
                 param_is_reference && const_reference_binds_materialized_temporary(*args[i], *ref_param_type);
-            if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
+            if (param_is_interface_reference) {
+                result.push_back(codegen_interface_value_for_target(*args[i], *ref_param_type));
+            } else if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
                 result.push_back(param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(*args[i])
                                                            : codegen_materialize_const_reference_source(
                                                                  *args[i], *ref_param_type->pointee));
@@ -3631,6 +4121,9 @@ private:
     // target type up front: a VarDecl initializer, a plain assignment's
     // RHS, and std::make_unique<T>(...)'s scalar argument.
     llvm::Value* codegen_value_for_target(const Expr& expr, const Type& target_type) {
+        if (is_interface_representation_type(target_type)) {
+            return codegen_interface_value_for_target(expr, target_type);
+        }
         // `-100`/`-1.5` (a negated literal, ExprKind::Unary/Neg over a
         // bare literal) is just as untyped as the bare literal itself --
         // real C++ itself treats a unary-minus-literal as a single
@@ -3758,7 +4251,7 @@ private:
                 return builder_->CreateGlobalString(expr.name, "str");
 
             case ExprKind::Conditional: {
-                llvm::Value* cond = bool_to_i1(codegen_expr(*expr.lhs));
+                llvm::Value* cond = codegen_contextual_bool_i1(*expr.lhs);
                 llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
                 llvm::BasicBlock* then_block = llvm::BasicBlock::Create(*context_, "cond.then", current_function);
                 llvm::BasicBlock* else_block = llvm::BasicBlock::Create(*context_, "cond.else", current_function);
@@ -3795,6 +4288,10 @@ private:
                 std::optional<Type> source_type = infer_type(*expr.lhs);
                 if (!source_type.has_value()) {
                     throw CodegenError("cast operand has no inferable type", current_loc_);
+                }
+                if (is_interface_representation_type(*source_type) || is_interface_representation_type(expr.type)) {
+                    throw CodegenError("casts involving interface-typed pointers or references are not supported",
+                                       current_loc_);
                 }
                 if (source_type->kind == TypeKind::Pointer && expr.type.kind == TypeKind::Pointer) {
                     return codegen_value_for_target(*expr.lhs, *source_type);
@@ -3870,6 +4367,10 @@ private:
             case ExprKind::Unary: {
                 if (expr.unary_op == UnaryOp::Deref) {
                     if (std::optional<Type> operand_type = infer_type(*expr.lhs);
+                        operand_type.has_value() && is_interface_pointer_type(*operand_type)) {
+                        return codegen_expr(*expr.lhs);
+                    }
+                    if (std::optional<Type> operand_type = infer_type(*expr.lhs);
                         operand_type.has_value() && operand_type->kind == TypeKind::FunctionPointer) {
                         return codegen_expr(*expr.lhs);
                     }
@@ -3881,6 +4382,17 @@ private:
                     return create_load(to_llvm_type(lv.type), lv.ptr, lv.alignment, "loadtmp");
                 }
                 if (expr.unary_op == UnaryOp::AddressOf) {
+                    if (std::optional<Type> operand_type = infer_type(*expr.lhs); operand_type.has_value()) {
+                        if (is_interface_reference_type(*operand_type)) {
+                            return codegen_expr(*expr.lhs);
+                        }
+                        if (expr.lhs->kind == ExprKind::Unary && expr.lhs->unary_op == UnaryOp::Deref && expr.lhs->lhs != nullptr) {
+                            std::optional<Type> inner = infer_type(*expr.lhs->lhs);
+                            if (inner.has_value() && is_interface_pointer_type(*inner)) {
+                                return codegen_expr(*expr.lhs->lhs);
+                            }
+                        }
+                    }
                     if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
                         if (llvm::Value* fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
                     }
@@ -3896,12 +4408,13 @@ private:
                     // verified expr.lhs resolves to a real place.
                     return codegen_lvalue(*expr.lhs).ptr;
                 }
-                llvm::Value* operand = codegen_expr(*expr.lhs);
                 if (expr.unary_op == UnaryOp::Neg) {
+                    llvm::Value* operand = codegen_expr(*expr.lhs);
                     std::optional<Type> operand_type = infer_type(*expr.lhs);
                     bool is_float = operand_type.has_value() && is_float_scalar_type_name(operand_type->name);
                     return is_float ? builder_->CreateFNeg(operand, "fnegtmp") : builder_->CreateNeg(operand, "negtmp");
                 }
+                llvm::Value* operand = codegen_contextual_bool_value(*expr.lhs);
                 // Not (`!`) -- `operand` is a `bool` value (i8; see
                 // to_llvm_type), so this goes through the i1 domain
                 // rather than a raw bitwise-not directly on the i8: NOT
@@ -3943,6 +4456,9 @@ private:
                     return codegen_builtin_print(expr);
                 }
                 CallResult result = codegen_call(expr);
+                if (result.callee_def != nullptr && is_interface_reference_type(result.callee_def->return_type)) {
+                    return result.value;
+                }
                 if (result.callee_def != nullptr && result.callee_def->return_type.kind == TypeKind::Reference) {
                     // The callee returns a reference -- an address,
                     // lowered identically to a pointer (see
@@ -4122,6 +4638,9 @@ private:
         if (!operand_type.has_value() || operand_type->kind != TypeKind::Pointer || operand_type->pointee == nullptr) {
             throw CodegenError("'delete' requires a raw pointer operand in this version", current_loc_);
         }
+        if (is_interface_pointer_type(*operand_type)) {
+            throw CodegenError("'delete' does not support interface pointers in this version", current_loc_);
+        }
         const Type& pointee = *operand_type->pointee;
         if (pointee.kind == TypeKind::Named) {
             if (class_has_destructor_in_chain(pointee.name)) {
@@ -4137,6 +4656,13 @@ private:
                                current_loc_);
         }
         llvm::Value* ptr = codegen_expr(*expr.lhs);
+        if (expr.destroy_through_pointer) {
+            std::optional<Type> operand_type = infer_type(*expr.lhs);
+            if (operand_type.has_value() && is_interface_pointer_type(*operand_type)) {
+                throw CodegenError("explicit destructor calls do not support interface pointers in this version",
+                                   current_loc_);
+            }
+        }
         if (expr.type.kind == TypeKind::Named) {
             if (class_has_destructor_in_chain(expr.type.name)) {
                 codegen_call_destructor_chain_unless_moved(expr.type.name, ptr, nullptr);
@@ -4792,6 +5318,9 @@ private:
                         current_loc_);
                 }
                 if (it->second.type.kind == TypeKind::Reference) {
+                    if (is_interface_reference_type(it->second.type)) {
+                        return LValue{it->second.alloca, it->second.type, alignment_for_type(it->second.type)};
+                    }
                     // A reference-typed local's own alloca just holds the
                     // address it's bound to (see the VarDecl case below,
                     // and how a Reference parameter arrives already as
@@ -4832,6 +5361,9 @@ private:
                                                                        expr.name + ".unionfield")
                                              : builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
                 if (field_type.kind == TypeKind::Reference) {
+                    if (is_interface_reference_type(field_type)) {
+                        return LValue{field_ptr, field_type, field_alignment};
+                    }
                     // ch05 §5.12: a Reference-typed field (e.g. a
                     // closure's own by-reference capture) stores just
                     // the address it's bound to, exactly like a
@@ -4906,6 +5438,12 @@ private:
                 if (result.callee_def == nullptr || result.callee_def->return_type.kind != TypeKind::Reference) {
                     throw CodegenError("expression is not assignable",
                         current_loc_);
+                }
+                if (is_interface_reference_type(result.callee_def->return_type)) {
+                    llvm::AllocaInst* slot =
+                        create_entry_block_alloca(to_llvm_type(result.callee_def->return_type), "ifacereftmp");
+                    create_store(result.value, slot, alignment_for_type(result.callee_def->return_type));
+                    return LValue{slot, result.callee_def->return_type, alignment_for_type(result.callee_def->return_type)};
                 }
                 return LValue{result.value, *result.callee_def->return_type.pointee,
                               alignment_for_type(*result.callee_def->return_type.pointee)};
@@ -4988,6 +5526,10 @@ private:
                     // would already have `r` resolved to its referent by
                     // the time this runs).
                     throw CodegenError("dereference ('*') is only supported for a raw pointer or a class with operator*",
+                        current_loc_);
+                }
+                if (is_interface_pointer_type(operand.type)) {
+                    throw CodegenError("dereferencing an interface pointer does not yield an assignable storage location",
                         current_loc_);
                 }
                 // A unique_ptr's/raw pointer's own storage holds the
@@ -5165,6 +5707,13 @@ private:
         bool rhs_is_literal = expr.rhs->kind == ExprKind::IntegerLiteral || expr.rhs->kind == ExprKind::FloatLiteral;
         std::optional<Type> lhs_type = infer_type(*expr.lhs);
         std::optional<Type> rhs_type = infer_type(*expr.rhs);
+        if ((expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) && lhs_type.has_value() && rhs_type.has_value() &&
+            is_interface_pointer_type(binary_operand_type(*lhs_type)) && is_interface_pointer_type(binary_operand_type(*rhs_type))) {
+            llvm::Value* lhs_object = extract_interface_object_ptr(codegen_expr(*expr.lhs));
+            llvm::Value* rhs_object = extract_interface_object_ptr(codegen_expr(*expr.rhs));
+            return i1_to_bool(expr.binary_op == BinaryOp::Eq ? builder_->CreateICmpEQ(lhs_object, rhs_object, "eqtmp")
+                                                             : builder_->CreateICmpNE(lhs_object, rhs_object, "netmp"));
+        }
         std::optional<Type> pointer_result_type =
             lhs_type.has_value() && rhs_type.has_value() ? pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type)
                                                          : std::nullopt;
@@ -5294,7 +5843,7 @@ private:
         // the merging PHI below can use either directly, matching how
         // every other bool value is stored/passed/returned) -- only the
         // branch conditions themselves need the narrower bool_to_i1 form.
-        llvm::Value* lhs = codegen_expr(*expr.lhs);
+        llvm::Value* lhs = codegen_contextual_bool_value(*expr.lhs);
         llvm::BasicBlock* rhs_block =
             llvm::BasicBlock::Create(*context_, is_and ? "and.rhs" : "or.rhs", current_function);
         llvm::BasicBlock* merge_block =
@@ -5308,7 +5857,7 @@ private:
         }
 
         builder_->SetInsertPoint(rhs_block);
-        llvm::Value* rhs = codegen_expr(*expr.rhs);
+        llvm::Value* rhs = codegen_contextual_bool_value(*expr.rhs);
         llvm::BasicBlock* rhs_end_block = builder_->GetInsertBlock();
         builder_->CreateBr(merge_block);
 

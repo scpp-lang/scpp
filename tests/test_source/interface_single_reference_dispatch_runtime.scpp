@@ -1,0 +1,27 @@
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() { return; }
+    virtual int read() const = 0;
+};
+
+class Box : public virtual IValue {
+public:
+    Box(int value) : value_{value} { return; }
+    ~Box() override { return; }
+    int read() const override { return this->value_; }
+
+private:
+    int value_{};
+};
+
+int read_twice(const IValue& value) {
+    return value.read() + value.read();
+}
+
+int main() {
+    Box box{21};
+    const IValue& value = box;
+    print_int(value.read());
+    print_int(read_twice(box));
+    return 0;
+}

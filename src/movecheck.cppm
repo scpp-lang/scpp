@@ -266,6 +266,7 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 [[maybe_unused]] [[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {});
 [[maybe_unused]] [[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {});
 [[nodiscard]] std::string enclosing_class_name(const Body& body);
+[[nodiscard]] bool is_interface_representation_type(const Type& type, const Program& program);
 [[nodiscard]] bool types_compatible_with_interface_conversion(const Type& source_type, const Type& target_type,
                                                               const Program& program, std::string_view current_class);
 
@@ -3698,6 +3699,12 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             if (report_errors) {
                 std::optional<Type> source_type = infer_expr_type(*expr.lhs, body, signatures);
+                if ((source_type.has_value() && is_interface_representation_type(*source_type, *body.program)) ||
+                    is_interface_representation_type(expr.type, *body.program)) {
+                    throw DataflowError("cannot cast interface-typed pointers or references to other scalar or raw "
+                                            "pointer representations",
+                                        state.current_loc);
+                }
                 bool scalar_source = source_type.has_value() && source_type->kind == TypeKind::Named &&
                                      is_scalar_type_name(source_type->name);
                 bool scalar_target = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
@@ -4923,6 +4930,14 @@ void check_function(const Function& fn, const Program& program, const Signatures
 [[nodiscard]] bool type_names_interface(const Program& program, const std::string& name) {
     const ClassDef* def = find_class_def(program, name);
     return def != nullptr && def->is_interface;
+}
+
+[[nodiscard]] bool is_interface_representation_type(const Type& type, const Program& program) {
+    if ((type.kind == TypeKind::Pointer || type.kind == TypeKind::Reference) && type.pointee &&
+        type.pointee->kind == TypeKind::Named) {
+        return type_names_interface(program, type.pointee->name);
+    }
+    return false;
 }
 
 [[nodiscard]] bool has_accessible_interface_base_conversion(const Program& program, const std::string& source_name,
