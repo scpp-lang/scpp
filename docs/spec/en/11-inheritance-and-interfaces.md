@@ -216,12 +216,84 @@ C++ virtual inheritance for that same source: all valid conversions of
 that most-derived object to `I` denote one shared `I` base identity,
 and virtual dispatch through `I` selects the unique final overrider.
 
-(7) SCPP26 need not realize the guarantee in (6) with the same ABI or
-object layout mechanism used by any particular C++ compiler. It is
-sufficient that the observable semantics named in (6) are preserved.
-This permission applies only to SCPP26's implementation of the
-required-virtual interface inheritance rules in this clause; it does
-not alter the observable semantics required for other C++ constructs.
+(7) A pointer or reference to a non-interface type is an *ordinary
+representation*. It occupies one machine word and denotes only the
+address of the referenced object. If a complete non-interface class
+type `D` directly or transitively implements one or more interfaces,
+those interface implementations contribute no additional per-object
+storage to `D`; in particular, `sizeof(D)` is unchanged by adding or
+removing interface bases while keeping `D`'s ordinary base class and
+non-static data members otherwise the same.
+
+(8) A pointer or reference to an interface type is an *interface
+representation*. It occupies exactly two machine words, and therefore
+exactly twice the size of the representation required by (7) on the
+same target. One word denotes the address of the underlying
+most-derived object. The other denotes dispatch information for the
+referenced interface, sufficient to dispatch each virtual member
+function declared by that interface for the concrete object currently
+referenced.
+
+(9) The dispatch information named in (8) shall be resolved when the
+interface-typed pointer or reference value is formed. Thereafter, a
+call through that value to a virtual member function declared by the
+referenced interface shall use that carried dispatch information
+directly and shall not require a search over the object's implemented
+interfaces at the call site.
+
+(10) Only pointer-to-interface types have null values. A
+pointer-to-interface value produced by `nullptr`, zero-initialization,
+or default-initialization of a pointer-typed member or variable is a
+null interface pointer. In a null interface pointer, the object-address
+word is zero. The value of the dispatch-information word is
+unspecified, and the program's semantics shall not depend on that
+word while the object-address word is zero.
+
+(11) A nullness test on a pointer-to-interface value, including
+comparison against `nullptr` and contextual conversion to `bool`,
+depends only on whether the object-address word named in (10) is zero.
+The dispatch-information word plays no part in such a test. In
+particular, two null interface pointers remain null regardless of
+whether their dispatch-information words are equal.
+
+(12) No conversion, implicit or explicit, is provided from an
+interface-typed pointer or reference value to any scalar type whose
+representation is one machine word. This includes `void*`, any other
+raw pointer type whose representation is one machine word, and integer
+scalar types such as `uintptr_t` or `intptr_t` when those types are
+one machine word on the target. A program that attempts such a
+conversion is ill-formed.
+
+[Note: When a program must pass an interface value through an API that
+accepts only `void*`, `uintptr_t`, or another single-word scalar, it
+can first store that interface value in an object with stable storage
+and pass a pointer to that storage, or another application-defined
+handle that preserves the needed information, instead. Any such pointer
+conversion remains subject to
+[§5.1](01-unsafe.md#51-attributes-dclattrscppunsafe). — end note]
+
+(13) SCPP26 need not realize the guarantees in (6), (8), (9), (10),
+and (11) with the same ABI, word ordering, object layout, or
+dispatch-table structure used by any particular C++ compiler or any
+other implementation technique. The order of the two machine words
+within an interface representation is unspecified, as is the internal
+structure of the dispatch information named in (8). It is sufficient
+that the observable semantics named in those paragraphs are preserved:
+one shared interface identity under (6), one-machine-word ordinary
+representations under (7), two-machine-word interface representations
+under (8), correct dispatch without call-site search under (9), and
+null interface-pointer semantics determined solely by the
+object-address word under (10) and (11). This permission applies only
+to SCPP26's implementation of the required-virtual interface
+inheritance rules and interface-typed representations in this clause;
+it does not alter the observable semantics required for other C++
+constructs.
+
+[Note: Consequently, an owning pointer specialization such as
+`unique_ptr<I>`, where `I` is an interface, may need to store both
+words of the interface representation so that ownership transfer
+preserves the full interface value. The exact library mechanism is
+outside this clause. — end note]
 
 ```cpp
 class [[scpp::interface]] IMovable {
@@ -270,9 +342,25 @@ public:
 
 void take_movable(IMovable&);
 
-void demo(Duck& duck, SecretMover& secret) {
+void take_userdata(void*);
+
+struct CallbackState {
+    IMovable* value;
+};
+
+void demo(Duck& duck, SecretMover& secret, CallbackState& state) {
     take_movable(duck);      // OK: public interface inheritance
     // take_movable(secret); // ill-formed: private base conversion denied
+
+    IMovable* p = nullptr;
+    if (p) {
+        p->move_it();
+    }
+
+    state.value = &duck;
+    // take_userdata(state.value); // ill-formed: interface pointer is not `void*`
+    // auto bits = uintptr_t(state.value); // ill-formed: not a single-word scalar conversion
+    take_userdata(&state);         // OK: pass pointer to stable storage instead
 }
 ```
 
