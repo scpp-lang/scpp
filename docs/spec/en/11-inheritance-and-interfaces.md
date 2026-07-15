@@ -147,15 +147,16 @@ interface base specified without `virtual` is ill-formed.
 (2) Rule (1) applies whether `D` is itself an interface or an ordinary
 class.
 
-(3) The access-specifier of an interface base is not otherwise
-restricted by this document. `public`, `protected`, and `private`
-interface inheritance retain their ordinary C++ meanings.
+(3) An interface base may be inherited only with the access-specifier
+`public` or `private`.
 
-(4) If an interface base is inherited `public`, the ordinary C++
-derived-to-base conversion to that interface type is available wherever
-access control permits it. If an interface base is inherited
-`protected` or `private`, the corresponding conversion is denied or
-permitted exactly as the ordinary C++ access-control rules require.
+(4) If an interface base is inherited `public`, the derived-to-base
+conversion to that interface type is available to ordinary external code
+as well as within the deriving class, subject to any other access rule
+of the program. If an interface base is inherited `private`, that
+conversion is available only within the deriving class's own member
+functions; a program is ill-formed if arbitrary external code attempts
+the corresponding conversion.
 
 (5) For each interface base `I` that is reachable from a most-derived
 object through one or more inheritance paths, all of which are virtual
