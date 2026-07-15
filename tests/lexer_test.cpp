@@ -51,7 +51,7 @@ void test_int_main_return() {
 
 void test_keywords() {
     expect_kinds(
-        "bool if else while for true false struct const new delete",
+        "bool if else while for true false struct const new delete virtual override using default",
         {
             scpp::TokenKind::KwBool,
             scpp::TokenKind::KwIf,
@@ -64,6 +64,10 @@ void test_keywords() {
             scpp::TokenKind::KwConst,
             scpp::TokenKind::KwNew,
             scpp::TokenKind::KwDelete,
+            scpp::TokenKind::KwVirtual,
+            scpp::TokenKind::KwOverride,
+            scpp::TokenKind::KwUsing,
+            scpp::TokenKind::KwDefault,
             scpp::TokenKind::EndOfFile,
         },
         "keywords");

@@ -622,6 +622,83 @@ private:
         return base;
     }
 
+    [[nodiscard]] BaseSpecifier parse_named_class_base_specifier(const Program& program) {
+        AccessSpecifier access = AccessSpecifier::Private;
+        bool access_spelled = false;
+        bool is_virtual = false;
+        bool consumed_specifier = true;
+        while (consumed_specifier) {
+            consumed_specifier = false;
+            if (!access_spelled && match(TokenKind::KwPublic)) {
+                access = AccessSpecifier::Public;
+                access_spelled = true;
+                consumed_specifier = true;
+                continue;
+            }
+            if (!access_spelled && match(TokenKind::KwPrivate)) {
+                access = AccessSpecifier::Private;
+                access_spelled = true;
+                consumed_specifier = true;
+                continue;
+            }
+            if (!is_virtual && match(TokenKind::KwVirtual)) {
+                is_virtual = true;
+                consumed_specifier = true;
+            }
+        }
+        const Token& base_tok = peek();
+        bool explicit_global = check(TokenKind::ColonColon);
+        std::string spelled_name = explicit_global ? parse_global_qualified_name() : parse_qualified_name();
+        std::string base_name = explicit_global ? spelled_name : resolve_visible_type_name(spelled_name);
+        if (base_name.empty() || !class_names_.contains(base_name)) {
+            throw ParseError(base_tok.line, base_tok.column,
+                             "'" + spelled_name +
+                                 "' is not a declared class -- a base class must be declared before use "
+                                 "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
+        }
+        BaseSpecifier base = make_named_base_specifier(program, base_name, access);
+        base.is_virtual = is_virtual;
+        return base;
+    }
+
+    void parse_named_class_base_clause(const Program& program, std::vector<BaseSpecifier>& bases) {
+        if (!match(TokenKind::Colon)) return;
+        do {
+            bases.push_back(parse_named_class_base_specifier(program));
+        } while (match(TokenKind::Comma));
+    }
+
+    void parse_class_using_declaration(ClassDef& def, AccessSpecifier current_access) {
+        const Token& using_tok = expect(TokenKind::KwUsing, "'using'");
+        bool explicit_global = match(TokenKind::ColonColon);
+        std::vector<std::string> segments;
+        segments.push_back(std::string(expect(TokenKind::Identifier, "base class name").text));
+        while (match(TokenKind::ColonColon)) {
+            segments.push_back(std::string(expect(TokenKind::Identifier, "identifier after '::'").text));
+        }
+        if (segments.size() < 2) {
+            throw ParseError(using_tok.line, using_tok.column,
+                             "a class-scope using declaration must name a base member as 'using Base::member;'");
+        }
+        std::string member_name = std::move(segments.back());
+        segments.pop_back();
+        std::string spelled_base_name;
+        for (size_t i = 0; i < segments.size(); i++) {
+            if (i != 0) spelled_base_name += "::";
+            spelled_base_name += segments[i];
+        }
+        std::string base_name = explicit_global ? spelled_base_name : resolve_visible_type_name(spelled_base_name);
+        if (base_name.empty() || !class_names_.contains(base_name)) {
+            throw ParseError(using_tok.line, using_tok.column,
+                             "'" + spelled_base_name +
+                                 "' is not a declared class -- a class-scope using declaration must name a "
+                                 "declared base class");
+        }
+        expect(TokenKind::Semicolon, "';'");
+        def.using_declarations.push_back(ClassUsingDeclaration{std::move(base_name), std::move(member_name),
+                                                               current_access});
+    }
+
     [[nodiscard]] ExprPtr make_bool_literal_expr(SourceLocation loc, bool value) {
         auto expr = std::make_unique<Expr>();
         expr->kind = ExprKind::BoolLiteral;
@@ -3137,6 +3214,27 @@ private:
         return ReceiverRefQualifier::None;
     }
 
+    StmtPtr parse_member_function_suffix(Function& fn) {
+        fn.is_override = match(TokenKind::KwOverride);
+        if (match(TokenKind::Assign)) {
+            if (match(TokenKind::KwDefault)) {
+                fn.is_defaulted = true;
+                expect(TokenKind::Semicolon, "';'");
+                return nullptr;
+            }
+            const Token& value_tok = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+            if (value_tok.text != "0") {
+                throw ParseError(value_tok.line, value_tok.column,
+                                 "expected 'default' or '0' after '=' in a member declaration");
+            }
+            fn.is_pure = true;
+            expect(TokenKind::Semicolon, "';'");
+            return nullptr;
+        }
+        if (match(TokenKind::Semicolon)) return nullptr;
+        return parse_block();
+    }
+
     std::vector<ExprPtr> parse_brace_initializer_args() {
         expect(TokenKind::LBrace, "'{'");
         std::vector<ExprPtr> args;
@@ -3968,24 +4066,7 @@ private:
         def.specialization_template_args = std::move(specialization_args);
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
-        if (match(TokenKind::Colon)) {
-            AccessSpecifier base_access = AccessSpecifier::Private;
-            if (match(TokenKind::KwPublic)) {
-                base_access = AccessSpecifier::Public;
-            } else {
-                match(TokenKind::KwPrivate);
-                base_access = AccessSpecifier::Private;
-            }
-            const Token& base_tok = peek();
-            std::string base_name = parse_qualified_name();
-            if (!class_names_.contains(base_name)) {
-                throw ParseError(base_tok.line, base_tok.column,
-                                 "'" + base_name +
-                                     "' is not a declared class -- a base class must be declared before use "
-                                     "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
-            }
-            def.base_specifiers.push_back(make_named_base_specifier(program, base_name, base_access));
-        }
+        parse_named_class_base_clause(program, def.base_specifiers);
 
         parse_class_body_into(program, def, class_name, def.template_params);
 
@@ -4102,28 +4183,7 @@ private:
         // type's own base (e.g. `Tuple<Head, Tail...> : private
         // Tuple<Tail...>`) is handled separately by the specialization
         // parser, which never reaches this ordinary path.
-        if (match(TokenKind::Colon)) {
-            AccessSpecifier base_access = AccessSpecifier::Private;
-            // Real C++'s own default when neither keyword is written is
-            // `private` for a `class` (only `struct` defaults to
-            // `public`, but structs have no inheritance here at all) --
-            // matching that exactly rather than requiring the keyword.
-            if (match(TokenKind::KwPublic)) {
-                base_access = AccessSpecifier::Public;
-            } else {
-                match(TokenKind::KwPrivate); // optional -- private either way
-                base_access = AccessSpecifier::Private;
-            }
-            const Token& base_tok = peek();
-            std::string base_name = parse_qualified_name();
-            if (!class_names_.contains(base_name)) {
-                throw ParseError(base_tok.line, base_tok.column,
-                                  "'" + base_name +
-                                      "' is not a declared class -- a base class must be declared before use "
-                                      "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
-            }
-            def.base_specifiers.push_back(make_named_base_specifier(program, base_name, base_access));
-        }
+        parse_named_class_base_clause(program, def.base_specifiers);
 
         parse_class_body_into(program, def, class_name, template_params);
 
@@ -4234,9 +4294,48 @@ private:
             bool member_requested_nodiscard = member_attrs.has_nodiscard;
             std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
             bool member_is_static = false;
-            if (match(TokenKind::KwStatic)) member_is_static = true;
-            FunctionEvalMode member_eval_mode = parse_optional_function_eval_mode();
-            if (!member_is_static && match(TokenKind::KwStatic)) member_is_static = true;
+            bool member_is_virtual = false;
+            FunctionEvalMode member_eval_mode = FunctionEvalMode::RuntimeOnly;
+            for (;;) {
+                if (match(TokenKind::KwStatic)) {
+                    member_is_static = true;
+                    continue;
+                }
+                if (match(TokenKind::KwVirtual)) {
+                    member_is_virtual = true;
+                    continue;
+                }
+                if (member_eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConstexpr)) {
+                    advance();
+                    member_eval_mode = FunctionEvalMode::Constexpr;
+                    continue;
+                }
+                if (member_eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConsteval)) {
+                    advance();
+                    member_eval_mode = FunctionEvalMode::Consteval;
+                    continue;
+                }
+                if ((check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval)) &&
+                    member_eval_mode != FunctionEvalMode::RuntimeOnly) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                     "a declaration may specify at most one of 'constexpr' or 'consteval'");
+                }
+                break;
+            }
+            if (check(TokenKind::KwUsing)) {
+                if (member_is_template) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                     "a class-scope using declaration cannot be a member template");
+                }
+                if (member_requested_unsafe || member_requested_nodiscard || member_is_static || member_is_virtual ||
+                    member_eval_mode != FunctionEvalMode::RuntimeOnly) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                     "a class-scope using declaration cannot carry function specifiers or attributes");
+                }
+                parse_class_using_declaration(def, current_access);
+                continue;
+            }
             if (match(TokenKind::Tilde)) {
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
@@ -4268,11 +4367,12 @@ private:
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.member_owner_class = qualified_class_name;
                 fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_delete";
                 fn.params.push_back(make_this_param(qualified_class_name, /*is_const=*/false));
-                fn.body = parse_member_body_or_declaration();
+                fn.body = parse_member_function_suffix(fn);
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -4300,6 +4400,7 @@ private:
                 fn.eval_mode = member_eval_mode;
                 fn.member_owner_class = qualified_class_name;
                 fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_new";
@@ -4329,11 +4430,29 @@ private:
                                           "' -- the compiler always provides one (spec §6.4(1)/(2), ch04 §4.2)");
                 }
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
+                fn.is_override = match(TokenKind::KwOverride);
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                if (!check(TokenKind::Semicolon)) {
+                if (!check(TokenKind::Semicolon) && !check(TokenKind::Assign)) {
                     fn.member_initializers = parse_constructor_member_initializer_list();
                 }
-                fn.body = parse_member_body_or_declaration();
+                if (match(TokenKind::Assign)) {
+                    if (match(TokenKind::KwDefault)) {
+                        fn.is_defaulted = true;
+                        expect(TokenKind::Semicolon, "';'");
+                        fn.body = nullptr;
+                    } else {
+                        const Token& value_tok = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+                        if (value_tok.text != "0") {
+                            throw ParseError(value_tok.line, value_tok.column,
+                                             "expected 'default' or '0' after '=' in a member declaration");
+                        }
+                        fn.is_pure = true;
+                        expect(TokenKind::Semicolon, "';'");
+                        fn.body = nullptr;
+                    }
+                } else {
+                    fn.body = parse_member_body_or_declaration();
+                }
                 if (fn.body == nullptr && !fn.member_initializers.empty()) {
                     throw ParseError(member_loc.line, member_loc.column,
                                      "a constructor member-initializer-list is only allowed on a constructor definition");
@@ -4385,6 +4504,7 @@ private:
                 fn.eval_mode = member_eval_mode;
                 fn.member_owner_class = qualified_class_name;
                 fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator*");
                 bool is_const = match(TokenKind::KwConst);
@@ -4392,7 +4512,8 @@ private:
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_operator_deref";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
-                fn.body = parse_member_body_or_declaration();
+                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
+                fn.body = parse_member_function_suffix(fn);
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
@@ -4417,6 +4538,7 @@ private:
                 fn.eval_mode = member_eval_mode;
                 fn.member_owner_class = qualified_class_name;
                 fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator=");
                 // spec §6.4(1): a program shall not declare a move
@@ -4448,7 +4570,8 @@ private:
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_operator_assign";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
-                fn.body = parse_member_body_or_declaration();
+                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
+                fn.body = parse_member_function_suffix(fn);
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
@@ -4471,6 +4594,10 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                       "static data members are not supported in this version");
                 }
+                if (member_is_virtual) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                     "a member variable cannot be declared virtual");
+                }
                 ClassField field;
                 field.type = parse_function_pointer_declarator(std::move(member_type), field.name);
                 field.access = current_access;
@@ -4490,6 +4617,7 @@ private:
                 fn.member_owner_class = qualified_class_name;
                 fn.is_static = member_is_static;
                 fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "a method");
                 fn.template_params = member_template_params;
@@ -4509,8 +4637,28 @@ private:
                 if (!member_is_static) {
                     fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
                 }
+                fn.is_override = match(TokenKind::KwOverride);
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                fn.body = parse_member_body_or_declaration();
+                if (match(TokenKind::Assign)) {
+                    if (match(TokenKind::KwDefault)) {
+                        fn.is_defaulted = true;
+                        expect(TokenKind::Semicolon, "';'");
+                        fn.body = nullptr;
+                    } else {
+                        const Token& value_tok = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+                        if (value_tok.text != "0") {
+                            throw ParseError(value_tok.line, value_tok.column,
+                                             "expected 'default' or '0' after '=' in a member declaration");
+                        }
+                        fn.is_pure = true;
+                        expect(TokenKind::Semicolon, "';'");
+                        fn.body = nullptr;
+                    }
+                } else if (match(TokenKind::Semicolon)) {
+                    fn.body = nullptr;
+                } else {
+                    fn.body = parse_block();
+                }
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -4537,6 +4685,10 @@ private:
             if (member_is_static) {
                 throw ParseError(member_loc.line, member_loc.column,
                                   "static data members are not supported in this version");
+            }
+            if (member_is_virtual) {
+                throw ParseError(member_loc.line, member_loc.column,
+                                 "a member variable cannot be declared virtual");
             }
             if (member_is_template) {
                 throw ParseError(member_loc.line, member_loc.column,
