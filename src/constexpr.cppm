@@ -384,10 +384,10 @@ private:
 
     [[nodiscard]] std::vector<ClassField> collect_class_fields(const ClassDef& def) {
         std::vector<ClassField> fields;
-        if (!def.base_class_name.empty()) {
-            auto base_it = classes_by_name_.find(def.base_class_name);
+        if (const BaseSpecifier* base = def.direct_ordinary_base()) {
+            auto base_it = classes_by_name_.find(base->base_type.name);
             if (base_it == classes_by_name_.end()) {
-                throw ConstexprError({}, "missing constexpr class definition for base class '" + def.base_class_name + "'");
+                throw ConstexprError({}, "missing constexpr class definition for base class '" + base->base_type.name + "'");
             }
             std::vector<ClassField> base_fields = collect_class_fields(*base_it->second);
             fields.insert(fields.end(), base_fields.begin(), base_fields.end());
@@ -733,8 +733,10 @@ private:
         std::string current = actual.name;
         while (true) {
             auto it = classes_by_name_.find(current);
-            if (it == classes_by_name_.end() || it->second->base_class_name.empty()) return false;
-            current = it->second->base_class_name;
+            if (it == classes_by_name_.end()) return false;
+            const BaseSpecifier* base = it->second->direct_ordinary_base();
+            if (base == nullptr) return false;
+            current = base->base_type.name;
             if (current == expected.name) return true;
         }
     }

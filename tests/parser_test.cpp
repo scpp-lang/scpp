@@ -3107,8 +3107,8 @@ void test_generic_type_instantiation_parses_with_template_args() {
            "generic_type_instantiation_parses_with_template_args: template arg should be Named('int')");
 }
 
-// ch05 §5.14: `class Derived : public Base { ... };` records
-// base_class_name/base_access on the ClassDef.
+// ch05 §5.14: `class Derived : public Base { ... };` records one
+// BaseSpecifier on the ClassDef.
 void test_class_public_inheritance_parses() {
     scpp::Program program = scpp::parse(
         "class Animal {\n"
@@ -3125,9 +3125,11 @@ void test_class_public_inheritance_parses() {
         if (c.name == "Dog") dog = &c;
     }
     expect(dog != nullptr, "class_public_inheritance_parses: expected a ClassDef named 'Dog'");
-    expect(dog->base_class_name == "Animal", "class_public_inheritance_parses: base_class_name should be 'Animal'");
-    expect(dog->base_access == scpp::AccessSpecifier::Public,
-           "class_public_inheritance_parses: base_access should be Public");
+    expect(dog->base_specifiers.size() == 1, "class_public_inheritance_parses: expected exactly one base specifier");
+    expect(dog->base_specifiers[0].base_type.name == "Animal",
+           "class_public_inheritance_parses: base type name should be 'Animal'");
+    expect(dog->base_specifiers[0].access == scpp::AccessSpecifier::Public,
+           "class_public_inheritance_parses: base access should be Public");
 }
 
 // ch05 §5.14: `class Derived : Base { ... };` (no access keyword)
@@ -3150,7 +3152,8 @@ void test_class_inheritance_defaults_to_private() {
         if (c.name == "Dog") dog = &c;
     }
     expect(dog != nullptr, "class_inheritance_defaults_to_private: expected a ClassDef named 'Dog'");
-    expect(dog->base_access == scpp::AccessSpecifier::Private,
+    expect(dog->base_specifiers.size() == 1, "class_inheritance_defaults_to_private: expected exactly one base specifier");
+    expect(dog->base_specifiers[0].access == scpp::AccessSpecifier::Private,
            "class_inheritance_defaults_to_private: base_access should default to Private");
 }
 
@@ -3169,6 +3172,22 @@ void test_class_inheritance_from_undeclared_class_is_rejected() {
         threw = true;
     }
     expect(threw, "class_inheritance_from_undeclared_class_is_rejected: expected a ParseError");
+}
+
+void test_interface_attribute_sets_class_flag() {
+    scpp::Program program = scpp::parse(
+        "class [[scpp::interface]] IReader {\n"
+        "public:\n"
+        "    IReader() { return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* iface = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "IReader") iface = &c;
+    }
+    expect(iface != nullptr, "interface_attribute_sets_class_flag: expected a ClassDef named 'IReader'");
+    expect(iface != nullptr && iface->is_interface,
+           "interface_attribute_sets_class_flag: expected [[scpp::interface]] to set ClassDef::is_interface");
 }
 
 // ch05 §5.14: `template<typename... Ts> class Tuple;` -- a variadic
@@ -3209,7 +3228,7 @@ void test_variadic_empty_pack_specialization_parses() {
 // ch05 §5.14: `template<typename Head, typename... Tail> class
 // Tuple<Head, Tail...> : private Tuple<Tail...> { Head head; };` -- the
 // recursive-case specialization: records template_params (Head +
-// Tail(is_pack)), base_class_name/base_pack_arg_name (the pack spread
+// Tail(is_pack)), the recursive base specifier (the pack spread
 // as the base's sole argument), and the field typed by the head
 // parameter.
 void test_variadic_recursive_specialization_parses() {
@@ -3228,10 +3247,16 @@ void test_variadic_recursive_specialization_parses() {
     expect(recursive_case->template_params.size() == 2 && recursive_case->template_params[0].name == "Head" &&
                recursive_case->template_params[1].name == "Tail" && recursive_case->template_params[1].is_pack,
            "variadic_recursive_specialization_parses: expected params [Head, Tail(pack)]");
-    expect(recursive_case->base_class_name == "Tuple",
-           "variadic_recursive_specialization_parses: base_class_name should be 'Tuple'");
-    expect(recursive_case->base_pack_arg_name == "Tail",
-           "variadic_recursive_specialization_parses: base_pack_arg_name should be 'Tail'");
+    expect(recursive_case->base_specifiers.size() == 1,
+           "variadic_recursive_specialization_parses: expected exactly one base specifier");
+    expect(recursive_case->base_specifiers[0].base_type.name == "Tuple",
+           "variadic_recursive_specialization_parses: base type name should be 'Tuple'");
+    expect(recursive_case->base_specifiers[0].pack_arg_name == "Tail",
+           "variadic_recursive_specialization_parses: pack_arg_name should be 'Tail'");
+    expect(recursive_case->base_specifiers[0].base_type.template_args.size() == 1 &&
+               recursive_case->base_specifiers[0].base_type.template_args[0].name == "Tail" &&
+               recursive_case->base_specifiers[0].base_type.template_args[0].is_pack_expansion,
+           "variadic_recursive_specialization_parses: expected base type template arg 'Tail...'");
     expect(recursive_case->fields.size() == 1 && recursive_case->fields[0].type.name == "Head",
            "variadic_recursive_specialization_parses: expected a single field typed 'Head'");
 }
@@ -3436,8 +3461,8 @@ void test_explicit_non_type_template_argument_call_parses() {
 // legal both alone (the empty-pack base case, `TupleImpl<Idx>`) and
 // followed by exactly one type parameter plus a pack (the recursive
 // case, `TupleImpl<Idx, Head, Tail...>`) -- both specializations parse,
-// and the recursive case's own base clause records base_non_type_arg
-// (the "Idx + 1" expression) alongside base_pack_arg_name ("Tail").
+// and the recursive case's own base clause records a non-type base
+// argument (the "Idx + 1" expression) alongside pack_arg_name ("Tail").
 void test_variadic_specialization_with_leading_non_type_param_parses() {
     scpp::Program program = scpp::parse("template<int Idx, typename... Ts> class TupleImpl;\n"
                                          "template<int Idx> class TupleImpl<Idx> {};\n"
@@ -3463,10 +3488,60 @@ void test_variadic_specialization_with_leading_non_type_param_parses() {
                recursive_case->template_params[2].is_pack,
            "variadic_specialization_with_leading_non_type_param_parses: expected params [Idx(non-type), Head, "
            "Tail(pack)]");
-    expect(recursive_case->base_class_name == "TupleImpl" && recursive_case->base_non_type_arg != nullptr &&
-               recursive_case->base_pack_arg_name == "Tail",
-           "variadic_specialization_with_leading_non_type_param_parses: expected base_class_name='TupleImpl', "
-           "base_non_type_arg set, base_pack_arg_name='Tail'");
+    expect(recursive_case->base_specifiers.size() == 1 &&
+               recursive_case->base_specifiers[0].base_type.name == "TupleImpl" &&
+               recursive_case->base_specifiers[0].base_type.non_type_args.size() == 1 &&
+               recursive_case->base_specifiers[0].base_type.non_type_args[0] != nullptr &&
+               recursive_case->base_specifiers[0].pack_arg_name == "Tail",
+           "variadic_specialization_with_leading_non_type_param_parses: expected base='TupleImpl', "
+           "one non-type base arg, pack_arg_name='Tail'");
+}
+
+void test_phase1_ast_metadata_fields_are_storable() {
+    scpp::ClassDef def;
+    def.name = "Example";
+    def.is_interface = true;
+    scpp::BaseSpecifier base;
+    base.base_type.kind = scpp::TypeKind::Named;
+    base.base_type.name = "IBase";
+    auto non_type_arg = std::make_shared<scpp::Expr>();
+    non_type_arg->kind = scpp::ExprKind::IntegerLiteral;
+    non_type_arg->int_value = 0;
+    base.base_type.non_type_args.push_back(non_type_arg);
+    scpp::Type pack_arg;
+    pack_arg.kind = scpp::TypeKind::Named;
+    pack_arg.name = "Rest";
+    pack_arg.is_pack_expansion = true;
+    base.base_type.template_args.push_back(pack_arg);
+    base.access = scpp::AccessSpecifier::Public;
+    base.is_virtual = true;
+    base.kind = scpp::BaseClassKind::Interface;
+    base.pack_arg_name = "Rest";
+    def.base_specifiers.push_back(base);
+    def.using_declarations.push_back(scpp::ClassUsingDeclaration{"IBase", "work", scpp::AccessSpecifier::Public});
+
+    scpp::Function fn;
+    fn.member_owner_class = "Example";
+    fn.is_virtual = true;
+    fn.is_override = true;
+    fn.is_pure = true;
+    fn.is_defaulted = true;
+
+    expect(def.is_interface, "phase1_ast_metadata_fields_are_storable: expected interface flag to store");
+    expect(def.base_specifiers.size() == 1 && def.base_specifiers[0].is_virtual &&
+               def.base_specifiers[0].kind == scpp::BaseClassKind::Interface &&
+               def.base_specifiers[0].pack_arg_name == "Rest",
+           "phase1_ast_metadata_fields_are_storable: expected base specifier metadata to store");
+    expect(def.base_specifiers[0].base_type.non_type_args.size() == 1 &&
+               def.base_specifiers[0].base_type.non_type_args[0] != nullptr &&
+               def.base_specifiers[0].base_type.template_args.size() == 1 &&
+               def.base_specifiers[0].base_type.template_args[0].is_pack_expansion,
+           "phase1_ast_metadata_fields_are_storable: expected base type metadata to store");
+    expect(def.using_declarations.size() == 1 && def.using_declarations[0].base_name == "IBase" &&
+               def.using_declarations[0].member_name == "work",
+           "phase1_ast_metadata_fields_are_storable: expected class-scope using declaration to store");
+    expect(fn.is_virtual && fn.is_override && fn.is_pure && fn.is_defaulted,
+           "phase1_ast_metadata_fields_are_storable: expected function metadata flags to store");
 }
 
 void test_namespace_relative_qualified_generic_type_declaration_parses() {
@@ -3782,6 +3857,7 @@ int main() {
     test_class_public_inheritance_parses();
     test_class_inheritance_defaults_to_private();
     test_class_inheritance_from_undeclared_class_is_rejected();
+    test_interface_attribute_sets_class_flag();
     test_variadic_primary_template_decl_parses();
     test_variadic_empty_pack_specialization_parses();
     test_variadic_recursive_specialization_parses();
@@ -3799,6 +3875,7 @@ int main() {
     test_explicit_template_argument_call_with_multiple_value_args_parses();
     test_explicit_non_type_template_argument_call_parses();
     test_variadic_specialization_with_leading_non_type_param_parses();
+    test_phase1_ast_metadata_fields_are_storable();
     test_namespace_relative_qualified_generic_type_declaration_parses();
 
     if (failures > 0) {

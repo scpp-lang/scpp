@@ -203,7 +203,7 @@ private:
     // exactly the primary template's own parameter names in order), and
     // to recognize the pack parameter's own name (needed for a
     // specialization's `: private Tuple<Tail...>` base-clause, see
-    // ClassDef::base_pack_arg_name).
+    // BaseSpecifier::pack_arg_name).
     std::unordered_map<std::string, std::vector<GenericTypeParam>> variadic_primary_template_params_;
     // ch05 §5.14: every ordinary (non-variadic) generic class/struct
     // *primary template*'s own declared parameter list, keyed by its
@@ -451,6 +451,22 @@ private:
         return clone;
     }
 
+    Type clone_type_tree(const Type& type) {
+        Type clone = type;
+        if (type.pointee) clone.pointee = std::make_shared<Type>(clone_type_tree(*type.pointee));
+        if (type.element) clone.element = std::make_shared<Type>(clone_type_tree(*type.element));
+        if (type.function_return) clone.function_return = std::make_shared<Type>(clone_type_tree(*type.function_return));
+        clone.function_params.clear();
+        for (const Type& param : type.function_params) clone.function_params.push_back(clone_type_tree(param));
+        clone.template_args.clear();
+        for (const Type& arg : type.template_args) clone.template_args.push_back(clone_type_tree(arg));
+        clone.non_type_args.clear();
+        for (const std::shared_ptr<Expr>& arg : type.non_type_args) {
+            clone.non_type_args.push_back(arg ? std::shared_ptr<Expr>(clone_expr_tree(*arg).release()) : nullptr);
+        }
+        return clone;
+    }
+
     ClassDef clone_class_def(const ClassDef& def) {
         ClassDef clone;
         clone.name = def.name;
@@ -464,14 +480,18 @@ private:
         clone.template_owner_id = def.template_owner_id;
         clone.is_forward_declaration = def.is_forward_declaration;
         clone.is_synthetic_check_only = def.is_synthetic_check_only;
-        clone.base_class_name = def.base_class_name;
-        clone.base_access = def.base_access;
+        clone.is_interface = def.is_interface;
+        clone.base_specifiers.clear();
+        for (const BaseSpecifier& base : def.base_specifiers) {
+            BaseSpecifier cloned = base;
+            cloned.base_type = clone_type_tree(base.base_type);
+            clone.base_specifiers.push_back(std::move(cloned));
+        }
+        clone.using_declarations = def.using_declarations;
         clone.is_variadic_primary_template = def.is_variadic_primary_template;
         clone.is_variadic_specialization = def.is_variadic_specialization;
         clone.is_partial_specialization = def.is_partial_specialization;
         clone.specialization_template_args = def.specialization_template_args;
-        clone.base_pack_arg_name = def.base_pack_arg_name;
-        if (def.base_non_type_arg) clone.base_non_type_arg = std::shared_ptr<Expr>(clone_expr_tree(*def.base_non_type_arg).release());
         clone.thread_movable_override = def.thread_movable_override;
         clone.thread_shareable_override = def.thread_shareable_override;
         clone.is_nodiscard = def.is_nodiscard;
@@ -584,6 +604,22 @@ private:
                               "a declaration may specify at most one of 'constexpr' or 'consteval'");
         }
         return mode;
+    }
+
+    [[nodiscard]] BaseClassKind classify_base_name(const Program& program, const std::string& base_name) const {
+        for (const ClassDef& def : program.classes) {
+            if (def.name == base_name) return def.is_interface ? BaseClassKind::Interface : BaseClassKind::OrdinaryClass;
+        }
+        return BaseClassKind::Unknown;
+    }
+
+    [[nodiscard]] BaseSpecifier make_named_base_specifier(const Program& program, const std::string& base_name,
+                                                          AccessSpecifier access) const {
+        BaseSpecifier base;
+        base.base_type = named_type(base_name);
+        base.access = access;
+        base.kind = classify_base_name(program, base_name);
+        return base;
     }
 
     [[nodiscard]] ExprPtr make_bool_literal_expr(SourceLocation loc, bool value) {
@@ -1133,7 +1169,9 @@ private:
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
                a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
-               a.is_static == b.is_static && a.access == b.access && a.member_owner_class == b.member_owner_class;
+               a.is_static == b.is_static && a.access == b.access && a.member_owner_class == b.member_owner_class &&
+               a.is_virtual == b.is_virtual && a.is_override == b.is_override && a.is_pure == b.is_pure &&
+               a.is_defaulted == b.is_defaulted;
     }
 
     [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
@@ -1153,6 +1191,29 @@ private:
         if (static_cast<bool>(a) != static_cast<bool>(b)) return false;
         if (!a) return true;
         return a->kind == b->kind && a->int_value == b->int_value && a->name == b->name;
+    }
+
+    [[nodiscard]] bool same_base_specifiers(const std::vector<BaseSpecifier>& a, const std::vector<BaseSpecifier>& b) const {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (!types_equal(a[i].base_type, b[i].base_type) || a[i].access != b[i].access ||
+                a[i].is_virtual != b[i].is_virtual || a[i].kind != b[i].kind ||
+                a[i].pack_arg_name != b[i].pack_arg_name) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool same_using_declarations(const std::vector<ClassUsingDeclaration>& a,
+                                               const std::vector<ClassUsingDeclaration>& b) const {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++) {
+            if (a[i].base_name != b[i].base_name || a[i].member_name != b[i].member_name || a[i].access != b[i].access) {
+                return false;
+            }
+        }
+        return true;
     }
 
 
@@ -1212,14 +1273,14 @@ private:
     [[nodiscard]] bool same_class_identity(const ClassDef& a, const ClassDef& b) const {
         if (a.name != b.name || a.namespace_path != b.namespace_path || a.is_concept_witness != b.is_concept_witness ||
             a.is_forward_declaration != b.is_forward_declaration ||
-            a.is_synthetic_check_only != b.is_synthetic_check_only || a.base_class_name != b.base_class_name ||
-            a.base_access != b.base_access || a.is_variadic_primary_template != b.is_variadic_primary_template ||
+            a.is_synthetic_check_only != b.is_synthetic_check_only || a.is_interface != b.is_interface ||
+            !same_base_specifiers(a.base_specifiers, b.base_specifiers) ||
+            !same_using_declarations(a.using_declarations, b.using_declarations) ||
+            a.is_variadic_primary_template != b.is_variadic_primary_template ||
             a.is_variadic_specialization != b.is_variadic_specialization ||
-            a.is_partial_specialization != b.is_partial_specialization || a.base_pack_arg_name != b.base_pack_arg_name ||
-            a.thread_movable_override != b.thread_movable_override ||
+            a.is_partial_specialization != b.is_partial_specialization || a.thread_movable_override != b.thread_movable_override ||
             a.thread_shareable_override != b.thread_shareable_override || a.is_nodiscard != b.is_nodiscard ||
-            a.nodiscard_reason != b.nodiscard_reason || !same_non_type_expr(a.base_non_type_arg, b.base_non_type_arg) ||
-            !same_specialization_args(a.specialization_template_args, b.specialization_template_args) ||
+            a.nodiscard_reason != b.nodiscard_reason || !same_specialization_args(a.specialization_template_args, b.specialization_template_args) ||
             !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
             return false;
         }
@@ -2156,6 +2217,10 @@ private:
         clone.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         clone.is_static = fn.is_static;
         clone.access = fn.access;
+        clone.is_virtual = fn.is_virtual;
+        clone.is_override = fn.is_override;
+        clone.is_pure = fn.is_pure;
+        clone.is_defaulted = fn.is_defaulted;
         clone.eval_mode = fn.eval_mode;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
@@ -3713,13 +3778,14 @@ private:
         // argument must be exactly this specialization's own pack
         // parameter, spread whole (the only shape either of the doc's
         // own variadic examples ever needs -- see
-        // ClassDef::base_pack_arg_name's own comment).
+        // BaseSpecifier::pack_arg_name's own comment).
         if (match(TokenKind::Colon)) {
+            AccessSpecifier base_access = AccessSpecifier::Private;
             if (match(TokenKind::KwPublic)) {
-                def.base_access = AccessSpecifier::Public;
+                base_access = AccessSpecifier::Public;
             } else {
                 match(TokenKind::KwPrivate);
-                def.base_access = AccessSpecifier::Private;
+                base_access = AccessSpecifier::Private;
             }
             const Token& base_tok = peek();
             std::string base_name = parse_qualified_name();
@@ -3728,7 +3794,7 @@ private:
                 throw ParseError(base_tok.line, base_tok.column,
                                   "'" + base_name + "' is not a declared variadic primary template (ch05 §5.14)");
             }
-            def.base_class_name = base_name;
+            BaseSpecifier base = make_named_base_specifier(program, base_name, base_access);
             size_t base_leading_non_type_count = 0;
             for (const GenericTypeParam& p : base_primary_it->second) {
                 if (!p.is_non_type) break;
@@ -3736,7 +3802,7 @@ private:
             }
             expect(TokenKind::Less, "'<'");
             for (size_t i = 0; i < base_leading_non_type_count; i++) {
-                def.base_non_type_arg = std::shared_ptr<Expr>(parse_additive().release());
+                base.base_type.non_type_args.push_back(std::shared_ptr<Expr>(parse_additive().release()));
                 expect(TokenKind::Comma, "','");
             }
             const Token& pack_tok = peek();
@@ -3750,7 +3816,11 @@ private:
             }
             expect(TokenKind::Ellipsis, "'...'");
             expect(TokenKind::Greater, "'>'");
-            def.base_pack_arg_name = pack_name;
+            Type pack_arg = named_type(pack_name);
+            pack_arg.is_pack_expansion = true;
+            base.base_type.template_args.push_back(std::move(pack_arg));
+            base.pack_arg_name = pack_name;
+            def.base_specifiers.push_back(std::move(base));
         }
 
         parse_class_body_into(program, def, class_name, template_params);
@@ -3872,6 +3942,7 @@ private:
 
         ClassDef def;
         def.name = qualified_class_name;
+        def.is_interface = class_attrs.has("interface");
         def.thread_movable_override = class_attrs.has("thread_movable");
         def.thread_shareable_override = class_attrs.has("thread_shareable");
         def.is_nodiscard = class_attrs.has_nodiscard;
@@ -3898,11 +3969,12 @@ private:
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
         if (match(TokenKind::Colon)) {
+            AccessSpecifier base_access = AccessSpecifier::Private;
             if (match(TokenKind::KwPublic)) {
-                def.base_access = AccessSpecifier::Public;
+                base_access = AccessSpecifier::Public;
             } else {
                 match(TokenKind::KwPrivate);
-                def.base_access = AccessSpecifier::Private;
+                base_access = AccessSpecifier::Private;
             }
             const Token& base_tok = peek();
             std::string base_name = parse_qualified_name();
@@ -3912,7 +3984,7 @@ private:
                                      "' is not a declared class -- a base class must be declared before use "
                                      "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
             }
-            def.base_class_name = base_name;
+            def.base_specifiers.push_back(make_named_base_specifier(program, base_name, base_access));
         }
 
         parse_class_body_into(program, def, class_name, def.template_params);
@@ -3999,6 +4071,7 @@ private:
 
         ClassDef def;
         def.name = qualified_class_name;
+        def.is_interface = class_attrs.has("interface");
         def.thread_movable_override = class_attrs.has("thread_movable");
         def.thread_shareable_override = class_attrs.has("thread_shareable");
         def.is_nodiscard = class_attrs.has_nodiscard;
@@ -4030,15 +4103,16 @@ private:
         // Tuple<Tail...>`) is handled separately by the specialization
         // parser, which never reaches this ordinary path.
         if (match(TokenKind::Colon)) {
+            AccessSpecifier base_access = AccessSpecifier::Private;
             // Real C++'s own default when neither keyword is written is
             // `private` for a `class` (only `struct` defaults to
             // `public`, but structs have no inheritance here at all) --
             // matching that exactly rather than requiring the keyword.
             if (match(TokenKind::KwPublic)) {
-                def.base_access = AccessSpecifier::Public;
+                base_access = AccessSpecifier::Public;
             } else {
                 match(TokenKind::KwPrivate); // optional -- private either way
-                def.base_access = AccessSpecifier::Private;
+                base_access = AccessSpecifier::Private;
             }
             const Token& base_tok = peek();
             std::string base_name = parse_qualified_name();
@@ -4048,7 +4122,7 @@ private:
                                       "' is not a declared class -- a base class must be declared before use "
                                       "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
             }
-            def.base_class_name = base_name;
+            def.base_specifiers.push_back(make_named_base_specifier(program, base_name, base_access));
         }
 
         parse_class_body_into(program, def, class_name, template_params);
@@ -4075,7 +4149,7 @@ private:
     // clause) that parse_class_def's own bodyless-forward-declaration
     // sibling, parse_variadic_primary_template_decl, never reaches at
     // all. `def`'s own name/namespace_path/is_exported/template_params/
-    // base_class_name/base_access/is_variadic_specialization must
+    // base_specifiers/is_variadic_specialization must
     // already be set by the caller; only `fields` is populated here.
     void parse_class_body_into(Program& program, ClassDef& def, const std::string& class_name,
                                 const std::vector<GenericTypeParam>& template_params) {

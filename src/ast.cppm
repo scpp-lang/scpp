@@ -697,6 +697,29 @@ enum class AccessSpecifier {
     Private,
 };
 
+enum class BaseClassKind {
+    Unknown,
+    OrdinaryClass,
+    Interface,
+};
+
+struct BaseSpecifier {
+    Type base_type;
+    AccessSpecifier access = AccessSpecifier::Private;
+    bool is_virtual = false;
+    BaseClassKind kind = BaseClassKind::Unknown;
+    // ch05 §5.14: meaningful for a variadic specialization's recursive
+    // base-clause shape (e.g. the trailing `Tail...` in
+    // `Tuple<Tail...>`). Empty for every other base-specifier.
+    std::string pack_arg_name;
+};
+
+struct ClassUsingDeclaration {
+    std::string base_name;
+    std::string member_name;
+    AccessSpecifier access = AccessSpecifier::Private;
+};
+
 struct Function {
     Type return_type;
     std::string name;
@@ -851,6 +874,16 @@ struct Function {
     // `public:` or `private:` section of its enclosing class. Free
     // functions leave this at the default Public.
     AccessSpecifier access = AccessSpecifier::Public;
+    // Member functions only: whether the declaration is marked `virtual`.
+    bool is_virtual = false;
+    // Member functions only: whether the declaration is marked `override`.
+    bool is_override = false;
+    // Member functions only: whether the declaration ends with a pure-
+    // specifier (`= 0`).
+    bool is_pure = false;
+    // Special-member functions only: whether the declaration is defaulted
+    // (`= default`).
+    bool is_defaulted = false;
 
     // ch05 §5.14: non-empty only for a synthesized *forwarding stub* --
     // a derived class inheriting a base method it doesn't itself
@@ -861,7 +894,7 @@ struct Function {
     // check at all (movecheck already skips every bodyless function,
     // the same as an `extern` declaration), since forwarding a
     // *pointer* unchanged (this class's own flattened layout, see
-    // ClassDef::base_class_name, makes a derived instance's leading
+    // ClassDef::base_specifiers/direct_ordinary_base, makes a derived instance's leading
     // bytes already byte-identical to its base) needs no scpp-level
     // logic of its own -- purely a thin, codegen-only wrapper. Avoids a
     // real scpp-level upcast/base-conversion expression, which doesn't
@@ -1054,29 +1087,18 @@ struct ClassDef {
     // Monomorphizer's own comment). Excluded from codegen exactly like
     // is_concept_witness.
     bool is_synthetic_check_only = false;
-    // ch05 §5.14: the enclosing class's own single, direct base class
-    // name (empty = none) -- `class Derived : public/private Base {
-    // ... };`. Real C++ single inheritance verbatim: the base's own
-    // fields are laid out first (see codegen's declare_class), and a
-    // method/field not found on the derived class itself falls back to
-    // the base (recursively, up the whole chain) -- both movecheck and
-    // codegen's `ClassName_memberName` resolution already walk this
-    // chain wherever they resolve a receiver's class name (see
-    // resolve_inherited_member_owner). Only a `class` may have a base
-    // (never a `struct` -- ch04 §4.1 has no inheritance concept at
-    // all); multiple/virtual inheritance are out of scope, matching the
-    // doc's own single, most-derived-first "recursive inheritance"
-    // pattern (Tuple-style variadic generic types, ch05 §5.14).
-    std::string base_class_name;
-    // Public inheritance keeps an inherited public member's own
-    // accessibility; private inheritance makes every inherited member
-    // (however it was declared on the base) private in the derived
-    // class's own external interface. Meaningless when base_class_name
-    // is empty.
-    AccessSpecifier base_access = AccessSpecifier::Private;
+    // `[[scpp::interface]]` on this class definition.
+    bool is_interface = false;
+    // Direct base-specifiers in source order. Existing behavior still only
+    // *uses* one ordinary base operationally, but the AST/model now stores
+    // the generalized shape needed for later interface/multiple-
+    // inheritance phases.
+    std::vector<BaseSpecifier> base_specifiers;
+    // Class-scope `using Base::member;` declarations in source order.
+    std::vector<ClassUsingDeclaration> using_declarations;
     // ch05 §5.14: true for a variadic generic type's own *primary
     // template* declaration -- `template<typename... Ts> class Tuple;`
-    // (a bodyless forward declaration; `fields`/`base_class_name` are
+    // (a bodyless forward declaration; `fields`/`base_specifiers` are
     // always empty/default for one of these). Exists purely to
     // register the name (so `Tuple<...>` parses as a type, and so a
     // later specialization of it can be recognized/validated) --
@@ -1104,26 +1126,6 @@ struct ClassDef {
     // instantiation's original template arguments.
     bool is_partial_specialization = false;
     std::vector<Type> specialization_template_args;
-    // ch05 §5.14: meaningful only when is_variadic_specialization and
-    // base_class_name is non-empty -- names *this* specialization's own
-    // pack parameter (e.g. "Tail") when the base class is instantiated
-    // by spreading it (`: private Tuple<Tail...>`). Scoped to exactly
-    // this one shape (a single pack, spread whole, as the base's only
-    // argument) -- the only one either of the doc's own two variadic
-    // examples ever needs; empty for every other base-class shape
-    // (ordinary inheritance, or no base at all).
-    std::string base_pack_arg_name;
-    // ch05 §5.14: meaningful only when is_variadic_specialization and
-    // the base class's own primary template has a leading non-type
-    // parameter (e.g. TupleImpl's own "Idx") -- holds that argument's
-    // own expression in the base clause (e.g. the "Idx + 1" in `:
-    // public TupleImpl<Idx + 1, Tail...>`), always logically *before*
-    // base_pack_arg_name's own spread, matching every variadic generic
-    // type's own established "non-type args first, then the pack"
-    // shape. nullptr when the base's own primary template has no
-    // leading non-type parameter at all (e.g. plain Tuple's own `:
-    // private Tuple<Tail...>`).
-    std::shared_ptr<Expr> base_non_type_arg;
     // ch05 §5.15: see StructDef::thread_movable_override's own comment
     // -- identical meaning, applied to a class declaration instead
     // (after the `class` keyword, before its name).
@@ -1139,6 +1141,20 @@ struct ClassDef {
     ExprPtr thread_movable_if_shareable_expr;
     bool is_nodiscard = false;
     std::string nodiscard_reason;
+
+    [[nodiscard]] const BaseSpecifier* direct_ordinary_base() const {
+        for (const BaseSpecifier& base : base_specifiers) {
+            if (base.kind != BaseClassKind::Interface) return &base;
+        }
+        return base_specifiers.empty() ? nullptr : &base_specifiers.front();
+    }
+
+    [[nodiscard]] BaseSpecifier* direct_ordinary_base() {
+        for (BaseSpecifier& base : base_specifiers) {
+            if (base.kind != BaseClassKind::Interface) return &base;
+        }
+        return base_specifiers.empty() ? nullptr : &base_specifiers.front();
+    }
 };
 
 // ch05 §5.11: one requirement inside a `concept Name = requires(...) {
@@ -1456,8 +1472,8 @@ struct TypeLayoutInfo {
                         }
                         std::uint64_t offset = 0;
                         std::uint64_t overall_align = 1;
-                        if (!def->base_class_name.empty()) {
-                            std::optional<TypeLayoutInfo> base_layout = (*this)(named_type(def->base_class_name));
+                        if (const BaseSpecifier* base = def->direct_ordinary_base()) {
+                            std::optional<TypeLayoutInfo> base_layout = (*this)(base->base_type);
                             if (!base_layout.has_value()) {
                                 clear_visit();
                                 return std::optional<TypeLayoutInfo>{};
