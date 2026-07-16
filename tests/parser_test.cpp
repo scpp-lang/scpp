@@ -44,6 +44,13 @@ const scpp::ClassDef* find_class_named(const scpp::Program& program, std::string
     return nullptr;
 }
 
+const scpp::StructDef* find_struct_named(const scpp::Program& program, std::string_view name) {
+    for (const scpp::StructDef& def : program.structs) {
+        if (def.name == name) return &def;
+    }
+    return nullptr;
+}
+
 std::string read_file(const std::string& path) {
     std::ifstream file(path);
     std::ostringstream buffer;
@@ -975,6 +982,66 @@ void test_struct_access_specifier_sections_parse() {
            "struct_access_specifier_sections_parse: value should stay public");
     expect(def.fields[1].name == "hidden" && def.fields[1].access == scpp::AccessSpecifier::Private,
            "struct_access_specifier_sections_parse: hidden should stay private");
+}
+
+void test_struct_constructors_and_methods_parse() {
+    scpp::Program program = scpp::parse(
+        "struct Size {\n"
+        "public:\n"
+        "    int width{};\n"
+        "    Size() {}\n"
+        "    Size(int side) : width{side}, height{side} {}\n"
+        "private:\n"
+        "    int height{};\n"
+        "    int hidden() const { return height; }\n"
+        "public:\n"
+        "    Size(int w, int h) : width{w}, height{h} {}\n"
+        "    int area() const { return width * height; }\n"
+        "    int perimeter() { return (width + hidden()) * 2; }\n"
+        "};\n");
+    const scpp::StructDef* size = find_struct_named(program, "Size");
+    expect(size != nullptr, "struct_constructors_and_methods_parse: expected a StructDef named 'Size'");
+    if (size == nullptr) return;
+    expect(size->fields.size() == 2, "struct_constructors_and_methods_parse: expected 2 fields");
+    if (size->fields.size() != 2) return;
+    expect(size->fields[0].name == "width" && size->fields[0].access == scpp::AccessSpecifier::Public,
+           "struct_constructors_and_methods_parse: width should stay public");
+    expect(size->fields[1].name == "height" && size->fields[1].access == scpp::AccessSpecifier::Private,
+           "struct_constructors_and_methods_parse: height should stay private");
+
+    int ctor_count = 0;
+    const scpp::Function* converting_ctor = nullptr;
+    const scpp::Function* area = nullptr;
+    const scpp::Function* perimeter = nullptr;
+    const scpp::Function* hidden = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.member_owner_class != "Size") continue;
+        if (fn.name == "Size_new") {
+            ctor_count++;
+            if (fn.params.size() == 2) converting_ctor = &fn;
+            continue;
+        }
+        if (fn.name == "Size_area") area = &fn;
+        if (fn.name == "Size_perimeter") perimeter = &fn;
+        if (fn.name == "Size_hidden") hidden = &fn;
+    }
+    expect(ctor_count == 3, "struct_constructors_and_methods_parse: expected 3 constructors");
+    expect(converting_ctor != nullptr, "struct_constructors_and_methods_parse: expected single-parameter converting ctor");
+    if (converting_ctor != nullptr) {
+        expect(converting_ctor->member_initializers.size() == 2,
+               "struct_constructors_and_methods_parse: converting ctor should preserve member initializer list");
+    }
+    expect(area != nullptr, "struct_constructors_and_methods_parse: expected const method 'area'");
+    if (area != nullptr) {
+        expect(area->params.size() == 1 && area->params[0].name == "this" &&
+                   area->params[0].type.kind == scpp::TypeKind::Reference && !area->params[0].type.is_mutable_ref &&
+                   area->params[0].type.pointee != nullptr && is_named_type(*area->params[0].type.pointee, "Size"),
+               "struct_constructors_and_methods_parse: const method should receive const-like this reference");
+    }
+    expect(perimeter != nullptr && perimeter->access == scpp::AccessSpecifier::Public,
+           "struct_constructors_and_methods_parse: expected public method 'perimeter'");
+    expect(hidden != nullptr && hidden->access == scpp::AccessSpecifier::Private,
+           "struct_constructors_and_methods_parse: expected private method 'hidden'");
 }
 
 void test_struct_interface_attribute_is_rejected() {
@@ -3931,6 +3998,7 @@ int main() {
     test_parse_error_on_missing_semicolon();
     test_struct_declaration();
     test_struct_access_specifier_sections_parse();
+    test_struct_constructors_and_methods_parse();
     test_struct_interface_attribute_is_rejected();
     test_struct_base_clause_is_rejected();
     test_struct_virtual_member_is_rejected();

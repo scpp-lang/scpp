@@ -2784,10 +2784,16 @@ private:
         emit_constructor_member_initializers(fn);
         codegen_stmt(*fn.body, llvm_fn);
 
-        // Every well-formed M1 function must return on all paths; if the
-        // generated block has no terminator (e.g. missing trailing return),
-        // that is a user error we surface instead of emitting invalid IR.
+        // Falling off the end of a `void` function/constructor/destructor is
+        // valid, exactly like C++; synthesize the implicit `return;`.
         if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
+            if (fn.return_type.kind == TypeKind::Named && fn.return_type.name == "void") {
+                builder_->CreateRetVoid();
+                builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+                current_debug_scope_ = nullptr;
+                current_subprogram_ = nullptr;
+                return;
+            }
             throw CodegenError("function '" + fn.name + "' does not return on all paths",
                 current_loc_);
         }
@@ -3822,6 +3828,22 @@ private:
         return LValue{field_ptr, field.type, alignment_for_type(field.type)};
     }
 
+    [[nodiscard]] LValue codegen_raw_member_storage(llvm::Value* object_ptr, const std::string& class_name,
+                                                    const StructField& field) {
+        auto info_it = structs_.find(class_name);
+        if (info_it == structs_.end()) {
+            throw CodegenError("unknown class '" + class_name + "'", current_loc_);
+        }
+        const StructInfo& info = info_it->second;
+        std::optional<size_t> field_index = info.find_field_index(field.name);
+        if (!field_index.has_value()) {
+            throw CodegenError("class '" + class_name + "' has no field '" + field.name + "'", current_loc_);
+        }
+        llvm::Value* field_ptr =
+            builder_->CreateStructGEP(info.llvm_type, object_ptr, info.physical_field_index(*field_index), field.name);
+        return LValue{field_ptr, field.type, alignment_for_type(field.type)};
+    }
+
     void initialize_reference_storage(const LValue& target, const Expr& expr) {
         if (target.type.kind != TypeKind::Reference || target.type.pointee == nullptr) {
             throw CodegenError("internal error: reference initializer target is not a reference", current_loc_);
@@ -3961,45 +3983,73 @@ private:
         zero_initialize_storage(target.ptr, target.type, target.alignment);
     }
 
+    template <typename FieldT>
+    void emit_default_initializers_for_record_fields(llvm::Value* object_ptr, const std::string& class_name,
+                                                     const std::vector<FieldT>& fields) {
+        for (const FieldT& field : fields) {
+            if (!field.default_initializer) continue;
+            LValue field_storage = codegen_raw_member_storage(object_ptr, class_name, field);
+            initialize_storage(field_storage, *field.default_initializer);
+        }
+    }
+
     void emit_constructor_member_initializers(const Function& fn) {
         if (!is_constructor_function(fn)) return;
         const ClassDef* class_def = find_class_def(fn.member_owner_class);
-        if (class_def == nullptr) {
+        const StructDef* struct_def = class_def == nullptr ? find_struct_def(fn.member_owner_class) : nullptr;
+        if (class_def == nullptr && struct_def == nullptr) {
             throw CodegenError("unknown constructor owner class '" + fn.member_owner_class + "'", current_loc_);
         }
         llvm::Value* object_ptr = load_this_object_ptr();
-        if (const BaseSpecifier* base = class_def->direct_ordinary_base()) {
-            const MemberInitializer* explicit_base_init = nullptr;
-            for (const MemberInitializer& init : fn.member_initializers) {
-                if (names_direct_base(init.member_name, *class_def)) {
-                    explicit_base_init = &init;
-                    break;
+        if (class_def != nullptr) {
+            if (const BaseSpecifier* base = class_def->direct_ordinary_base()) {
+                const MemberInitializer* explicit_base_init = nullptr;
+                for (const MemberInitializer& init : fn.member_initializers) {
+                    if (names_direct_base(init.member_name, *class_def)) {
+                        explicit_base_init = &init;
+                        break;
+                    }
+                }
+                const ClassDef* base_def = find_class_def(base->base_type.name);
+                if (base_def == nullptr) {
+                    throw CodegenError("unknown base class '" + base->base_type.name + "'", current_loc_);
+                }
+                static const std::vector<ExprPtr> no_base_args;
+                const std::vector<ExprPtr>* base_args =
+                    explicit_base_init != nullptr ? &explicit_base_init->initializer.brace_args : nullptr;
+                const Function* base_ctor =
+                    resolve_constructor_overload_exact(base->base_type.name, base_args != nullptr ? *base_args : no_base_args);
+                if (base_ctor != nullptr) {
+                    std::vector<llvm::Value*> ctor_args =
+                        codegen_call_args(base_args != nullptr ? *base_args : no_base_args, base_ctor, /*param_offset=*/1);
+                    ctor_args.insert(ctor_args.begin(), object_ptr);
+                    builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), ctor_args);
+                } else if (base_args == nullptr || base_args->empty()) {
+                    emit_default_initializers_for_class_storage(object_ptr, *base_def,
+                                                                /*initialize_virtual_interface_bases=*/false);
+                } else {
+                    throw CodegenError("base-class initializer for '" + base->base_type.name +
+                                           "' does not match any constructor of that class",
+                                       current_loc_);
                 }
             }
-            const ClassDef* base_def = find_class_def(base->base_type.name);
-            if (base_def == nullptr) {
-                throw CodegenError("unknown base class '" + base->base_type.name + "'", current_loc_);
+            initialize_ordinary_vtable_pointer(class_def->name, object_ptr);
+            for (const ClassField& field : class_def->fields) {
+                const Initializer* selected_init = nullptr;
+                for (const MemberInitializer& init : fn.member_initializers) {
+                    if (init.member_name == field.name) {
+                        selected_init = &init.initializer;
+                        break;
+                    }
+                }
+                if (selected_init == nullptr && field.default_initializer) selected_init = &*field.default_initializer;
+                if (selected_init == nullptr) continue;
+                LValue field_storage = codegen_raw_member_storage(object_ptr, class_def->name, field);
+                initialize_storage(field_storage, *selected_init);
             }
-            static const std::vector<ExprPtr> no_base_args;
-            const std::vector<ExprPtr>* base_args = explicit_base_init != nullptr ? &explicit_base_init->initializer.brace_args
-                                                                                  : nullptr;
-            const Function* base_ctor =
-                resolve_constructor_overload_exact(base->base_type.name, base_args != nullptr ? *base_args : no_base_args);
-            if (base_ctor != nullptr) {
-                std::vector<llvm::Value*> ctor_args =
-                    codegen_call_args(base_args != nullptr ? *base_args : no_base_args, base_ctor, /*param_offset=*/1);
-                ctor_args.insert(ctor_args.begin(), object_ptr);
-                builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), ctor_args);
-            } else if (base_args == nullptr || base_args->empty()) {
-                emit_default_initializers_for_class_storage(object_ptr, *base_def, /*initialize_virtual_interface_bases=*/false);
-            } else {
-                throw CodegenError("base-class initializer for '" + base->base_type.name +
-                                       "' does not match any constructor of that class",
-                                   current_loc_);
-            }
+            return;
         }
-        initialize_ordinary_vtable_pointer(class_def->name, object_ptr);
-        for (const ClassField& field : class_def->fields) {
+        for (const StructField& field : struct_def->fields) {
             const Initializer* selected_init = nullptr;
             for (const MemberInitializer& init : fn.member_initializers) {
                 if (init.member_name == field.name) {
@@ -4009,7 +4059,7 @@ private:
             }
             if (selected_init == nullptr && field.default_initializer) selected_init = &*field.default_initializer;
             if (selected_init == nullptr) continue;
-            LValue field_storage = codegen_raw_member_storage(object_ptr, class_def->name, field);
+            LValue field_storage = codegen_raw_member_storage(object_ptr, struct_def->name, field);
             initialize_storage(field_storage, *selected_init);
         }
     }
@@ -4039,11 +4089,7 @@ private:
             }
         }
         initialize_ordinary_vtable_pointer(class_def.name, object_ptr);
-        for (const ClassField& field : class_def.fields) {
-            if (!field.default_initializer) continue;
-            LValue field_storage = codegen_raw_member_storage(object_ptr, class_def.name, field);
-            initialize_storage(field_storage, *field.default_initializer);
-        }
+        emit_default_initializers_for_record_fields(object_ptr, class_def.name, class_def.fields);
     }
 
     llvm::Value* codegen_class_value_for_boundary(const Expr& expr, const Type& target_type) {

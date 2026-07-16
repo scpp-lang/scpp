@@ -945,6 +945,25 @@ private:
         Binding this_binding = lookup_binding("this", fn.loc);
         auto* object = std::get_if<ObjectValue>(&this_binding.cell->data);
         if (!object) throw ConstexprError(fn.loc, "constructor receiver is not an object during constant evaluation");
+        if (auto struct_it = structs_by_name_.find(fn.member_owner_class); struct_it != structs_by_name_.end()) {
+            for (const StructField& field : struct_it->second->fields) {
+                const Initializer* selected = nullptr;
+                for (const MemberInitializer& init : fn.member_initializers) {
+                    if (init.member_name == field.name) {
+                        selected = &init.initializer;
+                        break;
+                    }
+                }
+                if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
+                if (selected == nullptr) continue;
+                auto field_it = object->fields.find(field.name);
+                if (field_it == object->fields.end()) {
+                    throw ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'");
+                }
+                apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc);
+            }
+            return;
+        }
         auto class_it = classes_by_name_.find(fn.member_owner_class);
         if (class_it == classes_by_name_.end()) {
             throw ConstexprError(fn.loc, "missing constexpr class definition for '" + fn.member_owner_class + "'");

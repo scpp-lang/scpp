@@ -1,0 +1,20 @@
+struct Size {
+public:
+    int width{};
+    Size() {}
+    Size(int side) : width{side}, height{side} {}
+private:
+    int height{};
+    int hidden_sum() const { return this->width + this->height; }
+public:
+    Size(int w, int h) : width{w}, height{h} {}
+    int area() const { return this->width * this->height; }
+    int perimeter() { return this->hidden_sum() * 2; }
+};
+
+int main() {
+    Size empty{};
+    Size square{3};
+    Size rect{4, 5};
+    return empty.area() + square.area() + rect.perimeter();
+}

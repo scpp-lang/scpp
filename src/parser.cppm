@@ -2589,7 +2589,7 @@ private:
         if (check(TokenKind::KwStruct)) {
             reject_unsafe_if_requested("a 'struct' declaration");
             SourceLocation loc = current_loc();
-            StructDef def = parse_struct_def();
+            StructDef def = parse_struct_def(program);
             def.is_exported = is_exported;
             check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
@@ -2686,7 +2686,7 @@ private:
                 }
                 SourceLocation loc = current_loc();
                 std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-                StructDef def = parse_struct_def(std::move(template_params));
+                StructDef def = parse_struct_def(program, std::move(template_params));
                 def.is_exported = is_exported;
                 check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
                 program.structs.push_back(std::move(def));
@@ -2788,7 +2788,7 @@ private:
                 advance(); // '{'
                 while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
                     if (check(TokenKind::KwStruct)) {
-                        program.structs.push_back(parse_struct_def());
+                        program.structs.push_back(parse_struct_def(program));
                         continue;
                     }
                     if (check(TokenKind::KwUnion)) {
@@ -2995,7 +2995,7 @@ private:
     // parameter's own bare name as a temporary type name for the
     // duration of this one struct's body, removed again immediately
     // afterward.
-    StructDef parse_struct_def(std::vector<GenericTypeParam> template_params = {}) {
+    StructDef parse_struct_def(Program& program, std::vector<GenericTypeParam> template_params = {}) {
         expect(TokenKind::KwStruct, "'struct'");
         StructDef def;
         // ch05 §5.15: `struct [[scpp::thread_movable]] Name { ... };` --
@@ -3066,41 +3066,23 @@ private:
                              "a declaration introduced by 'struct' shall not have a base-clause (spec §11.1(2.1))");
         }
 
-        expect(TokenKind::LBrace, "'{'");
-        AccessSpecifier current_access = AccessSpecifier::Public;
-        while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-            if (match(TokenKind::KwPublic)) {
-                expect(TokenKind::Colon, "':'");
-                current_access = AccessSpecifier::Public;
-                continue;
-            }
-            if (match(TokenKind::KwPrivate)) {
-                expect(TokenKind::Colon, "':'");
-                current_access = AccessSpecifier::Private;
-                continue;
-            }
-            if (check(TokenKind::KwVirtual)) {
-                const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                 "a declaration introduced by 'struct' shall not declare a virtual member function "
-                                 "or virtual destructor (spec §11.1(2.3))");
-            }
-            StructField field;
-            Type base = parse_type();
-            if (starts_function_pointer_declarator()) {
-                field.type = parse_function_pointer_declarator(std::move(base), field.name);
-                field.default_initializer = parse_optional_default_initializer("a struct member declaration");
-            } else {
-                field.name = std::string(expect(TokenKind::Identifier, "field name").text);
-                field.type = parse_array_suffix(base);
-                field.default_initializer = parse_optional_default_initializer("a struct member declaration");
-            }
-            field.access = current_access;
-            expect(TokenKind::Semicolon, "';'");
-            def.fields.push_back(std::move(field));
-        }
-        expect(TokenKind::RBrace, "'}'");
-        expect(TokenKind::Semicolon, "';'");
+        parse_record_body_into(
+            program, bare_name, def.name, def.name, def.template_params, def.is_exported, def.template_owner_id,
+            AccessSpecifier::Public,
+            /*allow_using_declarations=*/false, /*allow_virtual_members=*/false, "struct",
+            "a struct member declaration",
+            "a declaration introduced by 'struct' shall not declare a virtual member function or virtual destructor "
+            "(spec §11.1(2.3))",
+            [](AccessSpecifier) {},
+            [&](Type field_type, std::string field_name, AccessSpecifier access,
+                std::optional<Initializer> default_initializer) {
+                StructField field;
+                field.type = std::move(field_type);
+                field.name = std::move(field_name);
+                field.access = access;
+                field.default_initializer = std::move(default_initializer);
+                def.fields.push_back(std::move(field));
+            });
 
         if (is_generic) {
             for (const GenericTypeParam& param : template_params) {
@@ -4241,23 +4223,24 @@ private:
     // all. `def`'s own name/namespace_path/is_exported/template_params/
     // base_specifiers/is_variadic_specialization must
     // already be set by the caller; only `fields` is populated here.
-    void parse_class_body_into(Program& program, ClassDef& def, const std::string& class_name,
-                                const std::vector<GenericTypeParam>& template_params) {
-        std::string qualified_class_name = def.name;
-        std::string synthesized_member_owner_name = qualified_class_name;
-        if ((def.is_partial_specialization || def.is_variadic_specialization) && !def.template_owner_id.empty()) {
-            synthesized_member_owner_name += "__" + def.template_owner_id;
-        }
-        bool is_exported = def.is_exported;
+    template <typename HandleUsingFn, typename AddFieldFn>
+    void parse_record_body_into(Program& program, const std::string& owner_name, const std::string& qualified_owner_name,
+                                const std::string& synthesized_member_owner_name,
+                                const std::vector<GenericTypeParam>& template_params, bool is_exported,
+                                const std::string& generic_method_owner_id, AccessSpecifier default_access,
+                                bool allow_using_declarations, bool allow_virtual_members,
+                                std::string_view owner_keyword, std::string_view member_decl_context,
+                                std::string_view virtual_member_error, HandleUsingFn&& handle_using,
+                                AddFieldFn&& add_field) {
         // Every method/constructor/destructor synthesized below shares
         // this same namespace_path/is_exported (ch11 §11.3: exporting a
-        // class exports its whole member surface as one unit) --
+        // type exports its whole member surface as one unit) --
         // owning_module stays default-empty (this program's own
         // declaration; only set later, at cross-module merge time).
         auto finish_member_fn = [&](Function& fn) {
             fn.namespace_path = namespace_stack_;
             fn.is_exported = is_exported;
-            if (!def.template_owner_id.empty()) fn.generic_method_owner_id = def.template_owner_id;
+            if (!generic_method_owner_id.empty()) fn.generic_method_owner_id = generic_method_owner_id;
         };
         auto enter_member_template_context = [&](const std::vector<GenericTypeParam>& member_template_params) {
             for (const GenericTypeParam& p : member_template_params) {
@@ -4284,10 +4267,7 @@ private:
         current_class_template_params_ = template_params;
 
         expect(TokenKind::LBrace, "'{'");
-        // Real C++'s own default: a class body starts `private` until the
-        // first access-specifier section (unlike `struct`, which has no
-        // access control at all -- ch04 §4.2).
-        AccessSpecifier current_access = AccessSpecifier::Private;
+        AccessSpecifier current_access = default_access;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             if (match(TokenKind::KwPublic)) {
                 expect(TokenKind::Colon, "':'");
@@ -4312,14 +4292,14 @@ private:
             // ch01 §1.2/§1.3: `[[scpp::unsafe]]` on a method/constructor/
             // destructor's own declaration -- identical function-level
             // marker semantics as a free function (see parse_function's
-            // own handling), just reached from inside a class body
+            // own handling), just reached from inside a type body
             // instead. Parsed once here, before dispatching on which
             // member shape follows; rejected if it turns out to be a
             // field (unsafe is only ever meaningful on a function, ch01
             // §1.3 (1)).
             const Token& member_attr_start_tok = peek();
             ParsedAttributes member_attrs = parse_attribute_specifier_seq();
-            reject_packed_attribute(member_attrs, member_attr_start_tok, "a class member declaration");
+            reject_packed_attribute(member_attrs, member_attr_start_tok, member_decl_context.data());
             bool member_requested_unsafe = member_attrs.has("unsafe");
             bool member_requested_nodiscard = member_attrs.has_nodiscard;
             std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
@@ -4353,7 +4333,16 @@ private:
                 }
                 break;
             }
+            if (member_is_virtual && !allow_virtual_members) {
+                throw ParseError(member_loc.line, member_loc.column, std::string(virtual_member_error));
+            }
             if (check(TokenKind::KwUsing)) {
+                if (!allow_using_declarations) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                     "a declaration introduced by '" + std::string(owner_keyword) +
+                                         "' shall not declare a class-scope using declaration because a " +
+                                         std::string(owner_keyword) + " has no base-clause in this version");
+                }
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
                                      "a class-scope using declaration cannot be a member template");
@@ -4363,7 +4352,7 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                      "a class-scope using declaration cannot carry function specifiers or attributes");
                 }
-                parse_class_using_declaration(def, current_access);
+                handle_using(current_access);
                 continue;
             }
             if (match(TokenKind::Tilde)) {
@@ -4379,14 +4368,12 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                       "a destructor cannot be declared constexpr or consteval");
                 }
-                // Destructor: `~ClassName() { ... }` -- no parameters, no
-                // return type, and always a mutable (non-`const`) `this`
-                // (it always needs to tear the receiver down).
                 const Token& name_tok = expect(TokenKind::Identifier, "destructor name");
-                if (std::string(name_tok.text) != class_name) {
+                if (std::string(name_tok.text) != owner_name) {
                     throw ParseError(name_tok.line, name_tok.column,
                                       "destructor name '~" + std::string(name_tok.text) +
-                                          "' must match the enclosing class name '" + class_name + "'");
+                                          "' must match the enclosing " + std::string(owner_keyword) + " name '" +
+                                          owner_name + "'");
                 }
                 expect(TokenKind::LParen, "'('");
                 expect(TokenKind::RParen, "')'");
@@ -4395,29 +4382,22 @@ private:
                 fn.is_unsafe = member_requested_unsafe;
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
-                fn.member_owner_class = qualified_class_name;
+                fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_delete";
-                fn.params.push_back(make_this_param(qualified_class_name, /*is_const=*/false));
+                fn.params.push_back(make_this_param(qualified_owner_name, /*is_const=*/false));
                 fn.body = parse_member_function_suffix(fn);
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
                 continue;
             }
-            if (check(TokenKind::Identifier) && std::string(peek().text) == class_name &&
+            if (check(TokenKind::Identifier) && std::string(peek().text) == owner_name &&
                 peek_at(1).kind == TokenKind::LParen) {
-                // Constructor: `ClassName(args) { ... }` -- distinguished
-                // from an ordinary method/field by its name matching the
-                // class exactly with *no* declared return type at all
-                // (real C++'s own rule: the constructor is the one member
-                // that never has a return type, not even `void`) --
-                // `this` is always mutable here too (it's what the
-                // constructor initializes).
-                advance(); // class name
+                advance(); // owner name
                 if (member_is_static) {
                     throw ParseError(member_loc.line, member_loc.column,
                                       "a constructor cannot be declared static");
@@ -4428,7 +4408,7 @@ private:
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
-                fn.member_owner_class = qualified_class_name;
+                fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.return_type.kind = TypeKind::Named;
@@ -4438,28 +4418,16 @@ private:
                 reject_generic_params(fn.params, "a constructor");
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
-                // spec §6.4(1): a program shall not declare a move
-                // constructor for a class type -- exactly one parameter,
-                // of type rvalue reference to the class's own type (real
-                // C++'s own [class.copy.ctor] classification). Every
-                // class instead gets a compiler-synthesized one (spec
-                // §6.4(2)), dispatched directly at each `ClassName y
-                // (std::move(x));` call site (see movecheck's
-                // is_move_construction_shape) -- never through this
-                // user-declared-constructor machinery at all. See the
-                // `operator=` parsing block further below for spec
-                // §6.4(1)'s other half (a move *assignment* operator,
-                // `ClassName& operator=(ClassName&& other)`), rejected by
-                // the identical shape check.
                 if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
                     fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
                     fn.params[0].type.pointee->kind == TypeKind::Named &&
-                    fn.params[0].type.pointee->name == class_name) {
+                    fn.params[0].type.pointee->name == owner_name) {
                     throw ParseError(member_loc.line, member_loc.column,
-                                      "a move constructor cannot be user-declared for class '" + class_name +
-                                          "' -- the compiler always provides one (spec §6.4(1)/(2), ch04 §4.2)");
+                                      "a move constructor cannot be user-declared for " + std::string(owner_keyword) +
+                                          " '" + owner_name + "' -- the compiler always provides one (spec "
+                                          "§6.4(1)/(2), ch04 §4.2)");
                 }
-                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, /*is_const=*/false));
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, /*is_const=*/false));
                 fn.is_override = match(TokenKind::KwOverride);
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 if (!check(TokenKind::Semicolon) && !check(TokenKind::Assign)) {
@@ -4493,27 +4461,7 @@ private:
                 continue;
             }
 
-            // Otherwise: an ordinary field, method, `operator*`, or `operator=` --
-            // all start with a declared type -- same "parse a type,
-            // then a name, then see what follows" disambiguation
-            // parse_var_decl/parse_struct_def already use.
             Type member_type = parse_type();
-            // spec §6.5: `ReturnType operator=(Params) { ... }` -- a
-            // user-declared copy (or otherwise custom) assignment
-            // operator. Unlike a move constructor (spec §6.4(1), always
-            // rejected), a program *may* freely declare its own -- no
-            // shape restriction here at all, mirroring how an ordinary
-            // constructor accepts any parameter list; only the exact
-            // shape `operator=(const ClassName&)` is later recognized
-            // (movecheck's has_user_declared_copy_assign) as *the* copy
-            // assignment operator for spec §6.5(3)'s auto-generation-
-            // suppression rule -- any other parameter shape is simply an
-            // ordinary (if unusual) overload of the name, resolved like
-            // any other method. Distinguished from an ordinary method
-            // named "operator" (impossible: `operator` is not a
-            // keyword, but the very next token being `=` -- itself
-            // never a legal start of a parameter list -- makes this
-            // unambiguous) by peeking one token ahead before committing.
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Star) {
                 if (member_is_template) {
@@ -4532,7 +4480,7 @@ private:
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
-                fn.member_owner_class = qualified_class_name;
+                fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
@@ -4541,7 +4489,7 @@ private:
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_operator_deref";
-                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_member_function_suffix(fn);
                 finish_member_fn(fn);
@@ -4566,40 +4514,26 @@ private:
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
-                fn.member_owner_class = qualified_class_name;
+                fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
                 reject_generic_params(fn.params, "an operator=");
-                // spec §6.4(1): a program shall not declare a move
-                // assignment operator for a class type either -- the
-                // identical shape check the constructor case above uses
-                // for a move *constructor* (exactly one parameter, of
-                // type rvalue reference to the class's own type). Every
-                // class instead gets a compiler-synthesized one
-                // (dispatched directly at each `y = std::move(x);` call
-                // site, see movecheck's is_move_construction_shape) --
-                // never through this user-declared-operator machinery.
-                // This was a real, discovered-and-fixed gap: unlike the
-                // constructor case, this shape check didn't exist at all
-                // when `operator=` parsing was first added, so a
-                // user-declared move assignment operator silently parsed
-                // as an ordinary (if unusual) overload instead of being
-                // rejected.
                 if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
                     fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
                     fn.params[0].type.pointee->kind == TypeKind::Named &&
-                    fn.params[0].type.pointee->name == class_name) {
+                    fn.params[0].type.pointee->name == owner_name) {
                     throw ParseError(member_loc.line, member_loc.column,
-                                      "a move assignment operator cannot be user-declared for class '" +
-                                          class_name + "' -- the compiler always provides one (spec "
+                                      "a move assignment operator cannot be user-declared for " +
+                                          std::string(owner_keyword) + " '" + owner_name +
+                                          "' -- the compiler always provides one (spec "
                                           "§6.4(1)/(2), ch04 §4.2)");
                 }
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_operator_assign";
-                fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_member_function_suffix(fn);
                 finish_member_fn(fn);
@@ -4628,12 +4562,12 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                      "a member variable cannot be declared virtual");
                 }
-                ClassField field;
-                field.type = parse_function_pointer_declarator(std::move(member_type), field.name);
-                field.access = current_access;
-                field.default_initializer = parse_optional_default_initializer("a class member declaration");
+                std::string field_name;
+                Type field_type = parse_function_pointer_declarator(std::move(member_type), field_name);
+                std::optional<Initializer> default_initializer =
+                    parse_optional_default_initializer(std::string(member_decl_context));
                 expect(TokenKind::Semicolon, "';'");
-                def.fields.push_back(std::move(field));
+                add_field(std::move(field_type), std::move(field_name), current_access, std::move(default_initializer));
                 continue;
             }
             std::string member_name = std::string(expect(TokenKind::Identifier, "field or method name").text);
@@ -4644,7 +4578,7 @@ private:
                 fn.is_nodiscard = member_requested_nodiscard;
                 fn.nodiscard_reason = member_nodiscard_reason;
                 fn.eval_mode = member_eval_mode;
-                fn.member_owner_class = qualified_class_name;
+                fn.member_owner_class = qualified_owner_name;
                 fn.is_static = member_is_static;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
@@ -4652,10 +4586,6 @@ private:
                 reject_generic_params(fn.params, "a method");
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
-                // `const` trails the parameter list, exactly like real
-                // C++ (`int length() const { ... }`), so it's only
-                // knowable -- and `this`'s mutability with it -- after
-                // parsing the params above.
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 if (member_is_static && (is_const || fn.receiver_ref_qualifier != ReceiverRefQualifier::None)) {
@@ -4665,7 +4595,7 @@ private:
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_" + member_name;
                 if (!member_is_static) {
-                    fn.params.insert(fn.params.begin(), make_this_param(qualified_class_name, is_const));
+                    fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
                 }
                 fn.is_override = match(TokenKind::KwOverride);
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
@@ -4695,14 +4625,6 @@ private:
                 continue;
             }
 
-            // ch04 §4.2: a field may now be public or private in any
-            // combination, exactly like real C++ (the class-only
-            // "member variables can never be public" restriction was
-            // reversed -- see the doc's own commit history). Direct
-            // external access to a public field is checked exactly like
-            // a struct field access (movecheck's apply_expr Member
-            // case: the whole-root-conservative treatment, not a new
-            // per-field mechanism).
             if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
                 throw ParseError(member_loc.line, member_loc.column,
                                   "only a member function or constructor may be declared constexpr or consteval");
@@ -4724,17 +4646,39 @@ private:
                 throw ParseError(member_loc.line, member_loc.column,
                                   "a member template declaration must declare a constructor or method, not a field");
             }
-            ClassField field;
-            field.type = parse_array_suffix(member_type);
-            field.name = member_name;
-            field.access = current_access;
-            field.default_initializer = parse_optional_default_initializer("a class member declaration");
+            Type field_type = parse_array_suffix(std::move(member_type));
+            std::optional<Initializer> default_initializer =
+                parse_optional_default_initializer(std::string(member_decl_context));
             expect(TokenKind::Semicolon, "';'");
-            def.fields.push_back(std::move(field));
+            add_field(std::move(field_type), std::move(member_name), current_access, std::move(default_initializer));
         }
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
         current_class_template_params_ = std::move(saved_class_template_params);
+    }
+
+    void parse_class_body_into(Program& program, ClassDef& def, const std::string& class_name,
+                                const std::vector<GenericTypeParam>& template_params) {
+        std::string qualified_class_name = def.name;
+        std::string synthesized_member_owner_name = qualified_class_name;
+        if ((def.is_partial_specialization || def.is_variadic_specialization) && !def.template_owner_id.empty()) {
+            synthesized_member_owner_name += "__" + def.template_owner_id;
+        }
+        parse_record_body_into(
+            program, class_name, qualified_class_name, synthesized_member_owner_name, template_params, def.is_exported,
+            def.template_owner_id, AccessSpecifier::Private,
+            /*allow_using_declarations=*/true, /*allow_virtual_members=*/true, "class", "a class member declaration",
+            /*virtual_member_error=*/"",
+            [&](AccessSpecifier access) { parse_class_using_declaration(def, access); },
+            [&](Type field_type, std::string field_name, AccessSpecifier access,
+                std::optional<Initializer> default_initializer) {
+                ClassField field;
+                field.type = std::move(field_type);
+                field.name = std::move(field_name);
+                field.access = access;
+                field.default_initializer = std::move(default_initializer);
+                def.fields.push_back(std::move(field));
+            });
         program.classes.push_back(std::move(def));
     }
 
