@@ -608,8 +608,33 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return member_name == base->base_type.name || member_name == unqualified_template_base_name(base->base_type.name);
 }
 
-[[nodiscard]] bool names_base(const std::string& member_name, const BaseSpecifier& base) {
-    return member_name == base.base_type.name || member_name == unqualified_template_base_name(base.base_type.name);
+void collect_virtual_interface_bases_in_construction_order(const Program& program, const ClassDef& def,
+                                                           std::vector<const ClassDef*>& out,
+                                                           std::unordered_set<std::string>& seen) {
+    for (const BaseSpecifier& base : def.base_specifiers) {
+        const ClassDef* base_def = find_class_def(program, base.base_type.name);
+        if (base_def == nullptr || base_def->is_forward_declaration) continue;
+        collect_virtual_interface_bases_in_construction_order(program, *base_def, out, seen);
+        if (base.kind == BaseClassKind::Interface && seen.insert(base_def->name).second) out.push_back(base_def);
+    }
+}
+
+[[nodiscard]] std::vector<const ClassDef*> collect_virtual_interface_bases_in_construction_order(const Program& program,
+                                                                                                 const ClassDef& def) {
+    std::vector<const ClassDef*> out;
+    std::unordered_set<std::string> seen;
+    collect_virtual_interface_bases_in_construction_order(program, def, out, seen);
+    return out;
+}
+
+[[nodiscard]] const MemberInitializer* find_explicit_interface_initializer(const Function& ctor, const ClassDef& interface_def) {
+    for (const MemberInitializer& init : ctor.member_initializers) {
+        if (init.member_name == interface_def.name ||
+            init.member_name == unqualified_template_base_name(interface_def.name)) {
+            return &init;
+        }
+    }
+    return nullptr;
 }
 
 [[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def) {
@@ -621,11 +646,12 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     return nullptr;
 }
 
-void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def) {
+void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program) {
     if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration) return;
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     std::unordered_set<std::string> direct_field_names;
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
+    std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(program, def);
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
     const BaseSpecifier* base = def.direct_ordinary_base();
     if (explicit_base_init != nullptr && base != nullptr && direct_field_names.contains(base->base_type.name)) {
@@ -636,15 +662,16 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
     }
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (&init == explicit_base_init) continue;
-        bool names_direct_interface_base = false;
-        for (const BaseSpecifier& direct_base : def.base_specifiers) {
-            if (direct_base.kind != BaseClassKind::Interface) continue;
-            if (names_base(init.member_name, direct_base)) {
-                names_direct_interface_base = true;
+        bool names_interface_base = false;
+        for (const ClassDef* interface_def : interface_bases) {
+            if (interface_def == nullptr) continue;
+            if (init.member_name == interface_def->name ||
+                init.member_name == unqualified_template_base_name(interface_def->name)) {
+                names_interface_base = true;
                 break;
             }
         }
-        if (names_direct_interface_base) continue;
+        if (names_interface_base) continue;
         if (!direct_field_names.contains(init.member_name)) {
             throw DataflowError("constructor for class '" + def.name + "' names unknown member '" + init.member_name +
                                     "' in its member-initializer-list",
@@ -1493,6 +1520,52 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
                                 "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                                 "'[[scpp::unsafe]]'",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+    }
+}
+
+void validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
+                                                                const Signatures& signatures) {
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || body.program == nullptr) return;
+    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
+    std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*body.program, def);
+    for (const ClassDef* interface_def : interface_bases) {
+        if (interface_def == nullptr) continue;
+        const MemberInitializer* explicit_init = find_explicit_interface_initializer(ctor, *interface_def);
+        std::string context_message =
+            "constructor for class '" + def.name + "' must initialize virtual interface base '" + interface_def->name + "'";
+        if (explicit_init == nullptr) {
+            if (!def.is_interface) {
+                ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures, ctor.loc,
+                                                              context_message);
+            }
+            continue;
+        }
+        const FunctionSignature* sig = resolve_constructor_signature(interface_def->name, explicit_init->initializer.brace_args,
+                                                                     body, signatures);
+        if (sig == nullptr) {
+            if (!class_has_any_constructor(interface_def->name, *body.program) &&
+                explicit_init->initializer.brace_args.empty()) {
+                ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures,
+                                                              explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc,
+                                                              context_message);
+                continue;
+            }
+            throw DataflowError("base-class initializer for '" + interface_def->name +
+                                    "' does not match any constructor of that class",
+                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc);
+        }
+        if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() &&
+            def.name != sig->member_owner_class) {
+            throw DataflowError("cannot call private constructor of base class '" + interface_def->name +
+                                    "' from derived class '" + def.name + "'",
+                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc);
+        }
+        if (sig->is_unsafe) {
+            throw DataflowError("cannot call base class '" + interface_def->name +
+                                    "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
+                                    "'[[scpp::unsafe]]'",
+                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc);
+        }
     }
 }
 
@@ -4821,6 +4894,7 @@ void check_function(const Function& fn, const Program& program, const Signatures
     if (is_constructor_function(fn)) {
         if (const ClassDef* owner = find_class_def(program, fn.member_owner_class)) {
             validate_constructor_base_initialization(fn, *owner, body, signatures);
+            validate_constructor_virtual_interface_base_initialization(fn, *owner, body, signatures);
         }
     }
 
@@ -10824,7 +10898,7 @@ void check_moves(const Program& program) {
     }
     for (const ClassDef& def : program.classes) {
         for (const Function& fn : program.functions) {
-            validate_constructor_member_initialization(fn, def);
+            validate_constructor_member_initialization(fn, def, program);
         }
     }
     // ch05 §5.11: every concept/bare-`auto` witness class (never a real,

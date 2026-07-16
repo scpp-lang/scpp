@@ -803,6 +803,9 @@ private:
                 if (ctor == nullptr) {
                     throw CodegenError("class '" + class_name + "' has no constructor matching this call", current_loc_);
                 }
+                if (const ClassDef* class_def = find_class_def(class_name)) {
+                    emit_complete_object_interface_initializers(*class_def, ctor_def, target.ptr);
+                }
                 std::vector<llvm::Value*> ctor_args = codegen_call_args(args, ctor_def, /*param_offset=*/1);
                 ctor_args.insert(ctor_args.begin(), target.ptr);
                 builder_->CreateCall(ctor, ctor_args);
@@ -810,7 +813,7 @@ private:
         } else if (args.empty()) {
             const ClassDef* class_def = find_class_def(class_name);
             if (class_def != nullptr && !class_has_any_constructor(class_name)) {
-                emit_default_initializers_for_class_storage(target.ptr, *class_def);
+                emit_default_initializers_for_class_storage(target.ptr, *class_def, /*initialize_virtual_interface_bases=*/true);
             }
         }
         return builder_->CreateLoad(llvm_type, temp, "classtmp.value");
@@ -2098,7 +2101,7 @@ private:
         }
         for (const Function& fn : program_->functions) {
             if (fn.member_owner_class != interface_name || fn.is_static || !fn.is_virtual || !fn.forwards_to.empty()) continue;
-            if (fn.name.ends_with("_new") || fn.name.ends_with("_delete")) continue;
+            if (fn.name.ends_with("_new")) continue;
             std::string slot_key = interface_method_slot_key(fn);
             auto slot_it = slot_indices.find(slot_key);
             if (slot_it == slot_indices.end()) {
@@ -2218,7 +2221,31 @@ private:
         return thunk;
     }
 
+    [[nodiscard]] llvm::Function* get_or_create_interface_destructor_thunk(const std::string& concrete_class_name,
+                                                                            const Function& interface_destructor) {
+        std::string cache_key = concrete_class_name + "|dtor|" + overload_names_.at(&interface_destructor);
+        auto it = interface_dispatch_thunks_.find(cache_key);
+        if (it != interface_dispatch_thunks_.end()) return it->second;
+        llvm::FunctionType* thunk_type = interface_dispatch_function_type(interface_destructor);
+        llvm::Function* thunk = llvm::Function::Create(thunk_type, llvm::GlobalValue::PrivateLinkage,
+                                                       "__scpp_iface_dtor_thunk." + cache_key, *module_);
+        interface_dispatch_thunks_.emplace(cache_key, thunk);
+        llvm::IRBuilderBase::InsertPoint saved_ip = builder_->saveIP();
+        llvm::DebugLoc saved_dbg = builder_->getCurrentDebugLocation();
+        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", thunk);
+        builder_->SetInsertPoint(entry);
+        llvm::Value* raw_this = thunk->arg_begin();
+        emit_destructor_chain_calls(concrete_class_name, raw_this);
+        builder_->CreateRetVoid();
+        builder_->restoreIP(saved_ip);
+        builder_->SetCurrentDebugLocation(saved_dbg);
+        return thunk;
+    }
+
     [[nodiscard]] llvm::Constant* interface_dispatch_entry_for(const std::string& concrete_class_name, const Function& method) {
+        if (method.name.ends_with("_delete")) {
+            return get_or_create_interface_destructor_thunk(concrete_class_name, method);
+        }
         const Function* provider = resolve_interface_slot_provider(concrete_class_name, interface_method_slot_key(method));
         if (provider == nullptr) {
             throw CodegenError("class '" + concrete_class_name + "' has no final overrider for interface method '" +
@@ -2998,7 +3025,7 @@ private:
                             return;
                         }
                         if (stmt.ctor_args.empty() && class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
-                            emit_default_initializers_for_class_storage(slot, *class_def);
+                            emit_default_initializers_for_class_storage(slot, *class_def, /*initialize_virtual_interface_bases=*/true);
                             return;
                         }
                         // spec §6.5: `ClassName y{x};` with no matching
@@ -3024,6 +3051,9 @@ private:
                     if (ctor == nullptr) {
                         throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                             current_loc_);
+                    }
+                    if (const ClassDef* class_def = find_class_def(stmt.type.name)) {
+                        emit_complete_object_interface_initializers(*class_def, ctor_def, slot);
                     }
                     std::vector<llvm::Value*> args = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
                     args.insert(args.begin(), slot);
@@ -3561,6 +3591,64 @@ private:
         return member_name == base.base_type.name || member_name == unqualified_template_base_name(base.base_type.name);
     }
 
+    void collect_virtual_interface_bases_in_construction_order(const ClassDef& def, std::vector<const ClassDef*>& out,
+                                                               std::unordered_set<std::string>& seen) const {
+        for (const BaseSpecifier& base : def.base_specifiers) {
+            const ClassDef* base_def = find_class_def(base.base_type.name);
+            if (base_def == nullptr || base_def->is_forward_declaration) continue;
+            collect_virtual_interface_bases_in_construction_order(*base_def, out, seen);
+            if (base.kind == BaseClassKind::Interface && seen.insert(base_def->name).second) out.push_back(base_def);
+        }
+    }
+
+    [[nodiscard]] std::vector<const ClassDef*> collect_virtual_interface_bases_in_construction_order(const ClassDef& def) const {
+        std::vector<const ClassDef*> out;
+        std::unordered_set<std::string> seen;
+        collect_virtual_interface_bases_in_construction_order(def, out, seen);
+        return out;
+    }
+
+    [[nodiscard]] const MemberInitializer* find_explicit_interface_initializer(const Function& ctor,
+                                                                               const ClassDef& interface_def) const {
+        for (const MemberInitializer& init : ctor.member_initializers) {
+            if (init.member_name == interface_def.name ||
+                init.member_name == unqualified_template_base_name(interface_def.name)) {
+                return &init;
+            }
+        }
+        return nullptr;
+    }
+
+    void emit_complete_object_interface_initializers(const ClassDef& most_derived_def, const Function* ctor_def,
+                                                     llvm::Value* object_ptr) {
+        static const std::vector<ExprPtr> no_base_args;
+        for (const ClassDef* interface_def : collect_virtual_interface_bases_in_construction_order(most_derived_def)) {
+            if (interface_def == nullptr) continue;
+            const MemberInitializer* explicit_init =
+                ctor_def != nullptr ? find_explicit_interface_initializer(*ctor_def, *interface_def) : nullptr;
+            const std::vector<ExprPtr>* init_args =
+                explicit_init != nullptr ? &explicit_init->initializer.brace_args : &no_base_args;
+            const Function* base_ctor = resolve_constructor_overload_exact(interface_def->name, *init_args);
+            if (base_ctor == nullptr) {
+                if (explicit_init == nullptr && !class_has_any_constructor(interface_def->name)) continue;
+                if (explicit_init == nullptr && init_args->empty()) {
+                    throw CodegenError("class '" + most_derived_def.name +
+                                           "' cannot be implicitly default-constructed because virtual interface base '" +
+                                           interface_def->name + "' has no accessible default constructor",
+                                       current_loc_);
+                }
+                throw CodegenError("base-class initializer for '" + interface_def->name +
+                                       "' does not match any constructor of that class",
+                                   current_loc_);
+            }
+            std::vector<llvm::Value*> ctor_args = codegen_call_args(*init_args, base_ctor, /*param_offset=*/1);
+            llvm::Value* fat_this =
+                build_interface_value(object_ptr, get_or_create_interface_dispatch_table(most_derived_def.name, interface_def->name));
+            ctor_args.insert(ctor_args.begin(), fat_this);
+            builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), ctor_args);
+        }
+    }
+
     [[nodiscard]] llvm::Value* load_this_object_ptr() {
         auto this_it = locals_.find("this");
         if (this_it == locals_.end()) {
@@ -3670,7 +3758,7 @@ private:
             if (ctor_def == nullptr) {
                 const ClassDef* class_def = find_class_def(target.type.name);
                 if (args.empty() && class_def != nullptr && !class_has_any_constructor(target.type.name)) {
-                    emit_default_initializers_for_class_storage(target.ptr, *class_def);
+                    emit_default_initializers_for_class_storage(target.ptr, *class_def, /*initialize_virtual_interface_bases=*/true);
                     return;
                 }
                 throw CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_);
@@ -3683,6 +3771,9 @@ private:
             llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
             if (ctor == nullptr) {
                 throw CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_);
+            }
+            if (const ClassDef* class_def = find_class_def(target.type.name)) {
+                emit_complete_object_interface_initializers(*class_def, ctor_def, target.ptr);
             }
             std::vector<llvm::Value*> ctor_args = codegen_call_args(args, ctor_def, /*param_offset=*/1);
             ctor_args.insert(ctor_args.begin(), target.ptr);
@@ -3741,36 +3832,12 @@ private:
                 ctor_args.insert(ctor_args.begin(), object_ptr);
                 builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), ctor_args);
             } else if (base_args == nullptr || base_args->empty()) {
-                emit_default_initializers_for_class_storage(object_ptr, *base_def);
+                emit_default_initializers_for_class_storage(object_ptr, *base_def, /*initialize_virtual_interface_bases=*/false);
             } else {
                 throw CodegenError("base-class initializer for '" + base->base_type.name +
                                        "' does not match any constructor of that class",
                                    current_loc_);
             }
-        }
-        for (const BaseSpecifier& base : class_def->base_specifiers) {
-            if (base.kind != BaseClassKind::Interface) continue;
-            const MemberInitializer* explicit_base_init = nullptr;
-            for (const MemberInitializer& init : fn.member_initializers) {
-                if (names_base(init.member_name, base)) {
-                    explicit_base_init = &init;
-                    break;
-                }
-            }
-            if (explicit_base_init == nullptr) continue;
-            const Function* base_ctor = resolve_constructor_overload_exact(base.base_type.name,
-                                                                           explicit_base_init->initializer.brace_args);
-            if (base_ctor == nullptr) {
-                throw CodegenError("base-class initializer for '" + base.base_type.name +
-                                       "' does not match any constructor of that class",
-                                   current_loc_);
-            }
-            std::vector<llvm::Value*> ctor_args =
-                codegen_call_args(explicit_base_init->initializer.brace_args, base_ctor, /*param_offset=*/1);
-            llvm::Value* fat_this =
-                build_interface_value(object_ptr, get_or_create_interface_dispatch_table(class_def->name, base.base_type.name));
-            ctor_args.insert(ctor_args.begin(), fat_this);
-            builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), ctor_args);
         }
         for (const ClassField& field : class_def->fields) {
             const Initializer* selected_init = nullptr;
@@ -3792,7 +3859,9 @@ private:
                            [&](const Function& fn) { return is_constructor_function(fn) && fn.member_owner_class == class_name; });
     }
 
-    void emit_default_initializers_for_class_storage(llvm::Value* object_ptr, const ClassDef& class_def) {
+    void emit_default_initializers_for_class_storage(llvm::Value* object_ptr, const ClassDef& class_def,
+                                                    bool initialize_virtual_interface_bases) {
+        if (initialize_virtual_interface_bases) emit_complete_object_interface_initializers(class_def, nullptr, object_ptr);
         if (const BaseSpecifier* base = class_def.direct_ordinary_base()) {
             const ClassDef* base_def = find_class_def(base->base_type.name);
             if (base_def == nullptr) {
@@ -3802,7 +3871,7 @@ private:
             if (base_ctor != nullptr) {
                 builder_->CreateCall(module_->getFunction(overload_names_.at(base_ctor)), {object_ptr});
             } else if (!class_has_any_constructor(base->base_type.name)) {
-                emit_default_initializers_for_class_storage(object_ptr, *base_def);
+                emit_default_initializers_for_class_storage(object_ptr, *base_def, /*initialize_virtual_interface_bases=*/false);
             } else {
                 throw CodegenError("class '" + class_def.name + "' cannot be implicitly default-constructed because base class '" +
                                       base->base_type.name + "' has no accessible default constructor",
@@ -4655,6 +4724,9 @@ private:
                     throw CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
                         current_loc_);
                 }
+                if (const ClassDef* class_def = find_class_def(expr.type.name)) {
+                    emit_complete_object_interface_initializers(*class_def, ctor_def, target.ptr);
+                }
                 std::vector<llvm::Value*> args = codegen_call_args(expr.args, ctor_def, /*param_offset=*/1);
                 args.insert(args.begin(), target.ptr);
                 builder_->CreateCall(ctor, args);
@@ -4683,7 +4755,19 @@ private:
             throw CodegenError("'delete' requires a raw pointer operand in this version", current_loc_);
         }
         if (is_interface_pointer_type(*operand_type)) {
-            throw CodegenError("'delete' does not support interface pointers in this version", current_loc_);
+            llvm::Value* object_ptr = extract_interface_object_ptr(ptr);
+            llvm::Value* is_null = builder_->CreateICmpEQ(
+                object_ptr, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)), "iface.isnull");
+            llvm::Function* current_fn = builder_->GetInsertBlock()->getParent();
+            llvm::BasicBlock* delete_bb = llvm::BasicBlock::Create(*context_, "iface.delete", current_fn);
+            llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(*context_, "iface.delete.skip", current_fn);
+            builder_->CreateCondBr(is_null, merge_bb, delete_bb);
+            builder_->SetInsertPoint(delete_bb);
+            emit_interface_destructor_dispatch_call(operand_type->pointee->name, ptr);
+            builder_->CreateCall(get_or_declare_free(), {object_ptr});
+            builder_->CreateBr(merge_bb);
+            builder_->SetInsertPoint(merge_bb);
+            return;
         }
         const Type& pointee = *operand_type->pointee;
         if (pointee.kind == TypeKind::Named) {
@@ -4703,8 +4787,8 @@ private:
         if (expr.destroy_through_pointer) {
             std::optional<Type> operand_type = infer_type(*expr.lhs);
             if (operand_type.has_value() && is_interface_pointer_type(*operand_type)) {
-                throw CodegenError("explicit destructor calls do not support interface pointers in this version",
-                                   current_loc_);
+                emit_interface_destructor_dispatch_call(operand_type->pointee->name, ptr);
+                return;
             }
         }
         if (expr.type.kind == TypeKind::Named) {
@@ -4733,6 +4817,36 @@ private:
             return module_->getFunction(overload_names_.at(&fn));
         }
         return nullptr;
+    }
+
+    [[nodiscard]] const Function* find_destructor_ast(const std::string& class_name) const {
+        for (const Function& fn : program_->functions) {
+            if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
+            const Type& this_param = fn.params[0].type;
+            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
+                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
+                continue;
+            }
+            return &fn;
+        }
+        return nullptr;
+    }
+
+    void emit_interface_destructor_dispatch_call(const std::string& interface_name, llvm::Value* interface_value) {
+        const Function* destructor = find_destructor_ast(interface_name);
+        if (destructor == nullptr) return;
+        std::optional<size_t> slot_index = interface_method_slot_index(interface_name, *destructor);
+        if (!slot_index.has_value()) {
+            throw CodegenError("missing destructor dispatch slot for interface '" + interface_name + "'", current_loc_);
+        }
+        llvm::Value* object_ptr = extract_interface_object_ptr(interface_value);
+        llvm::Value* dispatch_ptr = extract_interface_dispatch_ptr(interface_value);
+        llvm::FunctionType* thunk_type = interface_dispatch_function_type(*destructor);
+        llvm::ArrayType* table_type = interface_dispatch_table_type(interface_name);
+        llvm::Value* slot_ptr = builder_->CreateConstGEP2_32(table_type, dispatch_ptr, 0,
+                                                             static_cast<unsigned>(*slot_index), "iface.dtor.slot");
+        llvm::Value* target_ptr = builder_->CreateLoad(llvm::PointerType::getUnqual(*context_), slot_ptr, "iface.dtor.target");
+        builder_->CreateCall(thunk_type, target_ptr, {object_ptr});
     }
 
     // spec §6.5: codegen's own counterpart to movecheck's identically-
@@ -4888,14 +5002,14 @@ private:
     }
 
     [[nodiscard]] bool class_has_destructor_in_chain(const std::string& class_name) {
-        std::string current = class_name;
-        while (!current.empty()) {
-            if (find_destructor(current) != nullptr) return true;
-            const ClassDef* def = find_class_def(current);
-            if (def == nullptr) break;
-            const BaseSpecifier* base = def->direct_ordinary_base();
-            if (base == nullptr) break;
-            current = base->base_type.name;
+        if (find_destructor(class_name) != nullptr) return true;
+        const ClassDef* def = find_class_def(class_name);
+        if (def == nullptr) return false;
+        if (const BaseSpecifier* base = def->direct_ordinary_base()) {
+            if (class_has_destructor_in_chain(base->base_type.name)) return true;
+        }
+        for (const ClassDef* interface_def : collect_virtual_interface_bases_in_construction_order(*def)) {
+            if (interface_def != nullptr && find_destructor(interface_def->name) != nullptr) return true;
         }
         return false;
     }
@@ -4906,7 +5020,16 @@ private:
         }
         const ClassDef* def = find_class_def(class_name);
         if (def != nullptr) {
-            if (const BaseSpecifier* base = def->direct_ordinary_base()) emit_destructor_chain_calls(base->base_type.name, object_ptr);
+            if (const BaseSpecifier* base = def->direct_ordinary_base()) {
+                emit_destructor_chain_calls(base->base_type.name, object_ptr);
+            }
+            std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*def);
+            for (auto it = interface_bases.rbegin(); it != interface_bases.rend(); ++it) {
+                if (*it == nullptr) continue;
+                if (llvm::Function* dtor = find_destructor((*it)->name)) {
+                    builder_->CreateCall(dtor, {object_ptr});
+                }
+            }
         }
     }
 

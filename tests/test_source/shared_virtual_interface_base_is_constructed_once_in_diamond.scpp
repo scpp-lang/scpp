@@ -1,0 +1,64 @@
+class [[scpp::interface]] IBase {
+public:
+    IBase(int marker) {
+        print_int(marker);
+        return;
+    }
+
+    virtual ~IBase() {
+        print_int(9);
+        return;
+    }
+
+    virtual int value() const = 0;
+};
+
+class [[scpp::interface]] ILeft : public virtual IBase {
+public:
+    ILeft() : IBase{1} {
+        print_int(2);
+        return;
+    }
+
+    virtual ~ILeft() override {
+        print_int(8);
+        return;
+    }
+};
+
+class [[scpp::interface]] IRight : public virtual IBase {
+public:
+    IRight() : IBase{3} {
+        print_int(4);
+        return;
+    }
+
+    virtual ~IRight() override {
+        print_int(7);
+        return;
+    }
+};
+
+class Impl : public virtual ILeft, public virtual IRight {
+public:
+    Impl() : IBase{5} {
+        print_int(6);
+        return;
+    }
+
+    ~Impl() override {
+        print_int(1);
+        return;
+    }
+
+    int value() const override {
+        return 0;
+    }
+};
+
+int main() {
+    {
+        Impl impl{};
+    }
+    return 0;
+}

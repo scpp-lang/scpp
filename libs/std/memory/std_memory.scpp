@@ -48,6 +48,14 @@ public:
             return *this->ptr_;
         }
     }
+
+    T* release() {
+        T* raw = this->ptr_;
+        T* empty{};
+        this->ptr_ = empty;
+        this->owns_ = false;
+        return raw;
+    }
 };
 
 export template<typename T, typename... Args>
