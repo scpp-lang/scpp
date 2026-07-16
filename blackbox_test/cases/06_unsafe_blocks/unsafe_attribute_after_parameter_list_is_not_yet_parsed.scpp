@@ -4,11 +4,8 @@
 // has no effect at all" -- this describes it as legal, if semantically
 // inert, grammar (real C++ [dcl.fct] already gives a function's type
 // its own optional attribute-specifier-seq in this position). As
-// currently implemented, though, this position isn't parsed at all yet
-// (a plain syntax error, "expected '{' but found '['") rather than
-// silently accepted-but-ignored -- a narrower gap than the spec
-// describes, worth double-checking against §1.3 once this grammar
-// position is wired up.
+// this position is legal but semantically inert: it appertains to the
+// function type rather than making the function body unsafe.
 int harmless() [[scpp::unsafe]] {
     return 5;
 }

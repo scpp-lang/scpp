@@ -1865,6 +1865,7 @@ private:
     // pipeline; see driver.cppm), so this only has to reject a
     // structurally-invalid signature up front.
     void validate_reference_return_elision(const Function& fn) {
+        if (fn.return_lifetime.present()) return;
         // ch04 §4.2/ch05 §5.9/spec §6.5: `this` (always params[0] when
         // present) is always the elision source when the function is a
         // method, regardless of how many other reference parameters it
@@ -5915,6 +5916,35 @@ private:
                 llvm::Value* ptr = codegen_construct_lambda(expr);
                 return LValue{ptr, named_type(expr.name),
                               alignment_for_type(named_type(expr.name))};
+            }
+
+            case ExprKind::Conditional: {
+                llvm::Value* cond = codegen_contextual_bool_i1(*expr.lhs);
+                llvm::Function* current_function = builder_->GetInsertBlock()->getParent();
+                llvm::BasicBlock* then_block = llvm::BasicBlock::Create(*context_, "cond.lvalue.then", current_function);
+                llvm::BasicBlock* else_block = llvm::BasicBlock::Create(*context_, "cond.lvalue.else", current_function);
+                llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(*context_, "cond.lvalue.end", current_function);
+                builder_->CreateCondBr(cond, then_block, else_block);
+
+                builder_->SetInsertPoint(then_block);
+                LValue then_lvalue = codegen_lvalue(*expr.rhs);
+                builder_->CreateBr(merge_block);
+                llvm::BasicBlock* then_end = builder_->GetInsertBlock();
+
+                builder_->SetInsertPoint(else_block);
+                LValue else_lvalue = codegen_lvalue(*expr.third);
+                builder_->CreateBr(merge_block);
+                llvm::BasicBlock* else_end = builder_->GetInsertBlock();
+
+                builder_->SetInsertPoint(merge_block);
+                if (!types_equal(then_lvalue.type, else_lvalue.type) || then_lvalue.alignment != else_lvalue.alignment ||
+                    then_lvalue.ptr->getType() != else_lvalue.ptr->getType()) {
+                    throw CodegenError("expression is not assignable", current_loc_);
+                }
+                auto* phi = builder_->CreatePHI(then_lvalue.ptr->getType(), 2, "cond.lvalue");
+                phi->addIncoming(then_lvalue.ptr, then_end);
+                phi->addIncoming(else_lvalue.ptr, else_end);
+                return LValue{phi, then_lvalue.type, then_lvalue.alignment};
             }
 
             case ExprKind::Move:

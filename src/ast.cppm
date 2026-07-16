@@ -177,6 +177,19 @@ struct Type {
     bool is_pack_expansion = false;
 };
 
+struct LifetimeAnnotation {
+    // Empty when no `[[scpp::lifetime(...)]]` is present on this
+    // declaration. Otherwise the raw identifier spelled in source --
+    // either the reserved word `generic` or a user-written, declaration-
+    // local group name.
+    std::string name;
+
+    [[nodiscard]] bool present() const { return !name.empty(); }
+    [[nodiscard]] bool is_generic() const { return name == "generic"; }
+
+    bool operator==(const LifetimeAnnotation&) const = default;
+};
+
 [[nodiscard]] inline Type named_type(std::string name) {
     Type type;
     type.kind = TypeKind::Named;
@@ -187,6 +200,7 @@ struct Type {
 struct Param {
     Type type;
     std::string name;
+    LifetimeAnnotation lifetime;
     // ch05 §5.11: empty for an ordinary parameter (the overwhelmingly
     // common case). Non-empty names the concept this parameter is
     // constrained by, for the abbreviated generic-function form --
@@ -729,6 +743,7 @@ struct Function {
     // rather than a specific statement/expression inside it.
     SourceLocation loc;
     std::vector<Param> params;
+    LifetimeAnnotation return_lifetime;
     // Null for a bodyless `extern "C"` declaration (ch02 §2.1) or a bare
     // `extern` module-linkage declaration (ch11 §11.6) -- defined
     // elsewhere, linked in externally. Always non-null for every other
