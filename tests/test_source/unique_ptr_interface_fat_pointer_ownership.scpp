@@ -1,0 +1,40 @@
+import std;
+
+class [[scpp::interface]] IBase {
+public:
+    virtual ~IBase() {
+        print_int(3);
+        return;
+    }
+
+    virtual int value() const = 0;
+};
+
+class [[scpp::interface]] IExtra : public virtual IBase {
+public:
+    virtual ~IExtra() override {
+        print_int(2);
+        return;
+    }
+};
+
+class Impl : public virtual IExtra {
+public:
+    ~Impl() override {
+        print_int(1);
+        return;
+    }
+
+    int value() const override {
+        return 42;
+    }
+};
+
+int main() {
+    {
+        std::unique_ptr<Impl> impl = std::make_unique<Impl>();
+        Impl* raw = impl.release();
+        std::unique_ptr<IBase> base{raw};
+    }
+    return 0;
+}

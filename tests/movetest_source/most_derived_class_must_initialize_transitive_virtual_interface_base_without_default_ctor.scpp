@@ -1,0 +1,36 @@
+class [[scpp::interface]] IBase {
+public:
+    IBase(int value) {
+        return;
+    }
+
+    virtual ~IBase() = default;
+    virtual int value() = 0;
+};
+
+class [[scpp::interface]] ILeaf : public virtual IBase {
+public:
+    ILeaf() {
+        return;
+    }
+
+    ~ILeaf() override = default;
+
+    int value() override {
+        return 1;
+    }
+};
+
+class Impl : public virtual ILeaf {
+public:
+    Impl() {
+        return;
+    }
+
+    ~Impl() override = default;
+};
+
+int main() {
+    Impl impl{};
+    return impl.value();
+}
