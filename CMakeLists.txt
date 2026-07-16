@@ -76,6 +76,7 @@ target_sources(scpp_movecheck
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/movecheck.cppm
+            src/compiler/movecheck/errors.cppm
             src/compiler/movecheck/state.cppm
             src/compiler/movecheck/signatures.cppm
             src/compiler/movecheck/types.cppm
