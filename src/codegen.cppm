@@ -238,6 +238,7 @@ private:
         std::vector<Type> field_types;
         bool is_union = false;
         bool is_packed = false;
+        bool has_ordinary_vtable = false;
         llvm::Align abi_align = llvm::Align(1);
 
         // ch05 §5.14: finds `name`'s own index in `field_names`, searching
@@ -259,6 +260,10 @@ private:
                 if (field_names[i - 1] == name) return i - 1;
             }
             return std::nullopt;
+        }
+
+        [[nodiscard]] size_t physical_field_index(size_t logical_index) const {
+            return logical_index + (has_ordinary_vtable ? 1u : 0u);
         }
     };
 
@@ -379,6 +384,11 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, size_t>> interface_slot_indices_cache_;
     std::unordered_map<std::string, llvm::GlobalVariable*> interface_dispatch_tables_;
     std::unordered_map<std::string, llvm::Function*> interface_dispatch_thunks_;
+    std::unordered_map<std::string, llvm::ArrayType*> ordinary_vtable_types_;
+    std::unordered_map<std::string, std::vector<const Function*>> ordinary_virtual_methods_cache_;
+    std::unordered_map<std::string, std::unordered_map<std::string, size_t>> ordinary_slot_indices_cache_;
+    std::unordered_map<std::string, llvm::GlobalVariable*> ordinary_vtables_;
+    std::unordered_map<std::string, llvm::Function*> ordinary_destructor_thunks_;
 
     [[nodiscard]] std::string default_debug_source_path() const {
         return source_path_.empty() ? (std::filesystem::current_path() / "memory.scpp").string() : source_path_;
@@ -635,48 +645,42 @@ private:
         return builder_->CreateExtractValue(interface_value, {1}, "iface.dispatch");
     }
 
-    [[nodiscard]] bool has_accessible_interface_base_conversion(const std::string& source_name, const std::string& target_name,
-                                                                std::string_view current_class) const {
+    [[nodiscard]] bool has_accessible_base_conversion(const std::string& source_name, const std::string& target_name,
+                                                      std::string_view current_class) const {
         if (source_name == target_name) return true;
         const ClassDef* def = find_class_def(source_name);
         if (def == nullptr) return false;
         for (const BaseSpecifier& base : def->base_specifiers) {
-            if (base.kind == BaseClassKind::Interface && base.access == AccessSpecifier::Private &&
-                current_class != source_name) {
+            if (base.access == AccessSpecifier::Private && current_class != source_name) {
                 continue;
             }
             if (base.base_type.name == target_name) return true;
-            if (has_accessible_interface_base_conversion(base.base_type.name, target_name, current_class)) return true;
+            if (has_accessible_base_conversion(base.base_type.name, target_name, current_class)) return true;
         }
         return false;
     }
 
-    [[nodiscard]] bool types_compatible_with_interface_conversion(const Type& source_type, const Type& target_type,
-                                                                  std::string_view current_class) const {
+    [[nodiscard]] bool types_compatible_with_base_conversion(const Type& source_type, const Type& target_type,
+                                                             std::string_view current_class) const {
         if (types_equal(source_type, target_type)) return true;
         if (target_type.kind == TypeKind::Reference && source_type.kind == TypeKind::Reference &&
             !target_type.is_rvalue_ref && !source_type.is_rvalue_ref && target_type.pointee && source_type.pointee) {
             if (target_type.is_mutable_ref && !source_type.is_mutable_ref) return false;
             if (types_equal(*source_type.pointee, *target_type.pointee)) return true;
             return target_type.pointee->kind == TypeKind::Named && source_type.pointee->kind == TypeKind::Named &&
-                   type_names_interface(target_type.pointee->name) &&
-                   has_accessible_interface_base_conversion(source_type.pointee->name, target_type.pointee->name,
-                                                            current_class);
+                   has_accessible_base_conversion(source_type.pointee->name, target_type.pointee->name, current_class);
         }
         if (target_type.kind == TypeKind::Reference && source_type.kind != TypeKind::Reference && target_type.pointee) {
             if (types_equal(source_type, *target_type.pointee)) return true;
             return target_type.pointee->kind == TypeKind::Named && source_type.kind == TypeKind::Named &&
-                   type_names_interface(target_type.pointee->name) &&
-                   has_accessible_interface_base_conversion(source_type.name, target_type.pointee->name, current_class);
+                   has_accessible_base_conversion(source_type.name, target_type.pointee->name, current_class);
         }
         if (target_type.kind == TypeKind::Pointer && source_type.kind == TypeKind::Pointer && target_type.pointee &&
             source_type.pointee) {
             if (target_type.is_mutable_pointee && !source_type.is_mutable_pointee) return false;
             if (types_equal(*source_type.pointee, *target_type.pointee)) return true;
             return target_type.pointee->kind == TypeKind::Named && source_type.pointee->kind == TypeKind::Named &&
-                   type_names_interface(target_type.pointee->name) &&
-                   has_accessible_interface_base_conversion(source_type.pointee->name, target_type.pointee->name,
-                                                            current_class);
+                   has_accessible_base_conversion(source_type.pointee->name, target_type.pointee->name, current_class);
         }
         return false;
     }
@@ -757,7 +761,8 @@ private:
                 auto it = std::find_if(value.object_fields.begin(), value.object_fields.end(),
                                        [&](const auto& field) { return field.first == info.field_names[i]; });
                 if (it == value.object_fields.end()) continue;
-                llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, dest_ptr, i, info.field_names[i]);
+                llvm::Value* field_ptr =
+                    builder_->CreateStructGEP(info.llvm_type, dest_ptr, info.physical_field_index(i), info.field_names[i]);
                 store_constexpr_value_into(field_ptr, info.field_types[i], *it->second);
             }
             return;
@@ -1202,7 +1207,7 @@ private:
         };
         auto argument_type_matches_or_converts = [&](const Type& arg_type, const Type& candidate_param_type) {
             return argument_type_matches_parameter(arg_type, candidate_param_type) ||
-                   types_compatible_with_interface_conversion(arg_type, candidate_param_type, current_enclosing_class_name());
+                   types_compatible_with_base_conversion(arg_type, candidate_param_type, current_enclosing_class_name());
         };
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
             // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- mirror image of
@@ -1579,6 +1584,7 @@ private:
         if (declaring_aggregates_.contains(def.name)) return;
         declaring_aggregates_.insert(def.name);
         StructInfo info;
+        info.has_ordinary_vtable = !def.is_interface;
         if (const BaseSpecifier* base = def.direct_ordinary_base()) {
             const StructInfo& base_info = structs_.at(base->base_type.name);
             info.field_names = base_info.field_names;
@@ -1586,6 +1592,9 @@ private:
         }
         std::vector<llvm::Type*> llvm_field_types;
         llvm_field_types.reserve(info.field_names.size() + def.fields.size());
+        if (info.has_ordinary_vtable) {
+            llvm_field_types.push_back(llvm::PointerType::getUnqual(*context_));
+        }
         for (const Type& t : info.field_types) llvm_field_types.push_back(to_llvm_type(t));
         for (const ClassField& field : def.fields) {
             info.field_names.push_back(field.name);
@@ -1790,6 +1799,9 @@ private:
                                        llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), 0),
                                        size,
                                        alignment.value_or(llvm::Align(1)));
+                if (type.kind == TypeKind::Named && class_has_ordinary_vtable(type.name)) {
+                    initialize_ordinary_vtable_pointer(type.name, ptr);
+                }
                 return;
             }
             default:
@@ -2178,6 +2190,11 @@ private:
         return fn.name.ends_with("_delete") && !fn.member_owner_class.empty() && type_names_interface(fn.member_owner_class);
     }
 
+    [[nodiscard]] bool class_has_ordinary_vtable(const std::string& class_name) const {
+        const ClassDef* def = find_class_def(class_name);
+        return def != nullptr && !def->is_interface;
+    }
+
     [[nodiscard]] llvm::Type* llvm_param_type_for_function(const Function& fn, const Param& param, size_t index) {
         if (index == 0 && interface_destructor_uses_raw_this(fn)) {
             return llvm::PointerType::getUnqual(*context_);
@@ -2240,6 +2257,113 @@ private:
         builder_->restoreIP(saved_ip);
         builder_->SetCurrentDebugLocation(saved_dbg);
         return thunk;
+    }
+
+    [[nodiscard]] const std::vector<const Function*>& ordinary_virtual_methods(const std::string& class_name) {
+        auto cached = ordinary_virtual_methods_cache_.find(class_name);
+        if (cached != ordinary_virtual_methods_cache_.end()) return cached->second;
+        const ClassDef* def = find_class_def(class_name);
+        if (def == nullptr || def->is_interface) {
+            throw CodegenError("unknown ordinary class '" + class_name + "' for vtable generation", current_loc_);
+        }
+        std::vector<const Function*> methods;
+        std::unordered_map<std::string, size_t> slot_indices;
+        if (const BaseSpecifier* base = def->direct_ordinary_base()) {
+            for (const Function* method : ordinary_virtual_methods(base->base_type.name)) {
+                slot_indices.emplace(interface_method_slot_key(*method), methods.size());
+                methods.push_back(method);
+            }
+        }
+        for (const Function& fn : program_->functions) {
+            if (fn.member_owner_class != class_name || fn.is_static || !fn.forwards_to.empty()) continue;
+            if (fn.name.ends_with("_new")) continue;
+            if (fn.name.ends_with("_delete")) continue;
+            std::string slot_key = interface_method_slot_key(fn);
+            auto slot_it = slot_indices.find(slot_key);
+            bool is_effectively_virtual = fn.is_virtual || slot_it != slot_indices.end();
+            if (!is_effectively_virtual) continue;
+            if (slot_it == slot_indices.end()) {
+                slot_indices.emplace(slot_key, methods.size());
+                methods.push_back(&fn);
+            } else {
+                methods[slot_it->second] = &fn;
+            }
+        }
+        ordinary_slot_indices_cache_.emplace(class_name, std::move(slot_indices));
+        auto [it, _] = ordinary_virtual_methods_cache_.emplace(class_name, std::move(methods));
+        return it->second;
+    }
+
+    [[nodiscard]] llvm::ArrayType* ordinary_vtable_type(const std::string& class_name) {
+        auto it = ordinary_vtable_types_.find(class_name);
+        if (it != ordinary_vtable_types_.end()) return it->second;
+        llvm::ArrayType* type =
+            llvm::ArrayType::get(llvm::PointerType::getUnqual(*context_), ordinary_virtual_methods(class_name).size() + 1);
+        ordinary_vtable_types_.emplace(class_name, type);
+        return type;
+    }
+
+    [[nodiscard]] std::optional<size_t> ordinary_method_slot_index(const std::string& class_name, const Function& method) {
+        if (!class_has_ordinary_vtable(class_name)) return std::nullopt;
+        (void)ordinary_virtual_methods(class_name);
+        auto cache_it = ordinary_slot_indices_cache_.find(class_name);
+        if (cache_it == ordinary_slot_indices_cache_.end()) return std::nullopt;
+        auto slot_it = cache_it->second.find(interface_method_slot_key(method));
+        if (slot_it == cache_it->second.end()) return std::nullopt;
+        return slot_it->second + 1;
+    }
+
+    [[nodiscard]] llvm::Function* get_or_create_ordinary_destructor_thunk(const std::string& concrete_class_name) {
+        auto it = ordinary_destructor_thunks_.find(concrete_class_name);
+        if (it != ordinary_destructor_thunks_.end()) return it->second;
+        llvm::FunctionType* thunk_type =
+            llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {llvm::PointerType::getUnqual(*context_)}, false);
+        llvm::Function* thunk = llvm::Function::Create(thunk_type, llvm::GlobalValue::PrivateLinkage,
+                                                       "__scpp_vtable_dtor." + concrete_class_name, *module_);
+        ordinary_destructor_thunks_.emplace(concrete_class_name, thunk);
+        llvm::IRBuilderBase::InsertPoint saved_ip = builder_->saveIP();
+        llvm::DebugLoc saved_dbg = builder_->getCurrentDebugLocation();
+        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", thunk);
+        builder_->SetInsertPoint(entry);
+        llvm::Value* raw_this = thunk->arg_begin();
+        emit_destructor_chain_calls(concrete_class_name, raw_this);
+        builder_->CreateRetVoid();
+        builder_->restoreIP(saved_ip);
+        builder_->SetCurrentDebugLocation(saved_dbg);
+        return thunk;
+    }
+
+    [[nodiscard]] llvm::GlobalVariable* get_or_create_ordinary_vtable(const std::string& class_name) {
+        auto it = ordinary_vtables_.find(class_name);
+        if (it != ordinary_vtables_.end()) return it->second;
+        llvm::ArrayType* table_type = ordinary_vtable_type(class_name);
+        std::vector<llvm::Constant*> entries;
+        entries.reserve(ordinary_virtual_methods(class_name).size() + 1);
+        entries.push_back(
+            llvm::ConstantExpr::getBitCast(get_or_create_ordinary_destructor_thunk(class_name),
+                                           llvm::PointerType::getUnqual(*context_)));
+        for (const Function* method : ordinary_virtual_methods(class_name)) {
+            llvm::Constant* target = nullptr;
+            llvm::Function* target_fn = module_->getFunction(overload_names_.at(method));
+            if (target_fn == nullptr) {
+                throw CodegenError("missing vtable target for ordinary virtual method '" + method->name + "'",
+                                   current_loc_);
+            }
+            target = llvm::ConstantExpr::getBitCast(target_fn, llvm::PointerType::getUnqual(*context_));
+            entries.push_back(target);
+        }
+        auto* init = llvm::ConstantArray::get(table_type, entries);
+        auto* global = new llvm::GlobalVariable(*module_, table_type, true, llvm::GlobalValue::PrivateLinkage, init,
+                                                "__scpp_vtable." + class_name);
+        ordinary_vtables_.emplace(class_name, global);
+        return global;
+    }
+
+    void initialize_ordinary_vtable_pointer(const std::string& class_name, llvm::Value* object_ptr) {
+        if (!class_has_ordinary_vtable(class_name)) return;
+        const StructInfo& info = structs_.at(class_name);
+        llvm::Value* vptr_slot = builder_->CreateStructGEP(info.llvm_type, object_ptr, 0, "vptr");
+        create_store(get_or_create_ordinary_vtable(class_name), vptr_slot, alignment_for_type(named_type(class_name)));
     }
 
     [[nodiscard]] llvm::Constant* interface_dispatch_entry_for(const std::string& concrete_class_name, const Function& method) {
@@ -2733,7 +2857,8 @@ private:
             const Type& field_type = info.field_types[i - 1];
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 llvm::Value* field_ptr =
-                    builder_->CreateStructGEP(info.llvm_type, this_ptr, i - 1, info.field_names[i - 1]);
+                    builder_->CreateStructGEP(info.llvm_type, this_ptr, info.physical_field_index(i - 1),
+                                              info.field_names[i - 1]);
                 codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
             }
         }
@@ -3357,7 +3482,8 @@ private:
                                                                                to_llvm_type(member_type)->getContext(),
                                                                                0),
                                                                            expr.name + ".fnptr")
-                                                 : builder_->CreateStructGEP(info.llvm_type, base.ptr, *field_index_opt,
+                                                 : builder_->CreateStructGEP(info.llvm_type, base.ptr,
+                                                                             info.physical_field_index(*field_index_opt),
                                                                              expr.name + ".fnptr");
                     llvm::Value* callee_value =
                         create_load(to_llvm_type(member_type), field_ptr,
@@ -3464,12 +3590,14 @@ private:
         llvm::Value* this_arg = nullptr;
         size_t param_offset = 0;
         bool receiver_is_mutable = true;
+        std::string receiver_static_class_name;
         if (expr.lhs != nullptr) {
             LValue receiver = codegen_lvalue(*expr.lhs);
             if (receiver.type.kind != TypeKind::Named) {
                 throw CodegenError("method call '." + expr.name + "(...)' is only supported on a class type",
                     current_loc_);
             }
+            receiver_static_class_name = receiver.type.name;
             callee_name = receiver.type.name + "_" + expr.name;
             this_arg = receiver.ptr;
             param_offset = 1;
@@ -3500,6 +3628,27 @@ private:
                 args.insert(args.begin(), codegen_interface_value_for_target(*expr.lhs, callee_def->params.front().type));
             } else {
                 args.insert(args.begin(), this_arg);
+                if (std::optional<size_t> slot_index =
+                        ordinary_method_slot_index(receiver_static_class_name, *callee_def);
+                    slot_index.has_value()) {
+                    const StructInfo& info = structs_.at(receiver_static_class_name);
+                    llvm::Value* vptr_slot = builder_->CreateStructGEP(info.llvm_type, this_arg, 0, "vptr");
+                    llvm::Value* vtable_ptr = create_load(llvm::PointerType::getUnqual(*context_), vptr_slot, std::nullopt,
+                                                          "vtable");
+                    llvm::ArrayType* table_type = ordinary_vtable_type(receiver_static_class_name);
+                    llvm::Value* table_ptr =
+                        builder_->CreateBitCast(vtable_ptr, llvm::PointerType::getUnqual(*context_), "vtable.array");
+                    llvm::Value* slot_ptr =
+                        builder_->CreateGEP(table_type, table_ptr,
+                                            {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0),
+                                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_),
+                                                                   static_cast<unsigned>(*slot_index))},
+                                            "vtable.slot");
+                    llvm::Value* target_ptr =
+                        create_load(llvm::PointerType::getUnqual(*context_), slot_ptr, std::nullopt, "virtfn");
+                    return CallResult{builder_->CreateCall(interface_dispatch_function_type(*callee_def), target_ptr, args),
+                                      callee_def};
+                }
             }
         }
         return CallResult{builder_->CreateCall(callee, args), callee_def};
@@ -3668,7 +3817,8 @@ private:
         if (!field_index.has_value()) {
             throw CodegenError("class '" + class_name + "' has no field '" + field.name + "'", current_loc_);
         }
-        llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, object_ptr, *field_index, field.name);
+        llvm::Value* field_ptr =
+            builder_->CreateStructGEP(info.llvm_type, object_ptr, info.physical_field_index(*field_index), field.name);
         return LValue{field_ptr, field.type, alignment_for_type(field.type)};
     }
 
@@ -3706,6 +3856,9 @@ private:
         }
         if (produces_rvalue_of_type(*args[0], target.type)) {
             create_store(codegen_expr(*args[0]), target.ptr, target.alignment);
+            if (class_has_ordinary_vtable(target.type.name)) {
+                initialize_ordinary_vtable_pointer(target.type.name, target.ptr);
+            }
             return true;
         }
         if (!is_bare_same_type_copy_source(*args[0], target.type) || !is_copy_constructible(target.type.name)) {
@@ -3729,6 +3882,9 @@ private:
         if (target.type.kind == TypeKind::Named && find_class_def(target.type.name) != nullptr) {
             llvm::Value* value = codegen_class_value_for_boundary(expr, target.type);
             create_store(value, target.ptr, target.alignment);
+            if (class_has_ordinary_vtable(target.type.name)) {
+                initialize_ordinary_vtable_pointer(target.type.name, target.ptr);
+            }
             return;
         }
         llvm::Value* init_value = codegen_value_for_target(expr, target.type);
@@ -3766,6 +3922,9 @@ private:
             if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
                 llvm::Value* value = codegen_constructed_class_value(target.type.name, args, ctor_def);
                 create_store(value, target.ptr, target.alignment);
+                if (class_has_ordinary_vtable(target.type.name)) {
+                    initialize_ordinary_vtable_pointer(target.type.name, target.ptr);
+                }
                 return;
             }
             llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
@@ -3839,6 +3998,7 @@ private:
                                    current_loc_);
             }
         }
+        initialize_ordinary_vtable_pointer(class_def->name, object_ptr);
         for (const ClassField& field : class_def->fields) {
             const Initializer* selected_init = nullptr;
             for (const MemberInitializer& init : fn.member_initializers) {
@@ -3878,6 +4038,7 @@ private:
                                    current_loc_);
             }
         }
+        initialize_ordinary_vtable_pointer(class_def.name, object_ptr);
         for (const ClassField& field : class_def.fields) {
             if (!field.default_initializer) continue;
             LValue field_storage = codegen_raw_member_storage(object_ptr, class_def.name, field);
@@ -4655,10 +4816,12 @@ private:
         const StructInfo& info = structs_.at(expr.name);
         llvm::AllocaInst* closure =
             existing_storage != nullptr ? existing_storage : create_entry_block_alloca(info.llvm_type, "lambdatmp");
+        if (info.has_ordinary_vtable) initialize_ordinary_vtable_pointer(expr.name, closure);
         for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
             const LambdaCapture& capture = expr.lambda_captures[i];
             const Type& field_type = info.field_types[i];
-            llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, closure, i, capture.name);
+            llvm::Value* field_ptr =
+                builder_->CreateStructGEP(info.llvm_type, closure, info.physical_field_index(i), capture.name);
             if (capture.by_reference) {
                 Expr ident;
                 ident.kind = ExprKind::Identifier;
@@ -4716,6 +4879,9 @@ private:
                 if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
                     llvm::Value* value = codegen_constructed_class_value(expr.type.name, expr.args, ctor_def);
                     builder_->CreateStore(value, heap_ptr);
+                    if (class_has_ordinary_vtable(expr.type.name)) {
+                        initialize_ordinary_vtable_pointer(expr.type.name, heap_ptr);
+                    }
                     return heap_ptr;
                 }
                 llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
@@ -4771,6 +4937,37 @@ private:
         }
         const Type& pointee = *operand_type->pointee;
         if (pointee.kind == TypeKind::Named) {
+            if (class_has_ordinary_vtable(pointee.name)) {
+                llvm::Value* is_null = builder_->CreateICmpEQ(
+                    ptr, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)), "delete.isnull");
+                llvm::Function* current_fn = builder_->GetInsertBlock()->getParent();
+                llvm::BasicBlock* delete_bb = llvm::BasicBlock::Create(*context_, "delete.body", current_fn);
+                llvm::BasicBlock* merge_bb = llvm::BasicBlock::Create(*context_, "delete.skip", current_fn);
+                builder_->CreateCondBr(is_null, merge_bb, delete_bb);
+                builder_->SetInsertPoint(delete_bb);
+                const StructInfo& info = structs_.at(pointee.name);
+                llvm::Value* vptr_slot = builder_->CreateStructGEP(info.llvm_type, ptr, 0, "vptr");
+                llvm::Value* vtable_ptr = create_load(llvm::PointerType::getUnqual(*context_), vptr_slot, std::nullopt,
+                                                      "vtable");
+                llvm::ArrayType* table_type = ordinary_vtable_type(pointee.name);
+                llvm::Value* table_ptr =
+                    builder_->CreateBitCast(vtable_ptr, llvm::PointerType::getUnqual(*context_), "vtable.array");
+                llvm::Value* slot_ptr =
+                    builder_->CreateGEP(table_type, table_ptr,
+                                        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0),
+                                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0)},
+                                        "vtable.dtor.slot");
+                llvm::Value* dtor_ptr =
+                    create_load(llvm::PointerType::getUnqual(*context_), slot_ptr, std::nullopt, "dtorfn");
+                llvm::FunctionType* dtor_type =
+                    llvm::FunctionType::get(llvm::Type::getVoidTy(*context_),
+                                            {llvm::PointerType::getUnqual(*context_)}, false);
+                builder_->CreateCall(dtor_type, dtor_ptr, {ptr});
+                builder_->CreateCall(get_or_declare_free(), {ptr});
+                builder_->CreateBr(merge_bb);
+                builder_->SetInsertPoint(merge_bb);
+                return;
+            }
             if (class_has_destructor_in_chain(pointee.name)) {
                 codegen_call_destructor_chain_unless_moved(pointee.name, ptr, nullptr);
             }
@@ -4950,10 +5147,13 @@ private:
     void codegen_memberwise_copy_construct(llvm::Value* dest_ptr, llvm::Value* src_ptr,
                                             const std::string& class_name) {
         const StructInfo& info = structs_.at(class_name);
+        if (info.has_ordinary_vtable) initialize_ordinary_vtable_pointer(class_name, dest_ptr);
         for (size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
-            llvm::Value* dest_field = builder_->CreateStructGEP(info.llvm_type, dest_ptr, i, info.field_names[i]);
-            llvm::Value* src_field = builder_->CreateStructGEP(info.llvm_type, src_ptr, i, info.field_names[i]);
+            llvm::Value* dest_field =
+                builder_->CreateStructGEP(info.llvm_type, dest_ptr, info.physical_field_index(i), info.field_names[i]);
+            llvm::Value* src_field =
+                builder_->CreateStructGEP(info.llvm_type, src_ptr, info.physical_field_index(i), info.field_names[i]);
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name)) {
                     llvm::Function* ctor = module_->getFunction(overload_names_.at(user_ctor));
@@ -4984,8 +5184,10 @@ private:
         const StructInfo& info = structs_.at(class_name);
         for (size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
-            llvm::Value* dest_field = builder_->CreateStructGEP(info.llvm_type, dest_ptr, i, info.field_names[i]);
-            llvm::Value* src_field = builder_->CreateStructGEP(info.llvm_type, src_ptr, i, info.field_names[i]);
+            llvm::Value* dest_field =
+                builder_->CreateStructGEP(info.llvm_type, dest_ptr, info.physical_field_index(i), info.field_names[i]);
+            llvm::Value* src_field =
+                builder_->CreateStructGEP(info.llvm_type, src_ptr, info.physical_field_index(i), info.field_names[i]);
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name)) {
                     llvm::Function* op = module_->getFunction(overload_names_.at(user_assign));
@@ -5097,7 +5299,8 @@ private:
         for (size_t i = 0; i < info.field_types.size(); i++) {
             const Type& field_type = info.field_types[i];
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                llvm::Value* field_ptr = builder_->CreateStructGEP(info.llvm_type, ptr, i, info.field_names[i]);
+                llvm::Value* field_ptr =
+                    builder_->CreateStructGEP(info.llvm_type, ptr, info.physical_field_index(i), info.field_names[i]);
                 codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
             }
         }
@@ -5526,7 +5729,9 @@ private:
                                                                                           to_llvm_type(field_type)->getContext(),
                                                                                           0),
                                                                        expr.name + ".unionfield")
-                                             : builder_->CreateStructGEP(info.llvm_type, base.ptr, field_index, expr.name);
+                                             : builder_->CreateStructGEP(info.llvm_type, base.ptr,
+                                                                         info.physical_field_index(field_index),
+                                                                         expr.name);
                 if (field_type.kind == TypeKind::Reference) {
                     if (is_interface_reference_type(field_type)) {
                         return LValue{field_ptr, field_type, field_alignment};

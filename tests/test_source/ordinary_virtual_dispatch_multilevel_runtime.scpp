@@ -1,0 +1,37 @@
+import std;
+
+class Base {
+public:
+    virtual ~Base() { return; }
+    virtual void foo() const {
+        std::println("Base::foo");
+        return;
+    }
+};
+
+class Mid : public Base {
+public:
+    ~Mid() override { return; }
+    void foo() const override {
+        std::println("Mid::foo");
+        return;
+    }
+};
+
+class Leaf : public Mid {
+public:
+    ~Leaf() override { return; }
+    void foo() const override {
+        std::println("Leaf::foo");
+        return;
+    }
+};
+
+int main() {
+    Leaf leaf{};
+    const Base& base = leaf;
+    const Mid& mid = leaf;
+    base.foo();
+    mid.foo();
+    return 0;
+}
