@@ -311,4 +311,4 @@ The next section applies the same borrowing model to non-owning views over range
 
 ---
 
-[← Previous: What Is Ownership?](ch04-01-what-is-ownership.md) · [Table of Contents](README.md)
+[← Previous: What Is Ownership?](ch04-01-what-is-ownership.md) · [Table of Contents](README.md) · [Next: `std::span` and Other Non-Owning Views →](ch04-03-std-span-and-other-non-owning-views.md)
