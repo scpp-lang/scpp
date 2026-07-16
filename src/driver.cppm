@@ -34,7 +34,7 @@ import scpp.ast;
 import scpp.codegen;
 import scpp.constexpr_engine;
 import scpp.lexer;
-import scpp.movecheck;
+import scpp.compiler.movecheck;
 import scpp.parser;
 
 export namespace scpp {

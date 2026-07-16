@@ -15,7 +15,7 @@ import scpp.lexer;
 import scpp.parser;
 import scpp.ast;
 import scpp.codegen;
-import scpp.movecheck;
+import scpp.compiler.movecheck;
 import scpp.driver;
 import scpp.project;
 

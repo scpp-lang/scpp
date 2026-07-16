@@ -1,5 +1,5 @@
 import scpp.codegen;
-import scpp.movecheck;
+import scpp.compiler.movecheck;
 import scpp.parser;
 import scpp.ast;
 
