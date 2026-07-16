@@ -1,0 +1,9 @@
+struct User {
+    int id{};
+    User(int initial_id) : id{initial_id} { return; }
+};
+
+int main() {
+    User user{};
+    return 0;
+}
