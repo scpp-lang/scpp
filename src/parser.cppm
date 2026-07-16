@@ -3059,8 +3059,32 @@ private:
         def.template_params = template_params;
         if (is_generic) def.template_owner_id = next_generic_template_owner_id();
 
+        const Token& maybe_base_clause_tok = peek();
+        if (match(TokenKind::Colon)) {
+            const Token& tok = maybe_base_clause_tok;
+            throw ParseError(tok.line, tok.column,
+                             "a declaration introduced by 'struct' shall not have a base-clause (spec §11.1(2.1))");
+        }
+
         expect(TokenKind::LBrace, "'{'");
+        AccessSpecifier current_access = AccessSpecifier::Public;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+            if (match(TokenKind::KwPublic)) {
+                expect(TokenKind::Colon, "':'");
+                current_access = AccessSpecifier::Public;
+                continue;
+            }
+            if (match(TokenKind::KwPrivate)) {
+                expect(TokenKind::Colon, "':'");
+                current_access = AccessSpecifier::Private;
+                continue;
+            }
+            if (check(TokenKind::KwVirtual)) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                 "a declaration introduced by 'struct' shall not declare a virtual member function "
+                                 "or virtual destructor (spec §11.1(2.3))");
+            }
             StructField field;
             Type base = parse_type();
             if (starts_function_pointer_declarator()) {
@@ -3071,6 +3095,7 @@ private:
                 field.type = parse_array_suffix(base);
                 field.default_initializer = parse_optional_default_initializer("a struct member declaration");
             }
+            field.access = current_access;
             expect(TokenKind::Semicolon, "';'");
             def.fields.push_back(std::move(field));
         }

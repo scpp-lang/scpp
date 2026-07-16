@@ -954,6 +954,76 @@ void test_struct_declaration() {
     expect(program.functions.size() == 1, "struct_declaration: expected 1 function after the struct");
 }
 
+void test_struct_access_specifier_sections_parse() {
+    scpp::Program program = scpp::parse(
+        "struct Box {\n"
+        "public:\n"
+        "    int value{};\n"
+        "private:\n"
+        "    int hidden{};\n"
+        "};\n"
+        "int main() {\n"
+        "    Box box{};\n"
+        "    return box.value;\n"
+        "}\n");
+    expect(program.structs.size() == 1, "struct_access_specifier_sections_parse: expected 1 struct");
+    if (program.structs.size() != 1) return;
+    const scpp::StructDef& def = program.structs[0];
+    expect(def.fields.size() == 2, "struct_access_specifier_sections_parse: expected 2 fields");
+    if (def.fields.size() != 2) return;
+    expect(def.fields[0].name == "value" && def.fields[0].access == scpp::AccessSpecifier::Public,
+           "struct_access_specifier_sections_parse: value should stay public");
+    expect(def.fields[1].name == "hidden" && def.fields[1].access == scpp::AccessSpecifier::Private,
+           "struct_access_specifier_sections_parse: hidden should stay private");
+}
+
+void test_struct_interface_attribute_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("struct [[scpp::interface]] Box { int value{}; };");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(std::string(e.what()).find("shall not be marked '[[scpp::interface]]'") != std::string::npos,
+               "struct_interface_attribute_is_rejected: expected interface-only diagnostic");
+    }
+    expect(threw, "struct_interface_attribute_is_rejected: expected a ParseError");
+}
+
+void test_struct_base_clause_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "class Base {\n"
+            "public:\n"
+            "    Base() { return; }\n"
+            "};\n"
+            "struct Derived : public Base {\n"
+            "    int value{};\n"
+            "};\n");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(std::string(e.what()).find("shall not have a base-clause") != std::string::npos,
+               "struct_base_clause_is_rejected: expected base-clause diagnostic");
+    }
+    expect(threw, "struct_base_clause_is_rejected: expected a ParseError");
+}
+
+void test_struct_virtual_member_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "struct Box {\n"
+            "public:\n"
+            "    virtual int value();\n"
+            "};\n");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(std::string(e.what()).find("shall not declare a virtual member function") != std::string::npos,
+               "struct_virtual_member_is_rejected: expected virtual-member diagnostic");
+    }
+    expect(threw, "struct_virtual_member_is_rejected: expected a ParseError");
+}
+
 void test_union_declaration() {
     scpp::Program program = scpp::parse("union Payload { int i; char c; }; int f() { return 0; }");
     expect(program.structs.size() == 1, "union_declaration: expected 1 aggregate");
@@ -3860,6 +3930,10 @@ int main() {
     test_parenthesized_expression();
     test_parse_error_on_missing_semicolon();
     test_struct_declaration();
+    test_struct_access_specifier_sections_parse();
+    test_struct_interface_attribute_is_rejected();
+    test_struct_base_clause_is_rejected();
+    test_struct_virtual_member_is_rejected();
     test_union_declaration();
     test_packed_struct_and_union_attributes_parse();
     test_packed_attribute_on_function_is_rejected();
