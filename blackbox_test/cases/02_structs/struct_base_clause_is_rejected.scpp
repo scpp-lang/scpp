@@ -1,0 +1,16 @@
+// spec §11.1(2.1): a declaration introduced by `struct` shall not have a
+// base-clause, regardless of what it tries to inherit from.
+class Base {
+public:
+    virtual ~Base() {
+        return;
+    }
+};
+
+struct Derived : public Base {
+    int value{};
+};
+
+int main() {
+    return 0;
+}

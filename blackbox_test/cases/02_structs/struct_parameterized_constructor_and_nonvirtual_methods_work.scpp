@@ -1,0 +1,22 @@
+// spec §11.1(4): a `struct` may declare constructors, access-specifiers,
+// and non-virtual member functions exactly as ordinary C++ permits.
+struct Size {
+private:
+    int width{};
+    int height{};
+public:
+    Size(int w, int h) : width{w}, height{h} {}
+    void grow_width(int delta) {
+        this->width = this->width + delta;
+        return;
+    }
+    int area() const {
+        return this->width * this->height;
+    }
+};
+
+int main() {
+    Size s{3, 4};
+    s.grow_width(2);
+    return s.area();
+}
