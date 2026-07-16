@@ -20,7 +20,7 @@
   - [`std::span` 与其它非拥有视图](ch04-03-std-span-and-other-non-owning-views.md)
 
 - 用 struct 与 class 组织相关数据
-  - 定义与实例化 `struct` / `class`
+  - [定义与实例化 `struct` / `class`](ch05-01-defining-and-instantiating-struct-and-class.md)
   - 一个使用受检查 class 的示例程序
   - 方法与 `this`
 

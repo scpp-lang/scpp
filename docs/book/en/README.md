@@ -20,7 +20,7 @@
   - [`std::span` and Other Non-Owning Views](ch04-03-std-span-and-other-non-owning-views.md)
 
 - Using Structs and Classes to Structure Related Data
-  - Defining and Instantiating `struct` and `class`
+  - [Defining and Instantiating `struct` and `class`](ch05-01-defining-and-instantiating-struct-and-class.md)
   - An Example Program Using a Checked Class
   - Methods and `this`
 
