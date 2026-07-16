@@ -1,0 +1,20 @@
+// spec §8.1(4): non-generic ordinary calls must enforce
+// `[[scpp::thread_shareable]]` on non-interface parameters too.
+class PlainHandle {
+public:
+    PlainHandle(int* raw) { this.raw = raw; return; }
+    virtual ~PlainHandle() = default;
+private:
+    int* raw{};
+};
+
+void publish(const PlainHandle& value [[scpp::thread_shareable]]) {
+    return;
+}
+
+int main() {
+    int value = 0;
+    PlainHandle handle{&value};
+    publish(handle);
+    return 0;
+}

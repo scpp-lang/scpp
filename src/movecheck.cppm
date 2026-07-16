@@ -216,6 +216,9 @@ struct DataflowState {
 // wrapped in `unsafe { }`" check (ch02/ch05.5) in check_call_arguments.
 struct FunctionSignature {
     std::vector<Type> param_types;
+    std::vector<std::string> param_names;
+    std::vector<bool> param_require_thread_movable;
+    std::vector<bool> param_require_thread_shareable;
     Type return_type;
     // Set only when return_type is itself a Reference: the index into
     // param_types of the sole reference parameter this function's own
@@ -265,6 +268,10 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 
 [[maybe_unused]] [[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {});
 [[maybe_unused]] [[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {});
+[[nodiscard]] bool thread_movable_of(const Type& type, const Program& program,
+                                     std::unordered_set<std::string> visiting = {});
+[[nodiscard]] bool thread_shareable_of(const Type& type, const Program& program,
+                                       std::unordered_set<std::string> visiting = {});
 [[nodiscard]] std::string enclosing_class_name(const Body& body);
 [[nodiscard]] bool is_interface_representation_type(const Type& type, const Program& program);
 [[nodiscard]] bool types_compatible_with_interface_conversion(const Type& source_type, const Type& target_type,
@@ -922,6 +929,9 @@ struct CalleeSignature {
 [[nodiscard]] FunctionSignature function_pointer_signature(const Type& type) {
     FunctionSignature sig;
     sig.param_types = type.function_params;
+    sig.param_names.resize(sig.param_types.size());
+    sig.param_require_thread_movable.assign(sig.param_types.size(), false);
+    sig.param_require_thread_shareable.assign(sig.param_types.size(), false);
     sig.return_type = *type.function_return;
     sig.is_unsafe = type.is_unsafe_function_pointer;
     return sig;
@@ -3258,6 +3268,58 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     }
 }
 
+[[nodiscard]] bool parameter_requires_thread_safety_constraint(const FunctionSignature& sig, size_t param_index) {
+    return param_index < sig.param_require_thread_movable.size() &&
+           (sig.param_require_thread_movable[param_index] || sig.param_require_thread_shareable[param_index]);
+}
+
+[[nodiscard]] std::string parameter_display_name(const FunctionSignature& sig, size_t param_index) {
+    if (param_index < sig.param_names.size() && !sig.param_names[param_index].empty()) return sig.param_names[param_index];
+    return "#" + std::to_string(param_index + 1);
+}
+
+[[nodiscard]] bool parameter_names_interface_type(const Type& param_type, const Body& body) {
+    if (body.program == nullptr || param_type.pointee == nullptr || param_type.pointee->kind != TypeKind::Named) return false;
+    const ClassDef* param_interface = find_class_def(*body.program, param_type.pointee->name);
+    return param_interface != nullptr && param_interface->is_interface;
+}
+
+[[nodiscard]] Type thread_safety_constraint_subject_type(const Expr& arg, const Type& param_type, const Body& body,
+                                                         const Signatures& signatures) {
+    if ((param_type.kind == TypeKind::Reference || param_type.kind == TypeKind::Pointer) &&
+        parameter_names_interface_type(param_type, body)) {
+        std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
+        if (source_type.has_value()) {
+            Type source = *source_type;
+            if (source.kind == TypeKind::Reference && source.pointee != nullptr) return *source.pointee;
+            if (source.kind == TypeKind::Pointer && source.pointee != nullptr) return *source.pointee;
+            return source;
+        }
+    }
+    return param_type;
+}
+
+void enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig, size_t param_index,
+                                                    std::string_view callee_kind, const std::string& callee_name,
+                                                    const Body& body, const Signatures& signatures, SourceLocation loc) {
+    if (body.program == nullptr || !parameter_requires_thread_safety_constraint(sig, param_index) ||
+        param_index >= sig.param_types.size()) {
+        return;
+    }
+    Type subject = thread_safety_constraint_subject_type(arg, sig.param_types[param_index], body, signatures);
+    std::string param_name = parameter_display_name(sig, param_index);
+    if (sig.param_require_thread_movable[param_index] && !thread_movable_of(subject, *body.program)) {
+        throw DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
+                                callee_name + "' does not satisfy '[[scpp::thread_movable]]' (spec §8.1/§8.5(6))",
+            loc);
+    }
+    if (sig.param_require_thread_shareable[param_index] && !thread_shareable_of(subject, *body.program)) {
+        throw DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
+                                callee_name + "' does not satisfy '[[scpp::thread_shareable]]' (spec §8.1/§8.5(6))",
+            loc);
+    }
+}
+
 // Checks every argument of a Call expression against its callee's
 // signature (if known), exactly the same way regardless of context --
 // shared by apply_expr's own Call case (a call used as a plain
@@ -3429,6 +3491,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 } else {
                     apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
                 }
+                if (report_errors && sig != nullptr) {
+                    enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
+                                                                   signatures, state.current_loc);
+                }
                 continue;
             }
             apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
@@ -3457,6 +3523,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                     "argument (would need 'const T*', which this parameter doesn't accept)",
                     state.current_loc);
             }
+        }
+        if (report_errors && sig != nullptr) {
+            enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
+                                                           signatures, state.current_loc);
         }
     }
 }
@@ -3562,6 +3632,10 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                     state.current_loc);
             }
             apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
+        }
+        if (report_errors && sig != nullptr) {
+            enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "constructor", class_name, body,
+                                                           signatures, state.current_loc);
         }
     }
 }
@@ -4967,8 +5041,14 @@ void check_function(const Function& fn, const Program& program, const Signatures
     for (const Function& fn : program.functions) {
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());
+        sig.param_names.reserve(fn.params.size());
+        sig.param_require_thread_movable.reserve(fn.params.size());
+        sig.param_require_thread_shareable.reserve(fn.params.size());
         for (const Param& param : fn.params) {
             sig.param_types.push_back(param.type);
+            sig.param_names.push_back(param.name);
+            sig.param_require_thread_movable.push_back(param.require_thread_movable);
+            sig.param_require_thread_shareable.push_back(param.require_thread_shareable);
         }
         sig.return_type = fn.return_type;
         sig.elided_param_index = resolve_elided_param_index(fn);
@@ -5090,9 +5170,9 @@ void check_function(const Function& fn, const Program& program, const Signatures
 [[nodiscard]] bool evaluate_thread_bool_constant_expr_for_program(const Expr& expr, const Program& program,
                                                                   std::unordered_set<std::string> visiting = {});
 [[nodiscard]] bool thread_movable_of(const Type& type, const Program& program,
-                                     std::unordered_set<std::string> visiting = {});
+                                     std::unordered_set<std::string> visiting);
 [[nodiscard]] bool thread_shareable_of(const Type& type, const Program& program,
-                                       std::unordered_set<std::string> visiting = {});
+                                       std::unordered_set<std::string> visiting);
 
 [[nodiscard]] bool evaluate_thread_bool_constant_expr_for_program(const Expr& expr, const Program& program,
                                                                   std::unordered_set<std::string> visiting) {

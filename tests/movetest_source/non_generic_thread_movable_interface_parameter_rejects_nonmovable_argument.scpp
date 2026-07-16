@@ -1,0 +1,28 @@
+// spec §8.5(6): a non-generic `I& [[scpp::thread_movable]]` parameter
+// checks the implementing argument type supplied at the call site.
+class [[scpp::interface]] IJob {
+public:
+    virtual ~IJob() = default;
+    virtual void run() = 0;
+};
+
+class BadJob : public virtual IJob {
+public:
+    BadJob(int* raw) { this.raw = raw; return; }
+    ~BadJob() override = default;
+    void run() override { return; }
+private:
+    int* raw{};
+};
+
+void launch(IJob& job [[scpp::thread_movable]]) {
+    job.run();
+    return;
+}
+
+int main() {
+    int value = 0;
+    BadJob bad{&value};
+    launch(bad);
+    return 0;
+}
