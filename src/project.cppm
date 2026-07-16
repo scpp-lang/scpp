@@ -33,7 +33,7 @@ import scpp.ast;
 import scpp.codegen;
 import scpp.driver;
 import scpp.lexer;
-import scpp.movecheck;
+import scpp.compiler.movecheck;
 import scpp.parser;
 
 export namespace scpp {

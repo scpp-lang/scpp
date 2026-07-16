@@ -75,7 +75,20 @@ add_library(scpp_movecheck)
 target_sources(scpp_movecheck
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/movecheck.cppm)
+            src/movecheck.cppm
+            src/compiler/movecheck/state.cppm
+            src/compiler/movecheck/signatures.cppm
+            src/compiler/movecheck/types.cppm
+            src/compiler/movecheck/calls.cppm
+            src/compiler/movecheck/borrows.cppm
+            src/compiler/movecheck/dataflow.cppm
+            src/compiler/movecheck/interfaces.cppm
+            src/compiler/movecheck/threadsafety.cppm
+            src/compiler/movecheck/generics_support.cppm
+            src/compiler/movecheck/lambdas.cppm
+            src/compiler/movecheck/monomorphize.cppm
+    PRIVATE
+            src/compiler/movecheck/movecheck.cpp)
 target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir)
 target_compile_features(scpp_movecheck PRIVATE cxx_std_23)
 

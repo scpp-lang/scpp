@@ -1,6 +1,6 @@
 import scpp.driver;
 import scpp.parser;
-import scpp.movecheck;
+import scpp.compiler.movecheck;
 import scpp.codegen;
 import scpp.ast;
 
