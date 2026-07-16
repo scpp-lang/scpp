@@ -1,0 +1,21 @@
+class Base {
+public:
+    virtual ~Base() { return; }
+    virtual int foo() const { return 1; }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override { return; }
+    int foo() const override { return 2; }
+};
+
+int read_value(const Base& base) {
+    return base.foo();
+}
+
+int main() {
+    Derived derived{};
+    Base& base = derived;
+    return read_value(base);
+}

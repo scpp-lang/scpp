@@ -1,0 +1,25 @@
+import std;
+
+class Base {
+public:
+    virtual ~Base() {
+        std::println("Base::~Base");
+        return;
+    }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override {
+        std::println("Derived::~Derived");
+        return;
+    }
+};
+
+int main() {
+    [[scpp::unsafe]] {
+        Base* base = new Derived();
+        delete base;
+    }
+    return 0;
+}

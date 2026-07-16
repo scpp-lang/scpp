@@ -1,0 +1,36 @@
+import std;
+
+class Base {
+public:
+    virtual ~Base() { return; }
+    virtual void foo() const {
+        std::println("Base::foo");
+        return;
+    }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override { return; }
+    void foo() const override {
+        std::println("Derived::foo");
+        return;
+    }
+};
+
+void call_foo(const Base* value) {
+    [[scpp::unsafe]] {
+        value->foo();
+    }
+    return;
+}
+
+int main() {
+    Derived derived{};
+    const Base* base = &derived;
+    [[scpp::unsafe]] {
+        base->foo();
+    }
+    call_foo(&derived);
+    return 0;
+}

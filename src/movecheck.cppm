@@ -274,8 +274,8 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
                                        std::unordered_set<std::string> visiting = {});
 [[nodiscard]] std::string enclosing_class_name(const Body& body);
 [[nodiscard]] bool is_interface_representation_type(const Type& type, const Program& program);
-[[nodiscard]] bool types_compatible_with_interface_conversion(const Type& source_type, const Type& target_type,
-                                                              const Program& program, std::string_view current_class);
+[[nodiscard]] bool types_compatible_with_base_conversion(const Type& source_type, const Type& target_type,
+                                                         const Program& program, std::string_view current_class);
 
 LocalState join(LocalState a, LocalState b) {
     if (a == b) return a;
@@ -1177,21 +1177,21 @@ struct NodiscardInfo {
                 return !param_type.is_mutable_ref || arg_type.is_mutable_ref;
             }
             return body.program != nullptr &&
-                   types_compatible_with_interface_conversion(arg_type, param_type, *body.program, enclosing_class_name(body));
+                   types_compatible_with_base_conversion(arg_type, param_type, *body.program, enclosing_class_name(body));
         }
         return param_type.pointee != nullptr &&
                (types_equal(arg_type, *param_type.pointee) ||
                 (body.program != nullptr &&
-                 types_compatible_with_interface_conversion(arg_type, param_type, *body.program, enclosing_class_name(body))));
+                 types_compatible_with_base_conversion(arg_type, param_type, *body.program, enclosing_class_name(body))));
     }
     if (arg_type.kind == TypeKind::Reference) {
         return (arg_type.pointee != nullptr && types_equal(*arg_type.pointee, param_type)) ||
                (body.program != nullptr &&
-                types_compatible_with_interface_conversion(arg_type, param_type, *body.program, enclosing_class_name(body)));
+                types_compatible_with_base_conversion(arg_type, param_type, *body.program, enclosing_class_name(body)));
     }
     return types_equal(arg_type, param_type) ||
            (body.program != nullptr &&
-            types_compatible_with_interface_conversion(arg_type, param_type, *body.program, enclosing_class_name(body)));
+            types_compatible_with_base_conversion(arg_type, param_type, *body.program, enclosing_class_name(body)));
 }
 
 [[nodiscard]] bool const_reference_binds_materialized_temporary(const Expr& arg, const Type& param_type,
@@ -1673,7 +1673,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
     if (!source_type || source_type->kind != TypeKind::Pointer) return;
     if (raw_pointer_implicitly_convertible(*source_type, target_type)) return;
     if (body.program != nullptr &&
-        types_compatible_with_interface_conversion(*source_type, target_type, *body.program, enclosing_class_name(body))) {
+        types_compatible_with_base_conversion(*source_type, target_type, *body.program, enclosing_class_name(body))) {
         return;
     }
     throw DataflowError("cannot initialize or assign raw pointer '" + target_name +
@@ -3195,8 +3195,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
         std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
         if (source_type.has_value() &&
             !types_equal(*source_type, param_type) &&
-            !types_compatible_with_interface_conversion(*source_type, param_type, *body.program, enclosing_class_name(body))) {
-            throw DataflowError("cannot bind interface-typed reference parameter from an incompatible source type",
+            !types_compatible_with_base_conversion(*source_type, param_type, *body.program, enclosing_class_name(body))) {
+            throw DataflowError("cannot bind reference parameter from an incompatible source type",
                                 state.current_loc);
         }
         }
@@ -3453,6 +3453,30 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
                                       report_errors);
         } else {
+            if (report_errors && sig != nullptr && param_index < sig->param_types.size() &&
+                sig->param_types[param_index].kind == TypeKind::Pointer) {
+                std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
+                auto unwrap_pointer_pointee = [](const Type& type) -> const Type* {
+                    if (type.kind != TypeKind::Pointer || type.pointee == nullptr) return nullptr;
+                    if (type.pointee->kind == TypeKind::Reference && type.pointee->pointee) return &*type.pointee->pointee;
+                    return &*type.pointee;
+                };
+                const Type* arg_pointee = arg_type.has_value() ? unwrap_pointer_pointee(*arg_type) : nullptr;
+                const Type* param_pointee = unwrap_pointer_pointee(sig->param_types[param_index]);
+                bool needs_class_pointer_validation =
+                    body.program != nullptr && arg_pointee != nullptr && param_pointee != nullptr &&
+                    arg_pointee->kind == TypeKind::Named && param_pointee->kind == TypeKind::Named &&
+                    (find_class_def(*body.program, arg_pointee->name) != nullptr ||
+                     find_class_def(*body.program, param_pointee->name) != nullptr);
+                if (needs_class_pointer_validation && arg_type->kind == TypeKind::Pointer &&
+                    !raw_pointer_implicitly_convertible(*arg_type, sig->param_types[param_index]) &&
+                    !types_compatible_with_base_conversion(*arg_type, sig->param_types[param_index], *body.program,
+                                                           enclosing_class_name(body))) {
+                    throw DataflowError("cannot pass an incompatible pointer type to parameter '" +
+                                            sig->param_names[param_index] + "'",
+                                        state.current_loc);
+                }
+            }
             bool class_value_param =
                 sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
@@ -4304,12 +4328,12 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         if (source_type.has_value()) {
             reference_binding_compatible =
                 types_equal(*source_type, stmt.type) ||
-                types_compatible_with_interface_conversion(*source_type, stmt.type, *body.program, state.current_class);
+                types_compatible_with_base_conversion(*source_type, stmt.type, *body.program, state.current_class);
             if (!reference_binding_compatible && stmt.type.pointee != nullptr) {
                 reference_binding_compatible =
                     types_equal(*source_type, *stmt.type.pointee) ||
-                    types_compatible_with_interface_conversion(*source_type, *stmt.type.pointee, *body.program,
-                                                               state.current_class);
+                    types_compatible_with_base_conversion(*source_type, *stmt.type.pointee, *body.program,
+                                                          state.current_class);
             }
         }
         if (!reference_binding_compatible) {
@@ -4846,13 +4870,13 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 if (returned_type.has_value()) {
                     return_type_compatible =
                         types_equal(*returned_type, fn.return_type) ||
-                        types_compatible_with_interface_conversion(*returned_type, fn.return_type, *body.program,
-                                                                   state.current_class);
+                        types_compatible_with_base_conversion(*returned_type, fn.return_type, *body.program,
+                                                              state.current_class);
                     if (!return_type_compatible && fn.return_type.pointee != nullptr) {
                         return_type_compatible =
                             types_equal(*returned_type, *fn.return_type.pointee) ||
-                            types_compatible_with_interface_conversion(*returned_type, *fn.return_type.pointee,
-                                                                       *body.program, state.current_class);
+                            types_compatible_with_base_conversion(*returned_type, *fn.return_type.pointee,
+                                                                  *body.program, state.current_class);
                     }
                 }
                 if (!return_type_compatible) {
@@ -5120,49 +5144,45 @@ void check_function(const Function& fn, const Program& program, const Signatures
     return false;
 }
 
-[[nodiscard]] bool has_accessible_interface_base_conversion(const Program& program, const std::string& source_name,
-                                                            const std::string& target_name,
-                                                            std::string_view current_class) {
+[[nodiscard]] bool has_accessible_base_conversion(const Program& program, const std::string& source_name,
+                                                  const std::string& target_name,
+                                                  std::string_view current_class) {
     if (source_name == target_name) return true;
     const ClassDef* def = find_class_def(program, source_name);
     if (def == nullptr) return false;
     for (const BaseSpecifier& base : def->base_specifiers) {
-        if (base.kind == BaseClassKind::Interface && base.access == AccessSpecifier::Private &&
-            current_class != source_name) {
+        if (base.access == AccessSpecifier::Private && current_class != source_name) {
             continue;
         }
         if (base.base_type.name == target_name) return true;
-        if (has_accessible_interface_base_conversion(program, base.base_type.name, target_name, current_class)) return true;
+        if (has_accessible_base_conversion(program, base.base_type.name, target_name, current_class)) return true;
     }
     return false;
 }
 
-[[nodiscard]] bool types_compatible_with_interface_conversion(const Type& source_type, const Type& target_type,
-                                                              const Program& program, std::string_view current_class) {
+[[nodiscard]] bool types_compatible_with_base_conversion(const Type& source_type, const Type& target_type,
+                                                         const Program& program, std::string_view current_class) {
     if (types_equal(source_type, target_type)) return true;
     if (target_type.kind == TypeKind::Reference && source_type.kind == TypeKind::Reference &&
         !target_type.is_rvalue_ref && !source_type.is_rvalue_ref && target_type.pointee && source_type.pointee) {
         if (target_type.is_mutable_ref && !source_type.is_mutable_ref) return false;
         if (types_equal(*source_type.pointee, *target_type.pointee)) return true;
         return target_type.pointee->kind == TypeKind::Named && source_type.pointee->kind == TypeKind::Named &&
-               type_names_interface(program, target_type.pointee->name) &&
-               has_accessible_interface_base_conversion(program, source_type.pointee->name, target_type.pointee->name,
-                                                        current_class);
+               has_accessible_base_conversion(program, source_type.pointee->name, target_type.pointee->name,
+                                              current_class);
     }
     if (target_type.kind == TypeKind::Reference && source_type.kind != TypeKind::Reference && target_type.pointee) {
         if (types_equal(source_type, *target_type.pointee)) return true;
         return target_type.pointee->kind == TypeKind::Named && source_type.kind == TypeKind::Named &&
-               type_names_interface(program, target_type.pointee->name) &&
-               has_accessible_interface_base_conversion(program, source_type.name, target_type.pointee->name, current_class);
+               has_accessible_base_conversion(program, source_type.name, target_type.pointee->name, current_class);
     }
     if (target_type.kind == TypeKind::Pointer && source_type.kind == TypeKind::Pointer && target_type.pointee &&
         source_type.pointee) {
         if (target_type.is_mutable_pointee && !source_type.is_mutable_pointee) return false;
         if (types_equal(*source_type.pointee, *target_type.pointee)) return true;
         return target_type.pointee->kind == TypeKind::Named && source_type.pointee->kind == TypeKind::Named &&
-               type_names_interface(program, target_type.pointee->name) &&
-               has_accessible_interface_base_conversion(program, source_type.pointee->name, target_type.pointee->name,
-                                                        current_class);
+               has_accessible_base_conversion(program, source_type.pointee->name, target_type.pointee->name,
+                                              current_class);
     }
     return false;
 }
@@ -5472,8 +5492,7 @@ private:
         auto it = class_defs_.find(source_name);
         if (it == class_defs_.end()) return false;
         for (const BaseSpecifier& base : it->second->base_specifiers) {
-            if (base.kind == BaseClassKind::Interface && base.access == AccessSpecifier::Private &&
-                current_class != source_name) {
+            if (base.access == AccessSpecifier::Private && current_class != source_name) {
                 continue;
             }
             if (base.base_type.name == target_name) return true;
@@ -5485,12 +5504,11 @@ private:
     [[nodiscard]] bool named_base_conversion_allowed(const Type& source_type, const Type& target_type,
                                                      std::string_view current_class) const {
         if (source_type.kind != TypeKind::Named || target_type.kind != TypeKind::Named) return false;
-        if (!type_names_interface(target_type.name)) return false;
         return has_accessible_base_conversion(source_type.name, target_type.name, current_class);
     }
 
-    [[nodiscard]] bool types_compatible_for_interface_conversion(const Type& source_type, const Type& target_type,
-                                                                 std::string_view current_class) const {
+    [[nodiscard]] bool types_compatible_for_base_conversion(const Type& source_type, const Type& target_type,
+                                                            std::string_view current_class) const {
         if (types_equal(source_type, target_type)) return true;
         if (target_type.kind == TypeKind::Reference && source_type.kind == TypeKind::Reference &&
             !target_type.is_rvalue_ref && !source_type.is_rvalue_ref && target_type.pointee && source_type.pointee) {

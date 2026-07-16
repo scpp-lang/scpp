@@ -1,0 +1,27 @@
+import std;
+
+class Base {
+public:
+    virtual ~Base() { return; }
+    void tag() const {
+        std::println("Base::tag");
+        return;
+    }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override { return; }
+    void tag() const {
+        std::println("Derived::tag");
+        return;
+    }
+};
+
+int main() {
+    Derived derived{};
+    const Base& base = derived;
+    base.tag();
+    derived.tag();
+    return 0;
+}
