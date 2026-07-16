@@ -1,0 +1,42 @@
+// Multi-level virtual dispatch must use the final overrider regardless of
+// whether the static type is the root, an intermediate base, or the leaf.
+class Root {
+public:
+    virtual ~Root() = default;
+    virtual int level() {
+        return 1;
+    }
+};
+
+class Middle : public Root {
+public:
+    ~Middle() override = default;
+    int level() override {
+        return 2;
+    }
+};
+
+class Leaf : public Middle {
+public:
+    ~Leaf() override = default;
+    int level() override {
+        return 4;
+    }
+};
+
+int from_root(Root& root) {
+    return root.level();
+}
+
+int from_middle(Middle& middle) {
+    return middle.level();
+}
+
+int from_leaf(Leaf& leaf) {
+    return leaf.level();
+}
+
+int main() {
+    Leaf leaf{};
+    return from_root(leaf) + from_middle(leaf) + from_leaf(leaf);
+}

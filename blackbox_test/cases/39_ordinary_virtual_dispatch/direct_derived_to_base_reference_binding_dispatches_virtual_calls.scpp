@@ -1,0 +1,24 @@
+// Direct same-scope binding from a derived object to a base reference now
+// compiles, and virtual calls through that bound reference dispatch to the
+// derived override.
+class Base {
+public:
+    virtual ~Base() = default;
+    virtual int code() {
+        return 2;
+    }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override = default;
+    int code() override {
+        return 8;
+    }
+};
+
+int main() {
+    Derived derived{};
+    Base& base = derived;
+    return base.code();
+}

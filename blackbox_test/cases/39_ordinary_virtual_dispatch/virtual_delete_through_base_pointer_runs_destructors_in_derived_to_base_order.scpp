@@ -1,0 +1,61 @@
+// Ordinary virtual destruction through a base pointer must run the
+// most-derived destructor first, then chain up through the base classes.
+class Base {
+public:
+    int* out{};
+
+    Base(int* value) {
+        this->out = value;
+        return;
+    }
+
+    virtual ~Base() {
+        [[scpp::unsafe]] {
+            int* out = this->out;
+            int current = *out;
+            *out = current * 10 + 3;
+        }
+        return;
+    }
+};
+
+class Mid : public Base {
+public:
+    Mid(int* value) : Base{value} {
+        return;
+    }
+
+    ~Mid() override {
+        [[scpp::unsafe]] {
+            int* out = this->out;
+            int current = *out;
+            *out = current * 10 + 2;
+        }
+        return;
+    }
+};
+
+class Derived : public Mid {
+public:
+    Derived(int* value) : Mid{value} {
+        return;
+    }
+
+    ~Derived() override {
+        [[scpp::unsafe]] {
+            int* out = this->out;
+            int current = *out;
+            *out = current * 10 + 1;
+        }
+        return;
+    }
+};
+
+int main() {
+    int order = 0;
+    [[scpp::unsafe]] {
+        Base* base = new Derived(&order);
+        delete base;
+    }
+    return order;
+}

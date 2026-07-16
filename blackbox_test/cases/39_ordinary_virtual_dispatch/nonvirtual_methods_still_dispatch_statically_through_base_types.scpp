@@ -1,0 +1,33 @@
+// Non-virtual methods remain statically bound: through a base reference or
+// pointer, lookup uses the base's own non-virtual member, not a same-named
+// derived method.
+class Base {
+public:
+    virtual ~Base() = default;
+    int tag() {
+        return 1;
+    }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override = default;
+    int tag() {
+        return 2;
+    }
+};
+
+int main() {
+    Derived ref_target{};
+    Base& base_ref = ref_target;
+    int through_ref = base_ref.tag();
+
+    Derived ptr_target{};
+    Base* base_ptr = &ptr_target;
+    int through_ptr = 0;
+    [[scpp::unsafe]] {
+        through_ptr = base_ptr->tag();
+    }
+
+    return through_ref + through_ptr + ref_target.tag() + ptr_target.tag();
+}

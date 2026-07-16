@@ -1,0 +1,26 @@
+// Ordinary single-inheritance virtual dispatch: a base-class reference bound
+// to a derived object must call the derived override, not the base body.
+class Base {
+public:
+    virtual ~Base() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+class Derived : public Base {
+public:
+    ~Derived() override = default;
+    int value() override {
+        return 7;
+    }
+};
+
+int read_value(Base& base) {
+    return base.value();
+}
+
+int main() {
+    Derived derived{};
+    return read_value(derived);
+}
