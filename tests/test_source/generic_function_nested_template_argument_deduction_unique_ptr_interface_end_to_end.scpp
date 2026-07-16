@@ -1,0 +1,30 @@
+import std;
+
+class [[scpp::interface]] IBase {
+public:
+    virtual ~IBase() { return; }
+    virtual int value() const = 0;
+};
+
+class Impl : public virtual IBase {
+public:
+    ~Impl() override { return; }
+
+    int value() const override {
+        return 42;
+    }
+};
+
+template<typename T, typename U>
+std::unique_ptr<T> cast_unique(std::unique_ptr<U> value) {
+    U* raw = value.release();
+    std::unique_ptr<T> result{raw};
+    return std::move(result);
+}
+
+int main() {
+    std::unique_ptr<Impl> impl = std::make_unique<Impl>();
+    std::unique_ptr<IBase> base = cast_unique<IBase>(std::move(impl));
+    print_int((*base).value());
+    return 0;
+}
