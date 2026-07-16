@@ -6423,6 +6423,11 @@ private:
     // `Vec<int>` used twice in the same program shares one concrete
     // class/method set rather than duplicating it.
     std::unordered_map<std::string, std::string> generic_type_instance_cache_;
+    struct OrdinaryGenericInstanceInfo {
+        std::string template_name;
+        std::vector<Type> type_args;
+    };
+    std::unordered_map<std::string, OrdinaryGenericInstanceInfo> ordinary_generic_instance_info_;
     // ch05 §5.14: every concrete variadic-generic-type instantiation's
     // own recorded (non-type argument values, type arguments) --
     // populated by instantiate_variadic_generic_type, keyed by the
@@ -7998,6 +8003,7 @@ private:
                 concrete.fields.push_back(std::move(nf));
             }
             program_.structs.push_back(std::move(concrete));
+            ordinary_generic_instance_info_[cache_key] = OrdinaryGenericInstanceInfo{template_name, named_concretes};
             return cache_key;
         }
 
@@ -8085,6 +8091,7 @@ private:
                 concrete.fields.push_back(std::move(nf));
             }
             program_.classes.push_back(std::move(concrete));
+            ordinary_generic_instance_info_[cache_key] = OrdinaryGenericInstanceInfo{template_name, named_concretes};
             for (const Function& method_tmpl : methods) {
                 if (!method_tmpl.method_requires_concept.empty()) {
                     auto concept_it = concepts_by_name_.find(method_tmpl.method_requires_concept);
@@ -8903,6 +8910,90 @@ private:
         return true;
     }
 
+    bool deduce_template_bindings_from_type_pattern(
+        const Type& pattern, const Type& concrete, const std::vector<GenericTypeParam>& template_params,
+        std::unordered_map<std::string, Type>& type_bindings, std::unordered_map<std::string, int>& value_bindings,
+        std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
+        (void)value_bindings;
+        if (pattern.kind == TypeKind::Named && pattern.template_args.empty() && pattern.non_type_args.empty()) {
+            for (const GenericTypeParam& tp : template_params) {
+                if (tp.is_non_type || tp.is_pack || tp.name != pattern.name) continue;
+                return bind_type_binding(type_bindings, tp.name, concrete);
+            }
+        }
+
+        if (pattern.kind != concrete.kind) return false;
+        switch (pattern.kind) {
+            case TypeKind::Named: {
+                const std::vector<Type>* concrete_template_args = &concrete.template_args;
+                if (pattern.name != concrete.name) {
+                    auto it = ordinary_generic_instance_info_.find(concrete.name);
+                    if (it == ordinary_generic_instance_info_.end() || it->second.template_name != pattern.name) {
+                        return false;
+                    }
+                    concrete_template_args = &it->second.type_args;
+                }
+                if (!pattern.non_type_args.empty()) return false;
+                size_t pi = 0;
+                size_t ci = 0;
+                for (; pi < pattern.template_args.size(); pi++, ci++) {
+                    if (pattern.template_args[pi].is_pack_expansion) {
+                        std::vector<Type> remaining_types;
+                        for (; ci < concrete_template_args->size(); ci++) remaining_types.push_back((*concrete_template_args)[ci]);
+                        return bind_type_pack_binding(pack_bindings, pattern.template_args[pi].name, remaining_types);
+                    }
+                    if (ci >= concrete_template_args->size()) return false;
+                    if (!deduce_template_bindings_from_type_pattern(pattern.template_args[pi], (*concrete_template_args)[ci],
+                                                                    template_params, type_bindings, value_bindings,
+                                                                    pack_bindings)) {
+                        return false;
+                    }
+                }
+                return ci == concrete_template_args->size();
+            }
+            case TypeKind::Pointer:
+                return pattern.is_mutable_pointee == concrete.is_mutable_pointee && pattern.pointee && concrete.pointee &&
+                       deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
+                                                                  type_bindings, value_bindings, pack_bindings);
+            case TypeKind::Reference:
+                return pattern.is_mutable_ref == concrete.is_mutable_ref &&
+                       pattern.is_rvalue_ref == concrete.is_rvalue_ref && pattern.pointee && concrete.pointee &&
+                       deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
+                                                                  type_bindings, value_bindings, pack_bindings);
+            case TypeKind::Span:
+                return pattern.is_mutable_ref == concrete.is_mutable_ref && pattern.pointee && concrete.pointee &&
+                       deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
+                                                                  type_bindings, value_bindings, pack_bindings);
+            case TypeKind::Array:
+                return pattern.array_size == concrete.array_size && pattern.element && concrete.element &&
+                       deduce_template_bindings_from_type_pattern(*pattern.element, *concrete.element, template_params,
+                                                                  type_bindings, value_bindings, pack_bindings);
+            case TypeKind::Function:
+            case TypeKind::FunctionPointer:
+                if ((pattern.kind == TypeKind::FunctionPointer &&
+                     pattern.is_unsafe_function_pointer != concrete.is_unsafe_function_pointer) ||
+                    (pattern.kind == TypeKind::Function &&
+                     (pattern.is_const_function != concrete.is_const_function ||
+                      pattern.function_ref_qualifier != concrete.function_ref_qualifier)) ||
+                    pattern.function_params.size() != concrete.function_params.size() || !pattern.function_return ||
+                    !concrete.function_return ||
+                    !deduce_template_bindings_from_type_pattern(*pattern.function_return, *concrete.function_return,
+                                                                template_params, type_bindings, value_bindings,
+                                                                pack_bindings)) {
+                    return false;
+                }
+                for (size_t i = 0; i < pattern.function_params.size(); i++) {
+                    if (!deduce_template_bindings_from_type_pattern(pattern.function_params[i], concrete.function_params[i],
+                                                                    template_params, type_bindings, value_bindings,
+                                                                    pack_bindings)) {
+                        return false;
+                    }
+                }
+                return true;
+        }
+        return false;
+    }
+
     [[nodiscard]] static bool type_depends_on_template_params(const Type& type,
                                                              const std::vector<GenericTypeParam>& template_params) {
         if (type.kind == TypeKind::Named) {
@@ -9024,28 +9115,20 @@ private:
                     }
                     const Type& param_type = tmpl.params[i].type;
                     const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
-                    if (underlying.kind != TypeKind::Named) {
-                        arg_cursor++;
-                        continue;
-                    }
-                    if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
-                        for (const GenericTypeParam& tp : tmpl.template_params) {
-                            if (tp.is_non_type || tp.name != underlying.name || type_bindings.contains(tp.name)) continue;
-                            std::optional<Type> arg_type = infer_expr_type(*args[arg_cursor], body, signatures_);
-                            if (!arg_type.has_value()) continue;
-                            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-                            type_bindings[tp.name] = named;
+                    std::optional<Type> arg_type = infer_expr_type(*args[arg_cursor], body, signatures_);
+                    if (arg_type.has_value()) {
+                        Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                        if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
+                            Expr fake_call;
+                            fake_call.loc = loc;
+                            for (const ExprPtr& arg : args) fake_call.args.push_back(clone_expr(*arg));
+                            deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings,
+                                                        value_bindings, pack_bindings,
+                                                        upcasts);
+                        } else {
+                            deduce_template_bindings_from_type_pattern(underlying, concrete, tmpl.template_params,
+                                                                       type_bindings, value_bindings, pack_bindings);
                         }
-                        arg_cursor++;
-                        continue;
-                    }
-                    if (variadic_generic_type_names_.contains(underlying.name)) {
-                        Expr fake_call;
-                        fake_call.loc = loc;
-                        for (const ExprPtr& arg : args) fake_call.args.push_back(clone_expr(*arg));
-                        deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings,
-                                                    value_bindings, pack_bindings,
-                                                    upcasts);
                     }
                     arg_cursor++;
                 }
@@ -9366,28 +9449,10 @@ private:
                 }
                 const Type& param_type = stable_tmpl.params[i].type;
                 const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
-                if (underlying.kind != TypeKind::Named) {
-                    if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
-                        resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
-                    }
-                    arg_cursor++;
-                    continue;
-                }
-
-                if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
-                    for (const GenericTypeParam& tp : stable_tmpl.template_params) {
-                        if (tp.is_non_type || tp.name != underlying.name || resolution.type_bindings.contains(tp.name)) {
-                            continue;
-                        }
-                        std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-                        if (!arg_type.has_value()) return false;
-                        Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-                        if (!bind_type_binding(resolution.type_bindings, tp.name, named)) return false;
-                    }
-                    arg_cursor++;
-                    continue;
-                }
-                if (variadic_generic_type_names_.contains(underlying.name)) {
+                std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+                if (!arg_type.has_value()) return false;
+                Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                     if (argument_type_can_participate_in_variadic_base_deduction(*expr_copy, arg_cursor, underlying.name,
                                                                                  body)) {
                         ExprPtr expr_copy_for_base_deduction = clone_expr(expr);
@@ -9395,16 +9460,17 @@ private:
                                                     resolution.type_bindings, resolution.value_bindings,
                                                     resolution.pack_bindings, resolution.upcasts);
                     }
+                } else {
+                    deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
+                                                               resolution.type_bindings, resolution.value_bindings,
+                                                               resolution.pack_bindings);
+                }
+                if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                     if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
                                                                       resolution.type_bindings,
                                                                       resolution.pack_bindings)) {
                         resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
                     }
-                    arg_cursor++;
-                    continue;
-                }
-                if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
-                    resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
                 }
                 arg_cursor++;
             }
@@ -9705,47 +9771,26 @@ private:
             }
             const Type& param_type = stable_tmpl.params[i].type;
             const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
-            if (underlying.kind != TypeKind::Named) {
-                if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
-                    deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
-                }
-                arg_cursor++;
-                continue;
-            }
-
-            if (underlying.template_args.empty() && underlying.non_type_args.empty()) {
-                // Case A: a bare parameter directly named after one of
-                // this template's own type parameters (e.g. "T x").
-                for (const GenericTypeParam& tp : stable_tmpl.template_params) {
-                    if (tp.is_non_type || tp.name != underlying.name || type_bindings.contains(tp.name)) continue;
-                    std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-                    if (!arg_type.has_value()) continue;
-                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-                    if (!bind_type_binding(type_bindings, tp.name, named)) {
-                        throw DataflowError("deduced type for template parameter '" + tp.name + "' of generic function '" +
-                                                stable_tmpl.name + "' disagrees across arguments",
-                            expr.loc);
+            std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+            if (arg_type.has_value()) {
+                Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
+                    // Case A: a base-class-deduction pattern (e.g.
+                    // "TupleImpl<I, Head, Tail...>& t").
+                    if (argument_type_can_participate_in_variadic_base_deduction(expr, arg_cursor, underlying.name, body)) {
+                        deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings,
+                                                    pack_bindings, upcasts);
                     }
+                } else {
+                    deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
+                                                               type_bindings, value_bindings, pack_bindings);
                 }
-                arg_cursor++;
-                continue;
             }
-            // Case B: a base-class-deduction pattern (e.g.
-            // "TupleImpl<I, Head, Tail...>& t").
-            if (variadic_generic_type_names_.contains(underlying.name)) {
-                if (argument_type_can_participate_in_variadic_base_deduction(expr, arg_cursor, underlying.name, body)) {
-                    deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings,
-                                                pack_bindings, upcasts);
-                }
+            if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                 if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params, type_bindings,
                                                                   pack_bindings)) {
                     deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
                 }
-                arg_cursor++;
-                continue;
-            }
-            if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
-                deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
             }
             arg_cursor++;
         }

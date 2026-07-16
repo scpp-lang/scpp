@@ -1,0 +1,25 @@
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+};
+
+class Sink {
+public:
+    int value{};
+
+    virtual ~Sink() { return; }
+
+    template<typename U>
+    Sink(const Box<U>& box) {
+        this->value = 7;
+        return;
+    }
+};
+
+int main() {
+    Box<int> box{};
+    Sink sink{box};
+    print_int(sink.value);
+    return 0;
+}
