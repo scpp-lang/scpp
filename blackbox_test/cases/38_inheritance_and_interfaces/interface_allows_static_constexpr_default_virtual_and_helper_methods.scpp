@@ -1,0 +1,28 @@
+// spec §11.2(2),(4): an interface may have class-scope static declarations,
+// default virtual implementations, and ordinary helper methods.
+class [[scpp::interface]] ICalculator {
+public:
+    virtual ~ICalculator() = default;
+
+    static int bias() {
+        return 3;
+    }
+
+    virtual int total() {
+        return this->helper() + 3;
+    }
+
+    int helper() {
+        return 4;
+    }
+};
+
+class Counter : public virtual ICalculator {
+public:
+    ~Counter() override = default;
+};
+
+int main() {
+    Counter counter{};
+    return counter.total();
+}

@@ -1,0 +1,29 @@
+// spec §11.2: interfaces may declare constructors, and a concrete class may
+// explicitly initialize a virtual interface base with a non-default
+// constructor. Successful formation of `Tagged` proves that initialization.
+class [[scpp::interface]] ITagged {
+public:
+    ITagged(int tag) {
+        return;
+    }
+
+    virtual ~ITagged() = default;
+
+    virtual int id() {
+        return 7;
+    }
+};
+
+class Tagged : public virtual ITagged {
+public:
+    Tagged() : ITagged{7} {
+        return;
+    }
+
+    ~Tagged() override = default;
+};
+
+int main() {
+    Tagged tagged{};
+    return tagged.id();
+}
