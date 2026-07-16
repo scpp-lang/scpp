@@ -1,0 +1,15 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](21) and (27), plus spec §8.1(3) and
+// §8.2(4): lifetime-group annotations constrain lifetime only and do not
+// relax thread-safety checks. A reference parameter is never
+// thread-movable even if it also carries a named lifetime group.
+void consume(
+    const int& x [[scpp::lifetime(a)]] [[scpp::thread_movable]]
+) {
+    return;
+}
+
+int main() {
+    int x = 5;
+    consume(x);
+    return 0;
+}

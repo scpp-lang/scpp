@@ -1,0 +1,23 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](15), (20), and (22): user-written
+// group names are local to one declaration. A caller/callee pair need not
+// spell the same textual names so long as each declaration's own grouping
+// relation is respected.
+const int& choose_first(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return x;
+}
+
+const int& relay_left(
+    const int& left [[scpp::lifetime(keep)]],
+    const int& right [[scpp::lifetime(drop)]]
+) [[scpp::lifetime(keep)]] {
+    return choose_first(left, right);
+}
+
+int main() {
+    int x = 12;
+    int y = 45;
+    return relay_left(x, y);
+}

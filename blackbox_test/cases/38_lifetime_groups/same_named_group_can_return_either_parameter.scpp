@@ -1,0 +1,15 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](20): when multiple parameters belong
+// to the same named group, the function may return a value derived from
+// any of them.
+const int& min_ref(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(a)]]
+) [[scpp::lifetime(a)]] {
+    return x < y ? x : y;
+}
+
+int main() {
+    int x = 9;
+    int y = 4;
+    return min_ref(x, y);
+}

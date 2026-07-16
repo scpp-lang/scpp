@@ -1,0 +1,15 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](20): a result tied to a shared named
+// group is no longer-lived than the shortest-lived actual argument
+// supplied to any parameter in that group.
+const int& min_ref(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(a)]]
+) [[scpp::lifetime(a)]] {
+    return x < y ? x : y;
+}
+
+int main() {
+    int local = 7;
+    const int& r = min_ref(3, local);
+    return r;
+}

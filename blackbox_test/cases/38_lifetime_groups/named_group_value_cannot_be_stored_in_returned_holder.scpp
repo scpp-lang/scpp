@@ -1,0 +1,16 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](24): only the direct bare return
+// value propagates a lifetime group. Returning an object that stores a
+// named-group-derived reference is ill-formed.
+struct Holder {
+    const int& ref;
+};
+
+Holder bad_named_store(const int& x [[scpp::lifetime(a)]]) {
+    return Holder{x};
+}
+
+int main() {
+    int x = 1;
+    Holder h = bad_named_store(x);
+    return h.ref;
+}

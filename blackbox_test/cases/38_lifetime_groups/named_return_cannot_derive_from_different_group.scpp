@@ -1,0 +1,14 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](19.3): a return tied to group `a`
+// cannot instead be derived from a parameter in different named group `b`.
+const int& bad_mismatch(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return y;
+}
+
+int main() {
+    int x = 3;
+    int y = 4;
+    return bad_mismatch(x, y);
+}

@@ -1,12 +1,13 @@
-// spec §6.2 [dcl.attr.scpp.lifetime]: cross-function named lifetime groups
-// let a return value be tied to one specific parameter even when other
-// parameters belong to different groups.
+// spec §6.2 [dcl.attr.scpp.lifetime](15)-(20): different user-written
+// lifetime-group names are independent, and a return tied to group `a`
+// may return the parameter that is a member of group `a` even when another
+// parameter is in a different named group.
 const int& get_x(const int& x [[scpp::lifetime(a)]], const int& y [[scpp::lifetime(b)]]) [[scpp::lifetime(a)]] {
     return x;
 }
 
 int main() {
-    int a = 1;
+    int a = 99;
     int b = 2;
     return get_x(a, b);
 }

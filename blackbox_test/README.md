@@ -135,6 +135,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `35_random` | `std::random_device`, `std::mt19937`, and `scpp::rand::uniform_int_distribution<int>` |
 | `36_charconv` | `std::from_chars` integer parsing: success, partial consumption, errors, signs, and explicit base |
 | `37_for_loops` | classic `for` loops, range-based `for` over arrays/`std::span`, and iteration-mode mutation rules |
+| `38_lifetime_groups` | spec-driven coverage for cross-function named lifetime groups: named-vs-generic groups, return-group matching, storage/escape rejection, member functions, templates, and thread-safety interaction |
 
 ## Testing philosophy
 

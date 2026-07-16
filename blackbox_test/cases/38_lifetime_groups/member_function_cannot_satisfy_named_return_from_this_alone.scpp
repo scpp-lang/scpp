@@ -1,0 +1,15 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](23): the implicit object parameter
+// cannot bear [[scpp::lifetime(name)]], so a named-group return cannot be
+// justified solely by `this`.
+struct Holder {
+    int value{};
+
+    int& self() [[scpp::lifetime(a)]] {
+        return this->value;
+    }
+};
+
+int main() {
+    Holder holder{};
+    return holder.self();
+}
