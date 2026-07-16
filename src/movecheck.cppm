@@ -733,6 +733,13 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
         }
         return true;
     }
+    for (const StructDef& def : program.structs) {
+        if (def.name != class_name) continue;
+        for (const StructField& f : def.fields) {
+            if (!is_field_copy_constructible(f.type, program)) return false;
+        }
+        return true;
+    }
     return false; // not a recognized class at all
 }
 
@@ -748,6 +755,14 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
     for (const ClassDef& def : program.classes) {
         if (def.name != class_name) continue;
         for (const ClassField& f : def.fields) {
+            if (is_reference(f.type)) return false;
+            if (!is_field_copy_assignable(f.type, program)) return false;
+        }
+        return true;
+    }
+    for (const StructDef& def : program.structs) {
+        if (def.name != class_name) continue;
+        for (const StructField& f : def.fields) {
             if (is_reference(f.type)) return false;
             if (!is_field_copy_assignable(f.type, program)) return false;
         }
@@ -1096,6 +1111,15 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     return false;
 }
 
+[[nodiscard]] bool is_named_record_type_for_call_binding(const Type& type, const Body& body) {
+    if (is_named_class_type(type, body)) return true;
+    if (type.kind != TypeKind::Named || body.program == nullptr) return false;
+    for (const StructDef& def : body.program->structs) {
+        if (def.name == type.name) return true;
+    }
+    return false;
+}
+
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body) {
     if (!candidate.is_compile_time_dependency) return true;
     if (!candidate.owning_module.empty() && candidate.owning_module == body.function_owning_module) return true;
@@ -1149,7 +1173,7 @@ struct NodiscardInfo {
 
 [[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type, const Body& body,
                                                             const Signatures& signatures) {
-    return body.program != nullptr && is_named_class_type(target_type, body) &&
+    return body.program != nullptr && is_named_record_type_for_call_binding(target_type, body) &&
            is_bare_same_type_copy_source(expr, target_type, body, signatures) &&
            is_copy_constructible(target_type.name, *body.program);
 }
@@ -1200,7 +1224,7 @@ struct NodiscardInfo {
         return false;
     }
     if (produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) return true;
-    return is_named_class_type(*param_type.pointee, body) &&
+    return is_named_record_type_for_call_binding(*param_type.pointee, body) &&
            find_single_argument_converting_constructor_signature(*param_type.pointee, arg, body, signatures) != nullptr;
 }
 
@@ -1238,26 +1262,29 @@ struct NodiscardInfo {
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
     if (!arg_type.has_value()) return false;
     if (!argument_type_matches_parameter(*arg_type, param_type, body)) {
-        if (is_named_class_type(param_type, body) &&
+        if (is_named_record_type_for_call_binding(param_type, body) &&
             find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr) {
             return true;
         }
         return false;
     }
-    if (is_named_class_type(param_type, body)) {
+    if (is_named_record_type_for_call_binding(param_type, body)) {
         return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
                produces_rvalue_of_type(arg, param_type, body, signatures);
     }
     return true;
 }
 
-[[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
-                                                                       const Body& body, const Signatures& signatures) {
+[[nodiscard]] bool constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type,
+                                                                   const Body& body, const Signatures& signatures) {
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
         return produces_rvalue_of_type(arg, *param_type.pointee, body, signatures);
     }
     if (is_reference(param_type)) {
-        if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) return true;
+        if (!param_type.is_mutable_ref && param_type.pointee != nullptr &&
+            produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
+            return true;
+        }
         if (arg.kind == ExprKind::Move ||
             arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
             arg.kind == ExprKind::BoolLiteral || arg.kind == ExprKind::CharLiteral ||
@@ -1268,15 +1295,21 @@ struct NodiscardInfo {
         return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type, body);
     }
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-    if (!arg_type.has_value()) return false;
-    if (argument_type_matches_parameter(*arg_type, param_type, body)) return true;
-    return is_named_class_type(param_type, body) &&
-           find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr;
+    if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, param_type, body)) return false;
+    if (is_named_record_type_for_call_binding(param_type, body)) {
+        return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
+               produces_rvalue_of_type(arg, param_type, body, signatures);
+    }
+    return true;
+}
+
+[[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
+                                                                       const Body& body, const Signatures& signatures) {
+    return constructor_parameter_accepts_argument_directly(arg, param_type, body, signatures);
 }
 
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
     const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures) {
-    if (arg.kind != ExprKind::StringLiteral) return nullptr;
     if (class_type.kind != TypeKind::Named) return nullptr;
     auto it = signatures.find(class_type.name + "_new");
     if (it == signatures.end()) return nullptr;
@@ -1289,7 +1322,9 @@ struct NodiscardInfo {
              types_equal(*ctor_param_type.pointee, class_type))) {
             continue;
         }
-        if (argument_matches_parameter(arg, candidate.param_types[1], body, signatures)) return &candidate;
+        if (constructor_parameter_accepts_argument_directly(arg, candidate.param_types[1], body, signatures)) {
+            return &candidate;
+        }
     }
     return nullptr;
 }
@@ -3503,7 +3538,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 }
             }
             bool class_value_param =
-                sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
+                sig != nullptr && param_index < sig->param_types.size() &&
+                is_named_record_type_for_call_binding(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             const FunctionSignature* converting_ctor =
@@ -3612,19 +3648,30 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     auto name_it = signatures.find(ctor_name);
     if (name_it != signatures.end()) {
         const std::vector<FunctionSignature>& candidates = name_it->second;
-        std::vector<const FunctionSignature*> matches;
+        std::vector<const FunctionSignature*> visible_arity_matches;
         for (const FunctionSignature& candidate : candidates) {
             if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
             if (candidate.param_types.size() != ctor_args.size() + 1) continue;
-            bool all_match = true;
-            for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
-                all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                                 candidate.param_types[i + 1], body,
-                                                                                 signatures);
-            }
-            if (all_match) matches.push_back(&candidate);
+            visible_arity_matches.push_back(&candidate);
         }
-        if (matches.size() == 1) sig = matches[0];
+        if (visible_arity_matches.size() == 1) {
+            sig = visible_arity_matches[0];
+        }
+        std::vector<const FunctionSignature*> matches;
+        if (sig == nullptr) {
+            for (const FunctionSignature& candidate : candidates) {
+                if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+                if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+                bool all_match = true;
+                for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
+                    all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
+                                                                                     candidate.param_types[i + 1], body,
+                                                                                     signatures);
+                }
+                if (all_match) matches.push_back(&candidate);
+            }
+            if (matches.size() == 1) sig = matches[0];
+        }
     }
     if (sig == nullptr && report_errors && ctor_args.empty()) {
         static const std::vector<ExprPtr> no_ctor_args;
@@ -3678,7 +3725,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                                       report_errors);
         } else {
             bool class_value_param =
-                sig != nullptr && param_index < sig->param_types.size() && is_named_class_type(sig->param_types[param_index], body);
+                sig != nullptr && param_index < sig->param_types.size() &&
+                is_named_record_type_for_call_binding(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             if (report_errors && class_value_param && !copyable_lvalue_source &&
