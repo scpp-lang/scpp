@@ -936,6 +936,7 @@ struct StructField {
     Type type;
     std::string name;
     std::optional<Initializer> default_initializer;
+    AccessSpecifier access = AccessSpecifier::Public;
 };
 
 struct StructDef {

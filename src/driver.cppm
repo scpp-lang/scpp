@@ -717,6 +717,7 @@ void write_struct_field(std::ostream& out, const StructField& field) {
     write_string(out, field.name);
     write_u8(out, field.default_initializer.has_value() ? 1u : 0u);
     if (field.default_initializer) write_initializer(out, *field.default_initializer);
+    write_enum(out, field.access);
 }
 
 [[nodiscard]] StructField read_struct_field(std::istream& in, const std::string& context) {
@@ -726,6 +727,7 @@ void write_struct_field(std::ostream& out, const StructField& field) {
     if (read_u8(in, context + " default initializer present") != 0u) {
         field.default_initializer = read_initializer(in, context + " default initializer");
     }
+    field.access = read_enum<AccessSpecifier>(in, context + " access");
     return field;
 }
 
