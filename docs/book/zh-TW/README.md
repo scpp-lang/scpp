@@ -21,7 +21,7 @@
 
 - 用 struct 與 class 組織相關資料
   - [定義與實例化 `struct` / `class`](ch05-01-defining-and-instantiating-struct-and-class.md)
-  - 一個使用受檢查 class 的示範程式
+  - [一個使用受檢查 class 的示範程式](ch05-02-an-example-program-using-a-checked-class.md)
   - 方法與 `this`
 
 - 安全邊界與 `[[scpp::unsafe]]`
