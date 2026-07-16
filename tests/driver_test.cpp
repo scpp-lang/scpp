@@ -46,24 +46,6 @@ import scpp.ast;
 #ifndef SCPP_STDLIB_SCPP_INTERFACE_PATH
 #error "SCPP_STDLIB_SCPP_INTERFACE_PATH must be defined by the build"
 #endif
-#ifndef SCPP_STDLIB_CHARCONV_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_CHARCONV_WRAPPER_LIB_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_IO_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_IO_WRAPPER_LIB_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_STRING_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_STRING_WRAPPER_LIB_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH must be defined by the build"
-#endif
-#ifndef SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH
-#error "SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH must be defined by the build"
-#endif
 namespace {
 
 int failures = 0;
@@ -118,9 +100,7 @@ std::unordered_map<std::string, std::string> prebuilt_module_import_paths() {
 }
 
 std::vector<std::string> std_link_inputs() {
-    return {SCPP_STDLIB_CHARCONV_WRAPPER_LIB_PATH, SCPP_STDLIB_IO_WRAPPER_LIB_PATH, SCPP_STDLIB_STRING_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_THREAD_WRAPPER_LIB_PATH, SCPP_STDLIB_PRINT_WRAPPER_LIB_PATH,
-            SCPP_STDLIB_RANDOM_WRAPPER_LIB_PATH};
+    return {};
 }
 
 class TestModuleCache {
@@ -3553,7 +3533,6 @@ void run_cli_extension_tests() {
                         "\n"
                         "[[bin]]\n"
                         "name = \"hello\"\n"
-                        "root = \"src/main.scpp\"\n"
                         "sources = [\"src/**/*.scpp\"]\n");
         write_text_file(src_dir / "helper.scpp",
                         "export module helper;\n"
@@ -3594,13 +3573,12 @@ void run_cli_extension_tests() {
                         "[package]\n"
                         "name = \"app\"\n"
                         "\n"
-                        "[lib]\n"
-                        "root = \"src/mylib.scpp\"\n"
+                        "[[lib]]\n"
+                        "name = \"mylib\"\n"
                         "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[[bin]]\n"
                         "name = \"app\"\n"
-                        "root = \"src/main.scpp\"\n"
                         "sources = [\"src/**/*.scpp\"]\n");
         write_text_file(src_dir / "mylib.scpp",
                         "export module mylib;\n"
@@ -3652,8 +3630,8 @@ void run_cli_extension_tests() {
                         "[package]\n"
                         "name = \"tls\"\n"
                         "\n"
-                        "[lib]\n"
-                        "root = \"src/tls.scpp\"\n"
+                        "[[lib]]\n"
+                        "name = \"tls\"\n"
                         "sources = [\"src/**/*.scpp\"]\n");
         write_text_file(tls_dir / "src" / "tls.scpp",
                         "export module tls;\n"
@@ -3664,8 +3642,8 @@ void run_cli_extension_tests() {
                         "[package]\n"
                         "name = \"net\"\n"
                         "\n"
-                        "[lib]\n"
-                        "root = \"src/net.scpp\"\n"
+                        "[[lib]]\n"
+                        "name = \"net\"\n"
                         "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[dependencies]\n"
@@ -3682,7 +3660,6 @@ void run_cli_extension_tests() {
                         "\n"
                         "[[bin]]\n"
                         "name = \"app\"\n"
-                        "root = \"src/main.scpp\"\n"
                         "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[dependencies]\n"
@@ -3745,8 +3722,7 @@ void run_cli_extension_tests() {
                         "\n"
                         "[[bin]]\n"
                         "name = \"rootapp\"\n"
-                        "root = \"src/main.scpp\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
+                                                "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[dependencies]\n"
                         "tls = { path = \"libs/tls\" }\n");
@@ -3756,8 +3732,8 @@ void run_cli_extension_tests() {
                         "[package]\n"
                         "name = \"tls\"\n"
                         "\n"
-                        "[lib]\n"
-                        "root = \"src/tls.scpp\"\n"
+                        "[[lib]]\n"
+                        "name = \"tls\"\n"
                         "sources = [\"src/**/*.scpp\"]\n");
         write_text_file(dep_dir / "src" / "tls.scpp",
                         "export module tls;\n"
@@ -3788,7 +3764,7 @@ void run_cli_extension_tests() {
         std::filesystem::path build_root = root / ".scpp" / "build" / scpp::host_target_triple() / "dev";
         std::filesystem::path dep_archive = build_root / "dep" / "archives" / "libdep.scppa";
         std::filesystem::path dep_interface = build_root / "dep" / "modules" / "dep.scppm";
-        std::filesystem::path app_object = build_root / "app" / "objects" / "app" / "root.o";
+        std::filesystem::path app_object = build_root / "app" / "objects" / "app" / "0_main_scpp.o";
         std::filesystem::path app_exe = build_root / "app" / "app";
         std::filesystem::path build_db = root / ".scpp" / "cache" / "build.db";
         cases_run++;
@@ -3807,8 +3783,8 @@ void run_cli_extension_tests() {
                         "[package]\n"
                         "name = \"dep\"\n"
                         "\n"
-                        "[lib]\n"
-                        "root = \"src/dep.scpp\"\n"
+                        "[[lib]]\n"
+                        "name = \"dep\"\n"
                         "sources = [\"src/**/*.scpp\"]\n");
         write_text_file(dep_dir / "src" / "dep.scpp",
                         "export module dep;\n"
@@ -3827,8 +3803,7 @@ void run_cli_extension_tests() {
                         "\n"
                         "[[bin]]\n"
                         "name = \"app\"\n"
-                        "root = \"src/main.scpp\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
+                                                "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[dependencies]\n"
                         "dep = { path = \"../dep\" }\n");
@@ -3916,8 +3891,8 @@ void run_cli_extension_tests() {
                         "[package]\n"
                         "name = \"trig\"\n"
                         "\n"
-                        "[lib]\n"
-                        "root = \"src/trig.scpp\"\n"
+                        "[[lib]]\n"
+                        "name = \"trig\"\n"
                         "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[native]\n"
@@ -3936,8 +3911,8 @@ void run_cli_extension_tests() {
                         "[package]\n"
                         "name = \"net\"\n"
                         "\n"
-                        "[lib]\n"
-                        "root = \"src/net.scpp\"\n"
+                        "[[lib]]\n"
+                        "name = \"net\"\n"
                         "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[dependencies]\n"
@@ -3954,7 +3929,6 @@ void run_cli_extension_tests() {
                         "\n"
                         "[[bin]]\n"
                         "name = \"app\"\n"
-                        "root = \"src/main.scpp\"\n"
                         "sources = [\"src/**/*.scpp\"]\n"
                         "\n"
                         "[dependencies]\n"

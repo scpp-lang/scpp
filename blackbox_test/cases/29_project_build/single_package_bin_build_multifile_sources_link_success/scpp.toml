@@ -1,0 +1,9 @@
+manifest-version = 1
+
+[package]
+name = "multibin"
+version = "0.1.0"
+
+[[bin]]
+name = "multibin"
+sources = ["src/**/*.scpp"]

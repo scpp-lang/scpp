@@ -1,0 +1,34 @@
+manifest-version = 1
+
+[package]
+name = "std"
+version = "0.1.0"
+
+[[lib]]
+name = "std"
+sources = ["**/*.scpp"]
+additional_objs = "std-native"
+
+[additional_objs.std-native]
+input = [
+    "string/scpp_string_wrapper.cpp",
+    "charconv/scpp_charconv_wrapper.cpp",
+    "thread/scpp_thread_wrapper.cpp",
+    "print/scpp_print_wrapper.cpp",
+    "random/scpp_random_wrapper.cpp",
+]
+output = [
+    "scpp_string_wrapper.o",
+    "scpp_charconv_wrapper.o",
+    "scpp_thread_wrapper.o",
+    "scpp_print_wrapper.o",
+    "scpp_random_wrapper.o",
+]
+command = """\
+${CXX:-c++} -std=c++26 -O2 -c \
+string/scpp_string_wrapper.cpp \
+charconv/scpp_charconv_wrapper.cpp \
+thread/scpp_thread_wrapper.cpp \
+print/scpp_print_wrapper.cpp \
+random/scpp_random_wrapper.cpp
+"""

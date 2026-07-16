@@ -1,0 +1,1 @@
+REGEX:^[\s\S]*undefined reference to .*main[\s\S]*error: linker command failed: [\s\S]*$

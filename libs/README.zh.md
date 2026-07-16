@@ -15,11 +15,34 @@
 
 | 路径 | 作用 |
 |---|---|
+| `scpp.toml` | `libs/` 的 workspace manifest，用来直接 dogfood `scpp build` |
+| `std/scpp.toml` | `std` 包的 manifest：`[[lib]]` 源集合，加上 `[additional_objs.std-native]` 包装层对象构建步骤 |
 | `std/std.scpp` | `std` 模块的主接口单元；通过 `export import :...;` 重新导出各分区 |
 | `std/` | `std` 模块的各分区和原生包装库 |
+| `scpp/scpp.toml` | `scpp` 包的 manifest；通过 path dependency 依赖 `../std` |
 | `scpp/scpp.scpp` | `scpp` 模块的主接口单元；重新导出 scpp 自己的扩展分区 |
 | `scpp/rand/` | `scpp:rand` 分区，提供 `scpp::rand::uniform_int_distribution<int>` |
-| `CMakeLists.txt` | 构建 `std` / `scpp` 模块及所需的原生辅助库 |
+| `CMakeLists.txt` | 只在 build 树里 staging 一个临时 workspace，执行 `scpp build --lib`，再把最终产物复制回稳定的 `build/libs` 路径 |
+
+## Manifest workspace
+
+现在 `libs/` 自己也使用书里教给用户的 manifest-based flow：
+
+- `libs/scpp.toml` 是一个两成员 workspace（`std`、`scpp`）
+- `libs/std/scpp.toml` 定义 `std` 这个库包
+- `libs/scpp/scpp.toml` 定义 `scpp` 这个库包，并通过 path dependency 依赖 `std`
+
+现在 `libs/` 已经把 wrapper 编译也放进 manifest build 本身：
+
+- `[[lib]]` 声明 scpp 模块源码集合
+- `[additional_objs.std-native]` / `[additional_objs.scpp-native]` 各自执行一次
+  `${CXX:-c++} -c ...`，产出原生 `.o`
+- `additional_objs = "..."` 把这些输出接到最终的 `libstd.scppa` /
+  `libscpp.scppa` 归档里
+
+因此现在唯一留在 manifest 之外的，只剩下一层很小的 CMake staging：在
+build 树里准备一次性 workspace，执行 workspace build，再把产物复制回顶层
+其余构建逻辑已经消费的稳定路径。
 
 ## 如何使用 `std`
 
@@ -34,8 +57,7 @@ import std;
 ```sh
 scpp app.scpp -o app \
   --import std=libs/std/std.scpp \
-  --import scpp=libs/scpp/scpp.scpp \
-  --link build/libs/libscpp_string_wrapper.a
+  --import scpp=libs/scpp/scpp.scpp
 ```
 
 说明：
@@ -44,8 +66,8 @@ scpp app.scpp -o app \
   `import std:string;` 或 `import std:memory;`
 - `libs/scpp/scpp.scpp` 负责聚合 scpp 自己的扩展分区；只有显式
   `import scpp;` 才会使用它们
-- 只有需要原生辅助库的分区才需要 `--link`。当前只有 `std:string`
-  需要；`std:memory` 是纯 scpp，不需要额外原生库
+- 原生辅助对象已经打包进随工具分发的 `libstd.scppa` / `libscpp.scppa`，
+  普通使用者不再需要单独传 wrapper `--link`
 - 各分区会和主接口单元一起编译成同一个 `std` 模块目标文件，不存在文本拼接
 
 ## 当前分区

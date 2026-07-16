@@ -308,13 +308,12 @@ manifest-version = 1
 name = "httpserver"
 version = "0.1.0"          # required for packaging, recommended otherwise
 
-[lib]
-root = "src/httpserver.scpp"
+[[lib]]
+name = "httpserver"
 sources = ["src/**/*.scpp"]
 
 [[bin]]
 name = "httpserver"
-root = "src/main.scpp"
 sources = ["src/**/*.scpp"]
 
 [dependencies]
@@ -352,16 +351,18 @@ search = ["native/lib"]
 - `[package]`
   - `name`（必需）
   - `version`（`scpp package` 必需，其余情况可选但推荐）
-- `[lib]`
-  - `root`
+- `[[lib]]`
+  - `name`
   - `sources`
+  - 可选 `additional_objs`
 - `[[bin]]`
   - `name`
-  - `root`
   - `sources`
+  - 可选 `additional_objs`
 - `[dependencies]`
 - `[profile.dev]`、`[profile.release]`、可选的自定义 `[profile.<name>]`
 - `[native]`，用于 package 级原生链接需求
+- `[additional_objs.<name>]`，用于可被 target 引用、能产出额外对象文件的自定义构建步骤
 - `[package.metadata]`，预留给外部工具
 
 推荐的 v1 限制：**每个 package 最多一个 library target**。
@@ -409,7 +410,6 @@ version = "0.1.0"
 
 [[bin]]
 name = "httpserver"
-root = "src/main.scpp"
 sources = ["src/**/*.scpp"]
 
 [dependencies]
@@ -499,10 +499,17 @@ json = { workspace = true }
 
 ## 8.1 manifest 声明的源码集合
 
-每个 target（`[lib]`、`[[bin]]`）都应声明：
+每个 target（`[[lib]]`、`[[bin]]`）都应声明：
 
-- 一个 `root` 文件；
+- 一个 `name` 字段（`[[lib]]` 的产物名或 `[[bin]]` 的可执行文件名）；
 - 一组 `sources` glob。
+- 可选的 `additional_objs` 引用，用来点名一个或多个 `[additional_objs.<name>]` 步骤。
+
+每个 `[additional_objs.<name>]` block 声明：
+
+- `input` —— 参与增量判断的输入文件；
+- `output` —— 该命令必须产出的文件；
+- `command` —— 只执行一次的 shell 命令；它产出的对象文件会被送入最终的归档 / 链接步骤。
 
 然后构建工具解析列出的源文件，以发现：
 
@@ -606,7 +613,7 @@ scpp package
 
 行为：
 
-- 仅对带 `[lib]` 的 package 有效；
+- 仅对带 `[[lib]]` 的 package 有效；
 - 在所选 profile / target 下构建该 package；
 - 按照现有规范，将生成的 `.scppm` / `.scppa` 制品和 manifest 元数据一起打包进 `.scppkg` 文件。[^scppkg-spec]
 
@@ -876,7 +883,7 @@ scpp gen --backend ninja
 ## Phase B —— manifest 解析器 + 单 package 构建
 
 1. 解析 `scpp.toml`
-2. 支持 `[package]`、`[lib]`、`[[bin]]`、`[profile.*]`
+2. 支持 `[package]`、`[[lib]]`、`[[bin]]`、`[profile.*]`
 3. 构建一个不含外部依赖的 manifest-based package
 4. 将本地输出写到 `.scpp/build/...`
 

@@ -37,7 +37,6 @@ version = "0.1.0"
 
 [[bin]]
 name = "guessing-game"
-root = "src/main.scpp"
 sources = ["src/**/*.scpp"]
 ```
 

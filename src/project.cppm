@@ -21,6 +21,7 @@ module;
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -121,6 +122,50 @@ std::string strip_toml_comment(std::string_view line) {
 }
 
 std::string parse_string_literal(std::string_view text, const std::string& context) {
+    auto parse_multiline_basic_string = [&](std::string_view body) {
+        std::string inner(body);
+        if (inner.starts_with("\r\n")) {
+            inner.erase(0, 2);
+        } else if (!inner.empty() && inner.front() == '\n') {
+            inner.erase(0, 1);
+        }
+
+        std::string out;
+        out.reserve(inner.size());
+        for (size_t i = 0; i < inner.size(); i++) {
+            char ch = inner[i];
+            if (ch == '\\') {
+                if (i + 1 < inner.size() && (inner[i + 1] == '\n' || inner[i + 1] == '\r')) {
+                    i++;
+                    if (inner[i] == '\r' && i + 1 < inner.size() && inner[i + 1] == '\n') i++;
+                    while (i + 1 < inner.size() &&
+                           (inner[i + 1] == ' ' || inner[i + 1] == '\t' || inner[i + 1] == '\n' ||
+                            inner[i + 1] == '\r')) {
+                        i++;
+                    }
+                    continue;
+                }
+                if (i + 1 >= inner.size()) {
+                    throw ManifestError(context + " ends with an incomplete escape sequence");
+                }
+                i++;
+                switch (inner[i]) {
+                    case '"': out.push_back('"'); break;
+                    case '\\': out.push_back('\\'); break;
+                    case 'n': out.push_back('\n'); break;
+                    case 't': out.push_back('\t'); break;
+                    default: throw ManifestError(context + " contains an unsupported escape sequence");
+                }
+                continue;
+            }
+            out.push_back(ch);
+        }
+        return out;
+    };
+
+    if (text.size() >= 6 && text.substr(0, 3) == "\"\"\"" && text.substr(text.size() - 3) == "\"\"\"") {
+        return parse_multiline_basic_string(text.substr(3, text.size() - 6));
+    }
     if (text.size() < 2 || text.front() != '"' || text.back() != '"') {
         throw ManifestError(context + " must be a TOML string");
     }
@@ -148,6 +193,68 @@ std::string parse_string_literal(std::string_view text, const std::string& conte
     }
     if (escape) throw ManifestError(context + " ends with an incomplete escape sequence");
     return out;
+}
+
+bool starts_multiline_basic_string(std::string_view text) {
+    std::string value = trim(text);
+    return value.size() >= 3 && value.substr(0, 3) == "\"\"\"";
+}
+
+bool closes_multiline_basic_string(std::string_view text) {
+    if (!starts_multiline_basic_string(text)) return false;
+    std::string value = trim(text);
+    return value.find("\"\"\"", 3) != std::string::npos;
+}
+
+bool top_level_delimiters_balanced(std::string_view text) {
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    bool in_string = false;
+    bool escape = false;
+    for (char ch : text) {
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (in_string) {
+            if (ch == '\\') {
+                escape = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (ch == '"') {
+            in_string = true;
+            continue;
+        }
+        if (ch == '[') bracket_depth++;
+        else if (ch == ']') bracket_depth--;
+        else if (ch == '{') brace_depth++;
+        else if (ch == '}') brace_depth--;
+    }
+    return !in_string && !escape && bracket_depth == 0 && brace_depth == 0;
+}
+
+std::string read_manifest_value(std::string value, std::ifstream& input, int& line_number,
+                                const std::filesystem::path& manifest_path) {
+    value = trim(value);
+    bool needs_multiline_string = starts_multiline_basic_string(value) && !closes_multiline_basic_string(value);
+    bool needs_balanced_collection =
+        (!value.empty() && (value.front() == '[' || value.front() == '{')) && !top_level_delimiters_balanced(value);
+    if (!needs_multiline_string && !needs_balanced_collection) return value;
+
+    std::string continued;
+    while (std::getline(input, continued)) {
+        line_number++;
+        value += "\n";
+        value += strip_toml_comment(continued);
+        if (needs_multiline_string && value.find("\"\"\"", 3) != std::string::npos) return value;
+        if (needs_balanced_collection && top_level_delimiters_balanced(value)) return value;
+    }
+    throw ManifestError(manifest_path.string() + ":" + std::to_string(line_number) +
+                        (needs_multiline_string ? ": unterminated multiline TOML string"
+                                                : ": unterminated multiline TOML collection"));
 }
 
 bool parse_bool_literal(std::string_view text, const std::string& context) {
@@ -219,6 +326,12 @@ std::vector<std::string> parse_string_array(std::string_view text, const std::st
         items.push_back(parse_string_literal(entry, context));
     }
     return items;
+}
+
+std::vector<std::string> parse_string_or_array(std::string_view text, const std::string& context) {
+    std::string value = trim(text);
+    if (!value.empty() && value.front() == '[') return parse_string_array(value, context);
+    return {parse_string_literal(value, context)};
 }
 
 std::unordered_map<std::string, std::string> parse_inline_table(std::string_view text, const std::string& context) {
@@ -506,10 +619,16 @@ struct NativeRequirements {
     std::vector<std::filesystem::path> search_paths;
 };
 
+struct CustomCommand {
+    std::vector<std::filesystem::path> input_paths;
+    std::vector<std::filesystem::path> output_paths;
+    std::string command;
+};
+
 struct ManifestTarget {
     std::string name;
-    std::filesystem::path root;
     std::vector<std::string> source_patterns;
+    std::vector<std::string> additional_obj_steps;
 };
 
 struct ManifestData {
@@ -518,6 +637,7 @@ struct ManifestData {
     std::optional<std::string> package_version;
     std::optional<ManifestTarget> lib_target;
     std::vector<ManifestTarget> bin_targets;
+    std::map<std::string, CustomCommand> custom_commands;
     std::map<std::string, ProfileSettings> profiles;
     std::unordered_set<std::string> explicit_profiles;
     std::filesystem::path manifest_path;
@@ -567,6 +687,7 @@ struct PackageBuildResult {
     std::filesystem::path package_output_root;
     std::vector<BuiltModule> library_modules;
     std::vector<std::filesystem::path> binaries;
+    std::unordered_map<std::string, std::vector<std::filesystem::path>> custom_outputs;
     std::unordered_map<std::string, std::string> exported_modules;
     std::unordered_map<std::string, std::string> closure_import_paths;
     std::unordered_map<std::string, std::string> closure_module_owners;
@@ -595,6 +716,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
         Package,
         Lib,
         Bin,
+        Custom,
         Profile,
         Dependencies,
         Native,
@@ -606,6 +728,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
 
     Section current_section = Section::Root;
     std::string current_profile;
+    std::string current_custom;
     ManifestTarget* current_bin = nullptr;
 
     std::string line;
@@ -626,25 +749,46 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                                         ": malformed array-of-table header");
                 }
                 std::string section_name = trim(stripped.substr(2, stripped.size() - 4));
-                if (section_name != "bin") {
+                if (section_name == "bin") {
+                    manifest.bin_targets.emplace_back();
+                    current_bin = &manifest.bin_targets.back();
+                    current_section = Section::Bin;
+                    continue;
+                }
+                if (section_name == "lib") {
+                    if (manifest.lib_target.has_value()) {
+                        throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
+                                            ": multiple [[lib]] targets are not implemented yet");
+                    }
+                    manifest.lib_target = ManifestTarget{};
+                    current_section = Section::Lib;
+                    continue;
+                }
+                {
                     throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
                                         ": unsupported array-of-table [[" + section_name + "]]");
                 }
-                manifest.bin_targets.emplace_back();
-                current_bin = &manifest.bin_targets.back();
-                current_section = Section::Bin;
-                continue;
             }
             std::string section_name = trim(stripped.substr(1, stripped.size() - 2));
             if (section_name == "package") {
                 current_section = Section::Package;
             } else if (section_name == "lib") {
-                current_section = Section::Lib;
-                if (!manifest.lib_target.has_value()) manifest.lib_target = ManifestTarget{};
+                throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
+                                    ": [lib] has been replaced by [[lib]]");
             } else if (section_name == "dependencies") {
                 current_section = Section::Dependencies;
             } else if (section_name == "native") {
                 current_section = Section::Native;
+            } else if (section_name.rfind("additional_objs.", 0) == 0) {
+                current_section = Section::Custom;
+                current_custom = section_name.substr(std::string("additional_objs.").size());
+                if (current_custom.empty()) {
+                    throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
+                                        ": additional_objs section name cannot be empty");
+                }
+                if (!manifest.custom_commands.contains(current_custom)) {
+                    manifest.custom_commands.emplace(current_custom, CustomCommand{});
+                }
             } else if (section_name == "workspace") {
                 current_section = Section::Workspace;
                 if (!manifest.workspace.has_value()) manifest.workspace = WorkspaceConfig{};
@@ -679,7 +823,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                                 ": expected key = value");
         }
         std::string key = trim(stripped.substr(0, eq));
-        std::string value = trim(stripped.substr(eq + 1));
+        std::string value = read_manifest_value(stripped.substr(eq + 1), input, line_number, manifest.manifest_path);
         std::string context = manifest.manifest_path.string() + ":" + std::to_string(line_number) + ": " + key;
 
         switch (current_section) {
@@ -700,24 +844,46 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                 }
                 break;
             case Section::Lib:
-                if (key == "root") {
-                    manifest.lib_target->root = parse_string_literal(value, context);
+                if (key == "name") {
+                    manifest.lib_target->name = parse_string_literal(value, context);
                 } else if (key == "sources") {
                     manifest.lib_target->source_patterns = parse_string_array(value, context);
+                } else if (key == "additional_objs") {
+                    manifest.lib_target->additional_obj_steps = parse_string_or_array(value, context);
                 } else {
-                    throw ManifestError(context + " is not supported in [lib]");
+                    throw ManifestError(context + " is not supported in [[lib]]");
                 }
                 break;
             case Section::Bin:
                 if (current_bin == nullptr) throw ManifestError(context + " is outside a [[bin]] table");
                 if (key == "name") {
                     current_bin->name = parse_string_literal(value, context);
-                } else if (key == "root") {
-                    current_bin->root = parse_string_literal(value, context);
                 } else if (key == "sources") {
                     current_bin->source_patterns = parse_string_array(value, context);
+                } else if (key == "additional_objs") {
+                    current_bin->additional_obj_steps = parse_string_or_array(value, context);
                 } else {
                     throw ManifestError(context + " is not supported in [[bin]]");
+                }
+                break;
+            case Section::Custom:
+                if (!manifest.custom_commands.contains(current_custom)) {
+                    throw ManifestError(context + " is outside an [additional_objs.<name>] table");
+                }
+                if (key == "input") {
+                    manifest.custom_commands[current_custom].input_paths.clear();
+                    for (const std::string& path : parse_string_array(value, context)) {
+                        manifest.custom_commands[current_custom].input_paths.emplace_back(path);
+                    }
+                } else if (key == "output") {
+                    manifest.custom_commands[current_custom].output_paths.clear();
+                    for (const std::string& path : parse_string_array(value, context)) {
+                        manifest.custom_commands[current_custom].output_paths.emplace_back(path);
+                    }
+                } else if (key == "command") {
+                    manifest.custom_commands[current_custom].command = parse_string_literal(value, context);
+                } else {
+                    throw ManifestError(context + " is not supported in [additional_objs." + current_custom + "]");
                 }
                 break;
             case Section::Profile:
@@ -797,26 +963,45 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
     }
     if (!manifest.package_name.has_value()) {
         if (manifest.lib_target.has_value() || !manifest.bin_targets.empty() || !manifest.dependencies.empty()) {
-            throw ManifestError("a virtual workspace manifest cannot declare [lib], [[bin]], or [dependencies]");
+            throw ManifestError("a virtual workspace manifest cannot declare [[lib]], [[bin]], or [dependencies]");
         }
         return manifest;
     }
     if (!manifest.lib_target.has_value() && manifest.bin_targets.empty()) {
-        throw ManifestError("manifest must declare at least one [lib] or [[bin]] target");
+        throw ManifestError("manifest must declare at least one [[lib]] or [[bin]] target");
     }
     if (manifest.lib_target.has_value()) {
-        if (manifest.lib_target->root.empty()) throw ManifestError("[lib].root is required");
-        if (manifest.lib_target->source_patterns.empty()) throw ManifestError("[lib].sources is required");
+        if (manifest.lib_target->name.empty()) throw ManifestError("[[lib]].name is required");
+        if (manifest.lib_target->source_patterns.empty()) throw ManifestError("[[lib]].sources is required");
     }
     std::unordered_set<std::string> bin_names;
     for (const ManifestTarget& bin : manifest.bin_targets) {
         if (bin.name.empty()) throw ManifestError("[[bin]].name is required");
-        if (bin.root.empty()) throw ManifestError("[[bin]].root is required");
         if (bin.source_patterns.empty()) throw ManifestError("[[bin]].sources is required");
         if (!bin_names.insert(bin.name).second) {
             throw ManifestError("duplicate [[bin]] target name '" + bin.name + "'");
         }
     }
+    for (const auto& [name, custom] : manifest.custom_commands) {
+        if (custom.input_paths.empty()) throw ManifestError("[additional_objs." + name + "].input is required");
+        if (custom.output_paths.empty()) throw ManifestError("[additional_objs." + name + "].output is required");
+        if (custom.command.empty()) throw ManifestError("[additional_objs." + name + "].command is required");
+    }
+    auto validate_custom_refs = [&](const ManifestTarget& target, std::string_view label) {
+        std::unordered_set<std::string> seen;
+        for (const std::string& step_name : target.additional_obj_steps) {
+            if (!manifest.custom_commands.contains(step_name)) {
+                throw ManifestError(std::string(label) + " target '" + target.name +
+                                    "' references unknown [additional_objs." + step_name + "]");
+            }
+            if (!seen.insert(step_name).second) {
+                throw ManifestError(std::string(label) + " target '" + target.name +
+                                    "' references duplicate custom step '" + step_name + "'");
+            }
+        }
+    };
+    if (manifest.lib_target.has_value()) validate_custom_refs(*manifest.lib_target, "[[lib]]");
+    for (const ManifestTarget& bin : manifest.bin_targets) validate_custom_refs(bin, "[[bin]]");
     return manifest;
 }
 
@@ -850,15 +1035,13 @@ std::regex glob_to_regex(std::string_view pattern) {
 }
 
 std::vector<std::filesystem::path> expand_source_patterns(const std::filesystem::path& base_dir,
-                                                          const std::vector<std::string>& patterns,
-                                                          const std::filesystem::path& root) {
+                                                          const std::vector<std::string>& patterns) {
     std::vector<std::regex> matchers;
     for (const std::string& pattern : patterns) {
         matchers.push_back(glob_to_regex(std::filesystem::path(pattern).generic_string()));
     }
     std::set<std::filesystem::path> paths;
     std::error_code ec;
-    if (std::filesystem::exists(root)) paths.insert(normalized_path(root));
     std::filesystem::recursive_directory_iterator end;
     for (std::filesystem::recursive_directory_iterator it(base_dir, ec); it != end && !ec; it.increment(ec)) {
         if (ec || !it->is_regular_file()) continue;
@@ -978,20 +1161,14 @@ std::vector<std::string> topo_sort_modules(const std::map<std::string, SourceInf
 }
 
 std::vector<SourceInfo> classify_target_sources(const std::filesystem::path& manifest_dir, const ManifestTarget& target) {
-    std::filesystem::path root = normalized_path(manifest_dir / target.root);
-    if (!std::filesystem::exists(root)) {
-        throw BuildError("target root '" + (manifest_dir / target.root).string() + "' does not exist");
+    std::vector<std::filesystem::path> source_paths = expand_source_patterns(manifest_dir, target.source_patterns);
+    if (source_paths.empty()) {
+        throw BuildError("target sources globs matched no files");
     }
-    std::vector<std::filesystem::path> source_paths = expand_source_patterns(manifest_dir, target.source_patterns, root);
-    bool found_root = false;
     std::vector<SourceInfo> sources;
     for (const std::filesystem::path& source_path : source_paths) {
         SourceInfo info = classify_source(source_path);
-        if (normalized_path(source_path) == root) found_root = true;
         sources.push_back(std::move(info));
-    }
-    if (!found_root) {
-        throw BuildError("target root '" + root.string() + "' is not covered by the declared sources globs");
     }
     return sources;
 }
@@ -1036,6 +1213,7 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
                                                   const std::unordered_map<std::string, std::string>& base_import_paths,
                                                   int opt_level,
                                                   const ManifestData& manifest,
+                                                  const ManifestTarget* target,
                                                   std::string_view profile_name,
                                                   BuildDatabase& database) {
     std::map<std::string, SourceInfo> primary_modules;
@@ -1088,6 +1266,14 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
         if (degree == 0) ready.push_back(name);
     }
     std::sort(ready.begin(), ready.end());
+    if (target != nullptr) {
+        if (primary_modules.empty()) {
+            throw BuildError("[[lib]] target must contain exactly one primary interface module");
+        }
+        if (primary_modules.size() != 1) {
+            throw BuildError("[[lib]] target must contain exactly one primary interface module");
+        }
+    }
     const std::string manifest_key = manifest_digest(manifest);
     const std::string compiler_key = compiler_version_key();
     while (!ready.empty()) {
@@ -1098,7 +1284,9 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
             futures.push_back(std::async(std::launch::async, [&, module_name]() -> BuiltModule {
                 const SourceInfo& source = primary_modules.at(module_name);
                 std::filesystem::path interface_path = module_dir / (module_name + ".scppm");
-                std::filesystem::path archive_path = archive_dir / ("lib" + module_name + ".scppa");
+                std::string archive_base_name =
+                    (target != nullptr && !target->name.empty()) ? target->name : module_name;
+                std::filesystem::path archive_path = archive_dir / ("lib" + archive_base_name + ".scppa");
                 std::string module_source = read_file(source.path);
                 std::vector<std::string> dep_keys;
                 for (const std::string& imported : source.imported_modules) {
@@ -1215,6 +1403,69 @@ void append_unique_strings(std::vector<std::string>& into, const std::vector<std
     for (const std::string& value : extra) {
         if (std::find(into.begin(), into.end(), value) == into.end()) into.push_back(value);
     }
+}
+
+std::string quote_for_shell(const std::string& text) {
+    std::string quoted = "\"";
+    for (char ch : text) {
+        if (ch == '"' || ch == '\\' || ch == '$' || ch == '`') quoted.push_back('\\');
+        quoted.push_back(ch);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+
+std::optional<std::string> find_program_on_path(const std::string& program) {
+    if (program.empty()) return std::nullopt;
+    const char* path_env = std::getenv("PATH");
+    if (path_env == nullptr || path_env[0] == '\0') return std::nullopt;
+    std::stringstream stream(path_env);
+    std::string dir;
+    while (std::getline(stream, dir, ':')) {
+        if (dir.empty()) continue;
+        std::filesystem::path candidate = std::filesystem::path(dir) / program;
+        if (access(candidate.c_str(), X_OK) == 0) return candidate.string();
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> default_custom_step_cxx() {
+    const char* env = std::getenv("CXX");
+    if (env != nullptr && env[0] != '\0') return std::string(env);
+    for (const std::string& candidate : {"clang++", "clang++-22", "g++", "c++"}) {
+        if (std::optional<std::string> resolved = find_program_on_path(candidate); resolved.has_value()) {
+            return resolved;
+        }
+    }
+    return std::nullopt;
+}
+
+void prepare_custom_workdir(const std::filesystem::path& manifest_dir, const std::filesystem::path& work_dir) {
+    std::filesystem::create_directories(work_dir);
+    for (const auto& entry : std::filesystem::directory_iterator(manifest_dir)) {
+        std::filesystem::path link_path = work_dir / entry.path().filename();
+        if (entry.path().filename() == ".scpp") continue;
+        std::error_code ec;
+        std::filesystem::remove_all(link_path, ec);
+        if (entry.is_directory()) {
+            std::filesystem::create_directory_symlink(entry.path(), link_path, ec);
+        } else {
+            std::filesystem::create_symlink(entry.path(), link_path, ec);
+        }
+        if (ec) {
+            throw BuildError("failed to prepare custom step workdir entry '" + link_path.string() +
+                             "': " + ec.message());
+        }
+    }
+}
+
+std::vector<std::string> path_digests(const std::vector<std::filesystem::path>& paths) {
+    std::vector<std::string> digests;
+    digests.reserve(paths.size());
+    for (const std::filesystem::path& path : paths) {
+        digests.push_back(path.string() + "#" + path_digest_or_empty(path));
+    }
+    return digests;
 }
 
 std::vector<std::string> expand_native_link_inputs(const ManifestData& manifest) {
@@ -1484,7 +1735,7 @@ public:
                     build_package(dep_manifest_path, /*build_binaries=*/false, scpp::ProjectBuildOptions{});
                 if (dep_result.library_modules.empty()) {
                     throw BuildError("dependency package '" + *dep_result.manifest.package_name +
-                                     "' does not provide a [lib] target");
+                                     "' does not provide a [[lib]] target");
                 }
                 for (const auto& [module_name, interface_path] : dep_result.exported_modules) {
                     auto [it, inserted] = direct_import_paths.emplace(module_name, interface_path);
@@ -1509,6 +1760,30 @@ public:
             }
 
             std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
+            std::unordered_set<std::string> referenced_custom_steps;
+            if (manifest.lib_target.has_value()) {
+                referenced_custom_steps.insert(manifest.lib_target->additional_obj_steps.begin(),
+                                               manifest.lib_target->additional_obj_steps.end());
+            }
+            if (build_binaries) {
+                if (options.selected_bin.has_value()) {
+                    auto it = std::find_if(manifest.bin_targets.begin(), manifest.bin_targets.end(),
+                                           [&](const ManifestTarget& target) { return target.name == *options.selected_bin; });
+                    if (it == manifest.bin_targets.end()) {
+                        throw ManifestError("unknown [[bin]] target '" + *options.selected_bin + "'");
+                    }
+                    referenced_custom_steps.insert(it->additional_obj_steps.begin(), it->additional_obj_steps.end());
+                } else {
+                    for (const ManifestTarget& target : manifest.bin_targets) {
+                        referenced_custom_steps.insert(target.additional_obj_steps.begin(), target.additional_obj_steps.end());
+                    }
+                }
+            }
+            for (const std::string& step_name : referenced_custom_steps) {
+                result.custom_outputs.emplace(step_name,
+                                              build_custom_step_with_cache(manifest, result.package_output_root, step_name));
+            }
+
             std::unordered_set<std::string> own_library_module_names;
             if (manifest.lib_target.has_value()) {
                 std::vector<SourceInfo> lib_sources = classify_target_sources(manifest_dir, *manifest.lib_target);
@@ -1518,9 +1793,18 @@ public:
                 result.library_modules = build_modules_for_target(lib_sources, result.package_output_root / "modules",
                                                                  result.package_output_root / "archives",
                                                                  full_dependency_import_paths, profile.opt_level,
-                                                                 manifest, profile_name_, database_);
+                                                                 manifest, &*manifest.lib_target, profile_name_,
+                                                                 database_);
+                std::vector<std::filesystem::path> lib_custom_outputs = collect_custom_outputs(result, *manifest.lib_target);
+                if (!lib_custom_outputs.empty()) {
+                    std::vector<std::string> archive_inputs;
+                    for (const std::filesystem::path& path : lib_custom_outputs) archive_inputs.push_back(path.string());
+                    scpp::archive_objects(archive_inputs, result.library_modules.front().archive_path.string());
+                    result.library_modules.front().archive_digest =
+                        path_digest_or_empty(result.library_modules.front().archive_path);
+                }
             } else if (options.build_lib_only) {
-                throw ManifestError("manifest has no [lib] target");
+                throw ManifestError("manifest has no [[lib]] target");
             }
 
             result.exported_modules = to_import_map(result.library_modules);
@@ -1540,9 +1824,6 @@ public:
                 if (options.selected_bin.has_value()) {
                     auto it = std::find_if(manifest.bin_targets.begin(), manifest.bin_targets.end(),
                                            [&](const ManifestTarget& target) { return target.name == *options.selected_bin; });
-                    if (it == manifest.bin_targets.end()) {
-                        throw ManifestError("unknown [[bin]] target '" + *options.selected_bin + "'");
-                    }
                     build_binary_target(manifest, *it, direct_import_paths, full_dependency_import_paths,
                                         transitive_only_modules, result, profile);
                 } else {
@@ -1615,6 +1896,114 @@ private:
         Failed,
     };
 
+    std::vector<std::filesystem::path> build_custom_step_with_cache(const ManifestData& manifest,
+                                                                    const std::filesystem::path& package_output_root,
+                                                                    const std::string& step_name) {
+        const auto step_it = manifest.custom_commands.find(step_name);
+        if (step_it == manifest.custom_commands.end()) {
+            throw BuildError("unknown additional_objs step '" + step_name + "' in '" + manifest.manifest_path.string() + "'");
+        }
+        const CustomCommand& step = step_it->second;
+        std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
+        std::filesystem::path work_dir = package_output_root / "custom" / sanitize_filename(step_name);
+
+        std::vector<std::filesystem::path> inputs;
+        inputs.reserve(step.input_paths.size());
+        for (const std::filesystem::path& input : step.input_paths) {
+            std::filesystem::path resolved = input.is_absolute() ? normalized_path(input) : normalized_path(manifest_dir / input);
+            if (!std::filesystem::exists(resolved)) {
+                throw BuildError("[additional_objs." + step_name + "] input '" + resolved.string() + "' does not exist");
+            }
+            inputs.push_back(std::move(resolved));
+        }
+
+        std::vector<std::filesystem::path> outputs;
+        outputs.reserve(step.output_paths.size());
+        for (const std::filesystem::path& output : step.output_paths) {
+            std::filesystem::path resolved = output.is_absolute() ? output.lexically_normal() : (work_dir / output).lexically_normal();
+            outputs.push_back(std::move(resolved));
+        }
+
+        std::vector<std::string> input_keys = path_digests(inputs);
+        std::sort(input_keys.begin(), input_keys.end());
+        std::vector<std::string> output_keys;
+        output_keys.reserve(outputs.size());
+        for (const std::filesystem::path& output : outputs) output_keys.push_back(output.string());
+        std::sort(output_keys.begin(), output_keys.end());
+
+        std::string signature = fnv1a64_hex(join_for_digest({
+            "kind=custom",
+            "manifest=" + manifest_digest(manifest),
+            "profile=" + profile_name_,
+            "compiler=" + compiler_version_key(),
+            "command=" + step.command,
+            "inputs=" + join_for_digest(input_keys),
+            "outputs=" + join_for_digest(output_keys),
+        }));
+        std::string record_key =
+            "custom|" + manifest.manifest_path.string() + "|" + profile_name_ + "|" + step_name;
+
+        bool outputs_exist = std::all_of(outputs.begin(), outputs.end(),
+                                         [](const std::filesystem::path& output) { return std::filesystem::exists(output); });
+        if (std::optional<BuildRecord> cached = database_.get(record_key); cached.has_value() &&
+            cached->signature == signature && outputs_exist) {
+            trace_build("cache hit custom " + step_name);
+            return outputs;
+        }
+
+        prepare_custom_workdir(manifest_dir, work_dir);
+        for (const std::filesystem::path& output : outputs) {
+            if (output.has_parent_path()) std::filesystem::create_directories(output.parent_path());
+        }
+
+        trace_build("run custom " + step_name);
+        std::string command = "cd " + quote_for_shell(work_dir.string()) + " && ";
+        if (std::getenv("CXX") == nullptr || std::getenv("CXX")[0] == '\0') {
+            if (std::optional<std::string> cxx = default_custom_step_cxx(); cxx.has_value()) {
+                command += "export CXX=" + quote_for_shell(*cxx) + " && ";
+            }
+        }
+        command += step.command;
+        int result = std::system(command.c_str());
+        if (result != 0) {
+            throw BuildError("[additional_objs." + step_name + "] command failed: " + command);
+        }
+        for (const std::filesystem::path& output : outputs) {
+            if (!std::filesystem::exists(output)) {
+                throw BuildError("[additional_objs." + step_name + "] did not produce expected output '" + output.string() + "'");
+            }
+        }
+
+        std::vector<std::string> output_digests = path_digests(outputs);
+        std::sort(output_digests.begin(), output_digests.end());
+        database_.put(BuildRecord{
+            record_key,
+            "custom",
+            signature,
+            {},
+            {},
+            join_for_digest(output_digests),
+            join_for_digest(output_keys),
+            manifest_digest(manifest),
+            compiler_version_key(),
+            scpp::host_target_triple(),
+        });
+        return outputs;
+    }
+
+    std::vector<std::filesystem::path> collect_custom_outputs(const PackageBuildResult& result,
+                                                              const ManifestTarget& target) const {
+        std::vector<std::filesystem::path> outputs;
+        for (const std::string& step_name : target.additional_obj_steps) {
+            auto it = result.custom_outputs.find(step_name);
+            if (it == result.custom_outputs.end()) {
+                throw BuildError("custom step '" + step_name + "' was not built for target '" + target.name + "'");
+            }
+            append_unique_paths(outputs, it->second);
+        }
+        return outputs;
+    }
+
     void build_binary_target(const ManifestData& manifest,
                              const ManifestTarget& bin_target,
                              const std::unordered_map<std::string, std::string>& direct_dep_import_paths,
@@ -1624,7 +2013,6 @@ private:
                              const ProfileSettings& profile) {
         std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
         std::vector<SourceInfo> sources = classify_target_sources(manifest_dir, bin_target);
-        std::filesystem::path root = normalized_path(manifest_dir / bin_target.root);
 
         std::unordered_map<std::string, std::string> base_import_paths = full_dependency_import_paths;
         append_import_maps(base_import_paths, result.exported_modules);
@@ -1654,7 +2042,7 @@ private:
 
         std::vector<BuiltModule> local_modules_built =
             build_modules_for_target(local_module_sources, module_dir, archive_dir, base_import_paths, profile.opt_level,
-                                     manifest, profile_name_, database_);
+                                     manifest, nullptr, profile_name_, database_);
         std::unordered_map<std::string, std::string> compile_import_paths = base_import_paths;
         append_import_maps(compile_import_paths, to_import_map(local_modules_built));
 
@@ -1663,7 +2051,7 @@ private:
         std::vector<std::filesystem::path> plain_objects;
         size_t plain_index = 0;
         for (const SourceInfo& source : sources) {
-            if (source.path == root || source.kind != SourceInfo::Kind::Plain) continue;
+            if (source.kind != SourceInfo::Kind::Plain) continue;
             std::filesystem::path object_path = object_dir / (std::to_string(plain_index++) + "_" +
                                                               sanitize_filename(source.path.filename().string()) + ".o");
             build_object_with_cache("plain:" + bin_target.name + ":" + std::to_string(plain_index - 1), manifest, source,
@@ -1671,11 +2059,10 @@ private:
             plain_objects.push_back(object_path);
         }
 
-        std::filesystem::path root_object = object_dir / "root.o";
-        build_object_with_cache("root:" + bin_target.name, manifest, find_source_info(sources, root), root_object,
-                                compile_import_paths, profile);
-
         std::vector<std::string> extra_link_inputs;
+        for (const std::filesystem::path& custom_output : collect_custom_outputs(result, bin_target)) {
+            extra_link_inputs.push_back(custom_output.string());
+        }
         for (const std::filesystem::path& object_path : plain_objects) extra_link_inputs.push_back(object_path.string());
         for (auto it = local_modules_built.rbegin(); it != local_modules_built.rend(); ++it) {
             extra_link_inputs.push_back(it->archive_path.string());
@@ -1690,7 +2077,6 @@ private:
         std::filesystem::path executable_path = result.package_output_root / bin_target.name;
         std::string binary_key = "binary|" + manifest.manifest_path.string() + "|" + profile_name_ + "|" + bin_target.name;
         std::vector<std::string> binary_inputs{
-            "root=" + path_digest_or_empty(root_object),
             "manifest=" + manifest_digest(manifest),
             "profile=" + profile_name_,
             "triple=" + scpp::host_target_triple(),
@@ -1714,7 +2100,7 @@ private:
             trace_build("cache hit link " + executable_path.string());
         } else {
             trace_build("link binary " + executable_path.string());
-            scpp::link_executable(root_object.string(), executable_path.string(), extra_link_inputs, profile.static_link);
+            scpp::link_executable(extra_link_inputs, executable_path.string(), profile.static_link);
             database_.put(BuildRecord{
                 binary_key,
                 "binary",
@@ -1732,13 +2118,6 @@ private:
         if (std::find(result.binaries.begin(), result.binaries.end(), executable_path) == result.binaries.end()) {
             result.binaries.push_back(executable_path);
         }
-    }
-
-    SourceInfo find_source_info(const std::vector<SourceInfo>& sources, const std::filesystem::path& path) const {
-        auto it = std::find_if(sources.begin(), sources.end(),
-                               [&](const SourceInfo& source) { return source.path == path; });
-        if (it == sources.end()) throw BuildError("target root source '" + path.string() + "' was not classified");
-        return *it;
     }
 
     void build_object_with_cache(const std::string& key_suffix,

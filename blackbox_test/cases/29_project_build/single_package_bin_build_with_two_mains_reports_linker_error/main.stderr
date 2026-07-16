@@ -1,0 +1,1 @@
+REGEX:^[\s\S]*(multiple definition of .*main|defined multiple times.*main)[\s\S]*error: linker command failed: [\s\S]*$

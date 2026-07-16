@@ -1362,8 +1362,14 @@ LoadedModuleFile read_module_file(const std::string& path) {
     return loaded;
 }
 
-void create_archive(const std::string& object_path, const std::string& archive_path) {
-    std::string command = "ar rcs \"" + archive_path + "\" \"" + object_path + "\"";
+void create_archive(const std::vector<std::string>& object_paths, const std::string& archive_path) {
+    if (object_paths.empty()) {
+        throw DriverError("archive command requires at least one object file for '" + archive_path + "'");
+    }
+    std::string command = "ar rcs \"" + archive_path + "\"";
+    for (const std::string& object_path : object_paths) {
+        command += " \"" + object_path + "\"";
+    }
     int result = std::system(command.c_str());
     if (result != 0) {
         throw DriverError("archive command failed: " + command);
@@ -1439,12 +1445,6 @@ void create_archive(const std::string& object_path, const std::string& archive_p
         if (!lib_dir.has_value()) continue;
         append_if_exists(*lib_dir / "libstd.scppa");
         append_if_exists(*lib_dir / "libscpp.scppa");
-        append_if_exists(*lib_dir / "libscpp_charconv_wrapper.a");
-        append_if_exists(*lib_dir / "libscpp_io_wrapper.a");
-        append_if_exists(*lib_dir / "libscpp_string_wrapper.a");
-        append_if_exists(*lib_dir / "libscpp_thread_wrapper.a");
-        append_if_exists(*lib_dir / "libscpp_print_wrapper.a");
-        append_if_exists(*lib_dir / "libscpp_random_wrapper.a");
     }
     return result;
 }
@@ -1770,6 +1770,46 @@ public:
     // each cached module's Program is only ever handed to that one
     // separate-compilation call, never read again afterward.
     [[nodiscard]] Program& program_for(const std::string& module_name) { return cache_.at(module_name); }
+    [[nodiscard]] static std::string unescape_json_string(std::string_view text) {
+        std::string out;
+        out.reserve(text.size());
+        for (size_t i = 0; i < text.size(); i++) {
+            char ch = text[i];
+            if (ch == '\\' && i + 1 < text.size()) {
+                char next = text[++i];
+                switch (next) {
+                    case '\\': out.push_back('\\'); break;
+                    case '"': out.push_back('"'); break;
+                    case 'n': out.push_back('\n'); break;
+                    case 'r': out.push_back('\r'); break;
+                    case 't': out.push_back('\t'); break;
+                    default: out.push_back(next); break;
+                }
+            } else {
+                out.push_back(ch);
+            }
+        }
+        return out;
+    }
+    [[nodiscard]] static std::optional<std::string> archive_from_metadata(const std::filesystem::path& metadata_path,
+                                                                           const std::string& module_name) {
+        if (!std::filesystem::exists(metadata_path)) return std::nullopt;
+        std::ifstream file(metadata_path);
+        if (!file) return std::nullopt;
+        std::string line;
+        const std::string name_needle = "\"name\": \"" + module_name + "\"";
+        const std::string archive_needle = "\"archive\": \"";
+        while (std::getline(file, line)) {
+            if (line.find(name_needle) == std::string::npos) continue;
+            size_t archive_pos = line.find(archive_needle);
+            if (archive_pos == std::string::npos) continue;
+            archive_pos += archive_needle.size();
+            size_t archive_end = line.find('"', archive_pos);
+            if (archive_end == std::string::npos) continue;
+            return unescape_json_string(std::string_view(line).substr(archive_pos, archive_end - archive_pos));
+        }
+        return std::nullopt;
+    }
     [[nodiscard]] std::optional<std::string> archive_for(const std::string& module_name) const {
         auto path_it = resolved_paths_.find(module_name);
         if (path_it == resolved_paths_.end()) return std::nullopt;
@@ -1781,6 +1821,12 @@ public:
         if (interface_path.parent_path().filename() == "modules") {
             candidates.push_back(interface_path.parent_path().parent_path() / "archives" /
                                  ("lib" + module_name + ".scppa"));
+            if (std::optional<std::string> metadata_archive =
+                    archive_from_metadata(interface_path.parent_path().parent_path() / "package-metadata.json",
+                                          module_name);
+                metadata_archive.has_value()) {
+                candidates.push_back(*metadata_archive);
+            }
         }
         for (const std::filesystem::path& archive_path : candidates) {
             if (std::filesystem::exists(archive_path)) return archive_path.string();
@@ -2057,7 +2103,7 @@ void emit_module_archive_for_program(Program& program, const std::string& archiv
     object_path.replace_extension(".scppo");
     emit_object_file_for_program(program, object_path.string(), /*emit_debug_info=*/false, opt_level);
     try {
-        create_archive(object_path.string(), archive_path);
+        create_archive({object_path.string()}, archive_path);
     } catch (...) {
         llvm::sys::fs::remove(object_path.string());
         throw;
@@ -2135,19 +2181,26 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
+void archive_objects(const std::vector<std::string>& object_paths, const std::string& archive_path) {
+    create_archive(object_paths, archive_path);
+}
+
 // Links a native object file into an executable using the system compiler
 // driver (clang/cc); this keeps us out of the business of re-implementing a
 // platform linker for M1. `extra_link_inputs` is appended verbatim after the
-// scpp object file -- additional .o/.a paths (e.g. a separately-built
-// `extern "C"` wrapper library, see libs/README.md, or another module's
-// own compiled object file, see compile_to_executable below) or
+// scpp object file -- additional .o/.a paths (e.g. manifest-built native
+// helper objects/archives, see libs/README.md, or another module's own
+// compiled object file, see compile_to_executable below) or
 // `-lname`/`-Lpath` flags a caller wants forwarded straight to the linker;
 // empty by default (an ordinary, no-C++-interop build needs none of this).
-void link_executable(const std::string& object_path, const std::string& executable_path,
-                      const std::vector<std::string>& extra_link_inputs = {}, bool static_link = false) {
-    std::string command = "cc \"" + object_path + "\"";
+void link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
+                     bool static_link = false) {
+    if (link_inputs.empty()) {
+        throw DriverError("linker command requires at least one input for '" + executable_path + "'");
+    }
+    std::string command = "cc";
     if (static_link) command += " -static";
-    for (const std::string& input : extra_link_inputs) {
+    for (const std::string& input : link_inputs) {
         command += " \"" + input + "\"";
     }
     // A wrapper library that itself calls into real C++ (e.g. std::string)
@@ -2155,7 +2208,7 @@ void link_executable(const std::string& object_path, const std::string& executab
     // doesn't pull that in automatically the way `c++`/`clang++` would.
     // Only added when there's an actual C++ wrapper to support, so a plain
     // scpp-only build's link command is unaffected.
-    if (!extra_link_inputs.empty()) command += " -lstdc++";
+    if (!link_inputs.empty()) command += " -lstdc++";
     command += " -o \"" + executable_path + "\"";
     int result = std::system(command.c_str());
     if (result != 0) {
@@ -2221,7 +2274,9 @@ void compile_to_executable(std::string_view source, const std::string& executabl
             }
         }
     }
-    link_executable(object_path, executable_path, link_inputs, static_link);
+    std::vector<std::string> final_link_inputs = {object_path};
+    final_link_inputs.insert(final_link_inputs.end(), link_inputs.begin(), link_inputs.end());
+    link_executable(final_link_inputs, executable_path, static_link);
 
     llvm::sys::fs::remove(object_path);
     for (const std::string& module_object_path : module_object_paths) {

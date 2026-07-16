@@ -4,6 +4,6 @@ manifest-version = 1
 name = "minlib"
 version = "0.1.0"
 
-[lib]
-root = "src/minlib.scpp"
+[[lib]]
+name = "minlib"
 sources = ["src/**/*.scpp"]
