@@ -1,0 +1,29 @@
+// spec §8.5(6): a reference-to-interface parameter annotated
+// `[[scpp::thread_shareable]]` checks the caller's concrete argument type,
+// even if the interface itself carries no class-level requirement.
+class [[scpp::interface]] IView {
+public:
+    virtual ~IView() = default;
+    virtual void render() const = 0;
+};
+
+class BadView : public virtual IView {
+private:
+    int* raw_{};
+public:
+    ~BadView() override = default;
+
+    void render() const override {
+        return;
+    }
+};
+
+void publish(IView& view [[scpp::thread_shareable]]) {
+    return;
+}
+
+int main() {
+    BadView bad{};
+    publish(bad);
+    return 0;
+}

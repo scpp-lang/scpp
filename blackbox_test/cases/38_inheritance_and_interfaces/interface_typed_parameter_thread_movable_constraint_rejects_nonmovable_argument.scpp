@@ -1,0 +1,35 @@
+// spec §8.5(6) together with §8.1(3): a reference-to-interface parameter
+// annotated `[[scpp::thread_movable]]` rejects a caller argument whose
+// concrete type is not thread-movable.
+class [[scpp::interface]] IJob {
+public:
+    virtual ~IJob() = default;
+    virtual void run() = 0;
+};
+
+class StickyJob : public virtual IJob {
+private:
+    int& ref_;
+public:
+    StickyJob(int& ref) : ref_{ref} {
+        return;
+    }
+
+    ~StickyJob() override = default;
+
+    void run() override {
+        return;
+    }
+};
+
+void launch(IJob& job [[scpp::thread_movable]]) {
+    job.run();
+    return;
+}
+
+int main() {
+    int value = 0;
+    StickyJob job{value};
+    launch(job);
+    return 0;
+}
