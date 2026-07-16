@@ -209,6 +209,190 @@ object，因为它没有别名化任何预先存在的对象或范围。
 并不是这种别名。无论哪一种绑定，本身都不会让完整对象进入 moved-out
 状态。——注释结束】
 
+
+### 跨函数生命周期分组 [dcl.attr.scpp.lifetime]
+
+(13) attribute-token `scpp::lifetime` 可以出现在一个
+*attribute-specifier-seq*（[dcl.attr.grammar]）里，并且附着于：
+
+  (13.1) 一个参数声明，并且该参数的类型是引用类型、指针类型、
+  `std::span<T>` 或者 `std::span<const T>`；或者
+
+  (13.2) 一个这类函数或者成员函数的声明符，并且它的返回类型是引用类型、
+  指针类型、`std::span<T>` 或者 `std::span<const T>`。
+
+如果它出现在别的位置，程序就是不合法（ill-formed）的。
+
+(14) `[[scpp::lifetime(name)]]` 恰好带一个实参。这个实参必须是一个标识符。
+
+(15) 除 `generic` 之外，这种标识符就是一个用户写出的分组名。用户写出的分组名
+只在单个函数或者成员函数声明内部有效。同样的拼写，如果出现在两个不同的声明里，
+不表示任何关系；如果在同一个这类声明里重复同样的拼写，它们表示同一个
+具名生命周期分组；如果拼写不同，它们表示不同的具名生命周期分组。
+
+(16) 标识符 `generic` 是保留的。每一个带
+`[[scpp::lifetime(generic)]]` 的参数，都表示一个全新的、由编译器合成的
+生命周期分组；它跟下列每一项都不同：
+
+  (16.1) 任何用户写出的分组；并且
+
+  (16.2) 任何别的 `generic` 出现处，包括同一个声明里的另一个这种参数。
+
+一个 `generic` 分组不会引入一个之后还可以被返回注解或者别的参数再次引用的
+名字。
+
+(17) 如果一个参数声明带有 `[[scpp::lifetime(name)]]`，并且 `name` 是用户
+写出的分组名，那么这个参数就是分组 `name` 的成员。一个没有
+`scpp::lifetime` attribute 的参数，不属于任何具名生命周期分组。
+
+(18) 如果一个这类函数或者成员函数的声明符带有
+`[[scpp::lifetime(name)]]`，那么它返回的那个引用、指针或者
+span 值，就绑定到分组 `name`。如果出现下列任一情况，
+程序不合法（ill-formed）：
+
+  (18.1) 返回类型不是 (13.2) 里的那类可用类型；
+
+  (18.2) `name` 是 `generic`；或者
+
+  (18.3) 这个声明里没有任何参数属于分组 `name`。
+
+(19) 一个绑定到分组 `name` 的值，只能从下列来源导出：
+
+  (19.1) 一个或多个属于分组 `name` 的参数；或者
+
+  (19.2) 通过 (19.1) 那样的值可以触达的子对象、数组元素、基类子对象、
+  pointee 或者连续范围。
+
+如果一个绑定到分组 `name` 的返回值，实际上却是从下列来源导出的，那么程序
+不合法（ill-formed）：
+
+  (19.3) 另一个不同具名分组里的参数；
+
+  (19.4) 一个带 `generic` 标签的参数；或者
+
+  (19.5) 一个局部对象、临时对象，或者其它没有被证明能活过这次调用的状态。
+
+(20) 如果多个参数属于同一个具名分组，那么这个函数可以在任何“需要该分组”
+的地方，返回或者转发一个从这些参数中的任意一个导出的值。在调用点，一个绑定到
+该分组的结果，会被视为至多和传给该分组全部参数里的“最短寿命那个实际实参”一样长。
+不同具名分组里的参数，在生命周期上彼此独立，除非本文档的其它规则又把它们关联起来。
+
+(21) 生命周期分组的身份只约束生命周期本身。它不会放宽 aliasing、mutability、
+线程安全属性，或者 `[[scpp::unsafe]]` 的要求。尤其是：给一个裸指针加上
+`[[scpp::lifetime(name)]]`，并不会允许它在 `[[scpp::unsafe]]` 之外被解引用。
+
+(22) 用户写出的分组名是声明局部的，并且只按 α-等价比较。一个这类声明里
+对另一个这类声明的调用，不会跨声明按文本拼写去比较生命周期分组名；检查器会用
+被调用方自己的分组关系，去判断哪些实际实参会影响它按 (18)-(20) 返回出来的
+那个可用返回值。至于一个从该分组导出的值，能不能被嵌进对象状态里，则单独由
+(24) 约束。
+
+(23) 一个非 static 成员函数，可以像自由函数一样，在它的显式参数上使用具名
+生命周期分组。就本小节而言，一次对非 static 成员函数的调用，会额外提供一个
+引用类型的隐式对象参数：对非 `const` 成员函数来说是 `C&`，对 `const`
+成员函数来说是 `const C&`；任何经由这个隐式对象参数形成的 borrow 或 reborrow，
+都受 6.2(7)-(12) 约束。这个隐式对象参数不能带 `[[scpp::lifetime(name)]]`，
+并且它本身不会单独引入一个用户写出的分组名。因此，如果一个成员函数显式写了
+`[[scpp::lifetime(name)]]` 返回注解，那么除非它的某个显式参数属于分组 `name`，
+否则这个程序就是不合法（ill-formed）的；一个只从 `this` 导出的值，不能满足
+这个要求。
+
+(24) 用一个“从具名生命周期分组导出的引用、指针或者 span”去构造对象、闭包，
+或者其它会被存起来的状态，并不会抹掉这个分组原本的生命周期义务。本小节只给
+(18)-(20) 里那种“函数或者成员函数直接返回出来的值”定义了生命周期分组传播；
+它没有定义任何机制，让一个 class、struct、union、数组、闭包，或者其它对象
+类型本身也带一个具名生命周期分组参数。因此，如果一个从具名分组或者从
+`[[scpp::lifetime(generic)]]` 导出的引用、指针或者 span，会被拿去初始化或赋值给
+这类对象的任意一个子对象，那么程序就是不合法（ill-formed）的。这包括：返回
+`Holder{x}`（其中 `Holder` 含有一个用 `x` 初始化的引用成员）、把这样的值存进
+某个数据成员或数组元素，或者把它 capture 进闭包。这个禁止项不妨碍 6.2(7)-(12)
+下的普通局部 reborrow，也不妨碍把这样的值作为实参继续传给另一个调用。
+
+(25) 生命周期分组注解可以按跟非模板完全相同的规则，出现在函数模板上，或者出现在
+类模板成员上。模板实参替换既不会创建新分组，也不会合并已有分组；它只是把同一套
+“声明局部的分组关系”实例化到特化后的签名上。
+
+(26) 同一个函数或者成员函数的两个声明，在生命周期分组注解上必须一致；判断“一致”
+时，允许对用户写出的分组名做一次前后一致的重命名。生命周期分组注解是函数签名里跟安全相关的事实；但重载解析不得仅仅因为生命周期分组注解不同，就把两个函数
+当成可区分的不同重载。
+
+(27) 生命周期分组注解不会修改一个类型在 §8 下的布局、triviality、thread-movable
+值或者 thread-shareable 值。如果同一个声明上还带有线程安全 attribute，那么两套
+要求会彼此独立、同时生效。
+
+下面这些声明是良构的：
+
+```cpp
+const int& get_x(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return x;
+}
+
+const int& min_ref(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(a)]]
+) [[scpp::lifetime(a)]] {
+    return x < y ? x : y;
+}
+
+const int* pick_right(
+    const int* left [[scpp::lifetime(a)]],
+    const int* right [[scpp::lifetime(b)]]
+) [[scpp::lifetime(b)]] {
+    return right;
+}
+
+const int& keep_head(
+    const int& head [[scpp::lifetime(head_life)]],
+    int& scratch [[scpp::lifetime(generic)]]
+) [[scpp::lifetime(head_life)]] {
+    scratch = 0;
+    return head;
+}
+```
+
+下面这些声明是不合法（ill-formed）的：
+
+```cpp
+const int& bad_unknown(
+    const int& x [[scpp::lifetime(a)]]
+) [[scpp::lifetime(b)]] {
+    return x;
+}
+// 不合法：没有任何参数引入 `b`
+
+const int& bad_mismatch(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return y;
+}
+// 不合法：返回引用来自分组 `b`，不是 `a`
+
+struct Holder {
+    const int& ref;
+};
+
+Holder bad_named_store(const int& x [[scpp::lifetime(a)]]) {
+    return Holder{x};
+}
+// 不合法：本小节没有提供让 `Holder` 携带分组 `a` 的机制
+
+const int& bad_generic_return(
+    const int& x [[scpp::lifetime(generic)]]
+) [[scpp::lifetime(generic)]] {
+    return x;
+}
+// 不合法：`generic` 是保留名，不能被返回注解点名
+
+Holder bad_store(const int& x [[scpp::lifetime(generic)]]) {
+    return Holder{x};
+}
+// 不合法：从 `generic` 导出的值被存进了返回状态
+```
+
 ## 6.3 析构（Destruction）[class.dtor]
 
 (1) 在一个对象的存储期结束时，如果这个对象处于 initialized 状态
