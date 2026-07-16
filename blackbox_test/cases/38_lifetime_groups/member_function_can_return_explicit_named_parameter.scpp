@@ -1,0 +1,16 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](23): a non-static member function may
+// use named lifetime groups on its explicit parameters under the same
+// rules as a free function.
+struct Relay {
+    const int& choose(
+        const int& candidate [[scpp::lifetime(a)]]
+    ) [[scpp::lifetime(a)]] {
+        return candidate;
+    }
+};
+
+int main() {
+    Relay relay{};
+    int value = 77;
+    return relay.choose(value);
+}

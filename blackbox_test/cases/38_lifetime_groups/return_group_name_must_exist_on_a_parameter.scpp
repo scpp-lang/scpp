@@ -1,0 +1,12 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](18.3): a named return group is
+// ill-formed if no parameter of that declaration belongs to that group.
+const int& bad_unknown(
+    const int& x [[scpp::lifetime(a)]]
+) [[scpp::lifetime(b)]] {
+    return x;
+}
+
+int main() {
+    int x = 1;
+    return bad_unknown(x);
+}

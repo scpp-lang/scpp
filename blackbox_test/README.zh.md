@@ -121,6 +121,7 @@ cmake --build build
 | `35_random` | `std::random_device`、`std::mt19937` 和 `scpp::rand::uniform_int_distribution<int>` |
 | `36_charconv` | `std::from_chars` 整数解析：成功路径、部分消费、错误码、符号和显式进制 |
 | `37_for_loops` | 经典 `for`、基于范围的 `for`（数组/`std::span`）以及不同迭代绑定模式下的可变性规则 |
+| `38_lifetime_groups` | 形式化规范驱动的跨函数命名生命周期分组覆盖：命名组 vs `generic`、返回组匹配、存储/逃逸拒绝、成员函数、模板以及与线程安全属性的交互 |
 
 ## 测试理念
 

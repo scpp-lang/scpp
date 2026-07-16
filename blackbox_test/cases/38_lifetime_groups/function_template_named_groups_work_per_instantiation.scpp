@@ -1,0 +1,16 @@
+// spec §6.2 [dcl.attr.scpp.lifetime](25): lifetime-group annotations are
+// permitted on function templates, and each instantiation preserves that
+// declaration-local grouping relation.
+template<typename T>
+const T& first(
+    const T& x [[scpp::lifetime(a)]],
+    const T& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return x;
+}
+
+int main() {
+    int x = 31;
+    int y = 8;
+    return first(x, y);
+}
