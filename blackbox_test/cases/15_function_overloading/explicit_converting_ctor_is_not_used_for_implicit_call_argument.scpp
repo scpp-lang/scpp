@@ -1,0 +1,18 @@
+// front matter §1(2): ordinary C++26 still governs constructor explicitness.
+// An `explicit` constructor is not a converting constructor, so an implicit
+// call-site conversion must be rejected cleanly rather than crashing.
+class Token {
+public:
+    int value{};
+
+    explicit Token(int initial_value) : value{initial_value} {}
+    virtual ~Token() { return; }
+};
+
+int read(Token token) {
+    return token.value;
+}
+
+int main() {
+    return read(5);
+}

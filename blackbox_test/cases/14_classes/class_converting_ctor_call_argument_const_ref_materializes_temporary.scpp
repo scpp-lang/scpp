@@ -1,0 +1,17 @@
+// spec §6.2(11.2) + §6.6(9): the same temporary-materialization rule for a
+// `const T&` call parameter applies to `class` just as it does to `struct`.
+class Inches {
+public:
+    int value{};
+
+    Inches(int initial_value) : value{initial_value} {}
+    virtual ~Inches() { return; }
+};
+
+int read(const Inches& inches) {
+    return inches.value == 12 ? 0 : 1;
+}
+
+int main() {
+    return read(12);
+}

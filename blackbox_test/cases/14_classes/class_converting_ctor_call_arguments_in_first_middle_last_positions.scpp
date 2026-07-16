@@ -1,0 +1,41 @@
+// C++26 converting-constructor semantics plus SCPP's call-parameter rules
+// permit materializing class temporaries for by-value call arguments. Cover
+// first/middle/last parameter positions and distinct source types.
+class Width {
+public:
+    int value{};
+
+    Width(int initial_value) : value{initial_value} {}
+    virtual ~Width() { return; }
+};
+
+class Enabled {
+public:
+    bool value{};
+
+    Enabled(bool initial_value) : value{initial_value} {}
+    virtual ~Enabled() { return; }
+};
+
+class Tag {
+public:
+    const char* text{};
+
+    Tag(const char* initial_text) : text{initial_text} {}
+    virtual ~Tag() { return; }
+};
+
+int combine(Width width, Enabled enabled, Tag tag) {
+    int result = width.value * 10;
+    if (enabled.value) {
+        result = result + 7;
+    }
+    if (tag.text[0] == 'x' && tag.text[1] == '\0') {
+        result = result + 4;
+    }
+    return result;
+}
+
+int main() {
+    return combine(3, true, "x");
+}

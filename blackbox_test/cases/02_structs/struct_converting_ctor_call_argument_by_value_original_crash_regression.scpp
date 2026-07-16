@@ -1,0 +1,18 @@
+// C++26 converting-constructor semantics still apply unless SCPP explicitly
+// changes them (front matter §1(2)); a non-explicit single-argument `struct`
+// constructor may therefore be used implicitly at a function-call argument
+// site. This was the original crash repro: it must compile and run, not hit
+// LLVM verifier failure.
+struct Meters {
+    int value{};
+public:
+    Meters(int initial_value) : value{initial_value} {}
+};
+
+int read(Meters meters) {
+    return meters.value;
+}
+
+int main() {
+    return read(5);
+}

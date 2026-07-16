@@ -1,0 +1,22 @@
+// front matter §1(2): ordinary C++26 overload ranking still applies. When an
+// exact non-class overload exists, SCPP must not prefer a user-defined
+// conversion through a single-argument constructor.
+class Score {
+public:
+    int value{};
+
+    Score(int initial_value) : value{initial_value} {}
+    virtual ~Score() { return; }
+};
+
+int pick(int value) {
+    return value + 1;
+}
+
+int pick(Score score) {
+    return score.value + 10;
+}
+
+int main() {
+    return pick(5);
+}

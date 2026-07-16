@@ -1,0 +1,32 @@
+// spec §6.2(11.2) + §6.6(9): a `const T&` call parameter binds to the
+// temporary materialized by selecting a single-argument converting
+// constructor of `T` from the source expression.
+struct Flag {
+    bool value{};
+public:
+    Flag(bool initial_value) : value{initial_value} {}
+};
+
+struct Label {
+    const char* text{};
+public:
+    Label(const char* initial_text) : text{initial_text} {}
+};
+
+int read_flag(const Flag& flag) {
+    return flag.value ? 0 : 1;
+}
+
+int read_label(const Label& label) {
+    if (label.text[0] != 'h') {
+        return 2;
+    }
+    if (label.text[1] != 'i') {
+        return 3;
+    }
+    return label.text[2] == '\0' ? 0 : 4;
+}
+
+int main() {
+    return read_flag(true) + read_label("hi");
+}
