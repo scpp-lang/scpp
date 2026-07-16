@@ -405,6 +405,7 @@ private:
         ExprPtr thread_movable_if_shareable_expr;
         bool has_nodiscard = false;
         std::string nodiscard_reason;
+        LifetimeAnnotation lifetime;
         [[nodiscard]] bool has(const std::string& token) const { return scpp_tokens.contains(token); }
     };
 
@@ -539,6 +540,16 @@ private:
         }
     }
 
+    void merge_lifetime_attribute(LifetimeAnnotation& dst, const LifetimeAnnotation& src, const Token& tok,
+                                  const char* where) {
+        if (!src.present()) return;
+        if (dst.present()) {
+            throw ParseError(tok.line, tok.column,
+                             std::string(where) + " may bear at most one '[[scpp::lifetime(name)]]' attribute");
+        }
+        dst = src;
+    }
+
     [[nodiscard]] ParsedAttributes parse_attribute_specifier_seq() {
         ParsedAttributes result;
         while (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
@@ -568,6 +579,20 @@ private:
                             expect(TokenKind::Comma, "','");
                             result.thread_movable_if_shareable_expr = parse_expr();
                             expect(TokenKind::RParen, "')'");
+                        } else if (ns == "scpp" && token == "lifetime") {
+                            if (!check(TokenKind::Identifier)) {
+                                const Token& tok = peek();
+                                throw ParseError(tok.line, tok.column,
+                                                 "'[[scpp::lifetime(name)]]' requires exactly one identifier argument");
+                            }
+                            result.lifetime.name =
+                                std::string(expect(TokenKind::Identifier, "lifetime group name").text);
+                            if (!check(TokenKind::RParen)) {
+                                const Token& tok = peek();
+                                throw ParseError(tok.line, tok.column,
+                                                 "'[[scpp::lifetime(name)]]' requires exactly one identifier argument");
+                            }
+                            expect(TokenKind::RParen, "')'");
                         } else {
                             skip_attribute_arguments();
                         }
@@ -587,6 +612,13 @@ private:
         throw ParseError(attr_start_tok.line, attr_start_tok.column,
                          "'[[scpp::packed]]' cannot appertain to " + std::string(what) +
                              " -- only to a struct or union declaration (spec §9.2)");
+    }
+
+    void reject_lifetime_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
+        if (!attrs.lifetime.present()) return;
+        throw ParseError(attr_start_tok.line, attr_start_tok.column,
+                         "'[[scpp::lifetime(name)]]' cannot appertain to " + std::string(what) +
+                             " -- only to an eligible parameter declaration or function declarator");
     }
 
 
@@ -1241,8 +1273,33 @@ private:
         return true;
     }
 
+    [[nodiscard]] bool lifetime_annotations_equivalent(const Function& a, const Function& b) const {
+        if (a.params.size() != b.params.size()) return false;
+        std::unordered_map<std::string, std::string> a_to_b;
+        std::unordered_map<std::string, std::string> b_to_a;
+        auto names_equivalent = [&](const LifetimeAnnotation& lhs, const LifetimeAnnotation& rhs) {
+            if (lhs.present() != rhs.present()) return false;
+            if (!lhs.present()) return true;
+            if (lhs.is_generic() || rhs.is_generic()) return lhs.is_generic() && rhs.is_generic();
+            auto lhs_it = a_to_b.find(lhs.name);
+            auto rhs_it = b_to_a.find(rhs.name);
+            if (lhs_it != a_to_b.end() || rhs_it != b_to_a.end()) {
+                return lhs_it != a_to_b.end() && rhs_it != b_to_a.end() && lhs_it->second == rhs.name &&
+                       rhs_it->second == lhs.name;
+            }
+            a_to_b.emplace(lhs.name, rhs.name);
+            b_to_a.emplace(rhs.name, lhs.name);
+            return true;
+        };
+        for (size_t i = 0; i < a.params.size(); i++) {
+            if (!names_equivalent(a.params[i].lifetime, b.params[i].lifetime)) return false;
+        }
+        return names_equivalent(a.return_lifetime, b.return_lifetime);
+    }
+
     [[nodiscard]] bool same_function_signature(const Function& a, const Function& b) const {
         return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
+               lifetime_annotations_equivalent(a, b) &&
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
                a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
@@ -2277,6 +2334,7 @@ private:
         clone.name = fn.name;
         clone.loc = fn.loc;
         clone.params = fn.params;
+        clone.return_lifetime = fn.return_lifetime;
         if (keep_body && fn.body) clone.body = clone_stmt(*fn.body);
         clone.is_extern_c = fn.is_extern_c;
         clone.is_module_extern = fn.is_module_extern;
@@ -3189,6 +3247,8 @@ private:
                 reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration");
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
+                merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
+                                         "a parameter declaration");
                 params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
@@ -3226,7 +3286,15 @@ private:
         return ReceiverRefQualifier::None;
     }
 
+    void parse_function_trailing_attributes(Function& fn, const char* what) {
+        const Token& attr_start_tok = peek();
+        ParsedAttributes attrs = parse_attribute_specifier_seq();
+        reject_packed_attribute(attrs, attr_start_tok, what);
+        merge_lifetime_attribute(fn.return_lifetime, attrs.lifetime, attr_start_tok, what);
+    }
+
     StmtPtr parse_member_function_suffix(Function& fn) {
+        parse_function_trailing_attributes(fn, "a member function declarator");
         fn.is_override = match(TokenKind::KwOverride);
         if (match(TokenKind::Assign)) {
             if (match(TokenKind::KwDefault)) {
@@ -4415,6 +4483,7 @@ private:
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_new";
                 fn.params = parse_param_list();
+                parse_function_trailing_attributes(fn, "a constructor declarator");
                 reject_generic_params(fn.params, "a constructor");
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
@@ -4484,6 +4553,7 @@ private:
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
+                parse_function_trailing_attributes(fn, "a member function declarator");
                 reject_generic_params(fn.params, "an operator*");
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
@@ -4518,6 +4588,7 @@ private:
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
+                parse_function_trailing_attributes(fn, "a member function declarator");
                 reject_generic_params(fn.params, "an operator=");
                 if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
                     fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
@@ -4583,6 +4654,7 @@ private:
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
+                parse_function_trailing_attributes(fn, "a member function declarator");
                 reject_generic_params(fn.params, "a method");
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
@@ -4742,10 +4814,16 @@ private:
                 reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration");
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
+                merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
+                                         "a parameter declaration");
                 fn.params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
         expect(TokenKind::RParen, "')'");
+        const Token& fn_attr_start_tok = peek();
+        ParsedAttributes fn_attrs = parse_attribute_specifier_seq();
+        reject_packed_attribute(fn_attrs, fn_attr_start_tok, "a function declarator");
+        merge_lifetime_attribute(fn.return_lifetime, fn_attrs.lifetime, fn_attr_start_tok, "a function declarator");
 
         // ch05 §5.11: a function with at least one concept-constrained
         // parameter is a *generic template* -- checked once, abstractly,
