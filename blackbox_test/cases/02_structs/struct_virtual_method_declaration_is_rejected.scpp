@@ -1,0 +1,12 @@
+// spec §11.1(2.3): a declaration introduced by `struct` shall not declare
+// a virtual member function.
+struct BadStructVirtual {
+public:
+    virtual int read() const {
+        return 0;
+    }
+};
+
+int main() {
+    return 0;
+}

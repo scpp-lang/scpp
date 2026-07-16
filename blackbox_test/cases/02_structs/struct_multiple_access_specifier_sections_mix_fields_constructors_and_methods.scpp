@@ -1,0 +1,33 @@
+// spec §11.1(4): a `struct` may freely mix public/private access-specifier
+// sections with fields, constructors, and non-virtual member functions.
+struct Account {
+public:
+    Account(int checking, int savings)
+        : checking_{checking}, savings_{savings}, bonus_{1} {}
+private:
+    int checking_{};
+public:
+    void deposit(int amount) {
+        this->checking_ = this->checking_ + amount;
+        return;
+    }
+private:
+    int savings_{};
+public:
+    int bonus_{};
+private:
+    int base_total() const {
+        return this->checking_ + this->savings_;
+    }
+public:
+    int total() const {
+        return this->base_total() + this->bonus_;
+    }
+};
+
+int main() {
+    Account account{4, 7};
+    account.deposit(3);
+    account.bonus_ = 2;
+    return account.total();
+}

@@ -1,0 +1,9 @@
+// spec §11.1(2.2): a declaration introduced by `struct` shall not be marked
+// with the attribute-token `scpp::interface`.
+struct [[scpp::interface]] BadStructInterface {
+    int value{};
+};
+
+int main() {
+    return 0;
+}

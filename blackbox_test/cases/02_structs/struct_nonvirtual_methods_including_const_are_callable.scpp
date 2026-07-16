@@ -1,0 +1,19 @@
+// spec §11.1(4): a `struct` may declare non-virtual member functions,
+// including const-qualified ones, exactly as ordinary C++ permits.
+struct Counter {
+    int value{};
+    void add(int delta) {
+        this->value = this->value + delta;
+        return;
+    }
+    int read() const {
+        return this->value;
+    }
+};
+
+int main() {
+    Counter counter{};
+    counter.add(6);
+    counter.add(1);
+    return counter.read();
+}
