@@ -1,0 +1,19 @@
+// spec §6.1(1)/(7): `Type value{};` is a braced direct-initialization. If a
+// class declares only a constructor that requires arguments, there is no
+// viable default constructor, so this must be rejected with a clean semantic
+// diagnostic rather than crashing during code generation.
+class Counter {
+    public:
+        virtual ~Counter() { return; }
+private:
+    int value{};
+public:
+    Counter(int x) : value{x} {
+        return;
+    }
+};
+
+int main() {
+    Counter value{};
+    return 0;
+}

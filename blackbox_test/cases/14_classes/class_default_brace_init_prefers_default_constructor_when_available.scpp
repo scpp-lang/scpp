@@ -1,0 +1,25 @@
+// spec §6.1(1)/(7): `Type value{};` selects the zero-argument constructor
+// when one is viable. A sibling overload taking arguments must still leave
+// default-brace-initialization well-formed.
+class Counter {
+    public:
+        virtual ~Counter() { return; }
+private:
+    int value{};
+public:
+    Counter() : value{5} {
+        return;
+    }
+    Counter(int start) : value{start} {
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    Counter zero{};
+    Counter from_arg{7};
+    return zero.get() + from_arg.get() - 12;
+}

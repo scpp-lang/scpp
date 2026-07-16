@@ -1,0 +1,19 @@
+// spec §6.1(1)/(7): `Type value{};` selects a viable zero-argument
+// constructor when one exists. Having an additional parameterized constructor
+// must not break default-brace-initialization.
+struct Counter {
+    int value;
+public:
+    Counter() : value{5} {
+        return;
+    }
+    Counter(int start) : value{start} {
+        return;
+    }
+};
+
+int main() {
+    Counter zero{};
+    Counter from_arg{7};
+    return zero.value + from_arg.value - 12;
+}
