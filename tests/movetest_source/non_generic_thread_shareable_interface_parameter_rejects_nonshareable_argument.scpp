@@ -1,0 +1,29 @@
+// spec §8.5(6): a non-generic `const I& [[scpp::thread_shareable]]`
+// parameter checks the implementing argument type supplied at the call
+// site.
+class [[scpp::interface]] IView {
+public:
+    virtual ~IView() = default;
+    virtual void render() const = 0;
+};
+
+class BadView : public virtual IView {
+public:
+    BadView(int* raw) { this.raw = raw; return; }
+    ~BadView() override = default;
+    void render() const override { return; }
+private:
+    int* raw{};
+};
+
+void publish(const IView& view [[scpp::thread_shareable]]) {
+    view.render();
+    return;
+}
+
+int main() {
+    int value = 0;
+    BadView bad{&value};
+    publish(bad);
+    return 0;
+}

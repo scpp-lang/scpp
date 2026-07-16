@@ -1,0 +1,23 @@
+// spec §8.5(3)-(5): a non-interface class implementing a
+// `[[scpp::thread_shareable]]` interface must itself be thread-shareable.
+class [[scpp::interface, scpp::thread_shareable]] IView {
+public:
+    virtual ~IView() = default;
+    virtual void render() const = 0;
+};
+
+class BadView : public virtual IView {
+public:
+    BadView(int* raw) { this.raw = raw; return; }
+    ~BadView() override = default;
+    void render() const override { return; }
+private:
+    int* raw{};
+};
+
+int main() {
+    int value = 0;
+    BadView bad{&value};
+    bad.render();
+    return 0;
+}

@@ -1,0 +1,23 @@
+// spec §8.5(2)-(5): a non-interface class implementing a
+// `[[scpp::thread_movable]]` interface must itself be thread-movable.
+class [[scpp::interface, scpp::thread_movable]] IJob {
+public:
+    virtual ~IJob() = default;
+    virtual void run() = 0;
+};
+
+class BadJob : public virtual IJob {
+public:
+    BadJob(int* raw) { this.raw = raw; return; }
+    ~BadJob() override = default;
+    void run() override { return; }
+private:
+    int* raw{};
+};
+
+int main() {
+    int value = 0;
+    BadJob bad{&value};
+    bad.run();
+    return 0;
+}
