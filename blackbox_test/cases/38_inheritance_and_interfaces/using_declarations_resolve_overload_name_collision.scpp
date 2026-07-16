@@ -1,0 +1,29 @@
+// spec §11.4(4): `using Base::f;` introduces the intended base declarations
+// so name lookup becomes unambiguous and overload resolution may proceed.
+class [[scpp::interface]] IIntOps {
+public:
+    virtual ~IIntOps() = default;
+    int f(int value) {
+        return value + 2;
+    }
+};
+
+class [[scpp::interface]] IRangeOps {
+public:
+    virtual ~IRangeOps() = default;
+    int f(int left, int right) {
+        return left + right;
+    }
+};
+
+class CombinedOps : public virtual IIntOps, public virtual IRangeOps {
+public:
+    ~CombinedOps() override = default;
+    using IIntOps::f;
+    using IRangeOps::f;
+};
+
+int main() {
+    CombinedOps ops{};
+    return ops.f(1);
+}

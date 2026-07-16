@@ -1,0 +1,24 @@
+// spec §11.3(3),(4): a private interface base denies external substitutability.
+class [[scpp::interface]] IReader {
+public:
+    virtual ~IReader() = default;
+    virtual int read() = 0;
+};
+
+class SecretReader : private virtual IReader {
+public:
+    ~SecretReader() override = default;
+
+    int read() override {
+        return 9;
+    }
+};
+
+int take_reader(IReader& reader) {
+    return reader.read();
+}
+
+int main() {
+    SecretReader reader{};
+    return take_reader(reader);
+}
