@@ -21,7 +21,7 @@
 
 - Using Structs and Classes to Structure Related Data
   - [Defining and Instantiating `struct` and `class`](ch05-01-defining-and-instantiating-struct-and-class.md)
-  - An Example Program Using a Checked Class
+  - [An Example Program Using a Checked Class](ch05-02-an-example-program-using-a-checked-class.md)
   - Methods and `this`
 
 - Safety Boundaries and `[[scpp::unsafe]]`

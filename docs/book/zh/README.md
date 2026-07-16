@@ -21,7 +21,7 @@
 
 - 用 struct 与 class 组织相关数据
   - [定义与实例化 `struct` / `class`](ch05-01-defining-and-instantiating-struct-and-class.md)
-  - 一个使用受检查 class 的示例程序
+  - [一个使用受检查 class 的示例程序](ch05-02-an-example-program-using-a-checked-class.md)
   - 方法与 `this`
 
 - 安全边界与 `[[scpp::unsafe]]`
