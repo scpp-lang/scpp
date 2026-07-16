@@ -17,7 +17,7 @@
 - 理解所有权
   - [什么是所有权？](ch04-01-what-is-ownership.md)
   - [引用与借用](ch04-02-references-and-borrowing.md)
-  - `std::span` 与其它非拥有视图
+  - [`std::span` 与其它非拥有视图](ch04-03-std-span-and-other-non-owning-views.md)
 
 - 用 struct 与 class 组织相关数据
   - 定义与实例化 `struct` / `class`
