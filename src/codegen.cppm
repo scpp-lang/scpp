@@ -590,6 +590,10 @@ private:
         return nullptr;
     }
 
+    [[nodiscard]] bool is_named_record_type(const Type& type) const {
+        return type.kind == TypeKind::Named && (find_class_def(type.name) != nullptr || find_struct_def(type.name) != nullptr);
+    }
+
     const Function* find_function_def(const std::string& name) const {
         for (const Function& fn : program_->functions) {
             if (fn.name == name) return &fn;
@@ -1114,7 +1118,7 @@ private:
             return false;
         }
         if (produces_rvalue_of_type(arg, *param_type.pointee)) return true;
-        return param_type.pointee->kind == TypeKind::Named && find_class_def(param_type.pointee->name) != nullptr &&
+        return is_named_record_type(*param_type.pointee) &&
                find_single_argument_converting_constructor(param_type.pointee->name, arg) != nullptr;
     }
 
@@ -1174,7 +1178,6 @@ private:
     // argument_matches_parameter (ch05 §5.10) exactly, just phrased over
     // codegen's own infer_type/types_equal instead of movecheck's.
     const Function* find_single_argument_converting_constructor(const std::string& class_name, const Expr& arg) {
-        if (arg.kind != ExprKind::StringLiteral) return nullptr;
         std::vector<const Function*> matches;
         for (const Function& fn : program_->functions) {
             if (fn.name != class_name + "_new" || fn.params.size() != 2) continue;
@@ -1184,27 +1187,28 @@ private:
                  types_equal(*ctor_param_type.pointee, named_type(class_name)))) {
                 continue;
             }
-            if (argument_matches_parameter(arg, fn.params[1].type)) matches.push_back(&fn);
+            if (constructor_parameter_accepts_argument_directly(arg, fn.params[1].type)) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
         return matches[0];
     }
 
-    bool argument_matches_parameter(const Expr& arg, const Type& param_type) {
-        auto argument_type_matches_parameter = [&](const Type& arg_type, const Type& candidate_param_type) {
-            if (candidate_param_type.kind == TypeKind::Reference) {
-                if (arg_type.kind == TypeKind::Reference) {
-                    if (arg_type.pointee == nullptr || candidate_param_type.pointee == nullptr) return false;
-                    return types_equal(*arg_type.pointee, *candidate_param_type.pointee) &&
-                           (!candidate_param_type.is_mutable_ref || arg_type.is_mutable_ref);
-                }
-                return candidate_param_type.pointee != nullptr && types_equal(arg_type, *candidate_param_type.pointee);
-            }
+    bool argument_type_matches_parameter(const Type& arg_type, const Type& candidate_param_type) {
+        if (candidate_param_type.kind == TypeKind::Reference) {
             if (arg_type.kind == TypeKind::Reference) {
-                return arg_type.pointee != nullptr && types_equal(*arg_type.pointee, candidate_param_type);
+                if (arg_type.pointee == nullptr || candidate_param_type.pointee == nullptr) return false;
+                return types_equal(*arg_type.pointee, *candidate_param_type.pointee) &&
+                       (!candidate_param_type.is_mutable_ref || arg_type.is_mutable_ref);
             }
-            return types_equal(arg_type, candidate_param_type);
-        };
+            return candidate_param_type.pointee != nullptr && types_equal(arg_type, *candidate_param_type.pointee);
+        }
+        if (arg_type.kind == TypeKind::Reference) {
+            return arg_type.pointee != nullptr && types_equal(*arg_type.pointee, candidate_param_type);
+        }
+        return types_equal(arg_type, candidate_param_type);
+    }
+
+    bool argument_matches_parameter(const Expr& arg, const Type& param_type) {
         auto argument_type_matches_or_converts = [&](const Type& arg_type, const Type& candidate_param_type) {
             return argument_type_matches_parameter(arg_type, candidate_param_type) ||
                    types_compatible_with_base_conversion(arg_type, candidate_param_type, current_enclosing_class_name());
@@ -1235,13 +1239,40 @@ private:
         std::optional<Type> arg_type = infer_type(arg);
         if (!arg_type.has_value()) return false;
         if (!argument_type_matches_or_converts(*arg_type, param_type)) {
-            if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr &&
+            if (is_named_record_type(param_type) &&
                 find_single_argument_converting_constructor(param_type.name, arg) != nullptr) {
                 return true;
             }
             return false;
         }
-        if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr) {
+        if (is_named_record_type(param_type)) {
+            return (is_bare_same_type_copy_source(arg, param_type) && is_copy_constructible(param_type.name)) ||
+                   produces_rvalue_of_type(arg, param_type);
+        }
+        return true;
+    }
+
+    bool constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type) {
+        if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
+            return produces_rvalue_of_type(arg, *param_type.pointee);
+        }
+        if (param_type.kind == TypeKind::Reference) {
+            if (!param_type.is_mutable_ref && param_type.pointee != nullptr &&
+                produces_rvalue_of_type(arg, *param_type.pointee)) {
+                return true;
+            }
+            if (arg.kind == ExprKind::Move || arg.kind == ExprKind::New ||
+                arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
+                arg.kind == ExprKind::BoolLiteral ||
+                arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
+                return false;
+            }
+            std::optional<Type> arg_type = infer_type(arg);
+            return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type);
+        }
+        std::optional<Type> arg_type = infer_type(arg);
+        if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, param_type)) return false;
+        if (is_named_record_type(param_type)) {
             return (is_bare_same_type_copy_source(arg, param_type) && is_copy_constructible(param_type.name)) ||
                    produces_rvalue_of_type(arg, param_type);
         }
@@ -3704,8 +3735,9 @@ private:
         }
         llvm::Type* llvm_type = to_llvm_type(target_type);
         llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "constreftmp");
-        if (target_type.kind == TypeKind::Named && find_class_def(target_type.name) != nullptr) {
-            create_store(codegen_class_value_for_boundary(expr, target_type), temp, alignment_for_type(target_type));
+        if (is_named_record_type(target_type)) {
+            create_store(codegen_class_value_for_boundary(expr, target_type, /*allow_implicit_converting_ctor=*/true), temp,
+                         alignment_for_type(target_type));
         } else {
             create_store(codegen_value_for_target(expr, target_type), temp, alignment_for_type(target_type));
         }
@@ -3873,7 +3905,7 @@ private:
     // source object directly into the destination storage instead of routing
     // back through ordinary constructor overload resolution.
     bool try_initialize_class_storage_from_same_type_source(const LValue& target, const std::vector<ExprPtr>& args) {
-        if (target.type.kind != TypeKind::Named || find_class_def(target.type.name) == nullptr || args.size() != 1) {
+        if (!is_named_record_type(target.type) || args.size() != 1) {
             return false;
         }
         if (produces_rvalue_of_type(*args[0], target.type)) {
@@ -3901,7 +3933,7 @@ private:
             initialize_span_storage(target, expr);
             return;
         }
-        if (target.type.kind == TypeKind::Named && find_class_def(target.type.name) != nullptr) {
+        if (is_named_record_type(target.type)) {
             llvm::Value* value = codegen_class_value_for_boundary(expr, target.type);
             create_store(value, target.ptr, target.alignment);
             if (class_has_ordinary_vtable(target.type.name)) {
@@ -4092,7 +4124,8 @@ private:
         emit_default_initializers_for_record_fields(object_ptr, class_def.name, class_def.fields);
     }
 
-    llvm::Value* codegen_class_value_for_boundary(const Expr& expr, const Type& target_type) {
+    llvm::Value* codegen_class_value_for_boundary(const Expr& expr, const Type& target_type,
+                                                  bool allow_implicit_converting_ctor = false) {
         llvm::Type* llvm_type = to_llvm_type(target_type);
         if (is_bare_same_type_copy_source(expr, target_type) && is_copy_constructible(target_type.name)) {
             auto src_it = locals_.find(expr.name);
@@ -4107,11 +4140,13 @@ private:
         if (produces_rvalue_of_type(expr, target_type)) {
             return codegen_expr(expr);
         }
-        if (const Function* converting_ctor = resolve_converting_constructor_by_type(target_type.name, expr);
-            converting_ctor != nullptr) {
-            std::vector<ExprPtr> ctor_args;
-            ctor_args.push_back(clone_expr(expr));
-            return codegen_constructed_class_value(target_type.name, ctor_args, converting_ctor);
+        if (allow_implicit_converting_ctor) {
+            if (const Function* converting_ctor = resolve_converting_constructor_by_type(target_type.name, expr);
+                converting_ctor != nullptr) {
+                std::vector<ExprPtr> ctor_args;
+                ctor_args.push_back(clone_expr(expr));
+                return codegen_constructed_class_value(target_type.name, ctor_args, converting_ctor);
+            }
         }
         return codegen_expr(expr);
     }
@@ -4243,8 +4278,9 @@ private:
                 // the callee's own parameter-type check.
                 if (callee_def != nullptr && i + param_offset < callee_def->params.size()) {
                     const Type& param_type = callee_def->params[i + param_offset].type;
-                    if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr) {
-                        result.push_back(codegen_class_value_for_boundary(*args[i], param_type));
+                    if (is_named_record_type(param_type)) {
+                        result.push_back(codegen_class_value_for_boundary(*args[i], param_type,
+                                                                         /*allow_implicit_converting_ctor=*/true));
                     } else {
                         result.push_back(codegen_value_for_target(*args[i], param_type));
                     }
@@ -4276,8 +4312,9 @@ private:
             } else if (param_is_reference) {
                 result.push_back(codegen_lvalue(*args[i]).ptr);
             } else if (i < param_types.size()) {
-                if (param_types[i].kind == TypeKind::Named && find_class_def(param_types[i].name) != nullptr) {
-                    result.push_back(codegen_class_value_for_boundary(*args[i], param_types[i]));
+                if (is_named_record_type(param_types[i])) {
+                    result.push_back(codegen_class_value_for_boundary(*args[i], param_types[i],
+                                                                     /*allow_implicit_converting_ctor=*/true));
                 } else {
                     result.push_back(codegen_value_for_target(*args[i], param_types[i]));
                 }
