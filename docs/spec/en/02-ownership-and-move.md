@@ -236,6 +236,217 @@ materializes a temporary under (11)-(12) is not such an alias. Neither
 kind of binding, by itself, places the complete object in the moved-out
 state. — end note]
 
+
+### Cross-function lifetime groups [dcl.attr.scpp.lifetime]
+
+(13) The attribute-token `scpp::lifetime` may appear in an
+*attribute-specifier-seq* ([dcl.attr.grammar]) appertaining to:
+
+  (13.1) a parameter declaration whose type is a reference type,
+  pointer type, `std::span<T>`, or `std::span<const T>`; or
+
+  (13.2) the declarator of a function or member function whose return
+  type is a reference type, pointer type, `std::span<T>`, or
+  `std::span<const T>`.
+
+If it appears elsewhere, the program is ill-formed.
+
+(14) `[[scpp::lifetime(name)]]` takes exactly one argument. That
+argument shall be an identifier.
+
+(15) A user-written group name is any such identifier other than
+`generic`. User-written group names are local to one function or member
+function declaration. The same spelling in two different
+declarations denotes no relation. Within one such declaration, user-written occurrences with
+the same spelling denote one named lifetime group; user-written
+occurrences with different spellings denote different named lifetime
+groups.
+
+(16) The identifier `generic` is reserved. Each parameter tagged
+`[[scpp::lifetime(generic)]]` denotes a fresh compiler-synthesized
+lifetime group distinct from:
+
+  (16.1) every user-written group; and
+
+  (16.2) every other `generic` occurrence, including another such
+  parameter in the same declaration.
+
+A `generic` group does not introduce a name that may later be referred
+to by a return annotation or by another parameter.
+
+(17) If a parameter declaration bears `[[scpp::lifetime(name)]]` with a
+user-written group name `name`, that parameter is a member of group
+`name`. A parameter with no `scpp::lifetime` attribute belongs to no
+named lifetime group.
+
+(18) If the declarator of such a function or member function bears
+`[[scpp::lifetime(name)]]`, the returned reference, pointer, or
+span value is tied to group `name`.
+The program is ill-formed if:
+
+  (18.1) the return type is not an eligible type under (13.2);
+
+  (18.2) `name` is `generic`; or
+
+  (18.3) no parameter of that declaration is a member of group `name`.
+
+(19) A value tied to group `name` shall be derived only from:
+
+  (19.1) one or more parameters that are members of group `name`; or
+
+  (19.2) a subobject, array element, base-class subobject, pointee, or
+  contiguous range reachable through a value from (19.1).
+
+It is ill-formed to return a value tied to group `name` if the returned
+value is instead derived from:
+
+  (19.3) a parameter in a different named group;
+
+  (19.4) a `generic`-tagged parameter; or
+
+  (19.5) a local object, temporary object, or other state whose
+  lifetime is not proved to outlive the call.
+
+(20) If several parameters belong to the same named group, the function
+may return or forward a value derived from any of them wherever that
+group is required. At a call site, a result tied to that group is
+treated as no longer-lived than the shortest-lived actual argument
+supplied to any parameter in that group. Parameters in different named
+groups are lifetime-independent unless some other rule of this document
+relates them.
+
+(21) Lifetime-group identity constrains lifetime only. It does not relax
+aliasing, mutability, thread-safety, or `[[scpp::unsafe]]`
+requirements. In particular, annotating a raw pointer with
+`[[scpp::lifetime(name)]]` does not permit dereference outside an
+`[[scpp::unsafe]]` context.
+
+(22) User-written group names are declaration-local and alpha-
+equivalent. A call from one such declaration to another does not
+compare lifetime-group names textually across declarations; the checker
+instead uses the callee's own grouping relation to determine which
+actual arguments may influence that callee's eligible return value under
+(18)-(20). Whether a value derived from such a group may instead be
+embedded into object state is governed separately by (24).
+
+(23) A non-static member function may use named lifetime groups on its
+explicit parameters under the same rules as a free function. For the
+purposes of this subclause, a call to a non-static member function
+supplies an implicit object parameter of reference type: `C&` for a
+non-`const` member function and `const C&` for a `const` member
+function; any borrow or reborrow through that implicit object parameter
+is governed by 6.2(7)-(12). The implicit object parameter cannot bear
+`[[scpp::lifetime(name)]]` and does not, by itself, introduce a user-
+written group name. Consequently, a member function with an explicit
+`[[scpp::lifetime(name)]]` return annotation is ill-formed unless one of
+its explicit parameters is a member of group `name`; a value derived
+solely from `this` cannot satisfy that requirement.
+
+(24) Constructing an object, closure, or other stored state from a
+reference, pointer, or span derived from a named lifetime group does not
+erase that group's lifetime obligation. This subclause defines lifetime-
+group propagation only for the direct function or member-function return
+value governed by (18)-(20); it defines no mechanism by which a class,
+struct, union, array, closure, or other object type itself carries a
+named lifetime-group parameter. Therefore, if a reference, pointer, or
+span derived from a named group or from `[[scpp::lifetime(generic)]]`
+would be used to initialize or assign any subobject of such an object,
+the program is ill-formed. This includes returning `Holder{x}` where
+`Holder` contains a reference member initialized from `x`, storing such
+a value into a data member or array element, or capturing it in a
+closure. This prohibition does not forbid ordinary local reborrows under
+6.2(7)-(12), nor passing such a value as an argument to another call.
+
+(25) Lifetime-group annotations are permitted on function templates and
+on members of class templates under the same rules as on non-templates.
+Template argument substitution neither creates nor merges groups; it
+instantiates the same declaration-local grouping relation for the
+specialized signature.
+
+(26) Two declarations of the same function or member function shall
+agree in lifetime-group annotations after a consistent renaming of user-
+written group names. Lifetime-group annotations are safety-relevant
+function-signature facts, but overload resolution shall not
+distinguish functions solely by different lifetime-group annotations.
+
+(27) Lifetime-group annotations do not alter a type's layout,
+triviality, thread-movable value, or thread-shareable value under §8. If
+the same declaration also bears thread-safety attributes, both sets of
+requirements apply independently.
+
+The following declarations are well-formed:
+
+```cpp
+const int& get_x(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return x;
+}
+
+const int& min_ref(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(a)]]
+) [[scpp::lifetime(a)]] {
+    return x < y ? x : y;
+}
+
+const int* pick_right(
+    const int* left [[scpp::lifetime(a)]],
+    const int* right [[scpp::lifetime(b)]]
+) [[scpp::lifetime(b)]] {
+    return right;
+}
+
+const int& keep_head(
+    const int& head [[scpp::lifetime(head_life)]],
+    int& scratch [[scpp::lifetime(generic)]]
+) [[scpp::lifetime(head_life)]] {
+    scratch = 0;
+    return head;
+}
+```
+
+The following declarations are ill-formed:
+
+```cpp
+const int& bad_unknown(
+    const int& x [[scpp::lifetime(a)]]
+) [[scpp::lifetime(b)]] {
+    return x;
+}
+// ill-formed: `b` is introduced by no parameter
+
+const int& bad_mismatch(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return y;
+}
+// ill-formed: the returned reference is derived from group `b`, not `a`
+
+struct Holder {
+    const int& ref;
+};
+
+Holder bad_named_store(const int& x [[scpp::lifetime(a)]]) {
+    return Holder{x};
+}
+// ill-formed: this subclause provides no way for `Holder` to carry group `a`
+
+const int& bad_generic_return(
+    const int& x [[scpp::lifetime(generic)]]
+) [[scpp::lifetime(generic)]] {
+    return x;
+}
+// ill-formed: `generic` is reserved and cannot be named by the return
+
+Holder bad_store(const int& x [[scpp::lifetime(generic)]]) {
+    return Holder{x};
+}
+// ill-formed: a value derived from `generic` is stored in returned state
+```
+
 ## 6.3 Destruction [class.dtor]
 
 (1) At the end of an object's storage duration, if the object is in the
