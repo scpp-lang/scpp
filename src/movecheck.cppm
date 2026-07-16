@@ -1251,6 +1251,29 @@ struct NodiscardInfo {
     return true;
 }
 
+[[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
+                                                                       const Body& body, const Signatures& signatures) {
+    if (is_reference(param_type) && param_type.is_rvalue_ref) {
+        return produces_rvalue_of_type(arg, *param_type.pointee, body, signatures);
+    }
+    if (is_reference(param_type)) {
+        if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) return true;
+        if (arg.kind == ExprKind::Move ||
+            arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
+            arg.kind == ExprKind::BoolLiteral || arg.kind == ExprKind::CharLiteral ||
+            arg.kind == ExprKind::StringLiteral) {
+            return false;
+        }
+        std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
+        return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type, body);
+    }
+    std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
+    if (!arg_type.has_value()) return false;
+    if (argument_type_matches_parameter(*arg_type, param_type, body)) return true;
+    return is_named_class_type(param_type, body) &&
+           find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr;
+}
+
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
     const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures) {
     if (arg.kind != ExprKind::StringLiteral) return nullptr;
@@ -1427,7 +1450,9 @@ struct NodiscardInfo {
         if (candidate.param_types.size() != ctor_args.size() + 1) continue;
         bool all_match = true;
         for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
-            all_match = argument_matches_parameter(*ctor_args[i], candidate.param_types[i + 1], body, signatures);
+            all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
+                                                                             candidate.param_types[i + 1], body,
+                                                                             signatures);
         }
         if (all_match) matches.push_back(&candidate);
     }
@@ -3574,11 +3599,11 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // dataflow checker (a has_ctor_args VarDecl lowered to a bare,
 // argument-blind Declare, see mir.cppm) -- e.g. `Holder h{std::move(p)};`
 // never marked `p` moved-out at all. Multiple candidates matching by
-// argument count alone (ambiguous, or none at all) leave `sig` null,
-// exactly like resolve_overload's own "let a more specific, later check
-// report it" pattern -- codegen's own resolve_overload_by_type
-// independently re-derives the same answer and is the one that actually
-// rejects an unresolvable call.
+// argument count alone generally leave `sig` null, exactly like
+// resolve_overload's own "let a more specific, later check report it"
+// pattern -- except for zero-argument/default-brace construction, which
+// must be diagnosed here as "no default constructor" rather than
+// slipping through to codegen and crashing LLVM module verification.
 void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors) {
@@ -3587,28 +3612,36 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     auto name_it = signatures.find(ctor_name);
     if (name_it != signatures.end()) {
         const std::vector<FunctionSignature>& candidates = name_it->second;
-        if (candidates.size() == 1) {
-            sig = &candidates[0];
-        } else {
-            std::vector<const FunctionSignature*> matches;
-            for (const FunctionSignature& candidate : candidates) {
-                if (candidate.param_types.size() != ctor_args.size() + 1) continue;
-                bool all_match = true;
-                for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
-                    all_match =
-                        argument_matches_parameter(*ctor_args[i], candidate.param_types[i + 1], body, signatures);
-                }
-                if (all_match) matches.push_back(&candidate);
+        std::vector<const FunctionSignature*> matches;
+        for (const FunctionSignature& candidate : candidates) {
+            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+            if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+            bool all_match = true;
+            for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
+                all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
+                                                                                 candidate.param_types[i + 1], body,
+                                                                                 signatures);
             }
-            if (matches.size() == 1) sig = matches[0];
+            if (all_match) matches.push_back(&candidate);
         }
+        if (matches.size() == 1) sig = matches[0];
     }
-    if (sig == nullptr && report_errors && ctor_args.empty() && body.program != nullptr &&
-        !class_has_any_constructor(class_name, *body.program)) {
-        ensure_implicit_default_construction_is_valid(class_name, state.current_class, body, signatures,
-                                                     state.current_loc, "implicit default construction of class '" +
-                                                                            class_name + "' is ill-formed");
-        return;
+    if (sig == nullptr && report_errors && ctor_args.empty()) {
+        static const std::vector<ExprPtr> no_ctor_args;
+        if (body.program != nullptr && !class_has_any_constructor(class_name, *body.program)) {
+            ensure_implicit_default_construction_is_valid(class_name, state.current_class, body, signatures,
+                                                          state.current_loc,
+                                                          "implicit default construction of class '" + class_name +
+                                                              "' is ill-formed");
+            return;
+        }
+        sig = resolve_constructor_signature(class_name, no_ctor_args, body, signatures);
+        if (sig == nullptr) {
+            throw DataflowError("type '" + class_name +
+                                    "' has no default constructor; no constructor of '" + class_name +
+                                    "' matches 0 arguments",
+                                state.current_loc);
+        }
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
         !sig->member_owner_class.empty() && state.current_class != sig->member_owner_class) {

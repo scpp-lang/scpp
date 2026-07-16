@@ -1,0 +1,10 @@
+struct User {
+    int id{};
+    User() : id{7} { return; }
+    User(int initial_id) : id{initial_id} { return; }
+};
+
+int main() {
+    User user{};
+    return user.id - 7;
+}

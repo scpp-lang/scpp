@@ -4849,6 +4849,112 @@ void run_inheritance_constructor_and_destructor_tests() {
     }
 }
 
+void run_default_constructor_selection_tests() {
+    {
+        std::string case_name = "struct_default_brace_init_with_only_parameterized_ctor_reports_dataflow_error";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(struct User {
+    int id{};
+    User(int initial_id) : id{initial_id} { return; }
+};
+
+int main() {
+    User user{};
+    return 0;
+}
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("no default constructor") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected movecheck to reject missing default constructor");
+    }
+
+    {
+        std::string case_name = "class_default_brace_init_with_only_parameterized_ctor_reports_dataflow_error";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(class User {
+public:
+    int id{};
+    User(int initial_id) : id{initial_id} { return; }
+    virtual ~User() = default;
+};
+
+int main() {
+    User user{};
+    return 0;
+}
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("no default constructor") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected movecheck to reject missing default constructor");
+    }
+
+    {
+        std::string case_name = "struct_default_brace_init_prefers_zero_arg_ctor_when_overloads_exist";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
+        scpp::compile_to_executable(
+            R"SCPP(struct User {
+    int id{};
+    User() : id{7} { return; }
+    User(int initial_id) : id{initial_id} { return; }
+};
+
+int main() {
+    User from_default{};
+    User from_argument{9};
+    print_int(from_default.id);
+    print_int(from_argument.id);
+    return 0;
+}
+)SCPP",
+            exe_path.string());
+        RunResult result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        std::filesystem::remove(exe_path);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "7\n9\n",
+               case_name + ": expected stdout '7\\n9\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "class_default_brace_init_prefers_zero_arg_ctor_when_overloads_exist";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
+        scpp::compile_to_executable(
+            R"SCPP(class User {
+public:
+    int id{};
+    User() : id{11} { return; }
+    User(int initial_id) : id{initial_id} { return; }
+    virtual ~User() = default;
+};
+
+int main() {
+    User from_default{};
+    User from_argument{13};
+    print_int(from_default.id);
+    print_int(from_argument.id);
+    return 0;
+}
+)SCPP",
+            exe_path.string());
+        RunResult result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        std::filesystem::remove(exe_path);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "11\n13\n",
+               case_name + ": expected stdout '11\\n13\\n', got '" + result.stdout_text + "'");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -4880,6 +4986,7 @@ int main() {
     run_brace_init_only_var_decl_tests();
     run_for_loop_tests();
     run_inheritance_constructor_and_destructor_tests();
+    run_default_constructor_selection_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
