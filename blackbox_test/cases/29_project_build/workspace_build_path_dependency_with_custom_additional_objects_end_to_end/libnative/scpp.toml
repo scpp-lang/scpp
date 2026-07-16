@@ -1,0 +1,22 @@
+manifest-version = 1
+
+[package]
+name = "libnative"
+version = "0.1.0"
+
+[[lib]]
+name = "libnative"
+sources = ["src/**/*.scpp"]
+additional_objs = "native-shim"
+
+[additional_objs.native-shim]
+input = [
+    "src/native_value.cpp",
+]
+output = [
+    "native_value.o",
+]
+command = """\
+${CXX:-c++} -std=c++23 -O2 -c \
+src/native_value.cpp
+"""

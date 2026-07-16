@@ -308,13 +308,12 @@ manifest-version = 1
 name = "httpserver"
 version = "0.1.0"          # required for packaging, recommended otherwise
 
-[lib]
-root = "src/httpserver.scpp"
+[[lib]]
+name = "httpserver"
 sources = ["src/**/*.scpp"]
 
 [[bin]]
 name = "httpserver"
-root = "src/main.scpp"
 sources = ["src/**/*.scpp"]
 
 [dependencies]
@@ -352,16 +351,18 @@ Recommended initial fields:
 - `[package]`
   - `name` (required)
   - `version` (required for `scpp package`, optional-but-recommended otherwise)
-- `[lib]`
-  - `root`
+- `[[lib]]`
+  - `name`
   - `sources`
+  - optional `additional_objs`
 - `[[bin]]`
   - `name`
-  - `root`
   - `sources`
+  - optional `additional_objs`
 - `[dependencies]`
 - `[profile.dev]`, `[profile.release]`, optional custom `[profile.<name>]`
 - `[native]` for package-wide native link requirements
+- `[additional_objs.<name>]` for a named custom build step that can produce additional objects
 - `[package.metadata]` reserved for external tools
 
 Recommended v1 restriction: **at most one library target per package**.
@@ -409,7 +410,6 @@ version = "0.1.0"
 
 [[bin]]
 name = "httpserver"
-root = "src/main.scpp"
 sources = ["src/**/*.scpp"]
 
 [dependencies]
@@ -501,10 +501,18 @@ User review confirmed this exact direction: `scpp.lock` should be reserved now, 
 
 ## 8.1 Manifest-declared source sets
 
-Each target (`[lib]`, `[[bin]]`) should declare:
+Each target (`[[lib]]`, `[[bin]]`) should declare:
 
-- one `root` file;
+- one `name` field (`[[lib]]` artifact name or `[[bin]]` executable name);
 - one `sources` glob set.
+- optionally one `additional_objs` reference naming one or more `[additional_objs.<name>]` steps.
+
+Each `[additional_objs.<name>]` block declares:
+
+- `input` — files whose digests participate in rebuild decisions;
+- `output` — files the command must produce;
+- `command` — one shell command, run once, whose outputs are then fed into the
+  target's final archive/link step.
 
 The build tool then parses the listed source files to discover:
 
@@ -608,7 +616,7 @@ scpp package
 
 Behavior:
 
-- valid only for packages with `[lib]`;
+- valid only for packages with `[[lib]]`;
 - builds the package in the selected profile/target;
 - bundles the produced `.scppm` / `.scppa` artifacts and manifest metadata into a `.scppkg` file following the existing spec.[^scppkg-spec]
 
@@ -878,7 +886,7 @@ Why:
 ## Phase B — manifest parser + single-package builds
 
 1. parse `scpp.toml`
-2. support `[package]`, `[lib]`, `[[bin]]`, `[profile.*]`
+2. support `[package]`, `[[lib]]`, `[[bin]]`, `[profile.*]`
 3. build one manifest-based package with no external dependencies
 4. write local outputs under `.scpp/build/...`
 

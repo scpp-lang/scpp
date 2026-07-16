@@ -9,5 +9,4 @@ json = { version = "1.2.3" }
 
 [[bin]]
 name = "badpkg"
-root = "main.scpp"
 sources = ["*.scpp"]

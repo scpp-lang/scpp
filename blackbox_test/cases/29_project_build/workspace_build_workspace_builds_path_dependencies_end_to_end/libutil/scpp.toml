@@ -7,6 +7,6 @@ version = "0.1.0"
 [dependencies]
 libmath = { path = "../libmath" }
 
-[lib]
-root = "src/libutil.scpp"
+[[lib]]
+name = "libutil"
 sources = ["src/**/*.scpp"]

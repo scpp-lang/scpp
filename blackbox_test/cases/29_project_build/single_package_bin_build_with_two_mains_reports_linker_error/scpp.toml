@@ -1,0 +1,9 @@
+manifest-version = 1
+
+[package]
+name = "twomains"
+version = "0.1.0"
+
+[[bin]]
+name = "twomains"
+sources = ["src/**/*.scpp"]

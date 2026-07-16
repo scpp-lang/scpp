@@ -1,0 +1,5 @@
+import libnative;
+
+int main() {
+    return libnative::value() - 42;
+}

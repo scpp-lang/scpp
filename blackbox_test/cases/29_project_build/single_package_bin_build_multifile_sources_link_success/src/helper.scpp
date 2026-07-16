@@ -1,0 +1,7 @@
+export module helper;
+
+namespace helper {
+    export int value() {
+        return 42;
+    }
+}

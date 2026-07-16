@@ -9,5 +9,4 @@ libutil = { path = "libutil" }
 
 [[bin]]
 name = "app"
-root = "main.scpp"
 sources = ["*.scpp"]

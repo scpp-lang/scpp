@@ -16,7 +16,6 @@ version = "0.1.0"
 
 [[bin]]
 name = "hello"
-root = "src/main.scpp"
 sources = ["src/**/*.scpp"]
 ```
 

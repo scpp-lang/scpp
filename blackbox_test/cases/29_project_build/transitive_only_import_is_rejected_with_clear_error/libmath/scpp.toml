@@ -4,6 +4,6 @@ manifest-version = 1
 name = "libmath"
 version = "0.1.0"
 
-[lib]
-root = "src/libmath.scpp"
+[[lib]]
+name = "libmath"
 sources = ["src/**/*.scpp"]

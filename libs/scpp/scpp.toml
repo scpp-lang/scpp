@@ -1,0 +1,25 @@
+manifest-version = 1
+
+[package]
+name = "scpp"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../std" }
+
+[[lib]]
+name = "scpp"
+sources = ["**/*.scpp"]
+additional_objs = "scpp-native"
+
+[additional_objs.scpp-native]
+input = [
+    "io/scpp_io_wrapper.cpp",
+]
+output = [
+    "scpp_io_wrapper.o",
+]
+command = """\
+${CXX:-c++} -std=c++26 -O2 -c \
+io/scpp_io_wrapper.cpp
+"""

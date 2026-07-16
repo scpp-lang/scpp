@@ -9,5 +9,4 @@ libs = ["sqlite3"]
 
 [[bin]]
 name = "nativepkg"
-root = "main.scpp"
 sources = ["*.scpp"]
