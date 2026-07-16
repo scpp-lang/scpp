@@ -1,0 +1,46 @@
+// spec §11.3(6): virtual interface inheritance preserves one shared base
+// identity across diamond paths. The shared interface constructor must run
+// exactly once in the most-derived object.
+class [[scpp::interface]] IMovable {
+public:
+    IMovable(int& constructed) {
+        constructed = constructed + 1;
+        return;
+    }
+
+    IMovable() {
+        return;
+    }
+
+    virtual ~IMovable() = default;
+    virtual void move_it() = 0;
+};
+
+class [[scpp::interface]] IFlyable : public virtual IMovable {
+public:
+    ~IFlyable() override = default;
+};
+
+class [[scpp::interface]] ISwimmable : public virtual IMovable {
+public:
+    ~ISwimmable() override = default;
+};
+
+class Duck : public virtual IFlyable, public virtual ISwimmable {
+public:
+    Duck(int& constructed) : IMovable{constructed} {
+        return;
+    }
+
+    ~Duck() override = default;
+
+    void move_it() override {
+        return;
+    }
+};
+
+int main() {
+    int constructed = 0;
+    Duck duck{constructed};
+    return constructed;
+}
