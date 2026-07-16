@@ -1,0 +1,16 @@
+// spec §6.1's `CtorOnly` example plus §6.1(1)/(7): `Type value{};` is a
+// braced direct-initialization. If a struct declares only a constructor that
+// requires arguments, default-brace-init must be rejected with a normal
+// constructor-selection diagnostic, not a compiler crash.
+struct CtorOnly {
+    int value;
+public:
+    CtorOnly(int x) : value{x} {
+        return;
+    }
+};
+
+int main() {
+    CtorOnly value{};
+    return 0;
+}

@@ -1,0 +1,1 @@
+REGEX:^[\s\S]*error: [\s\S]*(CtorOnly|struct 'CtorOnly')[\s\S]*(default constructor|no matching[^\n]*constructor|requires 1 argument|expects 1 argument|0 were provided)[\s\S]*$
