@@ -1,1 +1,1 @@
-sequence: operator_deref | getelementptr inbounds nuw %struct.Point, ptr
+sequence: operator_arrow | getelementptr inbounds nuw %struct.Point, ptr

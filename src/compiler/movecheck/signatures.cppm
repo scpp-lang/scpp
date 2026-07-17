@@ -647,6 +647,27 @@ void validate_lifetime_annotation_placement(const Function& fn) {
     }
 }
 
+[[nodiscard]] bool is_operator_arrow_function(const Function& fn) {
+    return !fn.member_owner_class.empty() && fn.name.ends_with("_operator_arrow") && !fn.params.empty() &&
+           fn.params[0].name == "this";
+}
+
+void validate_operator_arrow_signature(const Function& fn) {
+    if (!is_operator_arrow_function(fn)) return;
+    if (fn.params.size() != 1) {
+        throw DataflowError("operator-> of class '" + fn.member_owner_class + "' shall have no parameters", fn.loc);
+    }
+    const Type& ret = fn.return_type;
+    bool returns_pointer = ret.kind == TypeKind::Pointer;
+    bool returns_class = ret.kind == TypeKind::Named;
+    bool returns_class_ref = ret.kind == TypeKind::Reference && ret.pointee != nullptr && ret.pointee->kind == TypeKind::Named;
+    if (!returns_pointer && !returns_class && !returns_class_ref) {
+        throw DataflowError("operator-> of class '" + fn.member_owner_class +
+                                "' shall return a pointer, a class, or a reference to class",
+                            fn.loc);
+    }
+}
+
 [[nodiscard]] std::vector<size_t> resolve_returned_lifetime_param_indices(const Function& fn) {
     validate_lifetime_annotation_placement(fn);
     if (fn.return_lifetime.present()) {
@@ -664,6 +685,9 @@ void validate_lifetime_annotation_placement(const Function& fn) {
                                     fn.loc);
             }
             indices.push_back(i);
+        }
+        if (indices.empty() && is_operator_arrow_function(fn) && !fn.params.empty() && fn.params[0].name == "this") {
+            indices.push_back(0);
         }
         if (indices.empty()) {
             throw DataflowError("function '" + fn.name + "' names lifetime group '" + fn.return_lifetime.name +
@@ -704,6 +728,7 @@ void validate_lifetime_annotation_placement(const Function& fn) {
 [[nodiscard]] Signatures build_signatures(const Program& program) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
+        validate_operator_arrow_signature(fn);
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());
         sig.param_names.reserve(fn.params.size());

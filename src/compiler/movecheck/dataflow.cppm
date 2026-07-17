@@ -36,9 +36,9 @@ namespace scpp {
 void check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
                                      const SourceLocation& loc);
 [[nodiscard]] std::optional<Type> resolve_member_field_type(const Expr& member_expr, const Body& body,
-                                                            const DataflowState& state);
-void validate_deref_operand(const Expr& operand, const DataflowState& state, const Body& body,
-                            const Signatures& signatures);
+                                                            const DataflowState& state, const Signatures& signatures);
+void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
+                         const Signatures& signatures);
 void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
                  bool report_errors);
 void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
@@ -140,21 +140,14 @@ void check_binary_expr_operand_types(const Expr& expr, const Body& body, const S
 // comment for why this lookup is possible at all despite movecheck's
 // otherwise Body-only (no Program access) architecture.
 [[nodiscard]] std::optional<Type> resolve_member_field_type(const Expr& member_expr, const Body& body,
-                                                              const DataflowState& state) {
+                                                            const DataflowState& state, const Signatures& signatures) {
     if (member_expr.kind != ExprKind::Member) return std::nullopt;
     if (state.class_field_types == nullptr) return std::nullopt;
-    std::string base_name;
-    if (member_expr.lhs->kind == ExprKind::Identifier) {
-        base_name = member_expr.lhs->name;
-    } else if (is_explicit_star_this(*member_expr.lhs)) {
-        base_name = "this";
-    } else {
-        return std::nullopt;
-    }
-    auto base_it = body.local_types.find(base_name);
-    if (base_it == body.local_types.end()) return std::nullopt;
-    const Type& base_type = base_it->second;
-    const std::string& type_name = (base_type.kind == TypeKind::Reference ? *base_type.pointee : base_type).name;
+    std::optional<Type> base_type = infer_expr_type(*member_expr.lhs, body, signatures);
+    if (!base_type.has_value()) return std::nullopt;
+    const Type& effective = base_type->kind == TypeKind::Reference && base_type->pointee ? *base_type->pointee : *base_type;
+    if (effective.kind != TypeKind::Named) return std::nullopt;
+    const std::string& type_name = effective.name;
     auto class_it = state.class_field_types->find(type_name);
     if (class_it == state.class_field_types->end()) return std::nullopt;
     auto field_it = class_it->second.find(member_expr.name);
@@ -178,14 +171,20 @@ void check_binary_expr_operand_types(const Expr& expr, const Body& body, const S
 // is implicitly always considered "Initialized, unborrowed" -- only its
 // *type* (and, for a raw pointer, the enclosing unsafe context) is
 // checked.
-void validate_deref_operand(const Expr& operand, const DataflowState& state, const Body& body,
-                            const Signatures& signatures) {
-    std::string describe = operand.kind == ExprKind::Member ? operand.lhs->name + "." + operand.name : operand.name;
+void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
+                         const Signatures& signatures) {
+    const Expr& operand = *expr.lhs;
+    std::string describe = operand.kind == ExprKind::Member ? operand.lhs->name + "." + operand.name
+                                                            : (operand.name.empty() ? "<expression>" : operand.name);
     std::optional<Type> resolved =
-        operand.kind == ExprKind::Member ? resolve_member_field_type(operand, body, state) : [&]() -> std::optional<Type> {
+        operand.kind == ExprKind::Member ? resolve_member_field_type(operand, body, state, signatures)
+                                         : [&]() -> std::optional<Type> {
             auto it = body.local_types.find(operand.name);
             return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
         }();
+    if (!resolved.has_value() && operand.kind != ExprKind::Identifier && operand.kind != ExprKind::Member) {
+        resolved = infer_expr_type(operand, body, signatures);
+    }
     const Type* underlying =
         resolved.has_value() && resolved->kind == TypeKind::Reference && resolved->pointee ? &*resolved->pointee
                                                                                             : (resolved ? &*resolved : nullptr);
@@ -202,12 +201,14 @@ void validate_deref_operand(const Expr& operand, const DataflowState& state, con
                              "being called, a class with operator*, or '*this' is supported here",
             state.current_loc);
     }
-    if (is_raw_ptr && state.unsafe_depth == 0) {
+    if (is_raw_ptr && state.unsafe_depth == 0 && !(expr.implicit_arrow_deref && expr.implicit_arrow_chain_safe)) {
         throw DataflowError("cannot dereference raw pointer '" + describe +
                              "': requires '[[scpp::unsafe]] { }' (spec ch01 §1.3/ch02)",
             state.current_loc);
     }
-    if (operand.kind == ExprKind::Member) return; // no per-field move/borrow state -- see this function's own comment
+    if (operand.kind == ExprKind::Member || expr.implicit_arrow_deref) {
+        return; // no separate per-field state, and implicit arrow derefs resolve their roots elsewhere
+    }
     LocalState current = lookup(state.locals, operand.name);
     if (current != LocalState::Initialized) {
         throw DataflowError(describe_bad_state(operand.name, current),
@@ -226,7 +227,12 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
                  bool report_errors) {
     if (is_explicit_star_this(expr)) {
         if (!report_errors) return;
-        validate_deref_operand(*expr.lhs, state, body, signatures);
+        validate_deref_expr(expr, state, body, signatures);
+        return;
+    }
+    if (expr.implicit_arrow_deref) {
+        if (!report_errors) return;
+        validate_deref_expr(expr, state, body, signatures);
         return;
     }
     bool is_plain_identifier = expr.lhs->kind == ExprKind::Identifier;
@@ -248,7 +254,7 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
         return;
     }
     if (!report_errors) return; // purely diagnostic: doesn't move p or change any tracked state
-    validate_deref_operand(*expr.lhs, state, body, signatures);
+    validate_deref_expr(expr, state, body, signatures);
     if (!is_plain_identifier) return; // no separate borrow-tracking key for a field -- see the comment above
     const std::string& name = expr.lhs->name;
     auto borrow_it = state.borrows.find(name);
@@ -436,7 +442,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         check_constructor_arguments(direct_call_type->name, expr.args, state, body, signatures, report_errors);
         return;
     }
-    CalleeSignature callee = resolve_callee_signature(expr, body, state.class_field_types);
+    CalleeSignature callee = resolve_callee_signature(expr, body, signatures, state.class_field_types);
     auto name_it = signatures.find(callee.key);
     const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
     if (expr.lhs) {
@@ -1074,7 +1080,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     // its own field (e.g. `Outer(Inner&& i) { this.inner =
                     // std::move(i); }`) works the same way as any other
                     // class move.
-                    std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state);
+                    std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state, signatures);
                     if (field_type.has_value() && field_type->kind == TypeKind::Named &&
                         state.class_names != nullptr && state.class_names->contains(field_type->name)) {
                         target_is_movable_class = true;
@@ -1124,7 +1130,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                         }
                     }
                 } else if (expr.lhs->kind == ExprKind::Member) {
-                    std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state);
+                    std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state, signatures);
                     if (field_type.has_value()) {
                         check_function_pointer_assignment(*field_type, *expr.rhs, body, signatures, state.current_loc,
                                                           expr.lhs->name, report_errors);
@@ -1155,13 +1161,19 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                             lender.has_value()) {
                             validate_reborrow_lender_write(*lender, state, report_errors);
                         }
+                        RootSet write_roots;
                         if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
-                            auto borrow_it = state.borrows.find(*root);
+                            write_roots = single_root(*root);
+                        } else {
+                            write_roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+                        }
+                        for (const std::string& root : write_roots) {
+                            auto borrow_it = state.borrows.find(root);
                             if (borrow_it != state.borrows.end() &&
                                 (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                                throw DataflowError("cannot assign to this place: '" + *root +
-                                                     "' is currently borrowed",
-                                    state.current_loc);
+                                throw DataflowError("cannot assign to this place: '" + root +
+                                                        "' is currently borrowed",
+                                                    state.current_loc);
                             }
                         }
                     }

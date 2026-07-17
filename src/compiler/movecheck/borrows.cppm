@@ -57,8 +57,8 @@ void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& stat
                                            const Signatures& signatures, bool report_errors,
                                            std::string_view context);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
-void validate_deref_operand(const Expr& operand, const DataflowState& state, const Body& body,
-                            const Signatures& signatures);
+void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
+                         const Signatures& signatures);
 void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors);
 
@@ -111,7 +111,7 @@ std::optional<std::string> resolve_reborrow_lender(const Expr& expr, const Body&
         case ExprKind::Unary:
             return expr.lhs ? resolve_reborrow_lender(*expr.lhs, body, signatures) : std::nullopt;
         case ExprKind::Call: {
-            CalleeSignature callee = resolve_callee_signature(expr, body);
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             bool returns_reference = sig != nullptr && !sig->returned_lifetime_param_indices.empty();
             if (!returns_reference) return std::nullopt;
@@ -607,7 +607,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 }
                 return {};
             }
-            if (report_errors) validate_deref_operand(*expr.lhs, state, body, signatures);
+            if (report_errors) validate_deref_expr(expr, state, body, signatures);
             if (expr.lhs->kind == ExprKind::Identifier) return resolve_root_place(expr.lhs->name, state);
             if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
                 return resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures, report_errors);
@@ -624,7 +624,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
         case ExprKind::Call: {
-            CalleeSignature callee = resolve_callee_signature(expr, body);
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             bool returns_reference = sig != nullptr && !sig->returned_lifetime_param_indices.empty();
             if (!returns_reference) {
@@ -705,7 +705,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         case ExprKind::Move:
             return expr.lhs ? resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors) : RootSet{};
         case ExprKind::Call: {
-            CalleeSignature callee = resolve_callee_signature(expr, body);
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig == nullptr || sig->returned_lifetime_param_indices.empty()) return {};
             RootSet roots;
@@ -740,6 +740,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                                       std::string_view group_name) {
     if (roots.empty()) return false;
     for (const std::string& root : roots) {
+        if (root == "this" && !fn.member_owner_class.empty() && fn.name.ends_with("_operator_arrow") &&
+            fn.return_lifetime.name == group_name) {
+            continue;
+        }
         std::optional<size_t> param_index = find_function_param_by_root(fn, root);
         if (!param_index.has_value()) return false;
         if (fn.params[*param_index].lifetime.name != group_name) return false;
@@ -801,17 +805,12 @@ void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& stat
             return is_read_only_reachable(*expr.lhs, body, signatures);
 
         case ExprKind::Unary: {
-            // `*p`/`p->x`: read-only iff `p` (necessarily a plain
-            // Identifier -- see resolve_borrow_source_root's own Unary
-            // case) is itself a `const T*` (is_mutable_pointee == false).
-            // Class `operator*` rewrites that yield a read-only view are
-            // handled by the Call case just below, via the method's own
-            // declared return type.
             if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
-            if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
-            auto it = body.local_types.find(expr.lhs->name);
-            if (it == body.local_types.end() || it->second.kind != TypeKind::Pointer) return false;
-            return !it->second.is_mutable_pointee;
+            if (expr.unary_op != UnaryOp::Deref) return false;
+            std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
+            if (!operand_type.has_value()) return false;
+            if (operand_type->kind == TypeKind::Pointer) return !operand_type->is_mutable_pointee;
+            return false;
         }
 
         case ExprKind::Call: {
@@ -824,7 +823,7 @@ void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& stat
             // only have been called successfully with a mutable-
             // reachable argument in the first place (apply_reference_
             // argument already enforces that at the call site).
-            CalleeSignature callee = resolve_callee_signature(expr, body);
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig == nullptr) return false;
             return !sig->return_type.is_mutable_ref;

@@ -1,6 +1,7 @@
 import std;
-// ch03: `p->x` (`p` a std::unique_ptr<T>) is safe member access sugar,
-// yielding an lvalue for the pointee's field -- both read and write.
+// `std::unique_ptr<T>` explicitly provides operator->(), so `p->x`
+// remains the safe end-to-end path for member access through the owned
+// raw pointer.
 struct Point {
     int x;
     int y;

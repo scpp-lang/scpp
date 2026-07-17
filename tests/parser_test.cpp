@@ -893,28 +893,48 @@ void test_address_of_dereference_chain() {
            "address_of_dereference_chain: innermost operand should be identifier 'p'");
 }
 
-void test_arrow_desugars_to_member_of_deref() {
-    // `p->x` is sugar for `(*p).x`, same as real C++ -- see parse_postfix.
+void test_arrow_parses_as_deferred_operator_arrow_access() {
     scpp::Program program = scpp::parse("int f() { return p->x; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Member && expr.name == "x",
-           "arrow_desugars_to_member_of_deref: top-level should be Member 'x'");
-    expect(expr.lhs->kind == scpp::ExprKind::Unary && expr.lhs->unary_op == scpp::UnaryOp::Deref,
-           "arrow_desugars_to_member_of_deref: base should be unary Deref");
-    expect(expr.lhs->lhs->kind == scpp::ExprKind::Identifier && expr.lhs->lhs->name == "p",
-           "arrow_desugars_to_member_of_deref: deref operand should be identifier 'p'");
+           "arrow_parses_as_deferred_operator_arrow_access: top-level should be Member 'x'");
+    expect(expr.through_arrow,
+           "arrow_parses_as_deferred_operator_arrow_access: member should remember it came from '->'");
+    expect(expr.lhs->kind == scpp::ExprKind::Identifier && expr.lhs->name == "p",
+           "arrow_parses_as_deferred_operator_arrow_access: receiver should stay as identifier 'p'");
 }
 
 void test_chained_arrow_and_dot() {
-    // `p->x.y` chains a `->` (deref+member) followed by a plain `.`.
     scpp::Program program = scpp::parse("int f() { return p->x.y; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Member && expr.name == "y",
            "chained_arrow_and_dot: outer should be Member 'y'");
     expect(expr.lhs->kind == scpp::ExprKind::Member && expr.lhs->name == "x",
            "chained_arrow_and_dot: middle should be Member 'x'");
-    expect(expr.lhs->lhs->kind == scpp::ExprKind::Unary && expr.lhs->lhs->unary_op == scpp::UnaryOp::Deref,
-           "chained_arrow_and_dot: inner should be unary Deref");
+    expect(expr.lhs->through_arrow,
+           "chained_arrow_and_dot: inner member should remember '->'");
+    expect(expr.lhs->lhs->kind == scpp::ExprKind::Identifier && expr.lhs->lhs->name == "p",
+           "chained_arrow_and_dot: inner receiver should remain identifier 'p'");
+}
+
+void test_operator_arrow_member_decl_and_explicit_call_parse() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "public:\n"
+        "    int* operator->() [[scpp::lifetime(self)]];\n"
+        "};\n"
+        "int* f(Box& b) { return b.operator->(); }\n");
+    const scpp::Function* op = find_function_named(program, "Box_operator_arrow");
+    expect(op != nullptr, "operator_arrow_member_decl_and_explicit_call_parse: missing synthesized operator-> function");
+    expect(op->params.size() == 1 && op->params[0].name == "this",
+           "operator_arrow_member_decl_and_explicit_call_parse: operator-> should only have implicit this");
+    expect(op->return_lifetime.present() && op->return_lifetime.name == "self",
+           "operator_arrow_member_decl_and_explicit_call_parse: return lifetime should parse");
+    const scpp::Expr& expr = *program.functions.back().body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Call && expr.name == "operator_arrow",
+           "operator_arrow_member_decl_and_explicit_call_parse: explicit call should parse as method call");
+    expect(!expr.through_arrow,
+           "operator_arrow_member_decl_and_explicit_call_parse: explicit .operator->() must not use arrow protocol");
 }
 
 void test_multiplication_is_not_confused_with_dereference() {
@@ -3991,8 +4011,9 @@ int main() {
     test_address_of_plain_variable();
     test_address_of_field_and_subscript();
     test_address_of_dereference_chain();
-    test_arrow_desugars_to_member_of_deref();
+    test_arrow_parses_as_deferred_operator_arrow_access();
     test_chained_arrow_and_dot();
+    test_operator_arrow_member_decl_and_explicit_call_parse();
     test_multiplication_is_not_confused_with_dereference();
     test_parenthesized_expression();
     test_parse_error_on_missing_semicolon();
