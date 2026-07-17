@@ -21,7 +21,7 @@ public:
 
 int main() {
     int result = 0;
-    std::storage_for<Box> slot{};
+    scpp::storage_for<Box> slot{};
     [[scpp::unsafe]] {
         Box* p = new ((Box*)&slot) Box(&result);
         p->~Box();

@@ -1308,12 +1308,12 @@ void test_span_of_const_element_type() {
 
 void test_storage_for_type_declaration() {
     scpp::Program program =
-        scpp::parse("int f() { std::storage_for<int, long> slot{}; return (int)sizeof(slot); }");
+        scpp::parse("int f() { scpp::storage_for<int, long> slot{}; return (int)sizeof(slot); }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "storage_for_type_declaration: statement 0 should be VarDecl");
-    expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "std::storage_for",
-           "storage_for_type_declaration: type should be std::storage_for");
+    expect(decl.type.kind == scpp::TypeKind::Named && decl.type.name == "scpp::storage_for",
+           "storage_for_type_declaration: type should be scpp::storage_for");
     expect(decl.type.template_args.size() == 2, "storage_for_type_declaration: expected 2 type arguments");
     expect(is_named_type(decl.type.template_args[0], "int"), "storage_for_type_declaration: arg 0 should be int");
     expect(is_named_type(decl.type.template_args[1], "long"), "storage_for_type_declaration: arg 1 should be long");
@@ -1439,7 +1439,7 @@ void test_new_and_delete_parse() {
 
 void test_placement_new_parse() {
     scpp::Program program = scpp::parse(
-        "int f() { [[scpp::unsafe]] { std::storage_for<int> slot{}; int* p = new ((int*)&slot) int(7); } return 0; }");
+        "int f() { [[scpp::unsafe]] { scpp::storage_for<int> slot{}; int* p = new ((int*)&slot) int(7); } return 0; }");
     const scpp::Stmt& unsafe_block = *program.functions[0].body->statements[0];
     const scpp::Stmt& decl = *unsafe_block.statements[1];
     expect(decl.kind == scpp::StmtKind::VarDecl, "placement_new_parse: statement 1 should be VarDecl");

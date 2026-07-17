@@ -115,7 +115,7 @@ cmake --build build
 | `29_project_build` | manifest 驱动的项目构建：单包 `build`、workspace/path dependency、直接依赖可见性、`-p` 选包，以及对尚未实现 manifest 特性的拒绝路径 |
 | `30_constant_evaluation` | 形式化规范驱动的 `constexpr`/`consteval` 覆盖：required constant evaluation、`if consteval` / `if !consteval`、v1 暂不支持的操作，以及“后面的参数先推导包，再回填前面依赖参数类型”的规则 |
 | `31_enum_class` | scoped enumeration：`enum class` 声明、带作用域的枚举项访问、不同枚举类型分离、显式 cast，以及显式底层类型/枚举值 |
-| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、placement-new，以及显式析构调用语法 |
+| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、`scpp::storage_for<T, ...>`、placement-new，以及显式析构调用语法 |
 | `33_nodiscard` | 函数/类型上的 `[[nodiscard]]` / `[[nodiscard("reason")]]`，包括丢弃结果时报错，以及合法的非丢弃用法 |
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` 的状态行为、误用时 abort，以及 `std::abort()` 本身 |
 | `35_random` | `std::random_device`、`std::mt19937` 和 `scpp::rand::uniform_int_distribution<int>` |
@@ -225,7 +225,7 @@ cmake --build build
   union 成员访问的 unsafe 门控、packed struct 的原始字节布局，以及
   Linux `epoll_event` / `epoll_data_t` 的真实 FFI 声明形态
 - **底层的 size/storage/lifetime 积木现在也有直接黑盒覆盖**：
-  `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、
+  `sizeof(type)` / `sizeof(expr)`、`scpp::storage_for<T, ...>`、
   placement-new、显式析构调用，以及前缀 `::` 的全局作用域查找
 - **`[[nodiscard]]` 现在也有直接黑盒覆盖**：
   函数级/类型级 nodiscard、带 reason 的诊断文本，以及那些本来就该

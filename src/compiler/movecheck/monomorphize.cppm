@@ -1639,7 +1639,7 @@ private:
     // via a fresh index-based access afterward, never holding a
     // reference across the call.
     [[nodiscard]] Type resolve_generic_type(Type type, SourceLocation loc) {
-        if (type.name == "std::storage_for") {
+        if (type.name == "scpp::storage_for") {
             std::vector<Type> resolved_args;
             resolved_args.reserve(type.template_args.size());
             for (const Type& arg : type.template_args) resolved_args.push_back(resolve_generic_type(arg, loc));

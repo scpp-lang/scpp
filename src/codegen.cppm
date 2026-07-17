@@ -1490,7 +1490,7 @@ private:
             case TypeKind::Named: {
                 if (is_scalar_type_name(type.name)) return;
                 if (find_enum_def(program_, type.name) != nullptr) return;
-                if (type.name == "std::storage_for") return;
+                if (type.name == "scpp::storage_for") return;
                 if (type.name == "void") {
                     throw CodegenError("'void' cannot be a struct field (only a return type or a "
                                         "pointer's pointee -- 'void*' -- may be 'void')",
@@ -1640,7 +1640,7 @@ private:
 
     [[nodiscard]] llvm::Type* storage_for_llvm_type(const Type& type) {
         if (type.template_args.empty()) {
-            throw CodegenError("'std::storage_for' requires at least one type argument", current_loc_);
+            throw CodegenError("'scpp::storage_for' requires at least one type argument", current_loc_);
         }
         size_t max_size = 0;
         size_t max_align = 1;
@@ -1752,7 +1752,7 @@ private:
                 if (type.name == "size_t" || type.name == "ptrdiff_t") {
                     return llvm::Type::getIntNTy(*context_, module_->getDataLayout().getPointerSizeInBits());
                 }
-                if (type.name == "std::storage_for") return storage_for_llvm_type(type);
+                if (type.name == "scpp::storage_for") return storage_for_llvm_type(type);
                 if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
                     return to_llvm_type(enum_def->underlying_type);
                 }
@@ -1797,7 +1797,7 @@ private:
 
     [[nodiscard]] std::optional<llvm::Align> alignment_for_type(const Type& type) const {
         if (type.kind != TypeKind::Named) return std::nullopt;
-        if (type.name == "std::storage_for") {
+        if (type.name == "scpp::storage_for") {
             llvm::Type* llvm_type = const_cast<Codegen*>(this)->to_llvm_type(type);
             return module_->getDataLayout().getABITypeAlign(llvm_type);
         }

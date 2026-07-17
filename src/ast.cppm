@@ -1446,7 +1446,7 @@ struct TypeLayoutInfo {
                 case TypeKind::Named: {
                     if (current.name == "void") return std::nullopt;
                     if (std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name)) return scalar;
-                    if (current.name == "std::storage_for") return storage_for_layout(current);
+                    if (current.name == "scpp::storage_for") return storage_for_layout(current);
                     if (const EnumDef* def = find_enum(current.name)) return (*this)(def->underlying_type);
                     if (visiting_named_types.contains(current.name)) return std::nullopt;
                     visiting_named_types.insert(current.name);

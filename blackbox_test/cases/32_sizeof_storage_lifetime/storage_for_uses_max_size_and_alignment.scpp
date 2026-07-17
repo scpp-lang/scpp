@@ -1,11 +1,11 @@
 import std;
-// Current `std::storage_for<T, U, ...>` semantics: raw storage is sized and
+// Current `scpp::storage_for<T, U, ...>` semantics: raw storage is sized and
 // aligned to hold whichever candidate type is largest.
 class Box {
     public:
         virtual ~Box() { return; }
 public:
-    std::storage_for<int, long> slot{};
+    scpp::storage_for<int, long> slot{};
 
     int payload_size() const {
         return static_cast<int>(sizeof(this->slot));
@@ -14,14 +14,14 @@ public:
 
 struct Holder {
     char tag;
-    std::storage_for<int, long> slot;
+    scpp::storage_for<int, long> slot;
     char tail;
 };
 
 int main() {
     Box box{};
     if (box.payload_size() != 8) return 1;
-    if (sizeof(std::storage_for<int, long>) != 8) return 2;
+    if (sizeof(scpp::storage_for<int, long>) != 8) return 2;
     if (sizeof(Holder) != 24) return 3;
     return 0;
 }

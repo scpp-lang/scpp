@@ -1,5 +1,5 @@
 import std;
-// Current `std::storage_for<T, U, ...>` semantics: user-defined candidate
+// Current `scpp::storage_for<T, U, ...>` semantics: user-defined candidate
 // types participate in the same max-size/max-alignment computation.
 class Widget {
     public:
@@ -11,11 +11,11 @@ public:
 
 struct Wrapper {
     char lead;
-    std::storage_for<Widget, int> storage;
+    scpp::storage_for<Widget, int> storage;
 };
 
 int main() {
-    if (sizeof(std::storage_for<Widget, int>) != 16) return 1;
+    if (sizeof(scpp::storage_for<Widget, int>) != 16) return 1;
     if (sizeof(Wrapper) != 24) return 2;
     return 0;
 }
