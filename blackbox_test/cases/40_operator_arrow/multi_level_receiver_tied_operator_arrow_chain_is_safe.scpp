@@ -1,0 +1,43 @@
+// spec §7.3 (8): every selected operator-> step in the chain must be
+// receiver-tied for the final implicit raw-pointer dereference to stay safe.
+struct Node {
+    int value{};
+};
+
+struct Inner {
+    Node* ptr{};
+
+    Node* operator->() [[scpp::lifetime(self)]] {
+        return this->ptr;
+    }
+
+    const Node* operator->() const [[scpp::lifetime(self)]] {
+        return this->ptr;
+    }
+};
+
+struct Outer {
+    Node node{};
+    Inner inner{};
+    Outer(int value) {
+        this->node.value = value;
+        this->inner.ptr = &this->node;
+    }
+
+    Inner& operator->() [[scpp::lifetime(self)]] {
+        return this->inner;
+    }
+
+    const Inner& operator->() const [[scpp::lifetime(self)]] {
+        return this->inner;
+    }
+};
+
+int read_value(const Outer& outer) {
+    return outer->value;
+}
+
+int main() {
+    Outer outer{14};
+    return read_value(outer);
+}

@@ -1,0 +1,33 @@
+// spec §7.3 (8): a receiver-tied operator-> chain ending in a raw pointer is
+// safe without [[scpp::unsafe]], and ordinary const overload resolution still
+// applies to the receiver.
+struct Node {
+    int value{};
+    int bias{};
+};
+
+struct SafePtr {
+    Node node{};
+    SafePtr(int value, int bias) {
+        this->node.value = value;
+        this->node.bias = bias;
+    }
+
+    Node* operator->() [[scpp::lifetime(self)]] {
+        return &this->node;
+    }
+
+    const Node* operator->() const [[scpp::lifetime(self)]] {
+        return &this->node;
+    }
+};
+
+int read_const(const SafePtr& p) {
+    return p->value + p->bias;
+}
+
+int main() {
+    SafePtr p{5, 8};
+    p->value = p->value + 1;
+    return read_const(p);
+}

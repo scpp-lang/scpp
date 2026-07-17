@@ -1,0 +1,39 @@
+// spec §7.3 (9): if even one selected operator-> step is not receiver-tied,
+// the safe case does not apply to any part of that same chain.
+struct Node {
+    int value{};
+};
+
+struct Inner {
+    Node* ptr{};
+
+    Node* operator->() [[scpp::lifetime(self)]] {
+        return this->ptr;
+    }
+
+    const Node* operator->() const [[scpp::lifetime(self)]] {
+        return this->ptr;
+    }
+};
+
+struct Outer {
+    Node node{};
+    Inner inner{};
+    Outer(int value) {
+        this->node.value = value;
+        this->inner.ptr = &this->node;
+    }
+
+    Inner& operator->() {
+        return this->inner;
+    }
+
+    const Inner& operator->() const {
+        return this->inner;
+    }
+};
+
+int main() {
+    Outer outer{15};
+    return outer->value;
+}

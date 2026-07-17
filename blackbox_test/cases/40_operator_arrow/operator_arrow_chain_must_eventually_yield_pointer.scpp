@@ -1,0 +1,21 @@
+// spec §7.3 (2.4): an operator-> chain is ill-formed if a selected step
+// yields a class value that itself provides no next operator->.
+struct Node {
+    int value{};
+};
+
+struct BadStep {
+    Node node{};
+    BadStep(int value) {
+        this->node.value = value;
+    }
+
+    Node operator->() const {
+        return this->node;
+    }
+};
+
+int main() {
+    BadStep bad{21};
+    return bad->value;
+}

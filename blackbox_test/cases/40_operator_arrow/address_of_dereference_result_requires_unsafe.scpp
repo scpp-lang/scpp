@@ -1,0 +1,26 @@
+// spec §7.3 (11): taking &(*p) names a raw pointer directly, so later member
+// access through that pointer remains outside the safe implicit arrow protocol.
+struct Node {
+    int value{};
+};
+
+struct SafeBox {
+    Node node{};
+    SafeBox(int value) {
+        this->node.value = value;
+    }
+
+    Node& operator*() {
+        return this->node;
+    }
+
+    const Node& operator*() const {
+        return this->node;
+    }
+};
+
+int main() {
+    SafeBox box{23};
+    Node* raw = &(*box);
+    return raw->value;
+}

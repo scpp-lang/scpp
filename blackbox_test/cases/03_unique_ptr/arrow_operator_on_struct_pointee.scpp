@@ -1,15 +1,18 @@
 import std;
-// `std::unique_ptr<T>` explicitly provides operator->(), so `p->x`
-// remains the safe end-to-end path for member access through the owned
-// raw pointer.
+// `std::unique_ptr<T>` now supports `p->x` through its explicit receiver-tied
+// operator->(), and the const overload remains part of the same safe path.
 struct Point {
     int x;
     int y;
 };
 
+int sum_point(const std::unique_ptr<Point>& p) {
+    return p->x + p->y;
+}
+
 int main() {
     std::unique_ptr<Point> p = std::make_unique<Point>();
     p->x = 3;
     p->y = 4;
-    return p->x + p->y;
+    return sum_point(p);
 }

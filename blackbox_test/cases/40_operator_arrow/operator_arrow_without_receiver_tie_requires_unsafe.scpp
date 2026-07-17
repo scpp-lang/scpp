@@ -1,0 +1,21 @@
+// spec §7.3 (9): if any selected operator-> invocation is not receiver-tied,
+// the implicit raw-pointer dereference still needs an unsafe context.
+struct Node {
+    int value{};
+};
+
+struct UncheckedPtr {
+    Node node{};
+    UncheckedPtr(int value) {
+        this->node.value = value;
+    }
+
+    Node* operator->() {
+        return &this->node;
+    }
+};
+
+int main() {
+    UncheckedPtr p{9};
+    return p->value;
+}
