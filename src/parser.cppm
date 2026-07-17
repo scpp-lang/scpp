@@ -3555,11 +3555,15 @@ private:
     //     with zero extra machinery.
     // Every argument must be a bare reference to one of the requires-
     // expression's own *other* (non-placeholder) parameters -- resolved
-    // to a concrete Type via `helper_param_types` right here, so nothing
-    // about the parameter list itself needs to survive into
-    // ConceptRequirement.
-    ConceptRequirement parse_concept_requirement(const std::string& placeholder_name,
-                                                   const std::unordered_map<std::string, Type>& helper_param_types) {
+    // to a concrete Type via `helper_param_types` right here. Each such
+    // parameter's own `[[scpp::lifetime(...)]]` annotation (if any),
+    // looked up the same way via `helper_param_lifetimes`, *does* survive
+    // into ConceptRequirement::arg_lifetimes -- spec §6.2(22) makes it
+    // constrain concept satisfaction itself (see generics_support.cppm's
+    // type_satisfies_concept).
+    ConceptRequirement parse_concept_requirement(
+        const std::string& placeholder_name, const std::unordered_map<std::string, Type>& helper_param_types,
+        const std::unordered_map<std::string, LifetimeAnnotation>& helper_param_lifetimes) {
         ConceptRequirement req;
         bool is_compound = match(TokenKind::LBrace);
 
@@ -3589,6 +3593,7 @@ private:
                                           "one of them");
                 }
                 req.arg_types.push_back(it->second);
+                req.arg_lifetimes.push_back(helper_param_lifetimes.at(std::string(arg_tok.text)));
             } while (match(TokenKind::Comma));
         }
         expect(TokenKind::RParen, "')'");
@@ -3828,6 +3833,13 @@ private:
         // already-declared concrete type (e.g. `int x`), tracked only
         // transiently to resolve a requirement's own argument types.
         std::unordered_map<std::string, Type> helper_param_types;
+        // spec §6.2(13.1)/(22): a probe (helper) parameter's own
+        // `[[scpp::lifetime(...)]]` annotation, tracked alongside its
+        // type -- constrains concept satisfaction (see
+        // parse_concept_requirement/type_satisfies_concept), unlike the
+        // placeholder itself, which (like an ordinary function's implicit
+        // object parameter, spec §6.2(23)) may never bear this attribute.
+        std::unordered_map<std::string, LifetimeAnnotation> helper_param_lifetimes;
         bool found_placeholder = false;
         if (!check(TokenKind::RParen)) {
             do {
@@ -3854,7 +3866,20 @@ private:
                     Type helper_type = parse_type();
                     std::string helper_name =
                         std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
+                    // ch05 §5.13/spec §6.2(13.1): a probe parameter
+                    // accepts the same trailing attribute-specifier-seq
+                    // an ordinary function parameter does (see
+                    // parse_function's identical handling) -- most
+                    // importantly `[[scpp::lifetime(name)]]`.
+                    const Token& helper_attr_start_tok = peek();
+                    ParsedAttributes helper_attrs = parse_attribute_specifier_seq();
+                    reject_packed_attribute(helper_attrs, helper_attr_start_tok,
+                                             "a requires-expression parameter declaration");
+                    LifetimeAnnotation helper_lifetime;
+                    merge_lifetime_attribute(helper_lifetime, helper_attrs.lifetime, helper_attr_start_tok,
+                                              "a requires-expression parameter declaration");
                     helper_param_types[helper_name] = std::move(helper_type);
+                    helper_param_lifetimes[helper_name] = std::move(helper_lifetime);
                 }
             } while (match(TokenKind::Comma));
         }
@@ -3870,7 +3895,8 @@ private:
 
         expect(TokenKind::LBrace, "'{'");
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-            def.requirements.push_back(parse_concept_requirement(def.requires_param_name, helper_param_types));
+            def.requirements.push_back(
+                parse_concept_requirement(def.requires_param_name, helper_param_types, helper_param_lifetimes));
         }
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
@@ -3907,6 +3933,18 @@ private:
                 Param p;
                 p.type = req.arg_types[i];
                 p.name = "arg" + std::to_string(i);
+                // Carries the probe parameter's own lifetime annotation
+                // (if any) through to the witness's signature -- this
+                // both (a) reuses build_signatures'
+                // validate_lifetime_annotation_placement to reject an
+                // ill-formed probe (tagged but not reference/pointer/
+                // span-typed) exactly like an ordinary parameter would
+                // be, and (b) is otherwise unused by the witness itself
+                // (is_concept_witness excludes it from real dataflow
+                // checking) -- the actual (22.1)-(22.4) satisfaction
+                // matching reads req.arg_lifetimes directly (see
+                // type_satisfies_concept), not this copy.
+                p.lifetime = req.arg_lifetimes[i];
                 fn.params.push_back(std::move(p));
             }
             // Bodyless: a witness method is never actually called or

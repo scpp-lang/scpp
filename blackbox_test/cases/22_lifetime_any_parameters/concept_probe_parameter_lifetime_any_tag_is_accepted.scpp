@@ -1,0 +1,40 @@
+// spec §6.2(13.1)/(22)-(22.3): "A requires-expression's own probe
+// parameter may carry the same tag. Tagging a compound requirement's
+// probe parameter [[scpp::lifetime(any)]] changes what that
+// requirement checks" -- e.g.
+// `requires(T a, Token& tok [[scpp::lifetime(any)]]) { ... }`. This
+// syntax now parses (same attribute-parsing path as an ordinary function
+// parameter -- see lifetime_any_tag_on_ordinary_parameter_is_accepted.
+// scpp) and has a real semantic effect on concept satisfaction, not just
+// tolerated syntax: per (22.3), an any-tagged probe parameter
+// requires the satisfying callable's corresponding parameter to also be
+// any-tagged. The closure passed below is any-tagged on its own
+// `Token&` parameter, so it satisfies `AcceptsToken` and the call
+// through the constrained generic function succeeds.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+template<typename T>
+concept AcceptsToken = requires(T a, Token& tok [[scpp::lifetime(any)]]) {
+    { a(tok) } -> std::same_as<void>;
+};
+
+void with_fresh_token(AcceptsToken auto&& f) {
+    Token tok{};
+    tok.value = 42;
+    f(tok);
+    return;
+}
+
+int main() {
+    int result = 0;
+    with_fresh_token([&result](Token& t [[scpp::lifetime(any)]]) {
+        result = t.value;
+        return;
+    });
+    return result;
+}
