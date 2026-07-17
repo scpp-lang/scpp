@@ -10,6 +10,13 @@
 下面的条目已经按当前 `main` 重新审计；已经修复的项目应当直接移除，而不是作
 为历史噪音继续留在列表里。
 
+## 进行中 / 刚完成正式化
+
+- 标准 C++ 的 `alignas` 支持现已在
+  `docs/spec/zh/05-unions-and-packed-layout.md` 中完成正式规范，并连带写清了
+  配套的 `alignof(type-id)` 查询。parser / semantic / codegen / test 的工作还
+  需要继续落地，但这个缺口现在已经从“未被记录的空白”转成了明确跟踪的实现后续项。
+
 ## 语言/语法缺口（当前重点）
 
 这一节里的项目需要真正的编译器工作：parser、semantic analysis、borrow/type
