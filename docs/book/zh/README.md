@@ -26,7 +26,7 @@
 
 - 安全边界与 `[[scpp::unsafe]]`
   - [`[[scpp::unsafe]]` 会做什么、不会做什么](ch06-01-what-scpp-unsafe-does-and-does-not-do.md)
-  - 调用 `extern "C"` 与使用裸指针
+  - [调用 `extern "C"` 与使用裸指针](ch06-02-calling-extern-c-and-using-raw-pointers.md)
   - 如何把“信任”局部化到真实程序里
 
 - 包、模块与项目布局
