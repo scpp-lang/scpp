@@ -31,7 +31,7 @@ module;
 export module scpp.driver;
 
 import scpp.ast;
-import scpp.codegen;
+import scpp.compiler.codegen;
 import scpp.constexpr_engine;
 import scpp.lexer;
 import scpp.compiler.movecheck;
