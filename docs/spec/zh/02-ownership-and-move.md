@@ -215,7 +215,8 @@ object，因为它没有别名化任何预先存在的对象或范围。
 (13) attribute-token `scpp::lifetime` 可以出现在一个
 *attribute-specifier-seq*（[dcl.attr.grammar]）里，并且附着于：
 
-  (13.1) 一个参数声明，并且该参数的类型是引用类型、指针类型、
+  (13.1) 一个参数声明（其中也包括 `requires(...)` 表达式里的 probe
+  parameter 声明），并且该参数的类型是引用类型、指针类型、
   `std::span<T>` 或者 `std::span<const T>`；或者
 
   (13.2) 一个这类函数或者成员函数的声明符，并且它的返回类型是引用类型、
@@ -293,7 +294,26 @@ span 值，就绑定到分组 `name`。如果出现下列任一情况，
 对另一个这类声明的调用，不会跨声明按文本拼写去比较生命周期分组名；检查器会用
 被调用方自己的分组关系，去判断哪些实际实参会影响它按 (18)-(20) 返回出来的
 那个可用返回值。至于一个从该分组导出的值，能不能被嵌进对象状态里，则单独由
-(24) 约束。
+(24) 约束。`requires(...)` 表达式拿带
+`[[scpp::lifetime(name)]]` 的 probe parameter 去测试某个 callable
+时，也使用同样这种“声明局部、按 α-等价比较”的规则。这样的注解会影响 concept
+是否满足；它不只是给一个原本普通的测试调用加了个语法糖。对这种满足性检查来说：
+
+  (22.1) 如果一个 probe parameter 带的是用户写出的分组名，那么被选中的那个
+  callable 声明里，对应形参必须属于某个非 `generic` 分组；而且如果多个 probe
+  parameter 属于同一个用户写出的分组，那么那个声明里对应的多个形参也必须同属
+  一个分组；
+
+  (22.2) 如果 probe parameters 属于不同的用户写出分组，那么那个声明里对应的
+  形参也必须属于不同分组；
+
+  (22.3) 如果一个 probe parameter 带的是
+  `[[scpp::lifetime(generic)]]`，那么被选中的 callable 声明里，对应形参也必须
+  带 `[[scpp::lifetime(generic)]]`；并且
+
+  (22.4) 如果一个 probe parameter 没有 `scpp::lifetime` attribute，
+  那么除了 probe 自身普通的 well-formedness / type requirements 之外，它不会再
+  额外施加生命周期分组约束。
 
 (23) 一个非 static 成员函数，可以像自由函数一样，在它的显式参数上使用具名
 生命周期分组。就本小节而言，一次对非 static 成员函数的调用，会额外提供一个
