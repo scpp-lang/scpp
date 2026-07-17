@@ -25,7 +25,7 @@
   - [Methods and `this`](ch05-03-methods-and-this.md)
 
 - Safety Boundaries and `[[scpp::unsafe]]`
-  - What `[[scpp::unsafe]]` Does and Does Not Do
+  - [What `[[scpp::unsafe]]` Does and Does Not Do](ch06-01-what-scpp-unsafe-does-and-does-not-do.md)
   - Calling `extern "C"` and Using Raw Pointers
   - Localizing Trust in Real Programs
 
