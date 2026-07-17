@@ -30,7 +30,7 @@
   - [如何把「信任」局部化到真實程式裡](ch06-03-localizing-trust-in-real-programs.md)
 
 - 套件、模組與專案版面配置
-  - 套件與專案清單
+  - [套件與專案清單](ch07-01-packages-and-project-manifests.md)
   - 用模組控制作用域與可見性
   - 在模組樹中參照項目的路徑
   - 使用 `import` 與限定名稱

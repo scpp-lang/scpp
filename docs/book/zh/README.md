@@ -30,7 +30,7 @@
   - [如何把“信任”局部化到真实程序里](ch06-03-localizing-trust-in-real-programs.md)
 
 - 包、模块与项目布局
-  - 包与项目清单
+  - [包与项目清单](ch07-01-packages-and-project-manifests.md)
   - 用模块控制作用域与可见性
   - 在模块树中引用条目的路径
   - 使用 `import` 与限定名

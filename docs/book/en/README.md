@@ -30,7 +30,7 @@
   - [Localizing Trust in Real Programs](ch06-03-localizing-trust-in-real-programs.md)
 
 - Packages, Modules, and Project Layout
-  - Packages and Project Manifests
+  - [Packages and Project Manifests](ch07-01-packages-and-project-manifests.md)
   - Control Scope and Privacy with Modules
   - Paths for Referring to Items in the Module Tree
   - Using `import` and Qualified Names
