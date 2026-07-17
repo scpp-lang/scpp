@@ -175,6 +175,17 @@ void run_integration_test() {
     expect(get_css.find("Content-Type: text/css") != std::string::npos, "GET /assets/site.css has text/css");
     expect(get_css.find("font-family: sans-serif;") != std::string::npos, "GET /assets/site.css returns CSS body");
 
+    std::string get_svg = send_request(port, "GET /assets/logo.svg HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(get_svg.find("HTTP/1.1 200 OK") == 0, "GET /assets/logo.svg returns 200");
+    expect(get_svg.find("Content-Type: image/svg+xml") != std::string::npos, "GET /assets/logo.svg has image/svg+xml");
+    expect(get_svg.find("<svg") != std::string::npos, "GET /assets/logo.svg returns SVG body");
+
+    std::string get_sitemap = send_request(port, "GET /sitemap.xml HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(get_sitemap.find("HTTP/1.1 200 OK") == 0, "GET /sitemap.xml returns 200");
+    expect(get_sitemap.find("Content-Type: application/xml") != std::string::npos,
+           "GET /sitemap.xml has application/xml");
+    expect(get_sitemap.find("<urlset") != std::string::npos, "GET /sitemap.xml returns XML body");
+
     std::string nested_index = send_request(port, "GET /book/en/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(nested_index.find("HTTP/1.1 200 OK") == 0, "GET /book/en/ returns 200");
     expect(nested_index.find("Content-Type: text/html") != std::string::npos, "GET /book/en/ has text/html");
