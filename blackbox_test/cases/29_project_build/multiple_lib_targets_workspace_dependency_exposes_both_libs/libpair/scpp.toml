@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "libpair"
+version = "0.1.0"
+
+[[lib]]
+name = "libone"
+sources = ["src/libone.scpp"]
+
+[[lib]]
+name = "libtwo"
+sources = ["src/libtwo.scpp"]

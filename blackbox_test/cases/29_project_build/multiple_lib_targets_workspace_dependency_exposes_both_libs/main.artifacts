@@ -1,0 +1,5 @@
+.scpp/build/*/dev/libpair/modules/libone.scppm
+.scpp/build/*/dev/libpair/archives/liblibone.scppa
+.scpp/build/*/dev/libpair/modules/libtwo.scppm
+.scpp/build/*/dev/libpair/archives/liblibtwo.scppa
+.scpp/build/*/dev/app/package-metadata.json

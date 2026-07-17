@@ -1,0 +1,7 @@
+export module beta;
+
+namespace beta {
+    export int value() {
+        return 32;
+    }
+}

@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "multilib"
+version = "0.1.0"
+
+[[lib]]
+name = "mathlib"
+sources = ["src/mathlib.scpp"]
+
+[[lib]]
+name = "textlib"
+sources = ["src/textlib.scpp"]

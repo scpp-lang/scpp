@@ -1,0 +1,7 @@
+export module textlib;
+
+namespace textlib {
+    export int length_of_hello() {
+        return 5;
+    }
+}

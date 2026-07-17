@@ -1,0 +1,6 @@
+import libone;
+import libtwo;
+
+int main() {
+    return libone::value() + libtwo::value() - 42;
+}

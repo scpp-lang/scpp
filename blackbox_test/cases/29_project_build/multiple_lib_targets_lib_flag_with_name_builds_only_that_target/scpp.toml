@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "selectlib"
+version = "0.1.0"
+
+[[lib]]
+name = "alpha"
+sources = ["src/alpha.scpp"]
+
+[[lib]]
+name = "beta"
+sources = ["src/beta.scpp"]
