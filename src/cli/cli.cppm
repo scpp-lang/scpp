@@ -685,6 +685,13 @@ int run(int argc, char** argv) {
             std::string_view arg = argv[i];
             if (arg == "--lib") {
                 options.build_lib_only = true;
+                if (i + 1 < argc) {
+                    std::string_view next = argv[i + 1];
+                    if (!next.empty() && next[0] != '-') {
+                        options.selected_lib = argv[i + 1];
+                        i++;
+                    }
+                }
             } else if (arg == "--bin" && i + 1 < argc) {
                 options.selected_bin = argv[++i];
             } else if ((arg == "-p" || arg == "--package") && i + 1 < argc) {
@@ -757,7 +764,7 @@ int run(int argc, char** argv) {
     std::cout << "       " << name
               << " <file.scpp> [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
     std::cout << "       " << name
-              << " build [--workspace] [-p <package>] [--lib] [--bin <name>] [--profile <name>] [--release]\n";
+              << " build [--workspace] [-p <package>] [--lib [<name>]] [--bin <name>] [--profile <name>] [--release]\n";
     std::cout << "       " << name
               << " build-module <file.scpp> --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
     return 0;
