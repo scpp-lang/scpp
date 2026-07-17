@@ -14,7 +14,7 @@ export module scpp.cli;
 import scpp.lexer;
 import scpp.parser;
 import scpp.ast;
-import scpp.codegen;
+import scpp.compiler.codegen;
 import scpp.compiler.movecheck;
 import scpp.driver;
 import scpp.project;

@@ -30,7 +30,7 @@ module;
 export module scpp.project;
 
 import scpp.ast;
-import scpp.codegen;
+import scpp.compiler.codegen;
 import scpp.driver;
 import scpp.lexer;
 import scpp.compiler.movecheck;
