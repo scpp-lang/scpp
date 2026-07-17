@@ -41,6 +41,7 @@ export namespace scpp {
 struct ProjectBuildOptions {
     bool build_lib_only = false;
     std::optional<std::string> selected_bin;
+    std::optional<std::string> selected_lib;
     std::optional<std::string> selected_profile;
     std::optional<std::string> selected_package;
     bool release = false;
@@ -635,7 +636,7 @@ struct ManifestData {
     int manifest_version = -1;
     std::optional<std::string> package_name;
     std::optional<std::string> package_version;
-    std::optional<ManifestTarget> lib_target;
+    std::vector<ManifestTarget> lib_targets;
     std::vector<ManifestTarget> bin_targets;
     std::map<std::string, CustomCommand> custom_commands;
     std::map<std::string, ProfileSettings> profiles;
@@ -730,6 +731,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
     std::string current_profile;
     std::string current_custom;
     ManifestTarget* current_bin = nullptr;
+    ManifestTarget* current_lib = nullptr;
 
     std::string line;
     int line_number = 0;
@@ -743,6 +745,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                                     ": malformed section header");
             }
             current_bin = nullptr;
+            current_lib = nullptr;
             if (stripped.rfind("[[", 0) == 0) {
                 if (stripped.size() < 4 || stripped.substr(stripped.size() - 2) != "]]" ) {
                     throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
@@ -756,11 +759,8 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                     continue;
                 }
                 if (section_name == "lib") {
-                    if (manifest.lib_target.has_value()) {
-                        throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
-                                            ": multiple [[lib]] targets are not implemented yet");
-                    }
-                    manifest.lib_target = ManifestTarget{};
+                    manifest.lib_targets.emplace_back();
+                    current_lib = &manifest.lib_targets.back();
                     current_section = Section::Lib;
                     continue;
                 }
@@ -844,12 +844,13 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                 }
                 break;
             case Section::Lib:
+                if (current_lib == nullptr) throw ManifestError(context + " is outside a [[lib]] table");
                 if (key == "name") {
-                    manifest.lib_target->name = parse_string_literal(value, context);
+                    current_lib->name = parse_string_literal(value, context);
                 } else if (key == "sources") {
-                    manifest.lib_target->source_patterns = parse_string_array(value, context);
+                    current_lib->source_patterns = parse_string_array(value, context);
                 } else if (key == "additional_objs") {
-                    manifest.lib_target->additional_obj_steps = parse_string_or_array(value, context);
+                    current_lib->additional_obj_steps = parse_string_or_array(value, context);
                 } else {
                     throw ManifestError(context + " is not supported in [[lib]]");
                 }
@@ -962,17 +963,21 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
         throw ManifestError("manifest must declare either [package] or [workspace]");
     }
     if (!manifest.package_name.has_value()) {
-        if (manifest.lib_target.has_value() || !manifest.bin_targets.empty() || !manifest.dependencies.empty()) {
+        if (!manifest.lib_targets.empty() || !manifest.bin_targets.empty() || !manifest.dependencies.empty()) {
             throw ManifestError("a virtual workspace manifest cannot declare [[lib]], [[bin]], or [dependencies]");
         }
         return manifest;
     }
-    if (!manifest.lib_target.has_value() && manifest.bin_targets.empty()) {
+    if (manifest.lib_targets.empty() && manifest.bin_targets.empty()) {
         throw ManifestError("manifest must declare at least one [[lib]] or [[bin]] target");
     }
-    if (manifest.lib_target.has_value()) {
-        if (manifest.lib_target->name.empty()) throw ManifestError("[[lib]].name is required");
-        if (manifest.lib_target->source_patterns.empty()) throw ManifestError("[[lib]].sources is required");
+    std::unordered_set<std::string> lib_names;
+    for (const ManifestTarget& lib : manifest.lib_targets) {
+        if (lib.name.empty()) throw ManifestError("[[lib]].name is required");
+        if (lib.source_patterns.empty()) throw ManifestError("[[lib]].sources is required");
+        if (!lib_names.insert(lib.name).second) {
+            throw ManifestError("duplicate [[lib]] target name '" + lib.name + "'");
+        }
     }
     std::unordered_set<std::string> bin_names;
     for (const ManifestTarget& bin : manifest.bin_targets) {
@@ -1000,7 +1005,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
             }
         }
     };
-    if (manifest.lib_target.has_value()) validate_custom_refs(*manifest.lib_target, "[[lib]]");
+    for (const ManifestTarget& lib : manifest.lib_targets) validate_custom_refs(lib, "[[lib]]");
     for (const ManifestTarget& bin : manifest.bin_targets) validate_custom_refs(bin, "[[bin]]");
     return manifest;
 }
@@ -1671,21 +1676,25 @@ public:
             std::unique_lock lock(mutex_);
             auto cached = cache_.find(key);
             if (cached != cache_.end()) {
-                if (!build_binaries) {
-                    erase_from_stack();
-                    return cached->second;
-                }
-                std::filesystem::path selected_binary_path;
-                if (options.selected_bin.has_value()) {
-                    selected_binary_path = cached->second.package_output_root / *options.selected_bin;
-                }
-                bool has_requested_binary = options.selected_bin.has_value()
-                    ? std::find(cached->second.binaries.begin(), cached->second.binaries.end(), selected_binary_path) !=
-                          cached->second.binaries.end()
-                    : (!cached->second.binaries.empty() || cached->second.manifest.bin_targets.empty());
-                if (has_requested_binary) {
-                    erase_from_stack();
-                    return cached->second;
+                bool has_all_libraries =
+                    cached->second.library_modules.size() >= cached->second.manifest.lib_targets.size();
+                if (has_all_libraries) {
+                    if (!build_binaries) {
+                        erase_from_stack();
+                        return cached->second;
+                    }
+                    std::filesystem::path selected_binary_path;
+                    if (options.selected_bin.has_value()) {
+                        selected_binary_path = cached->second.package_output_root / *options.selected_bin;
+                    }
+                    bool has_requested_binary = options.selected_bin.has_value()
+                        ? std::find(cached->second.binaries.begin(), cached->second.binaries.end(), selected_binary_path) !=
+                              cached->second.binaries.end()
+                        : (!cached->second.binaries.empty() || cached->second.manifest.bin_targets.empty());
+                    if (has_requested_binary) {
+                        erase_from_stack();
+                        return cached->second;
+                    }
                 }
             }
             auto state = states_.find(key);
@@ -1759,11 +1768,18 @@ public:
                 result.uses_stdlib = result.uses_stdlib || dep_result.uses_stdlib;
             }
 
-            std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
             std::unordered_set<std::string> referenced_custom_steps;
-            if (manifest.lib_target.has_value()) {
-                referenced_custom_steps.insert(manifest.lib_target->additional_obj_steps.begin(),
-                                               manifest.lib_target->additional_obj_steps.end());
+            if (options.selected_lib.has_value()) {
+                auto it = std::find_if(manifest.lib_targets.begin(), manifest.lib_targets.end(),
+                                       [&](const ManifestTarget& target) { return target.name == *options.selected_lib; });
+                if (it == manifest.lib_targets.end()) {
+                    throw ManifestError("unknown [[lib]] target '" + *options.selected_lib + "'");
+                }
+                referenced_custom_steps.insert(it->additional_obj_steps.begin(), it->additional_obj_steps.end());
+            } else {
+                for (const ManifestTarget& target : manifest.lib_targets) {
+                    referenced_custom_steps.insert(target.additional_obj_steps.begin(), target.additional_obj_steps.end());
+                }
             }
             if (build_binaries) {
                 if (options.selected_bin.has_value()) {
@@ -1784,26 +1800,18 @@ public:
                                               build_custom_step_with_cache(manifest, result.package_output_root, step_name));
             }
 
-            std::unordered_set<std::string> own_library_module_names;
-            if (manifest.lib_target.has_value()) {
-                std::vector<SourceInfo> lib_sources = classify_target_sources(manifest_dir, *manifest.lib_target);
-                own_library_module_names = local_primary_module_names(lib_sources);
-                validate_direct_visibility(lib_sources, own_library_module_names, direct_import_paths, transitive_only_modules);
-                result.uses_stdlib = result.uses_stdlib || sources_use_stdlib(lib_sources);
-                result.library_modules = build_modules_for_target(lib_sources, result.package_output_root / "modules",
-                                                                 result.package_output_root / "archives",
-                                                                 full_dependency_import_paths, profile.opt_level,
-                                                                 manifest, &*manifest.lib_target, profile_name_,
-                                                                 database_);
-                std::vector<std::filesystem::path> lib_custom_outputs = collect_custom_outputs(result, *manifest.lib_target);
-                if (!lib_custom_outputs.empty()) {
-                    std::vector<std::string> archive_inputs;
-                    for (const std::filesystem::path& path : lib_custom_outputs) archive_inputs.push_back(path.string());
-                    scpp::archive_objects(archive_inputs, result.library_modules.front().archive_path.string());
-                    result.library_modules.front().archive_digest =
-                        path_digest_or_empty(result.library_modules.front().archive_path);
+            if (options.selected_lib.has_value()) {
+                auto it = std::find_if(manifest.lib_targets.begin(), manifest.lib_targets.end(),
+                                       [&](const ManifestTarget& target) { return target.name == *options.selected_lib; });
+                build_library_target(manifest, *it, direct_import_paths, full_dependency_import_paths,
+                                     transitive_only_modules, result, profile);
+            } else {
+                for (const ManifestTarget& lib_target : manifest.lib_targets) {
+                    build_library_target(manifest, lib_target, direct_import_paths, full_dependency_import_paths,
+                                         transitive_only_modules, result, profile);
                 }
-            } else if (options.build_lib_only) {
+            }
+            if (manifest.lib_targets.empty() && options.build_lib_only) {
                 throw ManifestError("manifest has no [[lib]] target");
             }
 
@@ -2002,6 +2010,31 @@ private:
             append_unique_paths(outputs, it->second);
         }
         return outputs;
+    }
+
+    void build_library_target(const ManifestData& manifest,
+                              const ManifestTarget& lib_target,
+                              const std::unordered_map<std::string, std::string>& direct_dep_import_paths,
+                              const std::unordered_map<std::string, std::string>& full_dependency_import_paths,
+                              const std::unordered_map<std::string, std::string>& transitive_only_modules,
+                              PackageBuildResult& result,
+                              const ProfileSettings& profile) {
+        std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
+        std::vector<SourceInfo> lib_sources = classify_target_sources(manifest_dir, lib_target);
+        std::unordered_set<std::string> own_library_module_names = local_primary_module_names(lib_sources);
+        validate_direct_visibility(lib_sources, own_library_module_names, direct_dep_import_paths, transitive_only_modules);
+        result.uses_stdlib = result.uses_stdlib || sources_use_stdlib(lib_sources);
+        std::vector<BuiltModule> built_lib_modules = build_modules_for_target(
+            lib_sources, result.package_output_root / "modules", result.package_output_root / "archives",
+            full_dependency_import_paths, profile.opt_level, manifest, &lib_target, profile_name_, database_);
+        std::vector<std::filesystem::path> lib_custom_outputs = collect_custom_outputs(result, lib_target);
+        if (!lib_custom_outputs.empty()) {
+            std::vector<std::string> archive_inputs;
+            for (const std::filesystem::path& path : lib_custom_outputs) archive_inputs.push_back(path.string());
+            scpp::archive_objects(archive_inputs, built_lib_modules.front().archive_path.string());
+            built_lib_modules.front().archive_digest = path_digest_or_empty(built_lib_modules.front().archive_path);
+        }
+        result.library_modules.insert(result.library_modules.end(), built_lib_modules.begin(), built_lib_modules.end());
     }
 
     void build_binary_target(const ManifestData& manifest,
@@ -2209,6 +2242,9 @@ std::vector<ManifestData> select_workspace_packages(const WorkspaceInfo& workspa
     }
     if (options.selected_bin.has_value() && options.build_workspace) {
         throw ManifestError("--bin cannot be combined with --workspace");
+    }
+    if (options.selected_lib.has_value() && options.build_workspace) {
+        throw ManifestError("--lib <name> cannot be combined with --workspace");
     }
 
     auto find_by_name = [&](const std::string& name) -> std::optional<ManifestData> {
