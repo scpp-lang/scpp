@@ -2524,6 +2524,22 @@ private:
             }
             program.functions.push_back(clone_function_declaration(fn, imported_name, is_reexport, keep_body));
         }
+        for (const GlobalVar& global : imported.globals) {
+            if (!global.is_exported) continue;
+            std::string effective_owner = global.owning_module.empty() ? imported_name : global.owning_module;
+            auto existing = std::find_if(program.globals.begin(), program.globals.end(), [&](const GlobalVar& current) {
+                return current.owning_module == effective_owner && current.decl != nullptr && global.decl != nullptr &&
+                       current.decl->var_name == global.decl->var_name;
+            });
+            if (existing != program.globals.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && global.is_exported);
+                continue;
+            }
+            GlobalVar clone = clone_global_var(global);
+            if (clone.owning_module.empty()) clone.owning_module = imported_name;
+            clone.is_exported = is_reexport && clone.is_exported;
+            program.globals.push_back(std::move(clone));
+        }
     }
 
     // Merges *every* declaration (exported or not -- ch11 §11.4: within a
@@ -2628,6 +2644,18 @@ private:
             }
             fn.is_exported = is_reexport && fn.is_exported;
             program.functions.push_back(std::move(fn));
+        }
+        for (GlobalVar& global : partition.globals) {
+            auto existing = std::find_if(program.globals.begin(), program.globals.end(), [&](const GlobalVar& current) {
+                return current.owning_module == global.owning_module && current.decl != nullptr && global.decl != nullptr &&
+                       current.decl->var_name == global.decl->var_name;
+            });
+            if (existing != program.globals.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && global.is_exported);
+                continue;
+            }
+            global.is_exported = is_reexport && global.is_exported;
+            program.globals.push_back(std::move(global));
         }
     }
 
@@ -2819,8 +2847,26 @@ private:
                                            requested_nodiscard_reason);
             }
         } else {
-            reject_alignment_specifiers(leading_alignments, "a function declaration");
             reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
+            if (looks_like_type_start()) {
+                size_t saved_pos = pos_;
+                try {
+                    reject_unsafe_if_requested("a variable declaration");
+                    StmtPtr decl = parse_global_var_decl(std::move(leading_alignments));
+                    GlobalVar global;
+                    global.decl = std::move(decl);
+                    global.namespace_path = namespace_stack_;
+                    global.is_exported = is_exported;
+                    SourceLocation loc = global.decl->loc;
+                    check_export_namespace(program, is_exported, global.namespace_path, loc,
+                                           "variable '" + global.decl->var_name + "'");
+                    program.globals.push_back(std::move(global));
+                    return;
+                } catch (const ParseError&) {
+                    pos_ = saved_pos;
+                }
+            }
+            reject_alignment_specifiers(leading_alignments, "a function declaration");
             parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe, requested_nodiscard,
                                                      requested_nodiscard_reason);
         }
@@ -5060,12 +5106,13 @@ private:
         return parse_expr_stmt();
     }
 
-    StmtPtr parse_var_decl(bool require_semicolon = true) {
+    StmtPtr parse_var_decl_impl(std::vector<AlignmentSpecifier> leading_alignments, bool require_semicolon,
+                                bool require_explicit_initializer, bool qualify_variable_name) {
         SourceLocation loc = current_loc();
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
         stmt->loc = loc;
-        stmt->alignment_specs = parse_alignment_specifier_seq();
+        stmt->alignment_specs = std::move(leading_alignments);
         stmt->is_constexpr = match(TokenKind::KwConstexpr);
         if (match(TokenKind::KwAuto)) {
             // ch05 §5.12: `auto name = expr;` infers the local's type
@@ -5081,6 +5128,7 @@ private:
             // check_moves/codegen unresolved.
             stmt->type = named_type("auto");
             stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            if (qualify_variable_name) stmt->var_name = qualify_name(stmt->var_name);
             const Token& tok = peek();
             if (!match(TokenKind::Assign)) {
                 throw ParseError(tok.line, tok.column,
@@ -5103,6 +5151,7 @@ private:
             stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
             stmt->type = parse_array_suffix(base);
         }
+        if (qualify_variable_name) stmt->var_name = qualify_name(stmt->var_name);
         if (match(TokenKind::Assign)) {
             stmt->init = parse_expr();
         } else if (check(TokenKind::LBrace)) {
@@ -5130,7 +5179,7 @@ private:
         // ever give it a value, unlike an ordinary mutable local, which
         // may be declared bare and assigned later. Matches real C++'s
         // own "default initialization of const variable" rejection.
-        if (stmt->type.kind != TypeKind::Array && !stmt->init && !stmt->has_ctor_args) {
+        if (require_explicit_initializer && stmt->type.kind != TypeKind::Array && !stmt->init && !stmt->has_ctor_args) {
             throw ParseError(loc.line, loc.column,
                              "a non-array local variable declaration must include an explicit initializer "
                              "(write '" + stmt->type.name + " " + stmt->var_name +
@@ -5144,6 +5193,23 @@ private:
                                   " " + stmt->var_name + " = ...;') -- it can never be given a value afterward");
         }
         if (require_semicolon) expect(TokenKind::Semicolon, "';'");
+        return stmt;
+    }
+
+    StmtPtr parse_var_decl(bool require_semicolon = true) {
+        return parse_var_decl_impl(parse_alignment_specifier_seq(), require_semicolon,
+                                   /*require_explicit_initializer=*/true,
+                                   /*qualify_variable_name=*/false);
+    }
+
+    StmtPtr parse_global_var_decl(std::vector<AlignmentSpecifier> leading_alignments) {
+        StmtPtr stmt = parse_var_decl_impl(std::move(leading_alignments), /*require_semicolon=*/true,
+                                          /*require_explicit_initializer=*/false,
+                                          /*qualify_variable_name=*/true);
+        if (stmt->type.kind == TypeKind::Reference && !stmt->init) {
+            throw ParseError(stmt->loc.line, stmt->loc.column,
+                             "a reference variable must be initialized at declaration");
+        }
         return stmt;
     }
 

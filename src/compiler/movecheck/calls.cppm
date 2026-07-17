@@ -24,6 +24,10 @@ import :signatures;
 
 namespace scpp {
 
+[[nodiscard]] const GlobalVar* find_visible_global_for_expr(const Expr& expr, const Body& body) {
+    return find_visible_global(body.program, body.function_namespace_path, expr.name, expr.explicit_global_qualification);
+}
+
 struct CalleeSignature {
     std::string key;
     size_t param_offset = 0;
@@ -689,6 +693,10 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     const Expr* source = &expr;
     if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
     if (source->kind != ExprKind::Identifier || body.local_types.contains(source->name)) return std::nullopt;
+    if (find_visible_global(body.program, body.function_namespace_path, source->name, source->explicit_global_qualification) !=
+        nullptr) {
+        return std::nullopt;
+    }
     auto it = signatures.find(source->name);
     if (it == signatures.end()) return std::nullopt;
     for (const FunctionSignature& sig : it->second) {
@@ -745,9 +753,16 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
     switch (expr.kind) {
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
-            return it != body.local_types.end() &&
-                   (body.const_locals.contains(expr.name) ||
-                    ((is_reference(it->second) || is_span(it->second)) && !it->second.is_mutable_ref));
+            if (it != body.local_types.end()) {
+                return body.const_locals.contains(expr.name) ||
+                       ((is_reference(it->second) || is_span(it->second)) && !it->second.is_mutable_ref);
+            }
+            if (const GlobalVar* global = find_visible_global_for_expr(expr, body); global != nullptr && global->decl != nullptr) {
+                const Type& type = global->decl->type;
+                return global->decl->is_const || global->decl->is_constexpr ||
+                       ((is_reference(type) || is_span(type)) && !type.is_mutable_ref);
+            }
+            return false;
         }
         case ExprKind::Member:
         case ExprKind::Subscript:
@@ -871,6 +886,9 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Identifier: {
             auto it = expr.explicit_global_qualification ? body.local_types.end() : body.local_types.find(expr.name);
             if (it != body.local_types.end()) return it->second;
+            if (const GlobalVar* global = find_visible_global_for_expr(expr, body); global != nullptr && global->decl != nullptr) {
+                return global->decl->type;
+            }
             if (const EnumDef* def = [&]() {
                     const EnumDef* enum_def = nullptr;
                     [[maybe_unused]] const EnumVariant* variant = find_enum_variant(body.program, expr.name, &enum_def);
@@ -897,6 +915,12 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             // std::unique_ptr<T> the moved-from local was declared as.
             if (expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
             auto it = body.local_types.find(expr.lhs->name);
+            if (it == body.local_types.end()) {
+                if (const GlobalVar* global = find_visible_global_for_expr(*expr.lhs, body);
+                    global != nullptr && global->decl != nullptr) {
+                    return global->decl->type;
+                }
+            }
             return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
         }
 
@@ -936,7 +960,8 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                 case UnaryOp::Not: return named_type("bool");
                 case UnaryOp::Neg: return infer_expr_type(*expr.lhs, body, signatures);
                 case UnaryOp::AddressOf: {
-                    if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name)) {
+                    if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name) &&
+                        find_visible_global_for_expr(*expr.lhs, body) == nullptr) {
                         auto it = signatures.find(expr.lhs->name);
                         if (it != signatures.end() && it->second.size() == 1) {
                             const FunctionSignature& sig = it->second[0];
