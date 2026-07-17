@@ -25,7 +25,7 @@
   - [方法与 `this`](ch05-03-methods-and-this.md)
 
 - 安全边界与 `[[scpp::unsafe]]`
-  - `[[scpp::unsafe]]` 会做什么、不会做什么
+  - [`[[scpp::unsafe]]` 会做什么、不会做什么](ch06-01-what-scpp-unsafe-does-and-does-not-do.md)
   - 调用 `extern "C"` 与使用裸指针
   - 如何把“信任”局部化到真实程序里
 
