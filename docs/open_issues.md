@@ -26,5 +26,42 @@ Future work should extend the structural-derivation rules to include inherited
 ordinary base-class subobjects when determining a derived class's own
 thread-safety properties.
 
+## File-scope globals currently keep C++'s cross-file dynamic-initialization-order hazard
+
+PR [#250](https://github.com/scpp-lang/scpp/pull/250) intentionally kept newly
+working file-scope / namespace-scope variable declarations instead of reverting
+them, because global constants such as `constexpr int X = ...;` are a genuinely
+wanted use case, and `alignas` may also need to apply to such globals. However,
+this also reintroduces the classic C++ "static initialization order fiasco" for
+globals that require true dynamic initialization.
+
+Within one translation unit / source file, C++ defines dynamic initialization
+order by declaration order. Across different translation units / source files,
+the relative order of dynamic initialization is unspecified. That means a
+global in one file whose constructor or runtime initializer depends on another
+dynamically-initialized global in a different file may observe that dependency
+either before or after it has been initialized.
+
+Globals with no initializer, or with a genuine constant-expression initializer
+(that is, initialization that can be completed deterministically without
+cross-file runtime ordering), are not affected by this hazard and are the
+primary intended use case that is fine to keep unrestricted for now.
+
+By contrast, globals that require non-constant, runtime-computed dynamic
+initialization are potentially affected when they have cross-file dependencies
+on other dynamically-initialized globals. scpp does not currently restrict or
+diagnose that pattern yet. The behavior intentionally remains available for now
+via PR [#250](https://github.com/scpp-lang/scpp/pull/250); as of this writing,
+there is not yet a separate open or merged
+`test-agent/global-vars-alignas-coverage` blackbox-coverage PR to cross-link
+here.
+
+Future work should address this explicitly. Because scpp is a whole-program AOT
+compiler rather than a traditional separate-compilation-plus-linking C++ toolchain,
+it may be possible to statically detect and diagnose problematic cross-file
+dynamic-initialization-order dependencies at compile time, instead of either
+blanket-banning all file-scope globals or silently inheriting C++'s full
+unsafe/unspecified behavior.
+
 The previously-open question about unchecked integer-to-enum casts was resolved
 by the specification in [docs/spec/en/09-enumeration-conversions.md](spec/en/09-enumeration-conversions.md).
