@@ -11,14 +11,6 @@ syntax is not real C++, scpp should not invent it.
 The list below was re-audited against current `main`; fixed items should be
 removed instead of left behind as historical noise.
 
-## In progress / recently specified
-
-- Standard C++ `alignas` support is now specified in
-  `docs/spec/en/05-unions-and-packed-layout.md` together with its companion
-  `alignof(type-id)` query. Parser/semantic/codegen/test work still needs to
-  land, but this gap is now tracked as an implementation follow-up rather than
-  an unspecified hole.
-
 ## Language/Syntax Gaps (current focus)
 
 These items need real compiler work: parser, semantic analysis, borrow/type
@@ -28,21 +20,15 @@ rules, coroutine machinery, codegen, or preprocessor support.
   the core fixed-size-local-array case works, but direct binding from a string
   literal still fails, and `std::span` still cannot be rebound after
   construction.
-- User-defined `operator->` is now specified (see `docs/spec/en/03-dereference-and-member-access.md`),
-  but the implementation is still missing: declaring it is rejected
-  (`expected ';' but found '->'`), and the current parser still implements the
-  old invented blanket rewrite `x->y` → `(*x).y` for class types. The required
-  fix is breaking-but-correcting: remove that non-standard fallback, implement
-  real C++-style explicit `operator->` chaining/proxy semantics, and migrate
-  shipped wrappers such as `std::unique_ptr` to declare `operator->()`
-  explicitly.
-- Cross-function named lifetime groups are still mostly absent.
-  `[[scpp::lifetime(generic)]]` on an ordinary parameter works, but multi-group
-  contracts such as separate `a`/`b` groups across a signature are still
-  rejected.
+- Most ISO `alignas` / `alignof(type-id)` support has landed, but `alignas` on
+  a file-scope variable declaration is still rejected even though the same
+  spelling works on local variables and class declarations.
+- Ordinary function/member signatures now support both named lifetime groups
+  and real user-defined `operator->`, but `[[scpp::lifetime(generic)]]` is
+  still not parsed on a `requires(...)` probe parameter, so that documented
+  lifetime-annotation form remains incomplete.
 - Coroutine/async language support is still absent: no `co_await`, `co_yield`,
   `co_return`, or coroutine lowering/runtime integration yet.
-- There is still no C/C++-style macro/preprocessor story (`#define`, etc.).
 
 ## Library/Stdlib Gaps (tracked, but not the current focus)
 
