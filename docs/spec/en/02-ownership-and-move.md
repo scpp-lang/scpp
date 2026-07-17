@@ -288,23 +288,33 @@ The program is ill-formed if:
 
   (18.2) `name` is `generic`; or
 
-  (18.3) no parameter of that declaration is a member of group `name`.
+  (18.3) neither:
+
+    (18.3.1) some explicit parameter of that declaration is a member of
+    group `name`; nor
+
+    (18.3.2) the declaration is a non-static member function named
+    `operator->` using the special implicit-object rule of (23).
 
 (19) A value tied to group `name` shall be derived only from:
 
-  (19.1) one or more parameters that are members of group `name`; or
+  (19.1) one or more explicit parameters that are members of group
+  `name`;
 
-  (19.2) a subobject, array element, base-class subobject, pointee, or
-  contiguous range reachable through a value from (19.1).
+  (19.2) for a non-static member function named `operator->` governed by
+  (23), that call's implicit object parameter; or
+
+  (19.3) a subobject, array element, base-class subobject, pointee, or
+  contiguous range reachable through a value from (19.1) or (19.2).
 
 It is ill-formed to return a value tied to group `name` if the returned
 value is instead derived from:
 
-  (19.3) a parameter in a different named group;
+  (19.4) an explicit parameter in a different named group;
 
-  (19.4) a `generic`-tagged parameter; or
+  (19.5) a `generic`-tagged parameter; or
 
-  (19.5) a local object, temporary object, or other state whose
+  (19.6) a local object, temporary object, or other state whose
   lifetime is not proved to outlive the call.
 
 (20) If several parameters belong to the same named group, the function
@@ -336,11 +346,19 @@ supplies an implicit object parameter of reference type: `C&` for a
 non-`const` member function and `const C&` for a `const` member
 function; any borrow or reborrow through that implicit object parameter
 is governed by 6.2(7)-(12). The implicit object parameter cannot bear
-`[[scpp::lifetime(name)]]` and does not, by itself, introduce a user-
-written group name. Consequently, a member function with an explicit
+`[[scpp::lifetime(name)]]` on its own declaration. Except as provided
+next for `operator->`, it does not by itself introduce a user-written
+group name. Consequently, a member function with an explicit
 `[[scpp::lifetime(name)]]` return annotation is ill-formed unless one of
 its explicit parameters is a member of group `name`; a value derived
-solely from `this` cannot satisfy that requirement.
+solely from `this` cannot satisfy that requirement. A non-static member
+function named `operator->` may, however, use
+`[[scpp::lifetime(name)]]` on its declarator to tie its returned value
+directly to that call's implicit object parameter instead of to an
+explicit parameter. In that special case, `name` remains a declaration-
+local user-written group name, but for that one declaration it denotes
+the implicit object parameter for the purposes of (18.3.2) and
+(19.2)-(19.3).
 
 (24) Constructing an object, closure, or other stored state from a
 reference, pointer, or span derived from a named lifetime group does not
