@@ -1,0 +1,39 @@
+// spec §7.2 (3), §7.3 (10), and §7.3 (11): the safe case applies only to the
+// compiler's internal transient pointer inside one E1->E2 expression. Any
+// user-visible raw pointer obtained by .operator->() or &(*p) must still be
+// used under ordinary [[scpp::unsafe]] rules.
+struct Node {
+    int value{};
+};
+
+struct SafeHandle {
+    Node node{};
+    SafeHandle(int value) {
+        this->node.value = value;
+    }
+
+    Node& operator*() {
+        return this->node;
+    }
+
+    const Node& operator*() const {
+        return this->node;
+    }
+
+    Node* operator->() [[scpp::lifetime(self)]] {
+        return &this->node;
+    }
+
+    const Node* operator->() const [[scpp::lifetime(self)]] {
+        return &this->node;
+    }
+};
+
+int main() {
+    SafeHandle handle{11};
+    [[scpp::unsafe]] {
+        Node* via_arrow = handle.operator->();
+        Node* via_star = &(*handle);
+        return via_arrow->value + via_star->value;
+    }
+}

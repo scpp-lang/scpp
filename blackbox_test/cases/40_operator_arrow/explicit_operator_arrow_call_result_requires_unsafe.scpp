@@ -1,0 +1,23 @@
+// spec §7.2 (3) and §7.3 (11): an explicit .operator->() call yields an
+// ordinary raw pointer value, so later dereference/member access follows the
+// usual raw-pointer rules instead of the safe implicit arrow carve-out.
+struct Node {
+    int value{};
+};
+
+struct SafePtr {
+    Node node{};
+    SafePtr(int value) {
+        this->node.value = value;
+    }
+
+    Node* operator->() [[scpp::lifetime(self)]] {
+        return &this->node;
+    }
+};
+
+int main() {
+    SafePtr p{22};
+    Node* raw = p.operator->();
+    return raw->value;
+}

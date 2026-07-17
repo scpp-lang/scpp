@@ -1,0 +1,23 @@
+// spec §7.3 (9): the same unannotated operator-> access is well-formed once
+// the enclosing arrow expression is explicitly vouched for as unsafe.
+struct Node {
+    int value{};
+};
+
+struct UncheckedPtr {
+    Node node{};
+    UncheckedPtr(int value) {
+        this->node.value = value;
+    }
+
+    Node* operator->() {
+        return &this->node;
+    }
+};
+
+int main() {
+    UncheckedPtr p{9};
+    [[scpp::unsafe]] {
+        return p->value;
+    }
+}

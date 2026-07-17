@@ -1,0 +1,37 @@
+// spec §7.3 (3): a class-type arrow expression is ill-formed when overload
+// resolution finds no operator->, even if operator* exists.
+struct Node {
+    int value{};
+};
+
+template<typename T>
+class OnlyDeref {
+private:
+    T* ptr{};
+
+public:
+    OnlyDeref(T* ptr) {
+        this->ptr = ptr;
+    }
+
+    virtual ~OnlyDeref() {}
+
+    T& operator*() {
+        [[scpp::unsafe]] {
+            return *this->ptr;
+        }
+    }
+
+    const T& operator*() const {
+        [[scpp::unsafe]] {
+            return *this->ptr;
+        }
+    }
+};
+
+int main() {
+    Node node{};
+    node.value = 17;
+    OnlyDeref<Node> p{&node};
+    return p->value;
+}
