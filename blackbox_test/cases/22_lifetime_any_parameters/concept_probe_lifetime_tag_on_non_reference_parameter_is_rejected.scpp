@@ -1,0 +1,21 @@
+// spec §6.2(13.1): "[[scpp::lifetime(name)]]" may appertain to "a
+// parameter declaration, including a requires(...) expression's probe
+// parameter declaration, whose type is a reference type, pointer type,
+// std::span<T>, or std::span<const T> ... If it appears elsewhere, the
+// program is ill-formed." A bare `int` probe parameter is none of
+// those, so tagging it is ill-formed -- exactly like tagging an
+// ordinary non-reference function parameter would be (the compiler
+// reuses the same validate_lifetime_annotation_placement check for
+// both, via the probe's own compiler-synthesized witness-method
+// signature). This concept is never even instantiated below; the
+// declaration alone is enough to be rejected, since every function's
+// signature (including a concept's own witness) is validated
+// unconditionally, not only when the concept is actually used.
+template<typename T>
+concept TakesTaggedInt = requires(T c, int x [[scpp::lifetime(any)]]) {
+    c.consume(x);
+};
+
+int main() {
+    return 0;
+}

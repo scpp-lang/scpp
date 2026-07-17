@@ -105,7 +105,7 @@ cmake --build build
 | `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
 | `20_generic_functions` | ch05 §5.11 的修订：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
 | `21_generic_types` | 泛型 `struct`/`class` 类型（ch05 §5.14）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
-| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免 |
+| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免，以及 `requires(...)` 探测参数上的 `[[scpp::lifetime(...)]]` 对概念满足性的约束（any/具名分组匹配、未标注不产生约束、非引用类型被拒绝） |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`（ch05 §5.15）：结构化推导与手动覆盖 |
 | `24_function_pointers` | 函数指针（ch05 §5.16）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、取地址时的自动类型选择（普通函数 / `[[scpp::unsafe]]` / 无函数体 `extern "C"` / 有函数体 `extern "C"`）、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析 |
 | `25_function_wrappers` | `std::function` / `std::move_only_function`（ch05 §5.18）：可拷贝/仅可移动 target、cv/ref-qualified 签名、moved-from 行为 |
