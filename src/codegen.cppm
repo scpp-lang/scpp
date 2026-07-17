@@ -155,6 +155,17 @@ public:
             if (def.is_synthetic_check_only) continue;
             declare_class(def);
         }
+        for (const GlobalVar& global : program.globals) {
+            if (global.decl == nullptr) continue;
+            llvm::Type* llvm_type = to_llvm_type(global.decl->type);
+            auto* init = llvm::Constant::getNullValue(llvm_type);
+            auto* variable =
+                new llvm::GlobalVariable(*module_, llvm_type, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+                                         init, mangle_global_symbol_name(global.decl->var_name));
+            if (global.decl->resolved_alignment != 0) variable->setAlignment(llvm::Align(global.decl->resolved_alignment));
+            globals_.emplace(global.decl->var_name, GlobalSlot{variable, global.decl->type,
+                                                               global.decl->is_const || global.decl->is_constexpr});
+        }
         build_overload_names();
         auto is_never_compiled = [&](const Function& fn) {
             // consteval functions/constructors are compile-time-only by
@@ -192,6 +203,7 @@ public:
             if (is_never_compiled(fn)) continue;
             declare_function(fn);
         }
+        if (!program.globals.empty()) define_global_initializers(program);
         for (const Function& fn : program.functions) {
             if (is_never_compiled(fn)) continue;
             if (fn.body != nullptr) {
@@ -312,6 +324,12 @@ private:
         llvm::AllocaInst* moved_flag = nullptr;
     };
 
+    struct GlobalSlot {
+        llvm::GlobalVariable* global = nullptr;
+        Type type;
+        bool is_const = false;
+    };
+
     const Program* program_ = nullptr;
     // The AST-level Function currently being lowered by define_function,
     // consulted by StmtKind::Return to tell whether *this* function's own
@@ -348,6 +366,7 @@ private:
     std::string source_path_;
     bool emit_debug_info_ = false;
     std::map<std::string, LocalSlot> locals_;
+    std::unordered_map<std::string, GlobalSlot> globals_;
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_set<std::string> declaring_aggregates_;
     // ch05 §5.10: each Function's actual LLVM symbol name -- the plain
@@ -391,6 +410,7 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, size_t>> ordinary_slot_indices_cache_;
     std::unordered_map<std::string, llvm::GlobalVariable*> ordinary_vtables_;
     std::unordered_map<std::string, llvm::Function*> ordinary_destructor_thunks_;
+    std::vector<std::string> current_global_namespace_path_;
 
     [[nodiscard]] std::string default_debug_source_path() const {
         return source_path_.empty() ? (std::filesystem::current_path() / "memory.scpp").string() : source_path_;
@@ -411,6 +431,29 @@ private:
         if (compile_unit_file_ != nullptr) return compile_unit_file_;
         compile_unit_file_ = debug_file_for_path(default_debug_source_path());
         return compile_unit_file_;
+    }
+
+    [[nodiscard]] const std::vector<std::string>& current_lookup_namespace_path() const {
+        if (!current_global_namespace_path_.empty()) return current_global_namespace_path_;
+        if (current_function_def_ != nullptr) return current_function_def_->namespace_path;
+        static const std::vector<std::string> empty;
+        return empty;
+    }
+
+    [[nodiscard]] const GlobalSlot* find_visible_global_slot(const std::string& name,
+                                                             bool explicit_global_qualification = false) const {
+        if (program_ == nullptr) return nullptr;
+        const GlobalVar* global =
+            find_visible_global(program_, current_lookup_namespace_path(), name, explicit_global_qualification);
+        if (global == nullptr || global->decl == nullptr) return nullptr;
+        auto it = globals_.find(global->decl->var_name);
+        return it == globals_.end() ? nullptr : &it->second;
+    }
+
+    [[nodiscard]] std::string mangle_global_symbol_name(const std::string& name) const {
+        std::string result = "__scpp_global.";
+        for (char ch : name) result += ch == ':' ? '.' : ch;
+        return result;
     }
 
     [[nodiscard]] llvm::DIFile* debug_file_for_loc(const SourceLocation& loc) {
@@ -879,6 +922,9 @@ private:
             case ExprKind::Identifier: {
                 auto it = expr.explicit_global_qualification ? locals_.end() : locals_.find(expr.name);
                 if (it != locals_.end()) return it->second.type;
+                if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
+                    return global->type;
+                }
                 if (const EnumDef* def = [&]() {
                         const EnumDef* enum_def = nullptr;
                         [[maybe_unused]] const EnumVariant* variant = find_enum_variant(program_, expr.name, &enum_def);
@@ -892,6 +938,12 @@ private:
             case ExprKind::Move: {
                 if (expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
                 auto it = locals_.find(expr.lhs->name);
+                if (it == locals_.end()) {
+                    if (const GlobalSlot* global =
+                            find_visible_global_slot(expr.lhs->name, expr.lhs->explicit_global_qualification)) {
+                        return global->type;
+                    }
+                }
                 return it == locals_.end() ? std::nullopt : std::optional<Type>(it->second.type);
             }
 
@@ -1333,7 +1385,12 @@ private:
         switch (expr.kind) {
             case ExprKind::Identifier: {
                 auto it = locals_.find(expr.name);
-                if (it == locals_.end()) return false;
+                if (it == locals_.end()) {
+                    if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
+                        return global->is_const;
+                    }
+                    return false;
+                }
                 return it->second.is_const || (it->second.type.kind == TypeKind::Reference && !it->second.type.is_mutable_ref);
             }
             case ExprKind::Member:
@@ -4475,6 +4532,56 @@ private:
         return create_load(to_llvm_type(lv.type), lv.ptr, lv.alignment, "loadtmp");
     }
 
+    void define_global_initializers(const Program& program) {
+        bool needs_initializer = false;
+        for (const GlobalVar& global : program.globals) {
+            if (global.decl != nullptr && (global.decl->init != nullptr || global.decl->has_ctor_args)) {
+                needs_initializer = true;
+                break;
+            }
+        }
+        if (!needs_initializer) return;
+
+        auto* fn_type = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), false);
+        auto* init_fn = llvm::Function::Create(fn_type, llvm::GlobalValue::InternalLinkage, "__scpp_global_init", module_.get());
+        auto* entry = llvm::BasicBlock::Create(*context_, "entry", init_fn);
+        builder_->SetInsertPoint(entry);
+        current_function_def_ = nullptr;
+        current_global_namespace_path_.clear();
+
+        for (const GlobalVar& global : program.globals) {
+            if (global.decl == nullptr) continue;
+            auto it = globals_.find(global.decl->var_name);
+            if (it == globals_.end()) continue;
+            current_global_namespace_path_ = global.namespace_path;
+            if (global.decl->has_ctor_args) {
+                throw CodegenError("global constructor-call initialization is not supported in this version", global.decl->loc);
+            }
+            if (global.decl->init == nullptr) continue;
+            if (global.decl->type.kind == TypeKind::Reference) {
+                llvm::Value* referent = codegen_lvalue(*global.decl->init).ptr;
+                create_store(referent, it->second.global, std::nullopt);
+                continue;
+            }
+            create_store(codegen_value_for_target(*global.decl->init, global.decl->type), it->second.global,
+                         global.decl->resolved_alignment != 0 ? std::optional<llvm::Align>(llvm::Align(global.decl->resolved_alignment))
+                                                              : alignment_for_type(global.decl->type));
+        }
+
+        builder_->CreateRetVoid();
+        current_global_namespace_path_.clear();
+
+        auto* ctor_ty = llvm::StructType::get(llvm::Type::getInt32Ty(*context_), llvm::PointerType::getUnqual(*context_),
+                                              llvm::PointerType::getUnqual(*context_));
+        auto* ctor_entry = llvm::ConstantStruct::get(
+            ctor_ty, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 65535),
+            llvm::ConstantExpr::getBitCast(init_fn, llvm::PointerType::getUnqual(*context_)),
+            llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)));
+        auto* array_ty = llvm::ArrayType::get(ctor_ty, 1);
+        new llvm::GlobalVariable(*module_, array_ty, /*isConstant=*/true, llvm::GlobalValue::AppendingLinkage,
+                                 llvm::ConstantArray::get(array_ty, {ctor_entry}), "llvm.global_ctors");
+    }
+
     // `bool` is stored/passed/returned as a full byte (i8; see
     // to_llvm_type), but LLVM's branch/select instructions require a
     // 1-bit condition -- this narrows an i8 bool value (guaranteed by
@@ -4811,6 +4918,10 @@ private:
 
             case ExprKind::Identifier: {
                 if (expr.explicit_global_qualification || !locals_.contains(expr.name)) {
+                    if (find_visible_global_slot(expr.name, expr.explicit_global_qualification) != nullptr) {
+                        LValue lv = codegen_lvalue(expr);
+                        return load_value(lv);
+                    }
                     const EnumDef* enum_def = nullptr;
                     const EnumVariant* enum_variant = find_enum_variant(program_, expr.name, &enum_def);
                     if (enum_variant != nullptr) {
@@ -5900,8 +6011,15 @@ private:
             case ExprKind::Identifier: {
                 auto it = locals_.find(expr.name);
                 if (it == locals_.end()) {
-                    throw CodegenError("use of undeclared variable '" + expr.name + "'",
-                        current_loc_);
+                    if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
+                        std::optional<llvm::Align> explicit_alignment;
+                        if (std::optional<llvm::Align> maybe_align = global->global->getAlign(); maybe_align.has_value()) {
+                            explicit_alignment = maybe_align;
+                        }
+                        return LValue{global->global, global->type,
+                                      explicit_alignment.has_value() ? explicit_alignment : alignment_for_type(global->type)};
+                    }
+                    throw CodegenError("use of undeclared variable '" + expr.name + "'", current_loc_);
                 }
                 if (it->second.type.kind == TypeKind::Reference) {
                     if (is_interface_reference_type(it->second.type)) {

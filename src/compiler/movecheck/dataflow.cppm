@@ -66,6 +66,23 @@ void check_function(const Function& fn, const Program& program, const Signatures
                     const std::unordered_set<std::string>& witness_class_names);
 void check_moves_impl(const Program& program);
 
+[[nodiscard]] const GlobalVar* find_visible_global_for_name(const std::string& name, bool explicit_global_qualification,
+                                                            const Body& body) {
+    return find_visible_global(body.program, body.function_namespace_path, name, explicit_global_qualification);
+}
+
+[[nodiscard]] std::optional<Type> find_visible_global_type(const std::string& name, bool explicit_global_qualification,
+                                                           const Body& body) {
+    const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);
+    if (global == nullptr || global->decl == nullptr) return std::nullopt;
+    return global->decl->type;
+}
+
+[[nodiscard]] bool is_visible_global_const(const std::string& name, bool explicit_global_qualification, const Body& body) {
+    const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);
+    return global != nullptr && global->decl != nullptr && (global->decl->is_const || global->decl->is_constexpr);
+}
+
 [[nodiscard]] bool binary_expr_has_compatible_types(const Expr& expr, const Body& body, const Signatures& signatures) {
     std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
     std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
@@ -180,7 +197,8 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
         operand.kind == ExprKind::Member ? resolve_member_field_type(operand, body, state, signatures)
                                          : [&]() -> std::optional<Type> {
             auto it = body.local_types.find(operand.name);
-            return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
+            if (it != body.local_types.end()) return it->second;
+            return find_visible_global_type(operand.name, operand.explicit_global_qualification, body);
         }();
     if (!resolved.has_value() && operand.kind != ExprKind::Identifier && operand.kind != ExprKind::Member) {
         resolved = infer_expr_type(operand, body, signatures);
@@ -209,7 +227,11 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
     if (operand.kind == ExprKind::Member || expr.implicit_arrow_deref) {
         return; // no separate per-field state, and implicit arrow derefs resolve their roots elsewhere
     }
-    LocalState current = lookup(state.locals, operand.name);
+    LocalState current = body.local_types.contains(operand.name)
+                             ? lookup(state.locals, operand.name)
+                             : (find_visible_global_for_name(operand.name, operand.explicit_global_qualification, body) != nullptr
+                                    ? LocalState::Initialized
+                                    : lookup(state.locals, operand.name));
     if (current != LocalState::Initialized) {
         throw DataflowError(describe_bad_state(operand.name, current),
             state.current_loc);
@@ -813,8 +835,11 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         case ExprKind::Identifier: {
             if (!report_errors) return;
             auto type_it = expr.explicit_global_qualification ? body.local_types.end() : body.local_types.find(expr.name);
-            if (type_it == body.local_types.end()) return; // unknown name: left to codegen's own check
-            LocalState current = lookup(state.locals, expr.name);
+            if (type_it == body.local_types.end() &&
+                find_visible_global_for_name(expr.name, expr.explicit_global_qualification, body) == nullptr) {
+                return; // unknown name: left to codegen's own check
+            }
+            LocalState current = type_it != body.local_types.end() ? lookup(state.locals, expr.name) : LocalState::Initialized;
             if (current != LocalState::Initialized) {
                 throw DataflowError(describe_bad_state(expr.name, current),
                     state.current_loc);
@@ -857,6 +882,9 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             // `i` itself is still a name, and moving from it marks that
             // local/parameter moved-out exactly like any other local name.
             if (type_it == body.local_types.end()) {
+                if (find_visible_global_for_name(name, expr.lhs->explicit_global_qualification, body) != nullptr) {
+                    return;
+                }
                 if (report_errors) {
                     throw DataflowError("unknown variable '" + name + "'",
                         state.current_loc);
@@ -1548,9 +1576,22 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // below (reference/span/class/unique_ptr/plain scalar) so it
             // uniformly covers all of them with one rule, rather than
             // needing to be threaded through each one separately.
-            if (report_errors && body.const_locals.contains(stmt.local) && state.locals.contains(stmt.local)) {
+            if (report_errors &&
+                ((body.const_locals.contains(stmt.local) && state.locals.contains(stmt.local)) ||
+                 is_visible_global_const(stmt.local, /*explicit_global_qualification=*/false, body))) {
                 throw DataflowError("cannot reassign 'const' variable '" + stmt.local + "' after initialization",
                     state.current_loc);
+            }
+            if (type_it == body.local_types.end()) {
+                std::optional<Type> global_type =
+                    find_visible_global_type(stmt.local, /*explicit_global_qualification=*/false, body);
+                if (!global_type.has_value()) return;
+                check_function_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
+                                                  report_errors);
+                check_raw_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
+                                             report_errors);
+                apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                return;
             }
             if (type_it != body.local_types.end() && is_reference(type_it->second)) {
                 apply_reference_write_through(stmt, state, body, signatures, report_errors);

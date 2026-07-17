@@ -2011,6 +2011,18 @@ public:
     void run() {
         for (StructDef& def : program_.structs) resolve_struct(def.name);
         for (ClassDef& def : program_.classes) resolve_class(def.name);
+        for (GlobalVar& global : program_.globals) {
+            if (global.decl == nullptr) continue;
+            resolve_type_dependencies(global.decl->type);
+            std::optional<TypeLayoutInfo> layout = layout_of_type(program_, global.decl->type);
+            if (!layout.has_value()) {
+                global.decl->resolved_alignment = 0;
+                continue;
+            }
+            global.decl->resolved_alignment =
+                engine_.resolve_root_alignment_specs(global.decl->alignment_specs, layout->abi_align_bytes, global.decl->loc,
+                                                     "variable '" + global.decl->var_name + "'");
+        }
         for (Function& fn : program_.functions) {
             if (fn.body) engine_.validate_constexpr_locals(fn);
         }

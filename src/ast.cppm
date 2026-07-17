@@ -611,6 +611,13 @@ struct Stmt {
     bool is_unsafe = false;
 };
 
+struct GlobalVar {
+    StmtPtr decl;
+    std::vector<std::string> namespace_path;
+    bool is_exported = false;
+    std::string owning_module;
+};
+
 struct Initializer {
     // `= expr`
     ExprPtr expr;
@@ -702,6 +709,15 @@ struct MemberInitializer {
     if (stmt.else_branch) clone->else_branch = clone_initializer_stmt(*stmt.else_branch);
     for (const StmtPtr& nested : stmt.statements) clone->statements.push_back(clone_initializer_stmt(*nested));
     clone->is_unsafe = stmt.is_unsafe;
+    return clone;
+}
+
+[[nodiscard]] inline GlobalVar clone_global_var(const GlobalVar& global) {
+    GlobalVar clone;
+    if (global.decl) clone.decl = clone_initializer_stmt(*global.decl);
+    clone.namespace_path = global.namespace_path;
+    clone.is_exported = global.is_exported;
+    clone.owning_module = global.owning_module;
     return clone;
 }
 
@@ -1351,6 +1367,7 @@ struct Program {
     std::vector<ClassDef> classes;
     std::vector<EnumDef> enums;
     std::vector<Function> functions;
+    std::vector<GlobalVar> globals;
     // ch05 §5.11: every `concept` declaration parsed from this file (or
     // merged in from an imported module -- concepts participate in
     // export/import exactly like a struct/class declaration).
@@ -1394,6 +1411,36 @@ struct Program {
     // pass for re-export bookkeeping.
     std::vector<ImportDecl> imports;
 };
+
+[[nodiscard]] inline const GlobalVar* find_visible_global(const Program* program, const std::vector<std::string>& namespace_path,
+                                                          const std::string& name, bool explicit_global_qualification = false) {
+    if (program == nullptr) return nullptr;
+    auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
+        return global.decl != nullptr && global.decl->var_name == candidate;
+    };
+    if (explicit_global_qualification) {
+        for (const GlobalVar& global : program->globals) {
+            if (matches_name(global, name)) return &global;
+        }
+        return nullptr;
+    }
+    for (size_t depth = namespace_path.size(); depth > 0; depth--) {
+        std::string candidate;
+        for (size_t i = 0; i < depth; i++) {
+            if (!candidate.empty()) candidate += "::";
+            candidate += namespace_path[i];
+        }
+        candidate += "::";
+        candidate += name;
+        for (const GlobalVar& global : program->globals) {
+            if (matches_name(global, candidate)) return &global;
+        }
+    }
+    for (const GlobalVar& global : program->globals) {
+        if (matches_name(global, name)) return &global;
+    }
+    return nullptr;
+}
 
 struct TargetLayoutInfo {
     std::uint64_t pointer_size_bytes = sizeof(void*);

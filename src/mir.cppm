@@ -167,6 +167,7 @@ struct Body {
     // Program::functions (which may reallocate while new clones are appended).
     std::string function_owning_module;
     std::string function_source_path;
+    std::vector<std::string> function_namespace_path;
 };
 
 Body build_mir(const Function& fn);
@@ -183,6 +184,7 @@ public:
     Body build() {
         body_.function_owning_module = fn_.owning_module;
         body_.function_source_path = fn_.loc.source_path_text();
+        body_.function_namespace_path = fn_.namespace_path;
         for (const Param& param : fn_.params) {
             declare_local(param.name, param.type);
         }
