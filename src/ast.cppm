@@ -39,6 +39,7 @@ struct SourceLocation {
         static const std::string empty;
         return source_path ? *source_path : empty;
     }
+
 };
 
 [[nodiscard]] inline SourceLocation make_source_location(int line, int column,
@@ -175,6 +176,19 @@ struct Type {
     // movecheck's base-class-deduction algorithm substitutes the
     // enclosing function template's own concrete Tail binding in place.
     bool is_pack_expansion = false;
+};
+
+struct AlignmentSpecifier {
+    SourceLocation loc;
+    bool operand_is_type = false;
+    Type type;
+    ExprPtr expr;
+
+    AlignmentSpecifier() = default;
+    AlignmentSpecifier(const AlignmentSpecifier& other);
+    AlignmentSpecifier& operator=(const AlignmentSpecifier& other);
+    AlignmentSpecifier(AlignmentSpecifier&&) = default;
+    AlignmentSpecifier& operator=(AlignmentSpecifier&&) = default;
 };
 
 struct LifetimeAnnotation {
@@ -318,6 +332,8 @@ enum class ExprKind {
                 // between two distinct scpp scalar types (no implicit
                 // conversion exists anywhere else). Target type `T` stored in
                 // `type`, operand in `lhs` -- see Expr's own comment.
+    Alignof,    // `alignof(T)` -- target-ABI alignment in bytes of a type-id,
+                // stored in `type`.
     Sizeof,     // `sizeof(T)` / `sizeof(expr)` -- target-ABI size in bytes of
                 // either a type operand (stored in `type`) or an unevaluated
                 // expression operand (stored in `lhs`), distinguished by
@@ -539,6 +555,8 @@ struct Stmt {
     Type type;
     std::string var_name;
     ExprPtr init; // optional
+    std::vector<AlignmentSpecifier> alignment_specs;
+    std::uint64_t resolved_alignment = 0;
 
     // VarDecl, scalar/struct/class (any non-reference, non-pointer)
     // only: true for `const T name = expr;`/`const ClassName name{args};`
@@ -671,6 +689,8 @@ struct MemberInitializer {
     clone->type = stmt.type;
     clone->var_name = stmt.var_name;
     if (stmt.init) clone->init = clone_initializer_expr(*stmt.init);
+    clone->alignment_specs = stmt.alignment_specs;
+    clone->resolved_alignment = stmt.resolved_alignment;
     clone->is_const = stmt.is_const;
     clone->is_constexpr = stmt.is_constexpr;
     clone->has_ctor_args = stmt.has_ctor_args;
@@ -683,6 +703,18 @@ struct MemberInitializer {
     for (const StmtPtr& nested : stmt.statements) clone->statements.push_back(clone_initializer_stmt(*nested));
     clone->is_unsafe = stmt.is_unsafe;
     return clone;
+}
+
+inline AlignmentSpecifier::AlignmentSpecifier(const AlignmentSpecifier& other)
+    : loc(other.loc), operand_is_type(other.operand_is_type), type(other.type) {
+    if (other.expr) expr = clone_initializer_expr(*other.expr);
+}
+
+inline AlignmentSpecifier& AlignmentSpecifier::operator=(const AlignmentSpecifier& other) {
+    if (this == &other) return *this;
+    AlignmentSpecifier clone(other);
+    *this = std::move(clone);
+    return *this;
 }
 
 inline Initializer::Initializer(const Initializer& other) : has_brace_args(other.has_brace_args) {
@@ -964,13 +996,17 @@ struct Function {
 };
 
 struct StructField {
+    SourceLocation loc;
     Type type;
     std::string name;
     std::optional<Initializer> default_initializer;
     AccessSpecifier access = AccessSpecifier::Public;
+    std::vector<AlignmentSpecifier> alignment_specs;
+    std::uint64_t resolved_alignment = 0;
 };
 
 struct StructDef {
+    SourceLocation loc;
     std::string name;
     std::vector<StructField> fields;
     // False for an ordinary `struct`, true for a `union`. Both reuse this
@@ -983,6 +1019,8 @@ struct StructDef {
     // packed layout (no implicit padding between fields, overall alignment 1)
     // for FFI-facing aggregates.
     bool is_packed = false;
+    std::vector<AlignmentSpecifier> alignment_specs;
+    std::uint64_t resolved_alignment = 0;
     // See Function::namespace_path/is_exported/owning_module above --
     // same meaning, applied to a struct declaration (ch11 §11.3's
     // "struct definitions" are part of v0.1's exportable surface).
@@ -1030,6 +1068,7 @@ struct StructDef {
 };
 
 struct ClassField {
+    SourceLocation loc;
     Type type;
     std::string name;
     std::optional<Initializer> default_initializer;
@@ -1039,6 +1078,8 @@ struct ClassField {
     // never representing it) so this stays a plain, uniform data shape,
     // matching StructField's own style.
     AccessSpecifier access = AccessSpecifier::Private;
+    std::vector<AlignmentSpecifier> alignment_specs;
+    std::uint64_t resolved_alignment = 0;
 };
 
 // ch04 §4.2 / ch05 §5.9: unlike `struct` (a purely trivial aggregate, ch04
@@ -1059,6 +1100,7 @@ struct ClassField {
 // receiver's/declared variable's static type, not by consulting this
 // struct or any separate registry.
 struct ClassDef {
+    SourceLocation loc;
     std::string name;
     std::vector<ClassField> fields;
     // See Function::namespace_path/is_exported/owning_module above --
@@ -1121,6 +1163,8 @@ struct ClassDef {
     bool is_synthetic_check_only = false;
     // `[[scpp::interface]]` on this class definition.
     bool is_interface = false;
+    std::vector<AlignmentSpecifier> alignment_specs;
+    std::uint64_t resolved_alignment = 0;
     // Direct base-specifiers in source order. Existing behavior still only
     // *uses* one ordinary base operationally, but the AST/model now stores
     // the generalized shape needed for later interface/multiple-
@@ -1470,18 +1514,21 @@ struct TypeLayoutInfo {
                     if (const StructDef* def = find_struct(current.name)) {
                         if (!def->is_union) {
                             std::uint64_t offset = 0;
-                            std::uint64_t overall_align = def->is_packed ? 1 : 1;
+                            std::uint64_t overall_align = 1;
                             for (const StructField& field : def->fields) {
                                 std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
                                 if (!field_layout.has_value()) {
                                     clear_visit();
                                     return std::optional<TypeLayoutInfo>{};
                                 }
-                                std::uint64_t field_align = def->is_packed ? 1 : field_layout->abi_align_bytes;
+                                std::uint64_t field_align =
+                                    def->is_packed ? std::uint64_t{1}
+                                                   : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
                                 offset = align_up(offset, field_align);
                                 offset += field_layout->size_bytes;
                                 overall_align = std::max(overall_align, field_align);
                             }
+                            overall_align = def->is_packed ? 1 : std::max(overall_align, def->resolved_alignment);
                             clear_visit();
                             return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
                         }
@@ -1490,7 +1537,7 @@ struct TypeLayoutInfo {
                             return std::nullopt;
                         }
                         std::uint64_t max_size = 0;
-                        std::uint64_t overall_align = def->is_packed ? 1 : 1;
+                        std::uint64_t overall_align = 1;
                         for (const StructField& field : def->fields) {
                             std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
                             if (!field_layout.has_value()) {
@@ -1498,9 +1545,12 @@ struct TypeLayoutInfo {
                                 return std::optional<TypeLayoutInfo>{};
                             }
                             max_size = std::max(max_size, field_layout->size_bytes);
-                            overall_align = std::max(overall_align,
-                                                     def->is_packed ? std::uint64_t{1} : field_layout->abi_align_bytes);
+                            overall_align = std::max(
+                                overall_align,
+                                def->is_packed ? std::uint64_t{1}
+                                               : std::max(field_layout->abi_align_bytes, field.resolved_alignment));
                         }
+                        overall_align = def->is_packed ? 1 : std::max(overall_align, def->resolved_alignment);
                         clear_visit();
                         return TypeLayoutInfo{align_up(max_size, overall_align), overall_align};
                     }
@@ -1526,10 +1576,12 @@ struct TypeLayoutInfo {
                                 clear_visit();
                                 return std::optional<TypeLayoutInfo>{};
                             }
-                            offset = align_up(offset, field_layout->abi_align_bytes);
+                            std::uint64_t field_align = std::max(field_layout->abi_align_bytes, field.resolved_alignment);
+                            offset = align_up(offset, field_align);
                             offset += field_layout->size_bytes;
-                            overall_align = std::max(overall_align, field_layout->abi_align_bytes);
+                            overall_align = std::max(overall_align, field_align);
                         }
+                        overall_align = std::max(overall_align, def->resolved_alignment);
                         clear_visit();
                         return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
                     }

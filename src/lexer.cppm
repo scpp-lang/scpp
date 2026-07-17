@@ -125,6 +125,8 @@ enum class TokenKind {
                  // abbreviated C++20 generic-function form; v0.1 has no
                  // other use for `auto` (no type inference for ordinary
                  // variables).
+    KwAlignas,
+    KwAlignof,
     KwSizeof,    // ch06: `sizeof(T)` / `sizeof(expr)` -- target-ABI size in
                  // bytes of a type or unevaluated expression operand.
     KwMutable,   // ch05 §5.12: trailing qualifier on a lambda's parameter
@@ -291,6 +293,8 @@ private:
         if (text == "concept") return TokenKind::KwConcept;
         if (text == "requires") return TokenKind::KwRequires;
         if (text == "auto") return TokenKind::KwAuto;
+        if (text == "alignas") return TokenKind::KwAlignas;
+        if (text == "alignof") return TokenKind::KwAlignof;
         if (text == "sizeof") return TokenKind::KwSizeof;
         if (text == "mutable") return TokenKind::KwMutable;
         return TokenKind::Identifier;

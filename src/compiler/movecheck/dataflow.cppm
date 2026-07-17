@@ -806,6 +806,9 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         case ExprKind::Sizeof:
             if (report_errors) validate_sizeof_operand(expr, body, signatures, state.current_loc);
             return;
+        case ExprKind::Alignof:
+            if (report_errors) validate_alignof_operand(expr, body, state.current_loc);
+            return;
 
         case ExprKind::Identifier: {
             if (!report_errors) return;

@@ -281,6 +281,7 @@ private:
 
     [[nodiscard]] bool looks_like_type_start() const {
         const Token& tok = peek();
+        if (tok.kind == TokenKind::KwAlignas) return true;
         if (tok.kind == TokenKind::KwConstexpr) return true;
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst ||
             tok.kind == TokenKind::KwVoid || tok.kind == TokenKind::KwChar || tok.kind == TokenKind::KwLong ||
@@ -316,6 +317,7 @@ private:
     // position).
     [[nodiscard]] bool looks_like_type_start_at(size_t offset) const {
         const Token& tok = peek_at(offset);
+        if (tok.kind == TokenKind::KwAlignas) return true;
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwChar ||
             tok.kind == TokenKind::KwLong || tok.kind == TokenKind::KwFloat || tok.kind == TokenKind::KwDouble ||
             tok.kind == TokenKind::KwUnsigned) {
@@ -408,6 +410,34 @@ private:
         LifetimeAnnotation lifetime;
         [[nodiscard]] bool has(const std::string& token) const { return scpp_tokens.contains(token); }
     };
+
+    std::vector<AlignmentSpecifier> parse_alignment_specifier_seq() {
+        std::vector<AlignmentSpecifier> specs;
+        while (check(TokenKind::KwAlignas)) {
+            SourceLocation loc = current_loc();
+            advance(); // alignas
+            expect(TokenKind::LParen, "'(' after 'alignas'");
+            AlignmentSpecifier spec;
+            spec.loc = loc;
+            size_t saved_pos = pos_;
+            try {
+                if (looks_like_type_start()) {
+                    Type queried_type = parse_type();
+                    expect(TokenKind::RParen, "')' after alignas type operand");
+                    spec.operand_is_type = true;
+                    spec.type = std::move(queried_type);
+                    specs.push_back(std::move(spec));
+                    continue;
+                }
+            } catch (const ParseError&) {
+            }
+            pos_ = saved_pos;
+            spec.expr = parse_expr();
+            expect(TokenKind::RParen, "')' after alignas expression operand");
+            specs.push_back(std::move(spec));
+        }
+        return specs;
+    }
 
     ExprPtr clone_expr_tree(const Expr& expr) {
         auto clone = std::make_unique<Expr>();
@@ -615,6 +645,15 @@ private:
         throw ParseError(attr_start_tok.line, attr_start_tok.column,
                          "'[[scpp::packed]]' cannot appertain to " + std::string(what) +
                              " -- only to a struct or union declaration (spec §9.2)");
+    }
+
+    void reject_alignment_specifiers(const std::vector<AlignmentSpecifier>& specs, const char* what) {
+        if (specs.empty()) return;
+        const SourceLocation& loc = specs.front().loc;
+        throw ParseError(loc.line, loc.column,
+                         "'alignas' cannot appertain to " + std::string(what) +
+                             " -- only to a variable declaration, a non-static data member declaration, or a "
+                             "struct/class/union declaration (spec §9.3)");
     }
 
     void reject_lifetime_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
@@ -2636,6 +2675,7 @@ private:
         // specifier-seq containing the attribute-token unsafe
         // appertains to anything other than [a compound-statement or a
         // function], the program is ill-formed").
+        std::vector<AlignmentSpecifier> leading_alignments = parse_alignment_specifier_seq();
         const Token& attr_start_tok = peek();
         ParsedAttributes leading_attrs = parse_attribute_specifier_seq();
         bool requested_unsafe = leading_attrs.has("unsafe");
@@ -2653,12 +2693,13 @@ private:
         if (check(TokenKind::KwStruct)) {
             reject_unsafe_if_requested("a 'struct' declaration");
             SourceLocation loc = current_loc();
-            StructDef def = parse_struct_def(program);
+            StructDef def = parse_struct_def(program, {}, std::move(leading_alignments));
             def.is_exported = is_exported;
             check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwEnum)) {
             reject_unsafe_if_requested("an 'enum class' declaration");
+            reject_alignment_specifiers(leading_alignments, "an 'enum class' declaration");
             reject_packed_attribute(leading_attrs, attr_start_tok, "an 'enum class' declaration");
             SourceLocation loc = current_loc();
             EnumDef def = parse_enum_def();
@@ -2668,7 +2709,7 @@ private:
         } else if (check(TokenKind::KwUnion)) {
             reject_unsafe_if_requested("a 'union' declaration");
             SourceLocation loc = current_loc();
-            StructDef def = parse_union_def();
+            StructDef def = parse_union_def(std::move(leading_alignments));
             def.is_exported = is_exported;
             check_export_namespace(program, is_exported, def.namespace_path, loc, "union '" + def.name + "'");
             program.structs.push_back(std::move(def));
@@ -2678,7 +2719,7 @@ private:
                 throw ParseError(attr_start_tok.line, attr_start_tok.column,
                                  "'[[scpp::packed]]' is only supported on struct/union declarations");
             }
-            parse_class_def(program, is_exported);
+            parse_class_def(program, is_exported, {}, std::move(leading_alignments));
         } else if (check(TokenKind::KwTemplate)) {
             // ch05 §5.11/§5.14: `template<...>` introduces either a
             // `concept` declaration or a generic `class`/`struct` type
@@ -2756,14 +2797,17 @@ private:
                 program.structs.push_back(std::move(def));
             } else if (after_header_kind == TokenKind::KwUnion) {
                 reject_unsafe_if_requested("a 'union' declaration");
+                reject_alignment_specifiers(leading_alignments, "a generic 'union' declaration");
                 const Token& tok = peek_at(after_header);
                 throw ParseError(tok.line, tok.column,
                                   "generic unions are not supported in this version");
             } else if (after_header_kind == TokenKind::KwConcept) {
                 reject_unsafe_if_requested("a 'concept' declaration");
+                reject_alignment_specifiers(leading_alignments, "a 'concept' declaration");
                 reject_packed_attribute(leading_attrs, attr_start_tok, "a 'concept' declaration");
                 parse_concept_def(program, is_exported);
             } else {
+                reject_alignment_specifiers(leading_alignments, "a function declaration");
                 reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
                 // ch05 §5.11: neither `class`/`struct` (a generic type,
                 // handled above) nor `concept` -- the only remaining
@@ -2775,6 +2819,7 @@ private:
                                            requested_nodiscard_reason);
             }
         } else {
+            reject_alignment_specifiers(leading_alignments, "a function declaration");
             reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
             parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe, requested_nodiscard,
                                                      requested_nodiscard_reason);
@@ -3059,14 +3104,18 @@ private:
     // parameter's own bare name as a temporary type name for the
     // duration of this one struct's body, removed again immediately
     // afterward.
-    StructDef parse_struct_def(Program& program, std::vector<GenericTypeParam> template_params = {}) {
+    StructDef parse_struct_def(Program& program, std::vector<GenericTypeParam> template_params = {},
+                               std::vector<AlignmentSpecifier> leading_alignments = {}) {
+        SourceLocation loc = current_loc();
         expect(TokenKind::KwStruct, "'struct'");
         StructDef def;
+        def.loc = loc;
         // ch05 §5.15: `struct [[scpp::thread_movable]] Name { ... };` --
         // real C++ grammar already gives a class-head an optional
         // attribute-specifier-seq right after its class-key, the same
         // slot `struct [[deprecated]] Name { ... };` would use.
         ParsedAttributes attrs = parse_attribute_specifier_seq();
+        std::vector<AlignmentSpecifier> trailing_alignments = parse_alignment_specifier_seq();
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
         if (attrs.has("interface")) {
@@ -3075,6 +3124,10 @@ private:
                              "a declaration introduced by 'struct' shall not be marked '[[scpp::interface]]' (spec §11.1(2.2))");
         }
         def.is_packed = attrs.has("packed");
+        def.alignment_specs = std::move(leading_alignments);
+        def.alignment_specs.insert(def.alignment_specs.end(),
+                                   std::make_move_iterator(trailing_alignments.begin()),
+                                   std::make_move_iterator(trailing_alignments.end()));
         def.is_nodiscard = attrs.has_nodiscard;
         def.nodiscard_reason = attrs.nodiscard_reason;
         if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
@@ -3083,6 +3136,11 @@ private:
                              "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations");
         }
         std::string bare_name = std::string(expect(TokenKind::Identifier, "struct name").text);
+        if (check(TokenKind::KwAlignas)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "'alignas' must appear before a struct name, not after it (spec §9.3)");
+        }
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
         // Register the (fully-qualified) name before parsing the body so
@@ -3139,12 +3197,14 @@ private:
             "(spec §11.1(2.3))",
             [](AccessSpecifier) {},
             [&](Type field_type, std::string field_name, AccessSpecifier access,
-                std::optional<Initializer> default_initializer) {
+                std::optional<Initializer> default_initializer, std::vector<AlignmentSpecifier> alignment_specs) {
                 StructField field;
+                field.loc = current_loc();
                 field.type = std::move(field_type);
                 field.name = std::move(field_name);
                 field.access = access;
                 field.default_initializer = std::move(default_initializer);
+                field.alignment_specs = std::move(alignment_specs);
                 def.fields.push_back(std::move(field));
             });
 
@@ -3159,14 +3219,21 @@ private:
         return def;
     }
 
-    StructDef parse_union_def() {
+    StructDef parse_union_def(std::vector<AlignmentSpecifier> leading_alignments = {}) {
+        SourceLocation loc = current_loc();
         expect(TokenKind::KwUnion, "'union'");
         StructDef def;
+        def.loc = loc;
         def.is_union = true;
         ParsedAttributes attrs = parse_attribute_specifier_seq();
+        std::vector<AlignmentSpecifier> trailing_alignments = parse_alignment_specifier_seq();
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
         def.is_packed = attrs.has("packed");
+        def.alignment_specs = std::move(leading_alignments);
+        def.alignment_specs.insert(def.alignment_specs.end(),
+                                   std::make_move_iterator(trailing_alignments.begin()),
+                                   std::make_move_iterator(trailing_alignments.end()));
         def.is_nodiscard = attrs.has_nodiscard;
         def.nodiscard_reason = attrs.nodiscard_reason;
         if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
@@ -3175,6 +3242,11 @@ private:
                              "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations");
         }
         std::string bare_name = std::string(expect(TokenKind::Identifier, "union name").text);
+        if (check(TokenKind::KwAlignas)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "'alignas' must appear before a union name, not after it (spec §9.3)");
+        }
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
         struct_names_.insert(def.name);
@@ -3183,12 +3255,22 @@ private:
         bool saw_field = false;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             StructField field;
+            field.loc = current_loc();
+            field.alignment_specs = parse_alignment_specifier_seq();
             Type base = parse_type();
             if (starts_function_pointer_declarator()) {
                 field.type = parse_function_pointer_declarator(std::move(base), field.name);
+                if (check(TokenKind::Colon)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+                }
                 field.default_initializer = parse_optional_default_initializer("a union member declaration");
             } else {
                 field.name = std::string(expect(TokenKind::Identifier, "field name").text);
+                if (check(TokenKind::Colon)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+                }
                 field.type = parse_array_suffix(base);
                 field.default_initializer = parse_optional_default_initializer("a union member declaration");
             }
@@ -3817,6 +3899,11 @@ private:
         if (template_params.empty()) template_params = parse_generic_type_header();
         expect(TokenKind::KwClass, "'class'");
         std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        if (check(TokenKind::KwAlignas)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "'alignas' must appear before a class name, not after it (spec §9.3)");
+        }
         std::string qualified_class_name = qualify_name(class_name);
         expect(TokenKind::Semicolon, "';'");
 
@@ -3826,6 +3913,7 @@ private:
         variadic_primary_template_params_[qualified_class_name] = template_params;
 
         ClassDef def;
+        def.loc = loc;
         def.name = qualified_class_name;
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
@@ -4182,7 +4270,8 @@ private:
     // monomorphized/checked here -- see the Monomorphizer's generic-type
     // handling (movecheck.cppm) for both the once-at-definition abstract
     // check and each concrete instantiation's own clone.
-    void parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {}) {
+    void parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {},
+                         std::vector<AlignmentSpecifier> leading_alignments = {}) {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
         bool is_generic = !template_params.empty();
@@ -4197,6 +4286,7 @@ private:
         // ch05 §5.15: `class [[scpp::thread_movable]] Name { ... };` --
         // see parse_struct_def's identical handling.
         ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        std::vector<AlignmentSpecifier> trailing_alignments = parse_alignment_specifier_seq();
         if (class_attrs.has("packed")) {
             throw ParseError(loc.line, loc.column,
                              "'[[scpp::packed]]' is only supported on struct/union declarations");
@@ -4239,6 +4329,10 @@ private:
         ClassDef def;
         def.name = qualified_class_name;
         def.is_interface = class_attrs.has("interface");
+        def.alignment_specs = std::move(leading_alignments);
+        def.alignment_specs.insert(def.alignment_specs.end(),
+                                   std::make_move_iterator(trailing_alignments.begin()),
+                                   std::make_move_iterator(trailing_alignments.end()));
         def.thread_movable_override = class_attrs.has("thread_movable");
         def.thread_shareable_override = class_attrs.has("thread_shareable");
         def.is_nodiscard = class_attrs.has_nodiscard;
@@ -4371,6 +4465,7 @@ private:
             // member shape follows; rejected if it turns out to be a
             // field (unsafe is only ever meaningful on a function, ch01
             // §1.3 (1)).
+            std::vector<AlignmentSpecifier> member_alignments = parse_alignment_specifier_seq();
             const Token& member_attr_start_tok = peek();
             ParsedAttributes member_attrs = parse_attribute_specifier_seq();
             reject_packed_attribute(member_attrs, member_attr_start_tok, member_decl_context.data());
@@ -4426,10 +4521,12 @@ private:
                     throw ParseError(member_loc.line, member_loc.column,
                                      "a class-scope using declaration cannot carry function specifiers or attributes");
                 }
+                reject_alignment_specifiers(member_alignments, "a class-scope using declaration");
                 handle_using(current_access);
                 continue;
             }
             if (match(TokenKind::Tilde)) {
+                reject_alignment_specifiers(member_alignments, "a destructor declaration");
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
                                       "a destructor cannot be a member template");
@@ -4471,6 +4568,7 @@ private:
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == owner_name &&
                 peek_at(1).kind == TokenKind::LParen) {
+                reject_alignment_specifiers(member_alignments, "a constructor declaration");
                 advance(); // owner name
                 if (member_is_static) {
                     throw ParseError(member_loc.line, member_loc.column,
@@ -4539,6 +4637,7 @@ private:
             Type member_type = parse_type();
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Star) {
+                reject_alignment_specifiers(member_alignments, "a member function declaration");
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
                                       "an operator* cannot currently be a member template");
@@ -4609,6 +4708,7 @@ private:
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Assign) {
+                reject_alignment_specifiers(member_alignments, "a member function declaration");
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
                                       "an operator= cannot currently be a member template");
@@ -4676,14 +4776,20 @@ private:
                 }
                 std::string field_name;
                 Type field_type = parse_function_pointer_declarator(std::move(member_type), field_name);
+                if (check(TokenKind::Colon)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+                }
                 std::optional<Initializer> default_initializer =
                     parse_optional_default_initializer(std::string(member_decl_context));
                 expect(TokenKind::Semicolon, "';'");
-                add_field(std::move(field_type), std::move(field_name), current_access, std::move(default_initializer));
+                add_field(std::move(field_type), std::move(field_name), current_access, std::move(default_initializer),
+                          std::move(member_alignments));
                 continue;
             }
             std::string member_name = std::string(expect(TokenKind::Identifier, "field or method name").text);
             if (check(TokenKind::LParen)) {
+                reject_alignment_specifiers(member_alignments, "a member function declaration");
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
@@ -4759,11 +4865,16 @@ private:
                 throw ParseError(member_loc.line, member_loc.column,
                                   "a member template declaration must declare a constructor or method, not a field");
             }
+            if (check(TokenKind::Colon)) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+            }
             Type field_type = parse_array_suffix(std::move(member_type));
             std::optional<Initializer> default_initializer =
                 parse_optional_default_initializer(std::string(member_decl_context));
             expect(TokenKind::Semicolon, "';'");
-            add_field(std::move(field_type), std::move(member_name), current_access, std::move(default_initializer));
+            add_field(std::move(field_type), std::move(member_name), current_access, std::move(default_initializer),
+                      std::move(member_alignments));
         }
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
@@ -4784,12 +4895,14 @@ private:
             /*virtual_member_error=*/"",
             [&](AccessSpecifier access) { parse_class_using_declaration(def, access); },
             [&](Type field_type, std::string field_name, AccessSpecifier access,
-                std::optional<Initializer> default_initializer) {
+                std::optional<Initializer> default_initializer, std::vector<AlignmentSpecifier> alignment_specs) {
                 ClassField field;
+                field.loc = current_loc();
                 field.type = std::move(field_type);
                 field.name = std::move(field_name);
                 field.access = access;
                 field.default_initializer = std::move(default_initializer);
+                field.alignment_specs = std::move(alignment_specs);
                 def.fields.push_back(std::move(field));
             });
         program.classes.push_back(std::move(def));
@@ -4952,6 +5065,7 @@ private:
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
         stmt->loc = loc;
+        stmt->alignment_specs = parse_alignment_specifier_seq();
         stmt->is_constexpr = match(TokenKind::KwConstexpr);
         if (match(TokenKind::KwAuto)) {
             // ch05 §5.12: `auto name = expr;` infers the local's type
@@ -4978,6 +5092,11 @@ private:
             return stmt;
         }
         Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
+        if (check(TokenKind::KwAlignas)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "'alignas' must appear before the declared type in a variable declaration (spec §9.3)");
+        }
         if (starts_function_pointer_declarator()) {
             stmt->type = parse_function_pointer_declarator(std::move(base), stmt->var_name);
         } else {
@@ -5033,6 +5152,7 @@ private:
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
         stmt->loc = loc;
+        stmt->alignment_specs = parse_alignment_specifier_seq();
 
         if (check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto)) {
             bool has_const = match(TokenKind::KwConst);
@@ -5053,6 +5173,11 @@ private:
         }
 
         Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
+        if (check(TokenKind::KwAlignas)) {
+            const Token& tok = peek();
+            throw ParseError(tok.line, tok.column,
+                             "'alignas' must appear before the declared type in a variable declaration (spec §9.3)");
+        }
         if (starts_function_pointer_declarator()) {
             stmt->type = parse_function_pointer_declarator(std::move(base), stmt->var_name);
         } else {
@@ -5324,6 +5449,22 @@ private:
 
     ExprPtr parse_unary() {
         SourceLocation loc = current_loc();
+        if (match(TokenKind::KwAlignof)) {
+            expect(TokenKind::LParen, "'(' after 'alignof'");
+            if (!looks_like_type_start()) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                 "'alignof' requires a type-id operand; GNU-style 'alignof(expression)' is not "
+                                 "supported in SCPP26 (spec §9.3)");
+            }
+            Type queried_type = parse_type();
+            expect(TokenKind::RParen, "')' after alignof type operand");
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Alignof;
+            node->loc = loc;
+            node->type = std::move(queried_type);
+            return node;
+        }
         if (match(TokenKind::KwSizeof)) {
             expect(TokenKind::LParen, "'(' after 'sizeof'");
             size_t saved_pos = pos_;

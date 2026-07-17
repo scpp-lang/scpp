@@ -10,6 +10,7 @@ module;
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -245,6 +246,15 @@ public:
         frames_.pop_back();
     }
 
+    std::uint64_t resolve_root_alignment_specs(const std::vector<AlignmentSpecifier>& specs, std::uint64_t natural_alignment,
+                                               const SourceLocation& loc, std::string_view what) {
+        frames_.clear();
+        steps_ = 0;
+        call_depth_ = 0;
+        string_storage_counter_ = 0;
+        return resolve_alignment_specs(specs, natural_alignment, loc, what);
+    }
+
 private:
     const Program& program_;
     ConstexprLimits limits_;
@@ -263,10 +273,67 @@ private:
         }
     }
 
+    [[nodiscard]] static bool is_power_of_two(std::uint64_t value) {
+        return value != 0 && (value & (value - 1)) == 0;
+    }
+
+    [[nodiscard]] std::uint64_t evaluate_alignment_operand(const AlignmentSpecifier& spec) {
+        if (spec.operand_is_type) {
+            std::optional<TypeLayoutInfo> layout = layout_of_type(program_, spec.type);
+            if (!layout.has_value()) {
+                throw ConstexprError(spec.loc, "cannot apply 'alignas' to this type in this version");
+            }
+            return layout->abi_align_bytes;
+        }
+        if (!spec.expr) {
+            throw ConstexprError(spec.loc, "internal error: malformed alignas operand");
+        }
+        std::shared_ptr<Cell> value = evaluate_expr(*spec.expr);
+        if (!is_integer_like(value->type)) {
+            throw ConstexprError(spec.loc, "'alignas' requires an integral constant expression");
+        }
+        long long raw = as_integer(value, spec.loc);
+        if (raw < 0) {
+            throw ConstexprError(spec.loc, "'alignas' requires a non-negative alignment value");
+        }
+        return static_cast<std::uint64_t>(raw);
+    }
+
+    [[nodiscard]] std::uint64_t resolve_alignment_specs(const std::vector<AlignmentSpecifier>& specs,
+                                                        std::uint64_t natural_alignment, const SourceLocation& loc,
+                                                        std::string_view what) {
+        std::uint64_t strictest = 0;
+        for (const AlignmentSpecifier& spec : specs) {
+            std::uint64_t requested = evaluate_alignment_operand(spec);
+            if (requested == 0) continue;
+            if (!is_power_of_two(requested)) {
+                throw ConstexprError(spec.loc, "'alignas' requires a positive power-of-two alignment");
+            }
+            if (requested < natural_alignment) {
+                throw ConstexprError(spec.loc,
+                                     "'alignas' requests alignment " + std::to_string(requested) +
+                                         ", which is less strict than the natural alignment " +
+                                         std::to_string(natural_alignment) + " of " + std::string(what));
+            }
+            strictest = std::max(strictest, requested);
+        }
+        static_cast<void>(loc);
+        return strictest > natural_alignment ? strictest : 0;
+    }
+
     void validate_constexpr_stmt_tree(Stmt& stmt) {
         tick(stmt.loc, "checking a constexpr local declaration");
         switch (stmt.kind) {
             case StmtKind::VarDecl:
+                if (!stmt.alignment_specs.empty()) {
+                    std::optional<TypeLayoutInfo> layout = layout_of_type(program_, stmt.type);
+                    if (!layout.has_value()) {
+                        throw ConstexprError(stmt.loc, "cannot apply 'alignas' to this variable type in this version");
+                    }
+                    stmt.resolved_alignment =
+                        resolve_alignment_specs(stmt.alignment_specs, layout->abi_align_bytes, stmt.loc,
+                                                "variable '" + stmt.var_name + "'");
+                }
                 if (stmt.is_constexpr) {
                     execute_stmt(stmt, named_type("void"));
                     if (stmt.init) {
@@ -280,6 +347,11 @@ private:
                             // already succeeded, so keep the original
                             // initializer in those cases.
                         }
+                    }
+                } else if (stmt.is_const && (stmt.init || stmt.has_ctor_args)) {
+                    try {
+                        execute_stmt(stmt, named_type("void"));
+                    } catch (const ConstexprError&) {
                     }
                 }
                 return;
@@ -1334,7 +1406,9 @@ private:
             case ExprKind::BoolLiteral: return named_type("bool");
             case ExprKind::CharLiteral: return named_type("char");
             case ExprKind::TypeTrait: return named_type("bool");
-            case ExprKind::Sizeof: return named_type("size_t");
+            case ExprKind::Alignof:
+            case ExprKind::Sizeof:
+                return named_type("size_t");
             case ExprKind::Destroy: return named_type("void");
             case ExprKind::StringLiteral: return make_const_char_pointer_type();
             case ExprKind::Identifier:
@@ -1474,6 +1548,11 @@ private:
             case ExprKind::StringLiteral: return make_string_literal_pointer(expr);
             case ExprKind::Destroy:
                 throw ConstexprError(expr.loc, "explicit destructor calls are not supported during constant evaluation");
+            case ExprKind::Alignof: {
+                std::optional<TypeLayoutInfo> layout = layout_of_type(program_, expr.type);
+                if (!layout.has_value()) throw ConstexprError(expr.loc, "cannot apply 'alignof' to this type in this version");
+                return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->abi_align_bytes));
+            }
             case ExprKind::Sizeof: {
                 Type queried_type;
                 if (expr.sizeof_operand_is_type) {
@@ -1925,6 +2004,175 @@ void rewrite_consteval_if_for_runtime(Stmt& stmt) {
     stmt.loc = loc;
 }
 
+class AlignmentResolver {
+public:
+    AlignmentResolver(Program& program, ConstexprEngine& engine) : program_(program), engine_(engine) {}
+
+    void run() {
+        for (StructDef& def : program_.structs) resolve_struct(def.name);
+        for (ClassDef& def : program_.classes) resolve_class(def.name);
+        for (Function& fn : program_.functions) {
+            if (fn.body) engine_.validate_constexpr_locals(fn);
+        }
+    }
+
+private:
+    Program& program_;
+    ConstexprEngine& engine_;
+    std::unordered_set<std::string> resolving_structs_;
+    std::unordered_set<std::string> resolved_structs_;
+    std::unordered_set<std::string> resolving_classes_;
+    std::unordered_set<std::string> resolved_classes_;
+
+    [[nodiscard]] StructDef* find_struct_mut(std::string_view name) {
+        for (StructDef& def : program_.structs) {
+            if (def.name == name) return &def;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] ClassDef* find_class_mut(std::string_view name) {
+        for (ClassDef& def : program_.classes) {
+            if (def.name == name) return &def;
+        }
+        return nullptr;
+    }
+
+    void resolve_type_dependencies(const Type& type) {
+        switch (type.kind) {
+            case TypeKind::Named:
+                if (StructDef* def = find_struct_mut(type.name)) {
+                    resolve_struct(def->name);
+                } else if (ClassDef* def = find_class_mut(type.name)) {
+                    resolve_class(def->name);
+                }
+                return;
+            case TypeKind::Pointer:
+            case TypeKind::Reference:
+            case TypeKind::Span:
+                if (type.pointee) resolve_type_dependencies(*type.pointee);
+                return;
+            case TypeKind::Array:
+                if (type.element) resolve_type_dependencies(*type.element);
+                return;
+            case TypeKind::Function:
+            case TypeKind::FunctionPointer:
+                if (type.function_return) resolve_type_dependencies(*type.function_return);
+                for (const Type& param : type.function_params) resolve_type_dependencies(param);
+                return;
+        }
+    }
+
+    [[nodiscard]] bool type_has_strengthened_record_alignment(const Type& type) {
+        if (type.kind == TypeKind::Array && type.element) return type_has_strengthened_record_alignment(*type.element);
+        if (type.kind != TypeKind::Named) return false;
+        if (StructDef* def = find_struct_mut(type.name)) return def->resolved_alignment != 0;
+        if (ClassDef* def = find_class_mut(type.name)) return def->resolved_alignment != 0;
+        return false;
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t> natural_field_alignment(const StructField& field) {
+        std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
+        if (!layout.has_value()) return std::nullopt;
+        return std::max(layout->abi_align_bytes, field.resolved_alignment);
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t> natural_field_alignment(const ClassField& field) {
+        std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
+        if (!layout.has_value()) return std::nullopt;
+        return std::max(layout->abi_align_bytes, field.resolved_alignment);
+    }
+
+    [[nodiscard]] std::uint64_t natural_struct_alignment(const StructDef& def) {
+        if (def.is_packed) return 1;
+        std::uint64_t overall = 1;
+        for (const StructField& field : def.fields) {
+            if (std::optional<std::uint64_t> align = natural_field_alignment(field)) {
+                overall = std::max(overall, *align);
+            }
+        }
+        return overall;
+    }
+
+    [[nodiscard]] std::uint64_t natural_class_alignment(const ClassDef& def) {
+        std::uint64_t overall = 1;
+        if (const BaseSpecifier* base = def.direct_ordinary_base()) {
+            std::optional<TypeLayoutInfo> base_layout = layout_of_type(program_, base->base_type);
+            if (base_layout.has_value()) overall = std::max(overall, base_layout->abi_align_bytes);
+        }
+        for (const ClassField& field : def.fields) {
+            if (std::optional<std::uint64_t> align = natural_field_alignment(field)) {
+                overall = std::max(overall, *align);
+            }
+        }
+        return overall;
+    }
+
+    void resolve_struct(const std::string& name) {
+        if (resolved_structs_.contains(name)) return;
+        if (!resolving_structs_.insert(name).second) return;
+        StructDef* def = find_struct_mut(name);
+        if (!def) return;
+        for (StructField& field : def->fields) {
+            resolve_type_dependencies(field.type);
+        }
+        if (def->is_packed && !def->alignment_specs.empty()) {
+            throw ConstexprError(def->alignment_specs.front().loc,
+                                 "'[[scpp::packed]]' cannot be combined with 'alignas' on '" + def->name + "'");
+        }
+        for (StructField& field : def->fields) {
+            if (def->is_packed && !field.alignment_specs.empty()) {
+                throw ConstexprError(field.alignment_specs.front().loc,
+                                     "'[[scpp::packed]]' cannot be combined with 'alignas' on member '" + field.name + "'");
+            }
+            std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
+            if (!layout.has_value()) {
+                field.resolved_alignment = 0;
+                continue;
+            }
+            field.resolved_alignment =
+                engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
+                                                     "member '" + field.name + "'");
+            if (def->is_packed && type_has_strengthened_record_alignment(field.type)) {
+                throw ConstexprError(field.loc,
+                                     "'[[scpp::packed]]' member '" + field.name +
+                                         "' cannot have a class/struct/union type whose alignment was strengthened by "
+                                         "'alignas'");
+            }
+        }
+        std::uint64_t natural_align = natural_struct_alignment(*def);
+        def->resolved_alignment =
+            engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc,
+                                                 std::string(def->is_union ? "union '" : "struct '") + def->name + "'");
+        resolving_structs_.erase(name);
+        resolved_structs_.insert(name);
+    }
+
+    void resolve_class(const std::string& name) {
+        if (resolved_classes_.contains(name)) return;
+        if (!resolving_classes_.insert(name).second) return;
+        ClassDef* def = find_class_mut(name);
+        if (!def) return;
+        if (const BaseSpecifier* base = def->direct_ordinary_base()) resolve_type_dependencies(base->base_type);
+        for (ClassField& field : def->fields) resolve_type_dependencies(field.type);
+        for (ClassField& field : def->fields) {
+            std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
+            if (!layout.has_value()) {
+                field.resolved_alignment = 0;
+                continue;
+            }
+            field.resolved_alignment =
+                engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
+                                                     "member '" + field.name + "'");
+        }
+        std::uint64_t natural_align = natural_class_alignment(*def);
+        def->resolved_alignment =
+            engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc, "class '" + def->name + "'");
+        resolving_classes_.erase(name);
+        resolved_classes_.insert(name);
+    }
+};
+
 } // namespace
 
 void fold_immediate_calls(Program& program, ConstexprLimits limits) {
@@ -1942,10 +2190,7 @@ void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     // constexpr function containing `if consteval` would incorrectly see
     // only the runtime branch, because the callee's AST has already been
     // destructively rewritten for the later runtime pipeline.
-    for (Function& fn : program.functions) {
-        if (!fn.body) continue;
-        engine.validate_constexpr_locals(fn);
-    }
+    AlignmentResolver(program, engine).run();
     for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
     for (Function& fn : program.functions) {
         if (fn.eval_mode == FunctionEvalMode::Consteval && !fn.name.ends_with("_new")) fn.body.reset();
