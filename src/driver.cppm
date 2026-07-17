@@ -508,6 +508,7 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
 void write_param(std::ostream& out, const Param& param) {
     write_type(out, param.type);
     write_string(out, param.name);
+    write_string(out, param.lifetime.name);
     write_string(out, param.generic_concept);
     write_u8(out, param.require_thread_movable ? 1u : 0u);
     write_u8(out, param.require_thread_shareable ? 1u : 0u);
@@ -518,6 +519,7 @@ void write_param(std::ostream& out, const Param& param) {
     Param param;
     param.type = read_type(in, context + " type");
     param.name = read_string(in, context + " name");
+    param.lifetime.name = read_string(in, context + " lifetime");
     param.generic_concept = read_string(in, context + " generic concept");
     param.require_thread_movable = read_u8(in, context + " thread_movable") != 0u;
     param.require_thread_shareable = read_u8(in, context + " thread_shareable") != 0u;
@@ -580,6 +582,9 @@ void write_expr(std::ostream& out, const Expr& expr) {
     write_u8(out, expr.sizeof_operand_is_type ? 1u : 0u);
     write_u8(out, expr.has_paren_init ? 1u : 0u);
     write_u8(out, expr.destroy_through_pointer ? 1u : 0u);
+    write_u8(out, expr.through_arrow ? 1u : 0u);
+    write_u8(out, expr.implicit_arrow_deref ? 1u : 0u);
+    write_u8(out, expr.implicit_arrow_chain_safe ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_captures.size()));
     for (const LambdaCapture& capture : expr.lambda_captures) write_lambda_capture(out, capture);
     write_enum(out, expr.lambda_blanket_mode);
@@ -616,6 +621,9 @@ ExprPtr read_expr(std::istream& in, const std::string& context) {
     expr->sizeof_operand_is_type = read_u8(in, context + " sizeof is type") != 0u;
     expr->has_paren_init = read_u8(in, context + " has paren init") != 0u;
     expr->destroy_through_pointer = read_u8(in, context + " destroy through pointer") != 0u;
+    expr->through_arrow = read_u8(in, context + " through arrow") != 0u;
+    expr->implicit_arrow_deref = read_u8(in, context + " implicit arrow deref") != 0u;
+    expr->implicit_arrow_chain_safe = read_u8(in, context + " implicit arrow chain safe") != 0u;
     std::uint32_t capture_count = read_u32_le(in, context + " capture count");
     expr->lambda_captures.reserve(capture_count);
     for (std::uint32_t i = 0; i < capture_count; i++) expr->lambda_captures.push_back(read_lambda_capture(in, context + " capture"));
@@ -955,6 +963,7 @@ void write_function(std::ostream& out, const Function& fn) {
     write_source_location(out, fn.loc);
     write_u32_le(out, static_cast<std::uint32_t>(fn.params.size()));
     for (const Param& param : fn.params) write_param(out, param);
+    write_string(out, fn.return_lifetime.name);
     write_u8(out, fn.body ? 1u : 0u);
     if (fn.body) write_stmt(out, *fn.body);
     write_u8(out, fn.is_extern_c ? 1u : 0u);
@@ -995,6 +1004,7 @@ void write_function(std::ostream& out, const Function& fn) {
     std::uint32_t param_count = read_u32_le(in, context + " param count");
     fn.params.reserve(param_count);
     for (std::uint32_t i = 0; i < param_count; i++) fn.params.push_back(read_param(in, context + " param"));
+    fn.return_lifetime.name = read_string(in, context + " return lifetime");
     if (read_u8(in, context + " body present") != 0u) fn.body = read_stmt(in, context + " body");
     fn.is_extern_c = read_u8(in, context + " extern_c") != 0u;
     fn.is_module_extern = read_u8(in, context + " module_extern") != 0u;

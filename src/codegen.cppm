@@ -716,6 +716,9 @@ private:
         clone->type = expr.type;
         clone->has_paren_init = expr.has_paren_init;
         clone->destroy_through_pointer = expr.destroy_through_pointer;
+        clone->through_arrow = expr.through_arrow;
+        clone->implicit_arrow_deref = expr.implicit_arrow_deref;
+        clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
         return clone;
     }
 
@@ -2097,6 +2100,7 @@ private:
     [[nodiscard]] static std::string method_lookup_name(const Function& fn) {
         if (fn.name.ends_with("_delete")) return "~";
         if (fn.name.ends_with("_operator_deref")) return "operator*";
+        if (fn.name.ends_with("_operator_arrow")) return "operator->";
         if (fn.name.ends_with("_operator_assign")) return "operator=";
         if (!fn.member_owner_class.empty() && fn.name.rfind(fn.member_owner_class + "_", 0) == 0) {
             return fn.name.substr(fn.member_owner_class.size() + 1);
@@ -4181,6 +4185,14 @@ private:
         if (target_type.kind == TypeKind::Pointer && target_type.pointee != nullptr &&
             target_type.pointee->kind == TypeKind::Named) {
             if (source_type->kind == TypeKind::Pointer && source_type->pointee != nullptr &&
+                source_type->pointee->kind == TypeKind::Named &&
+                type_names_interface(target_type.pointee->name) &&
+                type_names_interface(source_type->pointee->name) &&
+                source_type->pointee->name == target_type.pointee->name &&
+                (!target_type.is_mutable_pointee || source_type->is_mutable_pointee)) {
+                return codegen_expr(expr);
+            }
+            if (source_type->kind == TypeKind::Pointer && source_type->pointee != nullptr &&
                 source_type->pointee->kind == TypeKind::Named && !type_names_interface(source_type->pointee->name)) {
                 llvm::Value* object_ptr = codegen_expr(expr);
                 llvm::Value* table_ptr =
@@ -5976,8 +5988,14 @@ private:
                     // resolves.
                     return codegen_lvalue(*expr.lhs);
                 }
-                LValue operand = codegen_lvalue(*expr.lhs);
-                if (operand.type.kind == TypeKind::Named) {
+                std::optional<Type> operand_type = infer_type(*expr.lhs);
+                if (!operand_type.has_value()) {
+                    throw CodegenError("expression is not assignable", current_loc_);
+                }
+                const Type& operand_underlying =
+                    operand_type->kind == TypeKind::Reference && operand_type->pointee ? *operand_type->pointee : *operand_type;
+                if (operand_underlying.kind == TypeKind::Named) {
+                    LValue operand = codegen_lvalue(*expr.lhs);
                     std::vector<ExprPtr> no_args;
                     bool receiver_is_mutable = !is_read_only_place(*expr.lhs);
                     if (const Function* callee_def =
@@ -5998,7 +6016,7 @@ private:
                                       alignment_for_type(*callee_def->return_type.pointee)};
                     }
                 }
-                if (operand.type.kind != TypeKind::Pointer) {
+                if (operand_type->kind != TypeKind::Pointer) {
                     // Whether a raw pointer dereference is licensed here
                     // (ch01 §1.3: only inside `unsafe {}`) is the move
                     // checker's job (scpp.movecheck), not codegen's --
@@ -6013,18 +6031,22 @@ private:
                     throw CodegenError("dereference ('*') is only supported for a raw pointer or a class with operator*",
                         current_loc_);
                 }
-                if (is_interface_pointer_type(operand.type)) {
+                if (is_interface_pointer_type(*operand_type)) {
                     throw CodegenError("dereferencing an interface pointer does not yield an assignable storage location",
                         current_loc_);
                 }
-                // A unique_ptr's/raw pointer's own storage holds the
-                // pointer *value* (see to_llvm_type's UniquePtr/Pointer
-                // case); dereferencing means loading that value and using
-                // it as the new base address, exactly like a reference's
-                // own auto-deref above.
-                llvm::Value* pointee_ptr =
-                    create_load(llvm::PointerType::getUnqual(*context_), operand.ptr, operand.alignment, "deref");
-                return LValue{pointee_ptr, *operand.type.pointee, alignment_for_type(*operand.type.pointee)};
+                bool operand_has_storage =
+                    expr.lhs->kind == ExprKind::Identifier || expr.lhs->kind == ExprKind::Member ||
+                    expr.lhs->kind == ExprKind::Subscript;
+                llvm::Value* pointee_ptr = nullptr;
+                if (operand_has_storage) {
+                    LValue operand = codegen_lvalue(*expr.lhs);
+                    pointee_ptr =
+                       create_load(llvm::PointerType::getUnqual(*context_), operand.ptr, operand.alignment, "deref");
+                } else {
+                    pointee_ptr = codegen_expr(*expr.lhs);
+                }
+                return LValue{pointee_ptr, *operand_type->pointee, alignment_for_type(*operand_type->pointee)};
             }
 
             default:

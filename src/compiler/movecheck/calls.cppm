@@ -35,6 +35,7 @@ struct CalleeSignature {
         void check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
                                                  const Signatures& signatures, const SourceLocation& loc);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
+                                                       const Signatures& signatures,
                                                        const ClassFieldTypes* class_field_types = nullptr);
 struct NodiscardInfo {
             std::string subject;
@@ -149,6 +150,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                                                                        const std::vector<ExprPtr>& args, Body& body,
                                                                        SourceLocation loc);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
+                                                       const Signatures& signatures,
                                                         const ClassFieldTypes* class_field_types) {
     if (call_expr.lhs && call_expr.name.empty()) {
         const Expr* callee_expr = call_expr.lhs.get();
@@ -238,7 +240,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             }
         }
         if (class_name.empty()) {
-            std::optional<Type> receiver_type = infer_expr_type(*call_expr.lhs, body, {});
+            std::optional<Type> receiver_type = infer_expr_type(*call_expr.lhs, body, signatures);
             if (receiver_type.has_value()) class_name = named_type_name(*receiver_type);
         }
         if (!class_name.empty()) return CalleeSignature{class_name + "_" + call_expr.name, 1, std::nullopt};
@@ -317,7 +319,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 [[nodiscard]] const NodiscardInfo* nodiscard_info_for_discarded_call(const Expr& expr, const Body& body,
                                                                      const Signatures& signatures) {
     if (expr.kind != ExprKind::Call) return nullptr;
-    CalleeSignature callee = resolve_callee_signature(expr, body);
+    CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
     if (const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures)) {
         if (sig->is_nodiscard) {
             static thread_local NodiscardInfo info;
@@ -750,26 +752,18 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Subscript:
             return assignment_target_is_read_only(*expr.lhs, body, signatures);
         case ExprKind::Unary: {
-            // `*p = ...`/`p->x = ...` (`p` a raw pointer): read-only iff
-            // `p`'s own declared type says `const T*`
-            // (is_mutable_pointee == false) -- ch05 §5.7's "writing
-            // through a const T* is an ordinary type error, in *every*
-            // context, including inside unsafe { }" rule (this function
-            // is never consulted with `state.unsafe_depth` at all, so
-            // there is nothing here for `unsafe { }` to relax). A
-            // std::unique_ptr pointee has no const-qualification concept
-            // in this version (same reasoning as is_read_only_reachable),
-            // so it's never read-only through this path.
-            if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
-            auto it = body.local_types.find(expr.lhs->name);
-            if (it == body.local_types.end()) return false;
-            if (expr.lhs->name == "this" && it->second.kind == TypeKind::Reference) {
-                return !it->second.is_mutable_ref;
+            if (expr.unary_op != UnaryOp::Deref) return false;
+            if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
+            std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
+            if (!operand_type.has_value()) return false;
+            if (operand_type->kind == TypeKind::Pointer) {
+                return !operand_type->is_mutable_pointee;
             }
-            return it->second.kind == TypeKind::Pointer && !it->second.is_mutable_pointee;
+            if (operand_type->kind == TypeKind::Reference) return !operand_type->is_mutable_ref;
+            return false;
         }
         case ExprKind::Call: {
-            CalleeSignature callee = resolve_callee_signature(expr, body);
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             return sig != nullptr && is_reference(sig->return_type) && !sig->return_type.is_mutable_ref;
         }
@@ -814,7 +808,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             // a generic function.
             break;
         case ExprKind::Call: {
-            CalleeSignature callee = resolve_callee_signature(expr, body);
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig == nullptr) {
                 std::optional<Type> call_type = infer_expr_type(expr, body, signatures);
@@ -1050,7 +1044,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                 if (unwrapped.kind == TypeKind::Array || unwrapped.kind == TypeKind::Span) return named_type("int");
                 return std::nullopt;
             }
-            CalleeSignature callee = resolve_callee_signature(expr, body);
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig != nullptr) return sig->return_type;
             if (expr.lhs == nullptr && body.program != nullptr) {

@@ -43,6 +43,9 @@ ExprPtr clone_expr(const Expr& expr) {
     clone->type = expr.type;
     clone->has_paren_init = expr.has_paren_init;
     clone->destroy_through_pointer = expr.destroy_through_pointer;
+    clone->through_arrow = expr.through_arrow;
+    clone->implicit_arrow_deref = expr.implicit_arrow_deref;
+    clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
     clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
     return clone;
 }

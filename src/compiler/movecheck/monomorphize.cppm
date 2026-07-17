@@ -3572,6 +3572,58 @@ private:
         }
     }
 
+    [[nodiscard]] ExprPtr make_deref_expr(ExprPtr operand, SourceLocation loc, bool implicit_arrow_deref = false,
+                                          bool implicit_arrow_chain_safe = false) {
+        auto deref = std::make_unique<Expr>();
+        deref->kind = ExprKind::Unary;
+        deref->loc = loc;
+        deref->unary_op = UnaryOp::Deref;
+        deref->lhs = std::move(operand);
+        deref->implicit_arrow_deref = implicit_arrow_deref;
+        deref->implicit_arrow_chain_safe = implicit_arrow_chain_safe;
+        return deref;
+    }
+
+    [[nodiscard]] ExprPtr rewrite_arrow_receiver(ExprPtr receiver, Body& body, const SourceLocation& loc) {
+        std::optional<Type> receiver_type = infer_expr_type(*receiver, body, signatures_);
+        bool selected_any_operator_arrow = false;
+        bool all_steps_receiver_tied = true;
+        for (int depth = 0; depth < 64; depth++) {
+            if (!receiver_type.has_value()) {
+                throw DataflowError("operator-> chain did not yield a pointer", loc);
+            }
+            const Type& effective =
+                receiver_type->kind == TypeKind::Reference && receiver_type->pointee ? *receiver_type->pointee : *receiver_type;
+            if (effective.kind == TypeKind::Pointer) {
+                return make_deref_expr(std::move(receiver), loc, selected_any_operator_arrow, all_steps_receiver_tied);
+            }
+            if (effective.kind != TypeKind::Named) {
+                throw DataflowError("operator-> chain did not yield a pointer", loc);
+            }
+            auto call = std::make_unique<Expr>();
+            call->kind = ExprKind::Call;
+            call->loc = loc;
+            call->name = "operator_arrow";
+            call->lhs = std::move(receiver);
+            CalleeSignature callee{effective.name + "_operator_arrow", 1, std::nullopt};
+            const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures_);
+            if (sig == nullptr) {
+                if (!selected_any_operator_arrow) {
+                    throw DataflowError("cannot use '->' on class type '" + effective.name +
+                                            "': it has no matching operator->()",
+                                        loc);
+                }
+                throw DataflowError("operator-> chain did not yield a pointer", loc);
+            }
+            selected_any_operator_arrow = true;
+            all_steps_receiver_tied =
+                all_steps_receiver_tied && sig->return_lifetime.present() && sig->param_types.size() == 1;
+            receiver = std::move(call);
+            receiver_type = infer_expr_type(*receiver, body, signatures_);
+        }
+        throw DataflowError("operator-> chain did not yield a pointer", loc);
+    }
+
     void walk_expr(Expr& expr, Body& body, const std::optional<Type>& enclosing_this_type,
                    bool allow_generic_monomorphization) {
         // ch05 §5.12: a Lambda's own sub-tree (captures' init-exprs,
@@ -3653,6 +3705,11 @@ private:
                     expr.unary_op = UnaryOp::Not;
                 }
             }
+        }
+
+        if ((expr.kind == ExprKind::Member || expr.kind == ExprKind::Call) && expr.through_arrow && expr.lhs != nullptr) {
+            expr.lhs = rewrite_arrow_receiver(std::move(expr.lhs), body, expr.loc);
+            expr.through_arrow = false;
         }
 
         if (expr.kind == ExprKind::Call && expr.lhs != nullptr && expr.name.empty()) {

@@ -464,6 +464,19 @@ struct Expr {
     bool has_paren_init = false;
     // Destroy only: true for `ptr->~T()`, false for `obj.~T()`.
     bool destroy_through_pointer = false;
+    // Member/Call only: true when the source spelled this access/call
+    // with `->` rather than `.`, so the operator-> protocol still needs
+    // to be resolved later once the receiver type is known.
+    bool through_arrow = false;
+    // Unary/Deref only: true for the compiler-synthesized final `*ptr`
+    // used internally to complete one `E1->E2` expression after following
+    // an operator-> chain. This pointer operand is never user-visible.
+    bool implicit_arrow_deref = false;
+    // Unary/Deref only, meaningful only when implicit_arrow_deref is
+    // true: whether every selected operator-> step in that same chain was
+    // receiver-tied, so the final implicit raw-pointer dereference is the
+    // one safe carve-out that does not itself require an unsafe context.
+    bool implicit_arrow_chain_safe = false;
 
     // Member: object stored in `lhs`, field name in `name`.
     // Subscript: array/collection stored in `lhs`, index expr in `rhs`.
@@ -632,6 +645,9 @@ struct MemberInitializer {
     clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
     clone->has_paren_init = expr.has_paren_init;
     clone->destroy_through_pointer = expr.destroy_through_pointer;
+    clone->through_arrow = expr.through_arrow;
+    clone->implicit_arrow_deref = expr.implicit_arrow_deref;
+    clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
     clone->lambda_captures.clear();
     for (const LambdaCapture& capture : expr.lambda_captures) {
         LambdaCapture cloned;

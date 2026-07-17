@@ -49,6 +49,14 @@ public:
         }
     }
 
+    T* operator->() [[scpp::lifetime(self)]] {
+        return this->ptr_;
+    }
+
+    const T* operator->() const [[scpp::lifetime(self)]] {
+        return this->ptr_;
+    }
+
     T* release() {
         T* raw = this->ptr_;
         T* empty{};

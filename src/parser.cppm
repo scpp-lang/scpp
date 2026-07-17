@@ -425,6 +425,9 @@ private:
         clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
         clone->has_paren_init = expr.has_paren_init;
         clone->destroy_through_pointer = expr.destroy_through_pointer;
+        clone->through_arrow = expr.through_arrow;
+        clone->implicit_arrow_deref = expr.implicit_arrow_deref;
+        clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
         clone->lambda_blanket_mode = expr.lambda_blanket_mode;
         clone->lambda_params = expr.lambda_params;
         clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
@@ -1126,6 +1129,9 @@ private:
         clone->type = expr.type;
         clone->has_paren_init = expr.has_paren_init;
         clone->destroy_through_pointer = expr.destroy_through_pointer;
+        clone->through_arrow = expr.through_arrow;
+        clone->implicit_arrow_deref = expr.implicit_arrow_deref;
+        clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
         return clone;
     }
 
@@ -4567,6 +4573,41 @@ private:
                 continue;
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
+                peek_at(1).kind == TokenKind::Arrow) {
+                if (member_is_template) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "an operator-> cannot currently be a member template");
+                }
+                if (member_is_static) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "an operator-> cannot be declared static");
+                }
+                advance(); // 'operator'
+                advance(); // '->'
+                Function fn;
+                fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
+                fn.eval_mode = member_eval_mode;
+                fn.member_owner_class = qualified_owner_name;
+                fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
+                fn.params = parse_param_list();
+                parse_function_trailing_attributes(fn, "a member function declarator");
+                reject_generic_params(fn.params, "an operator->");
+                bool is_const = match(TokenKind::KwConst);
+                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
+                fn.return_type = std::move(member_type);
+                fn.name = synthesized_member_owner_name + "_operator_arrow";
+                fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
+                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
+                fn.body = parse_member_function_suffix(fn);
+                finish_member_fn(fn);
+                program.functions.push_back(std::move(fn));
+                continue;
+            }
+            if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Assign) {
                 if (member_is_template) {
                     throw ParseError(member_loc.line, member_loc.column,
@@ -5407,11 +5448,25 @@ private:
         return parse_postfix(parse_primary());
     }
 
+    [[nodiscard]] std::string parse_member_access_name() {
+        if (check(TokenKind::Identifier) && std::string(peek().text) == "operator") {
+            advance(); // 'operator'
+            if (match(TokenKind::Star)) return "operator_deref";
+            if (match(TokenKind::Arrow)) return "operator_arrow";
+            if (match(TokenKind::Assign)) return "operator_assign";
+            throw ParseError(current_loc().line, current_loc().column,
+                             "expected '*', '->', or '=' after 'operator' in member access");
+        }
+        return std::string(expect(TokenKind::Identifier, "field or method name").text);
+    }
+
     // Applies trailing `.name` (Member, or a method call -- ch05 §5.9 --
-    // if `(` follows), `->name` (same, off a dereference -- sugar for
-    // `(*p).name`, same as real C++ -- unless `p` is literally `this`,
-    // see below), and `[index]` (Subscript) operators, e.g. `p.x`,
-    // `arr[i]`, `p.inner.x`, `arr[i].x`, `p->x`, `obj.method(args)`.
+    // if `(` follows), `->name` (resolved later via raw-pointer member
+    // access or an explicit operator-> chain; `this->x` stays a special
+    // case because `this` is modeled as a reference pseudo-parameter
+    // rather than a real pointer), and `[index]` (Subscript) operators,
+    // e.g. `p.x`, `arr[i]`, `p.inner.x`, `arr[i].x`, `p->x`,
+    // `obj.method(args)`.
     ExprPtr parse_postfix(ExprPtr expr) {
         for (;;) {
             if (match(TokenKind::Dot)) {
@@ -5427,7 +5482,7 @@ private:
                     expr = std::move(node);
                     continue;
                 }
-                std::string name = std::string(expect(TokenKind::Identifier, "field or method name").text);
+                std::string name = parse_member_access_name();
                 expr = parse_member_or_method_call(std::move(expr), name);
             } else if (match(TokenKind::Arrow)) {
                 if (match(TokenKind::Tilde)) {
@@ -5443,7 +5498,7 @@ private:
                     expr = std::move(node);
                     continue;
                 }
-                std::string name = std::string(expect(TokenKind::Identifier, "field or method name").text);
+                std::string name = parse_member_access_name();
                 // `this->x` (ch05 §5.9): `this` is represented as an
                 // ordinary Reference-typed pseudo-parameter (see parser's
                 // make_this_param), which already auto-dereferences on
@@ -5456,12 +5511,7 @@ private:
                     expr = parse_member_or_method_call(std::move(expr), name);
                     continue;
                 }
-                auto deref = std::make_unique<Expr>();
-                deref->kind = ExprKind::Unary;
-                deref->unary_op = UnaryOp::Deref;
-                deref->loc = expr->loc;
-                deref->lhs = std::move(expr);
-                expr = parse_member_or_method_call(std::move(deref), name);
+                expr = parse_member_or_method_call(std::move(expr), name, /*through_arrow=*/true);
             } else if (match(TokenKind::LBracket)) {
                 ExprPtr index = parse_expr();
                 expect(TokenKind::RBracket, "']'");
@@ -5534,7 +5584,7 @@ private:
     // synthesized function symbol only once `base`'s static type is known
     // (movecheck/codegen, not the parser). Otherwise it's a plain field
     // access, unchanged from before method calls existed.
-    ExprPtr parse_member_or_method_call(ExprPtr base, const std::string& name) {
+    ExprPtr parse_member_or_method_call(ExprPtr base, const std::string& name, bool through_arrow = false) {
         SourceLocation loc = base->loc;
         if (match(TokenKind::LParen)) {
             auto node = std::make_unique<Expr>();
@@ -5542,6 +5592,7 @@ private:
             node->loc = loc;
             node->name = name;
             node->lhs = std::move(base);
+            node->through_arrow = through_arrow;
             if (!check(TokenKind::RParen)) {
                 do {
                     node->args.push_back(parse_expr());
@@ -5555,6 +5606,7 @@ private:
         node->loc = loc;
         node->name = name;
         node->lhs = std::move(base);
+        node->through_arrow = through_arrow;
         return node;
     }
 
