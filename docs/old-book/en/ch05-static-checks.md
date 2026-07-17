@@ -444,11 +444,11 @@ This reaches the soundness pattern Rust expresses with higher-ranked trait
 bounds, but it does so by extending scpp's existing named-group design instead
 of reversing it.
 
-**Current compiler status.** This caveat from the previous revision is worth
-keeping: today the compiler still enforces only the older single-reference-
-parameter / implicit-`this` subset from [§5.3](#53-lifetime). The
-`[[scpp::lifetime(any)]]` story here is the intended design, not yet a
-fully implemented feature.
+**Current compiler status.** All three bullets above are implemented: the
+`any` reserved-group restrictions on ordinary parameters, the
+`requires`-expression probe-parameter concept-checking semantics, and the
+call-site exemption for passing a freshly invented local's reference into an
+`any`-tagged parameter.
 
 
 ## 5.14 Generic Types

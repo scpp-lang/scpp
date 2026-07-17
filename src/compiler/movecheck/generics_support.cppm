@@ -17,6 +17,7 @@ StmtPtr clone_stmt(const Stmt& stmt);
 [[nodiscard]] bool type_satisfies_concept(const Type& type, const ConceptDef& concept_def,
                                           const Program& program);
 [[nodiscard]] std::string mangle_type_for_clone_name(const Type& type);
+[[nodiscard]] bool probe_lifetime_groups_match(const ConceptRequirement& req, const Function& fn);
 
 ExprPtr clone_expr(const Expr& expr) {
     auto clone = std::make_unique<Expr>();
@@ -116,6 +117,48 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     return clone;
 }
 
+// spec §6.2(22)-(22.4): whether candidate declaration `fn`
+// (already confirmed to match `req` on name/arg-count/arg-types/return-
+// type) also satisfies the lifetime-group relation `req`'s own probe
+// parameters impose. `req.arg_lifetimes` is parallel to `req.arg_types`;
+// `fn.params[i + 1]` is `fn`'s corresponding real parameter (`params[0]`
+// is always the implicit receiver, see make_this_param). Uses the same
+// declaration-local, alpha-equivalent comparison spec §6.2(22) uses for
+// an ordinary call: two probe parameters are compared only against each
+// other (never by spelling against `fn`'s own group names), so `fn` may
+// freely use whatever group names it likes as long as its own grouping
+// relation -- which of its parameters share a group, and which don't --
+// mirrors the probes'.
+[[nodiscard]] bool probe_lifetime_groups_match(const ConceptRequirement& req, const Function& fn) {
+    for (size_t i = 0; i < req.arg_lifetimes.size(); i++) {
+        const LifetimeAnnotation& probe = req.arg_lifetimes[i];
+        if (!probe.present()) continue; // spec §6.2(22.4): no attribute, no constraint.
+        const LifetimeAnnotation& candidate = fn.params[i + 1].lifetime;
+        if (probe.is_any()) {
+            // spec §6.2(22.3): an `any`-tagged probe requires the
+            // corresponding real parameter to also be `any`-tagged.
+            if (!candidate.present() || !candidate.is_any()) return false;
+            continue;
+        }
+        // spec §6.2(22.1) first clause: a user-written-group probe
+        // requires the corresponding real parameter to belong to some
+        // non-`any` group.
+        if (!candidate.present() || candidate.is_any()) return false;
+        // spec §6.2(22.1) second clause/(22.2): same spelling among
+        // probes => same real group; different spelling => different
+        // real group.
+        for (size_t j = 0; j < i; j++) {
+            const LifetimeAnnotation& other_probe = req.arg_lifetimes[j];
+            if (!other_probe.present() || other_probe.is_any()) continue;
+            const LifetimeAnnotation& other_candidate = fn.params[j + 1].lifetime;
+            bool probes_same_group = other_probe.name == probe.name;
+            bool candidates_same_group = other_candidate.name == candidate.name;
+            if (probes_same_group != candidates_same_group) return false;
+        }
+    }
+    return true;
+}
+
 // ch05 §5.11: whether `type` (a concrete, ordinary type -- never a
 // witness class) structurally satisfies `concept_def`: for every
 // requirement, the class named by `type` must have a real method
@@ -125,7 +168,12 @@ StmtPtr clone_stmt(const Stmt& stmt) {
 // when the requirement itself constrains it) an identical return type.
 // A simple requirement (no return-type constraint) only requires the
 // method to exist with matching arguments -- its own return type is
-// unconstrained, so any return type qualifies.
+// unconstrained, so any return type qualifies. spec §6.2(22): a
+// requirement whose probe parameters bear `[[scpp::lifetime(...)]]`
+// additionally requires the candidate method's corresponding parameters
+// to honor that same lifetime-grouping relation (see
+// probe_lifetime_groups_match) -- this is a real constraint on concept
+// satisfaction, not merely syntax the probe parameter tolerates.
 [[nodiscard]] bool type_satisfies_concept(const Type& type, const ConceptDef& concept_def, const Program& program) {
     if (type.kind != TypeKind::Named) return false;
     for (const ConceptRequirement& req : concept_def.requirements) {
@@ -144,6 +192,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
             }
             if (!args_match) continue;
             if (req.has_return_constraint && !types_equal(fn.return_type, req.return_type)) continue;
+            if (!probe_lifetime_groups_match(req, fn)) continue;
             found = true;
             break;
         }

@@ -23,9 +23,6 @@ rules, coroutine machinery, codegen, or preprocessor support.
 - Most ISO `alignas` / `alignof(type-id)` support has landed, but `alignas` on
   a file-scope variable declaration is still rejected even though the same
   spelling works on local variables and class declarations.
-- The spec now explicitly allows both named lifetime groups and
-  `[[scpp::lifetime(any)]]` on `requires(...)` probe parameters, but the
-  compiler still does not parse that attribute in probe-parameter position yet.
 - Coroutine/async language support is still absent: no `co_await`, `co_yield`,
   `co_return`, or coroutine lowering/runtime integration yet.
 

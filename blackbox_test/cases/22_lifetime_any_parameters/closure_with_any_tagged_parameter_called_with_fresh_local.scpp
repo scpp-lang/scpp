@@ -3,10 +3,10 @@
 // `tok`, a function-local `Token`) and calls a passed-in closure with a
 // reference to it; the closure's own parameter is tagged
 // `[[scpp::lifetime(any)]]`, matching how the spec's own example is
-// written (modulo the concept probe-parameter tag, which isn't parsed
-// yet -- see concept_probe_parameter_lifetime_any_tag_is_not_yet_
-// parsed.scpp -- so the concept here checks plain callability only,
-// without itself requiring the any tag).
+// written. The concept's own probe parameter is any-tagged too (see
+// concept_probe_parameter_lifetime_any_tag_is_accepted.scpp), so per
+// spec §6.2(22.3) this concept now genuinely requires an any-tagged
+// candidate parameter, not just plain callability.
 class Token {
     public:
         virtual ~Token() { return; }
@@ -15,7 +15,7 @@ public:
 };
 
 template<typename T>
-concept AcceptsToken = requires(T a, Token& tok) {
+concept AcceptsToken = requires(T a, Token& tok [[scpp::lifetime(any)]]) {
     { a(tok) } -> std::same_as<void>;
 };
 

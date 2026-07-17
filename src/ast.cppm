@@ -1268,6 +1268,17 @@ struct ConceptRequirement {
     // always params[0] elsewhere; here there is no receiver slot at all
     // since the placeholder is never itself part of this list.
     std::vector<Type> arg_types;
+    // Parallel to arg_types: the corresponding probe parameter's own
+    // `[[scpp::lifetime(...)]]` annotation (spec §6.2(13.1)), or a
+    // default-constructed (absent) LifetimeAnnotation when that probe
+    // parameter bears none. Per spec §6.2(22)-(22.4), this constrains
+    // concept satisfaction itself -- see generics_support.cppm's own
+    // type_satisfies_concept, which compares this declaration-local
+    // grouping relation (same-spelling => same group, different-spelling
+    // => different group, `any` => must also be `any`) against
+    // each candidate declaration's own corresponding parameters. Always
+    // the same length as arg_types.
+    std::vector<LifetimeAnnotation> arg_lifetimes;
     // True for a compound requirement (`{ expr } -> std::same_as<T>;`).
     // False (the common case) for a simple requirement (`{ expr };`),
     // which constrains nothing about the result's type -- ch05 §5.11:
