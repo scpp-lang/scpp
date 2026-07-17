@@ -1,0 +1,57 @@
+// Coverage gap found by manual audit: file-scope variable declarations are
+// part of the intended language surface and should behave like ordinary
+// variable definitions when read and written across functions.
+struct Pair {
+    int left;
+    int right;
+};
+
+class Box {
+private:
+    int value{};
+public:
+    virtual ~Box() { return; }
+
+    void set(int next) {
+        this->value = next;
+        return;
+    }
+
+    int get() {
+        return this->value;
+    }
+};
+
+int seeded = 4;
+int zeroed;
+bool enabled = true;
+bool disabled;
+Pair global_pair;
+Box global_box;
+
+int read_seeded() {
+    return seeded;
+}
+
+void write_globals() {
+    zeroed = 5;
+    global_pair.left = 2;
+    global_pair.right = 3;
+    global_box.set(7);
+    return;
+}
+
+int total_after_write() {
+    return zeroed + global_pair.left + global_pair.right + global_box.get();
+}
+
+int main() {
+    if (!enabled || disabled) {
+        return 1;
+    }
+    if (zeroed != 0 || global_pair.left != 0 || global_pair.right != 0 || global_box.get() != 0) {
+        return 2;
+    }
+    write_globals();
+    return read_seeded() + total_after_write();
+}

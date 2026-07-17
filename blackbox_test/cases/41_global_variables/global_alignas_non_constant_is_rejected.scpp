@@ -1,0 +1,8 @@
+// spec 05-unions-and-packed-layout §(2.1): `alignas(constant-expression)`
+// requires an integral constant expression, not a runtime variable.
+int requested_alignment = 8;
+alignas(requested_alignment) int bad_alignment = 1;
+
+int main() {
+    return bad_alignment;
+}

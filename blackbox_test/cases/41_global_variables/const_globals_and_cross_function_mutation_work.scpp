@@ -1,0 +1,30 @@
+// Coverage gap found by manual audit: const file-scope variables, constant-
+// expression global initializers, and shared mutable globals should all work
+// within one translation unit.
+const int seed = 4;
+int counter = seed + 1;
+int baseline = counter * 2;
+bool armed;
+
+int bump() {
+    counter = counter + 2;
+    return counter;
+}
+
+int read_again() {
+    if (armed) {
+        return counter;
+    }
+    return 0;
+}
+
+int read_baseline() {
+    return baseline;
+}
+
+int main() {
+    armed = true;
+    int first = bump();
+    int second = read_again();
+    return read_baseline() * 10 + first * 2 + second;
+}

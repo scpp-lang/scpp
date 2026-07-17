@@ -122,6 +122,9 @@ cmake --build build
 | `36_charconv` | `std::from_chars` 整数解析：成功路径、部分消费、错误码、符号和显式进制 |
 | `37_for_loops` | 经典 `for`、基于范围的 `for`（数组/`std::span`）以及不同迭代绑定模式下的可变性规则 |
 | `38_lifetime_groups` | 形式化规范驱动的跨函数命名生命周期分组覆盖：命名组 vs `generic`、返回组匹配、存储/逃逸拒绝、成员函数、模板以及与线程安全属性的交互 |
+| `39_ordinary_virtual_dispatch` | 普通虚派发：基类/派生类引用与指针上的 override 选择，以及经由辅助函数转发后的分派 |
+| `40_operator_arrow` | `operator->`：递归箭头链、cv 正确性的重载选择、普通/unsafe 调用门控，以及原始指针叶子要求 |
+| `41_global_variables` | 文件作用域 / 全局变量声明：普通全局变量、`const` 全局变量、跨函数读写，以及 `alignas` 的接受/拒绝规则 |
 
 ## 测试理念
 
@@ -183,8 +186,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 417 个用例**
-- 运行器原始统计 **417/417 通过**
+- **总共 505 个用例**
+- 运行器原始统计 **505/505 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
