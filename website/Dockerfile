@@ -22,9 +22,11 @@ RUN cmake -S . -B build -G Ninja \
 
 ARG DOCS_BUILD_SCRIPT=docs/site/build.sh
 ARG DOCS_BUILD_OUTPUT_DIR=docs/site/dist
+ARG SITE_BASE_URL=https://www.scpp-lang.org
 RUN SITE_OUTPUT_DIR=/work/site-dist \
     DOCS_BUILD_SCRIPT="${DOCS_BUILD_SCRIPT}" \
     DOCS_BUILD_OUTPUT_DIR="${DOCS_BUILD_OUTPUT_DIR}" \
+    SITE_BASE_URL="${SITE_BASE_URL}" \
     bash website/build_site_for_docker.sh
 
 FROM scratch AS runtime

@@ -118,9 +118,19 @@ jobs:
           docker info
 
       - name: Build website image
-        run: docker build --pull -f website/Dockerfile -t scpp-website-ci .
+        env:
+          SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
+        run: |
+          set -euxo pipefail
+          build_args=()
+          if [ -n "${SITE_BASE_URL}" ]; then
+            build_args+=(--build-arg "SITE_BASE_URL=${SITE_BASE_URL}")
+          fi
+          docker build --pull "${build_args[@]}" -f website/Dockerfile -t scpp-website-ci .
 
       - name: Smoke test website container
+        env:
+          SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
         run: |
           set -euxo pipefail
           container_name=scpp-website-smoke
@@ -138,13 +148,16 @@ jobs:
             sleep 1
           done
           python3 - <<'PY'
+          import os
           import sys
           import urllib.error
           import urllib.parse
           import urllib.request
+          import xml.etree.ElementTree as ET
           from html.parser import HTMLParser
 
           BASE = "http://127.0.0.1:18080/"
+          CANONICAL_BASE = (os.environ.get("SITE_BASE_URL") or "https://www.scpp-lang.org").rstrip("/")
           MAX_SECOND_HOP_LINKS = 40
 
           class LinkParser(HTMLParser):
@@ -206,6 +219,38 @@ jobs:
               raise AssertionError("homepage exposed no links")
           if not root_parser.stylesheets:
               raise AssertionError("homepage exposed no stylesheet links")
+
+          robots_status, robots_type, robots_body = fetch(urllib.parse.urljoin(BASE, "robots.txt"))
+          assert robots_status == 200, robots_status
+          expected_robots = f"User-agent: *\nAllow: /\nSitemap: {CANONICAL_BASE}/sitemap.xml\n"
+          if robots_body != expected_robots:
+              raise AssertionError(f"unexpected robots.txt contents: {robots_body!r}")
+
+          sitemap_status, sitemap_type, sitemap_body = fetch(urllib.parse.urljoin(BASE, "sitemap.xml"))
+          assert sitemap_status == 200, sitemap_status
+          if "xml" not in sitemap_type:
+              raise AssertionError(f"unexpected sitemap content type: {sitemap_type}")
+          sitemap = ET.fromstring(sitemap_body)
+          ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+          locs = [node.text for node in sitemap.findall("sm:url/sm:loc", ns)]
+          if not locs:
+              raise AssertionError("sitemap.xml exposed no URLs")
+          if len(locs) != len(set(locs)):
+              raise AssertionError("sitemap.xml exposed duplicate URLs")
+
+          for loc in locs:
+              if not loc or not loc.startswith(CANONICAL_BASE):
+                  raise AssertionError(f"non-canonical sitemap URL: {loc!r}")
+              parsed = urllib.parse.urlparse(loc)
+              local_url = urllib.parse.urljoin(BASE, parsed.path.lstrip("/"))
+              status, content_type, _ = fetch(local_url)
+              if status != 200:
+                  raise AssertionError(f"sitemap URL failed locally: {local_url} -> {status}")
+              if parsed.path.endswith(".xml"):
+                  if "xml" not in content_type:
+                      raise AssertionError(f"sitemap URL returned wrong type: {local_url} -> {content_type}")
+              elif not content_type.startswith("text/html"):
+                  raise AssertionError(f"sitemap page returned wrong type: {local_url} -> {content_type}")
 
           for stylesheet_href in root_parser.stylesheets:
               stylesheet_url = urllib.parse.urljoin(BASE, stylesheet_href)
@@ -271,8 +316,15 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build website image
+        env:
+          SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
         run: |
-          docker build --pull -f website/Dockerfile \
+          set -euxo pipefail
+          build_args=()
+          if [ -n "${SITE_BASE_URL}" ]; then
+            build_args+=(--build-arg "SITE_BASE_URL=${SITE_BASE_URL}")
+          fi
+          docker build --pull "${build_args[@]}" -f website/Dockerfile \
             -t "${IMAGE_NAME}:latest" \
             -t "${IMAGE_SHA_TAG}" .
 

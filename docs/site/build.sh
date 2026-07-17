@@ -12,6 +12,18 @@ LOGO_SVG_SRC="$ROOT_DIR/assets/logo/scpp-logo.svg"
 LOGO_PNG_SRC="$ROOT_DIR/assets/logo/scpp-logo.png"
 SITE_TITLE="SCPP Documentation"
 GITHUB_REPO_URL="https://github.com/scpp-lang/scpp"
+SITE_BASE_URL="${SITE_BASE_URL:-https://www.scpp-lang.org}"
+
+SITE_BASE_URL="${SITE_BASE_URL%/}"
+case "$SITE_BASE_URL" in
+  http://*|https://*) ;;
+  *)
+    echo "error: SITE_BASE_URL must start with http:// or https:// (got: $SITE_BASE_URL)" >&2
+    exit 1
+    ;;
+esac
+
+declare -a GENERATED_PAGE_PATHS=()
 
 command -v pandoc >/dev/null 2>&1 || {
   echo "error: pandoc not found on PATH" >&2
@@ -609,6 +621,37 @@ render_markdown_page() {
     --metadata pagetitle="$title" \
     --metadata lang="$lang" \
     -o "$out_path"
+  GENERATED_PAGE_PATHS+=("$rel_out")
+}
+
+site_url_for() {
+  local rel_out="$1"
+  if [ "$rel_out" = 'index.html' ]; then
+    printf '%s/' "$SITE_BASE_URL"
+  else
+    printf '%s/%s' "$SITE_BASE_URL" "$rel_out"
+  fi
+}
+
+generate_sitemap() {
+  local out_file="$OUT_DIR/sitemap.xml"
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    local rel_out
+    for rel_out in "${GENERATED_PAGE_PATHS[@]}"; do
+      printf '  <url><loc>%s</loc></url>\n' "$(html_escape "$(site_url_for "$rel_out")")"
+    done
+    printf '%s\n' '</urlset>'
+  } > "$out_file"
+}
+
+generate_robots() {
+  cat > "$OUT_DIR/robots.txt" <<EOF2
+User-agent: *
+Allow: /
+Sitemap: ${SITE_BASE_URL}/sitemap.xml
+EOF2
 }
 
 build_section() {
@@ -719,6 +762,7 @@ EOF2
     --metadata pagetitle="SCPP Documentation Site" \
     --metadata lang="en" \
     -o "$OUT_DIR/index.html"
+  GENERATED_PAGE_PATHS+=("index.html")
 }
 
 build_landing
@@ -731,5 +775,8 @@ for section in book spec design; do
     build_section "$section" "$lang"
   done < <(section_languages "$section")
 done
+
+generate_sitemap
+generate_robots
 
 echo "Done. Output in $OUT_DIR/"
