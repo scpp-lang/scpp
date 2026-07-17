@@ -33,14 +33,18 @@ add_library(scpp_lexer)
 target_sources(scpp_lexer
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/lexer.cppm)
+            src/lexer.cppm
+    PRIVATE
+            src/lexer.cpp)
 target_compile_features(scpp_lexer PRIVATE cxx_std_23)
 
 add_library(scpp_ast)
 target_sources(scpp_ast
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/ast.cppm)
+            src/ast.cppm
+    PRIVATE
+            src/ast.cpp)
 target_compile_features(scpp_ast PRIVATE cxx_std_23)
 
 add_library(scpp_parser)
