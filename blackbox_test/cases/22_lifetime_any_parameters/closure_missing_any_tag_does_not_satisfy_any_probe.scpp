@@ -1,0 +1,39 @@
+// spec §6.2(22.3), continuing the closure pattern from
+// closure_with_any_tagged_parameter_called_with_fresh_local.scpp and
+// concept_probe_parameter_lifetime_any_tag_is_accepted.scpp, both of
+// which accept a closure whose own parameter *is* any-tagged, matching
+// an any-tagged probe. This file supplies the negative sibling: a
+// closure whose parameter carries no lifetime tag at all does not
+// satisfy a concept whose probe parameter is
+// [[scpp::lifetime(any)]]-tagged, exactly like the ordinary-method
+// rejection case in
+// concept_probe_lifetime_any_tag_rejects_untagged_candidate.scpp --
+// just through a closure's compiler-synthesized operator() instead of a
+// hand-written method (ch05 §5.12).
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+template<typename T>
+concept AcceptsToken = requires(T a, Token& tok [[scpp::lifetime(any)]]) {
+    { a(tok) } -> std::same_as<void>;
+};
+
+void with_fresh_token(AcceptsToken auto&& f) {
+    Token tok{};
+    tok.value = 42;
+    f(tok);
+    return;
+}
+
+int main() {
+    int result = 0;
+    with_fresh_token([&result](Token& t) {
+        result = t.value;
+        return;
+    });
+    return result;
+}

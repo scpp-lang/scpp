@@ -1,0 +1,41 @@
+// spec §6.2(22.3): "a probe parameter tagged [[scpp::lifetime(any)]]
+// requires the corresponding parameter of the selected callable
+// declaration to be tagged [[scpp::lifetime(any)]]" -- this is a
+// real constraint on concept satisfaction, not merely tolerated syntax
+// (§6.2(22): "Such an annotation constrains concept satisfaction; it is
+// not merely syntactic sugar for an otherwise ordinary test call").
+// UntaggedReader::read has the right name/arity/argument-types/return-
+// type to satisfy ReadsToken structurally, but its Token& parameter
+// bears no lifetime tag at all, so it must still be rejected -- not
+// merely fail to parse.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+class UntaggedReader {
+    public:
+        virtual ~UntaggedReader() { return; }
+public:
+    int read(Token& t) const {
+        return t.value;
+    }
+};
+
+template<typename T>
+concept ReadsToken = requires(T c, Token& tok [[scpp::lifetime(any)]]) {
+    { c.read(tok) } -> std::same_as<int>;
+};
+
+int use_it(const ReadsToken auto& c, Token& tok) {
+    return c.read(tok);
+}
+
+int main() {
+    UntaggedReader r{};
+    Token tok{};
+    tok.value = 42;
+    return use_it(r, tok);
+}

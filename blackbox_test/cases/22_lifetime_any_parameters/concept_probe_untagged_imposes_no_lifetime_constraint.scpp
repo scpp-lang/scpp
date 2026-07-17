@@ -1,0 +1,44 @@
+// spec §6.2(22.4): "a probe parameter with no scpp::lifetime attribute
+// imposes no lifetime-group constraint beyond the ordinary
+// well-formedness and type requirements of the probe" -- a
+// no-regression check for the probe_lifetime_groups_match code path
+// added alongside (22.1)-(22.3): every requirement now runs through it
+// (ConceptRequirement::arg_lifetimes is populated in parallel with
+// arg_types for every probe parameter, tagged or not), but a plain,
+// untagged probe must still accept a candidate whose own matching
+// parameter *does* carry a tag. TaggedReader::read is any-tagged,
+// yet ReadsTokenPlain's own probe never mentions
+// [[scpp::lifetime(...)]] at all, so that tag is simply irrelevant to
+// satisfaction -- ordinary structural concept-checking (ch05 §5.11)
+// keeps working exactly as it did before this feature existed.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+class TaggedReader {
+    public:
+        virtual ~TaggedReader() { return; }
+public:
+    int read(Token& t [[scpp::lifetime(any)]]) const {
+        return t.value;
+    }
+};
+
+template<typename T>
+concept ReadsTokenPlain = requires(T c, Token& tok) {
+    { c.read(tok) } -> std::same_as<int>;
+};
+
+int use_it(const ReadsTokenPlain auto& c, Token& tok) {
+    return c.read(tok);
+}
+
+int main() {
+    TaggedReader r{};
+    Token tok{};
+    tok.value = 9;
+    return use_it(r, tok);
+}

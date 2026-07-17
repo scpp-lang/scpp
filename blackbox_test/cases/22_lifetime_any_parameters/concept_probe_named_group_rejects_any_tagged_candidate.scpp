@@ -1,0 +1,40 @@
+// spec §6.2(22.1): "a probe parameter tagged with a user-written group
+// name requires the corresponding parameter of the selected callable
+// declaration to be a member of some non-`any` group". This is the
+// mirror image of
+// concept_probe_lifetime_any_tag_rejects_named_group_candidate.scpp:
+// here the probe uses a user-written group name ("g"), but the
+// candidate's matching parameter is tagged
+// [[scpp::lifetime(any)]] -- the reserved any group -- which is
+// not a member of any named group, so satisfaction must still fail.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+class AnyTaggedReader {
+    public:
+        virtual ~AnyTaggedReader() { return; }
+public:
+    int read(Token& t [[scpp::lifetime(any)]]) const {
+        return t.value;
+    }
+};
+
+template<typename T>
+concept ReadsTokenNamed = requires(T c, Token& tok [[scpp::lifetime(g)]]) {
+    { c.read(tok) } -> std::same_as<int>;
+};
+
+int use_it(const ReadsTokenNamed auto& c, Token& tok) {
+    return c.read(tok);
+}
+
+int main() {
+    AnyTaggedReader r{};
+    Token tok{};
+    tok.value = 42;
+    return use_it(r, tok);
+}

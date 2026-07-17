@@ -1,0 +1,40 @@
+// spec §6.2(22.3): an any-tagged probe parameter requires the
+// candidate's corresponding parameter to be tagged
+// [[scpp::lifetime(any)]] specifically -- not merely *some*
+// lifetime-group tag. NamedGroupReader::read is tagged with an ordinary
+// user-written group ("g"), which is a real, well-formed lifetime tag
+// (§6.2(15)), but "any" is reserved (§6.2(16)) and distinct from
+// every user-written group, so this must still be rejected. See
+// concept_probe_named_group_rejects_any_tagged_candidate.scpp for
+// the mirror-image case.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+class NamedGroupReader {
+    public:
+        virtual ~NamedGroupReader() { return; }
+public:
+    int read(Token& t [[scpp::lifetime(g)]]) const {
+        return t.value;
+    }
+};
+
+template<typename T>
+concept ReadsToken = requires(T c, Token& tok [[scpp::lifetime(any)]]) {
+    { c.read(tok) } -> std::same_as<int>;
+};
+
+int use_it(const ReadsToken auto& c, Token& tok) {
+    return c.read(tok);
+}
+
+int main() {
+    NamedGroupReader r{};
+    Token tok{};
+    tok.value = 42;
+    return use_it(r, tok);
+}

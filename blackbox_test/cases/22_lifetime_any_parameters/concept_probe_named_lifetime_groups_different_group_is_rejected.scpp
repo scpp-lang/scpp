@@ -1,0 +1,42 @@
+// spec §6.2(22.2): "probe parameters in different user-written groups
+// require corresponding parameters in that declaration to belong to
+// different groups" -- drawing the boundary the other way from
+// concept_probe_named_lifetime_groups_same_group_is_accepted.scpp:
+// AddsPair's two probe parameters share one group ("p"), but
+// Subtractor::add ties its two Token& parameters to two *different*
+// groups ("g1"/"g2"), so it must fail to satisfy AddsPair even though
+// every other structural aspect (name/arity/argument-types/return-type)
+// matches.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+class Subtractor {
+    public:
+        virtual ~Subtractor() { return; }
+public:
+    int add(Token& a [[scpp::lifetime(g1)]], Token& b [[scpp::lifetime(g2)]]) const {
+        return a.value + b.value;
+    }
+};
+
+template<typename T>
+concept AddsPair = requires(T c, Token& x [[scpp::lifetime(p)]], Token& y [[scpp::lifetime(p)]]) {
+    { c.add(x, y) } -> std::same_as<int>;
+};
+
+int use_it(const AddsPair auto& c, Token& x, Token& y) {
+    return c.add(x, y);
+}
+
+int main() {
+    Subtractor s{};
+    Token t1{};
+    t1.value = 3;
+    Token t2{};
+    t2.value = 4;
+    return use_it(s, t1, t2);
+}

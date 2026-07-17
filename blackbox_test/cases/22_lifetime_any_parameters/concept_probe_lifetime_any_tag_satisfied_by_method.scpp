@@ -1,0 +1,47 @@
+// spec §6.2(13.1)/(22)/(22.3): a concept's requires-expression probe
+// parameter may bear [[scpp::lifetime(any)]] (§6.2(13.1)), and that
+// annotation genuinely constrains concept satisfaction (§6.2(22)): per
+// (22.3), an any-tagged probe parameter requires the satisfying
+// declaration's corresponding parameter to itself be any-tagged. This
+// is the ordinary-method shape of that rule -- as opposed to the
+// closure shape covered by
+// closure_with_any_tagged_parameter_called_with_fresh_local.scpp and
+// concept_probe_parameter_lifetime_any_tag_is_accepted.scpp, both of
+// which use a closure -- a real class method with an any-tagged
+// reference parameter satisfies a concept whose own probe parameter
+// carries the same tag. Checked through the abbreviated
+// `Concept auto&` form (not the full header `template<Concept T>`
+// form) so that concept satisfaction -- and thus
+// probe_lifetime_groups_match -- is actually exercised at the call
+// site.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+class Reader {
+    public:
+        virtual ~Reader() { return; }
+public:
+    int read(Token& t [[scpp::lifetime(any)]]) const {
+        return t.value;
+    }
+};
+
+template<typename T>
+concept ReadsToken = requires(T c, Token& tok [[scpp::lifetime(any)]]) {
+    { c.read(tok) } -> std::same_as<int>;
+};
+
+int use_it(const ReadsToken auto& c, Token& tok) {
+    return c.read(tok);
+}
+
+int main() {
+    Reader r{};
+    Token tok{};
+    tok.value = 42;
+    return use_it(r, tok);
+}

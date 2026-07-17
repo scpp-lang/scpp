@@ -1,0 +1,41 @@
+// spec §6.2(22.1): "probe parameters in the same user-written group
+// require corresponding parameters in that declaration to be members
+// of one and the same group". Per §6.2(22), this comparison is
+// "declaration-local and alpha-equivalent... the checker instead uses
+// the callee's own grouping relation" -- so Adder::add's group spelling
+// ("shared") need not match the probe's own spelling ("p"); what
+// matters is only that both of Adder::add's parameters share one
+// group, exactly like both of the probe's parameters do.
+class Token {
+    public:
+        virtual ~Token() { return; }
+public:
+    int value{};
+};
+
+class Adder {
+    public:
+        virtual ~Adder() { return; }
+public:
+    int add(Token& a [[scpp::lifetime(shared)]], Token& b [[scpp::lifetime(shared)]]) const {
+        return a.value + b.value;
+    }
+};
+
+template<typename T>
+concept AddsPair = requires(T c, Token& x [[scpp::lifetime(p)]], Token& y [[scpp::lifetime(p)]]) {
+    { c.add(x, y) } -> std::same_as<int>;
+};
+
+int use_it(const AddsPair auto& c, Token& x, Token& y) {
+    return c.add(x, y);
+}
+
+int main() {
+    Adder adder{};
+    Token t1{};
+    t1.value = 3;
+    Token t2{};
+    t2.value = 4;
+    return use_it(adder, t1, t2);
+}
