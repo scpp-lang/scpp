@@ -1,0 +1,6 @@
+import nativea;
+import nativeb;
+
+int main() {
+    return nativea::value() + nativeb::value() - 42;
+}

@@ -1,0 +1,5 @@
+.scpp/build/*/dev/multilib/modules/mathlib.scppm
+.scpp/build/*/dev/multilib/archives/libmathlib.scppa
+.scpp/build/*/dev/multilib/modules/textlib.scppm
+.scpp/build/*/dev/multilib/archives/libtextlib.scppa
+.scpp/build/*/dev/multilib/package-metadata.json

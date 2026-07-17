@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "duplicatelib"
+version = "0.1.0"
+
+[[lib]]
+name = "shared"
+sources = ["src/one.scpp"]
+
+[[lib]]
+name = "shared"
+sources = ["src/two.scpp"]

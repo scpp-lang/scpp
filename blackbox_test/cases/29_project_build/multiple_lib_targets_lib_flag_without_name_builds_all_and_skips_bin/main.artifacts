@@ -1,0 +1,5 @@
+.scpp/build/*/dev/buildalllibs/modules/alpha.scppm
+.scpp/build/*/dev/buildalllibs/archives/libalpha.scppa
+.scpp/build/*/dev/buildalllibs/modules/beta.scppm
+.scpp/build/*/dev/buildalllibs/archives/libbeta.scppa
+!.scpp/build/*/dev/buildalllibs/buildalllibs

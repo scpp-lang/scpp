@@ -1,0 +1,6 @@
+import alpha;
+import beta;
+
+int main() {
+    return alpha::value() + beta::value() - 30;
+}

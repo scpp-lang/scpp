@@ -1,0 +1,7 @@
+export module libone;
+
+namespace libone {
+    export int value() {
+        return 18;
+    }
+}

@@ -1,0 +1,11 @@
+export module nativeb;
+
+extern "C" int native_value_b();
+
+namespace nativeb {
+    export int value() {
+        [[scpp::unsafe]] {
+            return native_value_b();
+        }
+    }
+}

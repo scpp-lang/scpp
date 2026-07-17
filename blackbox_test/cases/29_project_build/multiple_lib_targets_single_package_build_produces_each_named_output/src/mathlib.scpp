@@ -1,0 +1,7 @@
+export module mathlib;
+
+namespace mathlib {
+    export int square(int x) {
+        return x * x;
+    }
+}

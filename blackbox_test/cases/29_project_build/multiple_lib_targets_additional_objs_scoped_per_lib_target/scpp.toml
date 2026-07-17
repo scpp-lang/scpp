@@ -1,0 +1,43 @@
+manifest-version = 1
+
+[package]
+name = "multiobjs"
+version = "0.1.0"
+
+[[lib]]
+name = "nativea"
+sources = ["src/nativea.scpp"]
+additional_objs = "nativea-shim"
+
+[[lib]]
+name = "nativeb"
+sources = ["src/nativeb.scpp"]
+additional_objs = "nativeb-shim"
+
+[[bin]]
+name = "multiobjs"
+sources = ["src/**/*.scpp"]
+
+[additional_objs.nativea-shim]
+input = [
+    "src/nativea_value.cpp",
+]
+output = [
+    "nativea_value.o",
+]
+command = """\
+${CXX:-c++} -std=c++23 -O2 -c \
+src/nativea_value.cpp -o nativea_value.o
+"""
+
+[additional_objs.nativeb-shim]
+input = [
+    "src/nativeb_value.cpp",
+]
+output = [
+    "nativeb_value.o",
+]
+command = """\
+${CXX:-c++} -std=c++23 -O2 -c \
+src/nativeb_value.cpp -o nativeb_value.o
+"""

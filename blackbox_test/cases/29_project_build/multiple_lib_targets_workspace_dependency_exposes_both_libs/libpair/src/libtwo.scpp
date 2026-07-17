@@ -1,0 +1,7 @@
+export module libtwo;
+
+namespace libtwo {
+    export int value() {
+        return 24;
+    }
+}
