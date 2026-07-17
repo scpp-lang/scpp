@@ -26,7 +26,7 @@
 
 - 安全邊界與 `[[scpp::unsafe]]`
   - [`[[scpp::unsafe]]` 會做什麼、不會做什麼](ch06-01-what-scpp-unsafe-does-and-does-not-do.md)
-  - 呼叫 `extern "C"` 與使用裸指標
+  - [呼叫 `extern "C"` 與使用裸指標](ch06-02-calling-extern-c-and-using-raw-pointers.md)
   - 如何把「信任」局部化到真實程式裡
 
 - 套件、模組與專案版面配置
