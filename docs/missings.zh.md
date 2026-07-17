@@ -18,10 +18,13 @@
 - `std::span` 在语言层面的借用 / 绑定规则上仍有缺口：核心的“从定长局部数组绑
   定”已经可以工作，但直接从字符串字面量绑定仍然会失败，而且 `std::span` 在构
   造后仍然不能重新绑定。
-- 用户自定义 `operator->` 仍然不受支持：声明它会被直接拒绝
-  （`expected ';' but found '->'`）；自定义类型上的 `x->y` 目前也仍然只是
-  通过 `operator*` fallback 间接工作，而不是真正的 C++ 风格
-  `operator->` 链式 / proxy 语义。
+- 用户自定义 `operator->` 现在已经有正式规范可依
+  （见 `docs/spec/zh/03-dereference-and-member-access.md`），但实现仍然缺失：
+  声明它会被直接拒绝（`expected ';' but found '->'`）；当前 parser 还在对
+  class 类型保留旧的、凭空发明出来的 blanket rewrite：`x->y` → `(*x).y`。
+  需要的修复是一次“breaking but correcting” 变更：删掉这个 non-standard
+  fallback，实现真实 C++ 风格的显式 `operator->` 链式 / proxy 语义，并把
+  `std::unique_ptr` 之类仓库里已发货的 wrapper 迁移成显式声明 `operator->()`。
 - 跨函数的具名生命周期组仍然大多缺失。普通形参上的
   `[[scpp::lifetime(generic)]]` 可以工作，但像在一个签名里分别声明 `a` / `b`
   多组约束这样的写法目前仍会被拒绝。

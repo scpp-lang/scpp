@@ -20,10 +20,14 @@ rules, coroutine machinery, codegen, or preprocessor support.
   the core fixed-size-local-array case works, but direct binding from a string
   literal still fails, and `std::span` still cannot be rebound after
   construction.
-- User-defined `operator->` is still unsupported: declaring it is rejected
-  (`expected ';' but found '->'`), and custom-type `x->y` currently works only
-  via `operator*` fallback instead of real C++-style `operator->`
-  chaining/proxy semantics.
+- User-defined `operator->` is now specified (see `docs/spec/en/03-dereference-and-member-access.md`),
+  but the implementation is still missing: declaring it is rejected
+  (`expected ';' but found '->'`), and the current parser still implements the
+  old invented blanket rewrite `x->y` → `(*x).y` for class types. The required
+  fix is breaking-but-correcting: remove that non-standard fallback, implement
+  real C++-style explicit `operator->` chaining/proxy semantics, and migrate
+  shipped wrappers such as `std::unique_ptr` to declare `operator->()`
+  explicitly.
 - Cross-function named lifetime groups are still mostly absent.
   `[[scpp::lifetime(generic)]]` on an ordinary parameter works, but multi-group
   contracts such as separate `a`/`b` groups across a signature are still
