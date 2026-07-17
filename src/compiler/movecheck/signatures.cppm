@@ -671,9 +671,9 @@ void validate_operator_arrow_signature(const Function& fn) {
 [[nodiscard]] std::vector<size_t> resolve_returned_lifetime_param_indices(const Function& fn) {
     validate_lifetime_annotation_placement(fn);
     if (fn.return_lifetime.present()) {
-        if (fn.return_lifetime.is_generic()) {
+        if (fn.return_lifetime.is_any()) {
             throw DataflowError("function '" + fn.name +
-                                    "' cannot name the reserved lifetime group 'generic' in its return annotation",
+                                    "' cannot name the reserved lifetime group 'any' in its return annotation",
                                 fn.loc);
         }
         std::vector<size_t> indices;
@@ -700,9 +700,9 @@ void validate_operator_arrow_signature(const Function& fn) {
     std::optional<size_t> elided = resolve_elided_param_index(fn);
     if (!elided.has_value()) return {};
     const Param& param = fn.params[*elided];
-    if (param.lifetime.is_generic()) {
+    if (param.lifetime.is_any()) {
         throw DataflowError("function '" + fn.name +
-                                "' returns a value derived from reserved lifetime group 'generic', which may not "
+                                "' returns a value derived from reserved lifetime group 'any', which may not "
                                 "escape the call",
                             fn.loc);
     }

@@ -1325,7 +1325,7 @@ private:
         auto names_equivalent = [&](const LifetimeAnnotation& lhs, const LifetimeAnnotation& rhs) {
             if (lhs.present() != rhs.present()) return false;
             if (!lhs.present()) return true;
-            if (lhs.is_generic() || rhs.is_generic()) return lhs.is_generic() && rhs.is_generic();
+            if (lhs.is_any() || rhs.is_any()) return lhs.is_any() && rhs.is_any();
             auto lhs_it = a_to_b.find(lhs.name);
             auto rhs_it = b_to_a.find(rhs.name);
             if (lhs_it != a_to_b.end() || rhs_it != b_to_a.end()) {

@@ -1,13 +1,13 @@
 // ch05 §5.13: "A requires-expression's own probe parameter may carry the
 // same tag. Tagging a compound requirement's probe parameter
-// [[scpp::lifetime(generic)]] changes what that requirement checks" --
-// e.g. `requires(T a, Token& tok [[scpp::lifetime(generic)]]) { ... }`.
+// [[scpp::lifetime(any)]] changes what that requirement checks" --
+// e.g. `requires(T a, Token& tok [[scpp::lifetime(any)]]) { ... }`.
 // This exact documented syntax is currently rejected at parse time
 // ("expected ')' but found '['") -- a requires-expression's parameter
 // list doesn't accept an attribute on a probe parameter at all yet,
 // even though the same attribute is accepted fine on an ordinary
 // function parameter (see
-// lifetime_generic_tag_on_ordinary_parameter_is_accepted.scpp).
+// lifetime_any_tag_on_ordinary_parameter_is_accepted.scpp).
 class Token {
     public:
         virtual ~Token() { return; }
@@ -16,7 +16,7 @@ public:
 };
 
 template<typename T>
-concept AcceptsToken = requires(T a, Token& tok [[scpp::lifetime(generic)]]) {
+concept AcceptsToken = requires(T a, Token& tok [[scpp::lifetime(any)]]) {
     { a(tok) } -> std::same_as<void>;
 };
 

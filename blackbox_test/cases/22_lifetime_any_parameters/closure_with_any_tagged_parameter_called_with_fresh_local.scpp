@@ -2,11 +2,11 @@
 // targets -- a wrapper function invents a value internally (here,
 // `tok`, a function-local `Token`) and calls a passed-in closure with a
 // reference to it; the closure's own parameter is tagged
-// `[[scpp::lifetime(generic)]]`, matching how the spec's own example is
+// `[[scpp::lifetime(any)]]`, matching how the spec's own example is
 // written (modulo the concept probe-parameter tag, which isn't parsed
-// yet -- see concept_probe_parameter_lifetime_generic_tag_is_not_yet_
+// yet -- see concept_probe_parameter_lifetime_any_tag_is_not_yet_
 // parsed.scpp -- so the concept here checks plain callability only,
-// without itself requiring the generic tag).
+// without itself requiring the any tag).
 class Token {
     public:
         virtual ~Token() { return; }
@@ -28,7 +28,7 @@ void with_fresh_token(AcceptsToken auto&& f) {
 
 int main() {
     int result = 0;
-    with_fresh_token([&result](Token& t [[scpp::lifetime(generic)]]) {
+    with_fresh_token([&result](Token& t [[scpp::lifetime(any)]]) {
         result = t.value;
         return;
     });

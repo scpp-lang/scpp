@@ -22,7 +22,7 @@
   变量声明只要写 `alignas` 仍会被拒绝；同样的写法放在局部变量或 class 声明上则
   已经可以工作。
 - 规范现在已经显式允许在 `requires(...)` probe parameter 上使用具名生命周期组和
-  `[[scpp::lifetime(generic)]]`；但编译器仍然还不能在这个 probe-parameter
+  `[[scpp::lifetime(any)]]`；但编译器仍然还不能在这个 probe-parameter
   位置解析该 attribute。
 - coroutine / async 语言支持仍然缺失：还没有 `co_await`、`co_yield`、
   `co_return`，也没有 coroutine lowering / runtime integration。

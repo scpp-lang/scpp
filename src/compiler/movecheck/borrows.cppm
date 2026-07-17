@@ -769,7 +769,7 @@ void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& stat
     if (!roots_include_parameter_lifetime(roots, state)) return;
     throw DataflowError("cannot store a reference, pointer, or span derived from " + format_roots(roots) +
                             " into " + std::string(context) +
-                            "; named and generic lifetime groups propagate only through the direct bare return value",
+                            "; named and any lifetime groups propagate only through the direct bare return value",
                         state.current_loc);
 }
 
