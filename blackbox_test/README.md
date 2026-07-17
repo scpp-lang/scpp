@@ -136,6 +136,9 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `36_charconv` | `std::from_chars` integer parsing: success, partial consumption, errors, signs, and explicit base |
 | `37_for_loops` | classic `for` loops, range-based `for` over arrays/`std::span`, and iteration-mode mutation rules |
 | `38_lifetime_groups` | spec-driven coverage for cross-function named lifetime groups: named-vs-generic groups, return-group matching, storage/escape rejection, member functions, templates, and thread-safety interaction |
+| `39_ordinary_virtual_dispatch` | ordinary virtual dispatch: override selection across base/derived references and pointers, including chained forwarding through helpers |
+| `40_operator_arrow` | `operator->`: recursive arrow chaining, cv-correct selection, ordinary-vs-unsafe call gating, and raw-pointer leaf requirements |
+| `41_global_variables` | file-scope/global variable declarations: plain globals, const globals, cross-function mutation, and `alignas` acceptance/rejection rules |
 
 ## Testing philosophy
 
@@ -218,8 +221,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **417 cases total**
-- **417/417 passing**
+- **505 cases total**
+- **505/505 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules

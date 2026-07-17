@@ -1,0 +1,9 @@
+// spec 05-unions-and-packed-layout §(2), §(7), §(10): `alignas(N)` and
+// `alignas(type-id)` both apply to variable declarations, including file-
+// scope variables.
+alignas(16) int constant_aligned = 7;
+alignas(double) int type_aligned = 3;
+
+int main() {
+    return constant_aligned + type_aligned;
+}

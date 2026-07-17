@@ -1,0 +1,7 @@
+// spec 05-unions-and-packed-layout §(4): `alignas` operands other than 0 must
+// name a valid supported alignment value, which in v1 means a power of two.
+alignas(3) int bad_alignment = 1;
+
+int main() {
+    return bad_alignment;
+}

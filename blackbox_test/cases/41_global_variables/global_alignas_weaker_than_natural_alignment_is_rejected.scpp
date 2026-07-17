@@ -1,0 +1,11 @@
+// spec 05-unions-and-packed-layout §(5): `alignas` may not request an
+// alignment weaker than the natural alignment of the declared entity.
+struct Wide {
+    double value;
+};
+
+alignas(1) Wide bad_alignment;
+
+int main() {
+    return 0;
+}
