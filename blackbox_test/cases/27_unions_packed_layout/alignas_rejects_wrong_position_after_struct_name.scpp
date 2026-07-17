@@ -1,0 +1,10 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3:
+// on a class declaration, alignas must appertain to the declaration itself,
+// not appear after the class name.
+struct Packet alignas(8) {
+    int value;
+};
+
+int main() {
+    return sizeof(Packet);
+}

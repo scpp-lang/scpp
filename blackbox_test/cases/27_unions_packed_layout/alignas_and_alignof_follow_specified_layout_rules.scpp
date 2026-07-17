@@ -1,0 +1,66 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3:
+// alignas is accepted on variables, struct/class/union declarations, and
+// non-static data members; alignas(type-id), multiple alignas, alignas(0),
+// alignof(type-id), and alignof(type-id) inside alignas follow ISO C++.
+struct alignas(16) Block {
+    int value;
+};
+
+class alignas(Block) Box {
+public:
+    virtual ~Box() { return; }
+public:
+    int value;
+};
+
+union alignas(32) WideUnion {
+    char bytes[32];
+    double whole;
+};
+
+struct Header {
+    char tag;
+    alignas(8) int checksum;
+};
+
+struct StrongestMemberWins {
+    alignas(4) alignas(16) int value;
+    char tail;
+};
+
+struct ZeroIsNoOp {
+    alignas(0) int value;
+    char tail;
+};
+
+struct alignas(alignof(double)) FromQuery {
+    int value;
+};
+
+int main() {
+    alignas(WideUnion) char scratch[32]{};
+    alignas(0) int local_zero_noop = 0;
+    Block blocks[2]{};
+    Box box{};
+
+    if (alignof(Block) != 16) return 1;
+    if (sizeof(Block) != 16) return 2;
+    if (sizeof(blocks) != 32) return 3;
+    if (alignof(Box) != alignof(Block)) return 4;
+    if (box.value != 0) return 5;
+    if (alignof(WideUnion) != 32) return 6;
+    if (sizeof(WideUnion) != 32) return 7;
+    if (alignof(Header) != 8) return 8;
+    if (sizeof(Header) != 16) return 9;
+    if (alignof(StrongestMemberWins) != 16) return 10;
+    if (sizeof(StrongestMemberWins) != 16) return 11;
+    if (alignof(ZeroIsNoOp) != 4) return 12;
+    if (sizeof(ZeroIsNoOp) != 8) return 13;
+    if (alignof(FromQuery) != alignof(double)) return 14;
+    if (sizeof(scratch) != 32) return 15;
+    if (local_zero_noop != 0) return 16;
+    if (alignof(char) != 1) return 17;
+    if (alignof(int) != 4) return 18;
+    if (alignof(double) != 8) return 19;
+    return 0;
+}

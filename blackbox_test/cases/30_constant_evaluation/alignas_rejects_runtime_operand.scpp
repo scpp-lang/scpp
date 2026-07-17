@@ -1,0 +1,13 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3 and
+// docs/spec/en/06-constant-evaluation.md §7.1-§7.4:
+// alignas requires a valid constant-expression operand, so a runtime value is
+// rejected.
+int runtime_alignment() {
+    return 16;
+}
+
+int main() {
+    int requested_alignment = runtime_alignment();
+    alignas(requested_alignment) int value = 0;
+    return value;
+}

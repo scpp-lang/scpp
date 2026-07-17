@@ -1,0 +1,6 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3:
+// SCPP26 supports only ISO C++ alignof(type-id), not GNU alignof(expression).
+int main() {
+    int value = 0;
+    return static_cast<int>(alignof(value));
+}

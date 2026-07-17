@@ -1,0 +1,15 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3:
+// a packed union cannot contain a member whose class type is itself
+// over-aligned by alignas.
+struct alignas(8) Block8 {
+    int value;
+};
+
+union [[scpp::packed]] Packet {
+    char tag;
+    Block8 payload;
+};
+
+int main() {
+    return sizeof(Packet);
+}

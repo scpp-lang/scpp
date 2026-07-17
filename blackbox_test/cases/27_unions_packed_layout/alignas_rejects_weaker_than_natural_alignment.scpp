@@ -1,0 +1,9 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3:
+// alignas may not request an alignment weaker than the type's natural minimum.
+struct alignas(1) TooWeak {
+    double value;
+};
+
+int main() {
+    return sizeof(TooWeak);
+}

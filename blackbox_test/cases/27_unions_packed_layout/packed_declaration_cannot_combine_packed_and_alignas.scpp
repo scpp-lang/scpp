@@ -1,0 +1,9 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3:
+// [[scpp::packed]] cannot appertain to the same declaration as alignas.
+struct [[scpp::packed]] alignas(8) Packet {
+    int value;
+};
+
+int main() {
+    return sizeof(Packet);
+}

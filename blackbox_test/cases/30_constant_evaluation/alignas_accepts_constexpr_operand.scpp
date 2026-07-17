@@ -1,0 +1,18 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.3 and
+// docs/spec/en/06-constant-evaluation.md §7.2:
+// alignas operands undergo required constant evaluation, so a constexpr value
+// is a valid operand.
+constexpr int requested_alignment() {
+    return 16;
+}
+
+struct alignas(requested_alignment()) Buffer {
+    int value;
+};
+
+int main() {
+    constexpr int expected = requested_alignment();
+    if (static_cast<int>(alignof(Buffer)) != expected) return 1;
+    if (static_cast<int>(sizeof(Buffer)) != expected) return 2;
+    return 0;
+}
