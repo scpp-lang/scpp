@@ -242,8 +242,9 @@ state. — end note]
 (13) The attribute-token `scpp::lifetime` may appear in an
 *attribute-specifier-seq* ([dcl.attr.grammar]) appertaining to:
 
-  (13.1) a parameter declaration whose type is a reference type,
-  pointer type, `std::span<T>`, or `std::span<const T>`; or
+  (13.1) a parameter declaration, including a `requires(...)`
+  expression's probe parameter declaration, whose type is a reference
+  type, pointer type, `std::span<T>`, or `std::span<const T>`; or
 
   (13.2) the declarator of a function or member function whose return
   type is a reference type, pointer type, `std::span<T>`, or
@@ -337,7 +338,32 @@ compare lifetime-group names textually across declarations; the checker
 instead uses the callee's own grouping relation to determine which
 actual arguments may influence that callee's eligible return value under
 (18)-(20). Whether a value derived from such a group may instead be
-embedded into object state is governed separately by (24).
+embedded into object state is governed separately by (24). The same
+declaration-local, alpha-equivalent comparison is used when a
+`requires(...)` expression tests a callable with probe parameters
+bearing `[[scpp::lifetime(name)]]`. Such an annotation constrains
+concept satisfaction; it is not merely syntactic sugar for an otherwise
+ordinary test call. For such a satisfaction check:
+
+  (22.1) a probe parameter tagged with a user-written group name
+  requires the corresponding parameter of the selected callable
+  declaration to be a member of some non-`generic` group, and probe
+  parameters in the same user-written group require corresponding
+  parameters in that declaration to be members of one and the same
+  group;
+
+  (22.2) probe parameters in different user-written groups require
+  corresponding parameters in that declaration to belong to different
+  groups;
+
+  (22.3) a probe parameter tagged
+  `[[scpp::lifetime(generic)]]` requires the corresponding parameter of
+  the selected callable declaration to be tagged
+  `[[scpp::lifetime(generic)]]`; and
+
+  (22.4) a probe parameter with no `scpp::lifetime` attribute imposes
+  no lifetime-group constraint beyond the ordinary well-formedness and
+  type requirements of the probe.
 
 (23) A non-static member function may use named lifetime groups on its
 explicit parameters under the same rules as a free function. For the

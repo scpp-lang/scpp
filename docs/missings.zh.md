@@ -21,10 +21,9 @@
 - 大部分 ISO `alignas` / `alignof(type-id)` 支持已经落地，但文件作用域上的
   变量声明只要写 `alignas` 仍会被拒绝；同样的写法放在局部变量或 class 声明上则
   已经可以工作。
-- 普通函数 / 成员函数签名里的具名生命周期组，以及真正的用户自定义 `operator->`
-  现在都已经可用；但 `[[scpp::lifetime(generic)]]` 仍然不能写在
-  `requires(...)` probe parameter 上，所以这一种文档里已经写明的生命周期注解形
-  式仍未完整实现。
+- 规范现在已经显式允许在 `requires(...)` probe parameter 上使用具名生命周期组和
+  `[[scpp::lifetime(generic)]]`；但编译器仍然还不能在这个 probe-parameter
+  位置解析该 attribute。
 - coroutine / async 语言支持仍然缺失：还没有 `co_await`、`co_yield`、
   `co_return`，也没有 coroutine lowering / runtime integration。
 
