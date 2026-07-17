@@ -10,13 +10,6 @@
 下面的条目已经按当前 `main` 重新审计；已经修复的项目应当直接移除，而不是作
 为历史噪音继续留在列表里。
 
-## 进行中 / 刚完成正式化
-
-- 标准 C++ 的 `alignas` 支持现已在
-  `docs/spec/zh/05-unions-and-packed-layout.md` 中完成正式规范，并连带写清了
-  配套的 `alignof(type-id)` 查询。parser / semantic / codegen / test 的工作还
-  需要继续落地，但这个缺口现在已经从“未被记录的空白”转成了明确跟踪的实现后续项。
-
 ## 语言/语法缺口（当前重点）
 
 这一节里的项目需要真正的编译器工作：parser、semantic analysis、borrow/type
@@ -25,19 +18,15 @@
 - `std::span` 在语言层面的借用 / 绑定规则上仍有缺口：核心的“从定长局部数组绑
   定”已经可以工作，但直接从字符串字面量绑定仍然会失败，而且 `std::span` 在构
   造后仍然不能重新绑定。
-- 用户自定义 `operator->` 现在已经有正式规范可依
-  （见 `docs/spec/zh/03-dereference-and-member-access.md`），但实现仍然缺失：
-  声明它会被直接拒绝（`expected ';' but found '->'`）；当前 parser 还在对
-  class 类型保留旧的、凭空发明出来的 blanket rewrite：`x->y` → `(*x).y`。
-  需要的修复是一次“breaking but correcting” 变更：删掉这个 non-standard
-  fallback，实现真实 C++ 风格的显式 `operator->` 链式 / proxy 语义，并把
-  `std::unique_ptr` 之类仓库里已发货的 wrapper 迁移成显式声明 `operator->()`。
-- 跨函数的具名生命周期组仍然大多缺失。普通形参上的
-  `[[scpp::lifetime(generic)]]` 可以工作，但像在一个签名里分别声明 `a` / `b`
-  多组约束这样的写法目前仍会被拒绝。
+- 大部分 ISO `alignas` / `alignof(type-id)` 支持已经落地，但文件作用域上的
+  变量声明只要写 `alignas` 仍会被拒绝；同样的写法放在局部变量或 class 声明上则
+  已经可以工作。
+- 普通函数 / 成员函数签名里的具名生命周期组，以及真正的用户自定义 `operator->`
+  现在都已经可用；但 `[[scpp::lifetime(generic)]]` 仍然不能写在
+  `requires(...)` probe parameter 上，所以这一种文档里已经写明的生命周期注解形
+  式仍未完整实现。
 - coroutine / async 语言支持仍然缺失：还没有 `co_await`、`co_yield`、
   `co_return`，也没有 coroutine lowering / runtime integration。
-- 仍然没有 C/C++ 风格的宏 / 预处理器能力（`#define` 等）。
 
 ## 库/标准库缺口（有价值，但不是当前重点）
 
