@@ -408,7 +408,7 @@ So the practical rule is: if you can explain a lambda as “just a small anonymo
 `class`”, you are reasoning about it the same way the checker does.
 
 
-## 5.13 Lifetime-Generic Parameters
+## 5.13 Lifetime `any` Parameters
 
 This is the one place where ordinary named lifetime groups from [§5.3](#53-lifetime)
 need a small extra idea.
@@ -422,20 +422,20 @@ scpp handles that pattern as a targeted extension of the existing
 `[[scpp::lifetime(name)]]` model rather than by introducing Rust-style lifetime
 parameters as a whole new syntactic category.
 
-- **`[[scpp::lifetime(generic)]]` is a reserved group name.** It means “fresh,
+- **`[[scpp::lifetime(any)]]` is a reserved group name.** It means “fresh,
   compiler-synthesized group that user code cannot otherwise name or unify with
   anything else”. Inside the callable's own body, that immediately limits what
-  can happen: a `generic`-tagged reference can be used synchronously for reads,
+  can happen: an `any`-tagged reference can be used synchronously for reads,
   method calls, and forwarding to compatible parameters, but it cannot be stored
   into some other named group, returned, or hidden in longer-lived state.
 - **A `requires`-expression may probe for that exact property.** When a concept's
-  probe parameter is tagged `[[scpp::lifetime(generic)]]`, satisfying the
-  concept means the callable's own matching parameter is itself lifetime-generic,
+  probe parameter is tagged `[[scpp::lifetime(any)]]`, satisfying the
+  concept means the callable's own matching parameter is itself `any`-tagged,
   not merely “some reference parameter that happens to accept this test call”.
   That is one new piece of concept-checking semantics attached to an already
   existing C++ grammar position.
 - **Calls to such a callable get one targeted exemption.** Once the type system
-  knows a callable parameter is lifetime-generic, the caller may pass it a
+  knows a callable parameter is tagged `any`, the caller may pass it a
   reference whose lifetime is invented freshly inside the caller's own body,
   precisely because the two bullets above already guarantee the callee cannot
   stash that reference anywhere that would outlive the call.
@@ -447,7 +447,7 @@ of reversing it.
 **Current compiler status.** This caveat from the previous revision is worth
 keeping: today the compiler still enforces only the older single-reference-
 parameter / implicit-`this` subset from [§5.3](#53-lifetime). The
-`[[scpp::lifetime(generic)]]` story here is the intended design, not yet a
+`[[scpp::lifetime(any)]]` story here is the intended design, not yet a
 fully implemented feature.
 
 

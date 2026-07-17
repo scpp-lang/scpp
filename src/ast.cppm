@@ -194,12 +194,12 @@ struct AlignmentSpecifier {
 struct LifetimeAnnotation {
     // Empty when no `[[scpp::lifetime(...)]]` is present on this
     // declaration. Otherwise the raw identifier spelled in source --
-    // either the reserved word `generic` or a user-written, declaration-
+    // either the reserved word `any` or a user-written, declaration-
     // local group name.
     std::string name;
 
     [[nodiscard]] bool present() const { return !name.empty(); }
-    [[nodiscard]] bool is_generic() const { return name == "generic"; }
+    [[nodiscard]] bool is_any() const { return name == "any"; }
 
     bool operator==(const LifetimeAnnotation&) const = default;
 };

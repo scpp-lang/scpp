@@ -226,20 +226,20 @@ object，因为它没有别名化任何预先存在的对象或范围。
 
 (14) `[[scpp::lifetime(name)]]` 恰好带一个实参。这个实参必须是一个标识符。
 
-(15) 除 `generic` 之外，这种标识符就是一个用户写出的分组名。用户写出的分组名
+(15) 除 `any` 之外，这种标识符就是一个用户写出的分组名。用户写出的分组名
 只在单个函数或者成员函数声明内部有效。同样的拼写，如果出现在两个不同的声明里，
 不表示任何关系；如果在同一个这类声明里重复同样的拼写，它们表示同一个
 具名生命周期分组；如果拼写不同，它们表示不同的具名生命周期分组。
 
-(16) 标识符 `generic` 是保留的。每一个带
-`[[scpp::lifetime(generic)]]` 的参数，都表示一个全新的、由编译器合成的
+(16) 标识符 `any` 是保留的。每一个带
+`[[scpp::lifetime(any)]]` 的参数，都表示一个全新的、由编译器合成的
 生命周期分组；它跟下列每一项都不同：
 
   (16.1) 任何用户写出的分组；并且
 
-  (16.2) 任何别的 `generic` 出现处，包括同一个声明里的另一个这种参数。
+  (16.2) 任何别的 `any` 出现处，包括同一个声明里的另一个这种参数。
 
-一个 `generic` 分组不会引入一个之后还可以被返回注解或者别的参数再次引用的
+一个 `any` 分组不会引入一个之后还可以被返回注解或者别的参数再次引用的
 名字。
 
 (17) 如果一个参数声明带有 `[[scpp::lifetime(name)]]`，并且 `name` 是用户
@@ -253,7 +253,7 @@ span 值，就绑定到分组 `name`。如果出现下列任一情况，
 
   (18.1) 返回类型不是 (13.2) 里的那类可用类型；
 
-  (18.2) `name` 是 `generic`；或者
+  (18.2) `name` 是 `any`；或者
 
   (18.3) 下列两者都不满足：
 
@@ -277,7 +277,7 @@ span 值，就绑定到分组 `name`。如果出现下列任一情况，
 
   (19.4) 另一个不同具名分组里的显式参数；
 
-  (19.5) 一个带 `generic` 标签的参数；或者
+  (19.5) 一个带 `any` 标签的参数；或者
 
   (19.6) 一个局部对象、临时对象，或者其它没有被证明能活过这次调用的状态。
 
@@ -300,7 +300,7 @@ span 值，就绑定到分组 `name`。如果出现下列任一情况，
 是否满足；它不只是给一个原本普通的测试调用加了个语法糖。对这种满足性检查来说：
 
   (22.1) 如果一个 probe parameter 带的是用户写出的分组名，那么被选中的那个
-  callable 声明里，对应形参必须属于某个非 `generic` 分组；而且如果多个 probe
+  callable 声明里，对应形参必须属于某个非 `any` 分组；而且如果多个 probe
   parameter 属于同一个用户写出的分组，那么那个声明里对应的多个形参也必须同属
   一个分组；
 
@@ -308,8 +308,8 @@ span 值，就绑定到分组 `name`。如果出现下列任一情况，
   形参也必须属于不同分组；
 
   (22.3) 如果一个 probe parameter 带的是
-  `[[scpp::lifetime(generic)]]`，那么被选中的 callable 声明里，对应形参也必须
-  带 `[[scpp::lifetime(generic)]]`；并且
+  `[[scpp::lifetime(any)]]`，那么被选中的 callable 声明里，对应形参也必须
+  带 `[[scpp::lifetime(any)]]`；并且
 
   (22.4) 如果一个 probe parameter 没有 `scpp::lifetime` attribute，
   那么除了 probe 自身普通的 well-formedness / type requirements 之外，它不会再
@@ -335,7 +335,7 @@ span 值，就绑定到分组 `name`。如果出现下列任一情况，
 (18)-(20) 里那种“函数或者成员函数直接返回出来的值”定义了生命周期分组传播；
 它没有定义任何机制，让一个 class、struct、union、数组、闭包，或者其它对象
 类型本身也带一个具名生命周期分组参数。因此，如果一个从具名分组或者从
-`[[scpp::lifetime(generic)]]` 导出的引用、指针或者 span，会被拿去初始化或赋值给
+`[[scpp::lifetime(any)]]` 导出的引用、指针或者 span，会被拿去初始化或赋值给
 这类对象的任意一个子对象，那么程序就是不合法（ill-formed）的。这包括：返回
 `Holder{x}`（其中 `Holder` 含有一个用 `x` 初始化的引用成员）、把这样的值存进
 某个数据成员或数组元素，或者把它 capture 进闭包。这个禁止项不妨碍 6.2(7)-(12)
@@ -379,7 +379,7 @@ const int* pick_right(
 
 const int& keep_head(
     const int& head [[scpp::lifetime(head_life)]],
-    int& scratch [[scpp::lifetime(generic)]]
+    int& scratch [[scpp::lifetime(any)]]
 ) [[scpp::lifetime(head_life)]] {
     scratch = 0;
     return head;
@@ -413,17 +413,17 @@ Holder bad_named_store(const int& x [[scpp::lifetime(a)]]) {
 }
 // 不合法：本小节没有提供让 `Holder` 携带分组 `a` 的机制
 
-const int& bad_generic_return(
-    const int& x [[scpp::lifetime(generic)]]
-) [[scpp::lifetime(generic)]] {
+const int& bad_any_return(
+    const int& x [[scpp::lifetime(any)]]
+) [[scpp::lifetime(any)]] {
     return x;
 }
-// 不合法：`generic` 是保留名，不能被返回注解点名
+// 不合法：`any` 是保留名，不能被返回注解点名
 
-Holder bad_store(const int& x [[scpp::lifetime(generic)]]) {
+Holder bad_store(const int& x [[scpp::lifetime(any)]]) {
     return Holder{x};
 }
-// 不合法：从 `generic` 导出的值被存进了返回状态
+// 不合法：从 `any` 导出的值被存进了返回状态
 ```
 
 ## 6.3 析构（Destruction）[class.dtor]

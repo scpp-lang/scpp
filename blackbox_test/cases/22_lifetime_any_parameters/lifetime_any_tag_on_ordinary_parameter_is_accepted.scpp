@@ -1,7 +1,7 @@
-// ch05 §5.13: "[[scpp::lifetime(generic)]] is a reserved group name.
+// ch05 §5.13: "[[scpp::lifetime(any)]] is a reserved group name.
 // Tagging a reference parameter this way assigns it a fresh,
 // compiler-synthesized group that no other group anywhere in the
-// program can ever be unified with... a generic-tagged parameter (or
+// program can ever be unified with... an any-tagged parameter (or
 // anything derived from it) may be used for ordinary, synchronous
 // operations -- read it, call a method on it..." Basic acceptance: the
 // attribute is legal on an ordinary reference parameter, and using it
@@ -13,7 +13,7 @@ public:
     int value{};
 };
 
-void consume(Token& t [[scpp::lifetime(generic)]]) {
+void consume(Token& t [[scpp::lifetime(any)]]) {
     t.value = 99;
     return;
 }

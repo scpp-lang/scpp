@@ -119,7 +119,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, and comparison rules for same-type vs mixed-type scalars |
 | `20_generic_functions` | ch05 §5.11 revisions: full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
 | `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access |
-| `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime |
+| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` (ch05 §5.15): structural derivation and manual override |
 | `24_function_pointers` | function pointers (ch05 §5.16): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, automatic address-type selection (ordinary / `[[scpp::unsafe]]` / bodyless `extern "C"` / with-body `extern "C"`), one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution |
 | `25_function_wrappers` | `std::function` / `std::move_only_function` (ch05 §5.18): copyable vs move-only targets, cv/ref-qualified signatures, moved-from behavior |
@@ -135,7 +135,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `35_random` | `std::random_device`, `std::mt19937`, and `scpp::rand::uniform_int_distribution<int>` |
 | `36_charconv` | `std::from_chars` integer parsing: success, partial consumption, errors, signs, and explicit base |
 | `37_for_loops` | classic `for` loops, range-based `for` over arrays/`std::span`, and iteration-mode mutation rules |
-| `38_lifetime_groups` | spec-driven coverage for cross-function named lifetime groups: named-vs-generic groups, return-group matching, storage/escape rejection, member functions, templates, and thread-safety interaction |
+| `38_lifetime_groups` | spec-driven coverage for cross-function named lifetime groups: named-vs-any groups, return-group matching, storage/escape rejection, member functions, templates, and thread-safety interaction |
 | `39_ordinary_virtual_dispatch` | ordinary virtual dispatch: override selection across base/derived references and pointers, including chained forwarding through helpers |
 | `40_operator_arrow` | `operator->`: recursive arrow chaining, cv-correct selection, ordinary-vs-unsafe call gating, and raw-pointer leaf requirements |
 | `41_global_variables` | file-scope/global variable declarations: plain globals, const globals, cross-function mutation, and `alignas` acceptance/rejection rules |

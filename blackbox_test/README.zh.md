@@ -105,7 +105,7 @@ cmake --build build
 | `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
 | `20_generic_functions` | ch05 §5.11 的修订：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
 | `21_generic_types` | 泛型 `struct`/`class` 类型（ch05 §5.14）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
-| `22_lifetime_generic_parameters` | `[[scpp::lifetime(generic)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免 |
+| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免 |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`（ch05 §5.15）：结构化推导与手动覆盖 |
 | `24_function_pointers` | 函数指针（ch05 §5.16）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、取地址时的自动类型选择（普通函数 / `[[scpp::unsafe]]` / 无函数体 `extern "C"` / 有函数体 `extern "C"`）、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析 |
 | `25_function_wrappers` | `std::function` / `std::move_only_function`（ch05 §5.18）：可拷贝/仅可移动 target、cv/ref-qualified 签名、moved-from 行为 |
@@ -121,7 +121,7 @@ cmake --build build
 | `35_random` | `std::random_device`、`std::mt19937` 和 `scpp::rand::uniform_int_distribution<int>` |
 | `36_charconv` | `std::from_chars` 整数解析：成功路径、部分消费、错误码、符号和显式进制 |
 | `37_for_loops` | 经典 `for`、基于范围的 `for`（数组/`std::span`）以及不同迭代绑定模式下的可变性规则 |
-| `38_lifetime_groups` | 形式化规范驱动的跨函数命名生命周期分组覆盖：命名组 vs `generic`、返回组匹配、存储/逃逸拒绝、成员函数、模板以及与线程安全属性的交互 |
+| `38_lifetime_groups` | 形式化规范驱动的跨函数命名生命周期分组覆盖：命名组 vs `any`、返回组匹配、存储/逃逸拒绝、成员函数、模板以及与线程安全属性的交互 |
 | `39_ordinary_virtual_dispatch` | 普通虚派发：基类/派生类引用与指针上的 override 选择，以及经由辅助函数转发后的分派 |
 | `40_operator_arrow` | `operator->`：递归箭头链、cv 正确性的重载选择、普通/unsafe 调用门控，以及原始指针叶子要求 |
 | `41_global_variables` | 文件作用域 / 全局变量声明：普通全局变量、`const` 全局变量、跨函数读写，以及 `alignas` 的接受/拒绝规则 |

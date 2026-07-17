@@ -256,23 +256,23 @@ If it appears elsewhere, the program is ill-formed.
 argument shall be an identifier.
 
 (15) A user-written group name is any such identifier other than
-`generic`. User-written group names are local to one function or member
+`any`. User-written group names are local to one function or member
 function declaration. The same spelling in two different
 declarations denotes no relation. Within one such declaration, user-written occurrences with
 the same spelling denote one named lifetime group; user-written
 occurrences with different spellings denote different named lifetime
 groups.
 
-(16) The identifier `generic` is reserved. Each parameter tagged
-`[[scpp::lifetime(generic)]]` denotes a fresh compiler-synthesized
+(16) The identifier `any` is reserved. Each parameter tagged
+`[[scpp::lifetime(any)]]` denotes a fresh compiler-synthesized
 lifetime group distinct from:
 
   (16.1) every user-written group; and
 
-  (16.2) every other `generic` occurrence, including another such
+  (16.2) every other `any` occurrence, including another such
   parameter in the same declaration.
 
-A `generic` group does not introduce a name that may later be referred
+An `any` group does not introduce a name that may later be referred
 to by a return annotation or by another parameter.
 
 (17) If a parameter declaration bears `[[scpp::lifetime(name)]]` with a
@@ -287,7 +287,7 @@ The program is ill-formed if:
 
   (18.1) the return type is not an eligible type under (13.2);
 
-  (18.2) `name` is `generic`; or
+  (18.2) `name` is `any`; or
 
   (18.3) neither:
 
@@ -313,7 +313,7 @@ value is instead derived from:
 
   (19.4) an explicit parameter in a different named group;
 
-  (19.5) a `generic`-tagged parameter; or
+  (19.5) an `any`-tagged parameter; or
 
   (19.6) a local object, temporary object, or other state whose
   lifetime is not proved to outlive the call.
@@ -347,7 +347,7 @@ ordinary test call. For such a satisfaction check:
 
   (22.1) a probe parameter tagged with a user-written group name
   requires the corresponding parameter of the selected callable
-  declaration to be a member of some non-`generic` group, and probe
+  declaration to be a member of some non-`any` group, and probe
   parameters in the same user-written group require corresponding
   parameters in that declaration to be members of one and the same
   group;
@@ -357,9 +357,9 @@ ordinary test call. For such a satisfaction check:
   groups;
 
   (22.3) a probe parameter tagged
-  `[[scpp::lifetime(generic)]]` requires the corresponding parameter of
+  `[[scpp::lifetime(any)]]` requires the corresponding parameter of
   the selected callable declaration to be tagged
-  `[[scpp::lifetime(generic)]]`; and
+  `[[scpp::lifetime(any)]]`; and
 
   (22.4) a probe parameter with no `scpp::lifetime` attribute imposes
   no lifetime-group constraint beyond the ordinary well-formedness and
@@ -393,7 +393,7 @@ group propagation only for the direct function or member-function return
 value governed by (18)-(20); it defines no mechanism by which a class,
 struct, union, array, closure, or other object type itself carries a
 named lifetime-group parameter. Therefore, if a reference, pointer, or
-span derived from a named group or from `[[scpp::lifetime(generic)]]`
+span derived from a named group or from `[[scpp::lifetime(any)]]`
 would be used to initialize or assign any subobject of such an object,
 the program is ill-formed. This includes returning `Holder{x}` where
 `Holder` contains a reference member initialized from `x`, storing such
@@ -444,7 +444,7 @@ const int* pick_right(
 
 const int& keep_head(
     const int& head [[scpp::lifetime(head_life)]],
-    int& scratch [[scpp::lifetime(generic)]]
+    int& scratch [[scpp::lifetime(any)]]
 ) [[scpp::lifetime(head_life)]] {
     scratch = 0;
     return head;
@@ -478,17 +478,17 @@ Holder bad_named_store(const int& x [[scpp::lifetime(a)]]) {
 }
 // ill-formed: this subclause provides no way for `Holder` to carry group `a`
 
-const int& bad_generic_return(
-    const int& x [[scpp::lifetime(generic)]]
-) [[scpp::lifetime(generic)]] {
+const int& bad_any_return(
+    const int& x [[scpp::lifetime(any)]]
+) [[scpp::lifetime(any)]] {
     return x;
 }
-// ill-formed: `generic` is reserved and cannot be named by the return
+// ill-formed: `any` is reserved and cannot be named by the return
 
-Holder bad_store(const int& x [[scpp::lifetime(generic)]]) {
+Holder bad_store(const int& x [[scpp::lifetime(any)]]) {
     return Holder{x};
 }
-// ill-formed: a value derived from `generic` is stored in returned state
+// ill-formed: a value derived from `any` is stored in returned state
 ```
 
 ## 6.3 Destruction [class.dtor]
