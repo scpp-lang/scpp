@@ -236,6 +236,8 @@ private:
         llvm::StructType* llvm_type = nullptr;
         std::vector<std::string> field_names;
         std::vector<Type> field_types;
+        std::vector<llvm::Align> field_alignments;
+        std::vector<size_t> field_physical_indices;
         bool is_union = false;
         bool is_packed = false;
         bool has_ordinary_vtable = false;
@@ -263,7 +265,7 @@ private:
         }
 
         [[nodiscard]] size_t physical_field_index(size_t logical_index) const {
-            return logical_index + (has_ordinary_vtable ? 1u : 0u);
+            return field_physical_indices[logical_index];
         }
     };
 
@@ -544,9 +546,14 @@ private:
     // emits its own control flow (e.g. checked arithmetic overflow
     // diamonds). Preserves declaration order among existing entry-block
     // allocas for tests/IR readability.
-    llvm::AllocaInst* create_entry_block_alloca(llvm::Type* type, const std::string& name) {
+    llvm::AllocaInst* create_entry_block_alloca(llvm::Type* type, const std::string& name,
+                                                std::optional<llvm::Align> alignment = std::nullopt) {
         llvm::BasicBlock* current_block = builder_->GetInsertBlock();
-        if (current_block == nullptr) return builder_->CreateAlloca(type, nullptr, name);
+        if (current_block == nullptr) {
+            llvm::AllocaInst* slot = builder_->CreateAlloca(type, nullptr, name);
+            if (alignment.has_value()) slot->setAlignment(*alignment);
+            return slot;
+        }
         llvm::IRBuilderBase::InsertPoint saved_ip = builder_->saveIP();
         llvm::DebugLoc saved_dbg = builder_->getCurrentDebugLocation();
         llvm::BasicBlock& entry = current_block->getParent()->getEntryBlock();
@@ -555,6 +562,7 @@ private:
         builder_->SetInsertPoint(&entry, insert_it);
         builder_->SetCurrentDebugLocation(llvm::DebugLoc());
         llvm::AllocaInst* slot = builder_->CreateAlloca(type, nullptr, name);
+        if (alignment.has_value()) slot->setAlignment(*alignment);
         builder_->restoreIP(saved_ip);
         builder_->SetCurrentDebugLocation(saved_dbg);
         return slot;
@@ -780,8 +788,9 @@ private:
     llvm::Value* codegen_consteval_class_value(const Expr& expr, const std::string& class_name) {
         ConstexprValue value = evaluate_immediate_expr(*program_, expr);
         llvm::Type* llvm_type = to_llvm_type(named_type(class_name));
-        llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "constevalclasstmp");
-        zero_initialize_storage(temp, named_type(class_name));
+        std::optional<llvm::Align> align = alignment_for_type(named_type(class_name));
+        llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "constevalclasstmp", align);
+        zero_initialize_storage(temp, named_type(class_name), align);
         store_constexpr_value_into(temp, named_type(class_name), value);
         return builder_->CreateLoad(llvm_type, temp, "constevalclass.value");
     }
@@ -789,8 +798,9 @@ private:
     llvm::Value* codegen_constructed_class_value(const std::string& class_name, const std::vector<ExprPtr>& args,
                                                  const Function* ctor_def, const Expr* original_expr = nullptr) {
         llvm::Type* llvm_type = to_llvm_type(named_type(class_name));
-        llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "classtmp");
-        LValue target{temp, named_type(class_name), std::nullopt};
+        std::optional<llvm::Align> align = alignment_for_type(named_type(class_name));
+        llvm::AllocaInst* temp = create_entry_block_alloca(llvm_type, "classtmp", align);
+        LValue target{temp, named_type(class_name), align};
         zero_initialize_storage(target.ptr, target.type, target.alignment);
         if (try_initialize_class_storage_from_same_type_source(target, args)) {
             return builder_->CreateLoad(llvm_type, temp, "classtmp.value");
@@ -853,7 +863,9 @@ private:
             case ExprKind::IntegerLiteral: return named_type("int");
             case ExprKind::FloatLiteral: return named_type("double");
             case ExprKind::BoolLiteral: return named_type("bool");
-            case ExprKind::Sizeof: return named_type("size_t");
+            case ExprKind::Alignof:
+            case ExprKind::Sizeof:
+                return named_type("size_t");
             case ExprKind::TypeTrait: return named_type("bool");
             case ExprKind::CharLiteral: return named_type("char");
             case ExprKind::StringLiteral: {
@@ -1095,6 +1107,7 @@ private:
             case ExprKind::BoolLiteral:
             case ExprKind::CharLiteral:
             case ExprKind::StringLiteral:
+            case ExprKind::Alignof:
             case ExprKind::Sizeof:
             case ExprKind::Lambda:
                 break;
@@ -1130,6 +1143,24 @@ private:
                                 module_->getDataLayout().getPointerABIAlignment(0).value()};
     }
 
+    [[nodiscard]] static size_t align_up(size_t value, size_t alignment) {
+        if (alignment <= 1) return value;
+        return ((value + alignment - 1) / alignment) * alignment;
+    }
+
+    [[nodiscard]] size_t alignment_bytes_for_type(const Type& type) const {
+        if (program_ != nullptr) {
+            std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, type, current_target_layout_info());
+            if (layout.has_value()) return layout->abi_align_bytes;
+        }
+        if (type.kind == TypeKind::Named) {
+            auto it = structs_.find(type.name);
+            if (it != structs_.end()) return it->second.abi_align.value();
+        }
+        llvm::Type* llvm_type = const_cast<Codegen*>(this)->to_llvm_type(type);
+        return module_->getDataLayout().getABITypeAlign(llvm_type).value();
+    }
+
     llvm::Value* codegen_sizeof_value(const Expr& expr) {
         Type queried_type;
         if (expr.sizeof_operand_is_type) {
@@ -1147,6 +1178,15 @@ private:
             throw CodegenError("cannot apply 'sizeof' to this type in this version", current_loc_);
         }
         return llvm::ConstantInt::get(to_llvm_type(named_type("size_t")), layout->size_bytes, /*isSigned=*/false);
+    }
+
+    llvm::Value* codegen_alignof_value(const Expr& expr) {
+        if (program_ == nullptr) throw CodegenError("internal error: alignof requires program type information", current_loc_);
+        std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, expr.type, current_target_layout_info());
+        if (!layout.has_value()) {
+            throw CodegenError("cannot apply 'alignof' to this type in this version", current_loc_);
+        }
+        return llvm::ConstantInt::get(to_llvm_type(named_type("size_t")), layout->abi_align_bytes, /*isSigned=*/false);
     }
 
     [[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr) {
@@ -1527,44 +1567,84 @@ private:
     void declare_struct(const StructDef& def) {
         if (declaring_aggregates_.contains(def.name)) return;
         declaring_aggregates_.insert(def.name);
-        std::vector<std::string> in_progress;
-        for (const StructField& field : def.fields) {
-            try {
-                validate_trivial(field.type, in_progress);
-            } catch (const CodegenError& e) {
-                throw CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
-                                        field.name + "': " + e.what() +
-                                        " (only scalars, pointers, trivial structs/unions, and fixed-size arrays "
-                                        "of trivial types are allowed here; see spec ch04)",
-                    current_loc_);
-            }
-        }
-
         StructInfo info;
         info.is_union = def.is_union;
         info.is_packed = def.is_packed;
+        std::vector<std::string> in_progress;
         std::vector<llvm::Type*> llvm_field_types;
-        llvm_field_types.reserve(def.fields.size());
-        for (const StructField& field : def.fields) {
-            info.field_names.push_back(field.name);
-            info.field_types.push_back(field.type);
-            llvm_field_types.push_back(to_llvm_type(field.type));
-        }
+        llvm_field_types.reserve(def.fields.size() * 2);
         if (!def.is_union) {
+            size_t offset = 0;
+            size_t overall_align = std::max<size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<size_t>(def.resolved_alignment));
+            for (const StructField& field : def.fields) {
+                try {
+                    validate_trivial(field.type, in_progress);
+                } catch (const CodegenError& e) {
+                    throw CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
+                                            field.name + "': " + e.what() +
+                                            " (only scalars, pointers, trivial structs/unions, and fixed-size arrays "
+                                            "of trivial types are allowed here; see spec ch04)",
+                        current_loc_);
+                }
+                llvm::Type* field_type = to_llvm_type(field.type);
+                size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
+                size_t field_align = def.is_packed ? 1
+                                                   : std::max(alignment_bytes_for_type(field.type),
+                                                              static_cast<size_t>(field.resolved_alignment));
+                size_t aligned_offset = align_up(offset, field_align);
+                if (aligned_offset > offset) {
+                    llvm_field_types.push_back(
+                        llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), aligned_offset - offset));
+                    offset = aligned_offset;
+                }
+                info.field_names.push_back(field.name);
+                info.field_types.push_back(field.type);
+                info.field_alignments.push_back(llvm::Align(field_align));
+                info.field_physical_indices.push_back(llvm_field_types.size());
+                llvm_field_types.push_back(field_type);
+                offset += field_size;
+                overall_align = def.is_packed ? 1 : std::max(overall_align, field_align);
+            }
+            size_t final_align = def.is_packed ? 1 : overall_align;
+            size_t final_size = align_up(offset, final_align);
+            if (final_size > offset) {
+                llvm_field_types.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), final_size - offset));
+            }
             info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "struct." + def.name, def.is_packed);
+            info.abi_align = llvm::Align(final_align);
         } else {
+            for (const StructField& field : def.fields) {
+                try {
+                    validate_trivial(field.type, in_progress);
+                } catch (const CodegenError& e) {
+                    throw CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
+                                            field.name + "': " + e.what() +
+                                            " (only scalars, pointers, trivial structs/unions, and fixed-size arrays "
+                                            "of trivial types are allowed here; see spec ch04)",
+                        current_loc_);
+                }
+                info.field_names.push_back(field.name);
+                info.field_types.push_back(field.type);
+                info.field_alignments.push_back(
+                    llvm::Align(def.is_packed ? 1
+                                              : std::max(alignment_bytes_for_type(field.type),
+                                                         static_cast<size_t>(field.resolved_alignment))));
+                info.field_physical_indices.push_back(0);
+                llvm_field_types.push_back(to_llvm_type(field.type));
+            }
             if (llvm_field_types.empty()) {
                 throw CodegenError("union '" + def.name + "' must declare at least one field",
                     current_loc_);
             }
-            size_t align_value = def.is_packed ? 1 : 0;
+            size_t align_value = def.is_packed ? 1 : std::max<size_t>(1, def.resolved_alignment);
             size_t max_size = 0;
             size_t max_rep_align = 0;
             llvm::Type* rep_type = llvm_field_types[0];
             size_t rep_size = module_->getDataLayout().getTypeAllocSize(rep_type);
-            for (llvm::Type* field_type : llvm_field_types) {
+            for (size_t i = 0; i < llvm_field_types.size(); ++i) {
+                llvm::Type* field_type = llvm_field_types[i];
                 size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
-                size_t field_align = def.is_packed ? 1 : module_->getDataLayout().getABITypeAlign(field_type).value();
+                size_t field_align = info.field_alignments[i].value();
                 if (field_size > max_size) max_size = field_size;
                 if (field_align > align_value) align_value = field_align;
                 if (field_align > max_rep_align ||
@@ -1582,8 +1662,8 @@ private:
                 storage_fields.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), union_size - rep_size));
             }
             info.llvm_type = llvm::StructType::create(*context_, storage_fields, "union." + def.name, def.is_packed);
+            info.abi_align = llvm::Align(align_value);
         }
-        info.abi_align = module_->getDataLayout().getABITypeAlign(info.llvm_type);
         structs_[def.name] = std::move(info);
         declaring_aggregates_.erase(def.name);
     }
@@ -1619,24 +1699,49 @@ private:
         declaring_aggregates_.insert(def.name);
         StructInfo info;
         info.has_ordinary_vtable = !def.is_interface;
+        std::vector<llvm::Type*> llvm_field_types;
+        size_t offset = 0;
+        size_t overall_align = std::max<size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<size_t>(def.resolved_alignment));
         if (const BaseSpecifier* base = def.direct_ordinary_base()) {
             const StructInfo& base_info = structs_.at(base->base_type.name);
             info.field_names = base_info.field_names;
             info.field_types = base_info.field_types;
+            info.field_alignments = base_info.field_alignments;
+            info.field_physical_indices = base_info.field_physical_indices;
+            llvm_field_types.assign(base_info.llvm_type->elements().begin(), base_info.llvm_type->elements().end());
+            offset = module_->getDataLayout().getTypeAllocSize(base_info.llvm_type);
+            overall_align = std::max(overall_align, static_cast<size_t>(base_info.abi_align.value()));
         }
-        std::vector<llvm::Type*> llvm_field_types;
-        llvm_field_types.reserve(info.field_names.size() + def.fields.size());
-        if (info.has_ordinary_vtable) {
+        if (info.has_ordinary_vtable && llvm_field_types.empty()) {
             llvm_field_types.push_back(llvm::PointerType::getUnqual(*context_));
+            offset = module_->getDataLayout().getTypeAllocSize(llvm_field_types.back());
+            overall_align = std::max(overall_align,
+                                     static_cast<size_t>(module_->getDataLayout().getPointerABIAlignment(0).value()));
         }
-        for (const Type& t : info.field_types) llvm_field_types.push_back(to_llvm_type(t));
         for (const ClassField& field : def.fields) {
+            llvm::Type* field_type = to_llvm_type(field.type);
+            size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
+            size_t field_align = std::max(alignment_bytes_for_type(field.type), static_cast<size_t>(field.resolved_alignment));
+            size_t aligned_offset = align_up(offset, field_align);
+            if (aligned_offset > offset) {
+                llvm_field_types.push_back(
+                    llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), aligned_offset - offset));
+                offset = aligned_offset;
+            }
             info.field_names.push_back(field.name);
             info.field_types.push_back(field.type);
-            llvm_field_types.push_back(to_llvm_type(field.type));
+            info.field_alignments.push_back(llvm::Align(field_align));
+            info.field_physical_indices.push_back(llvm_field_types.size());
+            llvm_field_types.push_back(field_type);
+            offset += field_size;
+            overall_align = std::max(overall_align, field_align);
+        }
+        size_t final_size = align_up(offset, overall_align);
+        if (final_size > offset) {
+            llvm_field_types.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), final_size - offset));
         }
         info.llvm_type = llvm::StructType::create(*context_, llvm_field_types, "class." + def.name);
-        info.abi_align = module_->getDataLayout().getABITypeAlign(info.llvm_type);
+        info.abi_align = llvm::Align(overall_align);
         structs_[def.name] = std::move(info);
         declaring_aggregates_.erase(def.name);
     }
@@ -1653,7 +1758,7 @@ private:
         for (const Type& candidate : type.template_args) {
             llvm::Type* candidate_llvm = to_llvm_type(candidate);
             size_t candidate_size = module_->getDataLayout().getTypeAllocSize(candidate_llvm);
-            size_t candidate_align = module_->getDataLayout().getABITypeAlign(candidate_llvm).value();
+            size_t candidate_align = alignment_bytes_for_type(candidate);
             max_size = std::max(max_size, candidate_size);
             max_align = std::max(max_align, candidate_align);
             if (rep_type == nullptr || candidate_align > rep_align || (candidate_align == rep_align && candidate_size > rep_size)) {
@@ -1799,11 +1904,11 @@ private:
     }
 
     [[nodiscard]] std::optional<llvm::Align> alignment_for_type(const Type& type) const {
-        if (type.kind != TypeKind::Named) return std::nullopt;
-        if (type.name == "std::storage_for") {
-            llvm::Type* llvm_type = const_cast<Codegen*>(this)->to_llvm_type(type);
-            return module_->getDataLayout().getABITypeAlign(llvm_type);
+        if (program_ != nullptr) {
+            std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, type, current_target_layout_info());
+            if (layout.has_value()) return llvm::Align(layout->abi_align_bytes);
         }
+        if (type.kind != TypeKind::Named) return std::nullopt;
         auto it = structs_.find(type.name);
         if (it == structs_.end()) return std::nullopt;
         return it->second.abi_align;
@@ -2803,11 +2908,13 @@ private:
             llvm::AllocaInst* slot = nullptr;
             if (index == 1 && interface_destructor_uses_raw_this(fn)) {
                 slot = builder_->CreateAlloca(to_llvm_type(param.type), nullptr, param.name);
+                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
                 llvm::Value* fat_this = build_interface_value(
                     &arg, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
             } else {
                 slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
+                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
                 builder_->CreateStore(&arg, slot);
             }
             locals_[param.name] = LocalSlot{slot, param.type};
@@ -2868,11 +2975,13 @@ private:
             llvm::AllocaInst* slot = nullptr;
             if (index == 1 && interface_destructor_uses_raw_this(fn)) {
                 slot = builder_->CreateAlloca(to_llvm_type(param.type), nullptr, param.name);
+                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
                 llvm::Value* fat_this = build_interface_value(
                     &arg, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
             } else {
                 slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
+                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
                 builder_->CreateStore(&arg, slot);
             }
             locals_[param.name] = LocalSlot{slot, param.type};
@@ -3037,6 +3146,13 @@ private:
                 return;
 
             case StmtKind::VarDecl: {
+                std::optional<llvm::Align> declared_alignment = alignment_for_type(stmt.type);
+                if (stmt.resolved_alignment != 0) {
+                    llvm::Align explicit_align(stmt.resolved_alignment);
+                    if (!declared_alignment.has_value() || explicit_align.value() > declared_alignment->value()) {
+                        declared_alignment = explicit_align;
+                    }
+                }
                 if (stmt.type.kind == TypeKind::Reference) {
                     // Real C++ references must be bound at declaration
                     // (there's no such thing as a later-bound or
@@ -3048,7 +3164,8 @@ private:
                             current_loc_);
                     }
                     if (is_interface_reference_type(stmt.type)) {
-                        llvm::AllocaInst* slot = create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name);
+                        llvm::AllocaInst* slot =
+                            create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name, declared_alignment);
                         create_store(codegen_interface_value_for_target(*stmt.init, stmt.type), slot, alignment_for_type(stmt.type));
                         locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                         locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
@@ -3078,7 +3195,7 @@ private:
                             ? codegen_materialize_rvalue_reference_source(*stmt.init)
                             : codegen_lvalue(*stmt.init).ptr;
                     llvm::AllocaInst* slot =
-                        create_entry_block_alloca(llvm::PointerType::getUnqual(*context_), stmt.var_name);
+                        create_entry_block_alloca(llvm::PointerType::getUnqual(*context_), stmt.var_name, declared_alignment);
                     builder_->CreateStore(referent_addr, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
@@ -3101,7 +3218,7 @@ private:
                     }
                     llvm::Type* span_type = to_llvm_type(stmt.type);
                     llvm::Value* span_value = codegen_span_value_for_target(*stmt.init, stmt.type);
-                    llvm::AllocaInst* slot = create_entry_block_alloca(span_type, stmt.var_name);
+                    llvm::AllocaInst* slot = create_entry_block_alloca(span_type, stmt.var_name, declared_alignment);
                     builder_->CreateStore(span_value, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
@@ -3136,7 +3253,8 @@ private:
                 // every scalar/struct/array/pointer type the general
                 // path below handles).
                 if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
-                    llvm::AllocaInst* closure_ptr = create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name);
+                    llvm::AllocaInst* closure_ptr =
+                        create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name, declared_alignment);
                     codegen_construct_lambda(*stmt.init, closure_ptr);
                     locals_[stmt.var_name] = LocalSlot{closure_ptr, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
@@ -3148,7 +3266,7 @@ private:
                 }
 
                 llvm::Type* llvm_type = to_llvm_type(stmt.type);
-                llvm::AllocaInst* slot = create_entry_block_alloca(llvm_type, stmt.var_name);
+                llvm::AllocaInst* slot = create_entry_block_alloca(llvm_type, stmt.var_name, declared_alignment);
                 if (stmt.has_ctor_args) {
                     // `ClassName name{args};` (ch04 §4.2 / spec §6.1):
                     // direct-
@@ -3162,7 +3280,7 @@ private:
                     // real C++ itself already uses, so this needs no new
                     // storage-layout logic beyond what every other
                     // Named-type VarDecl already does above.
-                    zero_initialize_storage(slot, stmt.type);
+                    zero_initialize_storage(slot, stmt.type, declared_alignment);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     if (stmt.type.kind == TypeKind::Named) {
@@ -3173,10 +3291,10 @@ private:
                         scope_stack_.back().push_back(stmt.var_name);
                     }
                     if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
-                        initialize_storage_from_brace_args(LValue{slot, stmt.type, std::nullopt}, stmt.ctor_args);
+                        initialize_storage_from_brace_args(LValue{slot, stmt.type, declared_alignment}, stmt.ctor_args);
                         return;
                     }
-                    if (try_initialize_class_storage_from_same_type_source(LValue{slot, stmt.type, std::nullopt},
+                    if (try_initialize_class_storage_from_same_type_source(LValue{slot, stmt.type, declared_alignment},
                                                                            stmt.ctor_args)) {
                         return;
                     }
@@ -3211,7 +3329,7 @@ private:
                     }
                     if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
                         llvm::Value* value = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
-                        create_store(value, slot, std::nullopt);
+                        create_store(value, slot, declared_alignment);
                         return;
                     }
                     llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
@@ -3265,14 +3383,14 @@ private:
                     // about.
                     refresh_debug_location(stmt.loc);
                     check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'");
-                    builder_->CreateStore(init_value, slot);
+                    create_store(init_value, slot, declared_alignment);
                 } else {
                     // scpp has no concept of an uninitialized variable: a
                     // local declared without an initializer is always
                     // zero-initialized (0 / false / null / all-zero
                     // fields), for every type -- scalars and raw pointers
                     // included, not just struct/array/unique_ptr.
-                    zero_initialize_storage(slot, stmt.type);
+                    zero_initialize_storage(slot, stmt.type, declared_alignment);
                 }
                 locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                 locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
@@ -3530,8 +3648,7 @@ private:
                     llvm::Value* callee_value =
                         create_load(to_llvm_type(member_type), field_ptr,
                                     info.is_union ? base.alignment
-                                                  : (info.is_packed ? std::optional<llvm::Align>(llvm::Align(1))
-                                                                    : std::nullopt),
+                                                  : std::optional<llvm::Align>(info.field_alignments[*field_index_opt]),
                                     expr.name + ".fn");
                     std::vector<llvm::Value*> args =
                         codegen_call_args_for_types(expr.args, member_type.function_params);
@@ -4605,6 +4722,9 @@ private:
                 // value 0-255 (see parser's decode_char_literal), which
                 // fits identically in the 8 bits either way.
                 return llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context_), expr.int_value, /*isSigned=*/false);
+
+            case ExprKind::Alignof:
+                return codegen_alignof_value(expr);
 
             case ExprKind::Sizeof:
                 return codegen_sizeof_value(expr);
@@ -5818,8 +5938,7 @@ private:
                 const Type& field_type = info.field_types[field_index];
                 std::optional<llvm::Align> field_alignment =
                     info.is_union ? (base.alignment.has_value() ? base.alignment : alignment_for_type(base.type))
-                                  : (info.is_packed ? std::optional<llvm::Align>(llvm::Align(1))
-                                                    : alignment_for_type(field_type));
+                                  : std::optional<llvm::Align>(info.field_alignments[field_index]);
                 llvm::Value* field_ptr = info.is_union
                                              ? builder_->CreateBitCast(base.ptr, llvm::PointerType::get(
                                                                                           to_llvm_type(field_type)->getContext(),

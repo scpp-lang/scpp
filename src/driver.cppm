@@ -349,6 +349,12 @@ void write_i64_le(std::ostream& out, std::int64_t value) {
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
+void write_u64_le(std::ostream& out, std::uint64_t value) {
+    std::array<char, 8> bytes = {};
+    for (size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((value >> (8 * i)) & 0xffu);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
 [[nodiscard]] std::uint32_t read_u32_le(std::istream& in, const std::string& context) {
     std::array<unsigned char, 4> bytes = {};
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
@@ -364,6 +370,15 @@ void write_i64_le(std::ostream& out, std::int64_t value) {
     std::uint64_t raw = 0;
     for (size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return static_cast<std::int64_t>(raw);
+}
+
+[[nodiscard]] std::uint64_t read_u64_le(std::istream& in, const std::string& context) {
+    std::array<unsigned char, 8> bytes = {};
+    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!in) throw DriverError("invalid " + context + ": truncated u64");
+    std::uint64_t raw = 0;
+    for (size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+    return raw;
 }
 
 void write_double_le(std::ostream& out, double value) {
@@ -423,6 +438,8 @@ ExprPtr read_expr(std::istream& in, const std::string& context);
 void write_expr(std::ostream& out, const Expr& expr);
 StmtPtr read_stmt(std::istream& in, const std::string& context);
 void write_stmt(std::ostream& out, const Stmt& stmt);
+void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec);
+[[nodiscard]] AlignmentSpecifier read_alignment_specifier(std::istream& in, const std::string& context);
 
 void write_type(std::ostream& out, const Type& type) {
     write_enum(out, type.kind);
@@ -644,6 +661,9 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     write_string(out, stmt.var_name);
     write_u8(out, stmt.init ? 1u : 0u);
     if (stmt.init) write_expr(out, *stmt.init);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.alignment_specs.size()));
+    for (const AlignmentSpecifier& spec : stmt.alignment_specs) write_alignment_specifier(out, spec);
+    write_u64_le(out, stmt.resolved_alignment);
     write_u8(out, stmt.is_const ? 1u : 0u);
     write_u8(out, stmt.is_constexpr ? 1u : 0u);
     write_u8(out, stmt.has_ctor_args ? 1u : 0u);
@@ -670,6 +690,12 @@ StmtPtr read_stmt(std::istream& in, const std::string& context) {
     stmt->type = read_type(in, context + " type");
     stmt->var_name = read_string(in, context + " var name");
     if (read_u8(in, context + " init present") != 0u) stmt->init = read_expr(in, context + " init");
+    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    stmt->alignment_specs.reserve(align_spec_count);
+    for (std::uint32_t i = 0; i < align_spec_count; i++) {
+        stmt->alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+    }
+    stmt->resolved_alignment = read_u64_le(in, context + " resolved alignment");
     stmt->is_const = read_u8(in, context + " is_const") != 0u;
     stmt->is_constexpr = read_u8(in, context + " is_constexpr") != 0u;
     stmt->has_ctor_args = read_u8(in, context + " has ctor args") != 0u;
@@ -694,6 +720,23 @@ void write_initializer(std::ostream& out, const Initializer& init) {
     write_u8(out, init.has_brace_args ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(init.brace_args.size()));
     for (const ExprPtr& arg : init.brace_args) write_expr(out, *arg);
+}
+
+void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec) {
+    write_source_location(out, spec.loc);
+    write_u8(out, spec.operand_is_type ? 1u : 0u);
+    write_type(out, spec.type);
+    write_u8(out, spec.expr ? 1u : 0u);
+    if (spec.expr) write_expr(out, *spec.expr);
+}
+
+[[nodiscard]] AlignmentSpecifier read_alignment_specifier(std::istream& in, const std::string& context) {
+    AlignmentSpecifier spec;
+    spec.loc = read_source_location(in, context + " loc");
+    spec.operand_is_type = read_u8(in, context + " operand is type") != 0u;
+    spec.type = read_type(in, context + " type");
+    if (read_u8(in, context + " expr present") != 0u) spec.expr = read_expr(in, context + " expr");
+    return spec;
 }
 
 [[nodiscard]] Initializer read_initializer(std::istream& in, const std::string& context) {
@@ -721,40 +764,62 @@ void write_member_initializer(std::ostream& out, const MemberInitializer& init) 
 }
 
 void write_struct_field(std::ostream& out, const StructField& field) {
+    write_source_location(out, field.loc);
     write_type(out, field.type);
     write_string(out, field.name);
     write_u8(out, field.default_initializer.has_value() ? 1u : 0u);
     if (field.default_initializer) write_initializer(out, *field.default_initializer);
     write_enum(out, field.access);
+    write_u32_le(out, static_cast<std::uint32_t>(field.alignment_specs.size()));
+    for (const AlignmentSpecifier& spec : field.alignment_specs) write_alignment_specifier(out, spec);
+    write_u64_le(out, field.resolved_alignment);
 }
 
 [[nodiscard]] StructField read_struct_field(std::istream& in, const std::string& context) {
     StructField field;
+    field.loc = read_source_location(in, context + " loc");
     field.type = read_type(in, context + " type");
     field.name = read_string(in, context + " name");
     if (read_u8(in, context + " default initializer present") != 0u) {
         field.default_initializer = read_initializer(in, context + " default initializer");
     }
     field.access = read_enum<AccessSpecifier>(in, context + " access");
+    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    field.alignment_specs.reserve(align_spec_count);
+    for (std::uint32_t i = 0; i < align_spec_count; i++) {
+        field.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+    }
+    field.resolved_alignment = read_u64_le(in, context + " resolved alignment");
     return field;
 }
 
 void write_class_field(std::ostream& out, const ClassField& field) {
+    write_source_location(out, field.loc);
     write_type(out, field.type);
     write_string(out, field.name);
     write_u8(out, field.default_initializer.has_value() ? 1u : 0u);
     if (field.default_initializer) write_initializer(out, *field.default_initializer);
     write_enum(out, field.access);
+    write_u32_le(out, static_cast<std::uint32_t>(field.alignment_specs.size()));
+    for (const AlignmentSpecifier& spec : field.alignment_specs) write_alignment_specifier(out, spec);
+    write_u64_le(out, field.resolved_alignment);
 }
 
 [[nodiscard]] ClassField read_class_field(std::istream& in, const std::string& context) {
     ClassField field;
+    field.loc = read_source_location(in, context + " loc");
     field.type = read_type(in, context + " type");
     field.name = read_string(in, context + " name");
     if (read_u8(in, context + " default initializer present") != 0u) {
         field.default_initializer = read_initializer(in, context + " default initializer");
     }
     field.access = read_enum<AccessSpecifier>(in, context + " access");
+    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    field.alignment_specs.reserve(align_spec_count);
+    for (std::uint32_t i = 0; i < align_spec_count; i++) {
+        field.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+    }
+    field.resolved_alignment = read_u64_le(in, context + " resolved alignment");
     return field;
 }
 
@@ -831,11 +896,15 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
 }
 
 void write_struct_def(std::ostream& out, const StructDef& def) {
+    write_source_location(out, def.loc);
     write_string(out, def.name);
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
     for (const StructField& field : def.fields) write_struct_field(out, field);
     write_u8(out, def.is_union ? 1u : 0u);
     write_u8(out, def.is_packed ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(def.alignment_specs.size()));
+    for (const AlignmentSpecifier& spec : def.alignment_specs) write_alignment_specifier(out, spec);
+    write_u64_le(out, def.resolved_alignment);
     write_u32_le(out, static_cast<std::uint32_t>(def.namespace_path.size()));
     for (const std::string& segment : def.namespace_path) write_string(out, segment);
     write_u8(out, def.is_exported ? 1u : 0u);
@@ -852,12 +921,19 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
 
 [[nodiscard]] StructDef read_struct_def(std::istream& in, const std::string& context) {
     StructDef def;
+    def.loc = read_source_location(in, context + " loc");
     def.name = read_string(in, context + " name");
     std::uint32_t field_count = read_u32_le(in, context + " field count");
     def.fields.reserve(field_count);
     for (std::uint32_t i = 0; i < field_count; i++) def.fields.push_back(read_struct_field(in, context + " field"));
     def.is_union = read_u8(in, context + " is_union") != 0u;
     def.is_packed = read_u8(in, context + " is_packed") != 0u;
+    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    def.alignment_specs.reserve(align_spec_count);
+    for (std::uint32_t i = 0; i < align_spec_count; i++) {
+        def.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+    }
+    def.resolved_alignment = read_u64_le(in, context + " resolved alignment");
     std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
     def.namespace_path.reserve(ns_count);
     for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));
@@ -876,9 +952,13 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
 }
 
 void write_class_def(std::ostream& out, const ClassDef& def) {
+    write_source_location(out, def.loc);
     write_string(out, def.name);
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
     for (const ClassField& field : def.fields) write_class_field(out, field);
+    write_u32_le(out, static_cast<std::uint32_t>(def.alignment_specs.size()));
+    for (const AlignmentSpecifier& spec : def.alignment_specs) write_alignment_specifier(out, spec);
+    write_u64_le(out, def.resolved_alignment);
     write_u32_le(out, static_cast<std::uint32_t>(def.namespace_path.size()));
     for (const std::string& segment : def.namespace_path) write_string(out, segment);
     write_u8(out, def.is_exported ? 1u : 0u);
@@ -912,10 +992,17 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
 
 [[nodiscard]] ClassDef read_class_def(std::istream& in, const std::string& context) {
     ClassDef def;
+    def.loc = read_source_location(in, context + " loc");
     def.name = read_string(in, context + " name");
     std::uint32_t field_count = read_u32_le(in, context + " field count");
     def.fields.reserve(field_count);
     for (std::uint32_t i = 0; i < field_count; i++) def.fields.push_back(read_class_field(in, context + " field"));
+    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    def.alignment_specs.reserve(align_spec_count);
+    for (std::uint32_t i = 0; i < align_spec_count; i++) {
+        def.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+    }
+    def.resolved_alignment = read_u64_le(in, context + " resolved alignment");
     std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
     def.namespace_path.reserve(ns_count);
     for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));

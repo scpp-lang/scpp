@@ -255,6 +255,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::StringLiteral:
         case ExprKind::TypeTrait:
         case ExprKind::Sizeof:
+        case ExprKind::Alignof:
             return;
         case ExprKind::New:
             if (expr->lhs) collect_reference_uses(expr->lhs.get(), body, out);

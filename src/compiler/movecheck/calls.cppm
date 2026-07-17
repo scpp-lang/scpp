@@ -90,6 +90,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                                                   const Signatures& signatures);
 void validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
                                     const SourceLocation& loc);
+void validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc);
         [[nodiscard]] std::optional<std::string> direct_write_root(const Expr& expr, const Body& body);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                            const Signatures& signatures);
@@ -856,7 +857,9 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::FloatLiteral: return named_type("double");
         case ExprKind::BoolLiteral: return named_type("bool");
         case ExprKind::CharLiteral: return named_type("char");
-        case ExprKind::Sizeof: return named_type("size_t");
+        case ExprKind::Sizeof:
+        case ExprKind::Alignof:
+            return named_type("size_t");
         case ExprKind::StringLiteral: {
             Type result;
             result.kind = TypeKind::Pointer;
@@ -1119,6 +1122,15 @@ void validate_sizeof_operand(const Expr& expr, const Body& body, const Signature
     }
     if (!layout_of_type(*body.program, queried_type).has_value()) {
         throw DataflowError("cannot apply 'sizeof' to this type in this version", loc);
+    }
+}
+
+void validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc) {
+    if (body.program == nullptr) {
+        throw DataflowError("internal error: alignof requires program type information", loc);
+    }
+    if (!layout_of_type(*body.program, expr.type).has_value()) {
+        throw DataflowError("cannot apply 'alignof' to this type in this version", loc);
     }
 }
 

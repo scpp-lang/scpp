@@ -76,6 +76,8 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwConcept: return "KwConcept";
         case scpp::TokenKind::KwRequires: return "KwRequires";
         case scpp::TokenKind::KwAuto: return "KwAuto";
+        case scpp::TokenKind::KwAlignas: return "KwAlignas";
+        case scpp::TokenKind::KwAlignof: return "KwAlignof";
         case scpp::TokenKind::KwSizeof: return "KwSizeof";
         case scpp::TokenKind::KwMutable: return "KwMutable";
         case scpp::TokenKind::LParen: return "LParen";
@@ -365,6 +367,9 @@ void print_expr(const scpp::Expr& expr, int depth) {
         case scpp::ExprKind::Cast:
             std::cout << "Cast " << type_to_string(expr.type) << "\n";
             print_expr(*expr.lhs, depth + 1);
+            break;
+        case scpp::ExprKind::Alignof:
+            std::cout << "AlignofType " << type_to_string(expr.type) << "\n";
             break;
         case scpp::ExprKind::Sizeof:
             if (expr.sizeof_operand_is_type) {
