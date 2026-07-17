@@ -27,7 +27,7 @@
 - Safety Boundaries and `[[scpp::unsafe]]`
   - [What `[[scpp::unsafe]]` Does and Does Not Do](ch06-01-what-scpp-unsafe-does-and-does-not-do.md)
   - [Calling `extern "C"` and Using Raw Pointers](ch06-02-calling-extern-c-and-using-raw-pointers.md)
-  - Localizing Trust in Real Programs
+  - [Localizing Trust in Real Programs](ch06-03-localizing-trust-in-real-programs.md)
 
 - Packages, Modules, and Project Layout
   - Packages and Project Manifests
