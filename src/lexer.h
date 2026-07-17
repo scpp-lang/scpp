@@ -1,13 +1,12 @@
-module;
+#pragma once
 
 #include <cctype>
 #include <string>
 #include <string_view>
 #include <vector>
 
-export module scpp.lexer;
+namespace scpp {
 
-export namespace scpp {
 
 enum class TokenKind {
     // literals / identifiers
@@ -428,7 +427,7 @@ private:
     }
 };
 
-std::vector<Token> tokenize(std::string_view source) {
+inline std::vector<Token> tokenize(std::string_view source) {
     Lexer lexer(source);
     return lexer.tokenize();
 }

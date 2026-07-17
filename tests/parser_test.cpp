@@ -1,5 +1,5 @@
-import scpp.parser;
-import scpp.ast;
+#include "parser.h"
+#include "ast.h"
 
 #include <fstream>
 #include <filesystem>

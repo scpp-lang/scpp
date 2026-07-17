@@ -29,103 +29,75 @@ list(INSERT CMAKE_FIND_LIBRARY_SUFFIXES 0 ".a")
 find_library(SQLITE3_LIB NAMES sqlite3 REQUIRED)
 find_path(SQLITE3_INCLUDE_DIR NAMES sqlite3.h REQUIRED)
 
-add_library(scpp_lexer)
-target_sources(scpp_lexer
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/lexer.cppm)
+function(scpp_use_src_includes target)
+    target_include_directories(${target} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+endfunction()
+
+add_library(scpp_lexer src/lexer.cpp)
+scpp_use_src_includes(scpp_lexer)
 target_compile_features(scpp_lexer PRIVATE cxx_std_23)
 
-add_library(scpp_ast)
-target_sources(scpp_ast
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/ast.cppm)
+add_library(scpp_ast src/ast.cpp)
+scpp_use_src_includes(scpp_ast)
 target_compile_features(scpp_ast PRIVATE cxx_std_23)
 
-add_library(scpp_parser)
-target_sources(scpp_parser
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/parser.cppm)
+add_library(scpp_parser src/parser.cpp)
 target_link_libraries(scpp_parser PUBLIC scpp_lexer scpp_ast)
+scpp_use_src_includes(scpp_parser)
 target_compile_features(scpp_parser PRIVATE cxx_std_23)
 
-add_library(scpp_mir)
-target_sources(scpp_mir
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/mir.cppm)
+add_library(scpp_mir src/mir.cpp)
 target_link_libraries(scpp_mir PUBLIC scpp_ast)
+scpp_use_src_includes(scpp_mir)
 target_compile_features(scpp_mir PRIVATE cxx_std_23)
 
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
-add_library(scpp_codegen)
-target_sources(scpp_codegen
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/codegen.cppm)
+add_library(scpp_codegen src/codegen.cpp)
+scpp_use_src_includes(scpp_codegen)
 target_include_directories(scpp_codegen SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
 target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr ${LLVM_LIBS})
 target_compile_features(scpp_codegen PRIVATE cxx_std_23)
 
-add_library(scpp_movecheck)
-target_sources(scpp_movecheck
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/movecheck.cppm
-            src/compiler/movecheck/state.cppm
-            src/compiler/movecheck/signatures.cppm
-            src/compiler/movecheck/types.cppm
-            src/compiler/movecheck/calls.cppm
-            src/compiler/movecheck/borrows.cppm
-            src/compiler/movecheck/dataflow.cppm
-            src/compiler/movecheck/interfaces.cppm
-            src/compiler/movecheck/threadsafety.cppm
-            src/compiler/movecheck/generics_support.cppm
-            src/compiler/movecheck/lambdas.cppm
-            src/compiler/movecheck/monomorphize.cppm
-    PRIVATE
-            src/compiler/movecheck/movecheck.cpp)
+add_library(scpp_movecheck
+    src/movecheck.cpp
+    src/compiler/movecheck/state.cpp
+    src/compiler/movecheck/signatures.cpp
+    src/compiler/movecheck/types.cpp
+    src/compiler/movecheck/calls.cpp
+    src/compiler/movecheck/borrows.cpp
+    src/compiler/movecheck/dataflow.cpp
+    src/compiler/movecheck/interfaces.cpp
+    src/compiler/movecheck/threadsafety.cpp
+    src/compiler/movecheck/generics_support.cpp
+    src/compiler/movecheck/lambdas.cpp
+    src/compiler/movecheck/monomorphize.cpp)
 target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir)
+scpp_use_src_includes(scpp_movecheck)
 target_compile_features(scpp_movecheck PRIVATE cxx_std_23)
 
-add_library(scpp_constexpr)
-target_sources(scpp_constexpr
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/constexpr.cppm)
+add_library(scpp_constexpr src/constexpr.cpp)
 target_link_libraries(scpp_constexpr PUBLIC scpp_ast)
+scpp_use_src_includes(scpp_constexpr)
 target_compile_features(scpp_constexpr PRIVATE cxx_std_23)
 
-add_library(scpp_driver)
-target_sources(scpp_driver
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/driver.cppm)
+add_library(scpp_driver src/driver.cpp)
 target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_constexpr ${LLVM_LIBS})
+scpp_use_src_includes(scpp_driver)
 target_compile_features(scpp_driver PRIVATE cxx_std_23)
 
-add_library(scpp_project)
-target_sources(scpp_project
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/project.cppm)
+add_library(scpp_project src/project.cpp)
+scpp_use_src_includes(scpp_project)
 target_include_directories(scpp_project PRIVATE ${SQLITE3_INCLUDE_DIR})
 target_link_libraries(scpp_project PUBLIC scpp_lexer scpp_driver ${SQLITE3_LIB})
 target_compile_features(scpp_project PRIVATE cxx_std_23)
 
-add_executable(scpp)
-
-target_sources(scpp
-    PRIVATE
-        src/main.cpp
-    PRIVATE
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/cli/cli.cppm)
+add_executable(scpp
+    src/main.cpp
+    src/cli/cli.cpp)
 target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver scpp_project)
+scpp_use_src_includes(scpp)
 
 target_compile_features(scpp PRIVATE cxx_std_23)
 target_compile_definitions(scpp PRIVATE
@@ -150,12 +122,14 @@ enable_testing()
 
 add_executable(lexer_test tests/lexer_test.cpp)
 target_link_libraries(lexer_test PRIVATE scpp_lexer)
+scpp_use_src_includes(lexer_test)
 target_compile_features(lexer_test PRIVATE cxx_std_23)
 
 add_test(NAME lexer_test COMMAND lexer_test)
 
 add_executable(parser_test tests/parser_test.cpp)
 target_link_libraries(parser_test PRIVATE scpp_parser scpp_ast scpp_lexer)
+scpp_use_src_includes(parser_test)
 target_compile_features(parser_test PRIVATE cxx_std_23)
 target_compile_definitions(parser_test PRIVATE
     SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
@@ -165,6 +139,7 @@ add_test(NAME parser_test COMMAND parser_test)
 
 add_executable(codegen_test tests/codegen_test.cpp)
 target_link_libraries(codegen_test PRIVATE scpp_codegen scpp_movecheck scpp_parser scpp_ast scpp_lexer)
+scpp_use_src_includes(codegen_test)
 target_compile_features(codegen_test PRIVATE cxx_std_23)
 target_compile_definitions(codegen_test PRIVATE
     SCPP_CODEGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source"
@@ -175,6 +150,7 @@ add_test(NAME codegen_test COMMAND codegen_test)
 
 add_executable(movecheck_test tests/movecheck_test.cpp)
 target_link_libraries(movecheck_test PRIVATE scpp_movecheck scpp_parser scpp_ast scpp_lexer)
+scpp_use_src_includes(movecheck_test)
 target_compile_features(movecheck_test PRIVATE cxx_std_23)
 target_compile_definitions(movecheck_test PRIVATE
     SCPP_MOVETEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/movetest_source"
@@ -185,6 +161,7 @@ add_test(NAME movecheck_test COMMAND movecheck_test)
 
 add_executable(driver_test tests/driver_test.cpp)
 target_link_libraries(driver_test PRIVATE scpp_driver scpp_codegen scpp_movecheck scpp_parser scpp_ast scpp_lexer)
+scpp_use_src_includes(driver_test)
 target_compile_features(driver_test PRIVATE cxx_std_23)
 target_compile_definitions(driver_test PRIVATE
     SCPP_BINARY_PATH="$<TARGET_FILE:scpp>"

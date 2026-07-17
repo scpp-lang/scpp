@@ -1,4 +1,4 @@
-import scpp.lexer;
+#include "lexer.h"
 
 #include <cstdlib>
 #include <iostream>

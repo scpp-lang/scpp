@@ -1,4 +1,4 @@
-module;
+#include "project.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -25,32 +25,15 @@ module;
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
 #include <sqlite3.h>
 
-export module scpp.project;
-
-import scpp.ast;
-import scpp.codegen;
-import scpp.driver;
-import scpp.lexer;
-import scpp.compiler.movecheck;
-import scpp.parser;
-
-export namespace scpp {
-
-struct ProjectBuildOptions {
-    bool build_lib_only = false;
-    std::optional<std::string> selected_bin;
-    std::optional<std::string> selected_profile;
-    std::optional<std::string> selected_package;
-    bool release = false;
-    bool build_workspace = false;
-};
-
-std::optional<std::filesystem::path> find_project_manifest(const std::filesystem::path& start_dir);
-int build_manifest_project(const std::filesystem::path& start_dir, const ProjectBuildOptions& options);
-
-} // namespace scpp
+#include "ast.h"
+#include "codegen.h"
+#include "driver.h"
+#include "lexer.h"
+#include "movecheck.h"
+#include "parser.h"
 
 namespace {
 
@@ -62,7 +45,7 @@ struct BuildError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-bool trace_enabled() {
+inline bool trace_enabled() {
     static bool enabled = []() {
         const char* env = std::getenv("SCPP_BUILD_TRACE");
         return env != nullptr && env[0] != '\0' && std::string_view(env) != "0";
@@ -70,7 +53,7 @@ bool trace_enabled() {
     return enabled;
 }
 
-void trace_build(const std::string& message) {
+inline void trace_build(const std::string& message) {
     if (!trace_enabled()) return;
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
@@ -79,7 +62,7 @@ void trace_build(const std::string& message) {
               << std::this_thread::get_id() << "] " << message << "\n";
 }
 
-std::string trim(std::string_view text) {
+inline std::string trim(std::string_view text) {
     size_t start = 0;
     while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) start++;
     size_t end = text.size();
@@ -87,14 +70,14 @@ std::string trim(std::string_view text) {
     return std::string(text.substr(start, end - start));
 }
 
-std::filesystem::path normalized_path(const std::filesystem::path& path) {
+inline std::filesystem::path normalized_path(const std::filesystem::path& path) {
     std::error_code ec;
     std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
     if (ec) return std::filesystem::absolute(path).lexically_normal();
     return canonical;
 }
 
-std::string strip_toml_comment(std::string_view line) {
+inline std::string strip_toml_comment(std::string_view line) {
     bool in_string = false;
     bool escape = false;
     std::string out;
@@ -121,7 +104,7 @@ std::string strip_toml_comment(std::string_view line) {
     return out;
 }
 
-std::string parse_string_literal(std::string_view text, const std::string& context) {
+inline std::string parse_string_literal(std::string_view text, const std::string& context) {
     auto parse_multiline_basic_string = [&](std::string_view body) {
         std::string inner(body);
         if (inner.starts_with("\r\n")) {
@@ -195,18 +178,18 @@ std::string parse_string_literal(std::string_view text, const std::string& conte
     return out;
 }
 
-bool starts_multiline_basic_string(std::string_view text) {
+inline bool starts_multiline_basic_string(std::string_view text) {
     std::string value = trim(text);
     return value.size() >= 3 && value.substr(0, 3) == "\"\"\"";
 }
 
-bool closes_multiline_basic_string(std::string_view text) {
+inline bool closes_multiline_basic_string(std::string_view text) {
     if (!starts_multiline_basic_string(text)) return false;
     std::string value = trim(text);
     return value.find("\"\"\"", 3) != std::string::npos;
 }
 
-bool top_level_delimiters_balanced(std::string_view text) {
+inline bool top_level_delimiters_balanced(std::string_view text) {
     int bracket_depth = 0;
     int brace_depth = 0;
     bool in_string = false;
@@ -257,13 +240,13 @@ std::string read_manifest_value(std::string value, std::ifstream& input, int& li
                                                 : ": unterminated multiline TOML collection"));
 }
 
-bool parse_bool_literal(std::string_view text, const std::string& context) {
+inline bool parse_bool_literal(std::string_view text, const std::string& context) {
     if (text == "true") return true;
     if (text == "false") return false;
     throw ManifestError(context + " must be true or false");
 }
 
-int parse_int_literal(std::string_view text, const std::string& context) {
+inline int parse_int_literal(std::string_view text, const std::string& context) {
     std::string value = trim(text);
     if (value.empty()) throw ManifestError(context + " must be an integer");
     size_t parsed = 0;
@@ -278,7 +261,7 @@ int parse_int_literal(std::string_view text, const std::string& context) {
     }
 }
 
-std::vector<std::string> split_top_level(std::string_view text, char delimiter) {
+inline std::vector<std::string> split_top_level(std::string_view text, char delimiter) {
     std::vector<std::string> parts;
     size_t start = 0;
     bool in_string = false;
@@ -314,7 +297,7 @@ std::vector<std::string> split_top_level(std::string_view text, char delimiter) 
     return parts;
 }
 
-std::vector<std::string> parse_string_array(std::string_view text, const std::string& context) {
+inline std::vector<std::string> parse_string_array(std::string_view text, const std::string& context) {
     std::string value = trim(text);
     if (value.size() < 2 || value.front() != '[' || value.back() != ']') {
         throw ManifestError(context + " must be an array of strings");
@@ -328,13 +311,13 @@ std::vector<std::string> parse_string_array(std::string_view text, const std::st
     return items;
 }
 
-std::vector<std::string> parse_string_or_array(std::string_view text, const std::string& context) {
+inline std::vector<std::string> parse_string_or_array(std::string_view text, const std::string& context) {
     std::string value = trim(text);
     if (!value.empty() && value.front() == '[') return parse_string_array(value, context);
     return {parse_string_literal(value, context)};
 }
 
-std::unordered_map<std::string, std::string> parse_inline_table(std::string_view text, const std::string& context) {
+inline std::unordered_map<std::string, std::string> parse_inline_table(std::string_view text, const std::string& context) {
     std::string value = trim(text);
     if (value.size() < 2 || value.front() != '{' || value.back() != '}') {
         throw ManifestError(context + " must be an inline table");
@@ -354,7 +337,7 @@ std::unordered_map<std::string, std::string> parse_inline_table(std::string_view
     return table;
 }
 
-std::string escape_json(std::string_view text) {
+inline std::string escape_json(std::string_view text) {
     std::string out;
     out.reserve(text.size());
     for (char ch : text) {
@@ -369,7 +352,7 @@ std::string escape_json(std::string_view text) {
     return out;
 }
 
-std::string sanitize_filename(std::string_view raw) {
+inline std::string sanitize_filename(std::string_view raw) {
     std::string out;
     out.reserve(raw.size());
     for (unsigned char ch : raw) {
@@ -380,7 +363,7 @@ std::string sanitize_filename(std::string_view raw) {
     return out;
 }
 
-std::string read_file(const std::filesystem::path& path) {
+inline std::string read_file(const std::filesystem::path& path) {
     std::ifstream file(path);
     if (!file) throw std::runtime_error("cannot open file '" + path.string() + "'");
     std::ostringstream buffer;
@@ -388,13 +371,13 @@ std::string read_file(const std::filesystem::path& path) {
     return buffer.str();
 }
 
-void write_file(const std::filesystem::path& path, std::string_view content) {
+inline void write_file(const std::filesystem::path& path, std::string_view content) {
     std::ofstream file(path);
     if (!file) throw std::runtime_error("cannot write file '" + path.string() + "'");
     file << content;
 }
 
-std::string fnv1a64_hex(std::string_view text) {
+inline std::string fnv1a64_hex(std::string_view text) {
     constexpr uint64_t offset_basis = 14695981039346656037ull;
     constexpr uint64_t prime = 1099511628211ull;
     uint64_t value = offset_basis;
@@ -407,11 +390,11 @@ std::string fnv1a64_hex(std::string_view text) {
     return out.str();
 }
 
-std::string digest_file(const std::filesystem::path& path) {
+inline std::string digest_file(const std::filesystem::path& path) {
     return fnv1a64_hex(read_file(path));
 }
 
-std::string join_for_digest(const std::vector<std::string>& values) {
+inline std::string join_for_digest(const std::vector<std::string>& values) {
     std::ostringstream out;
     for (const std::string& value : values) {
         out << value.size() << ":" << value << ";";
@@ -419,7 +402,7 @@ std::string join_for_digest(const std::vector<std::string>& values) {
     return out.str();
 }
 
-std::string path_digest_or_empty(const std::filesystem::path& path) {
+inline std::string path_digest_or_empty(const std::filesystem::path& path) {
     return std::filesystem::exists(path) ? digest_file(path) : std::string();
 }
 
@@ -702,7 +685,7 @@ struct ProjectDiscovery {
     std::optional<ManifestData> workspace_manifest;
 };
 
-ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
+inline ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
     ManifestData manifest;
     manifest.manifest_path = normalized_path(manifest_path);
     manifest.profiles["dev"] = ProfileSettings{0, true, false};
@@ -1005,7 +988,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
     return manifest;
 }
 
-std::regex glob_to_regex(std::string_view pattern) {
+inline std::regex glob_to_regex(std::string_view pattern) {
     std::string regex = "^";
     for (size_t i = 0; i < pattern.size(); i++) {
         char ch = pattern[i];
@@ -1058,7 +1041,7 @@ std::vector<std::filesystem::path> expand_source_patterns(const std::filesystem:
     return std::vector<std::filesystem::path>(paths.begin(), paths.end());
 }
 
-SourceInfo classify_source(const std::filesystem::path& path) {
+inline SourceInfo classify_source(const std::filesystem::path& path) {
     SourceInfo info;
     info.path = normalized_path(path);
     std::string source = read_file(info.path);
@@ -1122,7 +1105,7 @@ SourceInfo classify_source(const std::filesystem::path& path) {
     return info;
 }
 
-std::vector<std::string> topo_sort_modules(const std::map<std::string, SourceInfo>& primary_modules) {
+inline std::vector<std::string> topo_sort_modules(const std::map<std::string, SourceInfo>& primary_modules) {
     std::unordered_map<std::string, std::vector<std::string>> edges;
     std::unordered_map<std::string, int> indegree;
     for (const auto& [name, _] : primary_modules) indegree[name] = 0;
@@ -1160,7 +1143,7 @@ std::vector<std::string> topo_sort_modules(const std::map<std::string, SourceInf
     return order;
 }
 
-std::vector<SourceInfo> classify_target_sources(const std::filesystem::path& manifest_dir, const ManifestTarget& target) {
+inline std::vector<SourceInfo> classify_target_sources(const std::filesystem::path& manifest_dir, const ManifestTarget& target) {
     std::vector<std::filesystem::path> source_paths = expand_source_patterns(manifest_dir, target.source_patterns);
     if (source_paths.empty()) {
         throw BuildError("target sources globs matched no files");
@@ -1173,7 +1156,7 @@ std::vector<SourceInfo> classify_target_sources(const std::filesystem::path& man
     return sources;
 }
 
-std::unordered_set<std::string> local_primary_module_names(const std::vector<SourceInfo>& sources) {
+inline std::unordered_set<std::string> local_primary_module_names(const std::vector<SourceInfo>& sources) {
     std::unordered_set<std::string> names;
     for (const SourceInfo& source : sources) {
         if (source.kind == SourceInfo::Kind::PrimaryInterface) names.insert(source.module_name);
@@ -1181,11 +1164,11 @@ std::unordered_set<std::string> local_primary_module_names(const std::vector<Sou
     return names;
 }
 
-bool source_uses_stdlib(const SourceInfo& source) {
+inline bool source_uses_stdlib(const SourceInfo& source) {
     return std::find(source.imported_modules.begin(), source.imported_modules.end(), "std") != source.imported_modules.end();
 }
 
-bool sources_use_stdlib(const std::vector<SourceInfo>& sources) {
+inline bool sources_use_stdlib(const std::vector<SourceInfo>& sources) {
     return std::any_of(sources.begin(), sources.end(), [](const SourceInfo& source) { return source_uses_stdlib(source); });
 }
 
@@ -1371,7 +1354,7 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
     return outputs;
 }
 
-std::unordered_map<std::string, std::string> to_import_map(const std::vector<BuiltModule>& modules) {
+inline std::unordered_map<std::string, std::string> to_import_map(const std::vector<BuiltModule>& modules) {
     std::unordered_map<std::string, std::string> import_paths;
     for (const BuiltModule& module : modules) import_paths.emplace(module.name, module.interface_path.string());
     return import_paths;
@@ -1393,19 +1376,19 @@ void append_import_maps(std::unordered_map<std::string, std::string>& into,
     }
 }
 
-void append_unique_paths(std::vector<std::filesystem::path>& into, const std::vector<std::filesystem::path>& extra) {
+inline void append_unique_paths(std::vector<std::filesystem::path>& into, const std::vector<std::filesystem::path>& extra) {
     for (const std::filesystem::path& path : extra) {
         if (std::find(into.begin(), into.end(), path) == into.end()) into.push_back(path);
     }
 }
 
-void append_unique_strings(std::vector<std::string>& into, const std::vector<std::string>& extra) {
+inline void append_unique_strings(std::vector<std::string>& into, const std::vector<std::string>& extra) {
     for (const std::string& value : extra) {
         if (std::find(into.begin(), into.end(), value) == into.end()) into.push_back(value);
     }
 }
 
-std::string quote_for_shell(const std::string& text) {
+inline std::string quote_for_shell(const std::string& text) {
     std::string quoted = "\"";
     for (char ch : text) {
         if (ch == '"' || ch == '\\' || ch == '$' || ch == '`') quoted.push_back('\\');
@@ -1415,7 +1398,7 @@ std::string quote_for_shell(const std::string& text) {
     return quoted;
 }
 
-std::optional<std::string> find_program_on_path(const std::string& program) {
+inline std::optional<std::string> find_program_on_path(const std::string& program) {
     if (program.empty()) return std::nullopt;
     const char* path_env = std::getenv("PATH");
     if (path_env == nullptr || path_env[0] == '\0') return std::nullopt;
@@ -1429,7 +1412,7 @@ std::optional<std::string> find_program_on_path(const std::string& program) {
     return std::nullopt;
 }
 
-std::optional<std::string> default_custom_step_cxx() {
+inline std::optional<std::string> default_custom_step_cxx() {
     const char* env = std::getenv("CXX");
     if (env != nullptr && env[0] != '\0') return std::string(env);
     for (const std::string& candidate : {"clang++", "clang++-22", "g++", "c++"}) {
@@ -1440,7 +1423,7 @@ std::optional<std::string> default_custom_step_cxx() {
     return std::nullopt;
 }
 
-void prepare_custom_workdir(const std::filesystem::path& manifest_dir, const std::filesystem::path& work_dir) {
+inline void prepare_custom_workdir(const std::filesystem::path& manifest_dir, const std::filesystem::path& work_dir) {
     std::filesystem::create_directories(work_dir);
     for (const auto& entry : std::filesystem::directory_iterator(manifest_dir)) {
         std::filesystem::path link_path = work_dir / entry.path().filename();
@@ -1459,7 +1442,7 @@ void prepare_custom_workdir(const std::filesystem::path& manifest_dir, const std
     }
 }
 
-std::vector<std::string> path_digests(const std::vector<std::filesystem::path>& paths) {
+inline std::vector<std::string> path_digests(const std::vector<std::filesystem::path>& paths) {
     std::vector<std::string> digests;
     digests.reserve(paths.size());
     for (const std::filesystem::path& path : paths) {
@@ -1468,7 +1451,7 @@ std::vector<std::string> path_digests(const std::vector<std::filesystem::path>& 
     return digests;
 }
 
-std::vector<std::string> expand_native_link_inputs(const ManifestData& manifest) {
+inline std::vector<std::string> expand_native_link_inputs(const ManifestData& manifest) {
     std::vector<std::string> inputs;
     std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
     for (const std::filesystem::path& path : manifest.native.search_paths) {
@@ -1481,25 +1464,25 @@ std::vector<std::string> expand_native_link_inputs(const ManifestData& manifest)
     return inputs;
 }
 
-std::string manifest_digest(const ManifestData& manifest) {
+inline std::string manifest_digest(const ManifestData& manifest) {
     return digest_file(manifest.manifest_path);
 }
 
-std::optional<std::filesystem::path> current_executable_path_local() {
+inline std::optional<std::filesystem::path> current_executable_path_local() {
     std::error_code ec;
     std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
     if (ec) return std::nullopt;
     return normalized_path(exe);
 }
 
-std::string compiler_version_key() {
+inline std::string compiler_version_key() {
     if (std::optional<std::filesystem::path> exe = current_executable_path_local(); exe.has_value()) {
         return digest_file(*exe);
     }
     return "unknown-compiler";
 }
 
-std::vector<std::filesystem::path> manifests_upward(const std::filesystem::path& start_dir) {
+inline std::vector<std::filesystem::path> manifests_upward(const std::filesystem::path& start_dir) {
     std::vector<std::filesystem::path> manifests;
     std::filesystem::path current = normalized_path(start_dir);
     while (true) {
@@ -1513,7 +1496,7 @@ std::vector<std::filesystem::path> manifests_upward(const std::filesystem::path&
     return manifests;
 }
 
-ProjectDiscovery discover_project(const std::filesystem::path& start_dir) {
+inline ProjectDiscovery discover_project(const std::filesystem::path& start_dir) {
     ProjectDiscovery discovery;
     for (const std::filesystem::path& manifest_path : manifests_upward(start_dir)) {
         ManifestData manifest = parse_manifest(manifest_path);
@@ -1526,7 +1509,7 @@ ProjectDiscovery discover_project(const std::filesystem::path& start_dir) {
     return discovery;
 }
 
-ManifestData load_package_manifest(const std::filesystem::path& manifest_path) {
+inline ManifestData load_package_manifest(const std::filesystem::path& manifest_path) {
     ManifestData manifest = parse_manifest(manifest_path);
     if (!manifest.package_name.has_value()) {
         throw ManifestError("dependency manifest '" + manifest.manifest_path.string() + "' does not declare [package]");
@@ -1534,7 +1517,7 @@ ManifestData load_package_manifest(const std::filesystem::path& manifest_path) {
     return manifest;
 }
 
-WorkspaceInfo load_workspace(const ManifestData& workspace_manifest) {
+inline WorkspaceInfo load_workspace(const ManifestData& workspace_manifest) {
     WorkspaceInfo workspace;
     workspace.manifest = workspace_manifest;
     std::filesystem::path root_dir = workspace_manifest.manifest_path.parent_path();
@@ -2246,7 +2229,7 @@ std::vector<ManifestData> select_workspace_packages(const WorkspaceInfo& workspa
 
 } // namespace
 
-export namespace scpp {
+namespace scpp {
 
 std::optional<std::filesystem::path> find_project_manifest(const std::filesystem::path& start_dir) {
     std::vector<std::filesystem::path> manifests = manifests_upward(start_dir);

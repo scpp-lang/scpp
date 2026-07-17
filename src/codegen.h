@@ -1,4 +1,4 @@
-module;
+#pragma once
 
 #include <algorithm>
 #include <cstdint>
@@ -28,12 +28,10 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-export module scpp.codegen;
+#include "ast.h"
+#include "constexpr.h"
 
-import scpp.ast;
-import scpp.constexpr_engine;
-
-export namespace scpp {
+namespace scpp {
 
 struct CodegenError : std::runtime_error {
     explicit CodegenError(const std::string& message, SourceLocation loc = {})
@@ -41,7 +39,7 @@ struct CodegenError : std::runtime_error {
     SourceLocation loc;
 };
 
-[[nodiscard]] bool is_scalar_type_name(const std::string& name) {
+[[nodiscard]] inline bool is_scalar_type_name(const std::string& name) {
     static const std::unordered_set<std::string> scalar_names = {
         "bool", "char", "int", "long", "unsigned int", "unsigned long", "int8_t", "int16_t", "int32_t",
         "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "float", "double", "float32_t", "float64_t",
@@ -49,7 +47,7 @@ struct CodegenError : std::runtime_error {
     return scalar_names.contains(name);
 }
 
-[[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name) {
+[[nodiscard]] inline const EnumDef* find_enum_def(const Program* program, const std::string& name) {
     if (program == nullptr) return nullptr;
     for (const EnumDef& def : program->enums) {
         if (def.name == name) return &def;
@@ -57,7 +55,7 @@ struct CodegenError : std::runtime_error {
     return nullptr;
 }
 
-[[nodiscard]] const EnumVariant* find_enum_variant(const Program* program, const std::string& name,
+[[nodiscard]] inline const EnumVariant* find_enum_variant(const Program* program, const std::string& name,
                                                    const EnumDef** owning_enum = nullptr) {
     if (program == nullptr) return nullptr;
     for (const EnumDef& def : program->enums) {

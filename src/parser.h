@@ -1,4 +1,4 @@
-module;
+#pragma once
 
 #include <algorithm>
 #include <functional>
@@ -10,12 +10,10 @@ module;
 #include <unordered_set>
 #include <vector>
 
-export module scpp.parser;
+#include "lexer.h"
+#include "ast.h"
 
-import scpp.lexer;
-import scpp.ast;
-
-export namespace scpp {
+namespace scpp {
 
 struct ParseError : std::runtime_error {
     ParseError(int line, int column, const std::string& message)
@@ -64,7 +62,7 @@ using ModuleResolver = std::function<const Program&(const std::string&)>;
 // constructed for any caller with no partitions to resolve.
 using PartitionResolver = std::function<Program(const std::string&)>;
 
-[[nodiscard]] size_t next_parser_instance_id() {
+[[nodiscard]] inline size_t next_parser_instance_id() {
     static size_t counter = 0;
     return ++counter;
 }
@@ -6023,13 +6021,13 @@ private:
     }
 };
 
-Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {},
+inline Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {},
               const PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
     Parser parser(std::move(tokens), resolver, partition_resolver, std::move(source_path));
     return parser.parse_program();
 }
 
-Program parse(std::string_view source, const ModuleResolver& resolver = {},
+inline Program parse(std::string_view source, const ModuleResolver& resolver = {},
               const PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
     return parse(tokenize(source), resolver, partition_resolver, std::move(source_path));
 }

@@ -1,7 +1,7 @@
-module scpp.compiler.movecheck;
+#include "movecheck.h"
 
-import :dataflow;
-import :monomorphize;
+#include "compiler/movecheck/dataflow.h"
+#include "compiler/movecheck/monomorphize.h"
 
 namespace scpp {
 

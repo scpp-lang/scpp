@@ -1,4 +1,4 @@
-module;
+#include "cli.h"
 
 #include <filesystem>
 #include <fstream>
@@ -9,15 +9,13 @@ module;
 #include <unordered_map>
 #include <vector>
 
-export module scpp.cli;
-
-import scpp.lexer;
-import scpp.parser;
-import scpp.ast;
-import scpp.codegen;
-import scpp.compiler.movecheck;
-import scpp.driver;
-import scpp.project;
+#include "ast.h"
+#include "codegen.h"
+#include "driver.h"
+#include "lexer.h"
+#include "movecheck.h"
+#include "parser.h"
+#include "project.h"
 
 #ifndef SCPP_VERSION
 #define SCPP_VERSION "0.0.0"
@@ -25,7 +23,7 @@ import scpp.project;
 
 namespace {
 
-std::string_view token_kind_name(scpp::TokenKind kind) {
+inline std::string_view token_kind_name(scpp::TokenKind kind) {
     switch (kind) {
         case scpp::TokenKind::Identifier: return "Identifier";
         case scpp::TokenKind::IntegerLiteral: return "IntegerLiteral";
@@ -116,7 +114,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
 
 std::string type_to_string(const scpp::Type& type);
 
-std::string type_to_string(const scpp::Type& type) {
+inline std::string type_to_string(const scpp::Type& type) {
     switch (type.kind) {
         case scpp::TypeKind::Named: {
             if (type.template_args.empty()) return type.name;
@@ -167,7 +165,7 @@ std::string type_to_string(const scpp::Type& type) {
     return "?";
 }
 
-std::string read_file(std::string_view path) {
+inline std::string read_file(std::string_view path) {
     std::ifstream file{std::string(path)};
     if (!file) {
         throw std::runtime_error("cannot open file '" + std::string(path) + "'");
@@ -177,7 +175,7 @@ std::string read_file(std::string_view path) {
     return buffer.str();
 }
 
-bool require_scpp_input_path(std::string_view path, std::string_view role) {
+inline bool require_scpp_input_path(std::string_view path, std::string_view role) {
     if (std::filesystem::path(std::string(path)).extension() == ".scpp") return true;
     std::cerr << "error: " << role << " must use the .scpp extension, got '" << path << "'\n";
     return false;
@@ -232,7 +230,7 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
     std::cerr << "^\n";
 }
 
-int run_lex(std::string_view path) {
+inline int run_lex(std::string_view path) {
     if (!require_scpp_input_path(path, "input file")) return 1;
     std::string source;
     try {
@@ -252,7 +250,7 @@ int run_lex(std::string_view path) {
     return 0;
 }
 
-std::string_view binary_op_name(scpp::BinaryOp op) {
+inline std::string_view binary_op_name(scpp::BinaryOp op) {
     switch (op) {
         case scpp::BinaryOp::Add: return "+";
         case scpp::BinaryOp::Sub: return "-";
@@ -271,7 +269,7 @@ std::string_view binary_op_name(scpp::BinaryOp op) {
     return "?";
 }
 
-std::string_view unary_op_name(scpp::UnaryOp op) {
+inline std::string_view unary_op_name(scpp::UnaryOp op) {
     switch (op) {
         case scpp::UnaryOp::Neg: return "-";
         case scpp::UnaryOp::Not: return "!";
@@ -281,7 +279,7 @@ std::string_view unary_op_name(scpp::UnaryOp op) {
     return "?";
 }
 
-void print_indent(int depth) {
+inline void print_indent(int depth) {
     for (int i = 0; i < depth; i++) std::cout << "  ";
 }
 
@@ -291,7 +289,7 @@ void print_indent(int depth) {
 // ordinary sub-expressions, so the two are mutually recursive.
 void print_stmt(const scpp::Stmt& stmt, int depth);
 
-void print_expr(const scpp::Expr& expr, int depth) {
+inline void print_expr(const scpp::Expr& expr, int depth) {
     print_indent(depth);
     switch (expr.kind) {
         case scpp::ExprKind::IntegerLiteral:
@@ -434,7 +432,7 @@ void print_expr(const scpp::Expr& expr, int depth) {
     }
 }
 
-void print_stmt(const scpp::Stmt& stmt, int depth) {
+inline void print_stmt(const scpp::Stmt& stmt, int depth) {
     print_indent(depth);
     switch (stmt.kind) {
         case scpp::StmtKind::VarDecl:
@@ -481,7 +479,7 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
     }
 }
 
-int run_parse(std::string_view path) {
+inline int run_parse(std::string_view path) {
     if (!require_scpp_input_path(path, "input file")) return 1;
     std::string source;
     try {
@@ -614,7 +612,7 @@ int run_build_module(std::string_view input_path, std::string_view interface_pat
 
 } // namespace
 
-export namespace scpp {
+namespace scpp {
 
 constexpr std::string_view version = SCPP_VERSION;
 

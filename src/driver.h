@@ -1,4 +1,4 @@
-module;
+#pragma once
 
 #include <array>
 #include <algorithm>
@@ -28,16 +28,14 @@ module;
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
 
-export module scpp.driver;
+#include "ast.h"
+#include "codegen.h"
+#include "constexpr.h"
+#include "lexer.h"
+#include "movecheck.h"
+#include "parser.h"
 
-import scpp.ast;
-import scpp.codegen;
-import scpp.constexpr_engine;
-import scpp.lexer;
-import scpp.compiler.movecheck;
-import scpp.parser;
-
-export namespace scpp {
+namespace scpp {
 
 struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
@@ -64,12 +62,12 @@ struct CompileTimePayloadPlan {
 // compile_to_executable below.
 namespace scpp {
 
-[[nodiscard]] std::string module_key(const Program& program) {
+[[nodiscard]] inline std::string module_key(const Program& program) {
     if (program.partition_name.empty()) return program.module_name;
     return program.module_name + ":" + program.partition_name;
 }
 
-[[nodiscard]] std::optional<std::string> declared_module_name_from_source(std::string_view source) {
+[[nodiscard]] inline std::optional<std::string> declared_module_name_from_source(std::string_view source) {
     std::vector<Token> tokens = tokenize(source);
     size_t i = 0;
     if (i < tokens.size() && tokens[i].kind == TokenKind::KwExport) i++;
@@ -87,7 +85,7 @@ namespace scpp {
     return name;
 }
 
-void write_u32_le(std::ostream& out, std::uint32_t value) {
+inline void write_u32_le(std::ostream& out, std::uint32_t value) {
     std::array<char, 4> bytes = {
         static_cast<char>(value & 0xffu),
         static_cast<char>((value >> 8) & 0xffu),
@@ -100,7 +98,7 @@ void write_u32_le(std::ostream& out, std::uint32_t value) {
 
 namespace {
 
-[[nodiscard]] bool is_exported_generic_type_name(const scpp::Program& program, std::string_view name) {
+[[nodiscard]] inline bool is_exported_generic_type_name(const scpp::Program& program, std::string_view name) {
     for (const scpp::StructDef& def : program.structs) {
         if (!def.is_exported || def.name != name) continue;
         if (!def.template_params.empty()) return true;
@@ -115,7 +113,7 @@ namespace {
     return false;
 }
 
-[[nodiscard]] bool is_compile_time_root(const scpp::Program& program, const scpp::Function& fn) {
+[[nodiscard]] inline bool is_compile_time_root(const scpp::Program& program, const scpp::Function& fn) {
     if (!fn.member_owner_class.empty() && is_exported_generic_type_name(program, fn.member_owner_class)) {
         return true;
     }
@@ -126,7 +124,7 @@ namespace {
     return false;
 }
 
-void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>& out) {
+inline void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>& out) {
     if (type.kind == scpp::TypeKind::Named && !type.name.empty()) out.insert(type.name);
     if (type.pointee) collect_type_names(*type.pointee, out);
     if (type.function_return) collect_type_names(*type.function_return, out);
@@ -164,7 +162,7 @@ void collect_stmt_edges(const scpp::Stmt& stmt, std::unordered_set<std::string>&
     for (const auto& nested : stmt.statements) collect_stmt_edges(*nested, function_names, type_names);
 }
 
-void collect_function_signature_types(const scpp::Function& fn, std::unordered_set<std::string>& type_names) {
+inline void collect_function_signature_types(const scpp::Function& fn, std::unordered_set<std::string>& type_names) {
     collect_type_names(fn.return_type, type_names);
     for (const scpp::Param& param : fn.params) collect_type_names(param.type, type_names);
 }
@@ -205,7 +203,7 @@ void collect_class_reachable_edges(const scpp::ClassDef& def, std::unordered_set
     }
 }
 
-void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
+inline void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
     std::function<void(const Stmt&)> walk_stmt = [&](const Stmt& stmt) {
         if (stmt.init) {
             // nothing to validate inside expressions yet
@@ -221,7 +219,7 @@ void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
 
 } // namespace
 
-CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
+inline CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     CompileTimePayloadPlan plan;
     std::unordered_map<std::string, std::vector<size_t>> function_indices_by_name;
     std::unordered_map<std::string, const EnumDef*> enums_by_name;
@@ -333,23 +331,23 @@ struct LoadedModuleFile {
     std::string compile_time_payload_bytes;
 };
 
-void write_u8(std::ostream& out, std::uint8_t value) { out.put(static_cast<char>(value)); }
+inline void write_u8(std::ostream& out, std::uint8_t value) { out.put(static_cast<char>(value)); }
 
-[[nodiscard]] std::uint8_t read_u8(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::uint8_t read_u8(std::istream& in, const std::string& context) {
     char byte = '\0';
     in.read(&byte, 1);
     if (!in) throw DriverError("invalid " + context + ": truncated byte");
     return static_cast<std::uint8_t>(static_cast<unsigned char>(byte));
 }
 
-void write_i64_le(std::ostream& out, std::int64_t value) {
+inline void write_i64_le(std::ostream& out, std::int64_t value) {
     std::array<char, 8> bytes = {};
     std::uint64_t raw = static_cast<std::uint64_t>(value);
     for (size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((raw >> (8 * i)) & 0xffu);
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
-[[nodiscard]] std::uint32_t read_u32_le(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::uint32_t read_u32_le(std::istream& in, const std::string& context) {
     std::array<unsigned char, 4> bytes = {};
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!in) throw DriverError("invalid " + context + ": truncated u32");
@@ -357,7 +355,7 @@ void write_i64_le(std::ostream& out, std::int64_t value) {
            (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
 }
 
-[[nodiscard]] std::int64_t read_i64_le(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::int64_t read_i64_le(std::istream& in, const std::string& context) {
     std::array<unsigned char, 8> bytes = {};
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!in) throw DriverError("invalid " + context + ": truncated i64");
@@ -366,26 +364,26 @@ void write_i64_le(std::ostream& out, std::int64_t value) {
     return static_cast<std::int64_t>(raw);
 }
 
-void write_double_le(std::ostream& out, double value) {
+inline void write_double_le(std::ostream& out, double value) {
     static_assert(sizeof(double) == sizeof(std::uint64_t));
     std::uint64_t raw = 0;
     std::memcpy(&raw, &value, sizeof(raw));
     write_i64_le(out, static_cast<std::int64_t>(raw));
 }
 
-[[nodiscard]] double read_double_le(std::istream& in, const std::string& context) {
+[[nodiscard]] inline double read_double_le(std::istream& in, const std::string& context) {
     std::uint64_t raw = static_cast<std::uint64_t>(read_i64_le(in, context));
     double value = 0.0;
     std::memcpy(&value, &raw, sizeof(value));
     return value;
 }
 
-void write_string(std::ostream& out, std::string_view text) {
+inline void write_string(std::ostream& out, std::string_view text) {
     write_u32_le(out, static_cast<std::uint32_t>(text.size()));
     out.write(text.data(), static_cast<std::streamsize>(text.size()));
 }
 
-[[nodiscard]] std::string read_string(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::string read_string(std::istream& in, const std::string& context) {
     std::uint32_t size = read_u32_le(in, context + " string length");
     std::string text(size, '\0');
     in.read(text.data(), static_cast<std::streamsize>(size));
@@ -393,13 +391,13 @@ void write_string(std::ostream& out, std::string_view text) {
     return text;
 }
 
-void write_source_location(std::ostream& out, const SourceLocation& loc) {
+inline void write_source_location(std::ostream& out, const SourceLocation& loc) {
     write_i64_le(out, loc.line);
     write_i64_le(out, loc.column);
     write_string(out, loc.source_path_text());
 }
 
-[[nodiscard]] SourceLocation read_source_location(std::istream& in, const std::string& context) {
+[[nodiscard]] inline SourceLocation read_source_location(std::istream& in, const std::string& context) {
     SourceLocation loc;
     loc.line = static_cast<int>(read_i64_le(in, context + " line"));
     loc.column = static_cast<int>(read_i64_le(in, context + " column"));
@@ -409,12 +407,12 @@ void write_source_location(std::ostream& out, const SourceLocation& loc) {
 }
 
 template<typename Enum>
-void write_enum(std::ostream& out, Enum value) {
+inline void write_enum(std::ostream& out, Enum value) {
     write_u8(out, static_cast<std::uint8_t>(value));
 }
 
 template<typename Enum>
-[[nodiscard]] Enum read_enum(std::istream& in, const std::string& context) {
+[[nodiscard]] inline Enum read_enum(std::istream& in, const std::string& context) {
     return static_cast<Enum>(read_u8(in, context));
 }
 
@@ -424,7 +422,7 @@ void write_expr(std::ostream& out, const Expr& expr);
 StmtPtr read_stmt(std::istream& in, const std::string& context);
 void write_stmt(std::ostream& out, const Stmt& stmt);
 
-void write_type(std::ostream& out, const Type& type) {
+inline void write_type(std::ostream& out, const Type& type) {
     write_enum(out, type.kind);
     write_string(out, type.name);
     write_u8(out, type.pointee ? 1u : 0u);
@@ -452,7 +450,7 @@ void write_type(std::ostream& out, const Type& type) {
     write_u8(out, type.is_pack_expansion ? 1u : 0u);
 }
 
-[[nodiscard]] Type read_type(std::istream& in, const std::string& context) {
+[[nodiscard]] inline Type read_type(std::istream& in, const std::string& context) {
     Type type;
     type.kind = read_enum<TypeKind>(in, context + " kind");
     type.name = read_string(in, context + " name");
@@ -487,7 +485,7 @@ void write_type(std::ostream& out, const Type& type) {
     return type;
 }
 
-void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) {
+inline void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) {
     write_string(out, param.name);
     write_string(out, param.concept_name);
     write_u8(out, param.is_pack ? 1u : 0u);
@@ -495,7 +493,7 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
     write_type(out, param.non_type_type);
 }
 
-[[nodiscard]] GenericTypeParam read_generic_type_param(std::istream& in, const std::string& context) {
+[[nodiscard]] inline GenericTypeParam read_generic_type_param(std::istream& in, const std::string& context) {
     GenericTypeParam param;
     param.name = read_string(in, context + " name");
     param.concept_name = read_string(in, context + " concept");
@@ -505,7 +503,7 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
     return param;
 }
 
-void write_param(std::ostream& out, const Param& param) {
+inline void write_param(std::ostream& out, const Param& param) {
     write_type(out, param.type);
     write_string(out, param.name);
     write_string(out, param.generic_concept);
@@ -514,7 +512,7 @@ void write_param(std::ostream& out, const Param& param) {
     write_u8(out, param.is_parameter_pack ? 1u : 0u);
 }
 
-[[nodiscard]] Param read_param(std::istream& in, const std::string& context) {
+[[nodiscard]] inline Param read_param(std::istream& in, const std::string& context) {
     Param param;
     param.type = read_type(in, context + " type");
     param.name = read_string(in, context + " name");
@@ -525,14 +523,14 @@ void write_param(std::ostream& out, const Param& param) {
     return param;
 }
 
-void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
+inline void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
     write_string(out, capture.name);
     write_u8(out, capture.by_reference ? 1u : 0u);
     write_u8(out, capture.init ? 1u : 0u);
     if (capture.init) write_expr(out, *capture.init);
 }
 
-[[nodiscard]] LambdaCapture read_lambda_capture(std::istream& in, const std::string& context) {
+[[nodiscard]] inline LambdaCapture read_lambda_capture(std::istream& in, const std::string& context) {
     LambdaCapture capture;
     capture.name = read_string(in, context + " name");
     capture.by_reference = read_u8(in, context + " by_reference") != 0u;
@@ -540,14 +538,14 @@ void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
     return capture;
 }
 
-void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& arg) {
+inline void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& arg) {
     write_u8(out, arg.is_type ? 1u : 0u);
     write_type(out, arg.type);
     write_u8(out, arg.value ? 1u : 0u);
     if (arg.value) write_expr(out, *arg.value);
 }
 
-[[nodiscard]] ExplicitTemplateArg read_explicit_template_arg(std::istream& in, const std::string& context) {
+[[nodiscard]] inline ExplicitTemplateArg read_explicit_template_arg(std::istream& in, const std::string& context) {
     ExplicitTemplateArg arg;
     arg.is_type = read_u8(in, context + " is_type") != 0u;
     arg.type = read_type(in, context + " type");
@@ -555,7 +553,7 @@ void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& a
     return arg;
 }
 
-void write_expr(std::ostream& out, const Expr& expr) {
+inline void write_expr(std::ostream& out, const Expr& expr) {
     write_enum(out, expr.kind);
     write_source_location(out, expr.loc);
     write_i64_le(out, expr.int_value);
@@ -591,7 +589,7 @@ void write_expr(std::ostream& out, const Expr& expr) {
     if (expr.lambda_body) write_stmt(out, *expr.lambda_body);
 }
 
-ExprPtr read_expr(std::istream& in, const std::string& context) {
+inline ExprPtr read_expr(std::istream& in, const std::string& context) {
     auto expr = std::make_unique<Expr>();
     expr->kind = read_enum<ExprKind>(in, context + " kind");
     expr->loc = read_source_location(in, context + " loc");
@@ -629,7 +627,7 @@ ExprPtr read_expr(std::istream& in, const std::string& context) {
     return expr;
 }
 
-void write_stmt(std::ostream& out, const Stmt& stmt) {
+inline void write_stmt(std::ostream& out, const Stmt& stmt) {
     write_enum(out, stmt.kind);
     write_source_location(out, stmt.loc);
     write_type(out, stmt.type);
@@ -655,7 +653,7 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     write_u8(out, stmt.is_unsafe ? 1u : 0u);
 }
 
-StmtPtr read_stmt(std::istream& in, const std::string& context) {
+inline StmtPtr read_stmt(std::istream& in, const std::string& context) {
     auto stmt = std::make_unique<Stmt>();
     stmt->kind = read_enum<StmtKind>(in, context + " kind");
     stmt->loc = read_source_location(in, context + " loc");
@@ -680,7 +678,7 @@ StmtPtr read_stmt(std::istream& in, const std::string& context) {
     return stmt;
 }
 
-void write_initializer(std::ostream& out, const Initializer& init) {
+inline void write_initializer(std::ostream& out, const Initializer& init) {
     write_u8(out, init.expr ? 1u : 0u);
     if (init.expr) write_expr(out, *init.expr);
     write_u8(out, init.has_brace_args ? 1u : 0u);
@@ -688,7 +686,7 @@ void write_initializer(std::ostream& out, const Initializer& init) {
     for (const ExprPtr& arg : init.brace_args) write_expr(out, *arg);
 }
 
-[[nodiscard]] Initializer read_initializer(std::istream& in, const std::string& context) {
+[[nodiscard]] inline Initializer read_initializer(std::istream& in, const std::string& context) {
     Initializer init;
     if (read_u8(in, context + " expr present") != 0u) init.expr = read_expr(in, context + " expr");
     init.has_brace_args = read_u8(in, context + " brace args present") != 0u;
@@ -698,13 +696,13 @@ void write_initializer(std::ostream& out, const Initializer& init) {
     return init;
 }
 
-void write_member_initializer(std::ostream& out, const MemberInitializer& init) {
+inline void write_member_initializer(std::ostream& out, const MemberInitializer& init) {
     write_string(out, init.member_name);
     write_initializer(out, init.initializer);
     write_source_location(out, init.loc);
 }
 
-[[nodiscard]] MemberInitializer read_member_initializer(std::istream& in, const std::string& context) {
+[[nodiscard]] inline MemberInitializer read_member_initializer(std::istream& in, const std::string& context) {
     MemberInitializer init;
     init.member_name = read_string(in, context + " member name");
     init.initializer = read_initializer(in, context + " initializer");
@@ -712,7 +710,7 @@ void write_member_initializer(std::ostream& out, const MemberInitializer& init) 
     return init;
 }
 
-void write_struct_field(std::ostream& out, const StructField& field) {
+inline void write_struct_field(std::ostream& out, const StructField& field) {
     write_type(out, field.type);
     write_string(out, field.name);
     write_u8(out, field.default_initializer.has_value() ? 1u : 0u);
@@ -720,7 +718,7 @@ void write_struct_field(std::ostream& out, const StructField& field) {
     write_enum(out, field.access);
 }
 
-[[nodiscard]] StructField read_struct_field(std::istream& in, const std::string& context) {
+[[nodiscard]] inline StructField read_struct_field(std::istream& in, const std::string& context) {
     StructField field;
     field.type = read_type(in, context + " type");
     field.name = read_string(in, context + " name");
@@ -731,7 +729,7 @@ void write_struct_field(std::ostream& out, const StructField& field) {
     return field;
 }
 
-void write_class_field(std::ostream& out, const ClassField& field) {
+inline void write_class_field(std::ostream& out, const ClassField& field) {
     write_type(out, field.type);
     write_string(out, field.name);
     write_u8(out, field.default_initializer.has_value() ? 1u : 0u);
@@ -739,7 +737,7 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     write_enum(out, field.access);
 }
 
-[[nodiscard]] ClassField read_class_field(std::istream& in, const std::string& context) {
+[[nodiscard]] inline ClassField read_class_field(std::istream& in, const std::string& context) {
     ClassField field;
     field.type = read_type(in, context + " type");
     field.name = read_string(in, context + " name");
@@ -750,7 +748,7 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     return field;
 }
 
-void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
+inline void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
     write_type(out, base.base_type);
     write_enum(out, base.access);
     write_u8(out, base.is_virtual ? 1u : 0u);
@@ -758,7 +756,7 @@ void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
     write_string(out, base.pack_arg_name);
 }
 
-[[nodiscard]] BaseSpecifier read_base_specifier(std::istream& in, const std::string& context) {
+[[nodiscard]] inline BaseSpecifier read_base_specifier(std::istream& in, const std::string& context) {
     BaseSpecifier base;
     base.base_type = read_type(in, context + " type");
     base.access = read_enum<AccessSpecifier>(in, context + " access");
@@ -768,13 +766,13 @@ void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
     return base;
 }
 
-void write_class_using_declaration(std::ostream& out, const ClassUsingDeclaration& decl) {
+inline void write_class_using_declaration(std::ostream& out, const ClassUsingDeclaration& decl) {
     write_string(out, decl.base_name);
     write_string(out, decl.member_name);
     write_enum(out, decl.access);
 }
 
-[[nodiscard]] ClassUsingDeclaration read_class_using_declaration(std::istream& in, const std::string& context) {
+[[nodiscard]] inline ClassUsingDeclaration read_class_using_declaration(std::istream& in, const std::string& context) {
     ClassUsingDeclaration decl;
     decl.base_name = read_string(in, context + " base name");
     decl.member_name = read_string(in, context + " member name");
@@ -782,19 +780,19 @@ void write_class_using_declaration(std::ostream& out, const ClassUsingDeclaratio
     return decl;
 }
 
-void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
+inline void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
     write_string(out, variant.name);
     write_i64_le(out, variant.value);
 }
 
-[[nodiscard]] EnumVariant read_enum_variant(std::istream& in, const std::string& context) {
+[[nodiscard]] inline EnumVariant read_enum_variant(std::istream& in, const std::string& context) {
     EnumVariant variant;
     variant.name = read_string(in, context + " name");
     variant.value = read_i64_le(in, context + " value");
     return variant;
 }
 
-void write_enum_def(std::ostream& out, const EnumDef& def) {
+inline void write_enum_def(std::ostream& out, const EnumDef& def) {
     write_string(out, def.name);
     write_type(out, def.underlying_type);
     write_u32_le(out, static_cast<std::uint32_t>(def.variants.size()));
@@ -806,7 +804,7 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
     write_string(out, def.owning_module);
 }
 
-[[nodiscard]] EnumDef read_enum_def(std::istream& in, const std::string& context) {
+[[nodiscard]] inline EnumDef read_enum_def(std::istream& in, const std::string& context) {
     EnumDef def;
     def.name = read_string(in, context + " name");
     def.underlying_type = read_type(in, context + " underlying");
@@ -822,7 +820,7 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
     return def;
 }
 
-void write_struct_def(std::ostream& out, const StructDef& def) {
+inline void write_struct_def(std::ostream& out, const StructDef& def) {
     write_string(out, def.name);
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
     for (const StructField& field : def.fields) write_struct_field(out, field);
@@ -842,7 +840,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     write_string(out, def.nodiscard_reason);
 }
 
-[[nodiscard]] StructDef read_struct_def(std::istream& in, const std::string& context) {
+[[nodiscard]] inline StructDef read_struct_def(std::istream& in, const std::string& context) {
     StructDef def;
     def.name = read_string(in, context + " name");
     std::uint32_t field_count = read_u32_le(in, context + " field count");
@@ -867,7 +865,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     return def;
 }
 
-void write_class_def(std::ostream& out, const ClassDef& def) {
+inline void write_class_def(std::ostream& out, const ClassDef& def) {
     write_string(out, def.name);
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
     for (const ClassField& field : def.fields) write_class_field(out, field);
@@ -902,7 +900,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     write_string(out, def.nodiscard_reason);
 }
 
-[[nodiscard]] ClassDef read_class_def(std::istream& in, const std::string& context) {
+[[nodiscard]] inline ClassDef read_class_def(std::istream& in, const std::string& context) {
     ClassDef def;
     def.name = read_string(in, context + " name");
     std::uint32_t field_count = read_u32_le(in, context + " field count");
@@ -949,7 +947,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     return def;
 }
 
-void write_function(std::ostream& out, const Function& fn) {
+inline void write_function(std::ostream& out, const Function& fn) {
     write_type(out, fn.return_type);
     write_string(out, fn.name);
     write_source_location(out, fn.loc);
@@ -987,7 +985,7 @@ void write_function(std::ostream& out, const Function& fn) {
     write_string(out, fn.owning_module);
 }
 
-[[nodiscard]] Function read_function(std::istream& in, const std::string& context) {
+[[nodiscard]] inline Function read_function(std::istream& in, const std::string& context) {
     Function fn;
     fn.return_type = read_type(in, context + " return type");
     fn.name = read_string(in, context + " name");
@@ -1032,7 +1030,7 @@ void write_function(std::ostream& out, const Function& fn) {
     return fn;
 }
 
-[[nodiscard]] bool types_equal_for_payload_merge(const Type& a, const Type& b) {
+[[nodiscard]] inline bool types_equal_for_payload_merge(const Type& a, const Type& b) {
     if (a.kind != b.kind || a.name != b.name || a.array_size != b.array_size ||
         a.is_unsafe_function_pointer != b.is_unsafe_function_pointer || a.is_const_function != b.is_const_function ||
         a.function_ref_qualifier != b.function_ref_qualifier || a.is_mutable_ref != b.is_mutable_ref ||
@@ -1060,7 +1058,7 @@ void write_function(std::ostream& out, const Function& fn) {
     return true;
 }
 
-[[nodiscard]] bool params_equal_for_payload_merge(const std::vector<Param>& a, const std::vector<Param>& b) {
+[[nodiscard]] inline bool params_equal_for_payload_merge(const std::vector<Param>& a, const std::vector<Param>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); i++) {
         if (a[i].name != b[i].name || a[i].generic_concept != b[i].generic_concept ||
@@ -1074,7 +1072,7 @@ void write_function(std::ostream& out, const Function& fn) {
     return true;
 }
 
-[[nodiscard]] bool same_function_identity_for_payload_merge(const Function& a, const Function& b) {
+[[nodiscard]] inline bool same_function_identity_for_payload_merge(const Function& a, const Function& b) {
     return a.name == b.name && types_equal_for_payload_merge(a.return_type, b.return_type) &&
            params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
            a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason &&
@@ -1083,7 +1081,7 @@ void write_function(std::ostream& out, const Function& fn) {
            a.is_defaulted == b.is_defaulted;
 }
 
-[[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
+[[nodiscard]] inline bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
                                                 const std::vector<GenericTypeParam>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); i++) {
@@ -1095,7 +1093,7 @@ void write_function(std::ostream& out, const Function& fn) {
     return true;
 }
 
-[[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) {
+[[nodiscard]] inline bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); i++) {
         if (!types_equal_for_payload_merge(a[i], b[i])) return false;
@@ -1103,13 +1101,13 @@ void write_function(std::ostream& out, const Function& fn) {
     return true;
 }
 
-[[nodiscard]] bool same_struct_identity_for_payload_merge(const StructDef& a, const StructDef& b) {
+[[nodiscard]] inline bool same_struct_identity_for_payload_merge(const StructDef& a, const StructDef& b) {
     return a.name == b.name && a.is_union == b.is_union && a.is_nodiscard == b.is_nodiscard &&
            a.nodiscard_reason == b.nodiscard_reason &&
            same_template_param_shape(a.template_params, b.template_params);
 }
 
-[[nodiscard]] bool same_class_identity_for_payload_merge(const ClassDef& a, const ClassDef& b) {
+[[nodiscard]] inline bool same_class_identity_for_payload_merge(const ClassDef& a, const ClassDef& b) {
     return a.name == b.name && a.is_variadic_primary_template == b.is_variadic_primary_template &&
            a.is_variadic_specialization == b.is_variadic_specialization &&
            a.is_partial_specialization == b.is_partial_specialization &&
@@ -1125,7 +1123,7 @@ struct GenericMethodOwnerRemap {
     std::string class_name;
 };
 
-[[nodiscard]] std::string rewrite_generic_method_name_for_owner(const Function& fn,
+[[nodiscard]] inline std::string rewrite_generic_method_name_for_owner(const Function& fn,
                                                                 const GenericMethodOwnerRemap& remap) {
     std::string old_prefix = remap.class_name + "__" + remap.old_owner_id;
     std::string new_prefix = remap.class_name + "__" + remap.new_owner_id;
@@ -1133,12 +1131,12 @@ struct GenericMethodOwnerRemap {
     return fn.name;
 }
 
-[[nodiscard]] bool is_local_module_enum(const EnumDef& def) { return def.owning_module.empty(); }
-[[nodiscard]] bool is_local_module_struct(const StructDef& def) { return def.owning_module.empty(); }
-[[nodiscard]] bool is_local_module_class(const ClassDef& def) { return def.owning_module.empty(); }
-[[nodiscard]] bool is_local_module_function(const Function& fn) { return fn.owning_module.empty(); }
+[[nodiscard]] inline bool is_local_module_enum(const EnumDef& def) { return def.owning_module.empty(); }
+[[nodiscard]] inline bool is_local_module_struct(const StructDef& def) { return def.owning_module.empty(); }
+[[nodiscard]] inline bool is_local_module_class(const ClassDef& def) { return def.owning_module.empty(); }
+[[nodiscard]] inline bool is_local_module_function(const Function& fn) { return fn.owning_module.empty(); }
 
-[[nodiscard]] std::string serialize_compile_time_payload(const Program& program) {
+[[nodiscard]] inline std::string serialize_compile_time_payload(const Program& program) {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
     if (plan.root_function_names.empty()) return {};
 
@@ -1182,7 +1180,7 @@ struct GenericMethodOwnerRemap {
     return payload.str();
 }
 
-[[nodiscard]] StructuredCompileTimePayload deserialize_compile_time_payload(std::string_view bytes, const std::string& path) {
+[[nodiscard]] inline StructuredCompileTimePayload deserialize_compile_time_payload(std::string_view bytes, const std::string& path) {
     std::istringstream in(std::string(bytes), std::ios::binary);
     char magic[4] = {};
     in.read(magic, sizeof(magic));
@@ -1213,12 +1211,12 @@ struct GenericMethodOwnerRemap {
     return payload;
 }
 
-[[nodiscard]] bool program_requires_structured_payload(const Program& program) {
+[[nodiscard]] inline bool program_requires_structured_payload(const Program& program) {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
     return !plan.root_function_names.empty();
 }
 
-void mark_reachable_hidden_compile_time_dependencies(Program& program) {
+inline void mark_reachable_hidden_compile_time_dependencies(Program& program) {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
     std::unordered_set<size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
                                                           plan.reachable_function_indices.end());
@@ -1246,7 +1244,7 @@ void mark_reachable_hidden_compile_time_dependencies(Program& program) {
     }
 }
 
-void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&& payload) {
+inline void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&& payload) {
     std::vector<GenericMethodOwnerRemap> owner_remaps;
     for (EnumDef& def : payload.enums) {
         if (!def.is_exported) def.is_compile_time_dependency = true;
@@ -1300,7 +1298,7 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     }
 }
 
-void write_scppm_file(const Program& program, std::string_view interface_source, const std::string& path) {
+inline void write_scppm_file(const Program& program, std::string_view interface_source, const std::string& path) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
         throw DriverError("cannot write module interface '" + path + "'");
@@ -1320,7 +1318,7 @@ void write_scppm_file(const Program& program, std::string_view interface_source,
     }
 }
 
-LoadedModuleFile read_module_file(const std::string& path) {
+inline LoadedModuleFile read_module_file(const std::string& path) {
     LoadedModuleFile loaded;
     std::filesystem::path file_path(path);
     if (file_path.extension() != ".scppm") {
@@ -1362,7 +1360,7 @@ LoadedModuleFile read_module_file(const std::string& path) {
     return loaded;
 }
 
-void create_archive(const std::vector<std::string>& object_paths, const std::string& archive_path) {
+inline void create_archive(const std::vector<std::string>& object_paths, const std::string& archive_path) {
     if (object_paths.empty()) {
         throw DriverError("archive command requires at least one object file for '" + archive_path + "'");
     }
@@ -1376,32 +1374,32 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     }
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> current_executable_path() {
+[[nodiscard]] inline std::optional<std::filesystem::path> current_executable_path() {
     std::error_code ec;
     std::filesystem::path path = std::filesystem::read_symlink("/proc/self/exe", ec);
     if (ec) return std::nullopt;
     return path;
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> runtime_default_prebuilt_stdlib_dir() {
+[[nodiscard]] inline std::optional<std::filesystem::path> runtime_default_prebuilt_stdlib_dir() {
     std::optional<std::filesystem::path> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
     return (exe->parent_path() / "libs").lexically_normal();
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> runtime_installed_stdlib_dir() {
+[[nodiscard]] inline std::optional<std::filesystem::path> runtime_installed_stdlib_dir() {
     std::optional<std::filesystem::path> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
     return (exe->parent_path() / ".." / "share" / "scpp" / "libs").lexically_normal();
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> runtime_default_source_stdlib_dir() {
+[[nodiscard]] inline std::optional<std::filesystem::path> runtime_default_source_stdlib_dir() {
     std::optional<std::filesystem::path> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
     return (exe->parent_path() / ".." / "libs").lexically_normal();
 }
 
-[[nodiscard]] std::vector<std::string> build_default_import_search_dirs(const std::vector<std::string>& explicit_dirs) {
+[[nodiscard]] inline std::vector<std::string> build_default_import_search_dirs(const std::vector<std::string>& explicit_dirs) {
     std::vector<std::string> dirs = explicit_dirs;
     auto append_if_missing = [&](std::string path) {
         if (path.empty()) return;
@@ -1428,7 +1426,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     return dirs;
 }
 
-[[nodiscard]] std::vector<std::string> default_stdlib_link_inputs() {
+[[nodiscard]] inline std::vector<std::string> default_stdlib_link_inputs() {
     std::vector<std::string> result;
     auto append_if_exists = [&](const std::filesystem::path& lib_path) {
         if (!std::filesystem::exists(lib_path)) return;
@@ -1449,14 +1447,14 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     return result;
 }
 
-[[nodiscard]] std::string absolute_source_path(const std::string& path) {
+[[nodiscard]] inline std::string absolute_source_path(const std::string& path) {
     std::error_code ec;
     std::filesystem::path absolute = std::filesystem::absolute(path, ec);
     if (ec) return path;
     return absolute.lexically_normal().string();
 }
 
-[[nodiscard]] std::vector<size_t> line_offsets(std::string_view source) {
+[[nodiscard]] inline std::vector<size_t> line_offsets(std::string_view source) {
     std::vector<size_t> offsets = {0};
     for (size_t i = 0; i < source.size(); i++) {
         if (source[i] == '\n') offsets.push_back(i + 1);
@@ -1464,14 +1462,14 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     return offsets;
 }
 
-[[nodiscard]] size_t offset_for_loc(std::string_view source, const SourceLocation& loc) {
+[[nodiscard]] inline size_t offset_for_loc(std::string_view source, const SourceLocation& loc) {
     std::vector<size_t> offsets = line_offsets(source);
     size_t line_index = static_cast<size_t>(std::max(loc.line, 1) - 1);
     if (line_index >= offsets.size()) return source.size();
     return std::min(offsets[line_index] + static_cast<size_t>(std::max(loc.column, 1) - 1), source.size());
 }
 
-[[nodiscard]] size_t find_matching_brace(std::string_view source, size_t open_offset) {
+[[nodiscard]] inline size_t find_matching_brace(std::string_view source, size_t open_offset) {
     bool in_string = false;
     bool in_char = false;
     bool in_line_comment = false;
@@ -1534,7 +1532,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     throw DriverError("failed to locate end of function body while writing module interface");
 }
 
-[[nodiscard]] std::optional<size_t> find_constructor_member_initializer_colon(std::string_view source,
+[[nodiscard]] inline std::optional<size_t> find_constructor_member_initializer_colon(std::string_view source,
                                                                                size_t signature_begin,
                                                                                size_t body_begin) {
     bool in_string = false;
@@ -1605,7 +1603,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     return std::nullopt;
 }
 
-std::string strip_concrete_function_bodies(const Program& program, const std::string& file_path, std::string source) {
+inline std::string strip_concrete_function_bodies(const Program& program, const std::string& file_path, std::string source) {
     struct BodyRange {
         size_t begin;
         size_t end;
@@ -1870,7 +1868,7 @@ private:
     std::vector<std::string> resolution_order_;
 };
 
-[[nodiscard]] std::string trim_copy(std::string_view text) {
+[[nodiscard]] inline std::string trim_copy(std::string_view text) {
     size_t begin = 0;
     while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) begin++;
     size_t end = text.size();
@@ -1878,11 +1876,11 @@ private:
     return std::string(text.substr(begin, end - begin));
 }
 
-[[nodiscard]] bool starts_with(std::string_view text, std::string_view prefix) {
+[[nodiscard]] inline bool starts_with(std::string_view text, std::string_view prefix) {
     return text.substr(0, prefix.size()) == prefix;
 }
 
-[[nodiscard]] std::string partition_path_from_primary(const std::string& module_source_path, const std::string& partition_name) {
+[[nodiscard]] inline std::string partition_path_from_primary(const std::string& module_source_path, const std::string& partition_name) {
     std::filesystem::path module_path(module_source_path);
     std::filesystem::path candidate =
         module_path.parent_path() / partition_name /
@@ -1890,21 +1888,21 @@ private:
     return candidate.string();
 }
 
-[[nodiscard]] bool is_partition_import_line(std::string_view trimmed) {
+[[nodiscard]] inline bool is_partition_import_line(std::string_view trimmed) {
     return starts_with(trimmed, "export import :") || starts_with(trimmed, "import :");
 }
 
-[[nodiscard]] bool is_non_partition_import_line(std::string_view trimmed) {
+[[nodiscard]] inline bool is_non_partition_import_line(std::string_view trimmed) {
     if (is_partition_import_line(trimmed)) return false;
     return starts_with(trimmed, "export import ") || starts_with(trimmed, "import ");
 }
 
-std::string render_module_interface_file(const Program& program, const std::string& file_path,
+inline std::string render_module_interface_file(const Program& program, const std::string& file_path,
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
                                          std::unordered_set<std::string>& expanded_partition_paths);
 
-std::string inline_partition_imports(const Program& program, const std::string& module_source_path, std::string_view source,
+inline std::string inline_partition_imports(const Program& program, const std::string& module_source_path, std::string_view source,
                                      bool keep_concrete_bodies, std::unordered_set<std::string>& expanded_partition_paths) {
     std::ostringstream out;
     size_t line_start = 0;
@@ -1938,7 +1936,7 @@ std::string inline_partition_imports(const Program& program, const std::string& 
     return out.str();
 }
 
-std::string render_module_interface_file(const Program& program, const std::string& file_path,
+inline std::string render_module_interface_file(const Program& program, const std::string& file_path,
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
                                          std::unordered_set<std::string>& expanded_partition_paths) {
@@ -1973,7 +1971,7 @@ std::string render_module_interface_file(const Program& program, const std::stri
     return out.str();
 }
 
-std::string hoist_non_partition_imports(std::string source) {
+inline std::string hoist_non_partition_imports(std::string source) {
     std::vector<std::string> imports;
     std::unordered_set<std::string> seen_imports;
     std::vector<std::string> body_lines;
@@ -2015,7 +2013,7 @@ std::string hoist_non_partition_imports(std::string source) {
     return out.str();
 }
 
-std::string build_merged_interface_source(const Program& program, const std::string& module_source_path,
+inline std::string build_merged_interface_source(const Program& program, const std::string& module_source_path,
                                           bool keep_concrete_bodies) {
     std::unordered_set<std::string> expanded_partition_paths;
     return hoist_non_partition_imports(render_module_interface_file(program, module_source_path, module_source_path,
@@ -2024,7 +2022,7 @@ std::string build_merged_interface_source(const Program& program, const std::str
                                                                     expanded_partition_paths));
 }
 
-llvm::CodeGenOptLevel codegen_opt_level_for(int opt_level) {
+inline llvm::CodeGenOptLevel codegen_opt_level_for(int opt_level) {
     if (opt_level <= 0) return llvm::CodeGenOptLevel::None;
     if (opt_level == 1) return llvm::CodeGenOptLevel::Less;
     if (opt_level == 2) return llvm::CodeGenOptLevel::Default;
@@ -2038,7 +2036,7 @@ llvm::CodeGenOptLevel codegen_opt_level_for(int opt_level) {
 // by compile_to_executable below -- exactly the same backend either way,
 // since by this point a Program is just a Program regardless of which
 // file it came from.
-void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
+inline void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
                                   int opt_level = 2) {
     reject_not_yet_lowerable_constexpr_surface(program);
     // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
@@ -2098,7 +2096,7 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     }
 }
 
-void emit_module_archive_for_program(Program& program, const std::string& archive_path, int opt_level = 2) {
+inline void emit_module_archive_for_program(Program& program, const std::string& archive_path, int opt_level = 2) {
     std::filesystem::path object_path(archive_path);
     object_path.replace_extension(".scppo");
     emit_object_file_for_program(program, object_path.string(), /*emit_debug_info=*/false, opt_level);
@@ -2113,21 +2111,21 @@ void emit_module_archive_for_program(Program& program, const std::string& archiv
 
 } // namespace scpp
 
-export namespace scpp {
+namespace scpp {
 
-std::string host_target_triple() { return llvm::sys::getDefaultTargetTriple(); }
+inline std::string host_target_triple() { return llvm::sys::getDefaultTargetTriple(); }
 
-std::vector<std::string> project_default_stdlib_link_inputs() { return default_stdlib_link_inputs(); }
+inline std::vector<std::string> project_default_stdlib_link_inputs() { return default_stdlib_link_inputs(); }
 
-std::optional<std::filesystem::path> driver_runtime_current_executable_path() { return current_executable_path(); }
+inline std::optional<std::filesystem::path> driver_runtime_current_executable_path() { return current_executable_path(); }
 
-std::optional<std::filesystem::path> driver_runtime_default_prebuilt_stdlib_dir() {
+inline std::optional<std::filesystem::path> driver_runtime_default_prebuilt_stdlib_dir() {
     return scpp::runtime_default_prebuilt_stdlib_dir();
 }
 
-std::optional<std::filesystem::path> driver_runtime_installed_stdlib_dir() { return scpp::runtime_installed_stdlib_dir(); }
+inline std::optional<std::filesystem::path> driver_runtime_installed_stdlib_dir() { return scpp::runtime_installed_stdlib_dir(); }
 
-std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() {
+inline std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() {
     return scpp::runtime_default_source_stdlib_dir();
 }
 
@@ -2140,7 +2138,7 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
 // imported module's *own* separate object file is compile_to_executable's
 // job below, since deciding where to put it needs an executable-level
 // path to derive from.
-void emit_object_file(std::string_view source, const std::string& object_path,
+inline void emit_object_file(std::string_view source, const std::string& object_path,
                        const std::unordered_map<std::string, std::string>& import_paths = {},
                        const std::vector<std::string>& import_search_dirs = {},
                        bool emit_debug_info = false,
@@ -2154,7 +2152,7 @@ void emit_object_file(std::string_view source, const std::string& object_path,
     emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
 }
 
-void emit_module_artifacts(std::string_view source, const std::string& interface_path, const std::string& archive_path,
+inline void emit_module_artifacts(std::string_view source, const std::string& interface_path, const std::string& archive_path,
                            const std::unordered_map<std::string, std::string>& import_paths = {},
                            const std::vector<std::string>& import_search_dirs = {},
                            const std::string& source_path = {},
@@ -2181,7 +2179,7 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
-void archive_objects(const std::vector<std::string>& object_paths, const std::string& archive_path) {
+inline void archive_objects(const std::vector<std::string>& object_paths, const std::string& archive_path) {
     create_archive(object_paths, archive_path);
 }
 
@@ -2193,7 +2191,7 @@ void archive_objects(const std::vector<std::string>& object_paths, const std::st
 // compiled object file, see compile_to_executable below) or
 // `-lname`/`-Lpath` flags a caller wants forwarded straight to the linker;
 // empty by default (an ordinary, no-C++-interop build needs none of this).
-void link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
+inline void link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
                      bool static_link = false) {
     if (link_inputs.empty()) {
         throw DriverError("linker command requires at least one input for '" + executable_path + "'");
@@ -2224,7 +2222,7 @@ void link_executable(const std::vector<std::string>& link_inputs, const std::str
 // §11.13/§11.14's intended "prefer compiled artifacts, fall back to
 // source/interface compilation" model while still letting generic
 // instantiations materialize in the importing file's own object.
-void compile_to_executable(std::string_view source, const std::string& executable_path,
+inline void compile_to_executable(std::string_view source, const std::string& executable_path,
                             const std::vector<std::string>& extra_link_inputs = {},
                             const std::unordered_map<std::string, std::string>& import_paths = {},
                             bool static_link = false,

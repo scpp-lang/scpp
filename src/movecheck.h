@@ -1,13 +1,11 @@
-module;
+#pragma once
 
 #include <stdexcept>
 #include <string>
 
-export module scpp.compiler.movecheck;
+#include "ast.h"
 
-import scpp.ast;
-
-export namespace scpp {
+namespace scpp {
 
 struct DataflowError : std::runtime_error {
     explicit DataflowError(const std::string& message, SourceLocation loc = {})

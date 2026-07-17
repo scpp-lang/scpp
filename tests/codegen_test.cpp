@@ -1,7 +1,7 @@
-import scpp.codegen;
-import scpp.compiler.movecheck;
-import scpp.parser;
-import scpp.ast;
+#include "codegen.h"
+#include "movecheck.h"
+#include "parser.h"
+#include "ast.h"
 
 #include <algorithm>
 #include <filesystem>

@@ -1,4 +1,4 @@
-module;
+#pragma once
 
 #include <cmath>
 #include <cstdint>
@@ -14,11 +14,9 @@ module;
 #include <variant>
 #include <vector>
 
-export module scpp.constexpr_engine;
+#include "ast.h"
 
-import scpp.ast;
-
-export namespace scpp {
+namespace scpp {
 
 struct ConstexprLimits {
     int max_steps = 1000000;
@@ -119,7 +117,7 @@ struct ReturnSignal {
 struct BreakSignal {};
 struct ContinueSignal {};
 
-[[nodiscard]] bool types_equal(const Type& a, const Type& b) {
+[[nodiscard]] inline bool types_equal(const Type& a, const Type& b) {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
         case TypeKind::Named:
@@ -158,7 +156,7 @@ struct ContinueSignal {};
     return false;
 }
 
-[[nodiscard]] Type make_const_char_pointer_type() {
+[[nodiscard]] inline Type make_const_char_pointer_type() {
     Type result;
     result.kind = TypeKind::Pointer;
     result.pointee = std::make_shared<Type>(named_type("char"));
@@ -166,27 +164,27 @@ struct ContinueSignal {};
     return result;
 }
 
-[[nodiscard]] bool is_named_type(const Type& type, std::string_view name) {
+[[nodiscard]] inline bool is_named_type(const Type& type, std::string_view name) {
     return type.kind == TypeKind::Named && type.name == name && type.template_args.empty();
 }
 
-[[nodiscard]] bool is_integral_named_type(std::string_view name) {
+[[nodiscard]] inline bool is_integral_named_type(std::string_view name) {
     return name == "int" || name == "bool" || name == "char" || name == "long" || name == "unsigned int" ||
            name == "unsigned long" || name == "size_t" || name == "ptrdiff_t" || name == "int8_t" ||
            name == "int16_t" || name == "int32_t" || name == "int64_t" || name == "uint8_t" ||
            name == "uint16_t" || name == "uint32_t" || name == "uint64_t";
 }
 
-[[nodiscard]] bool is_integer_like(const Type& type) {
+[[nodiscard]] inline bool is_integer_like(const Type& type) {
     return type.kind == TypeKind::Named && is_integral_named_type(type.name);
 }
 
-[[nodiscard]] bool is_floating_like(const Type& type) {
+[[nodiscard]] inline bool is_floating_like(const Type& type) {
     return type.kind == TypeKind::Named &&
            (type.name == "float" || type.name == "double" || type.name == "float32_t" || type.name == "float64_t");
 }
 
-[[nodiscard]] Type make_pointer_type_to(const Type& pointee, bool is_mutable_pointee) {
+[[nodiscard]] inline Type make_pointer_type_to(const Type& pointee, bool is_mutable_pointee) {
     Type type;
     type.kind = TypeKind::Pointer;
     type.pointee = std::make_shared<Type>(pointee);
@@ -1703,7 +1701,7 @@ private:
     }
 };
 
-[[nodiscard]] const Function* find_consteval_function(const Program& program, const Expr& expr) {
+[[nodiscard]] inline const Function* find_consteval_function(const Program& program, const Expr& expr) {
     if (expr.kind != ExprKind::Call || expr.lhs) return nullptr;
     const Function* only_match = nullptr;
     for (const Function& fn : program.functions) {
@@ -1718,7 +1716,7 @@ private:
     return only_match;
 }
 
-[[nodiscard]] bool expr_depends_on_runtime_bindings(const Expr& expr) {
+[[nodiscard]] inline bool expr_depends_on_runtime_bindings(const Expr& expr) {
     switch (expr.kind) {
         case ExprKind::Identifier:
             return true;
@@ -1744,7 +1742,7 @@ private:
     return false;
 }
 
-void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
+inline void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     if (is_named_type(value->type, "int")) {
         expr.kind = ExprKind::IntegerLiteral;
         expr.int_value = std::get<long long>(value->data);
@@ -1796,7 +1794,7 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     expr.type = value->type;
 }
 
-[[nodiscard]] ConstexprValue snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc) {
+[[nodiscard]] inline ConstexprValue snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc) {
     ConstexprValue snapshot;
     snapshot.type = value->type;
     if (is_named_type(value->type, "void")) {
@@ -1906,7 +1904,7 @@ void collect_runtime_expr_rewrites(const Program& program, Expr& expr, Constexpr
     }
 }
 
-void rewrite_consteval_if_for_runtime(Stmt& stmt) {
+inline void rewrite_consteval_if_for_runtime(Stmt& stmt) {
     if (stmt.kind != StmtKind::If || stmt.if_mode == IfMode::Runtime) return;
     SourceLocation loc = stmt.loc;
     IfMode mode = stmt.if_mode;
@@ -1927,7 +1925,7 @@ void rewrite_consteval_if_for_runtime(Stmt& stmt) {
 
 } // namespace
 
-void fold_immediate_calls(Program& program, ConstexprLimits limits) {
+inline void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     ConstexprEngine engine(program, limits);
     std::vector<ExprRewrite> expr_rewrites;
     std::vector<Stmt*> consteval_if_rewrites;
@@ -1952,7 +1950,7 @@ void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     }
 }
 
-ConstexprValue evaluate_immediate_expr(const Program& program, const Expr& expr, ConstexprLimits limits) {
+inline ConstexprValue evaluate_immediate_expr(const Program& program, const Expr& expr, ConstexprLimits limits) {
     ConstexprEngine engine(program, limits);
     return snapshot_constexpr_value(engine.evaluate_root_expr(expr), expr.loc);
 }

@@ -1,8 +1,8 @@
-import scpp.driver;
-import scpp.parser;
-import scpp.compiler.movecheck;
-import scpp.codegen;
-import scpp.ast;
+#include "driver.h"
+#include "parser.h"
+#include "movecheck.h"
+#include "codegen.h"
+#include "ast.h"
 
 #include <algorithm>
 #include <chrono>

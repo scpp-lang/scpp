@@ -1,17 +1,17 @@
-module;
+#pragma once
 
 #include <algorithm>
 #include <cstdint>
-#include <optional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
-#include <vector>
 #include <utility>
+#include <vector>
 
-export module scpp.ast;
+namespace scpp {
 
-export namespace scpp {
 
 struct Expr;
 struct Stmt;
