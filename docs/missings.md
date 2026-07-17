@@ -11,6 +11,14 @@ syntax is not real C++, scpp should not invent it.
 The list below was re-audited against current `main`; fixed items should be
 removed instead of left behind as historical noise.
 
+## In progress / recently specified
+
+- Standard C++ `alignas` support is now specified in
+  `docs/spec/en/05-unions-and-packed-layout.md` together with its companion
+  `alignof(type-id)` query. Parser/semantic/codegen/test work still needs to
+  land, but this gap is now tracked as an implementation follow-up rather than
+  an unspecified hole.
+
 ## Language/Syntax Gaps (current focus)
 
 These items need real compiler work: parser, semantic analysis, borrow/type

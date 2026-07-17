@@ -108,7 +108,10 @@ support:
   (6.2) calls to `consteval` functions and constructors; and
 
   (6.3) arithmetic and comparison operations on integer, character, and
-  floating-point operands.
+  floating-point operands; and
+
+  (6.4) `sizeof(type-id)`, `sizeof(expression)`, and `alignof(type-id)`
+  queries whose operands are otherwise well-formed.
 
 ## 7.3 Unsupported operations [expr.const.scpp.unsupported]
 
