@@ -61,26 +61,7 @@ target_compile_features(scpp_mir PRIVATE cxx_std_23)
 
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
-add_library(scpp_codegen)
-target_sources(scpp_codegen
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/compiler/codegen/codegen.cppm
-            src/compiler/codegen/errors.cppm
-            src/compiler/codegen/api.cppm
-            src/compiler/codegen/orchestration.cppm
-            src/compiler/codegen/debug.cppm
-            src/compiler/codegen/semantics.cppm
-            src/compiler/codegen/layout.cppm
-            src/compiler/codegen/object_model.cppm
-            src/compiler/codegen/functions.cppm
-            src/compiler/codegen/expressions.cppm
-            src/compiler/codegen/lifetime.cppm
-            src/compiler/codegen/statements.cppm)
-target_include_directories(scpp_codegen SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
-target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
-target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr ${LLVM_LIBS})
-target_compile_features(scpp_codegen PRIVATE cxx_std_23)
+add_subdirectory(src/compiler/codegen)
 
 add_subdirectory(src/compiler/movecheck)
 
