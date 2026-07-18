@@ -7,7 +7,7 @@ namespace std {
 export template<typename E>
 class unexpected {
 private:
-    std::storage_for<E> error_storage_{};
+    alignas(E) char error_storage_[sizeof(E)]{};
 
 public:
     unexpected(E error) {
@@ -41,7 +41,7 @@ export template<typename T, typename E>
 class [[nodiscard("expected results must be checked")]] expected {
 private:
     bool has_value_{};
-    std::storage_for<T, E> storage_{};
+    alignas(T) alignas(E) char storage_[sizeof(T) > sizeof(E) ? sizeof(T) : sizeof(E)]{};
 
 public:
     expected(T value) {

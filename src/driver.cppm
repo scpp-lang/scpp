@@ -449,6 +449,15 @@ void write_type(std::ostream& out, const Type& type) {
     write_u8(out, type.element ? 1u : 0u);
     if (type.element) write_type(out, *type.element);
     write_i64_le(out, type.array_size);
+    // ch05 §9.4: a still-generic exported class/struct's field may have an
+    // array bound that's deliberately left unresolved until an importing
+    // module's own monomorphization substitutes a concrete type in for the
+    // template parameter it depends on (e.g. `char storage[sizeof(T)]`) --
+    // array_size stays 0 and array_size_expr must round-trip through
+    // .scppm so the importer has something to substitute into, exactly
+    // like non_type_args below.
+    write_u8(out, type.array_size_expr ? 1u : 0u);
+    if (type.array_size_expr) write_expr(out, *type.array_size_expr);
     write_u8(out, type.function_return ? 1u : 0u);
     if (type.function_return) write_type(out, *type.function_return);
     write_u32_le(out, static_cast<std::uint32_t>(type.function_params.size()));
@@ -476,6 +485,9 @@ void write_type(std::ostream& out, const Type& type) {
     if (read_u8(in, context + " pointee present") != 0u) type.pointee = std::make_shared<Type>(read_type(in, context + " pointee"));
     if (read_u8(in, context + " element present") != 0u) type.element = std::make_shared<Type>(read_type(in, context + " element"));
     type.array_size = read_i64_le(in, context + " array size");
+    if (read_u8(in, context + " array size expr present") != 0u) {
+        type.array_size_expr = std::shared_ptr<Expr>(read_expr(in, context + " array size expr").release());
+    }
     if (read_u8(in, context + " function return present") != 0u) {
         type.function_return = std::make_shared<Type>(read_type(in, context + " function return"));
     }

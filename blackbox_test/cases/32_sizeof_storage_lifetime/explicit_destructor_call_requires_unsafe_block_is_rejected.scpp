@@ -11,7 +11,7 @@ public:
 int main() {
     Box* p{};
     [[scpp::unsafe]] {
-        std::storage_for<Box> slot{};
+        alignas(Box) char slot[sizeof(Box)]{};
         p = (Box*)&slot;
         new (p) Box();
     }

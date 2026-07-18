@@ -1544,19 +1544,6 @@ struct TypeLayoutInfo {
             return std::nullopt;
         }
 
-        [[nodiscard]] std::optional<TypeLayoutInfo> storage_for_layout(const Type& current) {
-            if (current.template_args.empty()) return std::nullopt;
-            std::uint64_t max_size = 0;
-            std::uint64_t max_align = 1;
-            for (const Type& candidate : current.template_args) {
-                std::optional<TypeLayoutInfo> candidate_layout = (*this)(candidate);
-                if (!candidate_layout.has_value()) return std::nullopt;
-                max_size = std::max(max_size, candidate_layout->size_bytes);
-                max_align = std::max(max_align, candidate_layout->abi_align_bytes);
-            }
-            return TypeLayoutInfo{align_up(max_size, max_align), max_align};
-        }
-
         [[nodiscard]] std::optional<TypeLayoutInfo> operator()(const Type& current) {
             switch (current.kind) {
                 case TypeKind::Pointer:
@@ -1591,7 +1578,6 @@ struct TypeLayoutInfo {
                 case TypeKind::Named: {
                     if (current.name == "void") return std::nullopt;
                     if (std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name)) return scalar;
-                    if (current.name == "std::storage_for") return storage_for_layout(current);
                     if (const EnumDef* def = find_enum(current.name)) return (*this)(def->underlying_type);
                     if (visiting_named_types.contains(current.name)) return std::nullopt;
                     visiting_named_types.insert(current.name);
@@ -1654,6 +1640,19 @@ struct TypeLayoutInfo {
                             }
                             offset = base_layout->size_bytes;
                             overall_align = std::max(overall_align, base_layout->abi_align_bytes);
+                        }
+                        // Mirrors Codegen::declare_class's `has_ordinary_vtable &&
+                        // llvm_field_types.empty()` check: every non-interface class
+                        // gets an implicit leading vtable pointer *unless* an ordinary
+                        // base already contributed one (offset > 0 here means the base
+                        // already supplied at least a vtable pointer and/or fields).
+                        // Omitting this made sizeof()/alignof() disagree with the real,
+                        // ABI object size for any class with a vtable (i.e. virtually
+                        // every class, since a virtual destructor is mandatory --
+                        // ch11 §11.5(1)), silently under-reporting size by one pointer.
+                        if (!def->is_interface && offset == 0) {
+                            offset = target.pointer_size_bytes;
+                            overall_align = std::max(overall_align, target.pointer_align_bytes);
                         }
                         for (const ClassField& field : def->fields) {
                             std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
