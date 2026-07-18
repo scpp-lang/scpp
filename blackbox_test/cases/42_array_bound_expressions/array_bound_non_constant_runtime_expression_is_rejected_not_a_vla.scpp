@@ -1,0 +1,15 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(5) and its note: "If
+// the array-bound constant-expression is not a constant expression, the
+// program is ill-formed ... This document does not thereby introduce
+// variable-length arrays: ... an array-bound constant-expression that is
+// not a constant expression remains ill-formed in SCPP26, exactly as in
+// strict ISO C++." A non-`const`, non-`constexpr` local variable is not
+// usable in a constant expression, so it must be rejected with a clean
+// diagnostic -- not silently accepted as a VLA now that the parser
+// accepts arbitrary expressions in this position.
+int main() {
+    int n = 5;
+    char runtime_bound[n];
+    runtime_bound[0] = 'a';
+    return 0;
+}

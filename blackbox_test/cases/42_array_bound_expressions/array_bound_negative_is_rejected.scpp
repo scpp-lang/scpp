@@ -1,0 +1,11 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(4) and (8)'s rejected
+// example: "that value shall be greater than zero"; `char
+// negative_bound[-1];` is explicitly listed as ill-formed. Unlike an
+// ordinary unsigned-conversion wraparound, the array bound's own
+// converted-constant-expression rules reject a negative value outright
+// rather than silently reinterpreting it as a huge unsigned size.
+int main() {
+    char negative_bound[-1];
+    negative_bound[0] = 'a';
+    return 0;
+}
