@@ -1,0 +1,30 @@
+import std;
+// Current raw-storage semantics: an `alignas`-qualified `char` array sized by
+// a constant expression is sized and aligned to hold whichever candidate
+// type is largest -- the standard, non-deprecated replacement for the
+// removed `std::storage_for<T, U, ...>` compiler builtin.
+class Box {
+    public:
+        virtual ~Box() { return; }
+public:
+    alignas(int) alignas(long) char slot[sizeof(int) > sizeof(long) ? sizeof(int) : sizeof(long)]{};
+
+    int payload_size() const {
+        return static_cast<int>(sizeof(this->slot));
+    }
+};
+
+struct Holder {
+    char tag;
+    alignas(int) alignas(long) char slot[sizeof(int) > sizeof(long) ? sizeof(int) : sizeof(long)];
+    char tail;
+};
+
+int main() {
+    Box box{};
+    if (box.payload_size() != 8) return 1;
+    alignas(int) alignas(long) char standalone_slot[sizeof(int) > sizeof(long) ? sizeof(int) : sizeof(long)];
+    if (sizeof(standalone_slot) != 8) return 2;
+    if (sizeof(Holder) != 24) return 3;
+    return 0;
+}

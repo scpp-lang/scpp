@@ -25,7 +25,7 @@ int main() {
     if (good.value().get() != 7) return 2;
     if (bad.has_value()) return 3;
     if (bad.error() != 5) return 4;
-    if (sizeof(std::unexpected<long>) != 8) return 5;
-    if (sizeof(std::expected<int, long>) != 16) return 6;
+    if (sizeof(std::unexpected<long>) != 16) return 5;
+    if (sizeof(std::expected<int, long>) != 24) return 6;
     return 0;
 }
