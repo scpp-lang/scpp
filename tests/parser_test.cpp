@@ -1227,7 +1227,14 @@ void test_array_field_and_subscript() {
     const scpp::StructDef& def = program.structs[0];
     const scpp::Type& values_type = def.fields[0].type;
     expect(values_type.kind == scpp::TypeKind::Array, "array_field_and_subscript: field should be an Array type");
-    expect(values_type.array_size == 4, "array_field_and_subscript: array size should be 4");
+    // ch05 §9.4: the parser only captures the bound as a deferred
+    // constant-expression (`array_size_expr`); it is resolved into
+    // `array_size` later, by the constant-expression evaluation pipeline
+    // -- not by the parser itself.
+    expect(values_type.array_size_expr != nullptr &&
+               values_type.array_size_expr->kind == scpp::ExprKind::IntegerLiteral &&
+               values_type.array_size_expr->int_value == 4,
+           "array_field_and_subscript: array_size_expr should be IntegerLiteral 4");
     expect(values_type.element != nullptr && is_named_type(*values_type.element, "int"),
            "array_field_and_subscript: element type should be 'int'");
 
@@ -1262,8 +1269,10 @@ void test_local_array_declaration() {
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "local_array_declaration: statement 0 should be VarDecl");
-    expect(decl.type.kind == scpp::TypeKind::Array && decl.type.array_size == 8,
-           "local_array_declaration: type should be an Array of size 8");
+    expect(decl.type.kind == scpp::TypeKind::Array && decl.type.array_size_expr != nullptr &&
+               decl.type.array_size_expr->kind == scpp::ExprKind::IntegerLiteral &&
+               decl.type.array_size_expr->int_value == 8,
+           "local_array_declaration: type should be an Array with array_size_expr IntegerLiteral 8");
     expect(decl.type.element != nullptr && is_named_type(*decl.type.element, "int"),
            "local_array_declaration: element type should be 'int'");
 }
