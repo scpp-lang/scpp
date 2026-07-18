@@ -1787,9 +1787,21 @@ public:
         resolving_.insert(module_name);
         std::string resolved_path = absolute_source_path(path_it->second);
         LoadedModuleFile loaded = read_module_file(resolved_path);
+        // Stamps every SourceLocation this parse() produces (see
+        // ParseError's and parse_primary()'s own comments) with
+        // path_it->second -- the path exactly as given via `--import
+        // name=path` (or as inferred by -I search) -- rather than
+        // `resolved_path`, so a diagnostic rooted in this file prints
+        // that same as-given spelling instead of silently rewriting it
+        // to an absolute path (cli.cppm's print_diagnostic, and this
+        // file's own entry-point parse() call below, agree on this
+        // convention). `resolved_path` remains the absolute form used
+        // for internal bookkeeping below (cache dedup, module-object
+        // naming, archive lookup) where deduplicating equivalent paths
+        // genuinely matters.
         Program imported = parse(
             loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
-            [this](const std::string& key) -> Program { return resolve_partition(key); }, resolved_path);
+            [this](const std::string& key) -> Program { return resolve_partition(key); }, path_it->second);
         imported.source_path = resolved_path;
         if (loaded.has_compile_time_payload) {
             merge_compile_time_payload(imported,
@@ -1848,10 +1860,16 @@ public:
             throw DriverError("partition import path '" + path_it->second +
                               "' must use a source .scpp file, not a compiled .scppm artifact");
         }
+        // path_it->second (not an absolute_source_path()-normalized
+        // form) so this partition's own SourceLocations preserve
+        // whatever spelling resolved it -- see resolve()'s matching
+        // comment above; partition.source_path just below is still the
+        // absolute form internal bookkeeping (e.g. resolved_paths_) can
+        // rely on.
         Program partition = parse(
             loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
             [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); },
-            absolute_source_path(path_it->second));
+            path_it->second);
         partition.source_path = absolute_source_path(path_it->second);
         partitions_resolving_.erase(key);
 

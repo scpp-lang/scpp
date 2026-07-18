@@ -3169,6 +3169,81 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_import_relative_path_diagnostic_uses_as_given_spelling";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_import_relative_path_diagnostic_uses_as_given_spelling";
+        std::filesystem::path module_path = root / "lib.scpp";
+        std::filesystem::path source_path = root / "main.scpp";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        // ch11 §11.5: an exported function's namespace must match its own
+        // module's name -- deliberately violated here so the error is
+        // rooted in lib.scpp itself, not main.scpp.
+        write_text_file(module_path,
+                        "export module lib;\n"
+                        "namespace wrong {\n"
+                        "    export int helper() { return 1; }\n"
+                        "}\n");
+        write_text_file(source_path, "import lib;\nint main() { return lib::helper(); }\n");
+        // `cd` into root and use bare relative arguments below (unlike
+        // every other test in this file, which prefixes every path with
+        // std::filesystem::current_path()) -- the bug this regresses only
+        // manifests when --import name=path is given a bare/relative
+        // spelling, exactly like an ordinary entry-file argument.
+        RunResult build_result = run_command_capture("cd " + root.string() + " && " + std::string(SCPP_BINARY_PATH) +
+                                                     " main.scpp -o app --import lib=lib.scpp 2>&1");
+        expect(build_result.exit_code != 0,
+               case_name + ": expected the namespace/module mismatch to fail the build");
+        // Before this fix, a diagnostic rooted in an imported file always
+        // printed a fully-resolved absolute path even when --import
+        // name=path was given a bare relative one, unlike an equivalent
+        // entry-file diagnostic -- see driver.cppm's ModuleCache::resolve.
+        expect(build_result.stdout_text.rfind("lib.scpp:", 0) == 0,
+               case_name + ": expected diagnostic to start with the as-given relative path 'lib.scpp:', got '" +
+                   build_result.stdout_text + "'");
+        expect(build_result.stdout_text.find(root.string()) == std::string::npos,
+               case_name + ": expected diagnostic to omit the absolute directory entirely, got '" +
+                   build_result.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_import_partition_relative_path_diagnostic_uses_as_given_spelling";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_import_partition_relative_path_diagnostic_uses_as_given_spelling";
+        std::filesystem::path partition_dir = root / "part";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(partition_dir);
+        write_text_file(root / "mymod.scpp", "export module mymod;\nimport :part;\n");
+        // A plain parse error, unconditionally caught while resolving the
+        // partition regardless of whether anything in it is ever called.
+        write_text_file(partition_dir / "mymod_part.scpp",
+                        "module mymod:part;\n"
+                        "int broken() {\n"
+                        "    return 1 +;\n"
+                        "}\n");
+        write_text_file(root / "main.scpp", "import mymod;\nint main() { return 0; }\n");
+        RunResult build_result = run_command_capture(
+            "cd " + root.string() + " && " + std::string(SCPP_BINARY_PATH) +
+            " main.scpp -o app --import mymod=mymod.scpp -I . 2>&1");
+        expect(build_result.exit_code != 0, case_name + ": expected the partition parse error to fail the build");
+        // Same bug as the sibling case above, but for a same-module
+        // partition (`import :part;`, resolved by ModuleCache::
+        // resolve_partition) inferred from a bare relative --import path
+        // rather than an explicit `module:partition=path` mapping.
+        expect(build_result.stdout_text.rfind("part/mymod_part.scpp:", 0) == 0,
+               case_name +
+                   ": expected diagnostic to start with the as-given relative path 'part/mymod_part.scpp:', got '" +
+                   build_result.stdout_text + "'");
+        expect(build_result.stdout_text.find(root.string()) == std::string::npos,
+               case_name + ": expected diagnostic to omit the absolute directory entirely, got '" +
+                   build_result.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_build_with_I_resolves_module";
         std::filesystem::path source_path = std::filesystem::current_path() / "cli_build_with_I_resolves_module.scpp";
         std::filesystem::path module_dir = std::filesystem::current_path() / "cli_build_with_I_resolves_module_dir";
