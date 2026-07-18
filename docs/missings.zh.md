@@ -21,6 +21,26 @@
 - 大部分 ISO `alignas` / `alignof(type-id)` 支持已经落地，但文件作用域上的
   变量声明只要写 `alignas` 仍会被拒绝；同样的写法放在局部变量或 class 声明上则
   已经可以工作。
+- `alignas`/`alignof` 还不能在一个泛型 class/function 自己的定义体内，把该
+  泛型自身的模板类型参数当作 type-id 操作数使用（例如 `alignas(T)`、
+  `alignas(alignof(T))`）：alignment 的求解会无条件遍历程序里的每一个
+  struct/class/function ——包括 monomorphization 特意保持未解析状态的、仍
+  处于泛型状态的模板定义本身——而且对于一个暂时无法解析的操作数类型没有任何回
+  退处理，这与同一遍处理里普通字段布局计算的做法不同。这使得直接在库代码里
+  写一个泛型的对齐存储缓冲区（`alignas(T) uint8_t buf[N];`）行不通，即便每
+  一个具体实例化本身都能正常解析。
+- 数组声明符的大小（`T name[N]`）必须是一个字面量整数 token；不接受任何
+  constant-expression，哪怕是对一个已经具体、非泛型类型写
+  `sizeof(SomeConcreteType)` 也不行——所以 alignment 规范里已经列为
+  accepted 的写法（`alignas(block) unsigned char scratch[sizeof(block)];`，
+  见 docs/spec/en/05-unions-and-packed-layout.md §9.3(12)）目前其实还编译
+  不过。
+- 泛型（模板化）的 `union` 声明会被直接拒绝（"generic unions are not
+  supported in this version"），这与泛型 `struct`/`class` 不同，因此 union
+  也还不能用某个泛型库类型自己的类型参数来参数化。加上前面两个缺口，这就是
+  `std::expected` 的可辨识联合存储目前仍需要依赖编译器特判、非标准的
+  `std::storage_for<T, ...>` 内置类型，而不能用普通的 `alignas`+数组或
+  union 库代码实现的原因。
 - 规范现在已经显式允许在 `requires(...)` probe parameter 上使用具名生命周期组和
   `[[scpp::lifetime(generic)]]`；但编译器仍然还不能在这个 probe-parameter
   位置解析该 attribute。
