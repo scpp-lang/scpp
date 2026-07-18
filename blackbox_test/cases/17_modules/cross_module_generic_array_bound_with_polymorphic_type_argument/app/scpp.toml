@@ -1,0 +1,12 @@
+manifest-version = 1
+
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+libbox = { path = "../libbox" }
+
+[[bin]]
+name = "app"
+sources = ["src/**/*.scpp"]

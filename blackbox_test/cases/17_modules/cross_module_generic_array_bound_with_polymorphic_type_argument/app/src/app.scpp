@@ -1,0 +1,58 @@
+import libbox;
+
+// Regression coverage for a real, previously-shipped compiler bug (fixed
+// alongside the std::storage_for -> alignas+array replacement): the
+// `.scppm` cross-module binary format only ever serialized a field's
+// *resolved* `array_size` integer, never its *unresolved* `array_size_expr`
+// expression tree. `libbox::Box<T>`'s `storage` field is exactly such a
+// field -- still generic (`T` unresolved) inside libbox's own compiled
+// module -- so before the fix, importing `libbox` here and instantiating
+// `Box<Gadget>` permanently froze `array_size` at 0 (confirmed empirically
+// against the pre-fix compiler: `storage_size()` returned 0 instead of
+// `sizeof(Gadget)`), producing an undersized LLVM array type. `Gadget` is
+// polymorphic (every scpp `class` mandates a virtual destructor, ch11
+// §11.5(1)), matching the real crash this reproduces (scpp::rand's
+// cross-module `std::expected<uniform_int_distribution<int>, error>`
+// usage).
+//
+// This needs a genuine `.scppm` binary round trip to exercise the bug at
+// all -- an ordinary `main.imports`-style `--import name=path.scpp`
+// mapping compiles the imported module's *source* on the fly, with no
+// serialization step at all (see this suite's own run_tests.cpp header
+// comment), so it cannot reach this code path. A workspace path-dependency
+// build (`scpp build --workspace`, following the pattern in
+// cases/29_project_build/workspace_build_workspace_builds_path_dependencies_end_to_end/)
+// does: it compiles `libbox` to a real `libbox.scppm` interface first, then
+// compiles `app` importing that already-compiled artifact -- exactly like
+// a real multi-package project, and the only way within this suite's
+// harness to genuinely exercise `write_type`/`read_type`.
+class Gadget {
+public:
+    virtual ~Gadget() { return; }
+    char tag{};
+    long value{};
+
+    long get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    libbox::Box<Gadget> box{};
+    // vtable(8) + tag(1) + pad(7) + value(8) = 24.
+    if (box.storage_size() != static_cast<int>(sizeof(Gadget))) return 1;
+    if (box.storage_size() != 24) return 2;
+
+    // Construct a real `Gadget` inside the cross-module-imported generic
+    // storage and use it, mirroring how std::expected places a real value
+    // inside its own inline storage -- if the storage were undersized (as
+    // it was pre-fix, frozen at 0 bytes), this would corrupt memory rather
+    // than merely miscompute a sizeof.
+    [[scpp::unsafe]] {
+        Gadget* p = new ((Gadget*)&box.storage) Gadget();
+        p->value = 42;
+        if (p->get() != 42) return 3;
+        p->~Gadget();
+    }
+    return 0;
+}

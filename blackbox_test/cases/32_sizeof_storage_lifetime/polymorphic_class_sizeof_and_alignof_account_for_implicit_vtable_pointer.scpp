@@ -1,0 +1,36 @@
+// src/ast.cppm regression: `layout_of_type` previously never accounted for
+// the implicit vtable pointer every polymorphic class carries (every scpp
+// `class` mandates an explicit virtual destructor, ch11 §11.5(1)), so
+// `sizeof`/`alignof` silently under-reported size and alignment for
+// essentially any `class` with fields following the vtable slot. `CharOnly`
+// isolates the purest case of this: its only data member (`char`, alignment
+// 1) would size/align the class as a 1-byte, 1-byte-aligned type if the
+// vtable pointer were ignored, but the leading vtable pointer alone (8
+// bytes, 8-byte aligned on this target) actually determines both the
+// class's overall alignment and, after padding, its size. `MultiField`
+// checks the same fix where a wider field (`long`) is also present,
+// following the vtable slot.
+class CharOnly {
+public:
+    virtual ~CharOnly() { return; }
+    char value{};
+};
+
+class MultiField {
+public:
+    virtual ~MultiField() { return; }
+    char c{};
+    long value{};
+};
+
+int main() {
+    // vtable(8, align 8) + value(1) = 9, rounded up to the class's own
+    // 8-byte alignment => size 16. Ignoring the vtable pointer would give
+    // alignof 1 and sizeof 1 instead.
+    if (alignof(CharOnly) != 8) return 1;
+    if (sizeof(CharOnly) != 16) return 2;
+    // vtable(8) + c(1) + pad(7) + value(8) = 24.
+    if (alignof(MultiField) != 8) return 3;
+    if (sizeof(MultiField) != 24) return 4;
+    return 0;
+}

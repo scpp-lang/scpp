@@ -1,0 +1,25 @@
+export module libbox;
+
+namespace libbox {
+    // A minimal stand-in for `std::expected<T, E>`'s own inline-storage
+    // idiom (libs/std/expected/std_expected.scpp): a generic class whose
+    // array-bound field depends on its own, still-unresolved template
+    // parameter. Exported from this module while `T` is still generic --
+    // `storage`'s array bound cannot be resolved to a concrete integer
+    // here, only recorded as an unresolved expression (`array_size_expr`
+    // in src/ast.cppm's `Field`). Only an importer's own monomorphization,
+    // once `T` is substituted with a concrete type, can resolve it -- and
+    // that resolution depends on `array_size_expr` surviving the
+    // `.scppm` binary round trip (src/driver.cppm's `write_type`/
+    // `read_type`).
+    export template<typename T>
+    class Box {
+    public:
+        virtual ~Box() { return; }
+        char storage[sizeof(T)];
+
+        int storage_size() const {
+            return static_cast<int>(sizeof(this->storage));
+        }
+    };
+}
