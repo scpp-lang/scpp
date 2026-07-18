@@ -21,6 +21,14 @@
 - 大部分 ISO `alignas` / `alignof(type-id)` 支持已经落地，但文件作用域上的
   变量声明只要写 `alignas` 仍会被拒绝；同样的写法放在局部变量或 class 声明上则
   已经可以工作。
+- 规范现在已经显式规定数组边界可以是任意常量表达式，包括依赖某个模板参数、
+  value-dependent 的边界（例如 `sizeof(T)`；这类边界会在每次实例化时求值，
+  和任何其它 value-dependent 表达式一样）：`sizeof`、`alignof`、具名的
+  `constexpr` 常量，或者由它们组成的算术 / 比较组合，现在都可以出现在任何
+  原本只允许裸整数字面量的位置；但编译器目前仍然只能解析单个整数字面量
+  token 作为数组边界，其它形式一律被拒绝。编译器目前也还不能在单态化之前
+  对依赖模板参数的数组边界求值——这与目前同样阻碍 `alignas` 依赖模板参数的
+  限制，是同一个底层缺口。
 - coroutine / async 语言支持仍然缺失：还没有 `co_await`、`co_yield`、
   `co_return`，也没有 coroutine lowering / runtime integration。
 

@@ -184,6 +184,123 @@ struct alignas(8) block8 { int x; };
 struct [[scpp::packed]] bad { char tag; block8 payload; }; // packed cannot contain an over-aligned class-type member
 ```
 
+## 9.4 Array declarators [dcl.array] {#94-array-declarators}
+
+(1) Except as modified by this subclause, [dcl.array] applies unchanged to
+SCPP26. This subclause governs every array declarator alike, regardless of
+the declaration in which it appears: a local variable, a non-static data
+member, a function parameter, or any other array declarator [dcl.array]
+itself permits.
+
+(2) The constant-expression giving an array's bound is, syntactically, an
+ordinary expression exactly as in ISO C++; this document imposes no
+restriction on its form beyond (4)-(7).
+
+[Note: in particular, nothing in this document limits that expression to a
+single integer-literal token. Forms accepted in this position by ISO C++ --
+and therefore by SCPP26 -- include, without limitation, a `sizeof`
+expression ([expr.sizeof]), an `alignof(type-id)` query
+([§9.3](#93-alignment-specifier-and-query)), an *id-expression* naming a
+`constexpr` variable ([dcl.constexpr]), and an arithmetic or comparison
+combination of such subexpressions, nested to any depth. — end note]
+
+(3) Evaluation of an array-bound constant-expression is required constant
+evaluation ([§7](06-constant-evaluation.md)); that clause governs which
+operands and operations are permitted during that evaluation.
+
+[Note: [§7.2](06-constant-evaluation.md#72-supported-subset-exprconstscppsupport)
+guarantees support for, among other operations, `sizeof`/`alignof` queries
+and arithmetic and comparison operations on integer operands. — end note]
+
+(4) The array-bound constant-expression shall be a converted constant
+expression of type `std::size_t` ([expr.const.const]). Its value specifies
+the array bound, that is, the number of elements in the array; that value
+shall be greater than zero. A program that violates either requirement is
+ill-formed.
+
+(5) If the array-bound constant-expression is not a constant expression,
+the program is ill-formed.
+
+[Note: a non-`const`, non-`constexpr` local variable, or any other entity
+whose value is not known until runtime, is not usable in a constant
+expression ([expr.const]) and therefore cannot be read by an array bound.
+This document does not thereby introduce variable-length arrays: unlike the
+VLA extension some C++ implementations accept as a non-conforming
+extension, an array-bound constant-expression that is not a constant
+expression remains ill-formed in SCPP26, exactly as in strict ISO C++. —
+end note]
+
+(6) If required constant evaluation of an array-bound constant-expression
+would need the size, alignment, or completeness of a class type that is
+not yet complete at that point of the program -- including the class type
+of the very declaration in which the array member appears -- the program
+is ill-formed.
+
+[Note: this is the same rule ISO C++ already applies to `sizeof`
+([expr.sizeof]): a class type is incomplete until the closing `}` of its
+own definition, so a non-static data member's array bound cannot use
+`sizeof` on its own enclosing class. — end note]
+
+(7) If an array-bound constant-expression is value-dependent
+([temp.dep.constexpr]) on a template parameter, required constant
+evaluation of that array-bound constant-expression is performed at each
+point of instantiation ([temp.point]) of the template declaring that
+parameter, using the template argument corresponding to that parameter at
+that instantiation. The resulting array-bound constant-expression is
+subject to (2)-(6), exactly as for any other array-bound
+constant-expression.
+
+[Note: for example, in `template<typename T> struct Box { char
+storage[sizeof(T)]; };`, the array bound `sizeof(T)` is value-dependent
+within the template definition. Instantiating `Box<int>` substitutes `int`
+for `T`, so that instantiation's array bound is the ordinary
+constant-expression `sizeof(int)`; instantiating `Box<double>` likewise
+yields the array bound `sizeof(double)` for that instantiation. This
+mirrors ISO C++'s own treatment of a value-dependent expression
+([temp.dep.constexpr], [temp.point]): the expression is fixed once, in the
+template definition, but is evaluated separately at each point of
+instantiation, using that instantiation's template arguments. — end note]
+
+(8) Examples:
+
+Accepted:
+
+```cpp
+char literal_bound[8];
+
+char sizeof_bound[sizeof(int) + 4];
+
+constexpr int kBufferSize = 64;
+char named_constant_bound[kBufferSize];
+
+struct Header {
+    std::uint16_t a;
+    std::uint32_t b;
+};
+char alignof_bound[alignof(Header) * 2];
+
+template<typename T>
+struct Box {
+    char storage[sizeof(T)]; // value-dependent in the template definition;
+                              // resolved to sizeof(int), sizeof(double), etc.
+                              // at each point of instantiation (7)
+};
+```
+
+Rejected:
+
+```cpp
+int n = 5;
+char runtime_bound[n];      // ill-formed: n is not a constant expression (not a VLA)
+
+struct Self {
+    char buf[sizeof(Self)]; // ill-formed: Self is incomplete here
+};
+
+char zero_bound[0];         // ill-formed: array bound shall be greater than zero
+char negative_bound[-1];    // ill-formed: array bound shall be greater than zero
+```
+
 ---
 
 [← Previous: Thread-Safety Properties](04-thread-safety-properties.md) · [Table of Contents](README.md) · [Next: Constant evaluation →](06-constant-evaluation.md)
