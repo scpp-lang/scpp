@@ -129,7 +129,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
 | `30_constant_evaluation` | formal-spec-driven `constexpr`/`consteval` coverage: required constant evaluation, `if consteval` / `if !consteval`, unsupported v1 operations, and the later-pack-to-earlier-parameter deduction rule |
 | `31_enum_class` | scoped enumerations: `enum class` declaration, scoped enumerator access, enum-type separation, explicit casts, and explicit underlying types/values |
-| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`, `std::storage_for<T, ...>`, placement-new, and explicit destructor-call syntax |
+| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`, `alignas`-qualified raw-buffer storage, placement-new, and explicit destructor-call syntax |
 | `33_nodiscard` | `[[nodiscard]]` / `[[nodiscard("reason")]]` on functions and types, including discard diagnostics and allowed non-discarding uses |
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` state behavior, misuse aborts, and `std::abort()` itself |
 | `35_random` | `std::random_device`, `std::mt19937`, and `scpp::rand::uniform_int_distribution<int>` |
@@ -275,7 +275,7 @@ re-run via `./build/run_tests`:
   real Linux `epoll_event` / `epoll_data_t` FFI declaration shape
 - **Low-level size/storage/lifetime building blocks now have direct
   black-box coverage too**:
-  `sizeof(type)` / `sizeof(expr)`, `std::storage_for<T, ...>`,
+  `sizeof(type)` / `sizeof(expr)`, `alignas`-qualified raw-buffer storage,
   placement-new, explicit destructor calls, and leading `::` global-scope
   lookup
 - **`[[nodiscard]]` now has direct black-box coverage too**:

@@ -296,7 +296,7 @@ private:
         // auto` in parameter position, parse_param_type) is never the
         // very first token of a statement, so there's no ambiguity here.
         if (tok.kind == TokenKind::KwAuto) return true;
-        if (check_std_qualified("span") || check_std_qualified("storage_for")) return true;
+        if (check_std_qualified("span")) return true;
         if (tok.kind != TokenKind::Identifier) return false;
         // ch11: a bare identifier might be the *first segment* of a
         // qualified name (`std::string`) rather than a plain type name --
@@ -324,8 +324,7 @@ private:
             return true;
         }
         if (tok.kind == TokenKind::Identifier && tok.text == "std" && peek_at(offset + 1).kind == TokenKind::ColonColon &&
-            peek_at(offset + 2).kind == TokenKind::Identifier &&
-            (peek_at(offset + 2).text == "span" || peek_at(offset + 2).text == "storage_for")) {
+            peek_at(offset + 2).kind == TokenKind::Identifier && peek_at(offset + 2).text == "span") {
             return true;
         }
         return tok.kind == TokenKind::Identifier && is_visible_type_name(std::string(tok.text));
@@ -1762,23 +1761,6 @@ private:
     // an outer pointer level), never a later/outer one, mirroring how
     // real C++ reads `const int**` as "pointer to (pointer to const int)".
     Type parse_unqualified_type(bool const_qualifies_first_pointer = false) {
-        if (check_std_qualified("storage_for")) {
-            consume_std_qualified();
-            expect(TokenKind::Less, "'<'");
-            Type type;
-            type.kind = TypeKind::Named;
-            type.name = "std::storage_for";
-            if (check(TokenKind::Greater)) {
-                const Token& err_tok = peek();
-                throw ParseError(err_tok.line, err_tok.column,
-                                 "'std::storage_for' requires at least one type argument");
-            }
-            do {
-                type.template_args.push_back(parse_template_type_argument());
-            } while (match(TokenKind::Comma));
-            expect(TokenKind::Greater, "'>'");
-            return type;
-        }
         if (check_std_qualified("span")) {
             consume_std_qualified();
             expect(TokenKind::Less, "'<'");

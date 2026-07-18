@@ -19,7 +19,7 @@ public:
 };
 
 int main() {
-    std::storage_for<Box> slot{};
+    alignas(Box) char slot[sizeof(Box)]{};
     [[scpp::unsafe]] {
         Box* p = new ((Box*)&slot) Box(9);
         return p->get() - 9;

@@ -1,0 +1,25 @@
+import std;
+// Current raw-storage semantics: user-defined candidate types participate in
+// the same max-size/max-alignment computation as any other type, including
+// a fully vtable-aware `sizeof` for a polymorphic candidate -- the standard,
+// non-deprecated replacement for the removed `std::storage_for<T, U, ...>`
+// compiler builtin.
+class Widget {
+    public:
+        virtual ~Widget() { return; }
+public:
+    char c{};
+    long value{};
+};
+
+struct Wrapper {
+    char lead;
+    alignas(Widget) alignas(int) char storage[sizeof(Widget) > sizeof(int) ? sizeof(Widget) : sizeof(int)];
+};
+
+int main() {
+    alignas(Widget) alignas(int) char storage[sizeof(Widget) > sizeof(int) ? sizeof(Widget) : sizeof(int)];
+    if (sizeof(storage) != 24) return 1;
+    if (sizeof(Wrapper) != 32) return 2;
+    return 0;
+}

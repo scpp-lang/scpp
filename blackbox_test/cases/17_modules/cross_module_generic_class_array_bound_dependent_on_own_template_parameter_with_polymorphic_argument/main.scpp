@@ -1,0 +1,37 @@
+// Regression test for the .scppm cross-module binary serialization format
+// (src/driver.cppm write_type/read_type): a still-generic exported class's
+// array-bound field expression (here `sizeof(T)`) must round-trip through
+// import so the importing module's monomorphization can substitute the
+// concrete type argument. Before the fix, only the already-resolved (and,
+// for a still-generic class, always-zero) `array_size` integer was
+// serialized -- the unresolved expression tree was silently dropped,
+// permanently freezing the field's size at 0 across the module boundary.
+// That produced undersized LLVM array types, undersized stack frames, and
+// memory corruption for any concrete instantiation of an imported generic
+// class with a template-parameter-dependent array bound.
+//
+// A polymorphic type argument (with a virtual destructor, so its layout
+// includes a vtable pointer) is used deliberately, so this case also
+// exercises vtable-aware `sizeof` (src/ast.cppm layout_of_type) composing
+// correctly with cross-module monomorphization -- both bugs were
+// discovered together while replacing the std::storage_for<T,U,...>
+// compiler builtin with a plain alignas-qualified raw buffer.
+import boxlib;
+
+class Polymorphic {
+public:
+    virtual ~Polymorphic() { return; }
+    long value;
+};
+
+int main() {
+    boxlib::Box<Polymorphic> box{};
+    if (sizeof(box.storage) != sizeof(Polymorphic)) return 1;
+    if (sizeof(box.storage) != 16) return 2;
+
+    box.storage[0] = 'a';
+    box.storage[15] = 'b';
+    if (box.storage[0] != 'a') return 3;
+    if (box.storage[15] != 'b') return 4;
+    return 0;
+}

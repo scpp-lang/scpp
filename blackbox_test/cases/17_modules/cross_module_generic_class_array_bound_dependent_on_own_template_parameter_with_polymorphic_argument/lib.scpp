@@ -1,0 +1,13 @@
+export module boxlib;
+
+namespace boxlib {
+    // A still-generic class whose array-bound field depends on its own
+    // template parameter cannot resolve `array_size` until monomorphized
+    // with a concrete type argument.
+    export template<typename T>
+    class Box {
+    public:
+        virtual ~Box() { return; }
+        char storage[sizeof(T)];
+    };
+}

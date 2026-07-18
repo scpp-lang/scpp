@@ -1,0 +1,38 @@
+// Regression test: `layout_of_type` (src/ast.cppm), used by `sizeof`/
+// `alignof` constant-expression evaluation and by `alignas` resolution,
+// must account for the implicit vtable pointer that every polymorphic
+// class carries -- exactly like the real class layout that
+// src/compiler/codegen/layout.cppm's declare_class() produces. Every
+// scpp class has a mandatory virtual destructor (docs/spec/en/11-*
+// §11.5(1)), so this affects the ordinary, everyday case, not just
+// exotic ones. Before the fix, `sizeof`/`alignof` silently ignored the
+// vtable pointer, undercounting every polymorphic class's size and
+// producing undersized buffers anywhere that size was used to declare
+// storage (e.g. an array bound depending on `sizeof(SomePolymorphicType)`).
+struct Plain {
+    long value;
+};
+
+class Polymorphic {
+public:
+    virtual ~Polymorphic() { return; }
+    long value;
+};
+
+// Vtable pointer (8 bytes, 8-byte aligned) forces the overall alignment to
+// 8 even though the only data member is a single `char`; the struct's
+// total size must then also round up to a multiple of that alignment.
+class PolymorphicNarrow {
+public:
+    virtual ~PolymorphicNarrow() { return; }
+    char value;
+};
+
+int main() {
+    if (sizeof(Plain) != 8) return 1;
+    if (sizeof(Polymorphic) != 16) return 2;   // vtable ptr (8) + long (8)
+    if (alignof(Polymorphic) != 8) return 3;
+    if (sizeof(PolymorphicNarrow) != 16) return 4; // vtable ptr (8) + char (1), padded to 16
+    if (alignof(PolymorphicNarrow) != 8) return 5;
+    return 0;
+}

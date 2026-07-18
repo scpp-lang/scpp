@@ -1,0 +1,38 @@
+// Regression test: monomorphization's substitute_type_param_in_expr
+// (src/compiler/movecheck/monomorphize.cppm) failed to recurse into a
+// ternary conditional expression's else-branch (Expr::third), unlike its
+// sibling substitute_type_pack_in_expr, which already did. An array bound
+// combining sizeof(T) and sizeof(E) via a ternary -- the "max of two
+// template-parameter-dependent sizes" idiom needed to replace the removed
+// std::storage_for<T, U, ...> compiler builtin with an ordinary
+// alignas-qualified raw buffer (docs/spec/en/05-unions-and-packed-layout.md
+// §9.4) -- silently left the else-branch's type name unsubstituted, so
+// whichever concrete instantiation actually selected the else-branch (i.e.
+// whenever E is the larger type) failed to resolve the array bound at all.
+// Both orderings are exercised here so neither branch of the ternary can
+// regress silently.
+template<typename T, typename E>
+class MaxSizeBox {
+public:
+    virtual ~MaxSizeBox() { return; }
+    char storage[sizeof(T) > sizeof(E) ? sizeof(T) : sizeof(E)];
+};
+
+struct Small { char x; };
+struct Large { double a; double b; double c; };
+
+int main() {
+    // T larger than E: selects the *then*-branch (Expr::second) -- already
+    // worked correctly even before the fix.
+    MaxSizeBox<Large, Small> t_larger{};
+    if (sizeof(t_larger.storage) != sizeof(Large)) return 1;
+    if (sizeof(t_larger.storage) != 24) return 2;
+
+    // E larger than T: selects the *else*-branch (Expr::third) -- this is
+    // exactly the case that failed to resolve before the fix.
+    MaxSizeBox<Small, Large> e_larger{};
+    if (sizeof(e_larger.storage) != sizeof(Large)) return 3;
+    if (sizeof(e_larger.storage) != 24) return 4;
+
+    return 0;
+}
