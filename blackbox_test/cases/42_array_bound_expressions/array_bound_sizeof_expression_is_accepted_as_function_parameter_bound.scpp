@@ -1,0 +1,18 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(1): array declarators
+// are governed alike "regardless of the declaration in which it appears
+// ... a function parameter." A function-parameter array declarator's bound
+// still decays to pointer (discarding the bound, exactly as before this
+// feature), but the declarator itself must parse with a `sizeof`-based
+// constant-expression bound just like the other two sites, confirming
+// uniform application of the parser change.
+void fill_first_byte(char buf[sizeof(int)], char value) {
+    buf[0] = value;
+    return;
+}
+
+int main() {
+    char storage[16];
+    fill_first_byte(storage, 'z');
+    if (storage[0] != 'z') return 1;
+    return 0;
+}

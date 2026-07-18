@@ -139,6 +139,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `39_ordinary_virtual_dispatch` | ordinary virtual dispatch: override selection across base/derived references and pointers, including chained forwarding through helpers |
 | `40_operator_arrow` | `operator->`: recursive arrow chaining, cv-correct selection, ordinary-vs-unsafe call gating, and raw-pointer leaf requirements |
 | `41_global_variables` | file-scope/global variable declarations: plain globals, const globals, cross-function mutation, and `alignas` acceptance/rejection rules |
+| `42_array_bound_expressions` | array declarators (ch05 §9.4): literal/`sizeof`/`alignof`/arithmetic/global-`constexpr`-named-constant bounds applied uniformly at local-variable, struct/class-field, and function-parameter sites; rejection of non-constant, zero, negative, and self-referential-incomplete-type bounds; a generic type's `sizeof(T)`-dependent bound resolved independently per instantiation; and the current local-`constexpr`-as-later-local-bound scope boundary |
 
 ## Testing philosophy
 
@@ -302,3 +303,13 @@ re-run via `./build/run_tests`:
   `-p` package selection, direct-only compile-time visibility, and
   rejection of still-deferred manifest features like registry deps,
   `[workspace.dependencies]`, and `[native]`
+- **Array bound constant-expressions (ch05 §9.4) now have dedicated
+  black-box coverage**: literal/`sizeof`/`alignof`/arithmetic/global-named-
+  constant bounds accepted uniformly across local-variable, struct/class-
+  field, and function-parameter declarator sites; non-constant (not a
+  VLA), zero, negative, and direct/indirect self-referential-incomplete-
+  type bounds rejected with clean diagnostics; a generic class's
+  `sizeof(T)`-dependent bound resolved independently and correctly across
+  four distinct instantiations; and the current, deliberate scope
+  boundary around a local `constexpr` constant used as a later local
+  array's bound in the same function

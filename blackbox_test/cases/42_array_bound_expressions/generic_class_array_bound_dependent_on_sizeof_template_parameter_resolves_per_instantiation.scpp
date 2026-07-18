@@ -1,0 +1,57 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(7) and the note
+// following it: a template-parameter-dependent array bound (e.g.
+// `sizeof(T)`) is value-dependent in the generic definition and is
+// resolved separately at each point of instantiation, using that
+// instantiation's own template argument -- not once, globally, for the
+// template as a whole. This is the hardest case this feature solves, so
+// it is exercised here across four distinct concrete types (a scalar, a
+// larger scalar, a 1-byte struct, and a 24-byte struct), each checked
+// independently.
+//
+// The spec's own illustrative example (8) writes this as a bare
+// `template<typename T> struct Box { char storage[sizeof(T)]; };`, but a
+// bare (unconstrained) type parameter on a generic *struct* is rejected
+// by a separate, pre-existing rule unrelated to array bounds (struct
+// field triviality is a whole-type property that must be guaranteed by a
+// concept constraint -- see the old book's ch05 §5.14, still enforced).
+// That rule cannot be satisfied here: `T` is only ever used inside
+// `sizeof(T)`, never as an actual field type, so no concept expressible
+// in this language version (which only supports method-call-shaped
+// `requires` bodies) is satisfiable uniformly by `int`, `double`, and two
+// unrelated structs alike. A generic *class* may leave its type parameter
+// bare, so this test uses `class` (with the explicit virtual destructor
+// every scpp class requires) instead, which exercises exactly the same
+// array-bound-resolves-per-instantiation mechanism (7) without tripping
+// that unrelated, independently-documented restriction.
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+    char storage[sizeof(T)];
+};
+
+struct OneByte {
+    char x;
+};
+
+struct TwentyFourBytes {
+    double a;
+    double b;
+    double c;
+};
+
+int main() {
+    Box<int> box_int{};
+    Box<double> box_double{};
+    Box<OneByte> box_one_byte{};
+    Box<TwentyFourBytes> box_24_byte{};
+
+    if (sizeof(box_int.storage) != sizeof(int)) return 1;
+    if (sizeof(box_double.storage) != sizeof(double)) return 2;
+    if (sizeof(box_one_byte.storage) != sizeof(OneByte)) return 3;
+    if (sizeof(box_24_byte.storage) != sizeof(TwentyFourBytes)) return 4;
+
+    if (sizeof(box_one_byte.storage) != 1) return 5;
+    if (sizeof(box_24_byte.storage) != 24) return 6;
+    return 0;
+}

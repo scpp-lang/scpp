@@ -1,0 +1,20 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(2)'s note lists an
+// id-expression naming a `constexpr` variable as an accepted bound form,
+// and (8)'s own accepted example only shows this for a *global*
+// `constexpr` constant. A deliberate, documented current implementation
+// boundary (not required or forbidden by the spec text itself, which is
+// silent on this exact case): a *local* `constexpr` constant used as a
+// later local array's bound, within the *same* function, is not yet
+// supported -- the early, non-executing pass that resolves array bounds
+// ahead of ordinary statement execution does not bind local values into
+// its constant-evaluation frame stack. This test pins down today's exact,
+// clean rejection behavior for that specific case (not a crash, and not
+// silently accepted) -- the same clean diagnostic an ordinary
+// non-constant local produces -- as a known, deliberate scope boundary
+// for a possible future extension, not a bug to be worked around here.
+int main() {
+    constexpr int kLocalSize = 4;
+    char buf[kLocalSize];
+    buf[0] = 'a';
+    return 0;
+}

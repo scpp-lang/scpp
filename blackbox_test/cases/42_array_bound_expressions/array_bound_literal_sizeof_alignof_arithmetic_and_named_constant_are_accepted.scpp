@@ -1,0 +1,26 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(2), (3), (8): an array
+// bound is an ordinary constant-expression, not restricted to a single
+// integer-literal token. Forms explicitly called out by the note in (2) --
+// a plain literal, a `sizeof` query, an `alignof(type-id)` query (§9.3), an
+// arithmetic combination, and an id-expression naming a `constexpr`
+// variable -- all apply uniformly at the local-variable declarator site.
+// This mirrors the accepted example block in (8) almost verbatim.
+struct Header {
+    int a;
+    char b;
+};
+
+constexpr int kBufferSize = 64;
+
+int main() {
+    char literal_bound[8];                  // regression: plain literal must still work
+    char sizeof_bound[sizeof(int) + 4];     // sizeof query + arithmetic combination
+    char named_constant_bound[kBufferSize]; // id-expression naming a global constexpr constant
+    char alignof_bound[alignof(Header) * 2]; // alignof(type-id) query + arithmetic combination
+
+    if (sizeof(literal_bound) != 8) return 1;
+    if (sizeof(sizeof_bound) != 8) return 2;
+    if (sizeof(named_constant_bound) != 64) return 3;
+    if (sizeof(alignof_bound) != 8) return 4;
+    return 0;
+}

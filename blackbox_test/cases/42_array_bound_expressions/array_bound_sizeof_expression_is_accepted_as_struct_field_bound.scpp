@@ -1,0 +1,19 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(1): "This subclause
+// governs every array declarator alike ... a local variable, a non-static
+// data member, a function parameter." Confirms the `sizeof` bound form
+// applies uniformly at the struct/class non-static-data-member declarator
+// site, not just for local variables.
+struct Frame {
+    char header[sizeof(int)];
+    int payload;
+};
+
+int main() {
+    Frame f{};
+    if (sizeof(f.header) != 4) return 1;
+    f.header[0] = 'x';
+    f.payload = 7;
+    if (f.header[0] != 'x') return 2;
+    if (f.payload != 7) return 3;
+    return 0;
+}

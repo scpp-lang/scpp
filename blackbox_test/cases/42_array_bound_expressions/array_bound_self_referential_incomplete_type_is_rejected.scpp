@@ -1,0 +1,16 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(6) and (8)'s rejected
+// example: "If required constant evaluation of an array-bound
+// constant-expression would need the size, alignment, or completeness of
+// a class type that is not yet complete at that point of the program --
+// including the class type of the very declaration in which the array
+// member appears -- the program is ill-formed." `Self` is still
+// incomplete at the point its own field's bound is evaluated, exactly
+// like the same restriction ISO C++ already applies to `sizeof`.
+struct Self {
+    char buf[sizeof(Self)]; // ill-formed: Self is incomplete here
+};
+
+int main() {
+    Self s{};
+    return 0;
+}

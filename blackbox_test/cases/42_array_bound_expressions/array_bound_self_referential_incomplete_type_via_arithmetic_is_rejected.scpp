@@ -1,0 +1,16 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(6): the same
+// incompleteness rule applies "including" but not limited to a bare
+// top-level `sizeof(Self)` -- it governs any required constant evaluation
+// that would need the enclosing type's size, however deeply the
+// self-reference is nested inside a larger constant-expression. Here the
+// self-reference is one operand of an arithmetic combination rather than
+// the whole bound, confirming the rejection is not merely a special case
+// for a bare `sizeof(Self)` token.
+struct SelfArith {
+    char buf[sizeof(SelfArith) + 4]; // ill-formed: SelfArith is incomplete here too
+};
+
+int main() {
+    SelfArith s{};
+    return 0;
+}

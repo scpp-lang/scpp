@@ -125,6 +125,7 @@ cmake --build build
 | `39_ordinary_virtual_dispatch` | 普通虚派发：基类/派生类引用与指针上的 override 选择，以及经由辅助函数转发后的分派 |
 | `40_operator_arrow` | `operator->`：递归箭头链、cv 正确性的重载选择、普通/unsafe 调用门控，以及原始指针叶子要求 |
 | `41_global_variables` | 文件作用域 / 全局变量声明：普通全局变量、`const` 全局变量、跨函数读写，以及 `alignas` 的接受/拒绝规则 |
+| `42_array_bound_expressions` | 数组声明符（ch05 §9.4）：字面量 / `sizeof` / `alignof` / 算术组合 / 全局 `constexpr` 命名常量作为数组边界，在局部变量、struct/class 字段、函数参数三种声明位置一致生效；拒绝非常量、零、负数以及自引用不完整类型边界；泛型类型中依赖 `sizeof(T)` 的边界在每次实例化时各自独立正确解析；以及当前关于「同一函数内局部 `constexpr` 常量用作后续局部数组边界」的既定能力边界 |
 
 ## 测试理念
 
@@ -252,3 +253,10 @@ cmake --build build
   单包 lib/bin 构建、workspace/path dependency 构建、`-p` 选包、
   仅直接依赖可见的编译期规则，以及对 registry 依赖、
   `[workspace.dependencies]`、`[native]` 等延期特性的拒绝路径
+- **数组边界常量表达式（ch05 §9.4）现在也有专门的黑盒覆盖**：
+  字面量 / `sizeof` / `alignof` / 算术组合 / 全局命名常量边界在局部变量、
+  struct/class 字段、函数参数三种声明位置上一致地被接受；非常量（不是
+  VLA）、零、负数，以及直接/间接的自引用不完整类型边界都以清晰的诊断信息
+  被拒绝；泛型 class 中依赖 `sizeof(T)` 的边界在四种不同实例化下都各自
+  独立且正确地被解析；以及「同一函数内局部 `constexpr` 常量用作后续局部
+  数组边界」这一当前既定能力边界

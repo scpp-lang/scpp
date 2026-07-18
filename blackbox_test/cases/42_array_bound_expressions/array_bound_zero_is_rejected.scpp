@@ -1,0 +1,11 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(4): "the number of
+// elements in the array ... shall be greater than zero. A program that
+// violates ... [this] requirement is ill-formed." Before this feature,
+// the parser only ever accepted a bare integer-literal token and never
+// checked its value against zero, so `char zero_bound[0];` was silently
+// accepted; this must now be a clean, rejected diagnostic.
+int main() {
+    char zero_bound[0];
+    zero_bound[0] = 'a';
+    return 0;
+}
