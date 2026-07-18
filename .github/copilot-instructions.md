@@ -84,6 +84,40 @@ repository. 以下规则适用于在本仓库中工作的任何 Copilot agent（
 - 是否合并、何时合并，只能由仓库所有者（人类用户）决定。sub-agent 的职责止
   于打开一个已充分验证、可合并的 PR 并汇报结果——绝不包括合并它。
 
+### File-scope ownership by role / 按角色划分的文件归属
+
+- dev-agent's PRs primarily touch implementation code and its
+  directly-coupled unit tests: `src/`, `libs/`, and `tests/*.cpp` +
+  `tests/*_source/` + `tests/*.expected` (gtest-style unit/fixture tests
+  that exercise internal APIs 1:1 with the code being changed).
+- dev-agent 的 PR 主要改动实现代码，以及与之直接耦合的单元测试：`src/`、
+  `libs/`，以及 `tests/*.cpp` + `tests/*_source/` + `tests/*.expected`
+  （以 gtest 风格、与被改动代码内部 API 一一对应的单元 / fixture 测试）。
+- If a dev-agent change causes existing `blackbox_test/` cases to fail
+  (e.g. it intentionally changes or removes language syntax/behavior
+  those cases exercise), dev-agent may make minimal fixes to restore a
+  passing build: migrating a case's syntax to match the new behavior,
+  correcting stale expected output/values, or deleting a case that now
+  tests something entirely inapplicable or nonexistent.
+- 如果 dev-agent 的改动导致现有的 `blackbox_test/` 用例失败（例如它有意
+  改变或移除了这些用例所验证的语言语法 / 行为），dev-agent 可以做最小化
+  的修复来恢复构建通过：迁移某个用例的语法以匹配新行为、修正过时的期望
+  输出 / 数值，或删除一个现在测试内容已完全不适用 / 不存在的用例。
+- dev-agent must never add brand-new test cases to `blackbox_test/`.
+  Authoring new coverage—including replacement coverage for a case
+  dev-agent deleted, and regression tests for any incidental bug found
+  along the way—is exclusively test-agent's job.
+- dev-agent 绝不能向 `blackbox_test/` 添加全新的测试用例。编写新的覆
+  盖——包括为 dev-agent 删除的用例补充替代覆盖，以及为顺带发现的偶发
+  bug 补充回归测试——完全是 test-agent 的工作。
+- That new coverage lands as a follow-up test-agent PR based on the
+  dev-agent's own branch, not `main`, per the existing convention that a
+  test-agent PR covering an in-flight dev-agent feature is based on the
+  dev-agent's branch.
+- 这些新增覆盖会以一个后续的 test-agent PR 落地，该 PR 基于 dev-agent
+  自己的分支创建，而不是基于 `main`——这也符合现有惯例：覆盖一个尚在进
+  行中的 dev-agent 功能的 test-agent PR，应该基于该 dev-agent 的分支。
+
 ## Testing philosophy / 测试原则
 
 - All tests in this repository—especially `blackbox_test/`, but the principle
