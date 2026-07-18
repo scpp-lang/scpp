@@ -43,6 +43,47 @@ repository. 以下规则适用于在本仓库中工作的任何 Copilot agent（
 - 如果 manager 自己下场做事，就会对用户失去及时响应；而用户随时都可能发出新
   指令或提出问题。保持随时可响应，正是 manager / sub-agent 分工的意义所在。
 
+## Branch naming and PR conventions / 分支命名与 PR 规范
+
+- Every sub-agent must name its git branch `<role>-agent/<slug>`, where
+  `<role>` matches the sub-agent's function (`dev-agent`, `test-agent`,
+  `doc-agent`, `book-agent`, etc.) and `<slug>` is a short kebab-case
+  description of the task.
+- 每个 sub-agent 的 git 分支都必须命名为 `<role>-agent/<slug>`，其中 `<role>`
+  对应该 sub-agent 的职能（`dev-agent`、`test-agent`、`doc-agent`、
+  `book-agent` 等），`<slug>` 则是对任务的简短 kebab-case 描述。
+- Concrete examples: `dev-agent/alignas-impl`,
+  `test-agent/array-bound-constant-expr-coverage`,
+  `doc-agent/requires-lifetime-spec`,
+  `book-agent/ch07-01-packages-project-manifests`.
+- 具体例子：`dev-agent/alignas-impl`、
+  `test-agent/array-bound-constant-expr-coverage`、
+  `doc-agent/requires-lifetime-spec`、
+  `book-agent/ch07-01-packages-project-manifests`。
+- Never create a branch without this prefix, no matter how small or
+  exploratory the change is.
+- 无论改动多小、多么带有探索性质，都绝不能创建没有该前缀的分支。
+- Every PR in this repository must contain exactly one commit. If a change
+  seems to need multiple commits, split the work into multiple separate PRs
+  instead of stacking commits on one branch / PR.
+- 本仓库中的每个 PR 都必须只包含一个 commit。如果某项改动看起来需要多个
+  commit，应该把工作拆分成多个独立的 PR，而不是在同一个分支 / PR 上堆叠多个
+  commit。
+- If you end up with more than one commit locally, squash or amend before
+  pushing so the branch / PR still contains only one commit.
+- 如果本地不小心产生了不止一个 commit，推送前要先 squash 或 amend，确保该分
+  支 / PR 最终仍然只有一个 commit。
+- Sub-agents and the manager agent must never run `gh pr merge` or any
+  equivalent action to merge a PR in this repository, no matter how
+  thoroughly validated or green that PR is.
+- 无论 sub-agent 还是 manager agent，都绝不能运行 `gh pr merge` 或任何等效
+  操作来合并本仓库中的 PR，哪怕这个 PR 已经过充分验证、状态全绿也不行。
+- Only the repository owner (the human user) decides when and whether to
+  merge. A sub-agent's job ends at opening a fully validated, mergeable PR
+  and reporting it back—never at merging it.
+- 是否合并、何时合并，只能由仓库所有者（人类用户）决定。sub-agent 的职责止
+  于打开一个已充分验证、可合并的 PR 并汇报结果——绝不包括合并它。
+
 ## Testing philosophy / 测试原则
 
 - All tests in this repository—especially `blackbox_test/`, but the principle
