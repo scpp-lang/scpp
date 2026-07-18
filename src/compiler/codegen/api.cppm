@@ -449,8 +449,6 @@ private:
     // plain bitcast, with no pointer adjustment.
     void declare_class(const ClassDef& def);
 
-    [[nodiscard]] llvm::Type* storage_for_llvm_type(const Type& type);
-
     llvm::Type* to_llvm_type(const Type& type);
 
     [[nodiscard]] std::optional<llvm::Align> alignment_for_type(const Type& type) const;

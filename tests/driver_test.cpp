@@ -1828,26 +1828,27 @@ void run_sizeof_tests() {
 
 void run_storage_tests() {
     {
-        std::string case_name = "storage_for_uses_max_size_and_alignment";
+        std::string case_name = "alignas_array_storage_uses_max_size_and_alignment";
         cases_run++;
         std::filesystem::path exe_path =
-            std::filesystem::current_path() / "storage_for_uses_max_size_and_alignment_exe";
+            std::filesystem::current_path() / "alignas_array_storage_uses_max_size_and_alignment_exe";
         scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
             "    virtual ~Box() = default;\n"
-            "    std::storage_for<int, long> slot;\n"
+            "    alignas(int) alignas(long) char slot[sizeof(int) > sizeof(long) ? sizeof(int) : sizeof(long)];\n"
             "    int payload_size() const { return (int)sizeof(this->slot); }\n"
             "};\n"
             "struct Holder {\n"
             "    char tag;\n"
-            "    std::storage_for<int, long> slot;\n"
+            "    alignas(int) alignas(long) char slot[sizeof(int) > sizeof(long) ? sizeof(int) : sizeof(long)];\n"
             "    char tail;\n"
             "};\n"
             "int main() {\n"
             "    Box box{};\n"
             "    if (box.payload_size() != 8) return 1;\n"
-            "    if ((int)sizeof(std::storage_for<int, long>) != 8) return 2;\n"
+            "    alignas(int) alignas(long) char standalone_slot[sizeof(int) > sizeof(long) ? sizeof(int) : sizeof(long)];\n"
+            "    if ((int)sizeof(standalone_slot) != 8) return 2;\n"
             "    if ((int)sizeof(Holder) != 24) return 3;\n"
             "    return 0;\n"
             "}\n",
@@ -1860,10 +1861,10 @@ void run_storage_tests() {
     }
 
     {
-        std::string case_name = "storage_for_accepts_user_defined_candidate_types";
+        std::string case_name = "alignas_array_storage_accepts_user_defined_candidate_types";
         cases_run++;
         std::filesystem::path exe_path =
-            std::filesystem::current_path() / "storage_for_accepts_user_defined_candidate_types_exe";
+            std::filesystem::current_path() / "alignas_array_storage_accepts_user_defined_candidate_types_exe";
         scpp::compile_to_executable(
             "class Widget {\n"
             "public:\n"
@@ -1873,11 +1874,12 @@ void run_storage_tests() {
             "};\n"
             "struct Wrapper {\n"
             "    char lead;\n"
-            "    std::storage_for<Widget, int> storage;\n"
+            "    alignas(Widget) alignas(int) char storage[sizeof(Widget) > sizeof(int) ? sizeof(Widget) : sizeof(int)];\n"
             "};\n"
             "int main() {\n"
-            "    if ((int)sizeof(std::storage_for<Widget, int>) != 16) return 1;\n"
-            "    if ((int)sizeof(Wrapper) != 24) return 2;\n"
+            "    alignas(Widget) alignas(int) char storage[sizeof(Widget) > sizeof(int) ? sizeof(Widget) : sizeof(int)];\n"
+            "    if ((int)sizeof(storage) != 24) return 1;\n"
+            "    if ((int)sizeof(Wrapper) != 32) return 2;\n"
             "    return 0;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
@@ -1897,7 +1899,7 @@ void run_placement_new_tests() {
             std::filesystem::current_path() / "placement_new_constructs_scalar_in_storage_exe";
         scpp::compile_to_executable(
             "int main() {\n"
-            "    std::storage_for<int> slot{};\n"
+            "    alignas(int) char slot[sizeof(int)]{};\n"
             "    [[scpp::unsafe]] {\n"
             "        int* p = new ((int*)&slot) int(7);\n"
             "        return *p - 7;\n"
@@ -1925,7 +1927,7 @@ void run_placement_new_tests() {
             "    int get() const { return this->value; }\n"
             "};\n"
             "int main() {\n"
-            "    std::storage_for<Box> slot{};\n"
+            "    alignas(Box) char slot[sizeof(Box)]{};\n"
             "    [[scpp::unsafe]] {\n"
             "        Box* p = new ((Box*)&slot) Box(9);\n"
             "        return p->get() - 9;\n"
@@ -1955,7 +1957,7 @@ void run_explicit_destructor_tests() {
             "};\n"
             "int main() {\n"
             "    int result = 0;\n"
-            "    std::storage_for<Box> slot{};\n"
+            "    alignas(Box) char slot[sizeof(Box)]{};\n"
             "    [[scpp::unsafe]] {\n"
             "        Box* p = new ((Box*)&slot) Box(&result);\n"
             "        p->~Box();\n"
