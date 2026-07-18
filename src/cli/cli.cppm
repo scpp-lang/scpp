@@ -198,27 +198,55 @@ bool require_scpp_input_path(std::string_view path, std::string_view role) {
 // there's nothing to point at; a DriverError (a linker failure) always
 // takes this path, as would any diagnostic from a code path that, for
 // whatever reason, couldn't determine a location.
+//
+// `path`/`source` are only the CLI's *entry-point* file -- ch11 §11.7's
+// separately-compiled imported modules mean a ParseError/DataflowError/
+// CodegenError can just as easily be rooted in some `--import name=path`
+// file instead (SourceLocation::source_path, stamped on by the parser --
+// see ast.cppm -- and threaded through movecheck/codegen unchanged,
+// records exactly which). Whenever `loc` names a *different* file than
+// `path`, that other file's own text is re-read from disk here so the
+// excerpt below actually matches what `loc.line`/`loc.column` point
+// into, instead of silently misreading `path`'s own (unrelated) text at
+// the same line/column offsets.
 void print_diagnostic(std::string_view path, const std::string& source, scpp::SourceLocation loc,
                        const std::string& message) {
-    std::cerr << path << ":";
+    std::string_view effective_path = path;
+    const std::string* effective_source = &source;
+    std::string reread_source;
+    if (loc.has_source_path() && loc.source_path_text() != path) {
+        effective_path = loc.source_path_text();
+        try {
+            reread_source = read_file(effective_path);
+            effective_source = &reread_source;
+        } catch (const std::exception&) {
+            // Best-effort: still report the right path/line/column below
+            // even if that file can no longer be read (e.g. removed
+            // since compilation started) -- just fall back to no source
+            // excerpt, exactly like the loc-past-EOF case further down.
+        }
+    }
+
+    std::cerr << effective_path << ":";
     if (loc.is_known()) std::cerr << loc.line << ":" << loc.column << ":";
     std::cerr << " error: " << message << "\n";
     if (!loc.is_known()) return;
 
     // Find the start of line `loc.line` (1-based) by counting newlines --
-    // `source` is the exact text the lexer/parser walked, so this always
-    // agrees with however Lexer::advance() itself counted lines.
+    // `effective_source` is the exact text the lexer/parser walked for
+    // whichever file `loc` actually belongs to, so this always agrees
+    // with however Lexer::advance() itself counted lines.
     size_t line_start = 0;
     int current_line = 1;
     while (current_line < loc.line) {
-        size_t next_nl = source.find('\n', line_start);
+        size_t next_nl = effective_source->find('\n', line_start);
         if (next_nl == std::string::npos) return; // loc.line is past EOF -- defensive, shouldn't happen
         line_start = next_nl + 1;
         current_line++;
     }
-    size_t line_end = source.find('\n', line_start);
-    if (line_end == std::string::npos) line_end = source.size();
-    std::string_view line_text(source.data() + line_start, line_end - line_start);
+    size_t line_end = effective_source->find('\n', line_start);
+    if (line_end == std::string::npos) line_end = effective_source->size();
+    std::string_view line_text(effective_source->data() + line_start, line_end - line_start);
 
     std::string line_num_str = std::to_string(loc.line);
     std::string gutter(line_num_str.size(), ' ');
