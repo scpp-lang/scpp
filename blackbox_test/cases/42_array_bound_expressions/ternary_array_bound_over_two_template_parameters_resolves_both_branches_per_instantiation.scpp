@@ -1,0 +1,36 @@
+// src/compiler/movecheck/monomorphize.cppm regression:
+// `substitute_type_param_in_expr` previously recursed into a ternary
+// conditional's condition and then-branch, but never its else-branch
+// (`Expr::third`), so a field's array bound written as a ternary over two
+// template parameters' `sizeof`s -- `sizeof(A) > sizeof(B) ? sizeof(A) :
+// sizeof(B)` -- silently failed to resolve for any instantiation whose
+// *else* branch was the one actually selected (whenever `sizeof(B) >=
+// sizeof(A)`), even though the *then* branch already resolved correctly.
+// Both orderings of the same two concrete types are instantiated here, so
+// both branches of the ternary are selected (once each) and must resolve
+// to the same value (the max of the two `sizeof`s) independently of which
+// template argument happens to be in the `A` vs `B` slot.
+template<typename A, typename B>
+class Combo {
+public:
+    virtual ~Combo() { return; }
+    char storage[sizeof(A) > sizeof(B) ? sizeof(A) : sizeof(B)];
+
+    int storage_size() const {
+        return static_cast<int>(sizeof(this->storage));
+    }
+};
+
+int main() {
+    // sizeof(long) > sizeof(int), so the then-branch (sizeof(A)) is
+    // selected here.
+    Combo<long, int> then_branch{};
+    // sizeof(int) > sizeof(long) is false, so the else-branch (sizeof(B))
+    // is selected here instead -- this is the ordering that previously
+    // failed to compile.
+    Combo<int, long> else_branch{};
+
+    if (then_branch.storage_size() != 8) return 1;
+    if (else_branch.storage_size() != 8) return 2;
+    return 0;
+}

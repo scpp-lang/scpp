@@ -114,7 +114,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `14_classes` | constructors/destructors, default member initializers and constructor member-initializer lists, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup, and leading `::` global-scope lookup; `using namespace` rejected |
-| `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions |
+| `17_modules` | `export module`/`import`, namespace-matches-module-name (ch11 §11.6), cross-module import/export/re-export, bare `extern`, partitions, and a workspace/path-dependency build whose cross-module `.scppm` binary artifact must correctly round-trip a still-generic exported class's template-parameter-dependent array bound |
 | `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
 | `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, and comparison rules for same-type vs mixed-type scalars |
 | `20_generic_functions` | ch05 §5.11 revisions: full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
@@ -129,7 +129,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
 | `30_constant_evaluation` | formal-spec-driven `constexpr`/`consteval` coverage: required constant evaluation, `if consteval` / `if !consteval`, unsupported v1 operations, and the later-pack-to-earlier-parameter deduction rule |
 | `31_enum_class` | scoped enumerations: `enum class` declaration, scoped enumerator access, enum-type separation, explicit casts, and explicit underlying types/values |
-| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`, `std::storage_for<T, ...>`, placement-new, and explicit destructor-call syntax |
+| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`, the `alignas`-qualified raw-`char`-array idiom for max-sized/aligned storage (replacing the removed `std::storage_for<T, ...>` builtin), placement-new, explicit destructor-call syntax, and polymorphic-class `sizeof`/`alignof` accounting for the implicit vtable pointer |
 | `33_nodiscard` | `[[nodiscard]]` / `[[nodiscard("reason")]]` on functions and types, including discard diagnostics and allowed non-discarding uses |
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` state behavior, misuse aborts, and `std::abort()` itself |
 | `35_random` | `std::random_device`, `std::mt19937`, and `scpp::rand::uniform_int_distribution<int>` |
@@ -139,7 +139,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `39_ordinary_virtual_dispatch` | ordinary virtual dispatch: override selection across base/derived references and pointers, including chained forwarding through helpers |
 | `40_operator_arrow` | `operator->`: recursive arrow chaining, cv-correct selection, ordinary-vs-unsafe call gating, and raw-pointer leaf requirements |
 | `41_global_variables` | file-scope/global variable declarations: plain globals, const globals, cross-function mutation, and `alignas` acceptance/rejection rules |
-| `42_array_bound_expressions` | array declarators (ch05 §9.4): literal/`sizeof`/`alignof`/arithmetic/global-`constexpr`-named-constant bounds applied uniformly at local-variable, struct/class-field, and function-parameter sites; rejection of non-constant, zero, negative, and self-referential-incomplete-type bounds; a generic type's `sizeof(T)`-dependent bound resolved independently per instantiation; and the current local-`constexpr`-as-later-local-bound scope boundary |
+| `42_array_bound_expressions` | array declarators (ch05 §9.4): literal/`sizeof`/`alignof`/arithmetic/global-`constexpr`-named-constant bounds applied uniformly at local-variable, struct/class-field, and function-parameter sites; rejection of non-constant, zero, negative, and self-referential-incomplete-type bounds; a generic type's `sizeof(T)`-dependent bound resolved independently per instantiation; a ternary bound over two template parameters' `sizeof`s resolving correctly for both branches (each selected by a different instantiation); and the current local-`constexpr`-as-later-local-bound scope boundary |
 
 ## Testing philosophy
 
@@ -189,6 +189,16 @@ Pass `--scpp-bin <path>` to point at a different build.
   partition directly" restriction is covered; the
   primary-interface-unit-aggregates-partitions mechanism itself isn't
   exercised.
+- **One `17_modules` case genuinely does compile a module to `.scppm`
+  first**: a workspace/path-dependency build (`scpp build --workspace`,
+  `main.argv` invoking it rather than `main.imports`) is the *only*
+  mechanism in this suite that produces and imports a real `.scppm`
+  binary artifact -- `src/project.cppm`'s manifest-build pipeline writes
+  one to disk for each path dependency and points the importing package's
+  module resolution at that compiled file, not at raw source. This is
+  what's needed to exercise cross-module binary (de)serialization bugs at
+  all (verified: an ordinary `--import name=path` case, per the note
+  above, never round-trips through `.scppm`).
 - **A module file can't also be the runnable program**: a file containing
   `export module name;` does not get its `main()` linked as the process
   entry point (discovered empirically via an "undefined reference to
@@ -222,8 +232,8 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **505 cases total**
-- **505/505 passing**
+- **534 cases total**
+- **534/534 passing**
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
@@ -275,9 +285,9 @@ re-run via `./build/run_tests`:
   real Linux `epoll_event` / `epoll_data_t` FFI declaration shape
 - **Low-level size/storage/lifetime building blocks now have direct
   black-box coverage too**:
-  `sizeof(type)` / `sizeof(expr)`, `std::storage_for<T, ...>`,
-  placement-new, explicit destructor calls, and leading `::` global-scope
-  lookup
+  `sizeof(type)` / `sizeof(expr)`, the `alignas`-qualified raw-array
+  storage idiom, placement-new, explicit destructor calls, and leading
+  `::` global-scope lookup
 - **`[[nodiscard]]` now has direct black-box coverage too**:
   function-level and type-level nodiscard, reason-string diagnostics, and
   ordinary consuming uses that must stay accepted
@@ -313,3 +323,26 @@ re-run via `./build/run_tests`:
   four distinct instantiations; and the current, deliberate scope
   boundary around a local `constexpr` constant used as a later local
   array's bound in the same function
+- **Three new regression cases cover compiler bugs found and fixed while
+  replacing `std::storage_for<T, ...>` with the `alignas`-qualified
+  raw-`char`-array idiom**:
+  - `32_sizeof_storage_lifetime/polymorphic_class_sizeof_and_alignof_account_for_implicit_vtable_pointer`:
+    a polymorphic class's `sizeof`/`alignof` now correctly accounts for
+    its implicit leading vtable pointer (previously silently
+    under-reported for any class with fields following the vtable slot),
+    including a case where the vtable pointer alone determines the
+    class's overall alignment
+  - `42_array_bound_expressions/ternary_array_bound_over_two_template_parameters_resolves_both_branches_per_instantiation`:
+    a ternary array bound over two template parameters' `sizeof`s now
+    resolves correctly regardless of which branch a given instantiation
+    selects (previously, only the `?:` then-branch was substituted
+    during generic monomorphization; the else-branch silently failed to
+    resolve)
+  - `17_modules/cross_module_generic_array_bound_with_polymorphic_type_argument`:
+    a still-generic exported class's template-parameter-dependent array
+    bound now survives the `.scppm` cross-module binary round trip when
+    instantiated with a polymorphic type argument across a module
+    boundary (previously, only the resolved integer was serialized,
+    never the unresolved expression tree needed to resolve it
+    per-instantiation on the importing side -- silently freezing the
+    array bound at 0)
