@@ -157,6 +157,110 @@ struct alignas(8) block8 { int x; };
 struct [[scpp::packed]] bad { char tag; block8 payload; }; // packed 不能包含 over-aligned 类类型成员
 ```
 
+## 9.4 数组声明符（Array declarators）[dcl.array] {#94-array-declarators}
+
+(1) 除本小节另有修改外，[dcl.array] 原样适用于 SCPP26。本小节统一适用于
+任何出现数组声明符的场合：局部变量声明、非 static 数据成员声明、函数形参
+声明，或者 [dcl.array] 本身允许出现数组声明符的任何其它场合。
+
+(2) 给出数组边界的 constant-expression，在语法上与 ISO C++ 中完全相同，
+是一个普通的表达式；除 (4)-(7) 之外，本文档不对它的形式施加任何限制。
+
+【注：特别地，本文档并不把这个表达式限制为单个整数字面量 token。ISO
+C++（因而 SCPP26）在这个位置所接受的形式，包括但不限于：一个 `sizeof`
+表达式（[expr.sizeof]）、一个 `alignof(type-id)` 查询
+（[§9.3](#93-alignment-specifier-and-query)）、一个指代 `constexpr` 变量的
+*id-expression*（[dcl.constexpr]），以及由这些子表达式构成的、可以嵌套
+任意深度的算术或比较组合。——注释结束】
+
+(3) 对数组边界 constant-expression 的求值，是 required constant
+evaluation（[§7](06-constant-evaluation.md)）；该条款规定这次求值所允许
+的操作数与操作。
+
+【注：[§7.2](06-constant-evaluation.md#72-支持的子集supported-subsetexprconstscppsupport)
+保证支持 `sizeof`/`alignof` 查询，以及对整数操作数的算术与比较运算等操作。——注释结束】
+
+(4) 数组边界 constant-expression 必须是一个类型为 `std::size_t` 的转换后
+的常量表达式（[expr.const.const]）；它的值给出该数组的边界，也就是数组中
+的元素个数，而且这个值必须大于零。这两项要求中有任一项不满足，程序就不
+合法（ill-formed）。
+
+(5) 如果数组边界 constant-expression 不是一个常量表达式，程序不合法
+（ill-formed）。
+
+【注：一个非 `const`、非 `constexpr` 的局部变量，或者任何其它直到运行期
+才能确定其值的实体，都不能用在常量表达式中（[expr.const]），因此也不能被
+数组边界读取。本文档并不会因此引入 variable-length array：与某些 C++
+实现把 VLA 作为不合规扩展加以接受不同，一个不是常量表达式的数组边界
+constant-expression，在 SCPP26 中仍然不合法（ill-formed），这与严格的
+ISO C++ 完全一致。——注释结束】
+
+(6) 如果对某个数组边界 constant-expression 的 required constant
+evaluation 需要用到某个 class 类型的大小、对齐要求或者完整性，而该 class
+类型在程序的那个位置尚未完整——包括这个数组成员所属声明本身所在的那个
+class 类型——那么程序不合法（ill-formed）。
+
+【注：这与 ISO C++ 已经施加给 `sizeof` 的规则相同（[expr.sizeof]）：一个
+class 类型在其自身定义的右花括号 `}` 之前都是不完整的，因此一个非 static
+数据成员的数组边界不能对它自身所属的这个 class 使用 `sizeof`。——注释
+结束】
+
+(7) 如果一个数组边界 constant-expression 依赖于某个模板参数，也就是说它是
+**value-dependent（值依赖）**的（[temp.dep.constexpr]），那么对这个数组
+边界 constant-expression 的 required constant evaluation，在声明该模板
+参数的模板的每次实例化（[temp.point]）时执行，使用该次实例化中与该模板
+参数对应的模板实参。求值得到的数组边界 constant-expression 按 (2)-(6)
+处理，与任何其它数组边界 constant-expression 完全一样。
+
+【注：例如，在 `template<typename T> struct Box { char storage[sizeof(T)];
+};` 里，数组边界 `sizeof(T)` 在模板定义内部是 value-dependent 的。实例化
+`Box<int>` 会用 `int` 代换 `T`，因此这次实例化的数组边界就是普通的常量
+表达式 `sizeof(int)`；实例化 `Box<double>` 同样会为这次实例化产生数组
+边界 `sizeof(double)`。这与 ISO C++ 自身对 value-dependent 表达式的处理
+方式一致（[temp.dep.constexpr]、[temp.point]）：这个表达式在模板定义里
+只确定一次，但会在每次实例化时分别求值，使用该次实例化的模板实参。——
+注释结束】
+
+(8) 例子：
+
+接受：
+
+```cpp
+char literal_bound[8];
+
+char sizeof_bound[sizeof(int) + 4];
+
+constexpr int kBufferSize = 64;
+char named_constant_bound[kBufferSize];
+
+struct Header {
+    std::uint16_t a;
+    std::uint32_t b;
+};
+char alignof_bound[alignof(Header) * 2];
+
+template<typename T>
+struct Box {
+    char storage[sizeof(T)]; // 在模板定义里是 value-dependent 的；在每次
+                              // 实例化（(7)）时被解析为 sizeof(int)、
+                              // sizeof(double) 等
+};
+```
+
+拒绝：
+
+```cpp
+int n = 5;
+char runtime_bound[n];      // 不合法：n 不是常量表达式（这不是 VLA）
+
+struct Self {
+    char buf[sizeof(Self)]; // 不合法：Self 在这里还不完整
+};
+
+char zero_bound[0];         // 不合法：数组边界必须大于零
+char negative_bound[-1];    // 不合法：数组边界必须大于零
+```
+
 ---
 
 [← 上一节：线程安全属性](04-thread-safety-properties.md) · [目录](README.md) · [下一节：常量求值 →](06-constant-evaluation.md)

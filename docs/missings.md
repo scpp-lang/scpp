@@ -23,6 +23,17 @@ rules, coroutine machinery, codegen, or preprocessor support.
 - Most ISO `alignas` / `alignof(type-id)` support has landed, but `alignas` on
   a file-scope variable declaration is still rejected even though the same
   spelling works on local variables and class declarations.
+- The spec now explicitly specifies array-bound constant expressions,
+  including bounds that are value-dependent on a template parameter (e.g.
+  `sizeof(T)`, resolved at each point of instantiation like any other
+  value-dependent expression): a `sizeof`, `alignof`, named `constexpr`
+  constant, or arithmetic/comparison combination is now permitted anywhere
+  a bare integer literal is, but the compiler still only parses a single
+  integer-literal token as an array bound and rejects everything else. The
+  compiler also cannot yet evaluate an array bound that depends on a
+  template parameter before monomorphization -- the same underlying gap
+  that currently also blocks `alignas` from depending on a template
+  parameter.
 - Coroutine/async language support is still absent: no `co_await`, `co_yield`,
   `co_return`, or coroutine lowering/runtime integration yet.
 
