@@ -100,7 +100,7 @@ cmake --build build
 | `14_classes` | 构造/析构函数、默认成员初始化器与构造成员初始化列表、私有成员访问控制、编译器提供/用户自定义的拷贝构造与拷贝赋值、只能由编译器提供的移动构造与移动赋值、方法调用的借用检查、`this` |
 | `15_function_overloading` | 按精确类型匹配解析重载、by-value/by-reference 独立轴、const/非-const 方法 |
 | `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套、同一命名空间内类名的非限定查找，以及前缀 `::` 的全局作用域查找；`using namespace` 被拒绝 |
-| `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition |
+| `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition，以及一个 workspace/path-dependency 构建——其跨模块 `.scppm` 二进制产物必须正确往返一个仍是泛型的导出类、依赖模板参数的数组边界 |
 | `18_closures` | lambda 表达式（ch05 §5.12）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
 | `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
 | `20_generic_functions` | ch05 §5.11 的修订：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
@@ -115,7 +115,7 @@ cmake --build build
 | `29_project_build` | manifest 驱动的项目构建：单包 `build`、workspace/path dependency、直接依赖可见性、`-p` 选包，以及对尚未实现 manifest 特性的拒绝路径 |
 | `30_constant_evaluation` | 形式化规范驱动的 `constexpr`/`consteval` 覆盖：required constant evaluation、`if consteval` / `if !consteval`、v1 暂不支持的操作，以及“后面的参数先推导包，再回填前面依赖参数类型”的规则 |
 | `31_enum_class` | scoped enumeration：`enum class` 声明、带作用域的枚举项访问、不同枚举类型分离、显式 cast，以及显式底层类型/枚举值 |
-| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、placement-new，以及显式析构调用语法 |
+| `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、用于最大尺寸/对齐存储的 `alignas` 限定裸 `char` 数组写法（取代已移除的 `std::storage_for<T, ...>` 内建）、placement-new、显式析构调用语法，以及多态类的 `sizeof`/`alignof` 正确计入隐式 vtable 指针 |
 | `33_nodiscard` | 函数/类型上的 `[[nodiscard]]` / `[[nodiscard("reason")]]`，包括丢弃结果时报错，以及合法的非丢弃用法 |
 | `34_expected_and_cstdlib` | `std::expected<T, E>` / `std::unexpected<E>` 的状态行为、误用时 abort，以及 `std::abort()` 本身 |
 | `35_random` | `std::random_device`、`std::mt19937` 和 `scpp::rand::uniform_int_distribution<int>` |
@@ -125,7 +125,7 @@ cmake --build build
 | `39_ordinary_virtual_dispatch` | 普通虚派发：基类/派生类引用与指针上的 override 选择，以及经由辅助函数转发后的分派 |
 | `40_operator_arrow` | `operator->`：递归箭头链、cv 正确性的重载选择、普通/unsafe 调用门控，以及原始指针叶子要求 |
 | `41_global_variables` | 文件作用域 / 全局变量声明：普通全局变量、`const` 全局变量、跨函数读写，以及 `alignas` 的接受/拒绝规则 |
-| `42_array_bound_expressions` | 数组声明符（ch05 §9.4）：字面量 / `sizeof` / `alignof` / 算术组合 / 全局 `constexpr` 命名常量作为数组边界，在局部变量、struct/class 字段、函数参数三种声明位置一致生效；拒绝非常量、零、负数以及自引用不完整类型边界；泛型类型中依赖 `sizeof(T)` 的边界在每次实例化时各自独立正确解析；以及当前关于「同一函数内局部 `constexpr` 常量用作后续局部数组边界」的既定能力边界 |
+| `42_array_bound_expressions` | 数组声明符（ch05 §9.4）：字面量 / `sizeof` / `alignof` / 算术组合 / 全局 `constexpr` 命名常量作为数组边界，在局部变量、struct/class 字段、函数参数三种声明位置一致生效；拒绝非常量、零、负数以及自引用不完整类型边界；泛型类型中依赖 `sizeof(T)` 的边界在每次实例化时各自独立正确解析；两个模板参数的 `sizeof` 构成的三目边界，在两个分支各自被不同实例化选中时都能正确解析；以及当前关于「同一函数内局部 `constexpr` 常量用作后续局部数组边界」的既定能力边界 |
 
 ## 测试理念
 
@@ -162,6 +162,14 @@ cmake --build build
   "每个模块名对应一条路径"的模型下依然没法表达——这里只覆盖了"外部文件
   不能直接 import 一个 partition"这条限制，没有覆盖"主接口单元汇聚
   partition"这个机制本身。
+- **`17_modules` 里有一个用例确实会先把模块编译成 `.scppm`**：一个
+  workspace/path-dependency 构建（`scpp build --workspace`，用
+  `main.argv` 调用而不是 `main.imports`）是这套件里唯一会真正产出并导入
+  一个 `.scppm` 二进制产物的机制——`src/project.cppm` 的 manifest 构建
+  流水线会为每个 path dependency 把它写到磁盘上，并让依赖方包的模块解析
+  指向这个已编译好的文件，而不是原始源码。这正是用来验证跨模块二进制
+  （反）序列化 bug 所必需的（已验证：按上面那条笔记，普通的
+  `--import name=path` 用例从不会经过 `.scppm` 往返）。
 - **一个模块文件不能同时是可运行的程序**：一个包含 `export module name;`
   的文件，它的 `main()` 不会被链接成进程入口（通过一次"undefined
   reference to `main`"的链接错误实证发现的）。因此 `17_modules` 下每个
@@ -187,8 +195,8 @@ cmake --build build
 当前维护中的基线：已用 CMake + Ninja 重新构建，并重新运行
 `./build/run_tests`：
 
-- **总共 505 个用例**
-- 运行器原始统计 **505/505 通过**
+- **总共 534 个用例**
+- 运行器原始统计 **534/534 通过**
 - **`24_function_pointers`：14/14 都已得到有意义的验证**——解析器现已接受
   真正的函数指针声明，套件同时覆盖了正向运行路径和必须报 `COMPILE_ERROR`
   的安全规则
@@ -229,7 +237,7 @@ cmake --build build
   union 成员访问的 unsafe 门控、packed struct 的原始字节布局，以及
   Linux `epoll_event` / `epoll_data_t` 的真实 FFI 声明形态
 - **底层的 size/storage/lifetime 积木现在也有直接黑盒覆盖**：
-  `sizeof(type)` / `sizeof(expr)`、`std::storage_for<T, ...>`、
+  `sizeof(type)` / `sizeof(expr)`、`alignas` 限定的裸数组存储写法、
   placement-new、显式析构调用，以及前缀 `::` 的全局作用域查找
 - **`[[nodiscard]]` 现在也有直接黑盒覆盖**：
   函数级/类型级 nodiscard、带 reason 的诊断文本，以及那些本来就该
@@ -260,3 +268,18 @@ cmake --build build
   被拒绝；泛型 class 中依赖 `sizeof(T)` 的边界在四种不同实例化下都各自
   独立且正确地被解析；以及「同一函数内局部 `constexpr` 常量用作后续局部
   数组边界」这一当前既定能力边界
+- **三个新增回归用例，覆盖了在把 `std::storage_for<T, ...>` 替换为
+  `alignas` 限定裸 `char` 数组写法过程中发现并修复的编译器 bug**：
+  - `32_sizeof_storage_lifetime/polymorphic_class_sizeof_and_alignof_account_for_implicit_vtable_pointer`：
+    多态类的 `sizeof`/`alignof` 现在会正确计入它隐式的前导 vtable 指针
+    （此前，任何在 vtable 槽位之后还有字段的类都会被静默地少算），
+    包含一个仅由 vtable 指针本身决定整个类对齐方式的用例
+  - `42_array_bound_expressions/ternary_array_bound_over_two_template_parameters_resolves_both_branches_per_instantiation`：
+    一个由两个模板参数的 `sizeof` 构成的三目数组边界，现在无论某次实例化
+    选中哪个分支都能正确解析（此前，泛型单态化时只有 `?:` 的 then 分支
+    会被替换，else 分支会静默解析失败）
+  - `17_modules/cross_module_generic_array_bound_with_polymorphic_type_argument`：
+    一个仍是泛型的导出类、依赖模板参数的数组边界，在跨模块边界用一个
+    多态类型参数实例化时，现在能正确经过 `.scppm` 跨模块二进制往返
+    （此前，只序列化了已解析的整数，从未序列化按每次实例化分别解析
+    所需要的、未解析的表达式树——导致数组边界被静默地永久冻结在 0）

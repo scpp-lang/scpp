@@ -1,0 +1,10 @@
+// This is a placeholder entry point required by the blackbox test harness
+// to recognize this directory as a module test case (see run_tests.cpp);
+// it is not itself part of the `[workspace]` and is never built by
+// `scpp build --workspace`. The real test is driven by `main.argv`
+// invoking `scpp build --workspace`, which builds the `libbox` and `app`
+// packages below and produces the executable that `main.output` points
+// at.
+int main() {
+    return 0;
+}
