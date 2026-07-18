@@ -24,7 +24,13 @@ struct ParseError : std::runtime_error {
     int column;
     // Same position as line/column above, just packaged as a
     // SourceLocation (ast.cppm) so cli.cppm's diagnostic printer can
-    // treat every error kind (Parse/Dataflow/Codegen) uniformly.
+    // treat every error kind (Parse/Dataflow/Codegen) uniformly. Built
+    // from a bare line/column pair above -- loc.source_path starts unset
+    // -- since plumbing this parser instance's own source_path_ through
+    // every one of this file's 150+ throw sites isn't practical; the
+    // free parse() function at the bottom of this file stamps it in
+    // once, at the parse()/Parser boundary, instead (see its own
+    // comment).
     SourceLocation loc;
 };
 
@@ -141,6 +147,16 @@ public:
         }
         return program;
     }
+
+    // Exposes this parser instance's own source_path_ (already threaded
+    // into every SourceLocation this parser hands out -- see
+    // current_loc()) so the free parse() function below can stamp it onto
+    // a ParseError that reaches it with no file identity of its own yet:
+    // ParseError's own constructor only ever takes a bare line/column
+    // pair (see ParseError above), so every one of its 150+ throw sites
+    // stays untouched -- this parse()-boundary stamp is the one place
+    // that attaches the file each error actually came from.
+    [[nodiscard]] std::shared_ptr<const std::string> source_path() const { return source_path_; }
 
 private:
     std::vector<Token> tokens_;
@@ -5980,7 +5996,15 @@ private:
 
     ExprPtr parse_primary() {
         const Token& tok = peek();
-        SourceLocation loc = make_source_location(tok.line, tok.column);
+        // current_loc() (not a bare make_source_location(tok.line,
+        // tok.column)) so every primary expression this function builds
+        // (identifiers, literals, std::move, sizeof/alignof, parenthesized
+        // sub-expressions, ...) carries this parser's own source_path_ --
+        // see cli.cppm's print_diagnostic for why a leaf Expr missing its
+        // file identity makes a DataflowError/CodegenError rooted in an
+        // imported file get silently mis-attributed to whichever file the
+        // *entry point* happened to be.
+        SourceLocation loc = current_loc();
 
         if (check(TokenKind::LBracket)) {
             return parse_lambda_expression();
@@ -6331,10 +6355,29 @@ private:
     }
 };
 
+// ch11 §11.7/§11.8: every recursive, per-file parse (the entry file, and
+// -- via ModuleCache::resolve/resolve_partition in driver.cppm -- each
+// `--import name=path` file and same-module partition) funnels through
+// this one function, one Parser instance per file. That makes it the
+// single choke point where a ParseError, freshly thrown from anywhere
+// inside this file's own parse_program() with no file identity of its
+// own yet (see ParseError's own comment), can be stamped with *this*
+// call's file before it propagates further -- but only if it doesn't
+// already have one: a ParseError thrown while parsing an imported file
+// already passed through *that* file's own parse() frame (deeper in the
+// call stack, since resolving an `import` recurses into parse() before
+// this frame's own catch runs) and was stamped there already, so this
+// frame must leave it alone and simply let it keep propagating,
+// unchanged, out to whichever file actually needed it.
 Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {},
               const PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
     Parser parser(std::move(tokens), resolver, partition_resolver, std::move(source_path));
-    return parser.parse_program();
+    try {
+        return parser.parse_program();
+    } catch (ParseError& e) {
+        if (!e.loc.has_source_path()) e.loc.source_path = parser.source_path();
+        throw;
+    }
 }
 
 Program parse(std::string_view source, const ModuleResolver& resolver = {},
