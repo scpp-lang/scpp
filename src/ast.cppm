@@ -80,7 +80,34 @@ struct Type {
 
     // Array
     std::shared_ptr<Type> element;
+    // ch05 §9.4: the array's bound, once resolved -- meaningless (0) until
+    // then. A freshly-parsed array declarator never sets this directly
+    // any more; it always starts out only as `array_size_expr` below,
+    // which the constexpr engine's array-bound resolution pass
+    // (constexpr.cppm's AlignmentResolver, extended for ch05 §9.4)
+    // evaluates and validates (a converted constant expression of
+    // `std::size_t`, strictly > 0) before clearing `array_size_expr`
+    // back to null and storing the resulting value here -- mirroring how
+    // `template_args` above is resolved in place and then cleared. Every
+    // consumer downstream of that pass (layout_of_type, codegen, ...)
+    // may assume `array_size_expr == nullptr` and read this field
+    // directly.
     long long array_size = 0;
+    // ch05 §9.4: the not-yet-evaluated array-bound constant-expression
+    // exactly as parsed (e.g. `sizeof(T)`, `alignof(Header) * 2`, a bare
+    // `constexpr` constant's name, or simply an integer literal) --
+    // non-null only between parsing and array-bound resolution. A
+    // shared_ptr (not unique_ptr) for the same reason as `non_type_args`
+    // below: Type must stay copyable (Param/StructField/Stmt store Type
+    // by value), so an ordinary Type copy just shares this expression
+    // harmlessly -- nothing may ever mutate `*array_size_expr` in place.
+    // Monomorphization's generic-parameter substitution (e.g. resolving
+    // `sizeof(T)` for `Box<int>`) instead clones this expression,
+    // substitutes the concrete type into the clone, and assigns a
+    // *new* shared_ptr here, exactly like `substitute_type_param`
+    // already does for `pointee`/`element` -- never modifies the
+    // original template's own expression object.
+    std::shared_ptr<Expr> array_size_expr;
 
     // Function / FunctionPointer
     std::shared_ptr<Type> function_return;

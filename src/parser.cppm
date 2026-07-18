@@ -2125,6 +2125,17 @@ private:
     // references aren't valid C++ (there's no storage layout for a raw
     // reference), so reject up front rather than let it silently codegen
     // as an array of addresses.
+    //
+    // ch05 §9.4: the bracketed size is an arbitrary constant-expression
+    // (not just an integer-literal token), parsed here exactly like any
+    // other expression -- via the same `parse_expr()` entry point
+    // `alignas(...)`'s own operand uses (parse_alignment_specifier_seq).
+    // It is stored, unevaluated, in the new Array Type's
+    // `array_size_expr`; the constexpr engine's array-bound resolution
+    // pass (constexpr.cppm) evaluates and validates it later (or, for a
+    // template-parameter-dependent bound such as `sizeof(T)`, at each
+    // point of instantiation -- see monomorphize.cppm), then fills in
+    // `array_size` and clears `array_size_expr`.
     Type parse_array_suffix(Type base) {
         // ch00 §2/ch01 §1.3: `[[` (a doubled bracket) starts an
         // attribute-specifier-seq, never an array declarator -- stop
@@ -2139,13 +2150,13 @@ private:
                 throw ParseError(bracket_tok.line, bracket_tok.column, "arrays of references are not supported");
             }
             advance();
-            const Token& size_tok = expect(TokenKind::IntegerLiteral, "array size");
+            ExprPtr size_expr = parse_expr();
             expect(TokenKind::RBracket, "']'");
             auto element = std::make_shared<Type>(base);
             base = Type{};
             base.kind = TypeKind::Array;
             base.element = std::move(element);
-            base.array_size = std::stoll(std::string(size_tok.text));
+            base.array_size_expr = std::shared_ptr<Expr>(std::move(size_expr));
         }
         return base;
     }

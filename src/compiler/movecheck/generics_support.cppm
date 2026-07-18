@@ -24,12 +24,14 @@ ExprPtr clone_expr(const Expr& expr) {
     clone->kind = expr.kind;
     clone->loc = expr.loc;
     clone->int_value = expr.int_value;
+    clone->float_value = expr.float_value;
     clone->bool_value = expr.bool_value;
     clone->name = expr.name;
     clone->explicit_global_qualification = expr.explicit_global_qualification;
     clone->binary_op = expr.binary_op;
     if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
     if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
+    if (expr.third) clone->third = clone_expr(*expr.third);
     clone->unary_op = expr.unary_op;
     clone->args.reserve(expr.args.size());
     for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
@@ -42,12 +44,26 @@ ExprPtr clone_expr(const Expr& expr) {
         clone->explicit_template_args.push_back(std::move(cloned_arg));
     }
     clone->type = expr.type;
+    clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
     clone->has_paren_init = expr.has_paren_init;
     clone->destroy_through_pointer = expr.destroy_through_pointer;
     clone->through_arrow = expr.through_arrow;
     clone->implicit_arrow_deref = expr.implicit_arrow_deref;
     clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
     clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
+    clone->lambda_captures.reserve(expr.lambda_captures.size());
+    for (const LambdaCapture& capture : expr.lambda_captures) {
+        LambdaCapture cloned_capture;
+        cloned_capture.name = capture.name;
+        cloned_capture.by_reference = capture.by_reference;
+        if (capture.init) cloned_capture.init = clone_expr(*capture.init);
+        clone->lambda_captures.push_back(std::move(cloned_capture));
+    }
+    clone->lambda_blanket_mode = expr.lambda_blanket_mode;
+    clone->lambda_params = expr.lambda_params;
+    clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
+    clone->lambda_is_mutable = expr.lambda_is_mutable;
+    if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
     return clone;
 }
 

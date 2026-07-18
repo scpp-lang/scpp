@@ -225,6 +225,9 @@ public:
         for (size_t i = 0; i < program_.functions.size(); ++i) functions_by_name_[program_.functions[i].name].push_back(i);
         for (const ClassDef& def : program_.classes) classes_by_name_.emplace(def.name, &def);
         for (const StructDef& def : program_.structs) structs_by_name_.emplace(def.name, &def);
+        for (const GlobalVar& global : program_.globals) {
+            if (global.decl != nullptr) globals_by_name_.emplace(global.decl->var_name, &global);
+        }
     }
 
     std::shared_ptr<Cell> evaluate_root_expr(const Expr& expr) {
@@ -255,6 +258,86 @@ public:
         return resolve_alignment_specs(specs, natural_alignment, loc, what);
     }
 
+    // ch05 §9.4: evaluates and validates a single array-bound
+    // constant-expression (the `N` in `T name[N]`) -- required constant
+    // evaluation, exactly like `alignas`'s own operand above. Rejects a
+    // non-constant operand, a non-integral result, and a resolved value
+    // that is not strictly greater than zero, each with its own clear
+    // diagnostic (§9.4(4)-(5)). Does NOT touch `frames_`/step counters --
+    // safe to call while already nested inside an in-progress evaluation
+    // (e.g. from `validate_constexpr_stmt_tree`, which runs inside a
+    // `frames_` scope pushed by `validate_constexpr_locals`). Use
+    // `resolve_root_array_bound` instead at a true top-level call site.
+    [[nodiscard]] long long evaluate_and_validate_array_bound(const Expr& expr) {
+        std::shared_ptr<Cell> value = evaluate_expr(expr);
+        if (!is_integer_like(value->type)) {
+            throw ConstexprError(expr.loc,
+                                 "array bound must be a converted constant expression of type 'std::size_t'");
+        }
+        long long raw = as_integer(value, expr.loc);
+        if (raw <= 0) {
+            throw ConstexprError(expr.loc, "array bound must be greater than zero (got " + std::to_string(raw) + ")");
+        }
+        return raw;
+    }
+
+    // Top-level entry point: resets evaluation state (mirroring
+    // `resolve_root_alignment_specs`) before evaluating. Only safe to call
+    // when no other evaluation is already in progress on this engine.
+    [[nodiscard]] long long resolve_root_array_bound(const Expr& expr) {
+        frames_.clear();
+        steps_ = 0;
+        call_depth_ = 0;
+        string_storage_counter_ = 0;
+        return evaluate_and_validate_array_bound(expr);
+    }
+
+    // ch05 §9.4: recursively resolves every not-yet-evaluated array bound
+    // reachable from `type` (its own bound if `type` itself is an array,
+    // then each dimension of a multi-dimensional array, and any array
+    // type nested inside a pointer/reference/span/function signature),
+    // replacing `array_size_expr` with the validated `array_size` in
+    // place. Safe to call more than once on the same Type: a Type with no
+    // pending `array_size_expr` (already resolved, or never an array in
+    // the first place) is left untouched. Deliberately uses
+    // `evaluate_and_validate_array_bound` (NOT `resolve_root_array_bound`):
+    // this is called from `validate_constexpr_stmt_tree` while a `frames_`
+    // scope is already active, so it must not reset the frame stack out
+    // from under its caller.
+    void resolve_array_bounds_in_type(Type& type) {
+        switch (type.kind) {
+            case TypeKind::Array:
+                if (type.element) resolve_array_bounds_in_type(*type.element);
+                if (type.array_size_expr) {
+                    long long resolved = evaluate_and_validate_array_bound(*type.array_size_expr);
+                    type.array_size = resolved;
+                    type.array_size_expr.reset();
+                }
+                return;
+            case TypeKind::Pointer:
+            case TypeKind::Reference:
+            case TypeKind::Span:
+                if (type.pointee) resolve_array_bounds_in_type(*type.pointee);
+                return;
+            case TypeKind::Function:
+            case TypeKind::FunctionPointer:
+                if (type.function_return) resolve_array_bounds_in_type(*type.function_return);
+                for (Type& param : type.function_params) resolve_array_bounds_in_type(param);
+                return;
+            case TypeKind::Named:
+                return;
+        }
+    }
+
+    // ch05 §9.4(6): while a struct/class's own fields are being resolved
+    // (AlignmentResolver::resolve_struct/resolve_class), its own type is
+    // not yet complete -- marks/unmarks `name` so that evaluating a
+    // `sizeof`/`alignof` naming it during that window is rejected with a
+    // clear diagnostic instead of silently computing a bogus (typically
+    // zero) size from the still-in-progress definition.
+    void mark_type_incomplete(const std::string& name) { incomplete_type_names_.insert(name); }
+    void mark_type_complete(const std::string& name) { incomplete_type_names_.erase(name); }
+
 private:
     const Program& program_;
     ConstexprLimits limits_;
@@ -265,6 +348,34 @@ private:
     std::unordered_map<std::string, std::vector<size_t>> functions_by_name_;
     std::unordered_map<std::string, const ClassDef*> classes_by_name_;
     std::unordered_map<std::string, const StructDef*> structs_by_name_;
+    std::unordered_set<std::string> incomplete_type_names_;
+    // ch05 §9.4(8)/06-constant-evaluation.md: a required constant
+    // expression (an array bound, an `alignas` operand, ...) may name a
+    // global `constexpr` variable (e.g. `constexpr int kBufferSize = 64;
+    // char buf[kBufferSize];`) -- unlike an ordinary local, a global is
+    // never pushed onto frames_ by any statement-execution path, so
+    // lookup_binding falls back to these when a plain frame-stack lookup
+    // finds nothing. globals_by_name_ indexes every global for that
+    // fallback; resolved_global_constants_ memoizes each global's own
+    // once-evaluated value (a global constexpr initializer is evaluated
+    // at most once, no matter how many other constant expressions go on
+    // to reference it); globals_resolving_ detects `constexpr int A =
+    // B; constexpr int B = A;`-style circular dependencies instead of
+    // recursing forever.
+    std::unordered_map<std::string, const GlobalVar*> globals_by_name_;
+    std::unordered_map<std::string, std::shared_ptr<Cell>> resolved_global_constants_;
+    std::unordered_set<std::string> globals_resolving_;
+
+    // ch05 §9.4(6): `struct Self { char buf[sizeof(Self)]; };` -- Self is
+    // incomplete at this point, so evaluating its size/alignment must be
+    // rejected rather than silently computed from a partially-resolved
+    // definition (see mark_type_incomplete/mark_type_complete above).
+    void reject_if_incomplete(const Type& queried_type, const SourceLocation& loc, std::string_view op) const {
+        if (queried_type.kind == TypeKind::Named && incomplete_type_names_.contains(queried_type.name)) {
+            throw ConstexprError(loc, "cannot apply '" + std::string(op) + "' to '" + queried_type.name +
+                                          "': it is still an incomplete type at this point");
+        }
+    }
 
     void tick(const SourceLocation& loc, std::string_view what) {
         ++steps_;
@@ -325,6 +436,12 @@ private:
         tick(stmt.loc, "checking a constexpr local declaration");
         switch (stmt.kind) {
             case StmtKind::VarDecl:
+                // ch05 §9.4: a local variable's own array bound (e.g.
+                // `char buf[sizeof(int)];`) must be resolved before
+                // anything below reads `stmt.type`'s layout (its
+                // `alignas`, if any) or codegen ever sees this
+                // declaration.
+                resolve_array_bounds_in_type(stmt.type);
                 if (!stmt.alignment_specs.empty()) {
                     std::optional<TypeLayoutInfo> layout = layout_of_type(program_, stmt.type);
                     if (!layout.has_value()) {
@@ -542,7 +659,49 @@ private:
             auto binding_it = it->find(name);
             if (binding_it != it->end()) return binding_it->second;
         }
+        if (std::shared_ptr<Cell> global_value = resolve_global_constant(name, loc)) {
+            return Binding{global_value, /*read_only=*/true};
+        }
         throw ConstexprError(loc, "expression is not a constant expression: identifier '" + name + "' is not available");
+    }
+
+    // ch05 §9.4(8): a required constant expression may name a global
+    // `constexpr` variable (e.g. `constexpr int kBufferSize = 64; char
+    // buf[kBufferSize];`, straight from the spec's own accepted-examples
+    // list) -- returns nullptr for any name that isn't such a global (a
+    // plain runtime global, or no global at all), so lookup_binding's
+    // existing "identifier is not available" diagnostic still fires for
+    // those. Evaluates the global's own initializer, at most once
+    // (memoized in resolved_global_constants_), in a completely isolated
+    // frame stack: a global initializer must only ever see other
+    // globals/functions, never whatever local variables happen to be
+    // live in the caller that triggered this lookup.
+    [[nodiscard]] std::shared_ptr<Cell> resolve_global_constant(const std::string& name, const SourceLocation& loc) {
+        if (auto cached = resolved_global_constants_.find(name); cached != resolved_global_constants_.end()) {
+            return cached->second;
+        }
+        auto global_it = globals_by_name_.find(name);
+        if (global_it == globals_by_name_.end()) return nullptr;
+        const GlobalVar& global = *global_it->second;
+        if (global.decl == nullptr || !global.decl->is_constexpr || !global.decl->init) return nullptr;
+        if (globals_resolving_.contains(name)) {
+            throw ConstexprError(loc, "constant expression circularly depends on global constexpr variable '" + name + "'");
+        }
+        globals_resolving_.insert(name);
+        std::vector<std::unordered_map<std::string, Binding>> saved_frames = std::move(frames_);
+        frames_.clear();
+        std::shared_ptr<Cell> value;
+        try {
+            value = evaluate_expr(*global.decl->init);
+        } catch (...) {
+            frames_ = std::move(saved_frames);
+            globals_resolving_.erase(name);
+            throw;
+        }
+        frames_ = std::move(saved_frames);
+        globals_resolving_.erase(name);
+        resolved_global_constants_.emplace(name, value);
+        return value;
     }
 
     [[nodiscard]] long long as_integer(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
@@ -1549,6 +1708,7 @@ private:
             case ExprKind::Destroy:
                 throw ConstexprError(expr.loc, "explicit destructor calls are not supported during constant evaluation");
             case ExprKind::Alignof: {
+                reject_if_incomplete(expr.type, expr.loc, "alignof");
                 std::optional<TypeLayoutInfo> layout = layout_of_type(program_, expr.type);
                 if (!layout.has_value()) throw ConstexprError(expr.loc, "cannot apply 'alignof' to this type in this version");
                 return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->abi_align_bytes));
@@ -1564,6 +1724,7 @@ private:
                     }
                     queried_type = *inferred;
                 }
+                reject_if_incomplete(queried_type, expr.loc, "sizeof");
                 std::optional<TypeLayoutInfo> layout = layout_of_type(program_, queried_type);
                 if (!layout.has_value()) throw ConstexprError(expr.loc, "cannot apply 'sizeof' to this type in this version");
                 return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->size_bytes));
@@ -2006,7 +2167,61 @@ void rewrite_consteval_if_for_runtime(Stmt& stmt) {
 
 class AlignmentResolver {
 public:
-    AlignmentResolver(Program& program, ConstexprEngine& engine) : program_(program), engine_(engine) {}
+    AlignmentResolver(Program& program, ConstexprEngine& engine) : program_(program), engine_(engine) {
+        // ch05 §9.4/§9.3: an uninstantiated generic struct/class template
+        // may freely mention its own not-yet-substituted type parameter
+        // inside an array bound or `alignas` operand (e.g. `sizeof(T)`)
+        // -- exactly like real C++, that value-dependent expression is
+        // only evaluated later, once per concrete instantiation (see
+        // monomorphize.cppm), never on the template primary itself. This
+        // set names every such primary's own struct/class/method so
+        // resolve_struct/resolve_class/run() can skip it entirely below
+        // -- mirrors codegen/orchestration.cppm's own
+        // generic_type_template_names/is_never_compiled, built for the
+        // same reason.
+        for (const StructDef& def : program_.structs) {
+            if (!def.template_params.empty()) generic_template_owner_names_.insert(def.name);
+        }
+        for (const ClassDef& def : program_.classes) {
+            if (!def.template_params.empty()) generic_template_owner_names_.insert(def.name);
+        }
+    }
+
+    // ch05 §9.4: resolves every array bound reachable anywhere in the
+    // program -- struct/class fields, globals, function parameter/return
+    // types, and every local variable inside every function body
+    // (including nested blocks/if/while and lambda bodies) -- and
+    // deliberately does NOT touch `alignas` at all (that remains `run()`'s
+    // job below, unchanged). MUST run before ANY other constant-expression
+    // evaluation elsewhere in the pipeline that might query a type's
+    // layout (`sizeof`/`alignof`) or execute a function body (which could
+    // declare a local array): in particular, this needs to run before
+    // `collect_runtime_stmt_rewrites`'s own folding of immediately-invoked
+    // consteval calls (see fold_immediate_calls's call site), since that
+    // step can execute an arbitrary consteval function body -- including
+    // one that declares and subscripts a local array -- long before
+    // `run()` below would otherwise get around to it. `run()` still
+    // resolves array bounds too (via `resolve_type_dependencies`), but by
+    // the time it runs every `array_size_expr` here has already been
+    // cleared, so that part of `run()` becomes a harmless no-op safety
+    // net for whichever call site is reached first.
+    void resolve_array_bounds() {
+        for (StructDef& def : program_.structs) resolve_struct_array_bounds(def.name);
+        for (ClassDef& def : program_.classes) resolve_class_array_bounds(def.name);
+        for (GlobalVar& global : program_.globals) {
+            if (global.decl == nullptr) continue;
+            resolve_array_bounds_type_dependencies(global.decl->type);
+        }
+        for (Function& fn : program_.functions) {
+            if (fn.is_generic_template) continue;
+            if (!fn.member_owner_class.empty() && generic_template_owner_names_.contains(fn.member_owner_class)) {
+                continue;
+            }
+            for (Param& param : fn.params) resolve_array_bounds_type_dependencies(param.type);
+            resolve_array_bounds_type_dependencies(fn.return_type);
+            if (fn.body) resolve_array_bounds_in_stmt(*fn.body);
+        }
+    }
 
     void run() {
         for (StructDef& def : program_.structs) resolve_struct(def.name);
@@ -2024,7 +2239,12 @@ public:
                                                      "variable '" + global.decl->var_name + "'");
         }
         for (Function& fn : program_.functions) {
-            if (fn.body) engine_.validate_constexpr_locals(fn);
+            if (!fn.body) continue;
+            if (fn.is_generic_template) continue;
+            if (!fn.member_owner_class.empty() && generic_template_owner_names_.contains(fn.member_owner_class)) {
+                continue;
+            }
+            engine_.validate_constexpr_locals(fn);
         }
     }
 
@@ -2035,6 +2255,150 @@ private:
     std::unordered_set<std::string> resolved_structs_;
     std::unordered_set<std::string> resolving_classes_;
     std::unordered_set<std::string> resolved_classes_;
+    std::unordered_set<std::string> generic_template_owner_names_;
+    // ch05 §9.4: separate tracking sets for `resolve_array_bounds()`'s own
+    // early pass above -- deliberately NOT shared with
+    // resolving_structs_/resolved_structs_ (which mean "fully resolved,
+    // alignas included" for `run()`'s later, different pass). Reusing
+    // those would make `run()` wrongly skip a struct/class's alignas work
+    // entirely, believing it already fully resolved.
+    std::unordered_set<std::string> array_bounds_resolving_structs_;
+    std::unordered_set<std::string> array_bounds_resolved_structs_;
+    std::unordered_set<std::string> array_bounds_resolving_classes_;
+    std::unordered_set<std::string> array_bounds_resolved_classes_;
+
+    // Named-type-aware recursive Type walker used only by
+    // resolve_array_bounds() above -- mirrors resolve_type_dependencies
+    // below but resolves ONLY array bounds (no alignas/layout work), and
+    // additionally recurses into a Named struct/class reference so a
+    // `sizeof(Other)` inside an array-bound expression sees Other's own
+    // array-sized fields correctly, regardless of declaration order.
+    void resolve_array_bounds_type_dependencies(Type& type) {
+        switch (type.kind) {
+            case TypeKind::Named:
+                if (StructDef* def = find_struct_mut(type.name)) {
+                    resolve_struct_array_bounds(def->name);
+                } else if (ClassDef* def = find_class_mut(type.name)) {
+                    resolve_class_array_bounds(def->name);
+                }
+                return;
+            case TypeKind::Pointer:
+            case TypeKind::Reference:
+            case TypeKind::Span:
+                if (type.pointee) resolve_array_bounds_type_dependencies(*type.pointee);
+                return;
+            case TypeKind::Array:
+                if (type.element) resolve_array_bounds_type_dependencies(*type.element);
+                if (type.array_size_expr) {
+                    type.array_size = engine_.resolve_root_array_bound(*type.array_size_expr);
+                    type.array_size_expr.reset();
+                }
+                return;
+            case TypeKind::Function:
+            case TypeKind::FunctionPointer:
+                if (type.function_return) resolve_array_bounds_type_dependencies(*type.function_return);
+                for (Type& param : type.function_params) resolve_array_bounds_type_dependencies(param);
+                return;
+        }
+    }
+
+    // Full statement-tree walk covering every StmtKind that can carry a
+    // nested VarDecl or expression -- mirrors collect_runtime_stmt_rewrites/
+    // collect_runtime_expr_rewrites's own traversal shape (the two
+    // functions this pass exists specifically to run ahead of).
+    void resolve_array_bounds_in_stmt(Stmt& stmt) {
+        switch (stmt.kind) {
+            case StmtKind::VarDecl:
+                resolve_array_bounds_type_dependencies(stmt.type);
+                if (stmt.init) resolve_array_bounds_in_expr(*stmt.init);
+                for (ExprPtr& arg : stmt.ctor_args) resolve_array_bounds_in_expr(*arg);
+                return;
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr) resolve_array_bounds_in_expr(*stmt.expr);
+                return;
+            case StmtKind::If:
+                if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
+                if (stmt.then_branch) resolve_array_bounds_in_stmt(*stmt.then_branch);
+                if (stmt.else_branch) resolve_array_bounds_in_stmt(*stmt.else_branch);
+                return;
+            case StmtKind::While:
+                if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
+                if (stmt.then_branch) resolve_array_bounds_in_stmt(*stmt.then_branch);
+                return;
+            case StmtKind::Block:
+                for (StmtPtr& nested : stmt.statements) resolve_array_bounds_in_stmt(*nested);
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return;
+        }
+    }
+
+    void resolve_array_bounds_in_expr(Expr& expr) {
+        if (expr.lhs) resolve_array_bounds_in_expr(*expr.lhs);
+        if (expr.rhs) resolve_array_bounds_in_expr(*expr.rhs);
+        if (expr.third) resolve_array_bounds_in_expr(*expr.third);
+        for (ExprPtr& arg : expr.args) resolve_array_bounds_in_expr(*arg);
+        if (expr.lambda_body) resolve_array_bounds_in_stmt(*expr.lambda_body);
+    }
+
+    // Array-bounds-only counterpart of resolve_struct/resolve_class below
+    // (no alignas work, and using this class's own separate
+    // array_bounds_resolving_*/array_bounds_resolved_* sets).
+    void resolve_struct_array_bounds(const std::string& name) {
+        if (array_bounds_resolved_structs_.contains(name)) return;
+        if (!array_bounds_resolving_structs_.insert(name).second) return;
+        StructDef* def = find_struct_mut(name);
+        if (!def) return;
+        if (!def->template_params.empty()) {
+            array_bounds_resolving_structs_.erase(name);
+            array_bounds_resolved_structs_.insert(name);
+            return;
+        }
+        engine_.mark_type_incomplete(name);
+        for (StructField& field : def->fields) resolve_array_bounds_type_dependencies(field.type);
+        engine_.mark_type_complete(name);
+        array_bounds_resolving_structs_.erase(name);
+        array_bounds_resolved_structs_.insert(name);
+    }
+
+    void resolve_class_array_bounds(const std::string& name) {
+        if (array_bounds_resolved_classes_.contains(name)) return;
+        if (!array_bounds_resolving_classes_.insert(name).second) return;
+        ClassDef* def = find_class_mut(name);
+        if (!def) return;
+        if (!def->template_params.empty()) {
+            array_bounds_resolving_classes_.erase(name);
+            array_bounds_resolved_classes_.insert(name);
+            return;
+        }
+        // ch05 §5.14: a "checking class" (ClassDef::is_synthetic_check_only,
+        // see check_generic_type_methods_once) is a purely internal,
+        // witness-substituted artifact synthesized only so movecheck can
+        // check one generic method's body once, abstractly -- its fields
+        // (including any array-bound expression like `sizeof(T)` with `T`
+        // replaced by the zero-field bare-witness struct) are never real
+        // storage and must never be evaluated/validated here: doing so
+        // would spuriously reject an entirely legitimate template-
+        // parameter-dependent bound (e.g. `char storage[sizeof(T)]` in a
+        // bare, unconstrained `class Box<T>`) at the generic-definition
+        // site, long before real instantiation ever substitutes a real
+        // concrete type for T (see also codegen/orchestration.cppm's own
+        // `if (def.is_synthetic_check_only) continue;`, the established
+        // precedent for skipping these synthetic classes entirely).
+        if (def->is_synthetic_check_only) {
+            array_bounds_resolving_classes_.erase(name);
+            array_bounds_resolved_classes_.insert(name);
+            return;
+        }
+        engine_.mark_type_incomplete(name);
+        if (BaseSpecifier* base = def->direct_ordinary_base()) resolve_array_bounds_type_dependencies(base->base_type);
+        for (ClassField& field : def->fields) resolve_array_bounds_type_dependencies(field.type);
+        engine_.mark_type_complete(name);
+        array_bounds_resolving_classes_.erase(name);
+        array_bounds_resolved_classes_.insert(name);
+    }
 
     [[nodiscard]] StructDef* find_struct_mut(std::string_view name) {
         for (StructDef& def : program_.structs) {
@@ -2050,7 +2414,7 @@ private:
         return nullptr;
     }
 
-    void resolve_type_dependencies(const Type& type) {
+    void resolve_type_dependencies(Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
                 if (StructDef* def = find_struct_mut(type.name)) {
@@ -2066,11 +2430,21 @@ private:
                 return;
             case TypeKind::Array:
                 if (type.element) resolve_type_dependencies(*type.element);
+                // ch05 §9.4: this array's own bound (not its element's --
+                // that was just handled by the recursive call above)
+                // must be resolved before any layout_of_type call below
+                // (natural_field_alignment/natural_struct_alignment/
+                // natural_class_alignment, and this same function's own
+                // callers) ever reads `array_size`.
+                if (type.array_size_expr) {
+                    type.array_size = engine_.resolve_root_array_bound(*type.array_size_expr);
+                    type.array_size_expr.reset();
+                }
                 return;
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
                 if (type.function_return) resolve_type_dependencies(*type.function_return);
-                for (const Type& param : type.function_params) resolve_type_dependencies(param);
+                for (Type& param : type.function_params) resolve_type_dependencies(param);
                 return;
         }
     }
@@ -2125,6 +2499,23 @@ private:
         if (!resolving_structs_.insert(name).second) return;
         StructDef* def = find_struct_mut(name);
         if (!def) return;
+        if (!def->template_params.empty()) {
+            // ch05 §9.4(7)/§9.3: this is the primary template
+            // definition itself, not a concrete instantiation -- its
+            // fields may freely reference the template's own,
+            // not-yet-substituted type parameter(s) (e.g. `char
+            // storage[sizeof(T)];`), which are not real types yet.
+            // monomorphize.cppm's instantiate_generic_type clones this
+            // struct's fields with each type parameter already
+            // substituted for a concrete type; that clone -- an
+            // ordinary struct with `template_params` empty -- goes
+            // through this same function on its own, separate call,
+            // where resolution proceeds normally.
+            resolving_structs_.erase(name);
+            resolved_structs_.insert(name);
+            return;
+        }
+        engine_.mark_type_incomplete(name);
         for (StructField& field : def->fields) {
             resolve_type_dependencies(field.type);
         }
@@ -2156,6 +2547,7 @@ private:
         def->resolved_alignment =
             engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc,
                                                  std::string(def->is_union ? "union '" : "struct '") + def->name + "'");
+        engine_.mark_type_complete(name);
         resolving_structs_.erase(name);
         resolved_structs_.insert(name);
     }
@@ -2165,7 +2557,29 @@ private:
         if (!resolving_classes_.insert(name).second) return;
         ClassDef* def = find_class_mut(name);
         if (!def) return;
-        if (const BaseSpecifier* base = def->direct_ordinary_base()) resolve_type_dependencies(base->base_type);
+        if (!def->template_params.empty()) {
+            // See the identical comment in resolve_struct above.
+            resolving_classes_.erase(name);
+            resolved_classes_.insert(name);
+            return;
+        }
+        // ch05 §9.4/§5.14: skip a synthetic "checking class"
+        // (ClassDef::is_synthetic_check_only) here too, for the same
+        // reason as the identical check in resolve_class_array_bounds
+        // above -- it is never codegen'd (codegen/orchestration.cppm's
+        // own `if (def.is_synthetic_check_only) continue;`) and its
+        // resolved_alignment/array bounds are never read by anything, so
+        // there is no reason to risk this pass throwing on a witness-
+        // substituted field type (e.g. `sizeof(T)` with T replaced by the
+        // zero-field bare-witness struct) that was never a real bound to
+        // begin with.
+        if (def->is_synthetic_check_only) {
+            resolving_classes_.erase(name);
+            resolved_classes_.insert(name);
+            return;
+        }
+        engine_.mark_type_incomplete(name);
+        if (BaseSpecifier* base = def->direct_ordinary_base()) resolve_type_dependencies(base->base_type);
         for (ClassField& field : def->fields) resolve_type_dependencies(field.type);
         for (ClassField& field : def->fields) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
@@ -2180,6 +2594,7 @@ private:
         std::uint64_t natural_align = natural_class_alignment(*def);
         def->resolved_alignment =
             engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc, "class '" + def->name + "'");
+        engine_.mark_type_complete(name);
         resolving_classes_.erase(name);
         resolved_classes_.insert(name);
     }
@@ -2189,6 +2604,14 @@ private:
 
 void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     ConstexprEngine engine(program, limits);
+    AlignmentResolver aligner(program, engine);
+    // ch05 §9.4: array bounds must be resolved before *any* immediate-call
+    // folding below, since folding a call to a consteval function actually
+    // executes its body (via evaluate_root_expr/execute_stmt) -- including
+    // any local array declaration inside it -- long before `aligner.run()`
+    // would otherwise get around to validating that same function. See
+    // resolve_array_bounds()'s own comment for the full rationale.
+    aligner.resolve_array_bounds();
     std::vector<ExprRewrite> expr_rewrites;
     std::vector<Stmt*> consteval_if_rewrites;
     for (Function& fn : program.functions) {
@@ -2202,7 +2625,7 @@ void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     // constexpr function containing `if consteval` would incorrectly see
     // only the runtime branch, because the callee's AST has already been
     // destructively rewritten for the later runtime pipeline.
-    AlignmentResolver(program, engine).run();
+    aligner.run();
     for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
     for (Function& fn : program.functions) {
         if (fn.eval_mode == FunctionEvalMode::Consteval && !fn.name.ends_with("_new")) fn.body.reset();

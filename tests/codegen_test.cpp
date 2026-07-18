@@ -1,5 +1,6 @@
 import scpp.compiler.codegen;
 import scpp.compiler.movecheck;
+import scpp.constexpr_engine;
 import scpp.parser;
 import scpp.ast;
 
@@ -100,6 +101,13 @@ scpp::Program parse_with_std_imports(std::string_view source) {
 std::string generate_ir(std::string_view source) {
     scpp::Program program = parse_with_std_imports(source);
     scpp::monomorphize_generics(program);
+    // ch05 §9.4: resolves every array bound (and other constant-expression
+    // context, e.g. `alignas`) before codegen ever reads a type's layout --
+    // codegen itself never evaluates constant expressions, only the
+    // already-resolved `Type::array_size`. Mirrors driver.cppm's own
+    // pipeline ordering (monomorphize_generics -> fold_immediate_calls ->
+    // ... -> codegen).
+    scpp::fold_immediate_calls(program);
     scpp::Codegen codegen("test_module");
     codegen.generate(program);
     return codegen.module_ir();

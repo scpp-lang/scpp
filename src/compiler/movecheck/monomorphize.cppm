@@ -440,7 +440,7 @@ private:
     // type) and a witness class (check_generic_type_methods_once), the
     // same way a generic function's own Concept-constrained parameter
     // is substituted at its own call site.
-    [[nodiscard]] static Type substitute_type_param(const Type& type, const std::string& param_name,
+    [[nodiscard]] Type substitute_type_param(const Type& type, const std::string& param_name,
                                                      const Type& replacement) {
         if (type.kind == TypeKind::Named && type.name == param_name) return replacement;
         Type result = type;
@@ -460,10 +460,25 @@ private:
         for (Type& param : result.function_params) {
             param = substitute_type_param(param, param_name, replacement);
         }
+        // ch05 §9.4: an array bound may itself mention the type parameter
+        // being substituted (e.g. `char storage[sizeof(T)];`) -- clone the
+        // still-unresolved expression tree before substituting into it, so
+        // the template primary's own `array_size_expr` is never mutated in
+        // place (a *different* instantiation must still see the original,
+        // unsubstituted expression). The clone is only ever partially
+        // substituted here if `type` has multiple template parameters --
+        // substitute_type_params below re-applies this once per
+        // parameter, so the expression converges to fully concrete once
+        // every parameter has been substituted.
+        if (result.array_size_expr) {
+            ExprPtr cloned = clone_expr(*result.array_size_expr);
+            substitute_type_param_in_expr(*cloned, param_name, replacement);
+            result.array_size_expr = std::shared_ptr<Expr>(std::move(cloned));
+        }
         return result;
     }
 
-    [[nodiscard]] static Type substitute_type_pack(const Type& type, std::string_view pack_name,
+    [[nodiscard]] Type substitute_type_pack(const Type& type, std::string_view pack_name,
                                                    const std::vector<Type>& pack_elems) {
         if (type.is_pack_expansion && type.kind == TypeKind::Named && type.name == pack_name) {
             if (pack_elems.size() == 1) return pack_elems.front();
@@ -499,10 +514,18 @@ private:
             expanded_function_params.push_back(substitute_type_pack(param, pack_name, pack_elems));
         }
         result.function_params = std::move(expanded_function_params);
+        // ch05 §9.4: see the identical comment in substitute_type_param
+        // above -- clone-then-substitute so the template primary's own
+        // array_size_expr is never mutated in place.
+        if (result.array_size_expr) {
+            ExprPtr cloned = clone_expr(*result.array_size_expr);
+            substitute_type_pack_in_expr(*cloned, pack_name, pack_elems);
+            result.array_size_expr = std::shared_ptr<Expr>(std::move(cloned));
+        }
         return result;
     }
 
-    [[nodiscard]] static Type substitute_type_params(
+    [[nodiscard]] Type substitute_type_params(
         const Type& type, const std::vector<std::pair<std::string, Type>>& replacements) {
         Type result = type;
         for (const auto& [param_name, replacement] : replacements) {
@@ -511,7 +534,7 @@ private:
         return result;
     }
 
-    [[nodiscard]] static Type substitute_type_packs(
+    [[nodiscard]] Type substitute_type_packs(
         const Type& type, const std::unordered_map<std::string, std::vector<Type>>& replacements) {
         Type result = type;
         for (const auto& [pack_name, pack_elems] : replacements) {
@@ -897,7 +920,7 @@ private:
         return nullptr;
     }
 
-    [[nodiscard]] static Type instantiate_type_pattern(
+    [[nodiscard]] Type instantiate_type_pattern(
         const Type& type, const std::vector<std::pair<std::string, Type>>& replacements,
         const std::unordered_map<std::string, std::vector<Type>>& pack_replacements) {
         if (!type.is_pack_expansion && type.kind == TypeKind::Named && type.template_args.empty() &&
@@ -938,6 +961,17 @@ private:
             new_function_params.push_back(instantiate_type_pattern(param, replacements, pack_replacements));
         }
         result.function_params = std::move(new_function_params);
+        // ch05 §9.4: see the identical comment in substitute_type_param
+        // above -- clone-then-substitute so the template primary's own
+        // array_size_expr is never mutated in place. Both the ordinary
+        // and pack replacements are applied, mirroring how nested Types
+        // above are substituted via both replacement maps.
+        if (result.array_size_expr) {
+            ExprPtr cloned = clone_expr(*result.array_size_expr);
+            substitute_type_params_in_expr(*cloned, replacements);
+            substitute_type_packs_in_expr(*cloned, pack_replacements);
+            result.array_size_expr = std::shared_ptr<Expr>(std::move(cloned));
+        }
         return result;
     }
 
@@ -2659,7 +2693,7 @@ private:
         return false;
     }
 
-    [[nodiscard]] static bool type_still_depends_on_unbound_template_params(
+    [[nodiscard]] bool type_still_depends_on_unbound_template_params(
         Type type, const std::vector<GenericTypeParam>& template_params,
         const std::unordered_map<std::string, Type>& type_bindings,
         const std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
