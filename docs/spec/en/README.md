@@ -32,6 +32,7 @@ is still designed (see the book) but not yet formalized in this document.
 14. [Enumeration conversions](09-enumeration-conversions.md)
 8. [Iteration statements](10-iteration-statements.md)
 11. [Inheritance and Interfaces](11-inheritance-and-interfaces.md)
+10. [Modules and Namespaces](12-modules-and-namespaces.md)
 
 ## File-Format Specifications
 

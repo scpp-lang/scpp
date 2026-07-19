@@ -526,4 +526,4 @@ struct BadStructVirtual {
 
 ---
 
-[← 上一节：迭代语句](10-iteration-statements.md) · [目录](README.md)
+[← 上一节：迭代语句](10-iteration-statements.md) · [目录](README.md) · [下一节：模块与命名空间 →](12-modules-and-namespaces.md)

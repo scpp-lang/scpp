@@ -582,4 +582,4 @@ struct BadStructVirtual {
 
 ---
 
-[← Previous: Iteration statements](10-iteration-statements.md) · [Table of Contents](README.md)
+[← Previous: Iteration statements](10-iteration-statements.md) · [Table of Contents](README.md) · [Next: Modules and Namespaces →](12-modules-and-namespaces.md)
