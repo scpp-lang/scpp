@@ -1,0 +1,3 @@
+contains: define internal i32 @_scppM3_fooF6_helperQ0_P0_(
+contains: define internal i32 @_scppM3_fooN3_barF6_helperQ0_P0_(
+contains: define i32 @_scppM3_fooF11_call_helperQ0_P0_(

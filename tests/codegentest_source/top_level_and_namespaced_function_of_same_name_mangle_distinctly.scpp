@@ -1,0 +1,27 @@
+// Regression test: a top-level (non-namespaced) function and a
+// same-named function declared inside a namespace unrelated to this
+// module's own name ("bar" vs module "foo") must never collide in
+// Codegen::mangle_exported_symbol's mangled LLVM symbol name, even
+// though `bar`'s namespace_path is the same *length* as the module's
+// own dotted-name segment count (ch11 §11.6: a non-exported declaration
+// "may live in any namespace, or none" -- comparing only namespace_path
+// *lengths* against the module's own segment count, instead of actual
+// segment *content*, previously let an unrelated same-length namespace
+// silently drop out of the mangled name entirely).
+export module foo;
+
+int helper() {
+    return 1;
+}
+
+namespace bar {
+    int helper() {
+        return 2;
+    }
+}
+
+namespace foo {
+    export int call_helper() {
+        return helper() * 10 + bar::helper();
+    }
+}

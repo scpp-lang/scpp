@@ -464,12 +464,30 @@ namespace scpp {
         const std::string& effective_module = fn.owning_module.empty() ? program_->module_name : fn.owning_module;
         std::string mangled = "_scppM" + std::to_string(effective_module.size()) + "_" + effective_module;
         // Namespace nesting *beyond* the module's own required prefix
-        // (ch11 §11.5 already requires every exported symbol's namespace
-        // to start with the module's dotted name -- module names use
-        // '.', namespace paths use '::', translated segment-for-segment
-        // -- so that shared prefix doesn't need re-encoding here).
+        // (ch11 §11.5 already requires every *exported* symbol's
+        // namespace to start with the module's dotted name -- module
+        // names use '.', namespace paths use '::', translated
+        // segment-for-segment -- so that shared prefix doesn't need
+        // re-encoding here). A *non-exported* declaration carries no
+        // such guarantee at all (ch11 §11.6: "may live in any namespace
+        // (or none)"), so its namespace_path can be shorter than, the
+        // same length as, or a completely different set of segments
+        // than the module's own name -- only the segments that actually
+        // match the module name one-for-one from the start are the
+        // module's own prefix; comparing by *length* alone (as opposed
+        // to content) would silently skip -- and drop from the mangled
+        // name entirely -- an unrelated same-length-or-shorter namespace
+        // (e.g. a private `namespace bar { ... }` function inside module
+        // `foo`), colliding with any other declaration of the same bare
+        // name that also happens to drop the same number of segments
+        // (e.g. a top-level one, dropping zero).
         std::vector<std::string> module_segments = split_dotted(effective_module);
-        for (size_t i = module_segments.size(); i < fn.namespace_path.size(); i++) {
+        size_t shared_prefix = 0;
+        while (shared_prefix < module_segments.size() && shared_prefix < fn.namespace_path.size() &&
+               module_segments[shared_prefix] == fn.namespace_path[shared_prefix]) {
+            shared_prefix++;
+        }
+        for (size_t i = shared_prefix; i < fn.namespace_path.size(); i++) {
             const std::string& segment = fn.namespace_path[i];
             mangled += "N" + std::to_string(segment.size()) + "_" + segment;
         }
