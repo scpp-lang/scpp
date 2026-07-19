@@ -1,0 +1,42 @@
+manifest-version = 1
+
+# Not yet a member of libs/scpp.toml's workspace (unlike std/scpp):
+# consumers of this package still need to pass real LLVM's own link
+# inputs by hand (e.g. `--link -lLLVM-22 --link -L/usr/lib/llvm-22/lib`,
+# or whatever `llvm-config --libfiles` resolves to on their system) --
+# there is no manifest-level mechanism yet (here or in libs/std,
+# libs/scpp) for a package to declare "consumers also need external
+# system library X at final link time" so it gets propagated
+# automatically. See tests/llvm_lib_test.cpp for how this project's own
+# end-to-end test supplies those flags explicitly, and libs/README.md for
+# follow-up plans to close that gap so this package can join the
+# workspace like std/scpp do.
+#
+# `name` below is `scpp-llvm` (hyphen), deliberately. `[package]`/`[[lib]]`
+# `name` is pure manifest metadata (like an npm/cargo package name), not a
+# scpp-language identifier -- it never appears as a scpp `import`/namespace
+# token, only as: (a) this package's own output archive filename
+# (`lib<name>.scppa`), (b) its build-cache output directory segment, and
+# (c) dependency-graph/workspace-membership bookkeeping (all in
+# project.cppm; parsed via parse_string_literal, an arbitrary TOML string
+# with no identifier-grammar restriction -- confirmed empirically, not
+# assumed). So, unlike a module name (which scpp's own grammar restricts to
+# `Identifier ('.' Identifier)*`, no hyphens), a hyphen here is fully legal
+# and does not collide with anything: this project's build model never
+# needs `name` to be a valid identifier, the same way a cargo crate can be
+# named `serde-json` while the Rust identifier it maps to is `serde_json`.
+# This is deliberately independent from the module name a consumer actually
+# `import`s, which is the dotted `scpp.llvm` (see scpp_llvm.scpp's own
+# header comment for why). Only the module name is what an `import`
+# statement resolves against; this manifest `name` is used solely for the
+# bookkeeping purposes above.
+[package]
+name = "scpp-llvm"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../std" }
+
+[[lib]]
+name = "scpp-llvm"
+sources = ["**/*.scpp"]

@@ -1,15 +1,20 @@
 module;
 
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/IR/Module.h>
-#include <llvm/MC/TargetRegistry.h>
-#include <llvm/Support/CodeGen.h>
-#include <llvm/Support/FileSystem.h>
-#include <llvm/Support/TargetSelect.h>
-#include <llvm/Support/raw_ostream.h>
-#include <llvm/Target/TargetMachine.h>
-#include <llvm/Target/TargetOptions.h>
-#include <llvm/TargetParser/Host.h>
+// Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
+// interface -- the TargetMachine construction and object-file emission
+// this file performs go through its llvm-c/Target.h and
+// llvm-c/TargetMachine.h functions directly below instead of any native
+// LLVM C++ header (llvm::TargetRegistry, llvm::TargetMachine,
+// llvm::legacy::PassManager, etc.). See libs/README.md for why this
+// project binds straight to LLVM-C wherever it already covers what's
+// needed -- including LLVMTargetMachineEmitToFile, which alone replaces
+// the raw_fd_ostream + legacy::PassManager + addPassesToEmitFile dance
+// the native C++ API required: a rigorous, function-by-function
+// empirical audit found LLVM-C fully covers every LLVM operation this
+// project's driver needs.
+#include <llvm-c/Core.h>
+#include <llvm-c/Target.h>
+#include <llvm-c/TargetMachine.h>
 
 export module scpp.driver;
 
@@ -2135,11 +2140,11 @@ std::string build_merged_interface_source(const Program& program, const std::str
                                                                     expanded_partition_paths));
 }
 
-llvm::CodeGenOptLevel codegen_opt_level_for(int opt_level) {
-    if (opt_level <= 0) return llvm::CodeGenOptLevel::None;
-    if (opt_level == 1) return llvm::CodeGenOptLevel::Less;
-    if (opt_level == 2) return llvm::CodeGenOptLevel::Default;
-    return llvm::CodeGenOptLevel::Aggressive;
+LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
+    if (opt_level <= 0) return LLVMCodeGenLevelNone;
+    if (opt_level == 1) return LLVMCodeGenLevelLess;
+    if (opt_level == 2) return LLVMCodeGenLevelDefault;
+    return LLVMCodeGenLevelAggressive;
 }
 
 // Move-checks an already-parsed (and, if it has imports of its own,
@@ -2166,21 +2171,30 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     try {
         check_moves(program);
 
-        llvm::InitializeNativeTarget();
-        llvm::InitializeNativeTargetAsmPrinter();
+        LLVMInitializeNativeTarget();
+        LLVMInitializeNativeAsmPrinter();
 
-        std::string triple = llvm::sys::getDefaultTargetTriple();
-        llvm::Triple target_triple(triple);
+        char* default_triple_c = LLVMGetDefaultTargetTriple();
+        std::string triple = default_triple_c;
+        LLVMDisposeMessage(default_triple_c);
 
-        std::string lookup_error;
-        const llvm::Target* target = llvm::TargetRegistry::lookupTarget(target_triple, lookup_error);
-        if (target == nullptr) {
+        LLVMTargetRef target = nullptr;
+        char* lookup_error_c = nullptr;
+        if (LLVMGetTargetFromTriple(triple.c_str(), &target, &lookup_error_c)) {
+            std::string lookup_error = lookup_error_c != nullptr ? lookup_error_c : "";
+            LLVMDisposeMessage(lookup_error_c);
             throw DriverError("failed to lookup target '" + triple + "': " + lookup_error);
         }
 
-        llvm::TargetOptions options;
-        std::unique_ptr<llvm::TargetMachine> target_machine(target->createTargetMachine(
-            target_triple, "generic", "", options, llvm::Reloc::PIC_, std::nullopt, codegen_opt_level_for(opt_level)));
+        // A std::unique_ptr with LLVMDisposeTargetMachine as its deleter
+        // gives target_machine the exact same "always freed, even if an
+        // exception unwinds through codegen.generate() below" exception
+        // safety the original llvm::TargetMachine unique_ptr had, without
+        // needing a bespoke RAII wrapper type.
+        std::unique_ptr<LLVMOpaqueTargetMachine, void (*)(LLVMTargetMachineRef)> target_machine(
+            LLVMCreateTargetMachine(target, triple.c_str(), "generic", "", codegen_opt_level_for(opt_level),
+                                     LLVMRelocPIC, LLVMCodeModelDefault),
+            &LLVMDisposeTargetMachine);
         if (!target_machine) {
             throw DriverError("failed to create target machine for '" + triple + "'");
         }
@@ -2189,21 +2203,21 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
         // needs a target-accurate sizeof(T) to call malloc with, which comes
         // from the module's DataLayout.
         Codegen codegen("scpp_module", program.source_path, emit_debug_info);
-        codegen.set_target(target_triple, target_machine->createDataLayout());
-        llvm::Module& module = codegen.generate(program);
+        LLVMTargetDataRef target_data = LLVMCreateTargetDataLayout(target_machine.get());
+        char* data_layout_c = LLVMCopyStringRepOfTargetData(target_data);
+        codegen.set_target(triple, data_layout_c);
+        LLVMDisposeMessage(data_layout_c);
+        LLVMDisposeTargetData(target_data);
 
-        std::error_code error_code;
-        llvm::raw_fd_ostream dest(object_path, error_code, llvm::sys::fs::OF_None);
-        if (error_code) {
-            throw DriverError("could not open object file '" + object_path + "': " + error_code.message());
-        }
+        LLVMModuleRef module = codegen.generate(program);
 
-        llvm::legacy::PassManager pass_manager;
-        if (target_machine->addPassesToEmitFile(pass_manager, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-            throw DriverError("target machine cannot emit an object file of this type");
+        char* emit_error_c = nullptr;
+        if (LLVMTargetMachineEmitToFile(target_machine.get(), module, object_path.c_str(), LLVMObjectFile,
+                                         &emit_error_c)) {
+            std::string emit_error = emit_error_c != nullptr ? emit_error_c : "unknown error";
+            LLVMDisposeMessage(emit_error_c);
+            throw DriverError("could not emit object file '" + object_path + "': " + emit_error);
         }
-        pass_manager.run(module);
-        dest.flush();
     } catch (const ConstexprError& error) {
         throw DriverError(error.what());
     }
@@ -2216,17 +2230,24 @@ void emit_module_archive_for_program(Program& program, const std::string& archiv
     try {
         create_archive({object_path.string()}, archive_path);
     } catch (...) {
-        llvm::sys::fs::remove(object_path.string());
+        std::error_code ec;
+        std::filesystem::remove(object_path, ec);
         throw;
     }
-    llvm::sys::fs::remove(object_path.string());
+    std::error_code ec;
+    std::filesystem::remove(object_path, ec);
 }
 
 } // namespace scpp
 
 export namespace scpp {
 
-std::string host_target_triple() { return llvm::sys::getDefaultTargetTriple(); }
+std::string host_target_triple() {
+    char* triple_c = LLVMGetDefaultTargetTriple();
+    std::string triple = triple_c;
+    LLVMDisposeMessage(triple_c);
+    return triple;
+}
 
 std::vector<std::string> project_default_stdlib_link_inputs() { return default_stdlib_link_inputs(); }
 
@@ -2389,9 +2410,10 @@ void compile_to_executable(std::string_view source, const std::string& executabl
     final_link_inputs.insert(final_link_inputs.end(), link_inputs.begin(), link_inputs.end());
     link_executable(final_link_inputs, executable_path, static_link);
 
-    llvm::sys::fs::remove(object_path);
+    std::error_code final_cleanup_ec;
+    std::filesystem::remove(object_path, final_cleanup_ec);
     for (const std::string& module_object_path : module_object_paths) {
-        llvm::sys::fs::remove(module_object_path);
+        std::filesystem::remove(module_object_path, final_cleanup_ec);
     }
 }
 

@@ -1,20 +1,6 @@
 module;
 
-#include <llvm/IR/BasicBlock.h>
-#include <llvm/IR/Constants.h>
-#include <llvm/IR/DIBuilder.h>
-#include <llvm/IR/DebugInfoMetadata.h>
-#include <llvm/IR/DataLayout.h>
-#include <llvm/IR/DerivedTypes.h>
-#include <llvm/IR/Function.h>
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/Intrinsics.h>
-#include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/Type.h>
-#include <llvm/IR/Verifier.h>
-#include <llvm/BinaryFormat/Dwarf.h>
-#include <llvm/Support/raw_ostream.h>
+#include <llvm-c/Core.h>
 
 module scpp.compiler.codegen:functions;
 
@@ -32,7 +18,7 @@ namespace scpp {
         if (fn.is_extern_c) {
             validate_c_abi_compatible(fn.return_type, fn.name, "return type");
         }
-        std::vector<llvm::Type*> param_types;
+        std::vector<LLVMTypeRef> param_types;
         param_types.reserve(fn.params.size());
         for (std::size_t i = 0; i < fn.params.size(); ++i) {
             const Param& param = fn.params[i];
@@ -50,8 +36,8 @@ namespace scpp {
             }
             param_types.push_back(llvm_param_type_for_function(fn, param, i));
         }
-        llvm::FunctionType* fn_type =
-            llvm::FunctionType::get(to_llvm_type(fn.return_type), param_types, fn.has_varargs);
+        LLVMTypeRef fn_type = LLVMFunctionType(to_llvm_type(fn.return_type), param_types.data(),
+                                               static_cast<unsigned>(param_types.size()), fn.has_varargs);
         // ch11 §11.9: a module-private (non-exported) function *defined*
         // in this same translation unit never needs to be visible
         // outside it -- LLVM internal linkage (the same mechanism as C's
@@ -67,7 +53,7 @@ namespace scpp {
         // non-module file's own function, or an exported one, handled
         // via overload_names_'s mangled name already) is unaffected --
         // external linkage, exactly as before this chapter.
-        llvm::Function::LinkageTypes linkage = llvm::Function::ExternalLinkage;
+        LLVMLinkage linkage = LLVMExternalLinkage;
         // ch05 §5.14: a forwarding stub (Function::forwards_to) gets a
         // real, defined body too (define_forwarding_function), just
         // never an scpp-level AST one -- eligible for the same internal
@@ -75,15 +61,16 @@ namespace scpp {
         bool has_definition = fn.body != nullptr || fn.is_defaulted || !fn.forwards_to.empty();
         if (has_definition && !fn.is_exported && !fn.is_extern_c &&
             (!fn.owning_module.empty() || !program_->module_name.empty() || fn.is_compile_time_dependency)) {
-            linkage = llvm::Function::InternalLinkage;
+            linkage = LLVMInternalLinkage;
         }
-        llvm::Function::Create(fn_type, linkage, overload_names_.at(&fn), *module_);
+        LLVMValueRef llvm_fn = LLVMAddFunction(module_, overload_names_.at(&fn).c_str(), fn_type);
+        LLVMSetLinkage(llvm_fn, linkage);
     }
 
 
     void Codegen::define_function(const Function& fn)
 {
-        llvm::Function* llvm_fn = module_->getFunction(overload_names_.at(&fn));
+        LLVMValueRef llvm_fn = LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
         if (llvm_fn == nullptr) {
             throw CodegenError("function '" + fn.name + "' was not declared before definition",
                 current_loc_);
@@ -104,28 +91,29 @@ namespace scpp {
         // concept is fully retired).
         unsafe_depth_ = fn.is_unsafe ? 1 : 0;
         attach_debug_subprogram(llvm_fn, fn);
-        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
-        builder_->SetInsertPoint(entry);
+        LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context_, llvm_fn, "entry");
+        LLVMPositionBuilderAtEnd(builder_, entry);
         current_loc_ = fn.loc;
-        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        LLVMSetCurrentDebugLocation2(builder_, nullptr);
 
         locals_.clear();
         scope_stack_.clear();
         std::size_t index = 0;
-        for (auto& arg : llvm_fn->args()) {
+        for (unsigned i = 0, n = LLVMCountParams(llvm_fn); i < n; ++i) {
+            LLVMValueRef arg = LLVMGetParam(llvm_fn, i);
             const Param& param = fn.params[index++];
-            arg.setName(param.name);
-            llvm::AllocaInst* slot = nullptr;
+            LLVMSetValueName2(arg, param.name.c_str(), param.name.size());
+            LLVMValueRef slot = nullptr;
             if (index == 1 && interface_destructor_uses_raw_this(fn)) {
-                slot = builder_->CreateAlloca(to_llvm_type(param.type), nullptr, param.name);
-                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
-                llvm::Value* fat_this = build_interface_value(
-                    &arg, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)));
+                slot = LLVMBuildAlloca(builder_, to_llvm_type(param.type), param.name.c_str());
+                if (std::optional<unsigned> align = alignment_for_type(param.type)) LLVMSetAlignment(slot, *align);
+                LLVMValueRef fat_this = build_interface_value(
+                    arg, LLVMConstPointerNull(LLVMPointerTypeInContext(context_, 0)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
             } else {
-                slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
-                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
-                builder_->CreateStore(&arg, slot);
+                slot = LLVMBuildAlloca(builder_, LLVMTypeOf(arg), param.name.c_str());
+                if (std::optional<unsigned> align = alignment_for_type(param.type)) LLVMSetAlignment(slot, *align);
+                LLVMBuildStore(builder_, arg, slot);
             }
             locals_[param.name] = LocalSlot{slot, param.type};
             maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index));
@@ -139,10 +127,10 @@ namespace scpp {
 
         // Falling off the end of a `void` function/constructor/destructor is
         // valid, exactly like C++; synthesize the implicit `return;`.
-        if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
+        if (LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder_)) == nullptr) {
             if (fn.return_type.kind == TypeKind::Named && fn.return_type.name == "void") {
-                builder_->CreateRetVoid();
-                builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+                LLVMBuildRetVoid(builder_);
+                LLVMSetCurrentDebugLocation2(builder_, nullptr);
                 current_debug_scope_ = nullptr;
                 current_subprogram_ = nullptr;
                 return;
@@ -150,7 +138,7 @@ namespace scpp {
             throw CodegenError("function '" + fn.name + "' does not return on all paths",
                 current_loc_);
         }
-        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        LLVMSetCurrentDebugLocation2(builder_, nullptr);
         current_debug_scope_ = nullptr;
         current_subprogram_ = nullptr;
     }
@@ -165,7 +153,7 @@ namespace scpp {
             throw CodegenError("only defaulted destructors are code-generated in this version", fn.loc);
         }
 
-        llvm::Function* llvm_fn = module_->getFunction(overload_names_.at(&fn));
+        LLVMValueRef llvm_fn = LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
         if (llvm_fn == nullptr) {
             throw CodegenError("function '" + fn.name + "' was not declared before definition", fn.loc);
         }
@@ -173,28 +161,29 @@ namespace scpp {
         current_function_def_ = &fn;
         unsafe_depth_ = fn.is_unsafe ? 1 : 0;
         attach_debug_subprogram(llvm_fn, fn);
-        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
-        builder_->SetInsertPoint(entry);
+        LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context_, llvm_fn, "entry");
+        LLVMPositionBuilderAtEnd(builder_, entry);
         current_loc_ = fn.loc;
-        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        LLVMSetCurrentDebugLocation2(builder_, nullptr);
 
         locals_.clear();
         scope_stack_.clear();
         std::size_t index = 0;
-        for (auto& arg : llvm_fn->args()) {
+        for (unsigned i = 0, n = LLVMCountParams(llvm_fn); i < n; ++i) {
+            LLVMValueRef arg = LLVMGetParam(llvm_fn, i);
             const Param& param = fn.params[index++];
-            arg.setName(param.name);
-            llvm::AllocaInst* slot = nullptr;
+            LLVMSetValueName2(arg, param.name.c_str(), param.name.size());
+            LLVMValueRef slot = nullptr;
             if (index == 1 && interface_destructor_uses_raw_this(fn)) {
-                slot = builder_->CreateAlloca(to_llvm_type(param.type), nullptr, param.name);
-                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
-                llvm::Value* fat_this = build_interface_value(
-                    &arg, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_)));
+                slot = LLVMBuildAlloca(builder_, to_llvm_type(param.type), param.name.c_str());
+                if (std::optional<unsigned> align = alignment_for_type(param.type)) LLVMSetAlignment(slot, *align);
+                LLVMValueRef fat_this = build_interface_value(
+                    arg, LLVMConstPointerNull(LLVMPointerTypeInContext(context_, 0)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
             } else {
-                slot = builder_->CreateAlloca(arg.getType(), nullptr, param.name);
-                if (std::optional<llvm::Align> align = alignment_for_type(param.type)) slot->setAlignment(*align);
-                builder_->CreateStore(&arg, slot);
+                slot = LLVMBuildAlloca(builder_, LLVMTypeOf(arg), param.name.c_str());
+                if (std::optional<unsigned> align = alignment_for_type(param.type)) LLVMSetAlignment(slot, *align);
+                LLVMBuildStore(builder_, arg, slot);
             }
             locals_[param.name] = LocalSlot{slot, param.type};
             maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index));
@@ -213,21 +202,21 @@ namespace scpp {
             throw CodegenError("defaulted destructor '" + fn.name + "' names unknown class '" + class_name + "'", fn.loc);
         }
 
-        llvm::Type* this_llvm_type = to_llvm_type(fn.params[0].type);
-        llvm::Value* this_ptr = builder_->CreateLoad(this_llvm_type, locals_.at("this").alloca, "thisptr");
+        LLVMTypeRef this_llvm_type = to_llvm_type(fn.params[0].type);
+        LLVMValueRef this_ptr = LLVMBuildLoad2(builder_, this_llvm_type, locals_.at("this").alloca, "thisptr");
         const StructInfo& info = info_it->second;
         for (std::size_t i = info.field_types.size(); i > 0; --i) {
             const Type& field_type = info.field_types[i - 1];
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                llvm::Value* field_ptr =
-                    builder_->CreateStructGEP(info.llvm_type, this_ptr, info.physical_field_index(i - 1),
-                                              info.field_names[i - 1]);
+                LLVMValueRef field_ptr = LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,
+                                                             info.physical_field_index(i - 1),
+                                                             info.field_names[i - 1].c_str());
                 codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
             }
         }
 
-        builder_->CreateRetVoid();
-        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        LLVMBuildRetVoid(builder_);
+        LLVMSetCurrentDebugLocation2(builder_, nullptr);
         current_debug_scope_ = nullptr;
         current_subprogram_ = nullptr;
     }
@@ -235,7 +224,7 @@ namespace scpp {
 
     void Codegen::define_forwarding_function(const Function& fn)
 {
-        llvm::Function* llvm_fn = module_->getFunction(overload_names_.at(&fn));
+        LLVMValueRef llvm_fn = LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
         if (llvm_fn == nullptr) {
             throw CodegenError("function '" + fn.name + "' was not declared before definition",
                 current_loc_);
@@ -262,60 +251,59 @@ namespace scpp {
             throw CodegenError("forwarding stub '" + fn.name + "' names an unknown target '" + fn.forwards_to + "'",
                 current_loc_);
         }
-        llvm::Function* target_llvm = module_->getFunction(overload_names_.at(target));
+        LLVMValueRef target_llvm = LLVMGetNamedFunction(module_, overload_names_.at(target).c_str());
 
         attach_debug_subprogram(llvm_fn, fn);
-        llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context_, "entry", llvm_fn);
-        builder_->SetInsertPoint(entry);
+        LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context_, llvm_fn, "entry");
+        LLVMPositionBuilderAtEnd(builder_, entry);
         current_loc_ = fn.loc;
-        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
-        std::vector<llvm::Value*> args;
-        args.reserve(llvm_fn->arg_size());
-        for (auto& arg : llvm_fn->args()) args.push_back(&arg);
-        llvm::Value* call_result = nullptr;
+        LLVMSetCurrentDebugLocation2(builder_, nullptr);
+        std::vector<LLVMValueRef> args;
+        unsigned arg_count = LLVMCountParams(llvm_fn);
+        args.reserve(arg_count);
+        for (unsigned i = 0; i < arg_count; ++i) args.push_back(LLVMGetParam(llvm_fn, i));
+        LLVMValueRef call_result = nullptr;
         if (!fn.params.empty() && is_interface_reference_type(fn.params.front().type)) {
             std::optional<std::size_t> slot_index = interface_method_slot_index(fn.member_owner_class, fn);
             if (!slot_index.has_value()) {
                 throw CodegenError("missing interface dispatch slot for forwarding stub '" + fn.name + "'", current_loc_);
             }
-            llvm::Value* receiver_value = args.front();
-            llvm::Value* dispatch_ptr = extract_interface_dispatch_ptr(receiver_value);
-            llvm::ArrayType* table_type = interface_dispatch_table_type(fn.member_owner_class);
-            llvm::Value* table_ptr = builder_->CreateBitCast(dispatch_ptr, llvm::PointerType::get(*context_, 0),
-                                                             "ifacetable");
-            llvm::Value* slot_ptr =
-                builder_->CreateGEP(table_type, table_ptr,
-                                    {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0),
-                                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_),
-                                                           static_cast<unsigned>(*slot_index))},
-                                    "ifaceslot");
-            llvm::Value* target_ptr =
-                create_load(llvm::PointerType::getUnqual(*context_), slot_ptr, std::nullopt, "ifacemethod");
-            std::vector<llvm::Value*> dispatch_args;
+            LLVMValueRef receiver_value = args.front();
+            LLVMValueRef dispatch_ptr = extract_interface_dispatch_ptr(receiver_value);
+            LLVMTypeRef table_type = interface_dispatch_table_type(fn.member_owner_class);
+            LLVMValueRef table_ptr = LLVMBuildBitCast(builder_, dispatch_ptr, LLVMPointerTypeInContext(context_, 0),
+                                                      "ifacetable");
+            LLVMTypeRef i32_ty = LLVMInt32TypeInContext(context_);
+            LLVMValueRef slot_indices[] = {LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
+                                           LLVMConstInt(i32_ty, static_cast<unsigned>(*slot_index), /*SignExtend=*/0)};
+            LLVMValueRef slot_ptr = LLVMBuildGEP2(builder_, table_type, table_ptr, slot_indices, 2, "ifaceslot");
+            LLVMValueRef target_ptr =
+                create_load(LLVMPointerTypeInContext(context_, 0), slot_ptr, std::nullopt, "ifacemethod");
+            std::vector<LLVMValueRef> dispatch_args;
             dispatch_args.reserve(args.size());
             dispatch_args.push_back(extract_interface_object_ptr(receiver_value));
             for (std::size_t i = 1; i < args.size(); ++i) dispatch_args.push_back(args[i]);
-            call_result = builder_->CreateCall(interface_dispatch_function_type(*target), target_ptr, dispatch_args);
+            call_result = build_call(interface_dispatch_function_type(*target), target_ptr, dispatch_args);
         } else if (!fn.params.empty() && !target->params.empty() && is_interface_reference_type(target->params.front().type)) {
             const std::string& concrete_class_name = fn.params.front().type.pointee->name;
             const std::string& target_interface_name = target->params.front().type.pointee->name;
-            llvm::Value* fat_receiver =
+            LLVMValueRef fat_receiver =
                 build_interface_value(args.front(), get_or_create_interface_dispatch_table(concrete_class_name,
                                                                                            target_interface_name));
-            std::vector<llvm::Value*> direct_args;
+            std::vector<LLVMValueRef> direct_args;
             direct_args.reserve(args.size());
             direct_args.push_back(fat_receiver);
             for (std::size_t i = 1; i < args.size(); ++i) direct_args.push_back(args[i]);
-            call_result = builder_->CreateCall(target_llvm, direct_args);
+            call_result = build_call(target_llvm, direct_args);
         } else {
-            call_result = builder_->CreateCall(target_llvm, args);
+            call_result = build_call(target_llvm, args);
         }
         if (is_bare_void(fn.return_type)) {
-            builder_->CreateRetVoid();
+            LLVMBuildRetVoid(builder_);
         } else {
-            builder_->CreateRet(call_result);
+            LLVMBuildRet(builder_, call_result);
         }
-        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+        LLVMSetCurrentDebugLocation2(builder_, nullptr);
         current_debug_scope_ = nullptr;
         current_subprogram_ = nullptr;
     }
