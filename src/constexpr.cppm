@@ -329,6 +329,60 @@ public:
         }
     }
 
+    // ch05 §9.4 (local-constexpr-as-array-bound gap fix): the four methods
+    // below let AlignmentResolver::resolve_array_bounds() -- a separate,
+    // earlier, non-executing pre-pass that must resolve every array bound
+    // in the program before this class's own `validate_constexpr_locals`
+    // above ever runs (see that other pass's own comment for why it has to
+    // stay distinct and narrower) -- track each local `constexpr` (or
+    // constant-initialized `const`) declaration into this SAME `frames_`
+    // stack, in declaration order, as it walks one function body's
+    // statements. Without this, a local array's bound expression could see
+    // a *global* constexpr (resolve_global_constant doesn't consult
+    // frames_ at all) but not an earlier *local* constexpr from the same
+    // function, even though that same local constexpr was already usable
+    // as an `alignas` operand via validate_constexpr_stmt_tree's own,
+    // identical frame bookkeeping. Mirrors validate_constexpr_locals/
+    // validate_constexpr_stmt_tree's own scope shape exactly (one root
+    // frame per function, one nested frame per block/if/while branch), so
+    // both passes agree on ordinary C++ block-scoping: a constexpr from an
+    // enclosing or the same block is visible to a later array bound, one
+    // from a later statement or an unrelated sibling block is not, and an
+    // inner declaration correctly shadows an outer one of the same name.
+    void begin_local_array_bound_scope() {
+        frames_.clear();
+        steps_ = 0;
+        call_depth_ = 0;
+        string_storage_counter_ = 0;
+        frames_.push_back({});
+    }
+
+    void end_local_array_bound_scope() { frames_.pop_back(); }
+
+    void push_local_array_bound_scope() { frames_.push_back({}); }
+    void pop_local_array_bound_scope() { frames_.pop_back(); }
+
+    // Mirrors validate_constexpr_stmt_tree's own VarDecl handling below
+    // (is_constexpr required-strict; is_const-with-init best-effort,
+    // failures silently ignored) but deliberately skips that method's
+    // extra rewrite_expr_as_constant step -- an unrelated AST-
+    // simplification left exclusively to validate_constexpr_locals/run(),
+    // unchanged. This only needs to make the local's own *value* available
+    // in the current innermost frame (via execute_stmt's existing
+    // `frames_.back()[var_name] = ...` binding) so a later sibling/nested
+    // array-bound expression in the same function can look it up, exactly
+    // like it already could as an `alignas` operand.
+    void bind_local_constant_for_array_bounds(const Stmt& stmt) {
+        if (stmt.is_constexpr) {
+            execute_stmt(stmt, named_type("void"));
+        } else if (stmt.is_const && (stmt.init || stmt.has_ctor_args)) {
+            try {
+                execute_stmt(stmt, named_type("void"));
+            } catch (const ConstexprError&) {
+            }
+        }
+    }
+
     // ch05 §9.4(6): while a struct/class's own fields are being resolved
     // (AlignmentResolver::resolve_struct/resolve_class), its own type is
     // not yet complete -- marks/unmarks `name` so that evaluating a
@@ -2219,7 +2273,24 @@ public:
             }
             for (Param& param : fn.params) resolve_array_bounds_type_dependencies(param.type);
             resolve_array_bounds_type_dependencies(fn.return_type);
-            if (fn.body) resolve_array_bounds_in_stmt(*fn.body);
+            if (fn.body) {
+                // ch05 §9.4 (local-constexpr-as-array-bound gap fix):
+                // opens this function's own local constant-evaluation
+                // frame (see ConstexprEngine::begin_local_array_bound_scope)
+                // so a local `constexpr`/const-with-init declaration seen
+                // while walking this body below becomes visible to a
+                // later array bound in the same function, exactly like it
+                // already is for `alignas` via validate_constexpr_locals.
+                // Reset fresh per function -- never leaks across functions.
+                engine_.begin_local_array_bound_scope();
+                try {
+                    resolve_array_bounds_in_stmt(*fn.body);
+                } catch (...) {
+                    engine_.end_local_array_bound_scope();
+                    throw;
+                }
+                engine_.end_local_array_bound_scope();
+            }
         }
     }
 
@@ -2305,13 +2376,36 @@ private:
     // Full statement-tree walk covering every StmtKind that can carry a
     // nested VarDecl or expression -- mirrors collect_runtime_stmt_rewrites/
     // collect_runtime_expr_rewrites's own traversal shape (the two
-    // functions this pass exists specifically to run ahead of).
+    // functions this pass exists specifically to run ahead of). Also
+    // mirrors validate_constexpr_stmt_tree's own frame-scoping shape (see
+    // ConstexprEngine::push_local_array_bound_scope's comment): a nested
+    // frame per Block/If-branch/While-body keeps a local constexpr's
+    // visibility scoped exactly like ordinary C++ block scoping.
     void resolve_array_bounds_in_stmt(Stmt& stmt) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
-                resolve_array_bounds_type_dependencies(stmt.type);
+                // ch05 §9.4 (local-constexpr-as-array-bound gap fix): uses
+                // ConstexprEngine::resolve_array_bounds_in_type (NOT this
+                // class's own resolve_array_bounds_type_dependencies)
+                // because that engine method resolves the bound in place
+                // inside the already-active frame opened by
+                // resolve_array_bounds() above, instead of unconditionally
+                // clearing it the way resolve_root_array_bound (used by
+                // resolve_array_bounds_type_dependencies) does -- clearing
+                // here would wipe out every local constexpr bound by an
+                // earlier sibling statement in this same function right
+                // before it's needed. Recursing into a Named struct/class
+                // is unnecessary here: every struct/class is already fully
+                // array-bounds-resolved (see resolve_array_bounds()'s own
+                // struct/class loops, which always run first).
+                engine_.resolve_array_bounds_in_type(stmt.type);
                 if (stmt.init) resolve_array_bounds_in_expr(*stmt.init);
                 for (ExprPtr& arg : stmt.ctor_args) resolve_array_bounds_in_expr(*arg);
+                // Makes this local's own value visible to a later
+                // sibling/nested array-bound expression in this same
+                // function, exactly like it's already visible as an
+                // `alignas` operand.
+                engine_.bind_local_constant_for_array_bounds(stmt);
                 return;
             case StmtKind::Return:
             case StmtKind::ExprStmt:
@@ -2319,15 +2413,49 @@ private:
                 return;
             case StmtKind::If:
                 if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
-                if (stmt.then_branch) resolve_array_bounds_in_stmt(*stmt.then_branch);
-                if (stmt.else_branch) resolve_array_bounds_in_stmt(*stmt.else_branch);
+                if (stmt.then_branch) {
+                    engine_.push_local_array_bound_scope();
+                    try {
+                        resolve_array_bounds_in_stmt(*stmt.then_branch);
+                    } catch (...) {
+                        engine_.pop_local_array_bound_scope();
+                        throw;
+                    }
+                    engine_.pop_local_array_bound_scope();
+                }
+                if (stmt.else_branch) {
+                    engine_.push_local_array_bound_scope();
+                    try {
+                        resolve_array_bounds_in_stmt(*stmt.else_branch);
+                    } catch (...) {
+                        engine_.pop_local_array_bound_scope();
+                        throw;
+                    }
+                    engine_.pop_local_array_bound_scope();
+                }
                 return;
             case StmtKind::While:
                 if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
-                if (stmt.then_branch) resolve_array_bounds_in_stmt(*stmt.then_branch);
+                if (stmt.then_branch) {
+                    engine_.push_local_array_bound_scope();
+                    try {
+                        resolve_array_bounds_in_stmt(*stmt.then_branch);
+                    } catch (...) {
+                        engine_.pop_local_array_bound_scope();
+                        throw;
+                    }
+                    engine_.pop_local_array_bound_scope();
+                }
                 return;
             case StmtKind::Block:
-                for (StmtPtr& nested : stmt.statements) resolve_array_bounds_in_stmt(*nested);
+                engine_.push_local_array_bound_scope();
+                try {
+                    for (StmtPtr& nested : stmt.statements) resolve_array_bounds_in_stmt(*nested);
+                } catch (...) {
+                    engine_.pop_local_array_bound_scope();
+                    throw;
+                }
+                engine_.pop_local_array_bound_scope();
                 return;
             case StmtKind::Break:
             case StmtKind::Continue:

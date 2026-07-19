@@ -1891,6 +1891,136 @@ void run_storage_tests() {
     }
 }
 
+// ch05 §9.4 (local-constexpr-as-array-bound gap fix): a local `constexpr`
+// declared earlier in a function body must be usable as a later local
+// array's own bound, exactly like it's already usable as an `alignas`
+// operand (run_storage_tests above) and exactly like a *global* `constexpr`
+// is already usable as an array bound -- and must otherwise obey ordinary
+// C++ block-scoping (no forward reference, no leaking out of a nested
+// block, no leaking across sibling functions).
+void run_local_constexpr_array_bound_tests() {
+    {
+        std::string case_name = "local_constexpr_resolves_array_bound_declared_after_it";
+        cases_run++;
+        RunResult run_result = compile_and_run(
+            "int main() {\n"
+            "    constexpr int n = 4;\n"
+            "    alignas(n) char ok[16]{};\n"
+            "    int arr[n];\n"
+            "    int total = 0;\n"
+            "    for (int i = 0; i < n; i = i + 1) {\n"
+            "        arr[i] = i + 1;\n"
+            "    }\n"
+            "    for (int i = 0; i < n; i = i + 1) {\n"
+            "        total = total + arr[i];\n"
+            "    }\n"
+            "    if ((int)sizeof(arr) != n * (int)sizeof(int)) return 100;\n"
+            "    if ((int)sizeof(ok) != 16) return 101;\n"
+            "    return total;\n"
+            "}\n",
+            case_name);
+        expect(run_result.exit_code == 10,
+               case_name + ": expected local constexpr to resolve both the alignas operand and the later "
+                           "array bound, got exit code " +
+                   std::to_string(run_result.exit_code));
+    }
+
+    {
+        std::string case_name = "local_constexpr_array_bound_rejects_use_before_declaration";
+        cases_run++;
+        bool threw = false;
+        std::string message;
+        try {
+            (void)compile_and_run(
+                "int main() {\n"
+                "    int arr[n];\n"
+                "    constexpr int n = 4;\n"
+                "    return 0;\n"
+                "}\n",
+                case_name);
+        } catch (const scpp::DriverError& error) {
+            threw = true;
+            message = error.what();
+        }
+        expect(threw && message.find("identifier 'n' is not available") != std::string::npos,
+               case_name + ": expected a local array bound to reject a constexpr declared later in the same "
+                           "function, got message '" +
+                   message + "'");
+    }
+
+    {
+        std::string case_name = "local_constexpr_array_bound_respects_nested_block_scope";
+        cases_run++;
+        bool threw = false;
+        std::string message;
+        try {
+            (void)compile_and_run(
+                "int main() {\n"
+                "    {\n"
+                "        constexpr int n = 4;\n"
+                "    }\n"
+                "    int arr[n];\n"
+                "    return 0;\n"
+                "}\n",
+                case_name);
+        } catch (const scpp::DriverError& error) {
+            threw = true;
+            message = error.what();
+        }
+        expect(threw && message.find("identifier 'n' is not available") != std::string::npos,
+               case_name + ": expected a nested block's local constexpr to stay out of scope once its own "
+                           "block ends, got message '" +
+                   message + "'");
+    }
+
+    {
+        std::string case_name = "local_constexpr_array_bound_is_visible_inside_nested_if_block";
+        cases_run++;
+        RunResult run_result = compile_and_run(
+            "int main() {\n"
+            "    constexpr int n = 4;\n"
+            "    if (n == 4) {\n"
+            "        int arr[n];\n"
+            "        arr[n - 1] = 9;\n"
+            "        return arr[n - 1];\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(run_result.exit_code == 9,
+               case_name + ": expected an enclosing local constexpr to stay visible to an array bound inside "
+                           "a nested if-block, got exit code " +
+                   std::to_string(run_result.exit_code));
+    }
+
+    {
+        std::string case_name = "local_constexpr_array_bound_does_not_leak_across_sibling_functions";
+        cases_run++;
+        bool threw = false;
+        std::string message;
+        try {
+            (void)compile_and_run(
+                "int main() {\n"
+                "    constexpr int n = 4;\n"
+                "    int arr[n];\n"
+                "    arr[0] = 1;\n"
+                "    return arr[0];\n"
+                "}\n"
+                "void other() {\n"
+                "    int leaked[n];\n"
+                "}\n",
+                case_name);
+        } catch (const scpp::DriverError& error) {
+            threw = true;
+            message = error.what();
+        }
+        expect(threw && message.find("identifier 'n' is not available") != std::string::npos,
+               case_name + ": expected a local constexpr in one function to stay invisible to an unrelated "
+                           "sibling function, got message '" +
+                   message + "'");
+    }
+}
+
 void run_placement_new_tests() {
     {
         std::string case_name = "placement_new_constructs_scalar_in_storage";
@@ -5030,6 +5160,7 @@ int main() {
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_sizeof_tests();
     run_storage_tests();
+    run_local_constexpr_array_bound_tests();
     run_placement_new_tests();
     run_explicit_destructor_tests();
     run_consteval_tests();
