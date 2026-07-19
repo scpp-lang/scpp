@@ -33,7 +33,7 @@
   - [包与项目清单](ch07-01-packages-and-project-manifests.md)
   - [用模块控制作用域与可见性](ch07-02-control-scope-and-privacy-with-modules.md)
   - [在模块树中引用条目的路径](ch07-03-paths-for-referring-to-items-in-module-tree.md)
-  - 使用 `import` 与限定名
+  - [使用 `import` 与限定名](ch07-04-using-import-and-qualified-names.md)
   - 把模块拆到不同文件中
 
 - 数组、缓冲区与视图
