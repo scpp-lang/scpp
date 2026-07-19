@@ -1,0 +1,5 @@
+int pick(int idx) {
+    int arr[4];
+    arr[0] = 1;
+    return arr[idx];
+}

@@ -1,0 +1,1 @@
+sequence: %elemtmp1 = getelementptr [4 x i32], ptr %arr, i32 0, i32 2 | %loadtmp = load i32, ptr %elemtmp1, align 4 | ret i32 %loadtmp

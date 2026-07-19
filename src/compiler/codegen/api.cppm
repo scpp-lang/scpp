@@ -1080,6 +1080,34 @@ private:
     // unconditional.
     void emit_span_bounds_check(llvm::Value* index, llvm::Value* size);
 
+    // Attempts to read `expr` as a compile-time-constant integer without
+    // any general constant-expression evaluation (that broader job
+    // belongs to scpp.constexpr_engine, which runs in an earlier pass,
+    // well before codegen ever sees this expression) -- just the same
+    // narrow, single-token recognition codegen_value_for_target already
+    // gives a bare/negated integer literal (`10`, `-1`), since that's the
+    // only form codegen itself can cheaply and unambiguously know the
+    // value of. Returns std::nullopt for anything else (e.g. a runtime
+    // variable, or a named `constexpr` constant -- codegen never folds
+    // those), in which case the caller falls back to a runtime check.
+    // Used by codegen_lvalue's fixed-size-array ExprKind::Subscript case
+    // to reject an out-of-bounds constant index at compile time instead
+    // of emitting a runtime check for it, since a fixed array's bound is
+    // always statically known (ch05 §9.4).
+    [[nodiscard]] std::optional<long long> try_eval_constant_index(const Expr& expr) const;
+
+    // Emits a runtime bounds check for a fixed-size array subscript,
+    // exactly like emit_span_bounds_check above but for a bound that's
+    // already known at compile time (a fixed array's declared size `N`,
+    // ch05 §9.4) rather than loaded from memory at runtime -- reuses that
+    // same check (0 <= index < size doesn't care where `size` came from),
+    // so it inherits the identical `unsafe_depth_` skip and abort()
+    // panic model. Only reached for a non-constant index; a compile-time-
+    // constant out-of-bounds index is instead rejected earlier,
+    // unconditionally, as a compile-time CodegenError (see
+    // try_eval_constant_index's caller in codegen_lvalue).
+    void emit_array_bounds_check(llvm::Value* index, long long bound);
+
     // ch06 §6: the numeric family's own signed/unsigned/floating
     // classification, by scpp type name -- LLVM draws no signed/
     // unsigned distinction at the *type* level (only i8/i16/i32/i64),

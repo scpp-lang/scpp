@@ -1,0 +1,3 @@
+contains: %idx64 = sext i32 %loadtmp to i64
+sequence: %toolow = icmp slt i64 %idx64, 0 | %toohigh = icmp sge i64 %idx64, 4 | %oob = or i1 %toolow, %toohigh | br i1 %oob, label %bounds.fail, label %bounds.ok
+sequence: bounds.fail: | call void @abort() | unreachable

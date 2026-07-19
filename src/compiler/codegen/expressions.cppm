@@ -1510,6 +1510,27 @@ namespace scpp {
     }
 
 
+    [[nodiscard]] std::optional<long long> Codegen::try_eval_constant_index(const Expr& expr) const
+{
+        if (expr.kind == ExprKind::IntegerLiteral) return expr.int_value;
+        // `-1` (a negated literal, ExprKind::Unary/Neg over a bare
+        // literal) is just as much a single compile-time-constant token
+        // as the bare literal itself -- same reasoning as
+        // codegen_value_for_target's identical recognition of a negated
+        // literal.
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs->kind == ExprKind::IntegerLiteral) {
+            return -expr.lhs->int_value;
+        }
+        return std::nullopt;
+    }
+
+
+    void Codegen::emit_array_bounds_check(llvm::Value* index, long long bound)
+{
+        emit_span_bounds_check(index, llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), bound, /*isSigned=*/true));
+    }
+
+
     [[nodiscard]] bool Codegen::is_float_scalar_type_name(const std::string& name)
 {
         return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
@@ -1784,8 +1805,10 @@ namespace scpp {
                     // Runtime bounds check (spec ch08: checked by default,
                     // bounds checks inserted unconditionally) -- unlike a
                     // fixed-size array's subscript below, a span's length is
-                    // only known at runtime, so there's no way to reject an
-                    // out-of-bounds constant index at compile time.
+                    // only known at runtime, so (even for a compile-time-
+                    // constant index) there's no way to reject an
+                    // out-of-bounds index at compile time; it's always this
+                    // same runtime check instead.
                     emit_span_bounds_check(index, size);
                     llvm::Value* elem_ptr =
                         builder_->CreateGEP(to_llvm_type(*base.type.pointee), data, {index}, "elemtmp");
@@ -1802,7 +1825,32 @@ namespace scpp {
                     throw CodegenError("subscript on a non-array type",
                         current_loc_);
                 }
+                // A fixed-size array's bound `N` is always statically known
+                // (ch05 §9.4), so a compile-time-constant index (e.g. a bare
+                // integer literal) that's out of bounds is rejected right
+                // here at compile time instead of merely at runtime --
+                // strictly better than a runtime abort when both operands
+                // are already known now, and unlike the span case above,
+                // never skipped inside `unsafe { }` (this is a detected-at-
+                // compile-time ill-formed program, not a scpp-inserted
+                // runtime check being opted out of).
+                std::optional<long long> constant_index = try_eval_constant_index(*expr.rhs);
+                if (constant_index.has_value() &&
+                    (*constant_index < 0 || *constant_index >= base.type.array_size)) {
+                    throw CodegenError("array subscript " + std::to_string(*constant_index) +
+                                            " is out of bounds for array of size " +
+                                            std::to_string(base.type.array_size),
+                        current_loc_);
+                }
                 llvm::Value* index = codegen_expr(*expr.rhs);
+                // Otherwise (a runtime-variable index), the same runtime
+                // bounds check as a span's subscript above, just against a
+                // compile-time-constant bound instead of a runtime-loaded
+                // size -- respects `unsafe { }` exactly like span's check
+                // (see emit_array_bounds_check).
+                if (!constant_index.has_value()) {
+                    emit_array_bounds_check(index, base.type.array_size);
+                }
                 llvm::Value* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), 0);
                 llvm::Value* elem_ptr =
                     builder_->CreateGEP(to_llvm_type(base.type), base.ptr, {zero, index}, "elemtmp");
