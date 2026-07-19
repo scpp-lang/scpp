@@ -1,10 +1,8 @@
 module;
 
-#include <stdexcept>
-#include <string>
-
 export module scpp.compiler.codegen:errors;
 
+import std;
 import scpp.ast;
 
 export namespace scpp {

@@ -1,16 +1,7 @@
 import scpp.compiler.movecheck;
 import scpp.parser;
 import scpp.ast;
-
-#include <algorithm>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <optional>
-#include <sstream>
-#include <string>
-#include <unordered_map>
-#include <vector>
+import std;
 
 // SCPP_MOVETEST_SOURCE_DIR is injected by CMake (see the movecheck_test
 // target in the top-level CMakeLists.txt) and points at
@@ -74,7 +65,7 @@ public:
 
 private:
     std::optional<std::string> infer_partition_path(const std::string& key) const {
-        size_t colon = key.find(':');
+        std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
         if (module_name != "std") return std::nullopt;

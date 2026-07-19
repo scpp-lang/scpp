@@ -1,15 +1,8 @@
 module;
 
-#include <algorithm>
-#include <memory>
-#include <optional>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:state;
 
+import std;
 import scpp.ast;
 import scpp.mir;
 
@@ -263,7 +256,7 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs) {
     if (roots.empty()) return "<unknown>";
     if (roots.size() == 1) return "'" + roots.front() + "'";
     std::string joined;
-    for (size_t i = 0; i < roots.size(); i++) {
+    for (std::size_t i = 0; i < roots.size(); i++) {
         if (i != 0) joined += ", ";
         joined += "'" + roots[i] + "'";
     }

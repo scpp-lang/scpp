@@ -1,15 +1,8 @@
 module;
 
-#include <memory>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:interfaces;
 
+import std;
 import scpp.ast;
 import :errors;
 import :signatures;
@@ -150,7 +143,7 @@ private:
             case TypeKind::Function:
             case TypeKind::FunctionPointer: {
                 std::string result = type.kind == TypeKind::Function ? "fn(" : "fnptr(";
-                for (size_t i = 0; i < type.function_params.size(); i++) {
+                for (std::size_t i = 0; i < type.function_params.size(); i++) {
                     if (i != 0) result += ",";
                     result += type_key(type.function_params[i]);
                 }
@@ -168,7 +161,7 @@ private:
     [[nodiscard]] static bool is_constructor_slot(const Function& fn) { return fn.name.ends_with("_new"); }
     [[nodiscard]] static bool is_destructor_slot(const Function& fn) { return fn.name.ends_with("_delete"); }
     [[nodiscard]] static std::string instantiated_template_source_name(std::string_view class_name) {
-        size_t dot = class_name.find('.');
+        std::size_t dot = class_name.find('.');
         return dot == std::string_view::npos ? std::string() : std::string(class_name.substr(0, dot));
     }
 
@@ -186,8 +179,8 @@ private:
     [[nodiscard]] static std::string slot_key(const Function& fn) {
         std::string key = lookup_name(fn);
         key += "(";
-        size_t start = fn.member_owner_class.empty() ? 0 : 1;
-        for (size_t i = start; i < fn.params.size(); i++) {
+        std::size_t start = fn.member_owner_class.empty() ? 0 : 1;
+        for (std::size_t i = start; i < fn.params.size(); i++) {
             if (i != start) key += ",";
             key += type_key(fn.params[i].type);
         }
@@ -498,7 +491,7 @@ private:
     }
 
     void validate_function_signature(const Function& fn) {
-        for (size_t i = 0; i < fn.params.size(); i++) {
+        for (std::size_t i = 0; i < fn.params.size(); i++) {
             if (i == 0 && fn.params[i].name == "this") continue;
             if (type_forms_interface_object(fn.params[i].type, program_)) {
                 throw DataflowError("function '" + fn.name + "' forms an object of interface type in a by-value "

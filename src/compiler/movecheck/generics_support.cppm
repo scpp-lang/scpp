@@ -1,11 +1,8 @@
 module;
 
-#include <memory>
-#include <string>
-#include <unordered_set>
-
 module scpp.compiler.movecheck:generics_support;
 
+import std;
 import scpp.ast;
 import :types;
 
@@ -146,7 +143,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
 // relation -- which of its parameters share a group, and which don't --
 // mirrors the probes'.
 [[nodiscard]] bool probe_lifetime_groups_match(const ConceptRequirement& req, const Function& fn) {
-    for (size_t i = 0; i < req.arg_lifetimes.size(); i++) {
+    for (std::size_t i = 0; i < req.arg_lifetimes.size(); i++) {
         const LifetimeAnnotation& probe = req.arg_lifetimes[i];
         if (!probe.present()) continue; // spec §6.2(22.4): no attribute, no constraint.
         const LifetimeAnnotation& candidate = fn.params[i + 1].lifetime;
@@ -163,7 +160,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
         // spec §6.2(22.1) second clause/(22.2): same spelling among
         // probes => same real group; different spelling => different
         // real group.
-        for (size_t j = 0; j < i; j++) {
+        for (std::size_t j = 0; j < i; j++) {
             const LifetimeAnnotation& other_probe = req.arg_lifetimes[j];
             if (!other_probe.present() || other_probe.is_any()) continue;
             const LifetimeAnnotation& other_candidate = fn.params[j + 1].lifetime;
@@ -203,7 +200,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
                 continue;
             }
             bool args_match = true;
-            for (size_t i = 0; args_match && i < req.arg_types.size(); i++) {
+            for (std::size_t i = 0; args_match && i < req.arg_types.size(); i++) {
                 args_match = types_equal(fn.params[i + 1].type, req.arg_types[i]);
             }
             if (!args_match) continue;

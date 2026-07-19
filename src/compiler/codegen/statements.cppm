@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:statements;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -521,9 +509,9 @@ namespace scpp {
     }
 
 
-    void Codegen::emit_scope_cleanup_to_depth(size_t target_depth)
+    void Codegen::emit_scope_cleanup_to_depth(std::size_t target_depth)
 {
-        for (size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
+        for (std::size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
             const std::vector<std::string>& names = scope_stack_[depth - 1];
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
                 auto slot_it = locals_.find(*it);

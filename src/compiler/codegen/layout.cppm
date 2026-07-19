@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:layout;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -78,14 +66,14 @@ namespace scpp {
     }
 
 
-    [[nodiscard]] size_t Codegen::align_up(size_t value, size_t alignment)
+    [[nodiscard]] std::size_t Codegen::align_up(std::size_t value, std::size_t alignment)
 {
         if (alignment <= 1) return value;
         return ((value + alignment - 1) / alignment) * alignment;
     }
 
 
-    [[nodiscard]] size_t Codegen::alignment_bytes_for_type(const Type& type) const
+    [[nodiscard]] std::size_t Codegen::alignment_bytes_for_type(const Type& type) const
 {
         if (program_ != nullptr) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, type, current_target_layout_info());
@@ -195,8 +183,8 @@ namespace scpp {
         std::vector<llvm::Type*> llvm_field_types;
         llvm_field_types.reserve(def.fields.size() * 2);
         if (!def.is_union) {
-            size_t offset = 0;
-            size_t overall_align = std::max<size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<size_t>(def.resolved_alignment));
+            std::size_t offset = 0;
+            std::size_t overall_align = std::max<std::size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<std::size_t>(def.resolved_alignment));
             for (const StructField& field : def.fields) {
                 try {
                     validate_trivial(field.type, in_progress);
@@ -208,11 +196,11 @@ namespace scpp {
                         current_loc_);
                 }
                 llvm::Type* field_type = to_llvm_type(field.type);
-                size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
-                size_t field_align = def.is_packed ? 1
+                std::size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
+                std::size_t field_align = def.is_packed ? 1
                                                    : std::max(alignment_bytes_for_type(field.type),
-                                                              static_cast<size_t>(field.resolved_alignment));
-                size_t aligned_offset = align_up(offset, field_align);
+                                                              static_cast<std::size_t>(field.resolved_alignment));
+                std::size_t aligned_offset = align_up(offset, field_align);
                 if (aligned_offset > offset) {
                     llvm_field_types.push_back(
                         llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), aligned_offset - offset));
@@ -226,8 +214,8 @@ namespace scpp {
                 offset += field_size;
                 overall_align = def.is_packed ? 1 : std::max(overall_align, field_align);
             }
-            size_t final_align = def.is_packed ? 1 : overall_align;
-            size_t final_size = align_up(offset, final_align);
+            std::size_t final_align = def.is_packed ? 1 : overall_align;
+            std::size_t final_size = align_up(offset, final_align);
             if (final_size > offset) {
                 llvm_field_types.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), final_size - offset));
             }
@@ -249,7 +237,7 @@ namespace scpp {
                 info.field_alignments.push_back(
                     llvm::Align(def.is_packed ? 1
                                               : std::max(alignment_bytes_for_type(field.type),
-                                                         static_cast<size_t>(field.resolved_alignment))));
+                                                         static_cast<std::size_t>(field.resolved_alignment))));
                 info.field_physical_indices.push_back(0);
                 llvm_field_types.push_back(to_llvm_type(field.type));
             }
@@ -257,15 +245,15 @@ namespace scpp {
                 throw CodegenError("union '" + def.name + "' must declare at least one field",
                     current_loc_);
             }
-            size_t align_value = def.is_packed ? 1 : std::max<size_t>(1, def.resolved_alignment);
-            size_t max_size = 0;
-            size_t max_rep_align = 0;
+            std::size_t align_value = def.is_packed ? 1 : std::max<std::size_t>(1, def.resolved_alignment);
+            std::size_t max_size = 0;
+            std::size_t max_rep_align = 0;
             llvm::Type* rep_type = llvm_field_types[0];
-            size_t rep_size = module_->getDataLayout().getTypeAllocSize(rep_type);
-            for (size_t i = 0; i < llvm_field_types.size(); ++i) {
+            std::size_t rep_size = module_->getDataLayout().getTypeAllocSize(rep_type);
+            for (std::size_t i = 0; i < llvm_field_types.size(); ++i) {
                 llvm::Type* field_type = llvm_field_types[i];
-                size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
-                size_t field_align = info.field_alignments[i].value();
+                std::size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
+                std::size_t field_align = info.field_alignments[i].value();
                 if (field_size > max_size) max_size = field_size;
                 if (field_align > align_value) align_value = field_align;
                 if (field_align > max_rep_align ||
@@ -276,7 +264,7 @@ namespace scpp {
                 }
             }
             if (align_value == 0) align_value = 1;
-            size_t union_size = ((max_size + align_value - 1) / align_value) * align_value;
+            std::size_t union_size = ((max_size + align_value - 1) / align_value) * align_value;
             std::vector<llvm::Type*> storage_fields;
             storage_fields.push_back(rep_type);
             if (union_size > rep_size) {
@@ -297,8 +285,8 @@ namespace scpp {
         StructInfo info;
         info.has_ordinary_vtable = !def.is_interface;
         std::vector<llvm::Type*> llvm_field_types;
-        size_t offset = 0;
-        size_t overall_align = std::max<size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<size_t>(def.resolved_alignment));
+        std::size_t offset = 0;
+        std::size_t overall_align = std::max<std::size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<std::size_t>(def.resolved_alignment));
         if (const BaseSpecifier* base = def.direct_ordinary_base()) {
             const StructInfo& base_info = structs_.at(base->base_type.name);
             info.field_names = base_info.field_names;
@@ -307,19 +295,19 @@ namespace scpp {
             info.field_physical_indices = base_info.field_physical_indices;
             llvm_field_types.assign(base_info.llvm_type->elements().begin(), base_info.llvm_type->elements().end());
             offset = module_->getDataLayout().getTypeAllocSize(base_info.llvm_type);
-            overall_align = std::max(overall_align, static_cast<size_t>(base_info.abi_align.value()));
+            overall_align = std::max(overall_align, static_cast<std::size_t>(base_info.abi_align.value()));
         }
         if (info.has_ordinary_vtable && llvm_field_types.empty()) {
             llvm_field_types.push_back(llvm::PointerType::getUnqual(*context_));
             offset = module_->getDataLayout().getTypeAllocSize(llvm_field_types.back());
             overall_align = std::max(overall_align,
-                                     static_cast<size_t>(module_->getDataLayout().getPointerABIAlignment(0).value()));
+                                     static_cast<std::size_t>(module_->getDataLayout().getPointerABIAlignment(0).value()));
         }
         for (const ClassField& field : def.fields) {
             llvm::Type* field_type = to_llvm_type(field.type);
-            size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
-            size_t field_align = std::max(alignment_bytes_for_type(field.type), static_cast<size_t>(field.resolved_alignment));
-            size_t aligned_offset = align_up(offset, field_align);
+            std::size_t field_size = module_->getDataLayout().getTypeAllocSize(field_type);
+            std::size_t field_align = std::max(alignment_bytes_for_type(field.type), static_cast<std::size_t>(field.resolved_alignment));
+            std::size_t aligned_offset = align_up(offset, field_align);
             if (aligned_offset > offset) {
                 llvm_field_types.push_back(
                     llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), aligned_offset - offset));
@@ -333,7 +321,7 @@ namespace scpp {
             offset += field_size;
             overall_align = std::max(overall_align, field_align);
         }
-        size_t final_size = align_up(offset, overall_align);
+        std::size_t final_size = align_up(offset, overall_align);
         if (final_size > offset) {
             llvm_field_types.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), final_size - offset));
         }

@@ -3,17 +3,7 @@ import scpp.compiler.movecheck;
 import scpp.constexpr_engine;
 import scpp.parser;
 import scpp.ast;
-
-#include <algorithm>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <optional>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <vector>
+import std;
 
 // SCPP_CODEGEN_TEST_SOURCE_DIR is injected by CMake (see the codegen_test
 // target in the top-level CMakeLists.txt) and points at
@@ -69,7 +59,7 @@ public:
 
 private:
     std::optional<std::string> infer_partition_path(const std::string& key) const {
-        size_t colon = key.find(':');
+        std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
         if (module_name != "std") return std::nullopt;
@@ -117,9 +107,9 @@ std::string generate_ir(std::string_view source) {
 // kinds to separate their pipe-delimited operands.
 std::vector<std::string> split_pipe(const std::string& s) {
     std::vector<std::string> parts;
-    size_t start = 0;
+    std::size_t start = 0;
     while (true) {
-        size_t bar = s.find(" | ", start);
+        std::size_t bar = s.find(" | ", start);
         if (bar == std::string::npos) {
             parts.push_back(s.substr(start));
             break;
@@ -145,7 +135,7 @@ std::vector<Assertion> parse_expected(const std::string& content) {
         while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
         if (line.empty()) continue;
 
-        size_t colon = line.find(": ");
+        std::size_t colon = line.find(": ");
         std::string kind = colon == std::string::npos ? "" : line.substr(0, colon);
         std::string rest = colon == std::string::npos ? "" : line.substr(colon + 2);
         if (kind == "contains" || kind == "throws") {
@@ -172,9 +162,9 @@ void check_ir_assertion(const Assertion& assertion, const std::string& ir, const
         // correctly skips an earlier, unrelated occurrence of a later
         // marker (e.g. a loop preheader's branch to `while.cond`, which
         // must be distinguished from the loop body's own back-edge).
-        size_t pos = 0;
+        std::size_t pos = 0;
         for (const std::string& marker : assertion.args) {
-            size_t found = ir.find(marker, pos);
+            std::size_t found = ir.find(marker, pos);
             if (found == std::string::npos) {
                 expect(false, case_name + ": expected to find '" + marker +
                                   "' after the previous marker in the sequence");
@@ -188,9 +178,9 @@ void check_ir_assertion(const Assertion& assertion, const std::string& ir, const
         int min_count = std::stoi(assertion.args[0]);
         const std::string& needle = assertion.args[1];
         int count = 0;
-        size_t pos = 0;
+        std::size_t pos = 0;
         while (true) {
-            size_t found = ir.find(needle, pos);
+            std::size_t found = ir.find(needle, pos);
             if (found == std::string::npos) break;
             count++;
             pos = found + needle.size();

@@ -1,9 +1,5 @@
 import scpp.lexer;
-
-#include <cstdlib>
-#include <iostream>
-#include <string_view>
-#include <vector>
+import std;
 
 namespace {
 
@@ -21,7 +17,7 @@ void expect_kinds(std::string_view source, std::vector<scpp::TokenKind> expected
     expect(tokens.size() == expected.size(),
            std::string(case_name) + ": expected " + std::to_string(expected.size()) +
                " tokens, got " + std::to_string(tokens.size()));
-    for (size_t i = 0; i < tokens.size() && i < expected.size(); i++) {
+    for (std::size_t i = 0; i < tokens.size() && i < expected.size(); i++) {
         expect(tokens[i].kind == expected[i],
                std::string(case_name) + ": token " + std::to_string(i) + " kind mismatch");
     }

@@ -1,17 +1,8 @@
 module;
 
-#include <algorithm>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_set>
-#include <vector>
-
 export module scpp.parser;
 
+import std;
 import scpp.lexer;
 import scpp.ast;
 
@@ -70,8 +61,8 @@ using ModuleResolver = std::function<const Program&(const std::string&)>;
 // constructed for any caller with no partitions to resolve.
 using PartitionResolver = std::function<Program(const std::string&)>;
 
-[[nodiscard]] size_t next_parser_instance_id() {
-    static size_t counter = 0;
+[[nodiscard]] std::size_t next_parser_instance_id() {
+    static std::size_t counter = 0;
     return ++counter;
 }
 
@@ -160,7 +151,7 @@ public:
 
 private:
     std::vector<Token> tokens_;
-    size_t pos_ = 0;
+    std::size_t pos_ = 0;
     ModuleResolver resolver_;
     PartitionResolver partition_resolver_;
     std::shared_ptr<const std::string> source_path_;
@@ -260,9 +251,9 @@ private:
     // function-pointer declarators recognize named pack parameters from
     // the enclosing type template as real pack expansions.
     std::vector<GenericTypeParam> current_class_template_params_;
-    size_t generic_template_owner_counter_ = 0;
-    size_t parser_instance_id_ = 0;
-    size_t synthesized_for_temp_counter_ = 0;
+    std::size_t generic_template_owner_counter_ = 0;
+    std::size_t parser_instance_id_ = 0;
+    std::size_t synthesized_for_temp_counter_ = 0;
     int loop_depth_ = 0;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
@@ -331,7 +322,7 @@ private:
     // `(` at `offset` positions ahead without disturbing `pos_` at all
     // (unlike looks_like_type_start, always checked at the current
     // position).
-    [[nodiscard]] bool looks_like_type_start_at(size_t offset) const {
+    [[nodiscard]] bool looks_like_type_start_at(std::size_t offset) const {
         const Token& tok = peek_at(offset);
         if (tok.kind == TokenKind::KwAlignas) return true;
         if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwChar ||
@@ -349,8 +340,8 @@ private:
     // Bounds-safe lookahead: returns the token `offset` positions ahead of
     // the current one, or the (always-last) EndOfFile token if that would
     // run past the end of the stream.
-    [[nodiscard]] const Token& peek_at(size_t offset) const {
-        size_t idx = pos_ + offset;
+    [[nodiscard]] const Token& peek_at(std::size_t offset) const {
+        std::size_t idx = pos_ + offset;
         return idx < tokens_.size() ? tokens_[idx] : tokens_.back();
     }
 
@@ -394,8 +385,8 @@ private:
     // `<...>` -- but doing so is free and more robust than assuming
     // flatness). Used purely for lookahead/dispatch; the real parse
     // that follows re-walks the same tokens structurally.
-    [[nodiscard]] size_t offset_after_matching_angle(size_t less_than_offset) const {
-        size_t offset = less_than_offset + 1;
+    [[nodiscard]] std::size_t offset_after_matching_angle(std::size_t less_than_offset) const {
+        std::size_t offset = less_than_offset + 1;
         int depth = 1;
         while (depth > 0 && peek_at(offset).kind != TokenKind::EndOfFile) {
             if (peek_at(offset).kind == TokenKind::Less) depth++;
@@ -434,7 +425,7 @@ private:
             expect(TokenKind::LParen, "'(' after 'alignas'");
             AlignmentSpecifier spec;
             spec.loc = loc;
-            size_t saved_pos = pos_;
+            std::size_t saved_pos = pos_;
             try {
                 if (looks_like_type_start()) {
                     Type queried_type = parse_type();
@@ -772,7 +763,7 @@ private:
         std::string member_name = std::move(segments.back());
         segments.pop_back();
         std::string spelled_base_name;
-        for (size_t i = 0; i < segments.size(); i++) {
+        for (std::size_t i = 0; i < segments.size(); i++) {
             if (i != 0) spelled_base_name += "::";
             spelled_base_name += segments[i];
         }
@@ -1015,7 +1006,7 @@ private:
     [[nodiscard]] std::string peek_qualified_name() const {
         if (peek().kind != TokenKind::Identifier) return {};
         std::string joined(peek().text);
-        size_t offset = 1;
+        std::size_t offset = 1;
         while (peek_at(offset).kind == TokenKind::ColonColon && peek_at(offset + 1).kind == TokenKind::Identifier) {
             joined += "::";
             joined += peek_at(offset + 1).text;
@@ -1027,7 +1018,7 @@ private:
     [[nodiscard]] std::string peek_global_qualified_name() const {
         if (peek().kind != TokenKind::ColonColon || peek_at(1).kind != TokenKind::Identifier) return {};
         std::string joined(peek_at(1).text);
-        size_t offset = 2;
+        std::size_t offset = 2;
         while (peek_at(offset).kind == TokenKind::ColonColon && peek_at(offset + 1).kind == TokenKind::Identifier) {
             joined += "::";
             joined += peek_at(offset + 1).text;
@@ -1068,7 +1059,7 @@ private:
             std::string result = type.name;
             if (!type.template_args.empty()) {
                 result += "<";
-                for (size_t i = 0; i < type.template_args.size(); i++) {
+                for (std::size_t i = 0; i < type.template_args.size(); i++) {
                     if (i != 0) result += ", ";
                     result += type_to_string(type.template_args[i]);
                 }
@@ -1081,7 +1072,7 @@ private:
                    "*";
         case TypeKind::Function: {
             std::string result = type_to_string(*type.function_return) + "(";
-            for (size_t i = 0; i < type.function_params.size(); i++) {
+            for (std::size_t i = 0; i < type.function_params.size(); i++) {
                 if (i != 0) result += ", ";
                 result += type_to_string(type.function_params[i]);
             }
@@ -1091,7 +1082,7 @@ private:
         case TypeKind::FunctionPointer: {
             std::string result = type_to_string(*type.function_return) + " (*";
             result += ")(";
-            for (size_t i = 0; i < type.function_params.size(); i++) {
+            for (std::size_t i = 0; i < type.function_params.size(); i++) {
                 if (i != 0) result += ", ";
                 result += type_to_string(type.function_params[i]);
             }
@@ -1116,7 +1107,7 @@ private:
         std::string resolved_base =
             explicit_global_qualification ? base_name : resolve_visible_type_name(base_name);
         if (resolved_base.empty() || !generic_type_names_.contains(resolved_base)) return std::nullopt;
-        size_t saved_pos = pos_;
+        std::size_t saved_pos = pos_;
         try {
             advance(); // '<'
             std::vector<Type> template_args;
@@ -1132,7 +1123,7 @@ private:
             }
             std::string member_name = std::string(expect(TokenKind::Identifier, "member name").text);
             std::string result = resolved_base + "<";
-            for (size_t i = 0; i < template_args.size(); i++) {
+            for (std::size_t i = 0; i < template_args.size(); i++) {
                 if (i != 0) result += ", ";
                 result += type_to_string(template_args[i]);
             }
@@ -1246,9 +1237,9 @@ private:
         if (spelled_name.contains("::")) {
             if (struct_names_.contains(spelled_name)) return spelled_name;
             if (!namespace_stack_.empty()) {
-                for (size_t depth = namespace_stack_.size(); depth > 0; depth--) {
+                for (std::size_t depth = namespace_stack_.size(); depth > 0; depth--) {
                     std::string candidate;
-                    for (size_t i = 0; i < depth; i++) {
+                    for (std::size_t i = 0; i < depth; i++) {
                         candidate += namespace_stack_[i];
                         candidate += "::";
                     }
@@ -1260,9 +1251,9 @@ private:
         }
         if (struct_names_.contains(spelled_name)) return spelled_name;
         if (!namespace_stack_.empty()) {
-            for (size_t depth = namespace_stack_.size(); depth > 0; depth--) {
+            for (std::size_t depth = namespace_stack_.size(); depth > 0; depth--) {
                 std::string candidate;
-                for (size_t i = 0; i < depth; i++) {
+                for (std::size_t i = 0; i < depth; i++) {
                     candidate += namespace_stack_[i];
                     candidate += "::";
                 }
@@ -1305,13 +1296,13 @@ private:
         if (a.pointee && !types_equal(*a.pointee, *b.pointee)) return false;
         if (a.element && !types_equal(*a.element, *b.element)) return false;
         if (a.function_return && !types_equal(*a.function_return, *b.function_return)) return false;
-        for (size_t i = 0; i < a.template_args.size(); i++) {
+        for (std::size_t i = 0; i < a.template_args.size(); i++) {
             if (!types_equal(a.template_args[i], b.template_args[i])) return false;
         }
-        for (size_t i = 0; i < a.function_params.size(); i++) {
+        for (std::size_t i = 0; i < a.function_params.size(); i++) {
             if (!types_equal(a.function_params[i], b.function_params[i])) return false;
         }
-        for (size_t i = 0; i < a.non_type_args.size(); i++) {
+        for (std::size_t i = 0; i < a.non_type_args.size(); i++) {
             const Expr& lhs = *a.non_type_args[i];
             const Expr& rhs = *b.non_type_args[i];
             if (lhs.kind != rhs.kind || lhs.int_value != rhs.int_value || lhs.name != rhs.name) return false;
@@ -1321,7 +1312,7 @@ private:
 
     [[nodiscard]] bool params_equal(const std::vector<Param>& a, const std::vector<Param>& b) const {
         if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++) {
+        for (std::size_t i = 0; i < a.size(); i++) {
             if (a[i].name != b[i].name || a[i].generic_concept != b[i].generic_concept ||
                 a[i].is_parameter_pack != b[i].is_parameter_pack ||
                 a[i].require_thread_movable != b[i].require_thread_movable ||
@@ -1351,7 +1342,7 @@ private:
             b_to_a.emplace(rhs.name, lhs.name);
             return true;
         };
-        for (size_t i = 0; i < a.params.size(); i++) {
+        for (std::size_t i = 0; i < a.params.size(); i++) {
             if (!names_equivalent(a.params[i].lifetime, b.params[i].lifetime)) return false;
         }
         return names_equivalent(a.return_lifetime, b.return_lifetime);
@@ -1371,7 +1362,7 @@ private:
     [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
                                                  const std::vector<GenericTypeParam>& b) const {
         if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++) {
+        for (std::size_t i = 0; i < a.size(); i++) {
             if (a[i].name != b[i].name || a[i].concept_name != b[i].concept_name ||
                 a[i].is_non_type != b[i].is_non_type || a[i].is_pack != b[i].is_pack ||
                 !types_equal(a[i].non_type_type, b[i].non_type_type)) {
@@ -1389,7 +1380,7 @@ private:
 
     [[nodiscard]] bool same_base_specifiers(const std::vector<BaseSpecifier>& a, const std::vector<BaseSpecifier>& b) const {
         if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++) {
+        for (std::size_t i = 0; i < a.size(); i++) {
             if (!types_equal(a[i].base_type, b[i].base_type) || a[i].access != b[i].access ||
                 a[i].is_virtual != b[i].is_virtual || a[i].kind != b[i].kind ||
                 a[i].pack_arg_name != b[i].pack_arg_name) {
@@ -1402,7 +1393,7 @@ private:
     [[nodiscard]] bool same_using_declarations(const std::vector<ClassUsingDeclaration>& a,
                                                const std::vector<ClassUsingDeclaration>& b) const {
         if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++) {
+        for (std::size_t i = 0; i < a.size(); i++) {
             if (a[i].base_name != b[i].base_name || a[i].member_name != b[i].member_name || a[i].access != b[i].access) {
                 return false;
             }
@@ -1433,7 +1424,7 @@ private:
 
     [[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) const {
         if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); i++) {
+        for (std::size_t i = 0; i < a.size(); i++) {
             if (!types_equal(a[i], b[i])) return false;
         }
         return true;
@@ -1444,7 +1435,7 @@ private:
             a.variants.size() != b.variants.size()) {
             return false;
         }
-        for (size_t i = 0; i < a.variants.size(); i++) {
+        for (std::size_t i = 0; i < a.variants.size(); i++) {
             if (a.variants[i].name != b.variants[i].name || a.variants[i].value != b.variants[i].value) return false;
         }
         return true;
@@ -1458,7 +1449,7 @@ private:
             !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
             return false;
         }
-        for (size_t i = 0; i < a.fields.size(); i++) {
+        for (std::size_t i = 0; i < a.fields.size(); i++) {
             if (a.fields[i].name != b.fields[i].name || !types_equal(a.fields[i].type, b.fields[i].type)) return false;
         }
         return true;
@@ -1478,7 +1469,7 @@ private:
             !same_template_param_shape(a.template_params, b.template_params) || a.fields.size() != b.fields.size()) {
             return false;
         }
-        for (size_t i = 0; i < a.fields.size(); i++) {
+        for (std::size_t i = 0; i < a.fields.size(); i++) {
             if (a.fields[i].name != b.fields[i].name || a.fields[i].access != b.fields[i].access ||
                 !types_equal(a.fields[i].type, b.fields[i].type)) {
                 return false;
@@ -1489,7 +1480,7 @@ private:
 
     [[nodiscard]] static std::string join_namespace_path(const std::vector<std::string>& namespace_path) {
         std::string joined;
-        for (size_t i = 0; i < namespace_path.size(); i++) {
+        for (std::size_t i = 0; i < namespace_path.size(); i++) {
             if (i != 0) joined += "::";
             joined += namespace_path[i];
         }
@@ -1515,7 +1506,7 @@ private:
         std::vector<Function> reconciled;
         reconciled.reserve(program.functions.size());
         std::vector<bool> consumed(program.functions.size(), false);
-        for (size_t i = 0; i < program.functions.size(); i++) {
+        for (std::size_t i = 0; i < program.functions.size(); i++) {
             if (consumed[i]) continue;
             Function merged = std::move(program.functions[i]);
             consumed[i] = true;
@@ -1523,7 +1514,7 @@ private:
                 reconciled.push_back(std::move(merged));
                 continue;
             }
-            for (size_t j = i + 1; j < program.functions.size(); j++) {
+            for (std::size_t j = i + 1; j < program.functions.size(); j++) {
                 Function& candidate = program.functions[j];
                 if (consumed[j] || !is_bodyless_extern_c_declaration(candidate) ||
                     !same_function_signature(merged, candidate)) {
@@ -1548,7 +1539,7 @@ private:
         std::vector<Function> reconciled;
         reconciled.reserve(program.functions.size());
         std::vector<bool> consumed(program.functions.size(), false);
-        for (size_t i = 0; i < program.functions.size(); i++) {
+        for (std::size_t i = 0; i < program.functions.size(); i++) {
             if (consumed[i]) continue;
             Function& fn = program.functions[i];
             if (!is_bodyless_free_function_forward_decl(program, fn)) {
@@ -1557,7 +1548,7 @@ private:
                 continue;
             }
             bool merged = false;
-            for (size_t j = i + 1; j < program.functions.size(); j++) {
+            for (std::size_t j = i + 1; j < program.functions.size(); j++) {
                 Function& candidate = program.functions[j];
                 if (!same_function_signature(fn, candidate)) continue;
                 if (is_bodyless_free_function_forward_decl(program, candidate)) {
@@ -1576,7 +1567,7 @@ private:
             }
             consumed[i] = true;
         }
-        for (size_t i = 0; i < program.functions.size(); i++) {
+        for (std::size_t i = 0; i < program.functions.size(); i++) {
             if (consumed[i]) continue;
             reconciled.push_back(std::move(program.functions[i]));
         }
@@ -1702,9 +1693,9 @@ private:
     // other segment-for-segment, never string-compared directly).
     [[nodiscard]] static std::vector<std::string> split_dotted_name(const std::string& dotted) {
         std::vector<std::string> segments;
-        size_t start = 0;
+        std::size_t start = 0;
         while (start <= dotted.size()) {
-            size_t dot = dotted.find('.', start);
+            std::size_t dot = dotted.find('.', start);
             if (dot == std::string::npos) {
                 segments.push_back(dotted.substr(start));
                 break;
@@ -1740,12 +1731,12 @@ private:
                               "exported " + what + " must be declared inside a namespace -- ch11 §11.5");
         }
         std::string module_name = program.module_name;
-        size_t partition = module_name.find(':');
+        std::size_t partition = module_name.find(':');
         if (partition != std::string::npos) module_name = module_name.substr(0, partition);
         std::vector<std::string> module_namespace;
-        size_t start = 0;
+        std::size_t start = 0;
         while (start <= module_name.size()) {
-            size_t dot = module_name.find('.', start);
+            std::size_t dot = module_name.find('.', start);
             std::string piece = module_name.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
             if (!piece.empty()) module_namespace.push_back(piece);
             if (dot == std::string::npos) break;
@@ -1756,7 +1747,7 @@ private:
                              "exported " + what + " must be declared in namespace matching module '" +
                                  program.module_name + "' -- ch11 §11.5");
         }
-        for (size_t i = 0; i < module_namespace.size(); i++) {
+        for (std::size_t i = 0; i < module_namespace.size(); i++) {
             if (module_namespace[i] != namespace_path[i]) {
                 throw ParseError(loc.line, loc.column,
                                  "exported " + what + " must be declared in namespace matching module '" +
@@ -1886,7 +1877,7 @@ private:
             const std::vector<GenericTypeParam>* ordinary_params = nullptr;
             auto ordinary_it = ordinary_generic_type_template_params_.find(type.name);
             if (ordinary_it != ordinary_generic_type_template_params_.end()) ordinary_params = &ordinary_it->second;
-            size_t leading_non_type_count = 0;
+            std::size_t leading_non_type_count = 0;
             if (is_variadic) {
                 for (const GenericTypeParam& p : variadic_primary_template_params_[type.name]) {
                     if (!p.is_non_type) break;
@@ -1894,7 +1885,7 @@ private:
                 }
             }
             expect(TokenKind::Less, "'<'");
-            size_t arg_index = 0;
+            std::size_t arg_index = 0;
             if (!check(TokenKind::Greater)) {
                 do {
                     bool parse_non_type_arg =
@@ -1918,11 +1909,11 @@ private:
             }
             expect(TokenKind::Greater, "'>'");
             if (!is_variadic && ordinary_params != nullptr) {
-                size_t expected_non_type_args = 0;
+                std::size_t expected_non_type_args = 0;
                 for (const GenericTypeParam& p : *ordinary_params) {
                     if (p.is_non_type) expected_non_type_args++;
                 }
-                size_t expected_type_args = ordinary_params->size() - expected_non_type_args;
+                std::size_t expected_type_args = ordinary_params->size() - expected_non_type_args;
                 if (type.template_args.size() != expected_type_args || type.non_type_args.size() != expected_non_type_args) {
                     throw ParseError(name_tok.line, name_tok.column,
                                       "'" + type.name + "' takes exactly " + std::to_string(ordinary_params->size()) +
@@ -2052,7 +2043,7 @@ private:
     // parameter was ever generic at all.
     Type parse_param_type(std::string& out_generic_concept) {
         out_generic_concept.clear();
-        size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
+        std::size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
         bool next_is_identifier_then_auto =
             peek_at(const_offset).kind == TokenKind::Identifier && peek_at(const_offset + 1).kind == TokenKind::KwAuto;
         bool next_is_bare_auto = peek_at(const_offset).kind == TokenKind::KwAuto;
@@ -2764,7 +2755,7 @@ private:
             // zero, one, or several parameters, possibly ending in a
             // pack) to see which of the three keywords follows, without
             // consuming anything yet.
-            size_t after_header = offset_after_matching_angle(1); // peek_at(1) is the header's own '<'
+            std::size_t after_header = offset_after_matching_angle(1); // peek_at(1) is the header's own '<'
             TokenKind after_header_kind = peek_at(after_header).kind;
             if (after_header_kind == TokenKind::KwClass) {
                 reject_unsafe_if_requested("a 'class' declaration");
@@ -2780,7 +2771,7 @@ private:
                 TokenKind after_name = peek_at(after_header + 2).kind;
                 if (after_name == TokenKind::Semicolon) {
                     std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-                    size_t leading_non_type_count = 0;
+                    std::size_t leading_non_type_count = 0;
                     while (leading_non_type_count < template_params.size() &&
                            template_params[leading_non_type_count].is_non_type) {
                         leading_non_type_count++;
@@ -2794,7 +2785,7 @@ private:
                         parse_ordinary_class_template_forward_decl(program, is_exported, std::move(template_params));
                     }
                 } else if (after_name == TokenKind::Less) {
-                    size_t name_offset = after_header + 1;
+                    std::size_t name_offset = after_header + 1;
                     std::string class_name = std::string(peek_at(name_offset).text);
                     std::string qualified_class_name = qualify_name(class_name);
                     if (variadic_primary_template_params_.contains(qualified_class_name)) {
@@ -2858,7 +2849,7 @@ private:
         } else {
             reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
             if (looks_like_type_start()) {
-                size_t saved_pos = pos_;
+                std::size_t saved_pos = pos_;
                 try {
                     reject_unsafe_if_requested("a variable declaration");
                     StmtPtr decl = parse_global_var_decl(std::move(leading_alignments));
@@ -2892,7 +2883,7 @@ private:
     // actually export (see the export/namespace validation pass).
     void parse_namespace_block(Program& program) {
         expect(TokenKind::KwNamespace, "'namespace'");
-        size_t pushed = 0;
+        std::size_t pushed = 0;
         for (;;) {
             std::string segment(expect(TokenKind::Identifier, "namespace name").text);
             namespace_stack_.push_back(std::move(segment));
@@ -2902,7 +2893,7 @@ private:
         expect(TokenKind::LBrace, "'{'");
         parse_top_level_items(program, /*inside_namespace=*/true);
         expect(TokenKind::RBrace, "'}'");
-        for (size_t i = 0; i < pushed; i++) namespace_stack_.pop_back();
+        for (std::size_t i = 0; i < pushed; i++) namespace_stack_.pop_back();
     }
 
     // Parses one top-level item that isn't a `struct`: an ordinary
@@ -3012,7 +3003,7 @@ private:
         std::string_view inner = tok.text.substr(1, tok.text.size() - 2);
         std::string result;
         result.reserve(inner.size());
-        for (size_t i = 0; i < inner.size(); i++) {
+        for (std::size_t i = 0; i < inner.size(); i++) {
             if (inner[i] != '\\') {
                 result.push_back(inner[i]);
                 continue;
@@ -3852,7 +3843,7 @@ private:
         bool found_placeholder = false;
         if (!check(TokenKind::RParen)) {
             do {
-                size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
+                std::size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
                 bool is_placeholder = peek_at(const_offset).kind == TokenKind::Identifier &&
                                        peek_at(const_offset).text == template_param_name;
                 if (is_placeholder) {
@@ -3938,7 +3929,7 @@ private:
             // reject an actually non-const-only method when instantiated
             // through a const access path.
             fn.params.push_back(make_this_param(def.name, /*is_const=*/true));
-            for (size_t i = 0; i < req.arg_types.size(); i++) {
+            for (std::size_t i = 0; i < req.arg_types.size(); i++) {
                 Param p;
                 p.type = req.arg_types[i];
                 p.name = "arg" + std::to_string(i);
@@ -4047,7 +4038,7 @@ private:
         // restate template_params' own names, in order (empty for the
         // base case).
         expect(TokenKind::Less, "'<'");
-        size_t index = 0;
+        std::size_t index = 0;
         if (!check(TokenKind::Greater)) {
             do {
                 if (index >= template_params.size()) {
@@ -4087,12 +4078,12 @@ private:
         // case, e.g. `TupleImpl<Idx>`) or exactly one type parameter
         // followed by a pack (the recursive case, e.g. `TupleImpl<Idx,
         // Head, Tail...>`).
-        size_t leading_non_type_count = 0;
+        std::size_t leading_non_type_count = 0;
         while (leading_non_type_count < template_params.size() &&
                template_params[leading_non_type_count].is_non_type) {
             leading_non_type_count++;
         }
-        for (size_t i = leading_non_type_count; i < template_params.size(); i++) {
+        for (std::size_t i = leading_non_type_count; i < template_params.size(); i++) {
             if (template_params[i].is_non_type) {
                 const Token& tok = peek();
                 throw ParseError(tok.line, tok.column,
@@ -4100,7 +4091,7 @@ private:
                                   "before any type parameter (ch05 §5.14)");
             }
         }
-        size_t remaining = template_params.size() - leading_non_type_count;
+        std::size_t remaining = template_params.size() - leading_non_type_count;
         bool has_pack = remaining == 2 && template_params[leading_non_type_count + 1].is_pack &&
                          !template_params[leading_non_type_count].is_pack;
         if (remaining != 0 && !has_pack) {
@@ -4160,13 +4151,13 @@ private:
                                   "'" + base_name + "' is not a declared variadic primary template (ch05 §5.14)");
             }
             BaseSpecifier base = make_named_base_specifier(program, base_name, base_access);
-            size_t base_leading_non_type_count = 0;
+            std::size_t base_leading_non_type_count = 0;
             for (const GenericTypeParam& p : base_primary_it->second) {
                 if (!p.is_non_type) break;
                 base_leading_non_type_count++;
             }
             expect(TokenKind::Less, "'<'");
-            for (size_t i = 0; i < base_leading_non_type_count; i++) {
+            for (std::size_t i = 0; i < base_leading_non_type_count; i++) {
                 base.base_type.non_type_args.push_back(std::shared_ptr<Expr>(parse_additive().release()));
                 expect(TokenKind::Comma, "','");
             }
@@ -5369,7 +5360,7 @@ private:
         expect(TokenKind::LParen, "'('");
 
         if (is_range_for_decl_start()) {
-            size_t saved_pos = pos_;
+            std::size_t saved_pos = pos_;
             try {
                 StmtPtr loop_var = parse_for_range_decl();
                 if (match(TokenKind::Colon)) {
@@ -5580,7 +5571,7 @@ private:
         }
         if (match(TokenKind::KwSizeof)) {
             expect(TokenKind::LParen, "'(' after 'sizeof'");
-            size_t saved_pos = pos_;
+            std::size_t saved_pos = pos_;
             try {
                 if (looks_like_type_start()) {
                     Type target_type = parse_type();
@@ -5616,7 +5607,7 @@ private:
         // parse_postfix(parse_primary())'s ordinary parenthesized-
         // expression handling below, unaffected.
         if (check(TokenKind::LParen) && looks_like_type_start_at(1)) {
-            size_t saved_pos = pos_;
+            std::size_t saved_pos = pos_;
             bool parsed_as_cast = false;
             std::unique_ptr<Expr> node;
             try {
@@ -5790,7 +5781,7 @@ private:
                     node->name = expr->name;
                     node->explicit_global_qualification = expr->explicit_global_qualification;
                     node->explicit_template_args = std::move(expr->explicit_template_args);
-                    size_t last_separator = node->name.rfind("::");
+                    std::size_t last_separator = node->name.rfind("::");
                     if (last_separator != std::string::npos) {
                         std::string owner_name = node->name.substr(0, last_separator);
                         std::string member_name = node->name.substr(last_separator + 2);
@@ -6028,7 +6019,7 @@ private:
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
                 advance(); // '<'
                 const std::vector<GenericTypeParam>& fn_template_params = generic_fn_it->second;
-                size_t arg_index = 0;
+                std::size_t arg_index = 0;
                 if (!check(TokenKind::Greater)) {
                     do {
                         ExplicitTemplateArg arg;
@@ -6227,7 +6218,7 @@ private:
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
                 advance(); // '<'
                 const std::vector<GenericTypeParam>& fn_template_params = generic_fn_it->second;
-                size_t arg_index = 0;
+                std::size_t arg_index = 0;
                 if (!check(TokenKind::Greater)) {
                     do {
                         ExplicitTemplateArg arg;
@@ -6261,7 +6252,7 @@ private:
             return node;
         }
         if (match(TokenKind::LParen)) {
-            size_t saved_pos = pos_;
+            std::size_t saved_pos = pos_;
             if (match(TokenKind::Ellipsis)) {
                 std::optional<BinaryOp> op = parse_fold_operator();
                 if (!op.has_value()) {

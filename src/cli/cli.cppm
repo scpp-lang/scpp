@@ -1,16 +1,8 @@
 module;
 
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <vector>
-
 export module scpp.cli;
 
+import std;
 import scpp.lexer;
 import scpp.parser;
 import scpp.ast;
@@ -123,7 +115,7 @@ std::string type_to_string(const scpp::Type& type) {
         case scpp::TypeKind::Named: {
             if (type.template_args.empty()) return type.name;
             std::string result = type.name + "<";
-            for (size_t i = 0; i < type.template_args.size(); i++) {
+            for (std::size_t i = 0; i < type.template_args.size(); i++) {
                 if (i > 0) result += ", ";
                 result += type_to_string(type.template_args[i]);
             }
@@ -135,7 +127,7 @@ std::string type_to_string(const scpp::Type& type) {
                    "*";
         case scpp::TypeKind::Function: {
             std::string result = type_to_string(*type.function_return) + "(";
-            for (size_t i = 0; i < type.function_params.size(); i++) {
+            for (std::size_t i = 0; i < type.function_params.size(); i++) {
                 if (i > 0) result += ", ";
                 result += type_to_string(type.function_params[i]);
             }
@@ -149,7 +141,7 @@ std::string type_to_string(const scpp::Type& type) {
             std::string result = type_to_string(*type.function_return) + " (*";
             if (type.is_unsafe_function_pointer) result += " [[scpp::unsafe]]";
             result += ")(";
-            for (size_t i = 0; i < type.function_params.size(); i++) {
+            for (std::size_t i = 0; i < type.function_params.size(); i++) {
                 if (i > 0) result += ", ";
                 result += type_to_string(type.function_params[i]);
             }
@@ -236,15 +228,15 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
     // `effective_source` is the exact text the lexer/parser walked for
     // whichever file `loc` actually belongs to, so this always agrees
     // with however Lexer::advance() itself counted lines.
-    size_t line_start = 0;
+    std::size_t line_start = 0;
     int current_line = 1;
     while (current_line < loc.line) {
-        size_t next_nl = effective_source->find('\n', line_start);
+        std::size_t next_nl = effective_source->find('\n', line_start);
         if (next_nl == std::string::npos) return; // loc.line is past EOF -- defensive, shouldn't happen
         line_start = next_nl + 1;
         current_line++;
     }
-    size_t line_end = effective_source->find('\n', line_start);
+    std::size_t line_end = effective_source->find('\n', line_start);
     if (line_end == std::string::npos) line_end = effective_source->size();
     std::string_view line_text(effective_source->data() + line_start, line_end - line_start);
 
@@ -256,8 +248,8 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
     // context before the caret, preserving tabs so the caret still lines
     // up correctly in a terminal that expands them (a plain space
     // wouldn't match a tab's actual rendered width).
-    for (int i = 0; i < loc.column - 1 && static_cast<size_t>(i) < line_text.size(); i++) {
-        std::cerr << (line_text[static_cast<size_t>(i)] == '\t' ? '\t' : ' ');
+    for (int i = 0; i < loc.column - 1 && static_cast<std::size_t>(i) < line_text.size(); i++) {
+        std::cerr << (line_text[static_cast<std::size_t>(i)] == '\t' ? '\t' : ' ');
     }
     std::cerr << "^\n";
 }
@@ -536,7 +528,7 @@ int run_parse(std::string_view path) {
         for (const scpp::Function& fn : program.functions) {
             std::cout << "Function " << (fn.is_extern_c ? "extern \"C\" " : "")
                        << type_to_string(fn.return_type) << " " << fn.name << "(";
-            for (size_t i = 0; i < fn.params.size(); i++) {
+            for (std::size_t i = 0; i < fn.params.size(); i++) {
                 if (i > 0) std::cout << ", ";
                 std::cout << type_to_string(fn.params[i].type) << " " << fn.params[i].name;
             }
@@ -686,7 +678,7 @@ int run(int argc, char** argv) {
                 archive_path = argv[++i];
             } else if (arg == "--import" && i + 1 < argc) {
                 std::string_view mapping = argv[++i];
-                size_t eq = mapping.find('=');
+                std::size_t eq = mapping.find('=');
                 if (eq == std::string_view::npos) {
                     std::cerr << "error: --import expects 'name=path', got '" << mapping << "'\n";
                     return 1;
@@ -767,7 +759,7 @@ int run(int argc, char** argv) {
                 // only import-resolution mechanism this version supports
                 // (no `.scppm`/`-I` search path yet).
                 std::string_view mapping = argv[++i];
-                size_t eq = mapping.find('=');
+                std::size_t eq = mapping.find('=');
                 if (eq == std::string_view::npos) {
                     std::cerr << "error: --import expects 'name=path', got '" << mapping << "'\n";
                     return 1;

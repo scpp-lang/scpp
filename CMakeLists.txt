@@ -1,9 +1,47 @@
 cmake_minimum_required(VERSION 3.28)
 
+# --- C++23 `import std;` setup -----------------------------------------------
+# scpp (the language) has no preprocessor/#include at all, so scpp's own C++
+# implementation is migrating off #include-based standard library usage and
+# onto `import std;`.
+#
+# This project deliberately builds against the platform default standard
+# library (libstdc++ on this Ubuntu/Clang toolchain) rather than libc++.
+# Clang's `import std;` support works with either, but the prebuilt LLVM
+# static libraries this project links against (see `find_package(LLVM)`
+# below) were themselves compiled against libstdc++: their public API
+# surface exposes `std::` types (e.g. `llvm::IRBuilderBase`'s
+# `std::optional<...>` parameters) whose mangled names bake in the standard
+# library's ABI. Building our own code with `-stdlib=libc++` therefore
+# produces object code that cannot link against these prebuilt LLVM
+# archives at all -- it's a hard ABI mismatch (different mangled symbol
+# names), not a flag/link-order problem. Staying on libstdc++ (Clang's
+# default here) keeps us ABI-compatible with LLVM while still getting a
+# fully working `import std;`.
+#
+# All of this must be decided *before* `project()` triggers CXX toolchain/ABI
+# detection -- CMake's own `import std;` support (CMAKE_CXX_MODULE_STD,
+# CMAKE_EXPERIMENTAL_CXX_IMPORT_STD, and the CMAKE_CXX_STANDARD_LIBRARY it
+# auto-detects) is still gated as an experimental feature; see
+# Help/dev/experimental.rst in CMake's own source tree for the current
+# activation UUID (it may change in future CMake releases -- re-check that
+# file when upgrading CMake).
+set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 project(scpp
     VERSION 26.0.0
     DESCRIPTION "A compiler frontend for a C++-looking language with safe regions"
     LANGUAGES C CXX)
+
+# Make `import std;` available to every target using cxx_std_23 or newer
+# (see CXX_MODULE_STD target property docs). Set once, project-wide, before
+# any targets are created, since it only initializes each target's
+# CXX_MODULE_STD property at the point the target is created.
+set(CMAKE_CXX_MODULE_STD 1)
 
 set(SCPP_STDLIB_STD_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/std/std.scpp")
 set(SCPP_STDLIB_STD_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/std.scppm")
@@ -12,9 +50,6 @@ set(SCPP_STDLIB_SCPP_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp/scpp.scp
 set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/scpp.scppm")
 set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libscpp.scppa")
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_options(-Wall -Wextra -Wpedantic)
 set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 

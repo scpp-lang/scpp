@@ -1,20 +1,8 @@
 module;
 
-#include <algorithm>
-#include <cctype>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:signatures;
 
+import std;
 import scpp.ast;
 import :errors;
 import scpp.mir;
@@ -31,8 +19,8 @@ struct FunctionSignature {
     std::vector<LifetimeAnnotation> param_lifetimes;
     Type return_type;
     LifetimeAnnotation return_lifetime;
-    std::vector<size_t> returned_lifetime_param_indices;
-    std::optional<size_t> elided_param_index;
+    std::vector<std::size_t> returned_lifetime_param_indices;
+    std::optional<std::size_t> elided_param_index;
     bool is_extern_c_declaration_only = false;
     bool is_unsafe = false;
     bool is_nodiscard = false;
@@ -90,10 +78,10 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
 void validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def,
                                                                 const Body& body,
                                                                 const Signatures& signatures);
-[[nodiscard]] std::optional<size_t> resolve_elided_param_index(const Function& fn);
+[[nodiscard]] std::optional<std::size_t> resolve_elided_param_index(const Function& fn);
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param);
 void validate_lifetime_annotation_placement(const Function& fn);
-[[nodiscard]] std::vector<size_t> resolve_returned_lifetime_param_indices(const Function& fn);
+[[nodiscard]] std::vector<std::size_t> resolve_returned_lifetime_param_indices(const Function& fn);
 [[nodiscard]] Signatures build_signatures(const Program& program);
 
 // spec §6.5: whether `class_name` has declared its own copy constructor
@@ -213,9 +201,9 @@ void validate_lifetime_annotation_placement(const Function& fn);
 }
 
 [[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name) {
-    size_t scope = class_name.rfind("::");
+    std::size_t scope = class_name.rfind("::");
     std::string_view tail = scope == std::string_view::npos ? class_name : class_name.substr(scope + 2);
-    size_t dot = tail.find('.');
+    std::size_t dot = tail.find('.');
     if (dot != std::string_view::npos) tail = tail.substr(0, dot);
     return std::string(tail);
 }
@@ -305,7 +293,7 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
     }
     if (!missing.empty()) {
         std::string names;
-        for (size_t i = 0; i < missing.size(); i++) {
+        for (std::size_t i = 0; i < missing.size(); i++) {
             if (i > 0) names += ", ";
             names += "'" + missing[i] + "'";
         }
@@ -398,7 +386,7 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
         if (candidate.param_types.size() != ctor_args.size() + 1) continue;
         bool all_match = true;
-        for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
+        for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
             all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
                                                                              candidate.param_types[i + 1], body,
                                                                              signatures);
@@ -409,7 +397,7 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
     if (matches.size() == 1) return matches[0];
     auto mutable_ref_score = [&](const FunctionSignature& candidate) {
         int score = 0;
-        for (size_t i = 0; i < ctor_args.size(); i++) {
+        for (std::size_t i = 0; i < ctor_args.size(); i++) {
             const Type& param_type = candidate.param_types[i + 1];
             if (is_reference(param_type) && param_type.is_mutable_ref &&
                 !is_read_only_reachable(*ctor_args[i], body, signatures)) {
@@ -421,7 +409,7 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
     const FunctionSignature* best = matches[0];
     int best_score = mutable_ref_score(*best);
     bool unique_best = true;
-    for (size_t i = 1; i < matches.size(); i++) {
+    for (std::size_t i = 1; i < matches.size(); i++) {
         int score = mutable_ref_score(*matches[i]);
         if (score > best_score) {
             best = matches[i];
@@ -552,7 +540,7 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
         }
     }
 }
-[[nodiscard]] std::optional<size_t> resolve_elided_param_index(const Function& fn) {
+[[nodiscard]] std::optional<std::size_t> resolve_elided_param_index(const Function& fn) {
     if (fn.return_lifetime.present()) return std::nullopt;
     if (!is_reference(fn.return_type)) return std::nullopt;
 
@@ -585,8 +573,8 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
         return 0;
     }
 
-    std::optional<size_t> found;
-    for (size_t i = 0; i < fn.params.size(); i++) {
+    std::optional<std::size_t> found;
+    for (std::size_t i = 0; i < fn.params.size(); i++) {
         // ch03/ch05 §5.11: an rvalue-reference (`T&&`) parameter is
         // never an eligible elision source -- its argument may be a
         // fresh temporary (a literal, a std::make_unique<T>(...)/call
@@ -668,7 +656,7 @@ void validate_operator_arrow_signature(const Function& fn) {
     }
 }
 
-[[nodiscard]] std::vector<size_t> resolve_returned_lifetime_param_indices(const Function& fn) {
+[[nodiscard]] std::vector<std::size_t> resolve_returned_lifetime_param_indices(const Function& fn) {
     validate_lifetime_annotation_placement(fn);
     if (fn.return_lifetime.present()) {
         if (fn.return_lifetime.is_any()) {
@@ -676,8 +664,8 @@ void validate_operator_arrow_signature(const Function& fn) {
                                     "' cannot name the reserved lifetime group 'any' in its return annotation",
                                 fn.loc);
         }
-        std::vector<size_t> indices;
-        for (size_t i = 0; i < fn.params.size(); i++) {
+        std::vector<std::size_t> indices;
+        for (std::size_t i = 0; i < fn.params.size(); i++) {
             if (fn.params[i].lifetime.name != fn.return_lifetime.name) continue;
             if (!param_can_outlive_call_for_lifetime_return(fn.params[i])) {
                 throw DataflowError("function '" + fn.name + "' ties its return to parameter '" + fn.params[i].name +
@@ -697,7 +685,7 @@ void validate_operator_arrow_signature(const Function& fn) {
         return indices;
     }
     if (!is_reference(fn.return_type)) return {};
-    std::optional<size_t> elided = resolve_elided_param_index(fn);
+    std::optional<std::size_t> elided = resolve_elided_param_index(fn);
     if (!elided.has_value()) return {};
     const Param& param = fn.params[*elided];
     if (param.lifetime.is_any()) {
@@ -759,7 +747,7 @@ void validate_operator_arrow_signature(const Function& fn) {
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             bool same_params = existing.param_types.size() == sig.param_types.size();
-            for (size_t i = 0; same_params && i < sig.param_types.size(); i++) {
+            for (std::size_t i = 0; same_params && i < sig.param_types.size(); i++) {
                 same_params = types_equal(existing.param_types[i], sig.param_types[i]);
             }
             if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {

@@ -1,15 +1,6 @@
 import scpp.parser;
 import scpp.ast;
-
-#include <fstream>
-#include <filesystem>
-#include <iostream>
-#include <memory>
-#include <optional>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <unordered_map>
+import std;
 
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
@@ -82,7 +73,7 @@ public:
 
 private:
     std::optional<std::string> infer_partition_path(const std::string& key) const {
-        size_t colon = key.find(':');
+        std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
         if (module_name != "std") return std::nullopt;

@@ -55,17 +55,23 @@ int legacy(int* p) {
 
 ## 构建
 
-需要支持 C++23 modules 的 Clang、CMake 3.28+、Ninja、LLVM 开发包，
-以及 SQLite 开发头文件/库。
+需要支持 C++23 modules 的 Clang、CMake 3.28+、Ninja、LLVM 开发包、
+SQLite 开发头文件/库，以及一个 `g++` 安装（用于其 `libstdc++` 开发文件，
+详见下文）。
 在 Debian/Ubuntu 上：
 
 ```sh
-sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev libsqlite3-dev
+sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev libsqlite3-dev g++
 ```
 
 （需要 `libzstd-dev` 是因为 LLVM 的 CMake config 会链接它；不装的话
 `find_package(LLVM)` 会报缺少 `zstd::libzstd_shared` target。`libsqlite3-dev`
-则提供 SCPP 全量源码构建现在会链接到的 `sqlite3.h` 头文件和 SQLite 库。）
+则提供 SCPP 全量源码构建现在会链接到的 `sqlite3.h` 头文件和 SQLite 库。
+`g++` 并不是用来做编译器的（编译器仍然是 Clang），但它的 `libstdc++-*-dev`
+包提供了 Clang 的 `import std;` 所依赖的 `bits/std.cc` module interface
+unit；SCPP 自身的 C++ 实现现在全面使用 `import std;` 而非 `#include`
+标准库头文件，并且刻意选择 libstdc++ 而非 libc++，以便和上面链接的
+LLVM 预编译库保持 ABI 兼容——那些库本身就是用 libstdc++ 构建的。）
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=<LLVM 的 lib/cmake/llvm 路径>

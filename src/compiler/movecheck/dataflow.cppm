@@ -1,20 +1,8 @@
 module;
 
-#include <algorithm>
-#include <cctype>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:dataflow;
 
+import std;
 import scpp.ast;
 import :errors;
 import scpp.mir;
@@ -522,9 +510,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
     BorrowMap in_call_borrows;
-    for (size_t i = 0; i < expr.args.size(); i++) {
+    for (std::size_t i = 0; i < expr.args.size(); i++) {
         const Expr& arg = *expr.args[i];
-        size_t param_index = i + callee.param_offset;
+        std::size_t param_index = i + callee.param_offset;
         bool param_is_reference =
             sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
         bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
@@ -699,7 +687,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
                 if (candidate.param_types.size() != ctor_args.size() + 1) continue;
                 bool all_match = true;
-                for (size_t i = 0; all_match && i < ctor_args.size(); i++) {
+                for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
                     all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
                                                                                      candidate.param_types[i + 1], body,
                                                                                      signatures);
@@ -743,12 +731,12 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     bool constructed_state_can_carry_lifetimes =
         report_errors && body.program != nullptr &&
         type_contains_lifetime_carrying_state(named_type(class_name), *body.program);
-    for (size_t i = 0; i < ctor_args.size(); i++) {
+    for (std::size_t i = 0; i < ctor_args.size(); i++) {
         const Expr& arg = *ctor_args[i];
         if (constructed_state_can_carry_lifetimes) {
             reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state");
         }
-        size_t param_index = i + 1;
+        std::size_t param_index = i + 1;
         bool param_is_reference =
             sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
         bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
@@ -1939,7 +1927,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                                             state.current_loc);
                     }
                 } else if (is_reference(fn.return_type)) {
-                    std::vector<size_t> source_indices = resolve_returned_lifetime_param_indices(fn);
+                    std::vector<std::size_t> source_indices = resolve_returned_lifetime_param_indices(fn);
                     if (!source_indices.empty()) {
                         RootSet expected = single_root(fn.params[source_indices.front()].name);
                         if (returned_roots != expected) {
@@ -1992,11 +1980,11 @@ void check_function(const Function& fn, const Program& program, const Signatures
     Body body = build_mir(fn);
     body.program = &program;
 
-    size_t n = body.blocks.size();
+    std::size_t n = body.blocks.size();
 
-    std::vector<std::vector<size_t>> preds(n);
-    for (size_t i = 0; i < n; i++) {
-        for (size_t succ : successors(body.blocks[i].terminator)) {
+    std::vector<std::vector<std::size_t>> preds(n);
+    for (std::size_t i = 0; i < n; i++) {
+        for (std::size_t succ : successors(body.blocks[i].terminator)) {
             preds[succ].push_back(i);
         }
     }
@@ -2060,15 +2048,15 @@ void check_function(const Function& fn, const Program& program, const Signatures
         }
     }
 
-    std::deque<size_t> worklist;
+    std::deque<std::size_t> worklist;
     std::vector<bool> queued(n, false);
-    for (size_t i = 0; i < n; i++) {
+    for (std::size_t i = 0; i < n; i++) {
         worklist.push_back(i);
         queued[i] = true;
     }
 
     while (!worklist.empty()) {
-        size_t b = worklist.front();
+        std::size_t b = worklist.front();
         worklist.pop_front();
         queued[b] = false;
 
@@ -2077,14 +2065,14 @@ void check_function(const Function& fn, const Program& program, const Signatures
             new_in = entry_state;
         } else {
             bool first = true;
-            for (size_t p : preds[b]) {
+            for (std::size_t p : preds[b]) {
                 new_in = first ? out_states[p] : join_states(new_in, out_states[p]);
                 first = false;
             }
         }
 
         DataflowState new_out = new_in;
-        for (size_t i = 0; i < body.blocks[b].statements.size(); i++) {
+        for (std::size_t i = 0; i < body.blocks[b].statements.size(); i++) {
             apply_statement(body.blocks[b].statements[i], new_out, body, signatures, /*report_errors=*/false);
             release_dead_references(new_out, body, live_after[b][i]);
         }
@@ -2094,7 +2082,7 @@ void check_function(const Function& fn, const Program& program, const Signatures
         out_states[b] = std::move(new_out);
 
         if (out_changed) {
-            for (size_t succ : successors(body.blocks[b].terminator)) {
+            for (std::size_t succ : successors(body.blocks[b].terminator)) {
                 if (!queued[succ]) {
                     worklist.push_back(succ);
                     queued[succ] = true;
@@ -2105,9 +2093,9 @@ void check_function(const Function& fn, const Program& program, const Signatures
 
     // Fixed point reached: `in_states` is now stable. Walk every block
     // once more, this time actually reporting diagnostics.
-    for (size_t b = 0; b < n; b++) {
+    for (std::size_t b = 0; b < n; b++) {
         DataflowState state = in_states[b];
-        for (size_t i = 0; i < body.blocks[b].statements.size(); i++) {
+        for (std::size_t i = 0; i < body.blocks[b].statements.size(); i++) {
             apply_statement(body.blocks[b].statements[i], state, body, signatures, /*report_errors=*/true);
             release_dead_references(state, body, live_after[b][i]);
         }

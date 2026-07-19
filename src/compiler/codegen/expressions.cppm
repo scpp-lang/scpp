@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:expressions;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -70,7 +58,7 @@ namespace scpp {
             return;
         }
         if (dest_type.kind == TypeKind::Array && dest_type.element && value.kind == ConstexprValueKind::Array) {
-            for (size_t i = 0; i < value.elements.size(); ++i) {
+            for (std::size_t i = 0; i < value.elements.size(); ++i) {
                 llvm::Value* elem_ptr = builder_->CreateConstGEP2_32(to_llvm_type(dest_type), dest_ptr, 0,
                                                                      static_cast<unsigned>(i));
                 store_constexpr_value_into(elem_ptr, *dest_type.element, value.elements[i]);
@@ -80,7 +68,7 @@ namespace scpp {
         if (dest_type.kind == TypeKind::Named && find_class_def(dest_type.name) != nullptr &&
             value.kind == ConstexprValueKind::Object) {
             const StructInfo& info = structs_.at(dest_type.name);
-            for (size_t i = 0; i < info.field_names.size(); ++i) {
+            for (std::size_t i = 0; i < info.field_names.size(); ++i) {
                 auto it = std::find_if(value.object_fields.begin(), value.object_fields.end(),
                                        [&](const auto& field) { return field.first == info.field_names[i]; });
                 if (it == value.object_fields.end()) continue;
@@ -176,7 +164,7 @@ namespace scpp {
                         args.insert(args.begin(), receiver_value);
                         return CallResult{builder_->CreateCall(target, args), callee};
                     }
-                    std::optional<size_t> slot_index = interface_method_slot_index(receiver_named.name, *callee);
+                    std::optional<std::size_t> slot_index = interface_method_slot_index(receiver_named.name, *callee);
                     if (!slot_index.has_value()) {
                         throw CodegenError("missing interface dispatch slot for '" + callee->name + "'", current_loc_);
                     }
@@ -200,7 +188,7 @@ namespace scpp {
             LValue base = codegen_lvalue(*expr.lhs);
             if (base.type.kind == TypeKind::Named && structs_.contains(base.type.name)) {
                 const StructInfo& info = structs_.at(base.type.name);
-                std::optional<size_t> field_index_opt = info.find_field_index(expr.name);
+                std::optional<std::size_t> field_index_opt = info.find_field_index(expr.name);
                 if (field_index_opt.has_value() &&
                     info.field_types[*field_index_opt].kind == TypeKind::FunctionPointer) {
                     const Type& member_type = info.field_types[*field_index_opt];
@@ -315,7 +303,7 @@ namespace scpp {
         }
         std::string callee_name = expr.name;
         llvm::Value* this_arg = nullptr;
-        size_t param_offset = 0;
+        std::size_t param_offset = 0;
         bool receiver_is_mutable = true;
         std::string receiver_static_class_name;
         if (expr.lhs != nullptr) {
@@ -355,7 +343,7 @@ namespace scpp {
                 args.insert(args.begin(), codegen_interface_value_for_target(*expr.lhs, callee_def->params.front().type));
             } else {
                 args.insert(args.begin(), this_arg);
-                if (std::optional<size_t> slot_index =
+                if (std::optional<std::size_t> slot_index =
                         ordinary_method_slot_index(receiver_static_class_name, *callee_def);
                     slot_index.has_value()) {
                     const StructInfo& info = structs_.at(receiver_static_class_name);
@@ -657,11 +645,11 @@ namespace scpp {
 
 
     std::vector<llvm::Value*> Codegen::codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
-                                                  size_t param_offset)
+                                                  std::size_t param_offset)
 {
         std::vector<llvm::Value*> result;
         result.reserve(args.size());
-        for (size_t i = 0; i < args.size(); i++) {
+        for (std::size_t i = 0; i < args.size(); i++) {
             bool param_is_reference = callee_def != nullptr && i + param_offset < callee_def->params.size() &&
                                        callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
             const Type* ref_param_type =
@@ -722,7 +710,7 @@ namespace scpp {
 {
         std::vector<llvm::Value*> result;
         result.reserve(args.size());
-        for (size_t i = 0; i < args.size(); i++) {
+        for (std::size_t i = 0; i < args.size(); i++) {
             bool param_is_reference = i < param_types.size() && param_types[i].kind == TypeKind::Reference;
             const Type* ref_param_type = param_is_reference ? &param_types[i] : nullptr;
             bool param_is_interface_reference = param_is_reference && is_interface_reference_type(*ref_param_type);
@@ -1263,7 +1251,7 @@ namespace scpp {
         llvm::AllocaInst* closure =
             existing_storage != nullptr ? existing_storage : create_entry_block_alloca(info.llvm_type, "lambdatmp");
         if (info.has_ordinary_vtable) initialize_ordinary_vtable_pointer(expr.name, closure);
-        for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
+        for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
             const LambdaCapture& capture = expr.lambda_captures[i];
             const Type& field_type = info.field_types[i];
             llvm::Value* field_ptr =
@@ -1307,7 +1295,7 @@ namespace scpp {
             heap_ptr = codegen_expr(*expr.lhs);
         } else {
             llvm::Function* malloc_fn = get_or_declare_malloc();
-            uint64_t size_in_bytes = module_->getDataLayout().getTypeAllocSize(element_type);
+            std::uint64_t size_in_bytes = module_->getDataLayout().getTypeAllocSize(element_type);
             llvm::Value* size_arg = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), size_in_bytes);
             heap_ptr = builder_->CreateCall(malloc_fn, {size_arg}, "newptr");
         }
@@ -1703,7 +1691,7 @@ namespace scpp {
         llvm::Value* lhs_int = builder_->CreatePtrToInt(lhs_ptr, diff_type, "lhsint");
         llvm::Value* rhs_int = builder_->CreatePtrToInt(rhs_ptr, diff_type, "rhsint");
         llvm::Value* byte_diff = builder_->CreateSub(lhs_int, rhs_int, "ptrbytes");
-        uint64_t elem_size = module_->getDataLayout().getTypeAllocSize(to_llvm_type(*pointer_type.pointee));
+        std::uint64_t elem_size = module_->getDataLayout().getTypeAllocSize(to_llvm_type(*pointer_type.pointee));
         if (elem_size == 1) return byte_diff;
         llvm::Value* elem_size_value = llvm::ConstantInt::get(diff_type, elem_size, /*isSigned=*/false);
         return builder_->CreateSDiv(byte_diff, elem_size_value, "ptrdifftmp");
@@ -1754,13 +1742,13 @@ namespace scpp {
                         current_loc_);
                 }
                 const StructInfo& info = structs_.at(base.type.name);
-                std::optional<size_t> field_index_opt = info.find_field_index(expr.name);
+                std::optional<std::size_t> field_index_opt = info.find_field_index(expr.name);
                 if (!field_index_opt.has_value()) {
                     throw CodegenError(std::string(info.is_union ? "union '" : "struct '") + base.type.name +
                                            "' has no field '" + expr.name + "'",
                         current_loc_);
                 }
-                size_t field_index = *field_index_opt;
+                std::size_t field_index = *field_index_opt;
                 const Type& field_type = info.field_types[field_index];
                 std::optional<llvm::Align> field_alignment =
                     info.is_union ? (base.alignment.has_value() ? base.alignment : alignment_for_type(base.type))

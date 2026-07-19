@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:object_model;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -156,7 +144,7 @@ namespace scpp {
             throw CodegenError("unknown interface '" + interface_name + "' for dispatch table generation", current_loc_);
         }
         std::vector<const Function*> methods;
-        std::unordered_map<std::string, size_t> slot_indices;
+        std::unordered_map<std::string, std::size_t> slot_indices;
         for (const BaseSpecifier& base : def->base_specifiers) {
             if (base.kind != BaseClassKind::Interface) continue;
             for (const Function* method : interface_dispatch_methods(base.base_type.name)) {
@@ -197,7 +185,7 @@ namespace scpp {
     }
 
 
-    [[nodiscard]] std::optional<size_t> Codegen::interface_method_slot_index(const std::string& interface_name,
+    [[nodiscard]] std::optional<std::size_t> Codegen::interface_method_slot_index(const std::string& interface_name,
                                                                     const Function& method)
 {
         (void)interface_dispatch_methods(interface_name);
@@ -246,7 +234,7 @@ namespace scpp {
         std::vector<llvm::Type*> params;
         params.reserve(method.params.size());
         params.push_back(llvm::PointerType::getUnqual(*context_));
-        for (size_t i = 1; i < method.params.size(); i++) {
+        for (std::size_t i = 1; i < method.params.size(); i++) {
             params.push_back(to_llvm_type(method.params[i].type));
         }
         return llvm::FunctionType::get(to_llvm_type(method.return_type), params, /*isVarArg=*/false);
@@ -266,7 +254,7 @@ namespace scpp {
     }
 
 
-    [[nodiscard]] llvm::Type* Codegen::llvm_param_type_for_function(const Function& fn, const Param& param, size_t index)
+    [[nodiscard]] llvm::Type* Codegen::llvm_param_type_for_function(const Function& fn, const Param& param, std::size_t index)
 {
         if (index == 0 && interface_destructor_uses_raw_this(fn)) {
             return llvm::PointerType::getUnqual(*context_);
@@ -345,7 +333,7 @@ namespace scpp {
             throw CodegenError("unknown ordinary class '" + class_name + "' for vtable generation", current_loc_);
         }
         std::vector<const Function*> methods;
-        std::unordered_map<std::string, size_t> slot_indices;
+        std::unordered_map<std::string, std::size_t> slot_indices;
         if (const BaseSpecifier* base = def->direct_ordinary_base()) {
             for (const Function* method : ordinary_virtual_methods(base->base_type.name)) {
                 slot_indices.emplace(interface_method_slot_key(*method), methods.size());
@@ -384,7 +372,7 @@ namespace scpp {
     }
 
 
-    [[nodiscard]] std::optional<size_t> Codegen::ordinary_method_slot_index(const std::string& class_name, const Function& method)
+    [[nodiscard]] std::optional<std::size_t> Codegen::ordinary_method_slot_index(const std::string& class_name, const Function& method)
 {
         if (!class_has_ordinary_vtable(class_name)) return std::nullopt;
         (void)ordinary_virtual_methods(class_name);
@@ -510,9 +498,9 @@ namespace scpp {
 
     [[nodiscard]] std::string Codegen::unqualified_template_base_name(std::string_view class_name) const
 {
-        size_t scope = class_name.rfind("::");
+        std::size_t scope = class_name.rfind("::");
         std::string_view tail = scope == std::string_view::npos ? class_name : class_name.substr(scope + 2);
-        size_t dot = tail.find('.');
+        std::size_t dot = tail.find('.');
         if (dot != std::string_view::npos) tail = tail.substr(0, dot);
         return std::string(tail);
     }
@@ -616,7 +604,7 @@ namespace scpp {
             throw CodegenError("unknown class '" + class_name + "'", current_loc_);
         }
         const StructInfo& info = info_it->second;
-        std::optional<size_t> field_index = info.find_field_index(field.name);
+        std::optional<std::size_t> field_index = info.find_field_index(field.name);
         if (!field_index.has_value()) {
             throw CodegenError("class '" + class_name + "' has no field '" + field.name + "'", current_loc_);
         }
@@ -634,7 +622,7 @@ namespace scpp {
             throw CodegenError("unknown class '" + class_name + "'", current_loc_);
         }
         const StructInfo& info = info_it->second;
-        std::optional<size_t> field_index = info.find_field_index(field.name);
+        std::optional<std::size_t> field_index = info.find_field_index(field.name);
         if (!field_index.has_value()) {
             throw CodegenError("class '" + class_name + "' has no field '" + field.name + "'", current_loc_);
         }

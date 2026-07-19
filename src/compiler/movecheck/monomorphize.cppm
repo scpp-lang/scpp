@@ -1,20 +1,8 @@
 module;
 
-#include <algorithm>
-#include <cctype>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:monomorphize;
 
+import std;
 import scpp.ast;
 import :errors;
 import scpp.mir;
@@ -33,7 +21,7 @@ class Monomorphizer {
 public:
     explicit Monomorphizer(Program& program) : program_(program) {
         for (const ConceptDef& c : program.concepts) concepts_by_name_[c.name] = &c;
-        for (size_t i = 0; i < program.functions.size(); i++) {
+        for (std::size_t i = 0; i < program.functions.size(); i++) {
             if (program.functions[i].is_generic_template) {
                 generic_template_indices_[program.functions[i].name].push_back(i);
             }
@@ -48,7 +36,7 @@ public:
         // need to reconstruct these each time.
         for (const StructDef& s : program.structs) known_type_names_.insert(s.name);
         for (const EnumDef& e : program.enums) known_type_names_.insert(e.name);
-        for (size_t i = 0; i < program.classes.size(); i++) {
+        for (std::size_t i = 0; i < program.classes.size(); i++) {
             const ClassDef& c = program.classes[i];
             known_type_names_.insert(c.name);
             if (!c.template_owner_id.empty()) {
@@ -154,8 +142,8 @@ public:
         // signature source for check_generic_type_methods_once and
         // resolve_generic_types' own per-instantiation clones, both
         // already done above.
-        size_t original_count = program_.functions.size();
-        for (size_t i = 0; i < original_count; i++) {
+        std::size_t original_count = program_.functions.size();
+        for (std::size_t i = 0; i < original_count; i++) {
             if (program_.functions[i].body == nullptr) continue;
             if (belongs_to_unresolved_generic_type_template(program_.functions[i])) continue;
             // ch05 §5.11: a full-header-form generic function's own
@@ -189,8 +177,8 @@ public:
 private:
     Program& program_;
     std::unordered_map<std::string, const ConceptDef*> concepts_by_name_;
-    std::unordered_map<std::string, std::vector<size_t>> generic_template_indices_;
-    std::unordered_map<std::string, size_t> class_template_indices_by_owner_id_;
+    std::unordered_map<std::string, std::vector<std::size_t>> generic_template_indices_;
+    std::unordered_map<std::string, std::size_t> class_template_indices_by_owner_id_;
     std::unordered_map<std::string, std::vector<std::string>> ordinary_class_template_owner_ids_by_name_;
     std::unordered_map<std::string, std::string> clone_cache_;
     std::unordered_set<std::string> known_type_names_;
@@ -327,9 +315,9 @@ private:
         return fn.name;
     }
 
-    [[nodiscard]] static size_t find_matching_angle(const std::string& text, size_t open_pos) {
+    [[nodiscard]] static std::size_t find_matching_angle(const std::string& text, std::size_t open_pos) {
         int depth = 0;
-        for (size_t i = open_pos; i < text.size(); i++) {
+        for (std::size_t i = open_pos; i < text.size(); i++) {
             if (text[i] == '<') depth++;
             else if (text[i] == '>') {
                 depth--;
@@ -339,9 +327,9 @@ private:
         return std::string::npos;
     }
 
-    [[nodiscard]] static size_t find_last_scope_outside_angles(const std::string& text) {
+    [[nodiscard]] static std::size_t find_last_scope_outside_angles(const std::string& text) {
         int depth = 0;
-        for (size_t i = text.size(); i-- > 1;) {
+        for (std::size_t i = text.size(); i-- > 1;) {
             char c = text[i];
             if (c == '>') depth++;
             else if (c == '<') depth--;
@@ -351,9 +339,9 @@ private:
     }
 
     [[nodiscard]] static std::string trim_copy(std::string text) {
-        size_t start = 0;
+        std::size_t start = 0;
         while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) start++;
-        size_t end = text.size();
+        std::size_t end = text.size();
         while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1]))) end--;
         return text.substr(start, end - start);
     }
@@ -363,18 +351,18 @@ private:
         if (text.empty()) return std::nullopt;
         Type type;
         type.kind = TypeKind::Named;
-        size_t lt = text.find('<');
+        std::size_t lt = text.find('<');
         if (lt == std::string::npos) {
             type.name = text;
             return type;
         }
-        size_t gt = find_matching_angle(text, lt);
+        std::size_t gt = find_matching_angle(text, lt);
         if (gt == std::string::npos || gt + 1 != text.size()) return std::nullopt;
         type.name = text.substr(0, lt);
         std::string inner = text.substr(lt + 1, gt - lt - 1);
         int depth = 0;
-        size_t start = 0;
-        for (size_t i = 0; i <= inner.size(); i++) {
+        std::size_t start = 0;
+        for (std::size_t i = 0; i <= inner.size(); i++) {
             bool at_end = i == inner.size();
             char c = at_end ? ',' : inner[i];
             if (!at_end) {
@@ -398,7 +386,7 @@ private:
 
     [[nodiscard]] std::optional<StaticTemplateCallResolution>
     resolve_static_template_call_target(const std::string& name, SourceLocation loc) {
-        size_t scope = find_last_scope_outside_angles(name);
+        std::size_t scope = find_last_scope_outside_angles(name);
         if (scope == std::string::npos) return std::nullopt;
         std::string owner = name.substr(0, scope);
         std::string member_name = name.substr(scope + 2);
@@ -414,7 +402,7 @@ private:
         return StaticTemplateCallResolution{concrete_class_name, member_name};
     }
 
-    void walk_new_concrete_function(size_t fn_index) {
+    void walk_new_concrete_function(std::size_t fn_index) {
         if (fn_index >= program_.functions.size()) return;
         Function& fn = program_.functions[fn_index];
         if (fn.body == nullptr || !fn.template_params.empty()) return;
@@ -843,7 +831,7 @@ private:
                     auto pack_it = pack_name ? pack_replacements.find(*pack_name) : pack_replacements.end();
                     if (pack_name && pack_it != pack_replacements.end()) {
                         pack_param_names[p.name] = {};
-                        for (size_t j = 0; j < pack_it->second.size(); j++) {
+                        for (std::size_t j = 0; j < pack_it->second.size(); j++) {
                             Param np = p;
                             np.is_parameter_pack = false;
                             np.name = p.name + "$" + std::to_string(j);
@@ -867,7 +855,7 @@ private:
                 if (init.initializer.expr) {
                     substitute_type_params_in_expr(*init.initializer.expr, type_replacements);
                     substitute_type_packs_in_expr(*init.initializer.expr, pack_replacements);
-                    for (size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                    for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
                         if (!template_params_copy[i].is_non_type) continue;
                         substitute_non_type_param_in_expr(*init.initializer.expr, template_params_copy[i].name,
                                                           non_type_args[i]);
@@ -877,7 +865,7 @@ private:
                 for (ExprPtr& arg : init.initializer.brace_args) {
                     substitute_type_params_in_expr(*arg, type_replacements);
                     substitute_type_packs_in_expr(*arg, pack_replacements);
-                    for (size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                    for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
                         if (!template_params_copy[i].is_non_type) continue;
                         substitute_non_type_param_in_expr(*arg, template_params_copy[i].name, non_type_args[i]);
                     }
@@ -888,7 +876,7 @@ private:
             if (clone.body) {
                 substitute_type_params_in_stmt(*clone.body, type_replacements);
                 substitute_type_packs_in_stmt(*clone.body, pack_replacements);
-                for (size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
                     if (!template_params_copy[i].is_non_type) continue;
                     substitute_non_type_param_in_stmt(*clone.body, template_params_copy[i].name, non_type_args[i]);
                 }
@@ -990,7 +978,7 @@ private:
         auto it = bindings.type_pack_replacements.find(name);
         if (it != bindings.type_pack_replacements.end()) {
             if (it->second.size() != concretes.size()) return false;
-            for (size_t i = 0; i < concretes.size(); i++) {
+            for (std::size_t i = 0; i < concretes.size(); i++) {
                 if (!types_equal(it->second[i], concretes[i])) return false;
             }
             return true;
@@ -1011,7 +999,7 @@ private:
                     for (const GenericTypeParam& param : params) {
                         if (!param.is_pack || param.is_non_type || param.name != last.name) continue;
                         if (inner_concretes.size() + 1 < inner_patterns.size()) return false;
-                        for (size_t i = 0; i + 1 < inner_patterns.size(); i++) {
+                        for (std::size_t i = 0; i + 1 < inner_patterns.size(); i++) {
                             if (!match_one(inner_patterns[i], inner_concretes[i])) return false;
                         }
                         std::vector<Type> pack_slice(
@@ -1022,7 +1010,7 @@ private:
                 }
             }
             if (inner_patterns.size() != inner_concretes.size()) return false;
-            for (size_t i = 0; i < inner_patterns.size(); i++) {
+            for (std::size_t i = 0; i < inner_patterns.size(); i++) {
                 if (!match_one(inner_patterns[i], inner_concretes[i])) return false;
             }
             return true;
@@ -1104,7 +1092,7 @@ private:
             if (candidate->template_params.size() != concrete_args.size()) continue;
             TemplateInstantiationBindings bindings;
             bool valid = true;
-            for (size_t param_index = 0; param_index < candidate->template_params.size(); ++param_index) {
+            for (std::size_t param_index = 0; param_index < candidate->template_params.size(); ++param_index) {
                 const GenericTypeParam& param = candidate->template_params[param_index];
                 if (param.is_non_type || param.is_pack) {
                     valid = false;
@@ -1161,8 +1149,8 @@ private:
     // derived class later defining its own constructor with a different
     // parameter list.
     void synthesize_inherited_method_forwards() {
-        size_t original_class_count = program_.classes.size();
-        for (size_t i = 0; i < original_class_count; i++) {
+        std::size_t original_class_count = program_.classes.size();
+        for (std::size_t i = 0; i < original_class_count; i++) {
             // ch05 §5.14: a variadic specialization's own base-specifier
             // (e.g. "Tuple", set by parse_variadic_specialization's base-
             // clause handling) names the *template*, not a real,
@@ -1193,7 +1181,7 @@ private:
                     for (const Function& fn : program_.functions) {
                         if (fn.name != derived_method_name || fn.params.size() != base_method.params.size()) continue;
                         bool same_signature = true;
-                        for (size_t p = 1; p < fn.params.size(); ++p) {
+                        for (std::size_t p = 1; p < fn.params.size(); ++p) {
                             if (!types_equal(fn.params[p].type, base_method.params[p].type)) {
                                 same_signature = false;
                                 break;
@@ -1225,7 +1213,7 @@ private:
                     this_type.is_mutable_ref = base_method.params[0].type.is_mutable_ref;
                     this_param.type = std::move(this_type);
                     forward.params.push_back(std::move(this_param));
-                    for (size_t p = 1; p < base_method.params.size(); p++) {
+                    for (std::size_t p = 1; p < base_method.params.size(); p++) {
                         forward.params.push_back(base_method.params[p]);
                     }
                     program_.functions.push_back(std::move(forward));
@@ -1278,8 +1266,8 @@ private:
         // outer iteration -- a `ClassDef&`/`GenericTypeParam&` reference
         // held across it (as an earlier version of this function did)
         // would silently dangle on the very next inner-loop iteration.
-        size_t original_class_count = program_.classes.size();
-        for (size_t i = 0; i < original_class_count; i++) {
+        std::size_t original_class_count = program_.classes.size();
+        for (std::size_t i = 0; i < original_class_count; i++) {
             if (program_.classes[i].template_params.empty()) continue;
             if (program_.classes[i].is_partial_specialization) continue;
             // ch05 §5.14: a variadic primary template's own bodyless
@@ -1304,7 +1292,7 @@ private:
                 if (!method_tmpl.template_params.empty()) continue;
                 std::vector<std::pair<std::string, Type>> type_replacements;
                 type_replacements.reserve(template_params.size());
-                for (size_t param_index = 0; param_index < template_params.size(); ++param_index) {
+                for (std::size_t param_index = 0; param_index < template_params.size(); ++param_index) {
                     const GenericTypeParam& param = template_params[param_index];
                     if (param.is_non_type) continue;
                     std::string witness_name;
@@ -1528,18 +1516,18 @@ private:
         // through a reference into any of these vectors), and written
         // back via a *fresh* index-based access afterward, never a
         // cached reference spanning the call.
-        size_t original_struct_count = program_.structs.size();
-        for (size_t i = 0; i < original_struct_count; i++) {
+        std::size_t original_struct_count = program_.structs.size();
+        for (std::size_t i = 0; i < original_struct_count; i++) {
             if (!program_.structs[i].template_params.empty()) continue; // the template itself, never instantiated in place
-            size_t field_count = program_.structs[i].fields.size();
-            for (size_t j = 0; j < field_count; j++) {
+            std::size_t field_count = program_.structs[i].fields.size();
+            for (std::size_t j = 0; j < field_count; j++) {
                 Type old_type = program_.structs[i].fields[j].type;
                 Type new_type = resolve_generic_type(old_type, SourceLocation{});
                 program_.structs[i].fields[j].type = new_type;
             }
         }
-        size_t original_class_count = program_.classes.size();
-        for (size_t i = 0; i < original_class_count; i++) {
+        std::size_t original_class_count = program_.classes.size();
+        for (std::size_t i = 0; i < original_class_count; i++) {
             if (!program_.classes[i].template_params.empty()) continue;
             // ch05 §5.14: the empty-pack base-case specialization
             // (`Tuple<>`) is the only variadic ClassDef shape whose own
@@ -1550,8 +1538,8 @@ private:
             // (see instantiate_variadic_generic_type, which is what
             // actually synthesizes a *concrete* base case).
             if (program_.classes[i].is_variadic_specialization) continue;
-            size_t field_count = program_.classes[i].fields.size();
-            for (size_t j = 0; j < field_count; j++) {
+            std::size_t field_count = program_.classes[i].fields.size();
+            for (std::size_t j = 0; j < field_count; j++) {
                 Type old_type = program_.classes[i].fields[j].type;
                 Type new_type = resolve_generic_type(old_type, SourceLocation{});
                 program_.classes[i].fields[j].type = new_type;
@@ -1563,8 +1551,8 @@ private:
                 resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_shareable_expr);
             }
         }
-        size_t original_count = program_.functions.size();
-        for (size_t i = 0; i < original_count; i++) {
+        std::size_t original_count = program_.functions.size();
+        for (std::size_t i = 0; i < original_count; i++) {
             if (belongs_to_unresolved_generic_type_template(program_.functions[i])) continue;
             // ch05 §5.11/§5.14: a full-header-form generic *function*'s
             // own template (e.g. `get`/`make`, Function::template_params
@@ -1581,8 +1569,8 @@ private:
             // here and only monomorphized per call site).
             if (!program_.functions[i].template_params.empty()) continue;
             SourceLocation loc = program_.functions[i].loc;
-            size_t param_count = program_.functions[i].params.size();
-            for (size_t j = 0; j < param_count; j++) {
+            std::size_t param_count = program_.functions[i].params.size();
+            for (std::size_t j = 0; j < param_count; j++) {
                 Type old_type = program_.functions[i].params[j].type;
                 Type new_type = resolve_generic_type(old_type, loc);
                 program_.functions[i].params[j].type = new_type;
@@ -1782,7 +1770,7 @@ private:
             }
             std::vector<std::pair<std::string, Type>> type_replacements;
             type_replacements.reserve(tmpl.template_params.size());
-            for (size_t param_index = 0; param_index < tmpl.template_params.size(); ++param_index) {
+            for (std::size_t param_index = 0; param_index < tmpl.template_params.size(); ++param_index) {
                 const GenericTypeParam& type_param = tmpl.template_params[param_index];
                 if (type_param.is_non_type) {
                     throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct",
@@ -1961,7 +1949,7 @@ private:
                                                  : class_selection.bindings.type_pack_replacements.end();
                         if (pack_name && pack_it != class_selection.bindings.type_pack_replacements.end()) {
                             pack_param_names[p.name] = {};
-                            for (size_t j = 0; j < pack_it->second.size(); j++) {
+                            for (std::size_t j = 0; j < pack_it->second.size(); j++) {
                                 Param np = p;
                                 np.is_parameter_pack = false;
                                 np.name = p.name + "$" + std::to_string(j);
@@ -2117,19 +2105,19 @@ private:
                 clone.member_initializers = method_tmpl.member_initializers;
                 for (MemberInitializer& init : clone.member_initializers) {
                     if (init.initializer.expr) {
-                        for (size_t i = 0; i < params_copy.size(); i++) {
+                        for (std::size_t i = 0; i < params_copy.size(); i++) {
                             substitute_non_type_param_in_expr(*init.initializer.expr, params_copy[i].name, non_type_args[i]);
                         }
                     }
                     for (ExprPtr& arg : init.initializer.brace_args) {
-                        for (size_t i = 0; i < params_copy.size(); i++) {
+                        for (std::size_t i = 0; i < params_copy.size(); i++) {
                             substitute_non_type_param_in_expr(*arg, params_copy[i].name, non_type_args[i]);
                         }
                     }
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
-                    for (size_t i = 0; i < params_copy.size(); i++) {
+                    for (std::size_t i = 0; i < params_copy.size(); i++) {
                         substitute_non_type_param_in_stmt(*clone.body, params_copy[i].name, non_type_args[i]);
                     }
                 }
@@ -2254,7 +2242,7 @@ private:
         // (a bare pointer into that vector) would otherwise dangle
         // (see this class's other generic-type methods' identical
         // concern).
-        size_t leading_non_type_count = non_type_args.size();
+        std::size_t leading_non_type_count = non_type_args.size();
         std::vector<GenericTypeParam> leading_non_type_params(
             recursive_tmpl->template_params.begin(), recursive_tmpl->template_params.begin() + leading_non_type_count);
         GenericTypeParam head_param = recursive_tmpl->template_params[leading_non_type_count];
@@ -2300,7 +2288,7 @@ private:
             std::vector<int> base_non_type_args;
             if (base_non_type_arg_expr) {
                 std::unordered_map<std::string, int> param_values;
-                for (size_t i = 0; i < leading_non_type_params.size(); i++) {
+                for (std::size_t i = 0; i < leading_non_type_params.size(); i++) {
                     param_values[leading_non_type_params[i].name] = non_type_args[i];
                 }
                 base_non_type_args.push_back(evaluate_non_type_arg(*base_non_type_arg_expr, param_values));
@@ -2419,11 +2407,11 @@ private:
     // since every level's own flattened layout is already byte-
     // compatible with its base, see ClassDef::base_specifiers' own
     // comment; this is purely a scpp-level type-compatibility fact).
-    void deduce_via_base_class_chain(const Expr& expr, size_t arg_index, const Type& pattern, Body& body,
+    void deduce_via_base_class_chain(const Expr& expr, std::size_t arg_index, const Type& pattern, Body& body,
                                       std::unordered_map<std::string, Type>& type_bindings,
                                       std::unordered_map<std::string, int>& value_bindings,
                                       std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
-                                      std::vector<std::pair<size_t, Type>>& upcasts) {
+                                      std::vector<std::pair<std::size_t, Type>>& upcasts) {
         std::vector<int> search_non_type_values;
         search_non_type_values.reserve(pattern.non_type_args.size());
         for (const std::shared_ptr<Expr>& e : pattern.non_type_args) {
@@ -2466,7 +2454,7 @@ private:
                 expr.loc);
         }
 
-        size_t ti = 0;
+        std::size_t ti = 0;
         for (const Type& sym : pattern.template_args) {
             if (sym.is_pack_expansion) {
                 std::vector<Type> remaining_types;
@@ -2547,7 +2535,7 @@ private:
         auto it = bindings.find(name);
         if (it != bindings.end()) {
             if (it->second.size() != concretes.size()) return false;
-            for (size_t i = 0; i < concretes.size(); i++) {
+            for (std::size_t i = 0; i < concretes.size(); i++) {
                 if (!types_equal(it->second[i], concretes[i])) return false;
             }
             return true;
@@ -2580,8 +2568,8 @@ private:
                     concrete_template_args = &it->second.type_args;
                 }
                 if (!pattern.non_type_args.empty()) return false;
-                size_t pi = 0;
-                size_t ci = 0;
+                std::size_t pi = 0;
+                std::size_t ci = 0;
                 for (; pi < pattern.template_args.size(); pi++, ci++) {
                     if (pattern.template_args[pi].is_pack_expansion) {
                         std::vector<Type> remaining_types;
@@ -2628,7 +2616,7 @@ private:
                                                                 pack_bindings)) {
                     return false;
                 }
-                for (size_t i = 0; i < pattern.function_params.size(); i++) {
+                for (std::size_t i = 0; i < pattern.function_params.size(); i++) {
                     if (!deduce_template_bindings_from_type_pattern(pattern.function_params[i], concrete.function_params[i],
                                                                     template_params, type_bindings, value_bindings,
                                                                     pack_bindings)) {
@@ -2659,7 +2647,7 @@ private:
         return false;
     }
 
-    [[nodiscard]] bool argument_type_can_participate_in_variadic_base_deduction(const Expr& expr, size_t arg_index,
+    [[nodiscard]] bool argument_type_can_participate_in_variadic_base_deduction(const Expr& expr, std::size_t arg_index,
                                                                                  const std::string& template_name,
                                                                                  Body& body) {
         if (arg_index >= expr.args.size()) return false;
@@ -2703,15 +2691,15 @@ private:
     }
 
     struct DeferredTemplateObligation {
-        size_t param_index = 0;
-        size_t arg_index = 0;
+        std::size_t param_index = 0;
+        std::size_t arg_index = 0;
         Type parameter_type_pattern;
     };
 
     void check_thread_safety_constraints(const Expr& expr, const Function& tmpl,
                                          const std::unordered_map<std::string, Type>& type_bindings,
                                          const std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
             Type concrete = apply_template_bindings_to_type(param.type, type_bindings, pack_bindings, expr.loc);
@@ -2740,11 +2728,11 @@ private:
                 std::unordered_map<std::string, Type> type_bindings;
                 std::unordered_map<std::string, int> value_bindings;
                 std::unordered_map<std::string, std::vector<Type>> pack_bindings;
-                std::vector<std::pair<size_t, Type>> upcasts;
+                std::vector<std::pair<std::size_t, Type>> upcasts;
                 std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
 
-                size_t arg_cursor = 0;
-                for (size_t i = 1; i < tmpl.params.size() && arg_cursor < args.size(); i++) {
+                std::size_t arg_cursor = 0;
+                for (std::size_t i = 1; i < tmpl.params.size() && arg_cursor < args.size(); i++) {
                     if (tmpl.params[i].is_parameter_pack) {
                         std::optional<std::string> pack_type_name =
                             referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
@@ -2795,7 +2783,7 @@ private:
                     cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings[tp.name]))
                                                 : ("." + mangle_type_for_clone_name(type_bindings[tp.name]));
                 }
-                for (size_t i = 0; i < tmpl.params.size(); i++) {
+                for (std::size_t i = 0; i < tmpl.params.size(); i++) {
                     if (!tmpl.params[i].is_parameter_pack) continue;
                     for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
                 }
@@ -2824,10 +2812,10 @@ private:
                 clone.return_type = resolve_generic_type(clone.return_type, tmpl.loc);
                 clone.params.reserve(tmpl.params.size());
                 std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
-                for (size_t i = 0; i < tmpl.params.size(); i++) {
+                for (std::size_t i = 0; i < tmpl.params.size(); i++) {
                     if (tmpl.params[i].is_parameter_pack) {
                         pack_param_names[tmpl.params[i].name] = {};
-                        for (size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
+                        for (std::size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
                             Param p = tmpl.params[i];
                             p.name = tmpl.params[i].name + "$" + std::to_string(j);
                             p.type = concrete_pack_param_types[i][j];
@@ -2888,7 +2876,7 @@ private:
                                                       const std::unordered_map<std::string, int>& value_bindings,
                                                       const std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
                                                       const std::vector<std::vector<Type>>& concrete_pack_param_types,
-                                                      const std::vector<std::pair<size_t, Type>>& upcasts = {}) {
+                                                      const std::vector<std::pair<std::size_t, Type>>& upcasts = {}) {
         std::string cache_key = tmpl.name;
         for (const GenericTypeParam& tp : tmpl.template_params) {
             if (tp.is_pack) {
@@ -2901,7 +2889,7 @@ private:
             cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings.at(tp.name)))
                                         : ("." + mangle_type_for_clone_name(type_bindings.at(tp.name)));
         }
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (!tmpl.params[i].is_parameter_pack) continue;
             for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
         }
@@ -2927,10 +2915,10 @@ private:
         clone.return_lifetime = tmpl.return_lifetime;
         clone.params.reserve(tmpl.params.size());
         std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (tmpl.params[i].is_parameter_pack) {
                 pack_param_names[tmpl.params[i].name] = {};
-                for (size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
+                for (std::size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
                     Param p = tmpl.params[i];
                     p.name = tmpl.params[i].name + "$" + std::to_string(j);
                     p.type = concrete_pack_param_types[i][j];
@@ -2982,8 +2970,8 @@ private:
                                           std::unordered_map<std::string, Type>& type_bindings,
                                           std::unordered_map<std::string, int>& value_bindings,
                                           std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
-        size_t explicit_index = 0;
-        for (size_t p = 0; p < tmpl.template_params.size(); p++) {
+        std::size_t explicit_index = 0;
+        for (std::size_t p = 0; p < tmpl.template_params.size(); p++) {
             const GenericTypeParam& tp = tmpl.template_params[p];
             if (tp.is_pack) {
                 std::vector<Type> pack;
@@ -3026,7 +3014,7 @@ private:
     void populate_concrete_pack_param_types(
         const Function& tmpl, const std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
         std::vector<std::vector<Type>>& concrete_pack_param_types) {
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (!tmpl.params[i].is_parameter_pack) continue;
             std::optional<std::string> pack_type_name =
                 referenced_type_pack_param_name(tmpl.params[i].type, tmpl.template_params);
@@ -3056,13 +3044,13 @@ private:
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
         std::unordered_map<std::string, std::vector<Type>> pack_bindings;
-        std::vector<std::pair<size_t, Type>> upcasts;
+        std::vector<std::pair<std::size_t, Type>> upcasts;
         std::vector<DeferredTemplateObligation> deferred_obligations;
         std::vector<std::vector<Type>> concrete_pack_param_types;
     };
 
     [[nodiscard]] bool try_resolve_full_header_generic_function_call(const Expr& expr, const Function& tmpl, Body& body,
-                                                                     size_t param_offset,
+                                                                     std::size_t param_offset,
                                                                      FullHeaderGenericCallResolution& resolution) {
         try {
             Function tmpl_snapshot = clone_function(tmpl);
@@ -3078,8 +3066,8 @@ private:
             seed_explicit_template_arguments(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.value_bindings,
                                              resolution.pack_bindings);
 
-            size_t arg_cursor = 0;
-            for (size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
+            std::size_t arg_cursor = 0;
+            for (std::size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
                 if (stable_tmpl.params[i].is_parameter_pack) {
                     std::optional<std::string> pack_type_name =
                         referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
@@ -3155,12 +3143,12 @@ private:
     };
 
     [[nodiscard]] bool try_resolve_abbreviated_generic_function_call(
-        const Expr& expr, const Function& tmpl, Body& body, size_t param_offset,
+        const Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset,
         AbbreviatedGenericCallResolution& resolution) {
         resolution.concrete_param_types.clear();
         resolution.concrete_pack_param_types.assign(tmpl.params.size(), {});
-        size_t arg_cursor = 0;
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        std::size_t arg_cursor = 0;
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (i < param_offset) {
                 resolution.concrete_param_types.push_back(param.type);
@@ -3214,7 +3202,7 @@ private:
         }
         if (arg_cursor != expr.args.size()) return false;
 
-        for (size_t i = param_offset; i < tmpl.params.size(); i++) {
+        for (std::size_t i = param_offset; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
             const std::vector<Type>* types_to_check = param.is_parameter_pack ? &resolution.concrete_pack_param_types[i]
@@ -3234,13 +3222,13 @@ private:
         return true;
     }
 
-    void monomorphize_abbreviated_generic_function_call(Expr& expr, const Function& tmpl, Body& body, size_t param_offset = 0,
+    void monomorphize_abbreviated_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
                                                         const std::string& cloned_method_suffix_prefix = "") {
         std::vector<Type> concrete_param_types;
         concrete_param_types.reserve(tmpl.params.size());
         std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
-        size_t arg_cursor = 0;
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        std::size_t arg_cursor = 0;
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (i < param_offset) {
                 concrete_param_types.push_back(param.type);
@@ -3305,7 +3293,7 @@ private:
             arg_cursor++;
         }
 
-        for (size_t i = param_offset; i < tmpl.params.size(); i++) {
+        for (std::size_t i = param_offset; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
             const std::vector<Type>* types_to_check = param.is_parameter_pack ? &concrete_pack_param_types[i] : nullptr;
@@ -3385,21 +3373,21 @@ private:
     // to it. The template definition itself lives in `program_.functions`,
     // so recursive generic instantiation can reallocate that vector; take
     // a deep snapshot first and read everything from it.
-    void monomorphize_generic_function_call(Expr& expr, const Function& tmpl, Body& body, size_t param_offset = 0,
+    void monomorphize_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
                                             const std::string& member_name_prefix = "") {
         Function tmpl_snapshot = clone_function(tmpl);
         const Function& stable_tmpl = tmpl_snapshot;
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
         std::unordered_map<std::string, std::vector<Type>> pack_bindings;
-        std::vector<std::pair<size_t, Type>> upcasts;
+        std::vector<std::pair<std::size_t, Type>> upcasts;
         std::vector<DeferredTemplateObligation> deferred_obligations;
         std::vector<std::vector<Type>> concrete_pack_param_types(stable_tmpl.params.size());
 
         seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
 
-        size_t arg_cursor = 0;
-        for (size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
+        std::size_t arg_cursor = 0;
+        for (std::size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
             if (stable_tmpl.params[i].is_parameter_pack) {
                 std::optional<std::string> pack_type_name =
                     referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
@@ -3756,8 +3744,8 @@ private:
         if (expr.kind == ExprKind::Identifier && !expr.explicit_template_args.empty()) {
             auto template_it = generic_template_indices_.find(expr.name);
             if (template_it == generic_template_indices_.end()) return;
-            std::vector<size_t> matching_candidates;
-            for (size_t candidate_index : template_it->second) {
+            std::vector<std::size_t> matching_candidates;
+            for (std::size_t candidate_index : template_it->second) {
                 const Function& tmpl = program_.functions[candidate_index];
                 if (!compile_time_dependency_visible(tmpl, body)) continue;
                 if (tmpl.template_params.empty()) continue;
@@ -3788,7 +3776,7 @@ private:
         }
         if (expr.kind != ExprKind::Call) return;
         std::string generic_template_name = expr.name;
-        size_t param_offset = 0;
+        std::size_t param_offset = 0;
         std::string cloned_method_suffix_prefix;
         if (expr.lhs != nullptr) {
             std::optional<Type> receiver = infer_expr_type(*expr.lhs, body, signatures_);
@@ -3810,8 +3798,8 @@ private:
             }
             return false;
         }();
-        std::vector<size_t> visible_template_candidates;
-        for (size_t candidate_index : template_it->second) {
+        std::vector<std::size_t> visible_template_candidates;
+        for (std::size_t candidate_index : template_it->second) {
             if (compile_time_dependency_visible(program_.functions[candidate_index], body)) {
                 visible_template_candidates.push_back(candidate_index);
             }
@@ -3827,8 +3815,8 @@ private:
             return;
         }
 
-        std::vector<size_t> matching_candidates;
-        for (size_t candidate_index : visible_template_candidates) {
+        std::vector<std::size_t> matching_candidates;
+        for (std::size_t candidate_index : visible_template_candidates) {
             const Function& tmpl = program_.functions[candidate_index];
             if (!tmpl.template_params.empty()) {
                 FullHeaderGenericCallResolution resolution;
@@ -3969,7 +3957,7 @@ private:
         ClassDef closure_class;
         closure_class.name = class_name;
         closure_class.fields.reserve(expr.lambda_captures.size());
-        for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
+        for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
             ClassField field;
             field.name = expr.lambda_captures[i].name;
             field.type = field_types[i];
@@ -4030,7 +4018,7 @@ private:
             call_method.return_type = expr.type;
         } else if (call_method.body) {
             std::unordered_map<std::string, Type> capture_types;
-            for (size_t i = 0; i < expr.lambda_captures.size(); i++) {
+            for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
                 capture_types[expr.lambda_captures[i].name] = field_types[i];
             }
             call_method.return_type = infer_lambda_return_type(*call_method.body, call_method.params, capture_types);
@@ -4316,7 +4304,7 @@ private:
                                     fold_expr.loc);
             }
             ExprPtr result = instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[0]);
-            for (size_t i = 1; i < concrete_names.size(); i++) {
+            for (std::size_t i = 1; i < concrete_names.size(); i++) {
                 result = build_binary_expr(fold_expr.binary_op, std::move(result),
                                            instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[i]));
             }
@@ -4332,7 +4320,7 @@ private:
             }
             ExprPtr result =
                 instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[concrete_names.size() - 1]);
-            for (size_t i = concrete_names.size() - 1; i-- > 0;) {
+            for (std::size_t i = concrete_names.size() - 1; i-- > 0;) {
                 result = build_binary_expr(fold_expr.binary_op,
                                            instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[i]),
                                            std::move(result));
@@ -4351,7 +4339,7 @@ private:
         }
         if (lhs_mentions) {
             ExprPtr result = clone_expr(*fold_expr.rhs);
-            for (size_t i = concrete_names.size(); i-- > 0;) {
+            for (std::size_t i = concrete_names.size(); i-- > 0;) {
                 result = build_binary_expr(fold_expr.binary_op,
                                            instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[i]),
                                            std::move(result));
@@ -4359,7 +4347,7 @@ private:
             return result;
         }
         ExprPtr result = clone_expr(*fold_expr.lhs);
-        for (size_t i = 0; i < concrete_names.size(); i++) {
+        for (std::size_t i = 0; i < concrete_names.size(); i++) {
             result = build_binary_expr(fold_expr.binary_op, std::move(result),
                                        instantiate_pack_operand(*fold_expr.rhs, pack_name, concrete_names[i]));
         }
@@ -4584,7 +4572,7 @@ private:
     std::string get_or_create_clone(const Function& tmpl, const std::vector<Type>& concrete_param_types,
                                     const std::vector<std::vector<Type>>& concrete_pack_param_types) {
         std::string cache_key = tmpl.name;
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (tmpl.params[i].is_parameter_pack) {
                 for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
             } else {
@@ -4619,7 +4607,7 @@ private:
         clone.is_static = tmpl.is_static;
         clone.access = tmpl.access;
         std::unordered_map<std::string, Type> witness_replacements;
-        for (size_t i = 0; i < tmpl.params.size() && i < concrete_param_types.size(); i++) {
+        for (std::size_t i = 0; i < tmpl.params.size() && i < concrete_param_types.size(); i++) {
             if (!tmpl.params[i].generic_concept.empty()) {
                 const Type& concrete = concrete_param_types[i].kind == TypeKind::Reference
                                            ? *concrete_param_types[i].pointee
@@ -4632,10 +4620,10 @@ private:
         }
         clone.params.reserve(tmpl.params.size());
         std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
-        for (size_t i = 0; i < tmpl.params.size(); i++) {
+        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (tmpl.params[i].is_parameter_pack) {
                 pack_param_names[tmpl.params[i].name] = {};
-                for (size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
+                for (std::size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
                     Param p = tmpl.params[i];
                     p.name = tmpl.params[i].name + "$" + std::to_string(j);
                     p.type = concrete_pack_param_types[i][j];

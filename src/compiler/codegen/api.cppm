@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 export module scpp.compiler.codegen:api;
 
+import std;
 import scpp.ast;
 import scpp.constexpr_engine;
 import :errors;
@@ -66,7 +54,7 @@ private:
         std::vector<std::string> field_names;
         std::vector<Type> field_types;
         std::vector<llvm::Align> field_alignments;
-        std::vector<size_t> field_physical_indices;
+        std::vector<std::size_t> field_physical_indices;
         bool is_union = false;
         bool is_packed = false;
         bool has_ordinary_vtable = false;
@@ -86,14 +74,14 @@ private:
         // access. Harmless/no-op for the overwhelmingly common
         // non-shadowed case (a name appearing only once has the same
         // first-match and last-match index).
-        [[nodiscard]] std::optional<size_t> find_field_index(const std::string& name) const {
-            for (size_t i = field_names.size(); i > 0; i--) {
+        [[nodiscard]] std::optional<std::size_t> find_field_index(const std::string& name) const {
+            for (std::size_t i = field_names.size(); i > 0; i--) {
                 if (field_names[i - 1] == name) return i - 1;
             }
             return std::nullopt;
         }
 
-        [[nodiscard]] size_t physical_field_index(size_t logical_index) const {
+        [[nodiscard]] std::size_t physical_field_index(std::size_t logical_index) const {
             return field_physical_indices[logical_index];
         }
     };
@@ -214,7 +202,7 @@ private:
     struct LoopFrame {
         llvm::BasicBlock* cond_block;
         llvm::BasicBlock* end_block;
-        size_t scope_depth;
+        std::size_t scope_depth;
     };
     std::vector<LoopFrame> loop_stack_;
     std::unordered_map<std::string, llvm::DIType*> debug_type_cache_;
@@ -222,12 +210,12 @@ private:
     llvm::StructType* interface_representation_llvm_type_ = nullptr;
     std::unordered_map<std::string, llvm::ArrayType*> interface_dispatch_table_types_;
     std::unordered_map<std::string, std::vector<const Function*>> interface_dispatch_methods_cache_;
-    std::unordered_map<std::string, std::unordered_map<std::string, size_t>> interface_slot_indices_cache_;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> interface_slot_indices_cache_;
     std::unordered_map<std::string, llvm::GlobalVariable*> interface_dispatch_tables_;
     std::unordered_map<std::string, llvm::Function*> interface_dispatch_thunks_;
     std::unordered_map<std::string, llvm::ArrayType*> ordinary_vtable_types_;
     std::unordered_map<std::string, std::vector<const Function*>> ordinary_virtual_methods_cache_;
-    std::unordered_map<std::string, std::unordered_map<std::string, size_t>> ordinary_slot_indices_cache_;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> ordinary_slot_indices_cache_;
     std::unordered_map<std::string, llvm::GlobalVariable*> ordinary_vtables_;
     std::unordered_map<std::string, llvm::Function*> ordinary_destructor_thunks_;
     std::vector<std::string> current_global_namespace_path_;
@@ -346,9 +334,9 @@ private:
 
     [[nodiscard]] TargetLayoutInfo current_target_layout_info() const;
 
-    [[nodiscard]] static size_t align_up(size_t value, size_t alignment);
+    [[nodiscard]] static std::size_t align_up(std::size_t value, std::size_t alignment);
 
-    [[nodiscard]] size_t alignment_bytes_for_type(const Type& type) const;
+    [[nodiscard]] std::size_t alignment_bytes_for_type(const Type& type) const;
 
     llvm::Value* codegen_sizeof_value(const Expr& expr);
 
@@ -406,7 +394,7 @@ private:
     // `true` for a constructor call (there's no *existing* object yet
     // for read-only-reachability to apply to).
     const Function* resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
-                                              size_t param_offset, bool receiver_is_mutable = true,
+                                              std::size_t param_offset, bool receiver_is_mutable = true,
                                               const Expr* receiver_expr = nullptr);
 
     const Function* resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args);
@@ -539,7 +527,7 @@ private:
 
     [[nodiscard]] llvm::ArrayType* interface_dispatch_table_type(const std::string& interface_name);
 
-    [[nodiscard]] std::optional<size_t> interface_method_slot_index(const std::string& interface_name,
+    [[nodiscard]] std::optional<std::size_t> interface_method_slot_index(const std::string& interface_name,
                                                                     const Function& method);
 
     [[nodiscard]] const Function* find_direct_method_by_slot(const std::string& class_name, const std::string& slot_key) const;
@@ -552,7 +540,7 @@ private:
 
     [[nodiscard]] bool class_has_ordinary_vtable(const std::string& class_name) const;
 
-    [[nodiscard]] llvm::Type* llvm_param_type_for_function(const Function& fn, const Param& param, size_t index);
+    [[nodiscard]] llvm::Type* llvm_param_type_for_function(const Function& fn, const Param& param, std::size_t index);
 
     [[nodiscard]] llvm::Function* get_or_create_interface_dispatch_thunk(const std::string& concrete_class_name,
                                                                          const Function& target);
@@ -564,7 +552,7 @@ private:
 
     [[nodiscard]] llvm::ArrayType* ordinary_vtable_type(const std::string& class_name);
 
-    [[nodiscard]] std::optional<size_t> ordinary_method_slot_index(const std::string& class_name, const Function& method);
+    [[nodiscard]] std::optional<std::size_t> ordinary_method_slot_index(const std::string& class_name, const Function& method);
 
     [[nodiscard]] llvm::Function* get_or_create_ordinary_destructor_thunk(const std::string& concrete_class_name);
 
@@ -790,7 +778,7 @@ private:
     llvm::Value* codegen_contextual_bool_i1(const Expr& expr);
 
     std::vector<llvm::Value*> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
-                                                  size_t param_offset);
+                                                  std::size_t param_offset);
 
     std::vector<llvm::Value*> codegen_call_args_for_types(const std::vector<ExprPtr>& args,
                                                           const std::vector<Type>& param_types);
@@ -1056,7 +1044,7 @@ private:
     // and to avoid a double free/destruction.
     void pop_scope();
 
-    void emit_scope_cleanup_to_depth(size_t target_depth);
+    void emit_scope_cleanup_to_depth(std::size_t target_depth);
 
     llvm::Function* get_or_declare_malloc();
 

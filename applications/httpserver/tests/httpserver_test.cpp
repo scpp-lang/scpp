@@ -1,18 +1,18 @@
+// None of these have an `import std;` module form: `arpa/inet.h`,
+// `netinet/in.h`, `sys/socket.h`, `sys/types.h`, and `sys/wait.h` are
+// POSIX networking/process headers, not part of ISO C++'s standard
+// library; `<csignal>` stays too because this file calls the POSIX
+// `kill()` function (declared alongside `SIGTERM` on this platform but,
+// unlike `SIGTERM`/`raise()` themselves, not part of ISO C++).
 #include <arpa/inet.h>
 #include <csignal>
-#include <cstdlib>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
 #include <netinet/in.h>
-#include <sstream>
-#include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
+
+import std;
 
 #ifndef SCPP_BINARY_PATH
 #error "SCPP_BINARY_PATH must be defined"
@@ -116,7 +116,7 @@ bool wait_for_server(int port) {
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons(static_cast<uint16_t>(port));
+        addr.sin_port = htons(static_cast<std::uint16_t>(port));
         if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
             close(fd);
             return true;
@@ -132,23 +132,23 @@ std::string send_request(int port, const std::string& request) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(static_cast<uint16_t>(port));
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
     if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         close(fd);
         return {};
     }
-    size_t sent = 0;
+    std::size_t sent = 0;
     while (sent < request.size()) {
         ssize_t n = ::send(fd, request.data() + sent, request.size() - sent, 0);
         if (n <= 0) break;
-        sent += static_cast<size_t>(n);
+        sent += static_cast<std::size_t>(n);
     }
     std::string response;
     char buffer[4096];
     while (true) {
         ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
         if (n <= 0) break;
-        response.append(buffer, static_cast<size_t>(n));
+        response.append(buffer, static_cast<std::size_t>(n));
     }
     close(fd);
     return response;
