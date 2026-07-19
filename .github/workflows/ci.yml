@@ -77,11 +77,73 @@ jobs:
               -o APT::Get::List-Cleanup="0"
           }
           scoped_update "${ubuntu_sources}"
-          sudo apt-get install -y ca-certificates curl cmake ninja-build libzstd-dev libsqlite3-dev clang-22 llvm-22-dev
+          # `g++` is not used as the compiler (that's still clang-22, via
+          # CC/CXX above) -- it's here so Clang's `import std;` support has
+          # a standard library to build the `std`/`std.compat` modules
+          # from: Clang implements `import std;` against whichever standard
+          # library it's configured for, and this project intentionally
+          # stays on the platform default (libstdc++) rather than libc++,
+          # since the prebuilt LLVM static libraries below are themselves
+          # built against libstdc++ (see the CMakeLists.txt comment next to
+          # `CMAKE_EXPERIMENTAL_CXX_IMPORT_STD` for the full ABI-compat
+          # rationale). `g++`'s `libstdc++-*-dev` provides the
+          # `bits/std.cc`/`bits/std.compat.cc` module interface units and
+          # `libstdc++.modules.json` manifest that CMake's CXX_MODULE_STD
+          # machinery needs.
+          #
+          # `cmake` is deliberately NOT installed here -- see the "Install
+          # pinned CMake" step below for why.
+          sudo apt-get install -y ca-certificates curl ninja-build libzstd-dev libsqlite3-dev clang-22 llvm-22-dev g++
+
+      - name: Install pinned CMake
+        if: steps.change-scope.outputs.docs_only != 'true'
+        run: |
+          set -euxo pipefail
+          # CMAKE_EXPERIMENTAL_CXX_IMPORT_STD's required activation UUID
+          # (see CMakeLists.txt) is tied to one exact CMake version -- CMake's
+          # own Help/dev/experimental.rst warns the UUID "may change in
+          # future versions of CMake", and it did: CMake 4.2.3 uses
+          # d0edc3af-4c50-42ea-a356-e2862fe7a444, but CMake 4.4.0 uses
+          # f35a9ac6-8463-4d38-8eec-5d6008153e7d instead.
+          #
+          # This is exactly what broke CI originally, and it wasn't even an
+          # apt-version-drift problem: `apt-get install cmake` correctly
+          # installed 4.2.3 (matching local dev validation), but the
+          # ubuntu-26.04 runner image ships its own pre-installed CMake
+          # 4.4.0 under /usr/local, which sits earlier in PATH than the
+          # apt-installed copy under /usr -- so the apt-installed 4.2.3 was
+          # silently shadowed and never actually used, and the runner's
+          # 4.4.0 (with the "wrong" UUID for our CMakeLists.txt) ran
+          # instead. Since this experimental feature is this fragile across
+          # versions, and PATH-shadowing by the runner image can silently
+          # reintroduce the same class of bug even if apt's version stays
+          # put, download and use one exact, pinned upstream CMake release
+          # instead of whatever apt/the runner image happen to provide, and
+          # put it first in PATH for the rest of this job. Re-check this
+          # pin (and the CMakeLists.txt UUID) together when deliberately
+          # upgrading CMake.
+          cmake_version=4.2.3
+          cmake_sha256=5bb505d5e0cca0480a330f7f27ccf52c2b8b5214c5bba97df08899f5ef650c23
+          cmake_archive="cmake-${cmake_version}-linux-x86_64.tar.gz"
+          cmake_dir="${RUNNER_TEMP}/cmake-${cmake_version}-linux-x86_64"
+          curl -fsSL -o "${cmake_archive}" \
+            "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/${cmake_archive}"
+          echo "${cmake_sha256}  ${cmake_archive}" | sha256sum -c -
+          mkdir -p "${cmake_dir}"
+          tar xzf "${cmake_archive}" -C "${cmake_dir}" --strip-components=1
+          echo "${cmake_dir}/bin" >> "${GITHUB_PATH}"
+          "${cmake_dir}/bin/cmake" --version
 
       - name: Configure main project
         if: steps.change-scope.outputs.docs_only != 'true'
-        run: cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}"
+        run: |
+          set -euxo pipefail
+          # Confirm which cmake actually resolves in PATH, so any future
+          # drift (e.g. a new runner image shadowing the pin again) is
+          # immediately visible in the CI log rather than failing opaquely.
+          which cmake
+          cmake --version
+          cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}"
 
       - name: Build main project
         if: steps.change-scope.outputs.docs_only != 'true'

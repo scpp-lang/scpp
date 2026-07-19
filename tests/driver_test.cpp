@@ -3,23 +3,14 @@ import scpp.parser;
 import scpp.compiler.movecheck;
 import scpp.compiler.codegen;
 import scpp.ast;
+import std;
 
-#include <algorithm>
-#include <chrono>
-#include <cstdint>
+// `popen`/`pclose`/`FILE*` are POSIX extensions, not part of ISO C++'s
+// standard library (they have no `import std;` module form), so `<cstdio>`
+// stays as a real #include; same for `<sys/wait.h>` (POSIX `WIFEXITED` et
+// al., used below).
 #include <cstdio>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <optional>
-#include <sstream>
-#include <string>
-#include <string_view>
 #include <sys/wait.h>
-#include <thread>
-#include <unordered_map>
-#include <vector>
 
 // SCPP_TEST_SOURCE_DIR and SCPP_DRIVER_TEST_SOURCE_DIR are injected by CMake
 // (see the driver_test target in the top-level CMakeLists.txt) and point at
@@ -70,7 +61,7 @@ std::vector<unsigned char> read_binary_file(const std::filesystem::path& path) {
     return std::vector<unsigned char>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 
-std::uint32_t read_u32_le(const std::vector<unsigned char>& bytes, size_t offset) {
+std::uint32_t read_u32_le(const std::vector<unsigned char>& bytes, std::size_t offset) {
     return static_cast<std::uint32_t>(bytes[offset]) |
            (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
            (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
@@ -130,7 +121,7 @@ public:
 
 private:
     std::optional<std::string> infer_partition_path(const std::string& key) const {
-        size_t colon = key.find(':');
+        std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
         auto module_it = import_paths_.find(module_name);
@@ -165,7 +156,7 @@ RunResult run_command_capture(const std::string& command) {
     std::string output;
     if (pipe != nullptr) {
         char buffer[256];
-        size_t n;
+        std::size_t n;
         while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
             output.append(buffer, n);
         }
@@ -182,17 +173,17 @@ void expect_dwarf_variable_has_location(const std::filesystem::path& binary_path
            case_name + ": llvm-dwarfdump should succeed, got '" + dwarfdump_result.stdout_text + "'");
     if (dwarfdump_result.exit_code != 0) return;
     std::string needle = "DW_AT_name\t(\"" + variable_name + "\")";
-    size_t name_pos = dwarfdump_result.stdout_text.find(needle);
+    std::size_t name_pos = dwarfdump_result.stdout_text.find(needle);
     expect(name_pos != std::string::npos,
            case_name + ": expected DWARF entry for variable '" + variable_name + "', got '" +
                dwarfdump_result.stdout_text + "'");
     if (name_pos == std::string::npos) return;
-    size_t entry_begin = dwarfdump_result.stdout_text.rfind("DW_TAG_variable", name_pos);
+    std::size_t entry_begin = dwarfdump_result.stdout_text.rfind("DW_TAG_variable", name_pos);
     expect(entry_begin != std::string::npos,
            case_name + ": expected DW_TAG_variable for '" + variable_name + "', got '" +
                dwarfdump_result.stdout_text + "'");
     if (entry_begin == std::string::npos) return;
-    size_t entry_end = dwarfdump_result.stdout_text.find("DW_TAG_", name_pos + needle.size());
+    std::size_t entry_end = dwarfdump_result.stdout_text.find("DW_TAG_", name_pos + needle.size());
     std::string entry =
         dwarfdump_result.stdout_text.substr(entry_begin, entry_end == std::string::npos ? std::string::npos
                                                                                        : entry_end - entry_begin);
@@ -209,15 +200,15 @@ void expect_dwarf_named_entry_contains(const std::filesystem::path& binary_path,
            case_name + ": llvm-dwarfdump should succeed, got '" + dwarfdump_result.stdout_text + "'");
     if (dwarfdump_result.exit_code != 0) return;
     std::string needle = "DW_AT_name\t(\"" + entry_name + "\")";
-    size_t name_pos = dwarfdump_result.stdout_text.find(needle);
+    std::size_t name_pos = dwarfdump_result.stdout_text.find(needle);
     expect(name_pos != std::string::npos,
            case_name + ": expected DWARF entry named '" + entry_name + "', got '" + dwarfdump_result.stdout_text + "'");
     if (name_pos == std::string::npos) return;
-    size_t entry_begin = dwarfdump_result.stdout_text.rfind(tag_name, name_pos);
+    std::size_t entry_begin = dwarfdump_result.stdout_text.rfind(tag_name, name_pos);
     expect(entry_begin != std::string::npos,
            case_name + ": expected " + tag_name + " for '" + entry_name + "', got '" + dwarfdump_result.stdout_text + "'");
     if (entry_begin == std::string::npos) return;
-    size_t entry_end = dwarfdump_result.stdout_text.find("DW_TAG_", name_pos + needle.size());
+    std::size_t entry_end = dwarfdump_result.stdout_text.find("DW_TAG_", name_pos + needle.size());
     std::string entry =
         dwarfdump_result.stdout_text.substr(entry_begin, entry_end == std::string::npos ? std::string::npos
                                                                                        : entry_end - entry_begin);
@@ -253,7 +244,7 @@ RunResult compile_and_run(std::string_view source, const std::string& case_name)
     std::string output;
     if (pipe != nullptr) {
         char buffer[256];
-        size_t n;
+        std::size_t n;
         while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
             output.append(buffer, n);
         }
@@ -281,7 +272,7 @@ struct ExpectedResult {
 };
 
 ExpectedResult parse_expected(const std::string& content) {
-    size_t newline = content.find('\n');
+    std::size_t newline = content.find('\n');
     std::string exit_code_line = newline == std::string::npos ? content : content.substr(0, newline);
     std::string stdout_text = newline == std::string::npos ? "" : content.substr(newline + 1);
     return ExpectedResult{std::stoi(exit_code_line), stdout_text};
@@ -455,7 +446,7 @@ void run_module_system_tests() {
             std::string output;
             if (pipe != nullptr) {
                 char buffer[256];
-                size_t n;
+                std::size_t n;
                 while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
             }
             int status = pipe != nullptr ? pclose(pipe) : -1;
@@ -658,7 +649,7 @@ void run_module_system_tests() {
             std::string output;
             if (pipe != nullptr) {
                 char buffer[256];
-                size_t n;
+                std::size_t n;
                 while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
             }
             int status = pipe != nullptr ? pclose(pipe) : -1;
@@ -816,7 +807,7 @@ void run_module_system_tests() {
             std::string output;
             if (pipe != nullptr) {
                 char buffer[256];
-                size_t n;
+                std::size_t n;
                 while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
             }
             int status = pipe != nullptr ? pclose(pipe) : -1;
@@ -862,7 +853,7 @@ void run_module_system_tests() {
             std::string output;
             if (pipe != nullptr) {
                 char buffer[256];
-                size_t n;
+                std::size_t n;
                 while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
             }
             int status = pipe != nullptr ? pclose(pipe) : -1;
@@ -903,7 +894,7 @@ void run_module_system_tests() {
                 std::string output;
                 if (pipe != nullptr) {
                     char buffer[256];
-                    size_t n;
+                    std::size_t n;
                     while ((n = fread(buffer, 1, sizeof(buffer), pipe)) > 0) output.append(buffer, n);
                 }
                 int status = pipe != nullptr ? pclose(pipe) : -1;
@@ -1733,7 +1724,7 @@ void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
            case_name + ": expected exported constexpr function root");
     auto reachable_function = [&](std::string_view name) {
         return std::find_if(plan.reachable_function_indices.begin(), plan.reachable_function_indices.end(),
-                            [&](size_t index) { return index < program.functions.size() && program.functions[index].name == name; }) !=
+                            [&](std::size_t index) { return index < program.functions.size() && program.functions[index].name == name; }) !=
                plan.reachable_function_indices.end();
     };
     expect(reachable_function("math::helper_value"),
@@ -2818,7 +2809,7 @@ void run_cli_extension_tests() {
         if (interface_bytes.size() >= 16) {
             expect((interface_bytes[7] & 0x01u) != 0u, case_name + ": expected structured payload flag");
             std::uint32_t interface_length = read_u32_le(interface_bytes, 8);
-            expect(interface_bytes.size() >= static_cast<size_t>(12 + interface_length + 8),
+            expect(interface_bytes.size() >= static_cast<std::size_t>(12 + interface_length + 8),
                    case_name + ": expected payload bytes after embedded interface source");
             std::string embedded_source(interface_bytes.begin() + 12, interface_bytes.begin() + 12 + interface_length);
             expect(embedded_source.find("return add_bonus(value, s);") == std::string::npos,
@@ -2827,8 +2818,8 @@ void run_cli_extension_tests() {
                    case_name + ": private helper generic body should be stripped from interface source");
             std::uint32_t payload_length = read_u32_le(interface_bytes, 12 + interface_length);
             expect(payload_length > 8, case_name + ": expected non-trivial structured payload length");
-            if (interface_bytes.size() >= static_cast<size_t>(16 + interface_length + payload_length)) {
-                size_t payload_offset = 16 + interface_length;
+            if (interface_bytes.size() >= static_cast<std::size_t>(16 + interface_length + payload_length)) {
+                std::size_t payload_offset = 16 + interface_length;
                 expect(std::string(interface_bytes.begin() + payload_offset, interface_bytes.begin() + payload_offset + 4) ==
                            "SAST",
                        case_name + ": expected structured payload magic");

@@ -1,34 +1,11 @@
 module;
 
-#include <algorithm>
-#include <condition_variable>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <ctime>
-#include <filesystem>
-#include <fstream>
-#include <future>
-#include <iomanip>
-#include <iostream>
-#include <map>
-#include <mutex>
-#include <optional>
-#include <regex>
-#include <set>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <thread>
 #include <unistd.h>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 #include <sqlite3.h>
 
 export module scpp.project;
 
+import std;
 import scpp.ast;
 import scpp.compiler.codegen;
 import scpp.driver;
@@ -81,9 +58,9 @@ void trace_build(const std::string& message) {
 }
 
 std::string trim(std::string_view text) {
-    size_t start = 0;
+    std::size_t start = 0;
     while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) start++;
-    size_t end = text.size();
+    std::size_t end = text.size();
     while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1]))) end--;
     return std::string(text.substr(start, end - start));
 }
@@ -133,7 +110,7 @@ std::string parse_string_literal(std::string_view text, const std::string& conte
 
         std::string out;
         out.reserve(inner.size());
-        for (size_t i = 0; i < inner.size(); i++) {
+        for (std::size_t i = 0; i < inner.size(); i++) {
             char ch = inner[i];
             if (ch == '\\') {
                 if (i + 1 < inner.size() && (inner[i + 1] == '\n' || inner[i + 1] == '\r')) {
@@ -173,7 +150,7 @@ std::string parse_string_literal(std::string_view text, const std::string& conte
     std::string out;
     out.reserve(text.size() - 2);
     bool escape = false;
-    for (size_t i = 1; i + 1 < text.size(); i++) {
+    for (std::size_t i = 1; i + 1 < text.size(); i++) {
         char ch = text[i];
         if (escape) {
             switch (ch) {
@@ -267,7 +244,7 @@ bool parse_bool_literal(std::string_view text, const std::string& context) {
 int parse_int_literal(std::string_view text, const std::string& context) {
     std::string value = trim(text);
     if (value.empty()) throw ManifestError(context + " must be an integer");
-    size_t parsed = 0;
+    std::size_t parsed = 0;
     try {
         int result = std::stoi(value, &parsed);
         if (parsed != value.size()) throw ManifestError(context + " must be an integer");
@@ -281,12 +258,12 @@ int parse_int_literal(std::string_view text, const std::string& context) {
 
 std::vector<std::string> split_top_level(std::string_view text, char delimiter) {
     std::vector<std::string> parts;
-    size_t start = 0;
+    std::size_t start = 0;
     bool in_string = false;
     bool escape = false;
     int brace_depth = 0;
     int bracket_depth = 0;
-    for (size_t i = 0; i < text.size(); i++) {
+    for (std::size_t i = 0; i < text.size(); i++) {
         char ch = text[i];
         if (escape) {
             escape = false;
@@ -343,7 +320,7 @@ std::unordered_map<std::string, std::string> parse_inline_table(std::string_view
     std::vector<std::string> entries = split_top_level(std::string_view(value).substr(1, value.size() - 2), ',');
     std::unordered_map<std::string, std::string> table;
     for (const std::string& entry : entries) {
-        size_t eq = entry.find('=');
+        std::size_t eq = entry.find('=');
         if (eq == std::string::npos) {
             throw ManifestError(context + " contains malformed inline table entry '" + entry + "'");
         }
@@ -396,11 +373,11 @@ void write_file(const std::filesystem::path& path, std::string_view content) {
 }
 
 std::string fnv1a64_hex(std::string_view text) {
-    constexpr uint64_t offset_basis = 14695981039346656037ull;
-    constexpr uint64_t prime = 1099511628211ull;
-    uint64_t value = offset_basis;
+    constexpr std::uint64_t offset_basis = 14695981039346656037ull;
+    constexpr std::uint64_t prime = 1099511628211ull;
+    std::uint64_t value = offset_basis;
     for (unsigned char ch : text) {
-        value ^= static_cast<uint64_t>(ch);
+        value ^= static_cast<std::uint64_t>(ch);
         value *= prime;
     }
     std::ostringstream out;
@@ -576,23 +553,23 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
     if (loc.is_known()) std::cerr << loc.line << ":" << loc.column << ":";
     std::cerr << " error: " << message << "\n";
     if (!loc.is_known()) return;
-    size_t line_start = 0;
+    std::size_t line_start = 0;
     int current_line = 1;
     while (current_line < loc.line) {
-        size_t next_nl = source.find('\n', line_start);
+        std::size_t next_nl = source.find('\n', line_start);
         if (next_nl == std::string::npos) return;
         line_start = next_nl + 1;
         current_line++;
     }
-    size_t line_end = source.find('\n', line_start);
+    std::size_t line_end = source.find('\n', line_start);
     if (line_end == std::string::npos) line_end = source.size();
     std::string_view line_text(source.data() + line_start, line_end - line_start);
     std::string line_num = std::to_string(loc.line);
     std::string gutter(line_num.size(), ' ');
     std::cerr << " " << line_num << " | " << line_text << "\n";
     std::cerr << " " << gutter << " | ";
-    for (int i = 0; i < loc.column - 1 && static_cast<size_t>(i) < line_text.size(); i++) {
-        std::cerr << (line_text[static_cast<size_t>(i)] == '\t' ? '\t' : ' ');
+    for (int i = 0; i < loc.column - 1 && static_cast<std::size_t>(i) < line_text.size(); i++) {
+        std::cerr << (line_text[static_cast<std::size_t>(i)] == '\t' ? '\t' : ' ');
     }
     std::cerr << "^\n";
 }
@@ -817,7 +794,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
             continue;
         }
 
-        size_t eq = stripped.find('=');
+        std::size_t eq = stripped.find('=');
         if (eq == std::string::npos) {
             throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
                                 ": expected key = value");
@@ -1012,7 +989,7 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
 
 std::regex glob_to_regex(std::string_view pattern) {
     std::string regex = "^";
-    for (size_t i = 0; i < pattern.size(); i++) {
+    for (std::size_t i = 0; i < pattern.size(); i++) {
         char ch = pattern[i];
         if (ch == '*') {
             if (i + 1 < pattern.size() && pattern[i + 1] == '*') {
@@ -1068,7 +1045,7 @@ SourceInfo classify_source(const std::filesystem::path& path) {
     info.path = normalized_path(path);
     std::string source = read_file(info.path);
     std::vector<scpp::Token> tokens = scpp::tokenize(source);
-    size_t i = 0;
+    std::size_t i = 0;
     bool exported_module = false;
     if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::KwExport) {
         if (i + 1 < tokens.size() && tokens[i + 1].kind == scpp::TokenKind::KwModule) {
@@ -1102,15 +1079,15 @@ SourceInfo classify_source(const std::filesystem::path& path) {
         }
     }
 
-    for (size_t token_index = 0; token_index < tokens.size(); token_index++) {
-        size_t import_index = token_index;
+    for (std::size_t token_index = 0; token_index < tokens.size(); token_index++) {
+        std::size_t import_index = token_index;
         if (tokens[token_index].kind == scpp::TokenKind::KwExport) {
             if (token_index + 1 >= tokens.size() || tokens[token_index + 1].kind != scpp::TokenKind::KwImport) continue;
             import_index = token_index + 1;
         } else if (tokens[token_index].kind != scpp::TokenKind::KwImport) {
             continue;
         }
-        size_t j = import_index + 1;
+        std::size_t j = import_index + 1;
         if (j >= tokens.size()) continue;
         if (tokens[j].kind == scpp::TokenKind::Colon) continue;
         if (tokens[j].kind != scpp::TokenKind::Identifier) continue;
@@ -1630,7 +1607,7 @@ void write_metadata_file(const PackageBuildResult& result, std::string_view prof
     json << "  \"profile\": \"" << escape_json(profile_name) << "\",\n";
     json << "  \"triple\": \"" << escape_json(scpp::host_target_triple()) << "\",\n";
     json << "  \"modules\": [\n";
-    for (size_t i = 0; i < result.library_modules.size(); i++) {
+    for (std::size_t i = 0; i < result.library_modules.size(); i++) {
         const BuiltModule& module = result.library_modules[i];
         json << "    {\"name\": \"" << escape_json(module.name) << "\", \"interface\": \""
              << escape_json(module.interface_path.string()) << "\", \"archive\": \""
@@ -1640,7 +1617,7 @@ void write_metadata_file(const PackageBuildResult& result, std::string_view prof
     }
     json << "  ],\n";
     json << "  \"binaries\": [\n";
-    for (size_t i = 0; i < result.binaries.size(); i++) {
+    for (std::size_t i = 0; i < result.binaries.size(); i++) {
         json << "    \"" << escape_json(result.binaries[i].string()) << "\"";
         if (i + 1 < result.binaries.size()) json << ",";
         json << "\n";
@@ -2082,7 +2059,7 @@ private:
         bool binary_uses_stdlib = result.uses_stdlib || sources_use_stdlib(sources);
 
         std::vector<std::filesystem::path> plain_objects;
-        size_t plain_index = 0;
+        std::size_t plain_index = 0;
         for (const SourceInfo& source : sources) {
             if (source.kind != SourceInfo::Kind::Plain) continue;
             std::filesystem::path object_path = object_dir / (std::to_string(plain_index++) + "_" +

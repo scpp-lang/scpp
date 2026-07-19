@@ -1,15 +1,8 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <optional>
-#include <memory>
-#include <string>
-#include <unordered_set>
-#include <vector>
-#include <utility>
-
 export module scpp.ast;
+
+import std;
 
 export namespace scpp {
 
@@ -1462,9 +1455,9 @@ struct Program {
         }
         return nullptr;
     }
-    for (size_t depth = namespace_path.size(); depth > 0; depth--) {
+    for (std::size_t depth = namespace_path.size(); depth > 0; depth--) {
         std::string candidate;
-        for (size_t i = 0; i < depth; i++) {
+        for (std::size_t i = 0; i < depth; i++) {
             if (!candidate.empty()) candidate += "::";
             candidate += namespace_path[i];
         }

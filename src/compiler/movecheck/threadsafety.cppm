@@ -1,13 +1,8 @@
 module;
 
-#include <memory>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <unordered_set>
-
 module scpp.compiler.movecheck:threadsafety;
 
+import std;
 import scpp.ast;
 import :errors;
 import :types;
@@ -22,22 +17,22 @@ namespace scpp {
                                      std::unordered_set<std::string> visiting = {});
 [[nodiscard]] bool thread_shareable_of(const Type& type, const Program& program,
                                        std::unordered_set<std::string> visiting = {});
-[[nodiscard]] bool parameter_requires_thread_safety_constraint(const FunctionSignature& sig, size_t param_index);
-[[nodiscard]] std::string parameter_display_name(const FunctionSignature& sig, size_t param_index);
+[[nodiscard]] bool parameter_requires_thread_safety_constraint(const FunctionSignature& sig, std::size_t param_index);
+[[nodiscard]] std::string parameter_display_name(const FunctionSignature& sig, std::size_t param_index);
 [[nodiscard]] bool parameter_names_interface_type(const Type& param_type, const Body& body);
 [[nodiscard]] Type thread_safety_constraint_subject_type(const Expr& arg, const Type& param_type,
                                                          const Body& body, const Signatures& signatures);
 void enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig,
-                                                    size_t param_index, std::string_view callee_kind,
+                                                    std::size_t param_index, std::string_view callee_kind,
                                                     const std::string& callee_name, const Body& body,
                                                     const Signatures& signatures, SourceLocation loc);
 
-[[nodiscard]] bool parameter_requires_thread_safety_constraint(const FunctionSignature& sig, size_t param_index) {
+[[nodiscard]] bool parameter_requires_thread_safety_constraint(const FunctionSignature& sig, std::size_t param_index) {
     return param_index < sig.param_require_thread_movable.size() &&
            (sig.param_require_thread_movable[param_index] || sig.param_require_thread_shareable[param_index]);
 }
 
-[[nodiscard]] std::string parameter_display_name(const FunctionSignature& sig, size_t param_index) {
+[[nodiscard]] std::string parameter_display_name(const FunctionSignature& sig, std::size_t param_index) {
     if (param_index < sig.param_names.size() && !sig.param_names[param_index].empty()) return sig.param_names[param_index];
     return "#" + std::to_string(param_index + 1);
 }
@@ -63,7 +58,7 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
     return param_type;
 }
 
-void enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig, size_t param_index,
+void enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig, std::size_t param_index,
                                                     std::string_view callee_kind, const std::string& callee_name,
                                                     const Body& body, const Signatures& signatures, SourceLocation loc) {
     if (body.program == nullptr || !parameter_requires_thread_safety_constraint(sig, param_index) ||

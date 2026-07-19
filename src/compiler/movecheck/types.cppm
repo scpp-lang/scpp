@@ -1,14 +1,8 @@
 module;
 
-#include <memory>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:types;
 
+import std;
 import scpp.ast;
 import scpp.mir;
 import :state;
@@ -181,7 +175,7 @@ namespace scpp {
     switch (a.kind) {
         case TypeKind::Named:
             if (a.name != b.name || a.template_args.size() != b.template_args.size()) return false;
-            for (size_t i = 0; i < a.template_args.size(); i++) {
+            for (std::size_t i = 0; i < a.template_args.size(); i++) {
                 if (!types_equal(a.template_args[i], b.template_args[i])) return false;
             }
             return true;
@@ -197,7 +191,7 @@ namespace scpp {
                 a.function_params.size() != b.function_params.size()) {
                 return false;
             }
-            for (size_t i = 0; i < a.function_params.size(); i++) {
+            for (std::size_t i = 0; i < a.function_params.size(); i++) {
                 if (!types_equal(a.function_params[i], b.function_params[i])) return false;
             }
             return true;

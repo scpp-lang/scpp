@@ -1,20 +1,8 @@
 module;
 
-#include <algorithm>
-#include <cctype>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:lambdas;
 
+import std;
 import scpp.ast;
 import :errors;
 import :state;

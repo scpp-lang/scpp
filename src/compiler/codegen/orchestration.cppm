@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:orchestration;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -288,8 +276,8 @@ namespace scpp {
 {
         std::string key = method_lookup_name(fn);
         key += "(";
-        size_t start = fn.member_owner_class.empty() ? 0 : 1;
-        for (size_t i = start; i < fn.params.size(); i++) {
+        std::size_t start = fn.member_owner_class.empty() ? 0 : 1;
+        for (std::size_t i = start; i < fn.params.size(); i++) {
             if (i != start) key += ",";
             key += mangle_type(fn.params[i].type);
         }
@@ -325,7 +313,7 @@ namespace scpp {
             !types_equal(*a.function_return, *b.function_return) || a.function_params.size() != b.function_params.size()) {
             return false;
         }
-        for (size_t i = 0; i < a.function_params.size(); i++) {
+        for (std::size_t i = 0; i < a.function_params.size(); i++) {
             if (!types_equal(a.function_params[i], b.function_params[i])) return false;
         }
         return true;
@@ -395,7 +383,7 @@ namespace scpp {
                 if (type.template_args.empty()) return type.name;
                 {
                     std::string result = type.name + "<";
-                    for (size_t i = 0; i < type.template_args.size(); i++) {
+                    for (std::size_t i = 0; i < type.template_args.size(); i++) {
                         if (i > 0) result += ", ";
                         result += verbatim_type_spelling(type.template_args[i]);
                     }
@@ -407,7 +395,7 @@ namespace scpp {
                        verbatim_type_spelling(*type.pointee) + "*";
             case TypeKind::Function: {
                 std::string result = verbatim_type_spelling(*type.function_return) + "(";
-                for (size_t i = 0; i < type.function_params.size(); i++) {
+                for (std::size_t i = 0; i < type.function_params.size(); i++) {
                     if (i > 0) result += ", ";
                     result += verbatim_type_spelling(type.function_params[i]);
                 }
@@ -421,7 +409,7 @@ namespace scpp {
                 std::string result = verbatim_type_spelling(*type.function_return) + " (*";
                 if (type.is_unsafe_function_pointer) result += " [[scpp::unsafe]]";
                 result += ")(";
-                for (size_t i = 0; i < type.function_params.size(); i++) {
+                for (std::size_t i = 0; i < type.function_params.size(); i++) {
                     if (i > 0) result += ", ";
                     result += verbatim_type_spelling(type.function_params[i]);
                 }
@@ -445,9 +433,9 @@ namespace scpp {
     [[nodiscard]] std::vector<std::string> Codegen::split_dotted(const std::string& dotted)
 {
         std::vector<std::string> segments;
-        size_t start = 0;
+        std::size_t start = 0;
         while (start <= dotted.size()) {
-            size_t dot = dotted.find('.', start);
+            std::size_t dot = dotted.find('.', start);
             if (dot == std::string::npos) {
                 segments.push_back(dotted.substr(start));
                 break;
@@ -482,12 +470,12 @@ namespace scpp {
         // name that also happens to drop the same number of segments
         // (e.g. a top-level one, dropping zero).
         std::vector<std::string> module_segments = split_dotted(effective_module);
-        size_t shared_prefix = 0;
+        std::size_t shared_prefix = 0;
         while (shared_prefix < module_segments.size() && shared_prefix < fn.namespace_path.size() &&
                module_segments[shared_prefix] == fn.namespace_path[shared_prefix]) {
             shared_prefix++;
         }
-        for (size_t i = shared_prefix; i < fn.namespace_path.size(); i++) {
+        for (std::size_t i = shared_prefix; i < fn.namespace_path.size(); i++) {
             const std::string& segment = fn.namespace_path[i];
             mangled += "N" + std::to_string(segment.size()) + "_" + segment;
         }
@@ -497,7 +485,7 @@ namespace scpp {
         // last "::"-separated piece (namespace nesting is separately
         // encoded by the N blocks above).
         std::string bare_name = fn.name;
-        size_t last_separator = bare_name.rfind("::");
+        std::size_t last_separator = bare_name.rfind("::");
         if (last_separator != std::string::npos) bare_name = bare_name.substr(last_separator + 2);
         mangled += "F" + std::to_string(bare_name.size()) + "_" + bare_name;
         mangled += "Q" + std::to_string(static_cast<int>(fn.receiver_ref_qualifier)) + "_";

@@ -1,22 +1,8 @@
 module;
 
-#include <cmath>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <variant>
-#include <vector>
-
 export module scpp.constexpr_engine;
 
+import std;
 import scpp.ast;
 
 export namespace scpp {
@@ -128,7 +114,7 @@ struct ContinueSignal {};
                 a.non_type_args.size() != b.non_type_args.size()) {
                 return false;
             }
-            for (size_t i = 0; i < a.template_args.size(); ++i) {
+            for (std::size_t i = 0; i < a.template_args.size(); ++i) {
                 if (!types_equal(a.template_args[i], b.template_args[i])) return false;
             }
             return true;
@@ -149,7 +135,7 @@ struct ContinueSignal {};
                 !types_equal(*a.function_return, *b.function_return)) {
                 return false;
             }
-            for (size_t i = 0; i < a.function_params.size(); ++i) {
+            for (std::size_t i = 0; i < a.function_params.size(); ++i) {
                 if (!types_equal(a.function_params[i], b.function_params[i])) return false;
             }
             return a.is_const_function == b.is_const_function &&
@@ -212,17 +198,17 @@ struct ContinueSignal {};
     if (!types_equal(*pointer_type.pointee, array->element_type)) {
         throw ConstexprError(loc, "constexpr pointer element type does not match the pointed-to storage");
     }
-    if (pointer.index < 0 || static_cast<size_t>(pointer.index) >= array->elements.size()) {
+    if (pointer.index < 0 || static_cast<std::size_t>(pointer.index) >= array->elements.size()) {
         throw ConstexprError(loc, "constexpr dereference out of bounds");
     }
-    return array->elements[static_cast<size_t>(pointer.index)];
+    return array->elements[static_cast<std::size_t>(pointer.index)];
 }
 
 class ConstexprEngine {
 public:
     ConstexprEngine(const Program& program, ConstexprLimits limits)
         : program_(program), limits_(limits) {
-        for (size_t i = 0; i < program_.functions.size(); ++i) functions_by_name_[program_.functions[i].name].push_back(i);
+        for (std::size_t i = 0; i < program_.functions.size(); ++i) functions_by_name_[program_.functions[i].name].push_back(i);
         for (const ClassDef& def : program_.classes) classes_by_name_.emplace(def.name, &def);
         for (const StructDef& def : program_.structs) structs_by_name_.emplace(def.name, &def);
         for (const GlobalVar& global : program_.globals) {
@@ -399,7 +385,7 @@ private:
     int call_depth_ = 0;
     int string_storage_counter_ = 0;
     std::vector<std::unordered_map<std::string, Binding>> frames_;
-    std::unordered_map<std::string, std::vector<size_t>> functions_by_name_;
+    std::unordered_map<std::string, std::vector<std::size_t>> functions_by_name_;
     std::unordered_map<std::string, const ClassDef*> classes_by_name_;
     std::unordered_map<std::string, const StructDef*> structs_by_name_;
     std::unordered_set<std::string> incomplete_type_names_;
@@ -789,9 +775,9 @@ private:
         if (is_named_type(type, "int16_t")) return {-32768, 32767};
         if (is_named_type(type, "uint16_t")) return {0, 65535};
         if (is_named_type(type, "int32_t")) {
-            return {std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max()};
+            return {std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()};
         }
-        if (is_named_type(type, "unsigned int")) return {0, std::numeric_limits<uint32_t>::max()};
+        if (is_named_type(type, "unsigned int")) return {0, std::numeric_limits<std::uint32_t>::max()};
         if (is_named_type(type, "size_t") || is_named_type(type, "uint64_t") || is_named_type(type, "unsigned long")) {
             return {0, std::numeric_limits<long long>::max()};
         }
@@ -906,10 +892,10 @@ private:
                 }
                 long long index = as_integer(evaluate_expr(*expr.rhs), expr.loc);
                 if (auto* array = std::get_if<ArrayValue>(&base->data)) {
-                    if (index < 0 || static_cast<size_t>(index) >= array->elements.size()) {
+                    if (index < 0 || static_cast<std::size_t>(index) >= array->elements.size()) {
                         throw ConstexprError(expr.loc, "constexpr subscript out of bounds");
                     }
-                    return LValue{array->elements[static_cast<size_t>(index)], base_read_only};
+                    return LValue{array->elements[static_cast<std::size_t>(index)], base_read_only};
                 }
                 if (auto* span = std::get_if<SpanValue>(&base->data)) {
                     if (index < 0 || index >= span->size) {
@@ -926,7 +912,7 @@ private:
                     shifted.index += index;
                     auto* array = shifted.storage ? std::get_if<ArrayValue>(&shifted.storage->data) : nullptr;
                     if (!array) throw ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage");
-                    if (shifted.index < 0 || static_cast<size_t>(shifted.index) >= array->elements.size()) {
+                    if (shifted.index < 0 || static_cast<std::size_t>(shifted.index) >= array->elements.size()) {
                         throw ConstexprError(expr.loc, "constexpr subscript out of bounds");
                     }
                     return LValue{dereference_pointer(shifted, base->type, expr.loc), true};
@@ -973,13 +959,13 @@ private:
                                                 bool require_constexpr) {
         auto it = functions_by_name_.find(std::string(name));
         if (it == functions_by_name_.end()) return nullptr;
-        for (size_t fn_index : it->second) {
+        for (std::size_t fn_index : it->second) {
             const Function* fn = &program_.functions[fn_index];
             if (!fn->body) continue;
             if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn->params.size() != args.size()) continue;
             bool params_match = true;
-            for (size_t i = 0; i < args.size(); ++i) {
+            for (std::size_t i = 0; i < args.size(); ++i) {
                 if (!constexpr_argument_matches_parameter(fn->params[i].type, args[i], require_constexpr)) {
                     params_match = false;
                     break;
@@ -995,7 +981,7 @@ private:
                                                                               bool require_constexpr) {
         auto it = functions_by_name_.find(std::string(class_name) + "_new");
         if (it == functions_by_name_.end()) return nullptr;
-        for (size_t fn_index : it->second) {
+        for (std::size_t fn_index : it->second) {
             const Function* fn = &program_.functions[fn_index];
             if (!fn->body) continue;
             if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
@@ -1071,13 +1057,13 @@ private:
                                                    bool require_constexpr) {
         auto it = functions_by_name_.find(std::string(class_name) + "_new");
         if (it == functions_by_name_.end()) return nullptr;
-        for (size_t fn_index : it->second) {
+        for (std::size_t fn_index : it->second) {
             const Function* fn = &program_.functions[fn_index];
             if (!fn->body) continue;
             if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn->params.size() != args.size() + 1) continue;
             bool params_match = true;
-            for (size_t i = 0; i < args.size(); ++i) {
+            for (std::size_t i = 0; i < args.size(); ++i) {
                 const Type& param_type = fn->params[i + 1].type;
                 const Type& arg_type = args[i]->type;
                 if (param_type.kind == TypeKind::Reference) {
@@ -1098,11 +1084,11 @@ private:
     [[nodiscard]] bool has_runtime_only_match(std::string_view name, const std::vector<std::shared_ptr<Cell>>& args) {
         auto it = functions_by_name_.find(std::string(name));
         if (it == functions_by_name_.end()) return false;
-        for (size_t fn_index : it->second) {
+        for (std::size_t fn_index : it->second) {
             const Function* fn = &program_.functions[fn_index];
             if (!fn->body || fn->eval_mode != FunctionEvalMode::RuntimeOnly || fn->params.size() != args.size()) continue;
             bool params_match = true;
-            for (size_t i = 0; i < args.size(); ++i) {
+            for (std::size_t i = 0; i < args.size(); ++i) {
                 if (!constexpr_argument_matches_parameter(fn->params[i].type, args[i], /*require_constexpr=*/false)) {
                     params_match = false;
                     break;
@@ -1187,7 +1173,7 @@ private:
                 std::vector<Binding> bindings;
                 bindings.reserve(ctor->params.size());
                 bindings.push_back(Binding{field_cell, false});
-                for (size_t i = 1; i < ctor->params.size(); ++i) {
+                for (std::size_t i = 1; i < ctor->params.size(); ++i) {
                     const Param& param = ctor->params[i];
                     const Expr& arg_expr = *init.brace_args[i - 1];
                     if (param.type.kind == TypeKind::Reference) {
@@ -1278,7 +1264,7 @@ private:
     [[nodiscard]] bool has_user_defined_destructor(std::string_view class_name) const {
         auto it = functions_by_name_.find(std::string(class_name) + "_delete");
         if (it == functions_by_name_.end()) return false;
-        for (size_t fn_index : it->second) {
+        for (std::size_t fn_index : it->second) {
             if (program_.functions[fn_index].body) return true;
         }
         return false;
@@ -1368,13 +1354,13 @@ private:
             --call_depth_;
             throw ConstexprError(loc, "constexpr evaluation exceeded recursion budget");
         }
-        for (size_t i = 0; i < fn.params.size(); ++i) {
+        for (std::size_t i = 0; i < fn.params.size(); ++i) {
             if (fn.params[i].type.kind == TypeKind::Reference) continue;
             reject_user_defined_destructor_execution(fn.params[i].type, loc);
         }
         frames_.push_back({});
         auto& frame = frames_.back();
-        for (size_t i = 0; i < fn.params.size(); ++i) frame.emplace(fn.params[i].name, std::move(bindings[i]));
+        for (std::size_t i = 0; i < fn.params.size(); ++i) frame.emplace(fn.params[i].name, std::move(bindings[i]));
         try {
             execute_constructor_member_initializers(fn);
             execute_stmt(*fn.body, fn.return_type);
@@ -1397,7 +1383,7 @@ private:
                                                                  const SourceLocation& loc) {
         std::vector<Binding> bindings;
         bindings.reserve(fn.params.size());
-        for (size_t i = 0; i < fn.params.size(); ++i) {
+        for (std::size_t i = 0; i < fn.params.size(); ++i) {
             const Param& param = fn.params[i];
             const Expr& arg_expr = *args[i];
             if (param.type.kind == TypeKind::Reference) {
@@ -1497,7 +1483,7 @@ private:
         std::string full_name = receiver_value->type.name + "_" + std::string(method_name);
         auto it = functions_by_name_.find(full_name);
         if (it == functions_by_name_.end()) return nullptr;
-        for (size_t fn_index : it->second) {
+        for (std::size_t fn_index : it->second) {
             const Function* fn = &program_.functions[fn_index];
             if (!fn->body) continue;
             if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
@@ -1512,7 +1498,7 @@ private:
             }
 
             bool params_match = true;
-            for (size_t i = 0; i < arg_values.size(); ++i) {
+            for (std::size_t i = 0; i < arg_values.size(); ++i) {
                 if (!constexpr_argument_matches_parameter(fn->params[i + 1].type, arg_values[i], require_constexpr)) {
                     params_match = false;
                     break;
@@ -1544,7 +1530,7 @@ private:
         std::vector<Binding> bindings;
         bindings.reserve(ctor->params.size());
         bindings.push_back(Binding{object, false});
-        for (size_t i = 1; i < ctor->params.size(); ++i) {
+        for (std::size_t i = 1; i < ctor->params.size(); ++i) {
             const Param& param = ctor->params[i];
             const Expr& arg_expr = *expr.args[i - 1];
             if (param.type.kind == TypeKind::Reference) {
@@ -1730,7 +1716,7 @@ private:
                     std::string full_name = receiver_named.name + "_" + expr.name;
                     auto it = functions_by_name_.find(full_name);
                     if (it == functions_by_name_.end()) return std::nullopt;
-                    for (size_t fn_index : it->second) {
+                    for (std::size_t fn_index : it->second) {
                         const Function& fn = program_.functions[fn_index];
                         if (fn.params.size() == expr.args.size() + 1) return fn.return_type;
                     }
@@ -1738,7 +1724,7 @@ private:
                 }
                 if (is_class_name(expr.name)) return named_type(expr.name);
                 if (auto it = functions_by_name_.find(expr.name); it != functions_by_name_.end()) {
-                    for (size_t fn_index : it->second) {
+                    for (std::size_t fn_index : it->second) {
                         const Function& fn = program_.functions[fn_index];
                         if (fn.params.size() == expr.args.size()) return fn.return_type;
                     }
@@ -1925,7 +1911,7 @@ private:
                         }
                         throw ConstexprError(stmt.loc, "no constexpr/consteval constructor matches for type '" + stmt.type.name + "'");
                     }
-                    for (size_t i = 1; i < ctor->params.size(); ++i) {
+                    for (std::size_t i = 1; i < ctor->params.size(); ++i) {
                         const Param& param = ctor->params[i];
                         const Expr& arg_expr = *stmt.ctor_args[i - 1];
                         if (param.type.kind == TypeKind::Reference && !param.type.is_rvalue_ref && param.type.is_mutable_ref) {
@@ -2119,7 +2105,7 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
             throw ConstexprError(loc, "unsupported constexpr pointer result");
         }
         snapshot.kind = ConstexprValueKind::StringLiteralPointer;
-        for (size_t i = static_cast<size_t>(std::max(pointer->index, 0LL)); i < array->elements.size(); ++i) {
+        for (std::size_t i = static_cast<std::size_t>(std::max(pointer->index, 0LL)); i < array->elements.size(); ++i) {
             long long ch = std::get<long long>(array->elements[i]->data);
             if (ch == 0) break;
             snapshot.string_value.push_back(static_cast<char>(ch));

@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:functions;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -46,7 +34,7 @@ namespace scpp {
         }
         std::vector<llvm::Type*> param_types;
         param_types.reserve(fn.params.size());
-        for (size_t i = 0; i < fn.params.size(); ++i) {
+        for (std::size_t i = 0; i < fn.params.size(); ++i) {
             const Param& param = fn.params[i];
             if (param.type.kind == TypeKind::Reference) {
                 validate_reference_pointee(*param.type.pointee);
@@ -123,7 +111,7 @@ namespace scpp {
 
         locals_.clear();
         scope_stack_.clear();
-        size_t index = 0;
+        std::size_t index = 0;
         for (auto& arg : llvm_fn->args()) {
             const Param& param = fn.params[index++];
             arg.setName(param.name);
@@ -192,7 +180,7 @@ namespace scpp {
 
         locals_.clear();
         scope_stack_.clear();
-        size_t index = 0;
+        std::size_t index = 0;
         for (auto& arg : llvm_fn->args()) {
             const Param& param = fn.params[index++];
             arg.setName(param.name);
@@ -228,7 +216,7 @@ namespace scpp {
         llvm::Type* this_llvm_type = to_llvm_type(fn.params[0].type);
         llvm::Value* this_ptr = builder_->CreateLoad(this_llvm_type, locals_.at("this").alloca, "thisptr");
         const StructInfo& info = info_it->second;
-        for (size_t i = info.field_types.size(); i > 0; --i) {
+        for (std::size_t i = info.field_types.size(); i > 0; --i) {
             const Type& field_type = info.field_types[i - 1];
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 llvm::Value* field_ptr =
@@ -262,7 +250,7 @@ namespace scpp {
         for (const Function& candidate : program_->functions) {
             if (candidate.name != fn.forwards_to || candidate.params.size() != fn.params.size()) continue;
             bool params_match = true;
-            for (size_t i = 1; i < fn.params.size() && params_match; i++) {
+            for (std::size_t i = 1; i < fn.params.size() && params_match; i++) {
                 params_match = types_equal(candidate.params[i].type, fn.params[i].type);
             }
             if (params_match) {
@@ -286,7 +274,7 @@ namespace scpp {
         for (auto& arg : llvm_fn->args()) args.push_back(&arg);
         llvm::Value* call_result = nullptr;
         if (!fn.params.empty() && is_interface_reference_type(fn.params.front().type)) {
-            std::optional<size_t> slot_index = interface_method_slot_index(fn.member_owner_class, fn);
+            std::optional<std::size_t> slot_index = interface_method_slot_index(fn.member_owner_class, fn);
             if (!slot_index.has_value()) {
                 throw CodegenError("missing interface dispatch slot for forwarding stub '" + fn.name + "'", current_loc_);
             }
@@ -306,7 +294,7 @@ namespace scpp {
             std::vector<llvm::Value*> dispatch_args;
             dispatch_args.reserve(args.size());
             dispatch_args.push_back(extract_interface_object_ptr(receiver_value));
-            for (size_t i = 1; i < args.size(); ++i) dispatch_args.push_back(args[i]);
+            for (std::size_t i = 1; i < args.size(); ++i) dispatch_args.push_back(args[i]);
             call_result = builder_->CreateCall(interface_dispatch_function_type(*target), target_ptr, dispatch_args);
         } else if (!fn.params.empty() && !target->params.empty() && is_interface_reference_type(target->params.front().type)) {
             const std::string& concrete_class_name = fn.params.front().type.pointee->name;
@@ -317,7 +305,7 @@ namespace scpp {
             std::vector<llvm::Value*> direct_args;
             direct_args.reserve(args.size());
             direct_args.push_back(fat_receiver);
-            for (size_t i = 1; i < args.size(); ++i) direct_args.push_back(args[i]);
+            for (std::size_t i = 1; i < args.size(); ++i) direct_args.push_back(args[i]);
             call_result = builder_->CreateCall(target_llvm, direct_args);
         } else {
             call_result = builder_->CreateCall(target_llvm, args);

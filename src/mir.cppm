@@ -1,12 +1,8 @@
 module;
 
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 export module scpp.mir;
 
+import std;
 import scpp.ast;
 
 export namespace scpp {
@@ -117,9 +113,9 @@ enum class TerminatorKind {
 
 struct Terminator {
     TerminatorKind kind = TerminatorKind::None;
-    size_t target = 0;                  // Goto
-    size_t true_target = 0;             // Branch (condition is true)
-    size_t false_target = 0;            // Branch (condition is false)
+    std::size_t target = 0;                  // Goto
+    std::size_t true_target = 0;             // Branch (condition is true)
+    std::size_t false_target = 0;            // Branch (condition is false)
     const Expr* condition = nullptr;    // Branch
     const Expr* return_value = nullptr; // Return (nullable)
     SourceLocation loc;                 // the originating Stmt's position, see MirStatement::loc
@@ -197,7 +193,7 @@ public:
 private:
     const Function& fn_;
     Body body_;
-    size_t current_block_ = 0;
+    std::size_t current_block_ = 0;
     // One frame per lexically-enclosing block/if-branch/while-body,
     // holding the names declared directly within it -- mirrors codegen's
     // scope_stack_. Parameters are declared before any frame is pushed
@@ -205,9 +201,9 @@ private:
     // whole function, same as in codegen.
     std::vector<std::vector<std::string>> scope_stack_;
     struct LoopFrame {
-        size_t cond_block;
-        size_t end_block;
-        size_t scope_depth;
+        std::size_t cond_block;
+        std::size_t end_block;
+        std::size_t scope_depth;
     };
     std::vector<LoopFrame> loop_stack_;
 
@@ -239,8 +235,8 @@ private:
         }
     }
 
-    void emit_scope_exits_to_depth(size_t target_depth) {
-        for (size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
+    void emit_scope_exits_to_depth(std::size_t target_depth) {
+        for (std::size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
             const std::vector<std::string>& names = scope_stack_[depth - 1];
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
                 current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{},
@@ -249,7 +245,7 @@ private:
         }
     }
 
-    size_t new_block() {
+    std::size_t new_block() {
         body_.blocks.push_back(BasicBlock{});
         return body_.blocks.size() - 1;
     }
@@ -353,10 +349,10 @@ private:
             }
 
             case StmtKind::If: {
-                size_t branch_block = current_block_;
-                size_t then_block = new_block();
-                size_t else_block = new_block();
-                size_t merge_block = new_block();
+                std::size_t branch_block = current_block_;
+                std::size_t then_block = new_block();
+                std::size_t else_block = new_block();
+                std::size_t merge_block = new_block();
 
                 body_.blocks[branch_block].terminator = Terminator{
                     TerminatorKind::Branch, 0, then_block, else_block, stmt.condition.get(), nullptr, stmt.loc};
@@ -384,10 +380,10 @@ private:
             }
 
             case StmtKind::While: {
-                size_t preheader = current_block_;
-                size_t cond_block = new_block();
-                size_t body_block = new_block();
-                size_t end_block = new_block();
+                std::size_t preheader = current_block_;
+                std::size_t cond_block = new_block();
+                std::size_t body_block = new_block();
+                std::size_t end_block = new_block();
 
                 body_.blocks[preheader].terminator =
                     Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr, stmt.loc};

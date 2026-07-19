@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:semantics;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -194,7 +182,7 @@ namespace scpp {
                 auto struct_it = structs_.find(base_named.name);
                 if (struct_it == structs_.end()) return std::nullopt;
                 const StructInfo& info = struct_it->second;
-                std::optional<size_t> field_index = info.find_field_index(expr.name);
+                std::optional<std::size_t> field_index = info.find_field_index(expr.name);
                 if (!field_index.has_value()) return std::nullopt;
                 const Type& field_type = info.field_types[*field_index];
                 // ch05 §5.12: a Reference-typed field (e.g. a closure's
@@ -337,7 +325,7 @@ namespace scpp {
                     return *locals_.at(expr.name).type.function_return;
                 }
                 std::string callee_name = expr.name;
-                size_t param_offset = 0;
+                std::size_t param_offset = 0;
                 bool receiver_is_mutable = true;
                 if (expr.lhs != nullptr) {
                     std::optional<Type> receiver = infer_type(*expr.lhs);
@@ -589,7 +577,7 @@ namespace scpp {
 
 
     const Function* Codegen::resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
-                                              size_t param_offset, bool receiver_is_mutable ,
+                                              std::size_t param_offset, bool receiver_is_mutable ,
                                               const Expr* receiver_expr)
 {
         std::vector<const Function*> candidates;
@@ -620,7 +608,7 @@ namespace scpp {
                 continue;
             }
             bool all_match = true;
-            for (size_t i = 0; all_match && i < args.size(); i++) {
+            for (std::size_t i = 0; all_match && i < args.size(); i++) {
                 all_match = argument_matches_parameter(*args[i], fn->params[i + param_offset].type);
             }
             if (all_match) matches.push_back(fn);
@@ -643,7 +631,7 @@ namespace scpp {
                     score += 2;
                 }
             }
-            for (size_t i = 0; i < args.size(); i++) {
+            for (std::size_t i = 0; i < args.size(); i++) {
                 const Type& param_type = fn->params[i + param_offset].type;
                 if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref && !is_read_only_place(*args[i])) {
                     score++;
@@ -654,7 +642,7 @@ namespace scpp {
         const Function* best = matches[0];
         int best_score = mutable_ref_score(best);
         bool unique_best = true;
-        for (size_t i = 1; i < matches.size(); i++) {
+        for (std::size_t i = 1; i < matches.size(); i++) {
             int score = mutable_ref_score(matches[i]);
             if (score > best_score) {
                 best = matches[i];
@@ -675,7 +663,7 @@ namespace scpp {
             if (fn.name != class_name + "_new") continue;
             if (fn.params.size() != args.size() + 1) continue;
             bool all_match = true;
-            for (size_t i = 0; all_match && i < args.size(); i++) {
+            for (std::size_t i = 0; all_match && i < args.size(); i++) {
                 all_match = argument_matches_parameter(*args[i], fn.params[i + 1].type);
             }
             if (all_match) matches.push_back(&fn);
@@ -684,7 +672,7 @@ namespace scpp {
         if (matches.size() == 1) return matches[0];
         auto mutable_ref_score = [&](const Function* fn) {
             int score = 0;
-            for (size_t i = 0; i < args.size(); i++) {
+            for (std::size_t i = 0; i < args.size(); i++) {
                 const Type& param_type = fn->params[i + 1].type;
                 if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref && !is_read_only_place(*args[i])) {
                     score++;
@@ -695,7 +683,7 @@ namespace scpp {
         const Function* best = matches[0];
         int best_score = mutable_ref_score(best);
         bool unique_best = true;
-        for (size_t i = 1; i < matches.size(); i++) {
+        for (std::size_t i = 1; i < matches.size(); i++) {
             int score = mutable_ref_score(matches[i]);
             if (score > best_score) {
                 best = matches[i];
@@ -715,7 +703,7 @@ namespace scpp {
         switch (a.kind) {
             case TypeKind::Named:
                 if (a.name != b.name || a.template_args.size() != b.template_args.size()) return false;
-                for (size_t i = 0; i < a.template_args.size(); i++) {
+                for (std::size_t i = 0; i < a.template_args.size(); i++) {
                     if (!types_equal(a.template_args[i], b.template_args[i])) return false;
                 }
                 return true;
@@ -731,7 +719,7 @@ namespace scpp {
                     return false;
                 }
 
-                for (size_t i = 0; i < a.function_params.size(); i++) {
+                for (std::size_t i = 0; i < a.function_params.size(); i++) {
                     if (!types_equal(a.function_params[i], b.function_params[i])) return false;
                 }
                 return true;

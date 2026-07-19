@@ -1,11 +1,8 @@
 module;
 
-#include <cctype>
-#include <string>
-#include <string_view>
-#include <vector>
-
 export module scpp.lexer;
+
+import std;
 
 export namespace scpp {
 
@@ -202,14 +199,14 @@ public:
 
 private:
     std::string_view source_;
-    size_t pos_ = 0;
+    std::size_t pos_ = 0;
     int line_ = 1;
     int column_ = 1;
 
     [[nodiscard]] bool at_end() const { return pos_ >= source_.size(); }
 
-    char peek(size_t offset = 0) const {
-        size_t idx = pos_ + offset;
+    char peek(std::size_t offset = 0) const {
+        std::size_t idx = pos_ + offset;
         return idx < source_.size() ? source_[idx] : '\0';
     }
 
@@ -300,7 +297,7 @@ private:
         return TokenKind::Identifier;
     }
 
-    Token make_token(TokenKind kind, size_t start, int start_line, int start_col) {
+    Token make_token(TokenKind kind, std::size_t start, int start_line, int start_col) {
         return Token{kind, source_.substr(start, pos_ - start), start_line, start_col};
     }
 
@@ -321,7 +318,7 @@ private:
             return Token{TokenKind::EndOfFile, {}, pre_skip_line, pre_skip_col};
         }
 
-        size_t start = pos_;
+        std::size_t start = pos_;
         int start_line = line_;
         int start_col = column_;
         char c = advance();

@@ -1,22 +1,5 @@
 module;
 
-#include <array>
-#include <algorithm>
-#include <cctype>
-#include <cstdint>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <functional>
-#include <memory>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/MC/TargetRegistry.h>
@@ -30,6 +13,7 @@ module;
 
 export module scpp.driver;
 
+import std;
 import scpp.ast;
 import scpp.compiler.codegen;
 import scpp.constexpr_engine;
@@ -49,7 +33,7 @@ inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 struct CompileTimePayloadPlan {
     std::uint32_t format_version = SCPPM_COMPILE_TIME_AST_VERSION;
     std::vector<std::string> root_function_names;
-    std::vector<size_t> reachable_function_indices;
+    std::vector<std::size_t> reachable_function_indices;
     std::vector<std::string> reachable_type_names;
 };
 
@@ -71,7 +55,7 @@ namespace scpp {
 
 [[nodiscard]] std::optional<std::string> declared_module_name_from_source(std::string_view source) {
     std::vector<Token> tokens = tokenize(source);
-    size_t i = 0;
+    std::size_t i = 0;
     if (i < tokens.size() && tokens[i].kind == TokenKind::KwExport) i++;
     if (i >= tokens.size() || tokens[i].kind != TokenKind::KwModule) return std::nullopt;
     i++;
@@ -223,12 +207,12 @@ void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
 
 CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     CompileTimePayloadPlan plan;
-    std::unordered_map<std::string, std::vector<size_t>> function_indices_by_name;
+    std::unordered_map<std::string, std::vector<std::size_t>> function_indices_by_name;
     std::unordered_map<std::string, const EnumDef*> enums_by_name;
     std::unordered_map<std::string, const StructDef*> structs_by_name;
     std::unordered_map<std::string, const ClassDef*> classes_by_name;
-    std::unordered_multimap<std::string, size_t> methods_by_owner;
-    for (size_t i = 0; i < program.functions.size(); i++) {
+    std::unordered_multimap<std::string, std::size_t> methods_by_owner;
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
         function_indices_by_name[program.functions[i].name].push_back(i);
         if (!program.functions[i].member_owner_class.empty()) {
             methods_by_owner.emplace(program.functions[i].member_owner_class, i);
@@ -238,10 +222,10 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     for (const StructDef& def : program.structs) structs_by_name.emplace(def.name, &def);
     for (const ClassDef& def : program.classes) classes_by_name.emplace(def.name, &def);
 
-    std::unordered_set<size_t> visited_function_indices;
+    std::unordered_set<std::size_t> visited_function_indices;
     std::unordered_set<std::string> visited_types;
     std::unordered_set<std::string> pending_types;
-    std::vector<size_t> worklist;
+    std::vector<std::size_t> worklist;
 
     auto enqueue_type = [&](const std::string& name) {
         if (name.empty()) return;
@@ -251,7 +235,7 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
         }
     };
 
-    auto enqueue_function_index = [&](size_t index, bool is_root = false) {
+    auto enqueue_function_index = [&](std::size_t index, bool is_root = false) {
         if (index >= program.functions.size()) return;
         const Function& fn = program.functions[index];
         if (visited_function_indices.insert(index).second) {
@@ -267,14 +251,14 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
         if (name.empty()) return;
         auto it = function_indices_by_name.find(name);
         if (it == function_indices_by_name.end()) return;
-        for (size_t index : it->second) enqueue_function_index(index);
+        for (std::size_t index : it->second) enqueue_function_index(index);
     };
 
-    for (size_t i = 0; i < program.functions.size(); i++) {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
         if (is_compile_time_root(program, program.functions[i])) enqueue_function_index(i, true);
     }
 
-    size_t next_function_index = 0;
+    std::size_t next_function_index = 0;
     while (next_function_index < worklist.size() || !pending_types.empty()) {
         while (next_function_index < worklist.size()) {
             const Function& fn = program.functions[worklist[next_function_index++]];
@@ -345,13 +329,13 @@ void write_u8(std::ostream& out, std::uint8_t value) { out.put(static_cast<char>
 void write_i64_le(std::ostream& out, std::int64_t value) {
     std::array<char, 8> bytes = {};
     std::uint64_t raw = static_cast<std::uint64_t>(value);
-    for (size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((raw >> (8 * i)) & 0xffu);
+    for (std::size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((raw >> (8 * i)) & 0xffu);
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
 void write_u64_le(std::ostream& out, std::uint64_t value) {
     std::array<char, 8> bytes = {};
-    for (size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((value >> (8 * i)) & 0xffu);
+    for (std::size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((value >> (8 * i)) & 0xffu);
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
@@ -368,7 +352,7 @@ void write_u64_le(std::ostream& out, std::uint64_t value) {
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!in) throw DriverError("invalid " + context + ": truncated i64");
     std::uint64_t raw = 0;
-    for (size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+    for (std::size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return static_cast<std::int64_t>(raw);
 }
 
@@ -377,7 +361,7 @@ void write_u64_le(std::ostream& out, std::uint64_t value) {
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!in) throw DriverError("invalid " + context + ": truncated u64");
     std::uint64_t raw = 0;
-    for (size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+    for (std::size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return raw;
 }
 
@@ -1157,9 +1141,9 @@ void write_function(std::ostream& out, const Function& fn) {
     if (!ptr_equal(a.pointee, b.pointee) || !ptr_equal(a.element, b.element) || !ptr_equal(a.function_return, b.function_return)) {
         return false;
     }
-    for (size_t i = 0; i < a.template_args.size(); i++) if (!types_equal_for_payload_merge(a.template_args[i], b.template_args[i])) return false;
-    for (size_t i = 0; i < a.function_params.size(); i++) if (!types_equal_for_payload_merge(a.function_params[i], b.function_params[i])) return false;
-    for (size_t i = 0; i < a.non_type_args.size(); i++) {
+    for (std::size_t i = 0; i < a.template_args.size(); i++) if (!types_equal_for_payload_merge(a.template_args[i], b.template_args[i])) return false;
+    for (std::size_t i = 0; i < a.function_params.size(); i++) if (!types_equal_for_payload_merge(a.function_params[i], b.function_params[i])) return false;
+    for (std::size_t i = 0; i < a.non_type_args.size(); i++) {
         const auto& lhs = a.non_type_args[i];
         const auto& rhs = b.non_type_args[i];
         if (static_cast<bool>(lhs) != static_cast<bool>(rhs)) return false;
@@ -1171,7 +1155,7 @@ void write_function(std::ostream& out, const Function& fn) {
 
 [[nodiscard]] bool params_equal_for_payload_merge(const std::vector<Param>& a, const std::vector<Param>& b) {
     if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); i++) {
+    for (std::size_t i = 0; i < a.size(); i++) {
         if (a[i].name != b[i].name || a[i].generic_concept != b[i].generic_concept ||
             a[i].require_thread_movable != b[i].require_thread_movable ||
             a[i].require_thread_shareable != b[i].require_thread_shareable ||
@@ -1195,7 +1179,7 @@ void write_function(std::ostream& out, const Function& fn) {
 [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
                                                 const std::vector<GenericTypeParam>& b) {
     if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); i++) {
+    for (std::size_t i = 0; i < a.size(); i++) {
         if (a[i].name != b[i].name || a[i].concept_name != b[i].concept_name ||
             a[i].is_non_type != b[i].is_non_type || a[i].is_pack != b[i].is_pack) {
             return false;
@@ -1206,7 +1190,7 @@ void write_function(std::ostream& out, const Function& fn) {
 
 [[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) {
     if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); i++) {
+    for (std::size_t i = 0; i < a.size(); i++) {
         if (!types_equal_for_payload_merge(a[i], b[i])) return false;
     }
     return true;
@@ -1251,7 +1235,7 @@ struct GenericMethodOwnerRemap {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
     if (plan.root_function_names.empty()) return {};
 
-    std::unordered_set<size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
+    std::unordered_set<std::size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
                                                           plan.reachable_function_indices.end());
     std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
     std::vector<const StructDef*> structs;
@@ -1269,7 +1253,7 @@ struct GenericMethodOwnerRemap {
     for (const ClassDef& def : program.classes) {
         if (is_local_module_class(def) && reachable_type_names.contains(def.name)) classes.push_back(&def);
     }
-    for (size_t i = 0; i < program.functions.size(); i++) {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
         const Function& fn = program.functions[i];
         if (!is_local_module_function(fn)) continue;
         if (reachable_function_indices.contains(i)) functions.push_back(&fn);
@@ -1329,7 +1313,7 @@ struct GenericMethodOwnerRemap {
 
 void mark_reachable_hidden_compile_time_dependencies(Program& program) {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
-    std::unordered_set<size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
+    std::unordered_set<std::size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
                                                           plan.reachable_function_indices.end());
     std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
     for (EnumDef& def : program.enums) {
@@ -1347,7 +1331,7 @@ void mark_reachable_hidden_compile_time_dependencies(Program& program) {
             def.is_compile_time_dependency = true;
         }
     }
-    for (size_t i = 0; i < program.functions.size(); i++) {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
         if (!program.functions[i].is_exported && program.functions[i].owning_module.empty() &&
             reachable_function_indices.contains(i)) {
             program.functions[i].is_compile_time_dependency = true;
@@ -1565,28 +1549,28 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     return absolute.lexically_normal().string();
 }
 
-[[nodiscard]] std::vector<size_t> line_offsets(std::string_view source) {
-    std::vector<size_t> offsets = {0};
-    for (size_t i = 0; i < source.size(); i++) {
+[[nodiscard]] std::vector<std::size_t> line_offsets(std::string_view source) {
+    std::vector<std::size_t> offsets = {0};
+    for (std::size_t i = 0; i < source.size(); i++) {
         if (source[i] == '\n') offsets.push_back(i + 1);
     }
     return offsets;
 }
 
-[[nodiscard]] size_t offset_for_loc(std::string_view source, const SourceLocation& loc) {
-    std::vector<size_t> offsets = line_offsets(source);
-    size_t line_index = static_cast<size_t>(std::max(loc.line, 1) - 1);
+[[nodiscard]] std::size_t offset_for_loc(std::string_view source, const SourceLocation& loc) {
+    std::vector<std::size_t> offsets = line_offsets(source);
+    std::size_t line_index = static_cast<std::size_t>(std::max(loc.line, 1) - 1);
     if (line_index >= offsets.size()) return source.size();
-    return std::min(offsets[line_index] + static_cast<size_t>(std::max(loc.column, 1) - 1), source.size());
+    return std::min(offsets[line_index] + static_cast<std::size_t>(std::max(loc.column, 1) - 1), source.size());
 }
 
-[[nodiscard]] size_t find_matching_brace(std::string_view source, size_t open_offset) {
+[[nodiscard]] std::size_t find_matching_brace(std::string_view source, std::size_t open_offset) {
     bool in_string = false;
     bool in_char = false;
     bool in_line_comment = false;
     bool in_block_comment = false;
     int depth = 0;
-    for (size_t i = open_offset; i < source.size(); i++) {
+    for (std::size_t i = open_offset; i < source.size(); i++) {
         char c = source[i];
         char next = i + 1 < source.size() ? source[i + 1] : '\0';
         if (in_line_comment) {
@@ -1643,16 +1627,16 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     throw DriverError("failed to locate end of function body while writing module interface");
 }
 
-[[nodiscard]] std::optional<size_t> find_constructor_member_initializer_colon(std::string_view source,
-                                                                               size_t signature_begin,
-                                                                               size_t body_begin) {
+[[nodiscard]] std::optional<std::size_t> find_constructor_member_initializer_colon(std::string_view source,
+                                                                               std::size_t signature_begin,
+                                                                               std::size_t body_begin) {
     bool in_string = false;
     bool in_char = false;
     bool in_line_comment = false;
     bool in_block_comment = false;
     int paren_depth = 0;
     bool saw_param_list_end = false;
-    for (size_t i = signature_begin; i < body_begin; i++) {
+    for (std::size_t i = signature_begin; i < body_begin; i++) {
         char c = source[i];
         char next = i + 1 < source.size() ? source[i + 1] : '\0';
         if (in_line_comment) {
@@ -1716,23 +1700,23 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
 
 std::string strip_concrete_function_bodies(const Program& program, const std::string& file_path, std::string source) {
     struct BodyRange {
-        size_t begin;
-        size_t end;
+        std::size_t begin;
+        std::size_t end;
         std::string replacement;
     };
     std::vector<BodyRange> ranges;
     for (const Function& fn : program.functions) {
         if (!fn.body || !fn.loc.has_source_path()) continue;
         if (absolute_source_path(fn.loc.source_path_text()) != file_path) continue;
-        size_t begin = offset_for_loc(source, fn.body->loc);
+        std::size_t begin = offset_for_loc(source, fn.body->loc);
         if (begin >= source.size() || source[begin] != '{') continue;
         if (!fn.member_initializers.empty()) {
-            size_t signature_begin = offset_for_loc(source, fn.loc);
+            std::size_t signature_begin = offset_for_loc(source, fn.loc);
             if (auto colon = find_constructor_member_initializer_colon(source, signature_begin, begin)) {
                 ranges.push_back(BodyRange{*colon, begin, ""});
             }
         }
-        size_t end = find_matching_brace(source, begin);
+        std::size_t end = find_matching_brace(source, begin);
         ranges.push_back(BodyRange{begin, end + 1, ";"});
     }
     std::sort(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) { return a.begin > b.begin; });
@@ -1900,7 +1884,7 @@ public:
     [[nodiscard]] static std::string unescape_json_string(std::string_view text) {
         std::string out;
         out.reserve(text.size());
-        for (size_t i = 0; i < text.size(); i++) {
+        for (std::size_t i = 0; i < text.size(); i++) {
             char ch = text[i];
             if (ch == '\\' && i + 1 < text.size()) {
                 char next = text[++i];
@@ -1928,10 +1912,10 @@ public:
         const std::string archive_needle = "\"archive\": \"";
         while (std::getline(file, line)) {
             if (line.find(name_needle) == std::string::npos) continue;
-            size_t archive_pos = line.find(archive_needle);
+            std::size_t archive_pos = line.find(archive_needle);
             if (archive_pos == std::string::npos) continue;
             archive_pos += archive_needle.size();
-            size_t archive_end = line.find('"', archive_pos);
+            std::size_t archive_end = line.find('"', archive_pos);
             if (archive_end == std::string::npos) continue;
             return unescape_json_string(std::string_view(line).substr(archive_pos, archive_end - archive_pos));
         }
@@ -1974,7 +1958,7 @@ private:
     }
 
     [[nodiscard]] std::optional<std::string> infer_partition_path(const std::string& key) const {
-        size_t colon = key.find(':');
+        std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
         std::string partition_name = key.substr(colon + 1);
@@ -1998,9 +1982,9 @@ private:
 };
 
 [[nodiscard]] std::string trim_copy(std::string_view text) {
-    size_t begin = 0;
+    std::size_t begin = 0;
     while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) begin++;
-    size_t end = text.size();
+    std::size_t end = text.size();
     while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) end--;
     return std::string(text.substr(begin, end - begin));
 }
@@ -2034,16 +2018,16 @@ std::string render_module_interface_file(const Program& program, const std::stri
 std::string inline_partition_imports(const Program& program, const std::string& module_source_path, std::string_view source,
                                      bool keep_concrete_bodies, std::unordered_set<std::string>& expanded_partition_paths) {
     std::ostringstream out;
-    size_t line_start = 0;
+    std::size_t line_start = 0;
     while (line_start <= source.size()) {
-        size_t line_end = source.find('\n', line_start);
+        std::size_t line_end = source.find('\n', line_start);
         bool had_newline = line_end != std::string_view::npos;
         std::string_view line =
             had_newline ? source.substr(line_start, line_end - line_start) : source.substr(line_start);
         std::string trimmed = trim_copy(line);
         if (is_partition_import_line(trimmed)) {
-            size_t colon = trimmed.find(':');
-            size_t semi = trimmed.find(';', colon);
+            std::size_t colon = trimmed.find(':');
+            std::size_t semi = trimmed.find(';', colon);
             std::string partition_name = trimmed.substr(colon + 1, semi == std::string::npos ? std::string::npos
                                                                                             : semi - (colon + 1));
             std::string partition_path = absolute_source_path(partition_path_from_primary(module_source_path, partition_name));
@@ -2076,9 +2060,9 @@ std::string render_module_interface_file(const Program& program, const std::stri
     }
 
     std::ostringstream out;
-    size_t line_start = 0;
+    std::size_t line_start = 0;
     while (line_start <= source.size()) {
-        size_t line_end = source.find('\n', line_start);
+        std::size_t line_end = source.find('\n', line_start);
         bool had_newline = line_end != std::string::npos;
         std::string_view line =
             had_newline ? std::string_view(source).substr(line_start, line_end - line_start)
@@ -2107,9 +2091,9 @@ std::string hoist_non_partition_imports(std::string source) {
     std::string module_line;
     bool module_line_set = false;
 
-    size_t line_start = 0;
+    std::size_t line_start = 0;
     while (line_start <= source.size()) {
-        size_t line_end = source.find('\n', line_start);
+        std::size_t line_end = source.find('\n', line_start);
         bool had_newline = line_end != std::string::npos;
         std::string_view line =
             had_newline ? std::string_view(source).substr(line_start, line_end - line_start)
@@ -2135,7 +2119,7 @@ std::string hoist_non_partition_imports(std::string source) {
         out << '\n';
         for (const std::string& import_line : imports) out << import_line << '\n';
     }
-    for (size_t i = 0; i < body_lines.size(); i++) {
+    for (std::size_t i = 0; i < body_lines.size(); i++) {
         if ((module_line_set || !imports.empty()) || i > 0) out << '\n';
         out << body_lines[i];
     }

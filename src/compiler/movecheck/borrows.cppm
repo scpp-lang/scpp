@@ -1,20 +1,8 @@
 module;
 
-#include <algorithm>
-#include <cctype>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:borrows;
 
+import std;
 import scpp.ast;
 import :errors;
 import scpp.mir;
@@ -36,20 +24,20 @@ void validate_reborrow_lender_write(const std::string& lender, const DataflowSta
                                     bool report_errors);
 void release_reference_borrow(const std::string& name, DataflowState& state, const Body& body);
 void release_closure_capture_borrows(const std::string& name, DataflowState& state);
-std::vector<size_t> successors(const Terminator& term);
+std::vector<std::size_t> successors(const Terminator& term);
 void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out);
 std::optional<std::string> reference_def(const MirStatement& stmt);
 LiveSet reference_uses(const MirStatement& stmt, const Body& body);
 LiveSet reference_uses(const Terminator& term, const Body& body);
 std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
-                                                             const std::vector<std::vector<size_t>>& preds);
+                                                             const std::vector<std::vector<std::size_t>>& preds);
 void release_dead_references(DataflowState& state, const Body& body, const LiveSet& live_after_stmt);
 
 [[nodiscard]] RootSet resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
                                                  const Signatures& signatures, bool report_errors);
 [[nodiscard]] RootSet resolve_lifetime_source_roots(const Expr& expr, DataflowState& state, const Body& body,
                                                     const Signatures& signatures, bool report_errors);
-[[nodiscard]] std::optional<size_t> find_function_param_by_root(const Function& fn, const std::string& root);
+[[nodiscard]] std::optional<std::size_t> find_function_param_by_root(const Function& fn, const std::string& root);
 [[nodiscard]] bool roots_satisfy_named_lifetime_group(const RootSet& roots, const Function& fn,
                                                       std::string_view group_name);
 [[nodiscard]] bool roots_include_parameter_lifetime(const RootSet& roots, const DataflowState& state);
@@ -116,7 +104,7 @@ std::optional<std::string> resolve_reborrow_lender(const Expr& expr, const Body&
             bool returns_reference = sig != nullptr && !sig->returned_lifetime_param_indices.empty();
             if (!returns_reference) return std::nullopt;
             if (sig->returned_lifetime_param_indices.size() != 1) return std::nullopt;
-            size_t source_index = sig->returned_lifetime_param_indices.front();
+            std::size_t source_index = sig->returned_lifetime_param_indices.front();
             if (expr.name == "operator_deref" && expr.lhs != nullptr && source_index < callee.param_offset) {
                 return resolve_reborrow_lender(*expr.lhs, body, signatures);
             }
@@ -217,7 +205,7 @@ void release_closure_capture_borrows(const std::string& name, DataflowState& sta
     state.closure_capture_borrows.erase(closure_it);
 }
 
-std::vector<size_t> successors(const Terminator& term) {
+std::vector<std::size_t> successors(const Terminator& term) {
     switch (term.kind) {
         case TerminatorKind::Goto: return {term.target};
         case TerminatorKind::Branch: return {term.true_target, term.false_target};
@@ -422,27 +410,27 @@ LiveSet reference_uses(const Terminator& term, const Body& body) {
 // after applying statement i to decide whether a currently-tracked
 // reference has just become dead and should have its borrow released.
 std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
-                                                              const std::vector<std::vector<size_t>>& preds) {
-    size_t n = body.blocks.size();
+                                                              const std::vector<std::vector<std::size_t>>& preds) {
+    std::size_t n = body.blocks.size();
     std::vector<LiveSet> block_live_in(n);
 
-    auto block_live_out = [&](size_t b) {
+    auto block_live_out = [&](std::size_t b) {
         LiveSet live;
-        for (size_t succ : successors(body.blocks[b].terminator)) {
+        for (std::size_t succ : successors(body.blocks[b].terminator)) {
             live.insert(block_live_in[succ].begin(), block_live_in[succ].end());
         }
         return live;
     };
 
-    std::deque<size_t> worklist;
+    std::deque<std::size_t> worklist;
     std::vector<bool> queued(n, false);
-    for (size_t i = 0; i < n; i++) {
+    for (std::size_t i = 0; i < n; i++) {
         worklist.push_back(i);
         queued[i] = true;
     }
 
     while (!worklist.empty()) {
-        size_t b = worklist.front();
+        std::size_t b = worklist.front();
         worklist.pop_front();
         queued[b] = false;
 
@@ -458,7 +446,7 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
 
         if (live != block_live_in[b]) {
             block_live_in[b] = std::move(live);
-            for (size_t p : preds[b]) {
+            for (std::size_t p : preds[b]) {
                 if (!queued[p]) {
                     worklist.push_back(p);
                     queued[p] = true;
@@ -471,14 +459,14 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
     // block once more, this time also recording the live-out-after-each-
     // statement snapshot the forward pass needs.
     std::vector<std::vector<LiveSet>> live_after(n);
-    for (size_t b = 0; b < n; b++) {
+    for (std::size_t b = 0; b < n; b++) {
         const BasicBlock& block = body.blocks[b];
         LiveSet live = block_live_out(b);
         for (const std::string& use : reference_uses(block.terminator, body)) {
             live.insert(use);
         }
         live_after[b].resize(block.statements.size());
-        for (size_t i = block.statements.size(); i-- > 0;) {
+        for (std::size_t i = block.statements.size(); i-- > 0;) {
             live_after[b][i] = live;
             if (std::optional<std::string> def = reference_def(block.statements[i])) live.erase(*def);
             for (const std::string& use : reference_uses(block.statements[i], body)) live.insert(use);
@@ -644,7 +632,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             }
             check_call_arguments(expr, state, body, signatures, report_errors);
             RootSet roots;
-            for (size_t source_index : sig->returned_lifetime_param_indices) {
+            for (std::size_t source_index : sig->returned_lifetime_param_indices) {
                 if (expr.name == "operator_deref" && expr.lhs != nullptr && source_index < callee.param_offset) {
                     if (expr.lhs->kind == ExprKind::Identifier) {
                         roots = union_roots(std::move(roots), resolve_root_place(expr.lhs->name, state));
@@ -710,7 +698,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig == nullptr || sig->returned_lifetime_param_indices.empty()) return {};
             RootSet roots;
-            for (size_t source_index : sig->returned_lifetime_param_indices) {
+            for (std::size_t source_index : sig->returned_lifetime_param_indices) {
                 if (source_index < callee.param_offset) {
                     if (expr.lhs) {
                         roots = union_roots(std::move(roots),
@@ -730,8 +718,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     }
 }
 
-[[nodiscard]] std::optional<size_t> find_function_param_by_root(const Function& fn, const std::string& root) {
-    for (size_t i = 0; i < fn.params.size(); i++) {
+[[nodiscard]] std::optional<std::size_t> find_function_param_by_root(const Function& fn, const std::string& root) {
+    for (std::size_t i = 0; i < fn.params.size(); i++) {
         if (fn.params[i].name == root) return i;
     }
     return std::nullopt;
@@ -745,7 +733,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             fn.return_lifetime.name == group_name) {
             continue;
         }
-        std::optional<size_t> param_index = find_function_param_by_root(fn, root);
+        std::optional<std::size_t> param_index = find_function_param_by_root(fn, root);
         if (!param_index.has_value()) return false;
         if (fn.params[*param_index].lifetime.name != group_name) return false;
     }

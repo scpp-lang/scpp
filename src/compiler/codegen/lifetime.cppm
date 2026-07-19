@@ -1,17 +1,5 @@
 module;
 
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
-#include <limits>
-#include <map>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -28,9 +16,9 @@ module;
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/raw_ostream.h>
 
-
 module scpp.compiler.codegen:lifetime;
 
+import std;
 import :api;
 
 namespace scpp {
@@ -110,7 +98,7 @@ namespace scpp {
 {
         const Function* destructor = find_destructor_ast(interface_name);
         if (destructor == nullptr) return;
-        std::optional<size_t> slot_index = interface_method_slot_index(interface_name, *destructor);
+        std::optional<std::size_t> slot_index = interface_method_slot_index(interface_name, *destructor);
         if (!slot_index.has_value()) {
             throw CodegenError("missing destructor dispatch slot for interface '" + interface_name + "'", current_loc_);
         }
@@ -223,7 +211,7 @@ namespace scpp {
 {
         const StructInfo& info = structs_.at(class_name);
         if (info.has_ordinary_vtable) initialize_ordinary_vtable_pointer(class_name, dest_ptr);
-        for (size_t i = 0; i < info.field_names.size(); i++) {
+        for (std::size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
             llvm::Value* dest_field =
                 builder_->CreateStructGEP(info.llvm_type, dest_ptr, info.physical_field_index(i), info.field_names[i]);
@@ -248,7 +236,7 @@ namespace scpp {
     void Codegen::codegen_memberwise_copy_assign(llvm::Value* dest_ptr, llvm::Value* src_ptr, const std::string& class_name)
 {
         const StructInfo& info = structs_.at(class_name);
-        for (size_t i = 0; i < info.field_names.size(); i++) {
+        for (std::size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
             llvm::Value* dest_field =
                 builder_->CreateStructGEP(info.llvm_type, dest_ptr, info.physical_field_index(i), info.field_names[i]);
@@ -345,7 +333,7 @@ namespace scpp {
         if (struct_it == structs_.end()) return;
         const StructInfo& info = struct_it->second;
         (void)get_or_declare_free();
-        for (size_t i = 0; i < info.field_types.size(); i++) {
+        for (std::size_t i = 0; i < info.field_types.size(); i++) {
             const Type& field_type = info.field_types[i];
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 llvm::Value* field_ptr =

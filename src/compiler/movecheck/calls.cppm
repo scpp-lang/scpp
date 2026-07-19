@@ -1,20 +1,8 @@
 module;
 
-#include <algorithm>
-#include <cctype>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 module scpp.compiler.movecheck:calls;
 
+import std;
 import scpp.ast;
 import :errors;
 import scpp.mir;
@@ -30,7 +18,7 @@ namespace scpp {
 
 struct CalleeSignature {
     std::string key;
-    size_t param_offset = 0;
+    std::size_t param_offset = 0;
     std::optional<FunctionSignature> direct_signature;
 };
 
@@ -588,7 +576,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             !receiver_matches_method_qualifier(*call_expr.lhs, candidate, body, signatures)) {
             all_match = false;
         }
-        for (size_t i = 0; all_match && i < call_expr.args.size(); i++) {
+        for (std::size_t i = 0; all_match && i < call_expr.args.size(); i++) {
             all_match = argument_matches_parameter(*call_expr.args[i], candidate.param_types[i + callee.param_offset],
                                                      body, signatures);
         }
@@ -618,7 +606,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 score += 2;
             }
         }
-        for (size_t i = 0; i < call_expr.args.size(); i++) {
+        for (std::size_t i = 0; i < call_expr.args.size(); i++) {
             const Type& param_type = candidate.param_types[i + callee.param_offset];
             if (is_reference(param_type) && param_type.is_mutable_ref &&
                 !is_read_only_reachable(*call_expr.args[i], body, signatures)) {
@@ -630,7 +618,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     const FunctionSignature* best = matches[0];
     int best_score = mutable_ref_score(*best);
     bool unique_best = true;
-    for (size_t i = 1; i < matches.size(); i++) {
+    for (std::size_t i = 1; i < matches.size(); i++) {
         int score = mutable_ref_score(*matches[i]);
         if (score > best_score) {
             best = matches[i];
@@ -660,7 +648,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         }
         if (!receiver_matches_method_qualifier(*call_expr.lhs, candidate, body, signatures)) continue;
         bool all_match = true;
-        for (size_t i = 0; all_match && i < call_expr.args.size(); i++) {
+        for (std::size_t i = 0; all_match && i < call_expr.args.size(); i++) {
             all_match = argument_matches_parameter(*call_expr.args[i], candidate.param_types[i + 1], body, signatures);
         }
         if (all_match) return &candidate;
@@ -682,7 +670,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         !types_equal(*a.function_return, *b.function_return)) {
         return false;
     }
-    for (size_t i = 0; i < a.function_params.size(); i++) {
+    for (std::size_t i = 0; i < a.function_params.size(); i++) {
         if (!types_equal(a.function_params[i], b.function_params[i])) return false;
     }
     return true;
