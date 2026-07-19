@@ -1,0 +1,19 @@
+// docs/spec/en/05-unions-and-packed-layout.md §9.4(2)'s note lists an
+// id-expression naming a `constexpr` variable as an accepted bound form,
+// with no requirement that the constant live at global scope. A *local*
+// `constexpr` constant, declared earlier in the same function, is just as
+// usable as a later local array's bound as a *global* `constexpr`
+// constant already is (see the sibling
+// array_bound_literal_sizeof_alignof_arithmetic_and_named_constant_are_accepted.scpp
+// case) -- the early, non-executing pass that resolves array bounds ahead
+// of ordinary statement execution binds each local `constexpr`
+// declaration into its own constant-evaluation frame stack as it walks a
+// function body in order, exactly mirroring how that same pass already
+// makes local `constexpr` values available as `alignas` operands within
+// the same function.
+int main() {
+    constexpr int kLocalSize = 4;
+    char buf[kLocalSize];
+    buf[0] = 'a';
+    return 0;
+}
