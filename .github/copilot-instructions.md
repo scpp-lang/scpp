@@ -63,6 +63,24 @@ repository. 以下规则适用于在本仓库中工作的任何 Copilot agent（
 - Never create a branch without this prefix, no matter how small or
   exploratory the change is.
 - 无论改动多小、多么带有探索性质，都绝不能创建没有该前缀的分支。
+- The `<role>-agent/<slug>` prefix applies ONLY to the branch name. The git
+  **commit author/committer identity** for every commit in this repository,
+  regardless of which sub-agent or role produced it, must always be
+  `xyb <xyb@lotx.name>` — never a role-specific identity such as
+  `dev-agent@users.noreply.github.com`. Before committing, run
+  `git config user.name xyb && git config user.email xyb@lotx.name` in the
+  worktree, and re-verify with `git log -1 --format='%an <%ae>'` after
+  committing; if a commit ever shows the wrong identity, fix it with
+  `git commit --amend --reset-author --no-edit` (after correcting the config)
+  before pushing.
+- `<role>-agent/<slug>` 前缀只适用于分支名。本仓库中每一个 commit 的 git
+  **author / committer 身份**，无论由哪个 sub-agent 或角色产生，都必须始终是
+  `xyb <xyb@lotx.name>`——绝不能使用类似 `dev-agent@users.noreply.github.com`
+  这样的角色专属身份。提交前，请在工作目录中运行
+  `git config user.name xyb && git config user.email xyb@lotx.name`，并在
+  提交后用 `git log -1 --format='%an <%ae>'` 再次核实；如果某个 commit 的身份
+  不对，先修正配置，再用 `git commit --amend --reset-author --no-edit` 改正，
+  然后再 push。
 - Every PR in this repository must contain exactly one commit. If a change
   seems to need multiple commits, split the work into multiple separate PRs
   instead of stacking commits on one branch / PR.
