@@ -18,17 +18,21 @@
 - `std::span` 在语言层面的借用 / 绑定规则上仍有缺口：核心的“从定长局部数组绑
   定”已经可以工作，但直接从字符串字面量绑定仍然会失败，而且 `std::span` 在构
   造后仍然不能重新绑定。
-- 大部分 ISO `alignas` / `alignof(type-id)` 支持已经落地，但文件作用域上的
-  变量声明只要写 `alignas` 仍会被拒绝；同样的写法放在局部变量或 class 声明上则
-  已经可以工作。
-- 规范现在已经显式规定数组边界可以是任意常量表达式，包括依赖某个模板参数、
-  value-dependent 的边界（例如 `sizeof(T)`；这类边界会在每次实例化时求值，
-  和任何其它 value-dependent 表达式一样）：`sizeof`、`alignof`、具名的
-  `constexpr` 常量，或者由它们组成的算术 / 比较组合，现在都可以出现在任何
-  原本只允许裸整数字面量的位置；但编译器目前仍然只能解析单个整数字面量
-  token 作为数组边界，其它形式一律被拒绝。编译器目前也还不能在单态化之前
-  对依赖模板参数的数组边界求值——这与目前同样阻碍 `alignas` 依赖模板参数的
-  限制，是同一个底层缺口。
+- 泛型（模板）`union` 声明会被直接拒绝，尽管带模板的 union 本身是普通、
+  合法的 ISO C++ 语法，而且非泛型 union 已经可以工作：union 的成员类型
+  永远无法用外层模板自己的类型参数来参数化。
+- 多文件的 module 构建目前还不能端到端工作：基于 manifest 的项目构建
+  （`scpp build`）会把任何被归类为 module 实现单元的源文件（以裸
+  `module name;` 开头、没有 `export` 的文件）直接拒绝，报错 "module
+  implementation units are not implemented in project builds yet"，所
+  以在真正的构建里，一个 module 的接口和实现现在还无法真正拆分到多个文
+  件里。为了支持这种拆分而存在的裸 `extern` 声明形式（一个已导出、无函
+  数体的 `extern int f(...);`，其函数体本应放在单独的实现单元或者
+  `.scppo` object 里）同样没有任何可行路径能真正获得那个函数体：无论在
+  同一个程序里的什么位置补上函数体——同一个 namespace 块，还是另外重新
+  打开的 namespace 块——都会被当作 redefinition 拒绝，而不会被当作该声
+  明自己的定义来接受；如果干脆不提供函数体，一旦被调用就会在链接阶段报
+  undefined-reference 错误。
 - coroutine / async 语言支持仍然缺失：还没有 `co_await`、`co_yield`、
   `co_return`，也没有 coroutine lowering / runtime integration。
 

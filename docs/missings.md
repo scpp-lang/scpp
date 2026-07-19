@@ -20,20 +20,24 @@ rules, coroutine machinery, codegen, or preprocessor support.
   the core fixed-size-local-array case works, but direct binding from a string
   literal still fails, and `std::span` still cannot be rebound after
   construction.
-- Most ISO `alignas` / `alignof(type-id)` support has landed, but `alignas` on
-  a file-scope variable declaration is still rejected even though the same
-  spelling works on local variables and class declarations.
-- The spec now explicitly specifies array-bound constant expressions,
-  including bounds that are value-dependent on a template parameter (e.g.
-  `sizeof(T)`, resolved at each point of instantiation like any other
-  value-dependent expression): a `sizeof`, `alignof`, named `constexpr`
-  constant, or arithmetic/comparison combination is now permitted anywhere
-  a bare integer literal is, but the compiler still only parses a single
-  integer-literal token as an array bound and rejects everything else. The
-  compiler also cannot yet evaluate an array bound that depends on a
-  template parameter before monomorphization -- the same underlying gap
-  that currently also blocks `alignas` from depending on a template
-  parameter.
+- Generic (template) `union` declarations are rejected outright, even
+  though a templated union is ordinary, valid ISO C++ syntax and
+  non-generic unions already work: a union's member types can never be
+  parameterized by an enclosing template's own type parameters.
+- Multi-file module builds are not usable end-to-end yet: a manifest-driven
+  project build (`scpp build`) rejects any source file classified as a
+  module implementation unit (a file starting with plain `module name;`,
+  no `export`) with "module implementation units are not implemented in
+  project builds yet", so a module's interface and implementation cannot
+  really be split across files in a real build. The bare `extern`
+  declaration form that exists precisely to let such a split happen (an
+  exported, bodyless `extern int f(...);` whose body is meant to live in a
+  separate implementation unit or `.scppo` object) has no working path to
+  ever receive that body either: supplying one anywhere reachable in the
+  same program -- the same namespace block, or a separately reopened one --
+  is rejected as a redefinition rather than accepted as that declaration's
+  own definition, and leaving it undefined instead fails to link with an
+  undefined-reference error as soon as it's called.
 - Coroutine/async language support is still absent: no `co_await`, `co_yield`,
   `co_return`, or coroutine lowering/runtime integration yet.
 
