@@ -31,7 +31,7 @@
 
 - Packages, Modules, and Project Layout
   - [Packages and Project Manifests](ch07-01-packages-and-project-manifests.md)
-  - Control Scope and Privacy with Modules
+  - [Control Scope and Privacy with Modules](ch07-02-control-scope-and-privacy-with-modules.md)
   - Paths for Referring to Items in the Module Tree
   - Using `import` and Qualified Names
   - Separating Modules into Different Files
