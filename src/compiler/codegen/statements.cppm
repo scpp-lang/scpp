@@ -1,20 +1,6 @@
 module;
 
-#include <llvm/IR/BasicBlock.h>
-#include <llvm/IR/Constants.h>
-#include <llvm/IR/DIBuilder.h>
-#include <llvm/IR/DebugInfoMetadata.h>
-#include <llvm/IR/DataLayout.h>
-#include <llvm/IR/DerivedTypes.h>
-#include <llvm/IR/Function.h>
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/Intrinsics.h>
-#include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/Type.h>
-#include <llvm/IR/Verifier.h>
-#include <llvm/BinaryFormat/Dwarf.h>
-#include <llvm/Support/raw_ostream.h>
+#include <llvm-c/Core.h>
 
 module scpp.compiler.codegen:statements;
 
@@ -23,7 +9,7 @@ import :api;
 
 namespace scpp {
 
-    void Codegen::codegen_stmt(const Stmt& stmt, llvm::Function* current_function)
+    void Codegen::codegen_stmt(const Stmt& stmt, LLVMValueRef current_function)
 {
         // Refreshed on every call (including each recursive call for a
         // nested statement) so a CodegenError thrown while handling
@@ -43,7 +29,7 @@ namespace scpp {
                 for (const auto& s : stmt.statements) {
                     // Once a block has a terminator (return), skip anything
                     // after it: unreachable code shouldn't be lowered.
-                    if (builder_->GetInsertBlock()->getTerminator() != nullptr) break;
+                    if (LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder_)) != nullptr) break;
                     codegen_stmt(*s, current_function);
                 }
                 if (stmt.is_unsafe) unsafe_depth_--;
@@ -51,10 +37,10 @@ namespace scpp {
                 return;
 
             case StmtKind::VarDecl: {
-                std::optional<llvm::Align> declared_alignment = alignment_for_type(stmt.type);
+                std::optional<unsigned> declared_alignment = alignment_for_type(stmt.type);
                 if (stmt.resolved_alignment != 0) {
-                    llvm::Align explicit_align(stmt.resolved_alignment);
-                    if (!declared_alignment.has_value() || explicit_align.value() > declared_alignment->value()) {
+                    unsigned explicit_align = stmt.resolved_alignment;
+                    if (!declared_alignment.has_value() || explicit_align > *declared_alignment) {
                         declared_alignment = explicit_align;
                     }
                 }
@@ -69,7 +55,7 @@ namespace scpp {
                             current_loc_);
                     }
                     if (is_interface_reference_type(stmt.type)) {
-                        llvm::AllocaInst* slot =
+                        LLVMValueRef slot =
                             create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name, declared_alignment);
                         create_store(codegen_interface_value_for_target(*stmt.init, stmt.type), slot, alignment_for_type(stmt.type));
                         locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
@@ -95,13 +81,13 @@ namespace scpp {
                     // address directly, and also enforces it resolves to
                     // a real, addressable place (a plain variable, or a
                     // further member/subscript chain off one).
-                    llvm::Value* referent_addr =
+                    LLVMValueRef referent_addr =
                         !stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)
                             ? codegen_materialize_rvalue_reference_source(*stmt.init)
                             : codegen_lvalue(*stmt.init).ptr;
-                    llvm::AllocaInst* slot =
-                        create_entry_block_alloca(llvm::PointerType::getUnqual(*context_), stmt.var_name, declared_alignment);
-                    builder_->CreateStore(referent_addr, slot);
+                    LLVMValueRef slot =
+                        create_entry_block_alloca(LLVMPointerTypeInContext(context_, 0), stmt.var_name, declared_alignment);
+                    LLVMBuildStore(builder_, referent_addr, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
@@ -121,10 +107,10 @@ namespace scpp {
                                             "' must be initialized (bound to an array) at declaration",
                             current_loc_);
                     }
-                    llvm::Type* span_type = to_llvm_type(stmt.type);
-                    llvm::Value* span_value = codegen_span_value_for_target(*stmt.init, stmt.type);
-                    llvm::AllocaInst* slot = create_entry_block_alloca(span_type, stmt.var_name, declared_alignment);
-                    builder_->CreateStore(span_value, slot);
+                    LLVMTypeRef span_type = to_llvm_type(stmt.type);
+                    LLVMValueRef span_value = codegen_span_value_for_target(*stmt.init, stmt.type);
+                    LLVMValueRef slot = create_entry_block_alloca(span_type, stmt.var_name, declared_alignment);
+                    LLVMBuildStore(builder_, span_value, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
@@ -158,7 +144,7 @@ namespace scpp {
                 // every scalar/struct/array/pointer type the general
                 // path below handles).
                 if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
-                    llvm::AllocaInst* closure_ptr =
+                    LLVMValueRef closure_ptr =
                         create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name, declared_alignment);
                     codegen_construct_lambda(*stmt.init, closure_ptr);
                     locals_[stmt.var_name] = LocalSlot{closure_ptr, stmt.type};
@@ -170,8 +156,8 @@ namespace scpp {
                     return;
                 }
 
-                llvm::Type* llvm_type = to_llvm_type(stmt.type);
-                llvm::AllocaInst* slot = create_entry_block_alloca(llvm_type, stmt.var_name, declared_alignment);
+                LLVMTypeRef llvm_type = to_llvm_type(stmt.type);
+                LLVMValueRef slot = create_entry_block_alloca(llvm_type, stmt.var_name, declared_alignment);
                 if (stmt.has_ctor_args) {
                     // `ClassName name{args};` (ch04 §4.2 / spec §6.1):
                     // direct-
@@ -233,11 +219,11 @@ namespace scpp {
                             current_loc_);
                     }
                     if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
-                        llvm::Value* value = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
+                        LLVMValueRef value = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
                         create_store(value, slot, declared_alignment);
                         return;
                     }
-                    llvm::Function* ctor = module_->getFunction(overload_names_.at(ctor_def));
+                    LLVMValueRef ctor = LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
                     if (ctor == nullptr) {
                         throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                             current_loc_);
@@ -245,9 +231,9 @@ namespace scpp {
                     if (const ClassDef* class_def = find_class_def(stmt.type.name)) {
                         emit_complete_object_interface_initializers(*class_def, ctor_def, slot);
                     }
-                    std::vector<llvm::Value*> args = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                    std::vector<LLVMValueRef> args = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
                     args.insert(args.begin(), slot);
-                    builder_->CreateCall(ctor, args);
+                    build_call(ctor, args);
                     return;
                 }
                 if (stmt.init) {
@@ -265,8 +251,8 @@ namespace scpp {
                         // compiler-provided recursive memberwise copy.
                         LValue src = codegen_lvalue(*stmt.init);
                         if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
-                            llvm::Function* ctor = module_->getFunction(overload_names_.at(user_ctor));
-                            builder_->CreateCall(ctor, {slot, src.ptr});
+                            LLVMValueRef ctor = LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+                            build_call(ctor, {slot, src.ptr});
                         } else {
                             codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name);
                         }
@@ -279,7 +265,7 @@ namespace scpp {
                         }
                         return;
                     }
-                    llvm::Value* init_value = codegen_value_for_target(*stmt.init, stmt.type);
+                    LLVMValueRef init_value = codegen_value_for_target(*stmt.init, stmt.type);
                     // Refresh to `stmt`'s own position: codegen_expr just
                     // recursed through `stmt.init` (possibly a compound
                     // expression like `a + b`), leaving current_loc_ at
@@ -325,7 +311,7 @@ namespace scpp {
                 // it means returning that address, not its current value
                 // -- codegen_lvalue, not codegen_expr (which would
                 // auto-dereference it, same as any other read).
-                llvm::Value* value = nullptr;
+                LLVMValueRef value = nullptr;
                 if (stmt.expr) {
                     if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
                         current_function_def_->return_type.name == "void") {
@@ -355,9 +341,9 @@ namespace scpp {
                 }
                 free_unique_ptr_locals();
                 if (value != nullptr) {
-                    builder_->CreateRet(value);
+                    LLVMBuildRet(builder_, value);
                 } else {
-                    builder_->CreateRetVoid();
+                    LLVMBuildRetVoid(builder_);
                 }
                 return;
             }
@@ -378,38 +364,38 @@ namespace scpp {
                 // `stmt.condition` is a `bool` expression, stored/passed
                 // as i8 (see to_llvm_type) -- CreateCondBr needs a 1-bit
                 // condition, so narrow it right here (see bool_to_i1).
-                llvm::Value* cond = codegen_contextual_bool_i1(*stmt.condition);
-                llvm::BasicBlock* then_block = llvm::BasicBlock::Create(*context_, "if.then", current_function);
-                llvm::BasicBlock* else_block = llvm::BasicBlock::Create(*context_, "if.else", current_function);
-                llvm::BasicBlock* merge_block = llvm::BasicBlock::Create(*context_, "if.end", current_function);
+                LLVMValueRef cond = codegen_contextual_bool_i1(*stmt.condition);
+                LLVMBasicBlockRef then_block = LLVMAppendBasicBlockInContext(context_, current_function, "if.then");
+                LLVMBasicBlockRef else_block = LLVMAppendBasicBlockInContext(context_, current_function, "if.else");
+                LLVMBasicBlockRef merge_block = LLVMAppendBasicBlockInContext(context_, current_function, "if.end");
 
-                builder_->CreateCondBr(cond, then_block, else_block);
+                LLVMBuildCondBr(builder_, cond, then_block, else_block);
 
                 // then/else each get their own scope so a unique_ptr
                 // declared in one branch (with or without braces -- a
                 // bare `if (c) unique_ptr<T> x = ...;` is valid grammar,
                 // same as real C++) is dropped at the end of *that*
                 // branch, not left dangling in the flat locals_ map.
-                builder_->SetInsertPoint(then_block);
+                LLVMPositionBuilderAtEnd(builder_, then_block);
                 push_scope();
                 codegen_stmt(*stmt.then_branch, current_function);
                 pop_scope();
-                if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
-                    builder_->CreateBr(merge_block);
+                if (LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder_)) == nullptr) {
+                    LLVMBuildBr(builder_, merge_block);
                 }
 
-                builder_->SetInsertPoint(else_block);
+                LLVMPositionBuilderAtEnd(builder_, else_block);
                 push_scope();
                 if (stmt.else_branch) {
                     codegen_stmt(*stmt.else_branch, current_function);
                 }
                 pop_scope();
-                if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
-                    builder_->CreateBr(merge_block);
+                if (LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder_)) == nullptr) {
+                    LLVMBuildBr(builder_, merge_block);
                 }
 
-                builder_->SetInsertPoint(merge_block);
-                if (merge_block->hasNPredecessorsOrMore(1)) {
+                LLVMPositionBuilderAtEnd(builder_, merge_block);
+                if (LLVMGetFirstUse(LLVMBasicBlockAsValue(merge_block)) != nullptr) {
                     return;
                 }
                 // Both branches terminated (e.g. returned), so this merge
@@ -417,52 +403,52 @@ namespace scpp {
                 // every basic block must end with one, and let the caller
                 // see the *original* branches' terminators, not this dead
                 // block, when checking "does this path return?".
-                builder_->CreateUnreachable();
+                LLVMBuildUnreachable(builder_);
                 return;
             }
 
             case StmtKind::While: {
-                llvm::BasicBlock* cond_block = llvm::BasicBlock::Create(*context_, "while.cond", current_function);
-                llvm::BasicBlock* body_block = llvm::BasicBlock::Create(*context_, "while.body", current_function);
-                llvm::BasicBlock* end_block = llvm::BasicBlock::Create(*context_, "while.end", current_function);
+                LLVMBasicBlockRef cond_block = LLVMAppendBasicBlockInContext(context_, current_function, "while.cond");
+                LLVMBasicBlockRef body_block = LLVMAppendBasicBlockInContext(context_, current_function, "while.body");
+                LLVMBasicBlockRef end_block = LLVMAppendBasicBlockInContext(context_, current_function, "while.end");
 
-                builder_->CreateBr(cond_block);
+                LLVMBuildBr(builder_, cond_block);
 
-                builder_->SetInsertPoint(cond_block);
+                LLVMPositionBuilderAtEnd(builder_, cond_block);
                 // Same bool_to_i1 narrowing as the If case above.
-                llvm::Value* cond = codegen_contextual_bool_i1(*stmt.condition);
-                builder_->CreateCondBr(cond, body_block, end_block);
+                LLVMValueRef cond = codegen_contextual_bool_i1(*stmt.condition);
+                LLVMBuildCondBr(builder_, cond, body_block, end_block);
 
                 // The body's scope is popped (and its unique_ptr locals
                 // dropped) at the end of *every* iteration, right before
                 // jumping back to re-check the condition -- so a
                 // unique_ptr re-declared each iteration doesn't leak the
                 // previous iteration's allocation.
-                builder_->SetInsertPoint(body_block);
+                LLVMPositionBuilderAtEnd(builder_, body_block);
                 push_scope();
                 loop_stack_.push_back(LoopFrame{cond_block, end_block, scope_stack_.size()});
                 codegen_stmt(*stmt.then_branch, current_function);
                 pop_scope();
                 loop_stack_.pop_back();
-                if (builder_->GetInsertBlock()->getTerminator() == nullptr) {
-                    builder_->CreateBr(cond_block);
+                if (LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder_)) == nullptr) {
+                    LLVMBuildBr(builder_, cond_block);
                 }
 
-                builder_->SetInsertPoint(end_block);
+                LLVMPositionBuilderAtEnd(builder_, end_block);
                 return;
             }
 
             case StmtKind::Break:
                 if (!loop_stack_.empty()) {
                     emit_scope_cleanup_to_depth(loop_stack_.back().scope_depth);
-                    builder_->CreateBr(loop_stack_.back().end_block);
+                    LLVMBuildBr(builder_, loop_stack_.back().end_block);
                 }
                 return;
 
             case StmtKind::Continue:
                 if (!loop_stack_.empty()) {
                     emit_scope_cleanup_to_depth(loop_stack_.back().scope_depth);
-                    builder_->CreateBr(loop_stack_.back().cond_block);
+                    LLVMBuildBr(builder_, loop_stack_.back().cond_block);
                 }
                 return;
         }
@@ -471,10 +457,31 @@ namespace scpp {
 
     void Codegen::free_unique_ptr_locals()
 {
-        for (const auto& [name, slot] : locals_) {
-            if (slot.type.kind == TypeKind::Named) {
-                if (class_has_destructor_in_chain(slot.type.name)) {
-                    codegen_call_destructor_chain_unless_moved(slot.type.name, slot.alloca, slot.moved_flag);
+        // Block-scoped locals first (deepest scope first, reverse
+        // declaration order within each), matching pop_scope()'s own
+        // single-scope case -- see emit_scope_cleanup_to_depth's comment.
+        emit_scope_cleanup_to_depth(0);
+
+        // Then this function's own parameters, in reverse *parameter*
+        // order: a parameter list is conceptually constructed left-to-
+        // right as the function is entered (before any of the body's own
+        // locals), so it's torn down right-to-left, same "reverse of
+        // construction order" rule as everywhere else in this codegen.
+        // Parameters live in locals_ like any other local slot, but
+        // (unlike block-scoped locals) are never pushed onto
+        // scope_stack_ (see the parameter-binding loop in
+        // define_function), so emit_scope_cleanup_to_depth above can't
+        // see them; they need this separate pass.
+        if (current_function_def_ != nullptr) {
+            const std::vector<Param>& params = current_function_def_->params;
+            for (auto it = params.rbegin(); it != params.rend(); ++it) {
+                auto slot_it = locals_.find(it->name);
+                if (slot_it == locals_.end()) continue;
+                if (slot_it->second.type.kind == TypeKind::Named) {
+                    if (class_has_destructor_in_chain(slot_it->second.type.name)) {
+                        codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
+                                                                   slot_it->second.moved_flag);
+                    }
                 }
             }
         }
@@ -490,7 +497,7 @@ namespace scpp {
         std::vector<std::string> names = std::move(scope_stack_.back());
         scope_stack_.pop_back();
 
-        bool already_terminated = builder_->GetInsertBlock()->getTerminator() != nullptr;
+        bool already_terminated = LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder_)) != nullptr;
         if (!already_terminated) {
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
                 auto slot_it = locals_.find(*it);

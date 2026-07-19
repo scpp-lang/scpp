@@ -1,0 +1,103 @@
+// A plain, non-moduled entry point (ch11: a file with `export module ...;`
+// never gets its main() linked as the process entry point) that imports
+// the `scpp.llvm` module (libs/scpp_llvm/ package) exactly as any scpp user
+// would -- building a small LLVM module from scratch, querying it,
+// printing its IR, and verifying it -- proving libs/scpp_llvm/ works end
+// to end under the real scpp compiler. Invoked by tests/llvm_lib_test.cpp;
+// its stdout is asserted against there.
+import std;
+import scpp.llvm;
+
+int main() {
+    scpp::llvm::core::Context context{};
+    // Named `mod`, not `module` -- `module` is a scpp keyword (ch11's
+    // `export module name;`), not just LLVM/C++ terminology.
+    scpp::llvm::core::Module mod{"llvm_lib_demo", context};
+
+    scpp::llvm::core::Type i32 = scpp::llvm::core::Type::get_int32(context);
+    scpp::llvm::core::Type i64 = scpp::llvm::core::Type::get_int64(context);
+
+    std::println("i32 alloc size: {}", static_cast<int>(mod.type_alloc_size(i32)));
+    std::println("i32 size in bits: {}", static_cast<int>(mod.type_size_in_bits(i32)));
+    std::println("i32 abi align: {}", static_cast<int>(mod.abi_type_align(i32)));
+    std::println("i64 alloc size: {}", static_cast<int>(mod.type_alloc_size(i64)));
+    std::println("pointer size: {}", static_cast<int>(mod.pointer_size(0)));
+    // Exercises pointer_abi_alignment, the one query that composes two
+    // official LLVM-C calls (LLVMPointerTypeInContext +
+    // LLVMABIAlignmentOfType, see scpp_llvm_core.scpp's own comment)
+    // instead of a single direct one -- proving that composition also
+    // works end to end under the real scpp compiler, not just the
+    // single-call direct-to-LLVM-C queries above.
+    std::println("pointer abi align: {}", static_cast<int>(mod.pointer_abi_alignment(0)));
+
+    // The remaining scalar Type factories added alongside i32/i64 above:
+    // i1/i8/i16 (sub-word integers), float/double (IEEE binary32/
+    // binary64), and void (no size/alignment of its own -- not queried
+    // below for that reason).
+    scpp::llvm::core::Type i1 = scpp::llvm::core::Type::get_int1(context);
+    scpp::llvm::core::Type i8 = scpp::llvm::core::Type::get_int8(context);
+    scpp::llvm::core::Type i16 = scpp::llvm::core::Type::get_int16(context);
+    scpp::llvm::core::Type f32 = scpp::llvm::core::Type::get_float(context);
+    scpp::llvm::core::Type f64 = scpp::llvm::core::Type::get_double(context);
+    scpp::llvm::core::Type void_ty = scpp::llvm::core::Type::get_void(context);
+    std::println("i1 size in bits: {}", static_cast<int>(mod.type_size_in_bits(i1)));
+    std::println("i8 size in bits: {}", static_cast<int>(mod.type_size_in_bits(i8)));
+    std::println("i16 size in bits: {}", static_cast<int>(mod.type_size_in_bits(i16)));
+    std::println("f32 size in bits: {}", static_cast<int>(mod.type_size_in_bits(f32)));
+    std::println("f64 size in bits: {}", static_cast<int>(mod.type_size_in_bits(f64)));
+
+    // Derived Types: a pointer, a 10-element i32 array, an anonymous
+    // (unnamed) 3-field struct, and an (int, i64) -> i32 function
+    // signature -- each queried the same way as the scalars above to
+    // prove their LLVM-C construction is correct, not just non-crashing.
+    scpp::llvm::core::Type ptr_ty = scpp::llvm::core::Type::get_pointer(context, 0);
+    scpp::llvm::core::Type array_ty = scpp::llvm::core::Type::get_array(i32, 10);
+    std::println("array alloc size: {}", static_cast<int>(mod.type_alloc_size(array_ty)));
+
+    scpp::llvm::core::Type struct_fields[3];
+    struct_fields[0] = i32;
+    struct_fields[1] = f64;
+    struct_fields[2] = ptr_ty;
+    std::span<const scpp::llvm::core::Type> struct_field_span = struct_fields;
+    scpp::llvm::core::Type struct_ty = scpp::llvm::core::Type::get_struct(context, struct_field_span, false);
+    // i32 (4-byte aligned) then padding to f64's 8-byte alignment, f64,
+    // then an 8-byte pointer: 4 + 4 pad + 8 + 8 = 24 bytes.
+    std::println("struct alloc size: {}", static_cast<int>(mod.type_alloc_size(struct_ty)));
+    // Also print the struct's own IR text, to directly confirm (not just
+    // via its overall alloc size) that all 3 field types survived the
+    // malloc/free marshalling in Type::get_struct in the right order.
+    struct_ty.print();
+
+    scpp::llvm::core::Type fn_param_types[2];
+    fn_param_types[0] = i32;
+    fn_param_types[1] = i64;
+    std::span<const scpp::llvm::core::Type> fn_param_span = fn_param_types;
+    scpp::llvm::core::Type fn_ty = scpp::llvm::core::Type::get_function(i32, fn_param_span, false);
+    // Function types have no size/alignment of their own in LLVM, so
+    // printing its IR text is the only way to confirm the return type and
+    // both parameter types survived Type::get_function's own marshalling.
+    fn_ty.print();
+
+    // Simple Constants: an i32, a double, and a null pointer -- printed as
+    // LLVM IR text (Value::print, mirroring Module::print) to prove they
+    // hold the exact values requested, and round-tripped through
+    // Value::type_of to prove a Value can recover its own Type.
+    scpp::llvm::core::Value const_i32 = scpp::llvm::core::Value::const_int(i32, 42, false);
+    scpp::llvm::core::Value const_f64 = scpp::llvm::core::Value::const_real(f64, 3.5);
+    scpp::llvm::core::Value null_ptr = scpp::llvm::core::Value::const_null(ptr_ty);
+    const_i32.print();
+    const_f64.print();
+    null_ptr.print();
+    std::println("const_i32 type size in bits: {}", static_cast<int>(mod.type_size_in_bits(const_i32.type_of())));
+
+    std::expected<bool, scpp::llvm::core::error> verify_result = mod.verify();
+    if (!verify_result.has_value()) {
+        std::println("module verification FAILED");
+        return 1;
+    }
+    std::println("module verified ok");
+
+    mod.print();
+
+    return 0;
+}

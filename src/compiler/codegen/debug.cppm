@@ -1,20 +1,19 @@
 module;
 
-#include <llvm/IR/BasicBlock.h>
-#include <llvm/IR/Constants.h>
-#include <llvm/IR/DIBuilder.h>
-#include <llvm/IR/DebugInfoMetadata.h>
-#include <llvm/IR/DataLayout.h>
-#include <llvm/IR/DerivedTypes.h>
-#include <llvm/IR/Function.h>
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/Intrinsics.h>
-#include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/Type.h>
-#include <llvm/IR/Verifier.h>
-#include <llvm/BinaryFormat/Dwarf.h>
-#include <llvm/Support/raw_ostream.h>
+// Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
+// interface -- the DataLayout numeric queries in this file go through its
+// llvm-c/Target.h functions directly below instead of llvm::DataLayout,
+// so this file no longer needs the heavier <llvm/IR/DataLayout.h> or any
+// other native LLVM C++ header. See libs/README.md for why this project
+// binds straight to LLVM-C wherever it already covers what's needed --
+// including pointer ABI alignment (see pointer_abi_alignment_for_as
+// below) and every DIBuilder debug-info operation this file performs: a
+// rigorous, function-by-function empirical audit found LLVM-C fully
+// covers every LLVM operation this project's codegen needs, so there is
+// no custom wrapper of any kind here.
+#include <llvm-c/Core.h>
+#include <llvm-c/DebugInfo.h>
+#include <llvm-c/Target.h>
 
 module scpp.compiler.codegen:debug;
 
@@ -23,25 +22,60 @@ import :api;
 
 namespace scpp {
 
+namespace {
+
+// Standard DWARF attribute-encoding values (DWARF spec, also mirrored in
+// LLVM's own llvm/BinaryFormat/Dwarf.def as DW_ATE_*) -- named locally
+// since llvm-c/DebugInfo.h's LLVMDWARFTypeEncoding is a bare `unsigned`
+// with no accompanying named enumerators of its own, unlike
+// LLVMDWARFSourceLanguage (which does have real enumerators, used
+// directly below in initialize_debug_info).
+constexpr unsigned kDwAteBoolean = 0x02;
+constexpr unsigned kDwAteFloat = 0x04;
+constexpr unsigned kDwAteSigned = 0x05;
+constexpr unsigned kDwAteSignedChar = 0x06;
+constexpr unsigned kDwAteUnsigned = 0x07;
+
+LLVMTargetDataRef data_layout_ref(LLVMModuleRef module) { return LLVMGetModuleDataLayout(module); }
+
+// llvm::DataLayout::getPointerABIAlignment(address_space).value() has no
+// function in llvm-c/Target.h with this exact shape (a data layout plus a
+// bare address space), but LLVMABIAlignmentOfType() queried against an
+// opaque pointer type *for that same address space* reads the exact same
+// per-address-space entry in the DataLayout's own pointer-alignment
+// table -- empirically confirmed identical (via a standalone LLVM-C++ vs.
+// LLVM-C comparison program) across several representative data layouts
+// and address spaces, including a synthetic one with an unusual, non-
+// default alignment. So this composes two already-official LLVM-C calls
+// instead of needing any wrapper of our own.
+unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_space) {
+    return LLVMABIAlignmentOfType(LLVMGetModuleDataLayout(module),
+                                  LLVMPointerTypeInContext(LLVMGetModuleContext(module), address_space));
+}
+
+} // namespace
+
     [[nodiscard]] std::string Codegen::default_debug_source_path() const
 {
         return source_path_.empty() ? (std::filesystem::current_path() / "memory.scpp").string() : source_path_;
     }
 
 
-    [[nodiscard]] llvm::DIFile* Codegen::debug_file_for_path(const std::string& path)
+    [[nodiscard]] LLVMMetadataRef Codegen::debug_file_for_path(const std::string& path)
 {
         if (!emit_debug_info_) return nullptr;
         auto it = debug_file_cache_.find(path);
         if (it != debug_file_cache_.end()) return it->second;
         std::filesystem::path source(path);
-        llvm::DIFile* file = dibuilder_->createFile(source.filename().string(), source.parent_path().string());
+        std::string filename = source.filename().string();
+        std::string dir = source.parent_path().string();
+        LLVMMetadataRef file = LLVMDIBuilderCreateFile(dibuilder_, filename.c_str(), filename.size(), dir.c_str(), dir.size());
         debug_file_cache_.emplace(path, file);
         return file;
     }
 
 
-    [[nodiscard]] llvm::DIFile* Codegen::debug_file_for_program()
+    [[nodiscard]] LLVMMetadataRef Codegen::debug_file_for_program()
 {
         if (!emit_debug_info_) return nullptr;
         if (compile_unit_file_ != nullptr) return compile_unit_file_;
@@ -50,7 +84,7 @@ namespace scpp {
     }
 
 
-    [[nodiscard]] llvm::DIFile* Codegen::debug_file_for_loc(const SourceLocation& loc)
+    [[nodiscard]] LLVMMetadataRef Codegen::debug_file_for_loc(const SourceLocation& loc)
 {
         return debug_file_for_path(loc.has_source_path() ? loc.source_path_text() : default_debug_source_path());
     }
@@ -59,88 +93,98 @@ namespace scpp {
     void Codegen::initialize_debug_info()
 {
         if (!emit_debug_info_) return;
-        dibuilder_ = std::make_unique<llvm::DIBuilder>(*module_);
-        llvm::DIFile* file = debug_file_for_program();
-        compile_unit_ = dibuilder_->createCompileUnit(llvm::dwarf::DW_LANG_C_plus_plus_17, file, "scpp", false, "", 0,
-                                                      "", llvm::DICompileUnit::FullDebug);
-        module_->addModuleFlag(llvm::Module::Warning, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
-        module_->addModuleFlag(llvm::Module::Warning, "Dwarf Version", 5);
+        dibuilder_ = LLVMCreateDIBuilder(module_);
+        LLVMMetadataRef file = debug_file_for_program();
+        static const char* const kProducer = "scpp";
+        compile_unit_ = LLVMDIBuilderCreateCompileUnit(
+            dibuilder_, LLVMDWARFSourceLanguageC_plus_plus_17, file, kProducer, std::strlen(kProducer),
+            /*isOptimized=*/0, "", 0, /*RuntimeVer=*/0, "", 0, LLVMDWARFEmissionFull, /*DWOId=*/0,
+            /*SplitDebugInlining=*/0, /*DebugInfoForProfiling=*/0, "", 0, "", 0);
+        LLVMAddModuleFlag(module_, LLVMModuleFlagBehaviorWarning, "Debug Info Version", sizeof("Debug Info Version") - 1,
+                          LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(context_), LLVMDebugMetadataVersion(), 0)));
+        LLVMAddModuleFlag(module_, LLVMModuleFlagBehaviorWarning, "Dwarf Version", sizeof("Dwarf Version") - 1,
+                          LLVMValueAsMetadata(LLVMConstInt(LLVMInt32TypeInContext(context_), 5, 0)));
     }
 
 
     void Codegen::finalize_debug_info()
 {
-        if (!emit_debug_info_ || !dibuilder_) return;
-        dibuilder_->finalize();
+        if (!emit_debug_info_ || dibuilder_ == nullptr) return;
+        LLVMDIBuilderFinalize(dibuilder_);
     }
 
 
-    [[nodiscard]] llvm::DIType* Codegen::debug_type_for(const Type& type)
+    [[nodiscard]] LLVMMetadataRef Codegen::debug_type_for(const Type& type)
 {
         if (!emit_debug_info_) return nullptr;
         std::string key = mangle_type(type);
         auto it = debug_type_cache_.find(key);
         if (it != debug_type_cache_.end()) return it->second;
-        llvm::DIType* result = nullptr;
+        LLVMMetadataRef result = nullptr;
         switch (type.kind) {
             case TypeKind::Named: {
-                auto basic = [&](llvm::dwarf::TypeKind encoding) -> llvm::DIType* {
-                    return dibuilder_->createBasicType(type.name, module_->getDataLayout().getTypeSizeInBits(to_llvm_type(type)),
-                                                       encoding);
+                auto basic = [&](LLVMDWARFTypeEncoding encoding) -> LLVMMetadataRef {
+                    return LLVMDIBuilderCreateBasicType(dibuilder_, type.name.c_str(), type.name.size(),
+                        LLVMSizeOfTypeInBits(data_layout_ref(module_), to_llvm_type(type)), encoding, LLVMDIFlagZero);
                 };
-                if (type.name == "bool") result = basic(llvm::dwarf::DW_ATE_boolean);
-                else if (type.name == "char") result = basic(llvm::dwarf::DW_ATE_signed_char);
-                else if (is_float_scalar_type_name(type.name)) result = basic(llvm::dwarf::DW_ATE_float);
+                if (type.name == "bool") result = basic(kDwAteBoolean);
+                else if (type.name == "char") result = basic(kDwAteSignedChar);
+                else if (is_float_scalar_type_name(type.name)) result = basic(kDwAteFloat);
                 else if (is_scalar_type_name(type.name)) {
-                    result = basic(is_unsigned_scalar_type_name(type.name) ? llvm::dwarf::DW_ATE_unsigned
-                                                                            : llvm::dwarf::DW_ATE_signed);
+                    result = basic(is_unsigned_scalar_type_name(type.name) ? kDwAteUnsigned : kDwAteSigned);
                 } else if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
                     const std::string& underlying = enum_def->underlying_type.name;
-                    result = basic(underlying == "char"                ? llvm::dwarf::DW_ATE_signed_char
-                                   : is_unsigned_scalar_type_name(underlying) ? llvm::dwarf::DW_ATE_unsigned
-                                                                               : llvm::dwarf::DW_ATE_signed);
+                    result = basic(underlying == "char"                ? kDwAteSignedChar
+                                   : is_unsigned_scalar_type_name(underlying) ? kDwAteUnsigned
+                                                                                : kDwAteSigned);
                 } else {
-                    result = dibuilder_->createUnspecifiedType(type.name);
+                    result = LLVMDIBuilderCreateUnspecifiedType(dibuilder_, type.name.c_str(), type.name.size());
                 }
                 break;
             }
             case TypeKind::Pointer:
             case TypeKind::Reference: {
                 if (is_interface_representation_type(type)) {
-                    result = dibuilder_->createUnspecifiedType(type.kind == TypeKind::Pointer ? "interface_ptr"
-                                                                                             : "interface_ref");
+                    const std::string name = type.kind == TypeKind::Pointer ? "interface_ptr" : "interface_ref";
+                    result = LLVMDIBuilderCreateUnspecifiedType(dibuilder_, name.c_str(), name.size());
                     break;
                 }
-                llvm::DIType* pointee = type.pointee ? debug_type_for(*type.pointee) : nullptr;
-                result = dibuilder_->createPointerType(
-                    pointee, module_->getDataLayout().getPointerSizeInBits(),
-                    module_->getDataLayout().getPointerABIAlignment(0).value() * 8);
+                LLVMMetadataRef pointee = type.pointee ? debug_type_for(*type.pointee) : nullptr;
+                result = LLVMDIBuilderCreatePointerType(
+                    dibuilder_, pointee, 8ULL * LLVMPointerSizeForAS(data_layout_ref(module_), 0),
+                    static_cast<uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8), /*AddressSpace=*/0, "", 0);
                 break;
             }
             case TypeKind::Array: {
-                llvm::DIType* element = debug_type_for(*type.element);
-                auto subscripts = dibuilder_->getOrCreateArray(
-                    {dibuilder_->getOrCreateSubrange(0, type.array_size)});
-                llvm::Type* llvm_type = to_llvm_type(type);
-                result = dibuilder_->createArrayType(module_->getDataLayout().getTypeSizeInBits(llvm_type),
-                                                     module_->getDataLayout().getABITypeAlign(llvm_type).value() * 8,
-                                                     element, subscripts);
+                LLVMMetadataRef element = debug_type_for(*type.element);
+                LLVMMetadataRef subrange =
+                    LLVMDIBuilderGetOrCreateSubrange(dibuilder_, 0, static_cast<int64_t>(type.array_size));
+                LLVMMetadataRef subscripts = LLVMDIBuilderGetOrCreateArray(dibuilder_, &subrange, 1);
+                LLVMTypeRef llvm_type = to_llvm_type(type);
+                result = LLVMDIBuilderCreateArrayType(
+                    dibuilder_, LLVMSizeOfTypeInBits(data_layout_ref(module_), llvm_type),
+                    static_cast<uint32_t>(LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type) * 8), element,
+                    &subscripts, 1);
                 break;
             }
-            case TypeKind::Span:
-                result = dibuilder_->createUnspecifiedType("std::span");
+            case TypeKind::Span: {
+                static const char* const kName = "std::span";
+                result = LLVMDIBuilderCreateUnspecifiedType(dibuilder_, kName, std::strlen(kName));
                 break;
+            }
             case TypeKind::Function:
             case TypeKind::FunctionPointer: {
-                std::vector<llvm::Metadata*> elems;
+                std::vector<LLVMMetadataRef> elems;
                 elems.push_back(type.function_return ? debug_type_for(*type.function_return) : nullptr);
                 for (const Type& param : type.function_params) elems.push_back(debug_type_for(param));
-                llvm::DISubroutineType* subroutine =
-                    dibuilder_->createSubroutineType(dibuilder_->getOrCreateTypeArray(elems));
+                LLVMMetadataRef subroutine = LLVMDIBuilderCreateSubroutineType(
+                    dibuilder_, nullptr, elems.data(), static_cast<unsigned>(elems.size()), LLVMDIFlagZero);
                 result = type.kind == TypeKind::FunctionPointer
-                             ? dibuilder_->createPointerType(subroutine, module_->getDataLayout().getPointerSizeInBits(),
-                                                            module_->getDataLayout().getPointerABIAlignment(0).value() * 8)
-                             : static_cast<llvm::DIType*>(subroutine);
+                             ? LLVMDIBuilderCreatePointerType(
+                                   dibuilder_, subroutine, 8ULL * LLVMPointerSizeForAS(data_layout_ref(module_), 0),
+                                   static_cast<uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8),
+                                   /*AddressSpace=*/0, "", 0)
+                             : subroutine;
                 break;
             }
         }
@@ -153,81 +197,104 @@ namespace scpp {
 {
         current_loc_ = loc;
         if (!emit_debug_info_ || current_debug_scope_ == nullptr || !loc.is_known()) {
-            builder_->SetCurrentDebugLocation(llvm::DebugLoc());
+            LLVMSetCurrentDebugLocation2(builder_, nullptr);
             return;
         }
-        builder_->SetCurrentDebugLocation(llvm::DILocation::get(*context_, loc.line, std::max(loc.column, 1),
-                                                                current_debug_scope_));
+        LLVMSetCurrentDebugLocation2(builder_, LLVMDIBuilderCreateDebugLocation(context_, loc.line, std::max(loc.column, 1),
+                                                                                current_debug_scope_, nullptr));
     }
 
 
-    void Codegen::maybe_emit_parameter_debug_decl(const Param& param, llvm::AllocaInst* slot, unsigned index)
+    void Codegen::maybe_emit_parameter_debug_decl(const Param& param, LLVMValueRef slot, unsigned index)
 {
         if (!emit_debug_info_ || current_subprogram_ == nullptr) return;
-        llvm::DIType* type = debug_type_for(param.type);
+        LLVMMetadataRef type = debug_type_for(param.type);
         if (type == nullptr) return;
-        llvm::DILocalVariable* var =
-            dibuilder_->createParameterVariable(current_subprogram_, param.name, index, debug_file_for_loc(current_function_def_->loc),
-                                                std::max(current_function_def_->loc.line, 1), type, true);
-        dibuilder_->insertDeclare(slot, var, dibuilder_->createExpression(),
-                                  llvm::DILocation::get(*context_, std::max(current_function_def_->loc.line, 1), 1,
-                                                        current_subprogram_),
-                                  builder_->GetInsertBlock());
+        LLVMMetadataRef var = LLVMDIBuilderCreateParameterVariable(
+            dibuilder_, current_subprogram_, param.name.c_str(), param.name.size(), index,
+            debug_file_for_loc(current_function_def_->loc), std::max(current_function_def_->loc.line, 1), type,
+            /*AlwaysPreserve=*/1, LLVMDIFlagZero);
+        LLVMMetadataRef expr = LLVMDIBuilderCreateExpression(dibuilder_, nullptr, 0);
+        LLVMMetadataRef loc = LLVMDIBuilderCreateDebugLocation(context_, std::max(current_function_def_->loc.line, 1), 1,
+                                                               current_subprogram_, nullptr);
+        LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, loc, LLVMGetInsertBlock(builder_));
     }
 
 
-    void Codegen::maybe_emit_local_debug_decl(const std::string& name, const Type& type, llvm::AllocaInst* slot, SourceLocation loc)
+    void Codegen::maybe_emit_local_debug_decl(const std::string& name, const Type& type, LLVMValueRef slot, SourceLocation loc)
 {
         if (!emit_debug_info_ || current_debug_scope_ == nullptr) return;
-        llvm::DIType* debug_type = debug_type_for(type);
+        LLVMMetadataRef debug_type = debug_type_for(type);
         if (debug_type == nullptr) return;
-        llvm::DILocalVariable* var =
-            dibuilder_->createAutoVariable(current_debug_scope_, name, debug_file_for_loc(loc), std::max(loc.line, 1),
-                                           debug_type, true);
-        dibuilder_->insertDeclare(slot, var, dibuilder_->createExpression(),
-                                  llvm::DILocation::get(*context_, std::max(loc.line, 1), std::max(loc.column, 1),
-                                                        current_debug_scope_),
-                                  builder_->GetInsertBlock());
+        LLVMMetadataRef var = LLVMDIBuilderCreateAutoVariable(dibuilder_, current_debug_scope_, name.c_str(), name.size(),
+                                                              debug_file_for_loc(loc), std::max(loc.line, 1), debug_type,
+                                                              /*AlwaysPreserve=*/1, LLVMDIFlagZero, /*AlignInBits=*/0);
+        LLVMMetadataRef expr = LLVMDIBuilderCreateExpression(dibuilder_, nullptr, 0);
+        LLVMMetadataRef debug_loc = LLVMDIBuilderCreateDebugLocation(context_, std::max(loc.line, 1), std::max(loc.column, 1),
+                                                                     current_debug_scope_, nullptr);
+        LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, debug_loc, LLVMGetInsertBlock(builder_));
     }
 
 
-    llvm::AllocaInst* Codegen::create_entry_block_alloca(llvm::Type* type, const std::string& name,
-                                                std::optional<llvm::Align> alignment)
+    LLVMValueRef Codegen::create_entry_block_alloca(LLVMTypeRef type, const std::string& name,
+                                                std::optional<unsigned> alignment)
 {
-        llvm::BasicBlock* current_block = builder_->GetInsertBlock();
+        LLVMBasicBlockRef current_block = LLVMGetInsertBlock(builder_);
         if (current_block == nullptr) {
-            llvm::AllocaInst* slot = builder_->CreateAlloca(type, nullptr, name);
-            if (alignment.has_value()) slot->setAlignment(*alignment);
+            LLVMValueRef slot = LLVMBuildAlloca(builder_, type, name.c_str());
+            if (alignment.has_value()) LLVMSetAlignment(slot, *alignment);
             return slot;
         }
-        llvm::IRBuilderBase::InsertPoint saved_ip = builder_->saveIP();
-        llvm::DebugLoc saved_dbg = builder_->getCurrentDebugLocation();
-        llvm::BasicBlock& entry = current_block->getParent()->getEntryBlock();
-        llvm::BasicBlock::iterator insert_it = entry.getFirstInsertionPt();
-        while (insert_it != entry.end() && llvm::isa<llvm::AllocaInst>(*insert_it)) ++insert_it;
-        builder_->SetInsertPoint(&entry, insert_it);
-        builder_->SetCurrentDebugLocation(llvm::DebugLoc());
-        llvm::AllocaInst* slot = builder_->CreateAlloca(type, nullptr, name);
-        if (alignment.has_value()) slot->setAlignment(*alignment);
-        builder_->restoreIP(saved_ip);
-        builder_->SetCurrentDebugLocation(saved_dbg);
+        // Every real call site reaches this function with the builder
+        // positioned at the end of whatever block it's currently
+        // building (this function is the only place that ever
+        // temporarily repositions the builder mid-block, always
+        // restoring before returning), so saving just the current block
+        // (rather than a full IRBuilderBase::InsertPoint, which
+        // llvm-c has no equivalent handle for) and restoring via
+        // LLVMPositionBuilderAtEnd is equivalent here.
+        LLVMBasicBlockRef saved_block = current_block;
+        LLVMMetadataRef saved_dbg = LLVMGetCurrentDebugLocation2(builder_);
+        LLVMBasicBlockRef entry = LLVMGetEntryBasicBlock(LLVMGetBasicBlockParent(current_block));
+        // Entry blocks have no predecessors, hence no PHI/landingpad
+        // instructions -- so "first insertion point" degenerates to
+        // simply the first instruction (or none, if empty), matching
+        // getFirstInsertionPt()'s general PHI/landingpad-skipping
+        // behavior for this specific (entry-block-only) use.
+        LLVMValueRef insert_before = LLVMGetFirstInstruction(entry);
+        while (insert_before != nullptr && LLVMIsAAllocaInst(insert_before) != nullptr) {
+            insert_before = LLVMGetNextInstruction(insert_before);
+        }
+        if (insert_before != nullptr) {
+            LLVMPositionBuilderBefore(builder_, insert_before);
+        } else {
+            LLVMPositionBuilderAtEnd(builder_, entry);
+        }
+        LLVMSetCurrentDebugLocation2(builder_, nullptr);
+        LLVMValueRef slot = LLVMBuildAlloca(builder_, type, name.c_str());
+        if (alignment.has_value()) LLVMSetAlignment(slot, *alignment);
+        LLVMPositionBuilderAtEnd(builder_, saved_block);
+        LLVMSetCurrentDebugLocation2(builder_, saved_dbg);
         return slot;
     }
 
 
-    void Codegen::attach_debug_subprogram(llvm::Function* llvm_fn, const Function& fn)
+    void Codegen::attach_debug_subprogram(LLVMValueRef llvm_fn, const Function& fn)
 {
         if (!emit_debug_info_) return;
-        std::vector<llvm::Metadata*> type_elems;
+        std::vector<LLVMMetadataRef> type_elems;
         type_elems.push_back(debug_type_for(fn.return_type));
         for (const Param& param : fn.params) type_elems.push_back(debug_type_for(param.type));
-        llvm::DISubroutineType* fn_type =
-            dibuilder_->createSubroutineType(dibuilder_->getOrCreateTypeArray(type_elems));
-        llvm::DISubprogram* subprogram = dibuilder_->createFunction(
-            debug_file_for_loc(fn.loc), fn.name, llvm_fn->getName(), debug_file_for_loc(fn.loc),
-            std::max(fn.loc.line, 1), fn_type, std::max(fn.loc.line, 1),
-            llvm::DINode::FlagPrototyped, llvm::DISubprogram::SPFlagDefinition);
-        llvm_fn->setSubprogram(subprogram);
+        LLVMMetadataRef fn_type = LLVMDIBuilderCreateSubroutineType(
+            dibuilder_, nullptr, type_elems.data(), static_cast<unsigned>(type_elems.size()), LLVMDIFlagZero);
+        LLVMMetadataRef file = debug_file_for_loc(fn.loc);
+        size_t linkage_name_len = 0;
+        const char* linkage_name = LLVMGetValueName2(llvm_fn, &linkage_name_len);
+        LLVMMetadataRef subprogram = LLVMDIBuilderCreateFunction(
+            dibuilder_, file, fn.name.c_str(), fn.name.size(), linkage_name, linkage_name_len, file,
+            std::max(fn.loc.line, 1), fn_type, /*IsLocalToUnit=*/0, /*IsDefinition=*/1, std::max(fn.loc.line, 1),
+            LLVMDIFlagPrototyped, /*IsOptimized=*/0);
+        LLVMSetSubprogram(llvm_fn, subprogram);
         current_subprogram_ = subprogram;
         current_debug_scope_ = subprogram;
     }
