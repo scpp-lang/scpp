@@ -1,0 +1,2647 @@
+// scpp_llvm.scpp
+//
+// The `:llvm` interface partition (ch11 SS11.4) of the `scpp` module:
+// `namespace scpp::llvm { export class Context/Type/Value/Module { ... }; }`,
+// an ergonomic, RAII scpp wrapper around LLVM. Every method's body that
+// touches the extern "C" surface is `[[scpp::unsafe]] { ... }`, exactly
+// like std::string's own `:string` partition.
+//
+// This partition is compiled into two entirely separate "scpp" modules
+// that are never linked together, by design:
+//   - libs/scpp/scpp.scpp, this package's own real primary interface unit
+//     (`export import :llvm;` alongside `:io`/`:rand`/`:enum_cast`), built
+//     via this project's own workspace/CLI path (see libs/scpp/scpp.toml)
+//     for ordinary scpp users to `import scpp;` and reach
+//     `scpp::llvm::...` alongside the rest of the package.
+//   - scpp_llvm_single_module.cpp, a tiny CMake-only primary interface
+//     unit (`export module scpp; export import :llvm;`) that aggregates
+//     *only* this partition, used exclusively by the root CMakeLists.txt
+//     to give the scpp compiler's own codegen/driver a standalone,
+//     independent module target -- decoupled at build time from
+//     `:io`/`:rand`/`:enum_cast` -- that it can `import scpp;` and reach
+//     the very same `scpp::llvm::...` surface from.
+// Either way, a consumer never imports this partition file directly, only
+// whichever primary interface aggregates it, then `scpp::llvm::...`.
+//
+// Official LLVM-C functions (llvm-c/*.h) are already a stable, extern "C"
+// interface designed precisely for cross-language binding like this, so
+// every class below calls them *directly*, under their real `LLVM*`
+// names -- there is no custom wrapper of any kind in this project, and
+// none is planned as a matter of course: a rigorous, function-by-function
+// empirical audit (this PR's own description has the full tally) checked
+// every LLVM operation the scpp compiler's own codegen uses against
+// llvm-c/*.h and found LLVM-C already covers all of it -- including
+// Module::pointer_abi_alignment below, which an earlier round of this
+// project mistakenly concluded needed a hand-written `ScppLLVM*`
+// gap-filler; empirical testing proved that wrong (LLVMABIAlignmentOfType
+// queried against an opaque pointer type reads the exact same DataLayout
+// entry LLVMPointerTypeInContext's address space selects), so it now
+// composes two official LLVM-C calls instead. Going forward, a custom
+// `extern "C"` shim is a last resort requiring explicit project-owner
+// sign-off after a confirmed, concrete LLVM-C coverage gap -- not a
+// default fallback reached for out of convenience.
+//
+// Scope note: covers the full surface the compiler's own codegen needs to
+// migrate entirely off raw LLVM-C: Context, Module (create/print/verify/
+// DataLayout/module-flag queries), scalar/pointer/array/(anonymous)
+// struct/function Types, Constant values, the full IRBuilder-equivalent
+// instruction-building surface (arithmetic/comparison/casts, memory/GEP,
+// control flow, calls, Phi), Function/BasicBlock/GlobalVariable/
+// Attribute/Intrinsic construction and management, DIBuilder-equivalent
+// debug-info generation, and Target/TargetMachine/DataLayout-based
+// object-file emission for the driver's own needs. See this PR's
+// description for the full function-by-function tally.
+export module scpp:llvm;
+
+import std;
+
+// The extern "C" declarations below stay at file scope, *outside*
+// `namespace scpp::llvm` -- they're plain C symbols (real C linkage,
+// never namespace-qualified or mangled regardless of enclosing
+// namespace, ch02 SS2.1/ch11 SS11.10) and are not `export`-marked, so
+// they're entirely invisible to anything that imports this partition or
+// the module as a whole: only the classes below are part of the public
+// surface.
+//
+// Every opaque LLVM-C handle (LLVMContextRef/LLVMModuleRef/LLVMTypeRef/
+// LLVMTargetDataRef) is declared here as plain `void*` instead, matching
+// this codebase's established extern "C"-declaration convention (see
+// e.g. std_string.scpp, std_random.scpp) -- they're all just
+// pointer-sized opaque handles at the ABI level, so a `void*` here is
+// fully binary-compatible; the real type safety scpp callers get comes
+// from the distinct Context/Type/Module *classes* below, not from the
+// raw handle type.
+// Parameters use `mod`, never `module` -- `module` is one of this very
+// language's own reserved keywords (ch11's `export module name;`), not
+// just LLVM's term for the concept; only the *name* of the parameter is
+// affected, not any ABI concern (extern "C" parameter names are never
+// part of a function's linkage).
+extern "C" {
+    // --- Official LLVM-C (llvm-c/Core.h) --------------------------------
+    void* LLVMContextCreate();
+    void LLVMContextDispose(void* context);
+
+    void* LLVMModuleCreateWithNameInContext(const char* name, void* context);
+    void LLVMDisposeModule(void* mod);
+    char* LLVMPrintModuleToString(void* mod);
+
+    void* LLVMInt1TypeInContext(void* context);
+    void* LLVMInt8TypeInContext(void* context);
+    void* LLVMInt16TypeInContext(void* context);
+    void* LLVMInt32TypeInContext(void* context);
+    void* LLVMInt64TypeInContext(void* context);
+    void* LLVMFloatTypeInContext(void* context);
+    void* LLVMDoubleTypeInContext(void* context);
+    void* LLVMVoidTypeInContext(void* context);
+    void* LLVMPointerTypeInContext(void* context, unsigned int address_space);
+    void* LLVMArrayType2(void* element_type, unsigned long element_count);
+    void* LLVMFunctionType(void* return_type, void** param_types, unsigned int param_count, int is_var_arg);
+    void* LLVMStructTypeInContext(void* context, void** element_types, unsigned int element_count, int packed);
+    void* LLVMGetModuleContext(void* mod);
+    char* LLVMPrintTypeToString(void* type);
+
+    void* LLVMConstInt(void* int_type, unsigned long value, int sign_extend);
+    void* LLVMConstReal(void* real_type, double value);
+    void* LLVMConstNull(void* type);
+    void* LLVMTypeOf(void* value);
+    char* LLVMPrintValueToString(void* value);
+    void* LLVMValueAsMetadata(void* val);
+
+    void LLVMDisposeMessage(char* message);
+
+    // --- Official LLVM-C (llvm-c/Analysis.h) ----------------------------
+    int LLVMVerifyModule(void* mod, int action, char** out_message);
+
+    // --- Official LLVM-C (llvm-c/Target.h) ------------------------------
+    void* LLVMGetModuleDataLayout(void* mod);
+    unsigned int LLVMPointerSizeForAS(void* data_layout, unsigned int address_space);
+    unsigned int LLVMABIAlignmentOfType(void* data_layout, void* type);
+    unsigned long LLVMABISizeOfType(void* data_layout, void* type);
+    unsigned long LLVMSizeOfTypeInBits(void* data_layout, void* type);
+
+    // --- Official LLVM-C (llvm-c/Core.h), IRBuilder + Function/
+    // BasicBlock/GlobalVariable/Attribute/Intrinsic construction and
+    // management surface -- added alongside the pre-existing Context/
+    // Type/Value/Module declarations above for the compiler's own
+    // codegen (src/compiler/codegen/*.cppm, src/driver.cppm) to migrate
+    // onto, per this partition's own scope note further up. Every
+    // wrapper method built on top of these (below, in the Builder/
+    // BasicBlock/Function/GlobalVariable/Attribute/Intrinsic classes,
+    // and the new `_handle`-suffixed static methods on Context/Type/
+    // Value/Module) takes and returns *raw* handles -- deliberately not
+    // the ergonomic, RAII Context/Type/Value/Module *objects* above --
+    // since the compiler's own Codegen class already holds raw
+    // LLVMContextRef/LLVMModuleRef/LLVMBuilderRef/etc. fields (a design
+    // decision made by the prior LLVM-C-native-API-to-LLVM-C-C-ABI
+    // conversion round, kept as-is here rather than restructured around
+    // RAII types) and calls these operations from thousands of call
+    // sites inside tight codegen loops; a raw-handle-in/raw-handle-out
+    // shape lets every call site just swap a bare `LLVMBuildXxx(...)`
+    // call for the equivalently-shaped `Builder::xxx(...)` one with no
+    // other change, rather than requiring an object to be constructed
+    // and unwrapped at every one of those call sites (this project's
+    // own "avoid awkward double-wrapping" guidance).
+    void* LLVMCreateBuilderInContext(void* context);
+    void LLVMDisposeBuilder(void* builder);
+    void LLVMPositionBuilderAtEnd(void* builder, void* block);
+    void LLVMPositionBuilderBefore(void* builder, void* instr);
+    void* LLVMGetInsertBlock(void* builder);
+    void* LLVMGetCurrentDebugLocation2(void* builder);
+    void LLVMSetCurrentDebugLocation2(void* builder, void* loc);
+
+    void* LLVMBuildAdd(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildSub(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildMul(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildSDiv(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildUDiv(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildFAdd(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildFSub(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildFMul(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildFDiv(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildAnd(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildOr(void* builder, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildNeg(void* builder, void* v, const char* name);
+    void* LLVMBuildFNeg(void* builder, void* v, const char* name);
+    void* LLVMBuildNot(void* builder, void* v, const char* name);
+
+    void* LLVMBuildICmp(void* builder, int predicate, void* lhs, void* rhs, const char* name);
+    void* LLVMBuildFCmp(void* builder, int predicate, void* lhs, void* rhs, const char* name);
+
+    void* LLVMBuildBitCast(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildTrunc(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildSExt(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildZExt(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildFPExt(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildFPTrunc(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildFPToSI(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildFPToUI(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildSIToFP(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildUIToFP(void* builder, void* val, void* dest_type, const char* name);
+    void* LLVMBuildPtrToInt(void* builder, void* val, void* dest_type, const char* name);
+
+    void* LLVMBuildAlloca(void* builder, void* type, const char* name);
+    void* LLVMBuildLoad2(void* builder, void* type, void* pointer_val, const char* name);
+    void* LLVMBuildStore(void* builder, void* val, void* ptr);
+    void* LLVMBuildGEP2(void* builder, void* type, void* pointer, void** indices, unsigned int num_indices,
+                         const char* name);
+    void* LLVMBuildStructGEP2(void* builder, void* type, void* pointer, unsigned int idx, const char* name);
+    void* LLVMBuildMemSet(void* builder, void* ptr, void* val, void* len, unsigned int align);
+
+    void* LLVMBuildExtractValue(void* builder, void* agg_val, unsigned int index, const char* name);
+    void* LLVMBuildInsertValue(void* builder, void* agg_val, void* elt_val, unsigned int index, const char* name);
+
+    void* LLVMBuildBr(void* builder, void* dest);
+    void* LLVMBuildCondBr(void* builder, void* if_val, void* then_block, void* else_block);
+    void* LLVMBuildRet(void* builder, void* v);
+    void* LLVMBuildRetVoid(void* builder);
+    void* LLVMBuildUnreachable(void* builder);
+    void* LLVMBuildPhi(void* builder, void* type, const char* name);
+    void LLVMAddIncoming(void* phi_node, void** incoming_values, void** incoming_blocks, unsigned int count);
+    void* LLVMBuildSelect(void* builder, void* if_val, void* then_val, void* else_val, const char* name);
+    void* LLVMBuildCall2(void* builder, void* fn_type, void* fn, void** args, unsigned int num_args,
+                          const char* name);
+    void* LLVMBuildGlobalString(void* builder, const char* str, const char* name);
+
+    void* LLVMAddFunction(void* mod, const char* name, void* fn_type);
+    void* LLVMGetNamedFunction(void* mod, const char* name);
+    unsigned int LLVMCountParams(void* fn);
+    void* LLVMGetParam(void* fn, unsigned int index);
+    void* LLVMGetEntryBasicBlock(void* fn);
+
+    void* LLVMAppendBasicBlockInContext(void* context, void* fn, const char* name);
+    void* LLVMGetBasicBlockParent(void* block);
+    void* LLVMGetBasicBlockTerminator(void* block);
+    void* LLVMGetFirstInstruction(void* block);
+    void* LLVMBasicBlockAsValue(void* block);
+    void* LLVMGetNextInstruction(void* inst);
+    void* LLVMGetFirstUse(void* val);
+    void* LLVMIsAAllocaInst(void* val);
+
+    void* LLVMAddGlobal(void* mod, void* type, const char* name);
+    void LLVMSetInitializer(void* global_var, void* constant_val);
+    void LLVMSetGlobalConstant(void* global_var, int is_constant);
+
+    void LLVMSetValueName2(void* val, const char* name, unsigned long name_len);
+    const char* LLVMGetValueName2(void* val, unsigned long* length);
+    void LLVMSetLinkage(void* global, int linkage);
+    void* LLVMGlobalGetValueType(void* global);
+    unsigned int LLVMGetAlignment(void* v);
+    void LLVMSetAlignment(void* v, unsigned int bytes);
+
+    int LLVMGetTypeKind(void* type);
+    unsigned int LLVMGetIntTypeWidth(void* integer_type);
+    void* LLVMIntTypeInContext(void* context, unsigned int num_bits);
+    unsigned int LLVMCountStructElementTypes(void* struct_type);
+    void LLVMGetStructElementTypes(void* struct_type, void** dest);
+    void* LLVMStructCreateNamed(void* context, const char* name);
+    void LLVMStructSetBody(void* struct_type, void** element_types, unsigned int element_count, int packed);
+
+    void* LLVMConstArray2(void* element_type, void** constant_vals, unsigned long length);
+    void* LLVMConstBitCast(void* constant_val, void* to_type);
+    void* LLVMConstPointerNull(void* type);
+    void* LLVMConstStructInContext(void* context, void** constant_vals, unsigned int count, int packed);
+    void* LLVMGetUndef(void* type);
+
+    void* LLVMCreateEnumAttribute(void* context, unsigned int kind_id, unsigned long val);
+    unsigned int LLVMGetEnumAttributeKindForName(const char* name, unsigned long slen);
+    void LLVMAddAttributeAtIndex(void* f, unsigned int idx, void* a);
+
+    unsigned int LLVMLookupIntrinsicID(const char* name, unsigned long name_len);
+    void* LLVMGetIntrinsicDeclaration(void* mod, unsigned int id, void** param_types, unsigned long param_count);
+
+    void LLVMSetDataLayout(void* mod, const char* data_layout_str);
+    void LLVMSetTarget(void* mod, const char* triple);
+    void LLVMAddModuleFlag(void* mod, int behavior, const char* key, unsigned long key_len, void* val);
+
+    // --- Official LLVM-C (llvm-c/DebugInfo.h) ---------------------------
+    // LLVMDisposeDIBuilder was needed unconditionally from the start (see
+    // DIBuilder's own comment, further down, for why); the rest of this
+    // group is the debug-info *generation* surface itself (compile unit/
+    // file/type/variable/subprogram construction, source locations),
+    // needed by src/compiler/codegen/debug.cppm to migrate off raw
+    // LLVM-C entirely. `LLVMDWARFSourceLanguage`/`LLVMDWARFEmissionKind`/
+    // `LLVMDIFlags` are each real upstream `enum`s, but every one is only
+    // ever passed a single (each, or a small fixed OR-combination)
+    // specific named value across this whole codebase, unlike
+    // IntPredicate/RealPredicate/Linkage's own many-values-many-call-
+    // sites shape further below -- so, consistent with
+    // Module::verify_handle's own `return_status_action` and
+    // Attribute::add_at_index_handle's own `idx` (see their comments),
+    // these stay plain `int`/`unsigned int` here rather than becoming
+    // dedicated enum classes; callers spell out exactly which named
+    // upstream constant they mean via a literal plus a comment recording
+    // its name (and, where not otherwise obvious, its numeric value).
+    void* LLVMCreateDIBuilder(void* mod);
+    void LLVMDIBuilderFinalize(void* dibuilder);
+    unsigned int LLVMDebugMetadataVersion();
+    void* LLVMDIBuilderCreateFile(void* dibuilder, const char* filename, unsigned long filename_len,
+                                   const char* directory, unsigned long directory_len);
+    void* LLVMDIBuilderCreateCompileUnit(void* dibuilder, int lang, void* file_ref, const char* producer,
+                                          unsigned long producer_len, int is_optimized, const char* flags,
+                                          unsigned long flags_len, unsigned int runtime_ver, const char* split_name,
+                                          unsigned long split_name_len, int kind, unsigned int dwo_id,
+                                          int split_debug_inlining, int debug_info_for_profiling,
+                                          const char* sys_root, unsigned long sys_root_len, const char* sdk,
+                                          unsigned long sdk_len);
+    void* LLVMDIBuilderCreateBasicType(void* dibuilder, const char* name, unsigned long name_len,
+                                        unsigned long size_in_bits, unsigned int encoding, int flags);
+    void* LLVMDIBuilderCreateUnspecifiedType(void* dibuilder, const char* name, unsigned long name_len);
+    void* LLVMDIBuilderCreatePointerType(void* dibuilder, void* pointee_ty, unsigned long size_in_bits,
+                                          unsigned int align_in_bits, unsigned int address_space, const char* name,
+                                          unsigned long name_len);
+    void* LLVMDIBuilderGetOrCreateSubrange(void* dibuilder, long lower_bound, long count);
+    void* LLVMDIBuilderGetOrCreateArray(void* dibuilder, void** data, unsigned long num_elements);
+    void* LLVMDIBuilderCreateArrayType(void* dibuilder, unsigned long size, unsigned int align_in_bits, void* ty,
+                                        void** subscripts, unsigned int num_subscripts);
+    void* LLVMDIBuilderCreateSubroutineType(void* dibuilder, void* file, void** parameter_types,
+                                             unsigned int num_parameter_types, int flags);
+    void* LLVMDIBuilderCreateDebugLocation(void* ctx, unsigned int line, unsigned int column, void* scope,
+                                            void* inlined_at);
+    void* LLVMDIBuilderCreateParameterVariable(void* dibuilder, void* scope, const char* name, unsigned long name_len,
+                                                unsigned int arg_no, void* file, unsigned int line_no, void* ty,
+                                                int always_preserve, int flags);
+    void* LLVMDIBuilderCreateAutoVariable(void* dibuilder, void* scope, const char* name, unsigned long name_len,
+                                           void* file, unsigned int line_no, void* ty, int always_preserve, int flags,
+                                           unsigned int align_in_bits);
+    void* LLVMDIBuilderCreateExpression(void* dibuilder, unsigned long* addr, unsigned long length);
+    void* LLVMDIBuilderInsertDeclareRecordAtEnd(void* dibuilder, void* storage, void* var_info, void* expr,
+                                                 void* debug_loc, void* block);
+    void* LLVMDIBuilderCreateFunction(void* dibuilder, void* scope, const char* name, unsigned long name_len,
+                                       const char* linkage_name, unsigned long linkage_name_len, void* file,
+                                       unsigned int line_no, void* ty, int is_local_to_unit, int is_definition,
+                                       unsigned int scope_line, int flags, int is_optimized);
+    void LLVMSetSubprogram(void* func, void* sp);
+    void LLVMDisposeDIBuilder(void* dibuilder);
+
+    // --- Official LLVM-C (llvm-c/Target.h, llvm-c/TargetMachine.h) ------
+    // TargetMachine construction and object-file emission for
+    // src/driver.cppm's own needs -- the M1/M2/M3 backend step that
+    // lowers a Codegen-produced Module to a native .scppo object file.
+    // `LLVMInitializeNativeTarget`/`LLVMInitializeNativeAsmPrinter`
+    // themselves are the one confirmed exception to this partition's
+    // "every class calls LLVM-C directly" rule (see this file's
+    // top-of-file comment and native_target_init.cpp's own comment for
+    // why): scpp_llvm_initialize_native_target/
+    // scpp_llvm_initialize_native_asm_printer are that tiny shim's own
+    // re-exported names, not LLVM's.
+    int scpp_llvm_initialize_native_target();
+    int scpp_llvm_initialize_native_asm_printer();
+    char* LLVMGetDefaultTargetTriple();
+    int LLVMGetTargetFromTriple(const char* triple, void** t, char** error_message);
+    char* LLVMCopyStringRepOfTargetData(void* data_layout);
+    void LLVMDisposeTargetData(void* data_layout);
+    // `level`/`reloc`/`code_model` are LLVMCodeGenOptLevel/LLVMRelocMode/
+    // LLVMCodeModel upstream -- `level` is a real `enum class`
+    // (CodeGenOptLevel, below) since driver.cppm's own
+    // codegen_opt_level_for chooses between all 4 of its named values at
+    // run time depending on the requested optimization level (the same
+    // many-values-one-real-caller-decision shape as IntPredicate/
+    // RealPredicate/Linkage further below), but `reloc`/`code_model` stay
+    // plain `int` (like `lang`/`kind` in the DIBuilder group above) since
+    // driver.cppm only ever passes one single named value for each,
+    // never choosing between alternatives.
+    void* LLVMCreateTargetMachine(void* t, const char* triple, const char* cpu, const char* features, int level,
+                                  int reloc, int code_model);
+    void LLVMDisposeTargetMachine(void* t);
+    void* LLVMCreateTargetDataLayout(void* t);
+    // `codegen` is LLVMCodeGenFileType -- stays plain `int` for the same
+    // reason as `reloc`/`code_model` just above (driver.cppm only ever
+    // requests LLVMObjectFile, never LLVMAssemblyFile).
+    int LLVMTargetMachineEmitToFile(void* t, void* m, const char* filename, int codegen, char** error_message);
+
+    // --- Plain C standard library (not part of LLVM at all) -------------
+    // Needed only as marshalling plumbing for LLVMFunctionType/
+    // LLVMStructTypeInContext below, which each require a contiguous
+    // LLVMTypeRef[] buffer built at run time from a `(const Type*, count)`
+    // pair whose length isn't known until run time. scpp has no std::vector yet
+    // (blackbox_test/cases/13_unsupported_robustness/
+    // std_vector_is_rejected_not_crashed.scpp) and no variable-length
+    // array or `new T[n]` (parser.cppm explicitly rejects both), so this
+    // uses the same universal, LLVM-independent C allocation primitive
+    // std::unique_ptr's own [[scpp::unsafe]] destructor already relies on
+    // for `delete` (see std_memory.scpp) -- plain malloc/free, exactly as
+    // any C or C++ program marshalling a dynamically-sized array across
+    // an extern "C" boundary would.
+    void* malloc(unsigned long size);
+    void free(void* ptr);
+}
+
+namespace scpp::llvm {
+
+// Error codes for this library's own std::expected-returning operations
+// (mirrors scpp::rand::error's shape -- see libs/scpp/rand/scpp_rand.scpp).
+export enum class error {
+    verification_failed,
+};
+
+// llvm::CmpInst::Predicate's integer-comparison half, via LLVM-C's
+// LLVMIntPredicate (llvm-c/Core.h) -- named-enum mirror of that C enum's
+// exact integer values (scpp has no mechanism to import a C enum's
+// value by name, same reasoning as Module::verify's own
+// return_status_action local, above), narrowed to the 10 real
+// enumerators (every one LLVMIntPredicate actually has -- there is no
+// "and then some" here, unlike RealPredicate below). Passed to
+// Builder::icmp.
+export enum class IntPredicate {
+    eq = 32,
+    ne = 33,
+    ugt = 34,
+    uge = 35,
+    ult = 36,
+    ule = 37,
+    sgt = 38,
+    sge = 39,
+    slt = 40,
+    sle = 41,
+};
+
+// llvm::CmpInst::Predicate's floating-point-comparison half, via LLVM-C's
+// LLVMRealPredicate (llvm-c/Core.h) -- narrowed to just the 6 *ordered*
+// comparisons (the scpp compiler's own codegen only ever needs these:
+// they're what `==`/`!=`/`<`/`<=`/`>`/`>=` on `float`/`double` naturally
+// mean -- false whenever either operand is NaN -- unlike the 6
+// *unordered* counterparts LLVMRealPredicate also has, which are true
+// when either operand is NaN; neither this library nor the compiler has
+// a use for those yet). Passed to Builder::fcmp.
+export enum class RealPredicate {
+    oeq = 1,
+    ogt = 2,
+    oge = 3,
+    olt = 4,
+    ole = 5,
+    one = 6,
+};
+
+// llvm::GlobalValue::LinkageTypes, via LLVM-C's LLVMLinkage (llvm-c/
+// Core.h) -- narrowed to the 4 enumerators the scpp compiler's own
+// codegen actually assigns (external is LLVM's own default for a
+// freshly-added function/global, so the compiler never has to name it
+// explicitly either -- included here anyway since Value::set_linkage
+// needs *some* value for "make this externally visible again", e.g. for
+// a function that turns out not to need internal linkage after all).
+export enum class Linkage {
+    external = 0,
+    appending = 7,
+    internal = 8,
+    priv = 9,
+};
+
+// llvm::CodeGenOptLevel, via LLVM-C's LLVMCodeGenOptLevel (llvm-c/
+// TargetMachine.h) -- unlike IntPredicate/RealPredicate/Linkage above,
+// this isn't narrowed at all: driver.cppm's own codegen_opt_level_for
+// maps its plain `int opt_level` (0, 1, 2, or anything higher) onto all
+// 4 of these, so all 4 are kept. Passed to TargetMachine::create_handle.
+export enum class CodeGenOptLevel {
+    none = 0,
+    less = 1,
+    default_ = 2,
+    aggressive = 3,
+};
+
+// llvm::Type::TypeID, via LLVM-C's LLVMTypeKind (llvm-c/Core.h) --
+// narrowed to the 3 enumerators Type::kind_of_handle's only caller
+// (src/compiler/codegen/expressions.cppm's scalar_bit_width) actually
+// distinguishes: every scalar type scpp's codegen ever casts between is
+// either a plain (non-vector) integer type or float/double, never any
+// of LLVMTypeKind's other 18 enumerators (vectors, tokens, labels,
+// metadata, etc. -- none of which scpp has surface syntax for at all).
+//
+// A plain class of static int-returning methods, deliberately *not* an
+// `enum class` like IntPredicate/RealPredicate/Linkage above: those are
+// only ever *consumed* (a caller passes e.g. IntPredicate::eq in, this
+// library casts it to `int` for the underlying LLVM-C call -- a
+// direction scpp always allows, spec 14.1(4)), but Type::kind_of_handle
+// needs to *produce* a LLVMGetTypeKind's raw `int` result as a
+// TypeKind-shaped value for its caller to compare -- and going from a
+// bare `int` back to an `enum class` value is exactly the direction
+// spec 14.1(5) requires `scpp::enum_cast<T>(value)` for instead of
+// `static_cast` (confirmed empirically: scpp rejects
+// `static_cast<SomeEnumClass>(some_int)` with "cannot cast an integer
+// value to enum class ...; use scpp::enum_cast<...>(value) instead").
+// `scpp::enum_cast` is itself a scpp-compiler-only intrinsic (requires
+// `import scpp;`, the compiler's own self-hosting-support module, and
+// has no real-C++ definition anywhere), so it cannot be used from
+// inside this dual-compiled file either. Plain static methods returning
+// `int` sidestep the whole issue while staying just as self-documenting
+// at the call site (`TypeKind::integer()` instead of
+// `LLVMIntegerTypeKind`).
+export class TypeKind {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~TypeKind() {
+        return;
+    }
+
+    static int integer() {
+        return 8;
+    }
+
+    static int float32() {
+        return 2;
+    }
+
+    static int float64() {
+        return 3;
+    }
+};
+
+// Wraps a single llvm::LLVMContext. Every Type and Module obtained from a
+// Context borrows it and must not outlive it. Move-only (no copy
+// constructor is declared, so scpp treats it like std::unique_ptr: an
+// LLVMContext cannot be cheaply duplicated, only owned by one Context at
+// a time).
+export class Context {
+private:
+    void* handle_{};
+
+public:
+    Context() {
+        [[scpp::unsafe]] {
+            this->handle_ = LLVMContextCreate();
+        }
+        return;
+    }
+
+    virtual ~Context() {
+        [[scpp::unsafe]] {
+            LLVMContextDispose(this->handle_);
+        }
+        return;
+    }
+
+    // The raw handle, for this partition's own Type/Module constructors
+    // to pass to other LLVM-C calls. Not meant for ordinary callers, but
+    // scpp has no `friend`-only visibility narrower than public for
+    // cross-class use within the same partition (see book ch04).
+    void* handle() const {
+        return this->handle_;
+    }
+
+    // --- Raw-handle counterparts, for the scpp compiler's own codegen -----
+    //
+    // Everything below this point in the file (this pair of methods, plus
+    // similar `_handle`-suffixed additions on Type/Value/Module further
+    // down, plus the brand-new BasicBlock/Builder/Function/GlobalVariable/
+    // Attribute/Intrinsic classes) exists for one specific consumer: the
+    // scpp compiler's OWN codegen implementation
+    // (src/compiler/codegen/*.cppm, src/driver.cppm), migrating off of
+    // direct `#include "llvm-c/*.h"` + raw `LLVMBuildXxx`/etc. calls (which
+    // cannot compile under scpp itself, since scpp has no preprocessor) and
+    // onto `import scpp;` instead. Codegen already holds raw
+    // LLVMContextRef/LLVMModuleRef/LLVMBuilderRef/etc. fields directly (a
+    // design decision from the prior LLVM-C-native-to-LLVM-C-ABI
+    // conversion, kept as-is here rather than restructured around the
+    // RAII Context/Type/Value/Module objects above), and calls these
+    // operations from thousands of call sites inside hot codegen loops --
+    // so every method below takes and returns *raw* handles, deliberately
+    // not RAII objects, letting each call site become a near-mechanical
+    // rename (`LLVMBuildAdd(builder_, l, r, name)` becomes
+    // `Builder::add(builder_, l, r, name)`) rather than a rewrite of
+    // variable declarations throughout Codegen. This also isn't merely a
+    // style choice for Context specifically: Context's only constructor is
+    // the owning `Context()` above (unlike Type/Value, which do have
+    // public non-owning raw-handle constructors) -- constructing a
+    // temporary Context from an existing raw handle just to reach an
+    // instance method would run this class's own destructor and dispose a
+    // handle that's still very much in use, a use-after-free/double-free
+    // hazard. A static, raw-handle-in/raw-handle-out method sidesteps that
+    // entirely.
+    static void* create_handle() {
+        [[scpp::unsafe]] {
+            return LLVMContextCreate();
+        }
+    }
+
+    static void dispose_handle(void* context) {
+        [[scpp::unsafe]] {
+            LLVMContextDispose(context);
+        }
+        return;
+    }
+};
+
+// A non-owning reference to an LLVM type interned by some Context. Types
+// are never individually created/destroyed -- their Context owns them
+// for its entire lifetime -- so Type is freely copyable (a Type is just
+// a handle, not a resource); spec §11.5(1) still requires an explicit
+// virtual destructor from every class regardless, so one is declared
+// below (a no-op), alongside an explicit copy constructor/assignment so
+// this destructor declaration alone doesn't make Type move-only.
+export class Type {
+private:
+    void* handle_{};
+
+public:
+    // Constructed via the get_* factories below; the raw-handle
+    // constructor stays public (rather than private-plus-friend, which
+    // scpp doesn't support) since nothing unsafe is possible here that
+    // isn't already possible from inside any [[scpp::unsafe]] block.
+    Type(void* handle) {
+        this->handle_ = handle;
+        return;
+    }
+
+    Type(const Type& other) {
+        this->handle_ = other.handle_;
+        return;
+    }
+
+    Type& operator=(const Type& other) {
+        this->handle_ = other.handle_;
+        return *this;
+    }
+
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor. Type owns nothing (its Context owns the underlying
+    // llvm::Type for that Context's entire lifetime), so this is a no-op.
+    virtual ~Type() {
+        return;
+    }
+
+    // llvm::Type::getInt1Ty(context), via LLVM-C's LLVMInt1TypeInContext.
+    static Type get_int1(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMInt1TypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::Type::getInt8Ty(context), via LLVM-C's LLVMInt8TypeInContext.
+    static Type get_int8(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMInt8TypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::Type::getInt16Ty(context), via LLVM-C's LLVMInt16TypeInContext.
+    static Type get_int16(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMInt16TypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::Type::getInt32Ty(context), via LLVM-C's LLVMInt32TypeInContext.
+    static Type get_int32(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMInt32TypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::Type::getInt64Ty(context), via LLVM-C's LLVMInt64TypeInContext.
+    static Type get_int64(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMInt64TypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::Type::getFloatTy(context), via LLVM-C's LLVMFloatTypeInContext.
+    static Type get_float(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMFloatTypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::Type::getDoubleTy(context), via LLVM-C's LLVMDoubleTypeInContext.
+    static Type get_double(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMDoubleTypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::Type::getVoidTy(context), via LLVM-C's LLVMVoidTypeInContext.
+    static Type get_void(const Context& context) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMVoidTypeInContext(context.handle());
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::PointerType::get(context, address_space), via LLVM-C's
+    // LLVMPointerTypeInContext -- already declared above for
+    // Module::pointer_abi_alignment's own internal use; this is its
+    // first exposure as a public Type factory.
+    static Type get_pointer(const Context& context, unsigned int address_space) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMPointerTypeInContext(context.handle(), address_space);
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::ArrayType::get(element_type, count), via LLVM-C's
+    // LLVMArrayType2 (the API-accurate, unsigned-long-counted successor to the
+    // deprecated, unsigned-counted LLVMArrayType).
+    static Type get_array(const Type& element_type, unsigned long count) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMArrayType2(element_type.handle(), count);
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::FunctionType::get(return_type, param_types, is_var_arg), via
+    // LLVM-C's LLVMFunctionType. Takes `param_types` as a raw pointer plus
+    // an explicit `param_count` (matching LLVMFunctionType's own C-style
+    // shape) instead of `std::span<const Type>`: a caller-side array
+    // argument decays to `const Type*` automatically (see load_value's own
+    // comment in codegen/api.cppm on this exact decay), so this loses no
+    // ergonomics on the calling side, while sidestepping a genuine dual-
+    // compilation conflict this method's *body* would otherwise hit --
+    // scpp treats std::span as a compiler-builtin, non-class kind whose
+    // `.size`/`.data` are bare property accesses (never spelled with
+    // parens; see src/compiler/codegen/expressions.cppm's "method call
+    // ... is only supported on a class type" rule), while real C++
+    // requires `std::span<T>::size()` to always be called *with* parens.
+    // No single spelling of "get this span's element count" satisfies
+    // both compilers, so the count is threaded through explicitly instead
+    // of ever being read back off a span from inside this dual-compiled
+    // file. See the malloc/free extern "C" declarations above for why
+    // this marshals param_types into a heap buffer instead of passing a
+    // std::vector or stack array straight through, and fill_type_handles
+    // below for why that buffer is filled via recursion rather than a
+    // `while` loop.
+    static Type get_function(const Type& return_type, const Type* param_types, unsigned int param_count,
+                              bool is_var_arg) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            unsigned long buffer_bytes = (unsigned long)(param_count) * sizeof(void*);
+            void** handles = static_cast<void**>(malloc(buffer_bytes));
+            Type::fill_type_handles(handles, param_types, 0, static_cast<int>(param_count));
+            int is_var_arg_flag = 0;
+            if (is_var_arg) {
+                is_var_arg_flag = 1;
+            }
+            handle = LLVMFunctionType(return_type.handle(), handles, param_count, is_var_arg_flag);
+            free(handles);
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // llvm::StructType::create(context, element_types, ..., packed), via
+    // LLVM-C's LLVMStructTypeInContext -- an *anonymous* (unnamed,
+    // structurally-typed) struct, matching LLVMStructTypeInContext's own
+    // shape; a named-struct factory (LLVMStructCreateNamed +
+    // LLVMStructSetBody) is left for a future slice, alongside Function/
+    // BasicBlock/IRBuilder. Takes `element_types` as a raw pointer plus an
+    // explicit `element_count` instead of `std::span<const Type>`, for the
+    // exact same dual-compilation reason as get_function's own `param_types`
+    // above. See the malloc/free extern "C" declarations above for why
+    // this marshals element_types into a heap buffer instead of passing a
+    // std::vector or stack array straight through, and fill_type_handles
+    // below for why that buffer is filled via recursion rather than a
+    // `while` loop.
+    static Type get_struct(const Context& context, const Type* element_types, unsigned int element_count,
+                            bool packed) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            unsigned long buffer_bytes = (unsigned long)(element_count) * sizeof(void*);
+            void** handles = static_cast<void**>(malloc(buffer_bytes));
+            Type::fill_type_handles(handles, element_types, 0, static_cast<int>(element_count));
+            int packed_flag = 0;
+            if (packed) {
+                packed_flag = 1;
+            }
+            handle = LLVMStructTypeInContext(context.handle(), handles, element_count, packed_flag);
+            free(handles);
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // Prints this type as human-readable LLVM IR text to stdout (via
+    // std::println), matching llvm::Type::print(llvm::outs()) --
+    // LLVM-C's LLVMPrintTypeToString does the formatting. See Module::
+    // print's own identical pattern above.
+    void print() const {
+        char* text{};
+        [[scpp::unsafe]] {
+            text = LLVMPrintTypeToString(this->handle_);
+        }
+        std::println("{}", text);
+        [[scpp::unsafe]] {
+            LLVMDisposeMessage(text);
+        }
+        return;
+    }
+
+    void* handle() const {
+        return this->handle_;
+    }
+
+    // --- Raw-handle counterparts, for the scpp compiler's own codegen -----
+    // See Context::create_handle's comment above for why every method in
+    // this section takes/returns raw handles rather than Type/Context
+    // objects. Each one is otherwise identical to its object-based
+    // counterpart above.
+    static void* get_int1_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMInt1TypeInContext(context);
+        }
+    }
+
+    static void* get_int8_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMInt8TypeInContext(context);
+        }
+    }
+
+    static void* get_int16_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMInt16TypeInContext(context);
+        }
+    }
+
+    static void* get_int32_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMInt32TypeInContext(context);
+        }
+    }
+
+    static void* get_int64_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMInt64TypeInContext(context);
+        }
+    }
+
+    // llvm::Type::getIntNTy(context, num_bits), via LLVM-C's
+    // LLVMIntTypeInContext -- an arbitrary-bit-width integer type (e.g. a
+    // scpp enum's underlying storage type, which need not be exactly 1/8/
+    // 16/32/64 bits); has no object-based (non-`_handle`) counterpart
+    // above since this module's own pre-existing surface never needed
+    // one.
+    static void* get_int_handle(void* context, unsigned int num_bits) {
+        [[scpp::unsafe]] {
+            return LLVMIntTypeInContext(context, num_bits);
+        }
+    }
+
+    static void* get_float_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMFloatTypeInContext(context);
+        }
+    }
+
+    static void* get_double_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMDoubleTypeInContext(context);
+        }
+    }
+
+    static void* get_void_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMVoidTypeInContext(context);
+        }
+    }
+
+    static void* get_pointer_handle(void* context, unsigned int address_space) {
+        [[scpp::unsafe]] {
+            return LLVMPointerTypeInContext(context, address_space);
+        }
+    }
+
+    static void* get_array_handle(void* element_type, unsigned long count) {
+        [[scpp::unsafe]] {
+            return LLVMArrayType2(element_type, count);
+        }
+    }
+
+    // Unlike get_function/get_struct above (which convert an *object*
+    // array -- `const Type*` -- into a raw LLVMTypeRef[] buffer, and so
+    // need the malloc'd scratch buffer and fill_type_handles recursion
+    // below), `param_types`/`element_types` here are already raw handles
+    // (a `void**`, exactly LLVMFunctionType/LLVMStructTypeInContext's own
+    // parameter shape), so these two pass them straight through with no
+    // marshalling at all.
+    static void* get_function_handle(void* return_type, void** param_types, unsigned int param_count,
+                                      bool is_var_arg) {
+        [[scpp::unsafe]] {
+            int is_var_arg_flag = 0;
+            if (is_var_arg) {
+                is_var_arg_flag = 1;
+            }
+            return LLVMFunctionType(return_type, param_types, param_count, is_var_arg_flag);
+        }
+    }
+
+    static void* get_struct_handle(void* context, void** element_types, unsigned int element_count, bool packed) {
+        [[scpp::unsafe]] {
+            int packed_flag = 0;
+            if (packed) {
+                packed_flag = 1;
+            }
+            return LLVMStructTypeInContext(context, element_types, element_count, packed_flag);
+        }
+    }
+
+    // llvm::StructType::create(context, name) -- an opaque, *named*
+    // struct type with no body yet (see set_struct_body_handle below to
+    // give it one); used for recursive/self-referential struct layouts
+    // (e.g. a linked-list node struct containing a pointer to its own
+    // type), where the element types can't all be known before the
+    // struct type itself must already exist to name them.
+    static void* create_named_struct_handle(void* context, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMStructCreateNamed(context, name);
+        }
+    }
+
+    static void set_struct_body_handle(void* struct_type, void** element_types, unsigned int element_count,
+                                        bool packed) {
+        [[scpp::unsafe]] {
+            int packed_flag = 0;
+            if (packed) {
+                packed_flag = 1;
+            }
+            LLVMStructSetBody(struct_type, element_types, element_count, packed_flag);
+        }
+        return;
+    }
+
+    // llvm::Type::getTypeID(), via LLVM-C's LLVMGetTypeKind -- returns a
+    // plain `int`, not a TypeKind value; see TypeKind's own comment above
+    // for why (spec 14.1(5)'s int-to-enum-class restriction). Compare the
+    // result against TypeKind::integer()/float32()/float64().
+    static int kind_of_handle(void* type) {
+        [[scpp::unsafe]] {
+            return LLVMGetTypeKind(type);
+        }
+    }
+
+    // llvm::IntegerType::getBitWidth(), via LLVM-C's LLVMGetIntTypeWidth.
+    static unsigned int int_width_handle(void* integer_type) {
+        [[scpp::unsafe]] {
+            return LLVMGetIntTypeWidth(integer_type);
+        }
+    }
+
+    // llvm::StructType::getNumElements(), via LLVM-C's
+    // LLVMCountStructElementTypes.
+    static unsigned int struct_element_count_handle(void* struct_type) {
+        [[scpp::unsafe]] {
+            return LLVMCountStructElementTypes(struct_type);
+        }
+    }
+
+    // llvm::StructType::elements(), via LLVM-C's
+    // LLVMGetStructElementTypes -- fills caller-owned `dest` (sized by a
+    // prior struct_element_count_handle call), exactly matching
+    // LLVMGetStructElementTypes's own out-parameter shape; no
+    // marshalling needed here since, unlike get_function/get_struct
+    // above, there's no Type-object array involved on either side.
+    static void get_struct_element_types_handle(void* struct_type, void** dest) {
+        [[scpp::unsafe]] {
+            LLVMGetStructElementTypes(struct_type, dest);
+        }
+        return;
+    }
+
+private:
+    // Copies types[i].handle() into handles[i] for every i in [i, count)
+    // -- used by get_function/get_struct above to fill a malloc'd
+    // LLVMTypeRef[] buffer from a `(const Type*, count)` pair. Takes
+    // `types` as a raw pointer (not `std::span<const Type>`) since
+    // get_function/get_struct above no longer have a span to pass down
+    // either -- see get_function's own comment for why. Subscripting a
+    // raw pointer (`types[i]`) is ordinary pointer arithmetic in both
+    // languages (unlike `.size`/`.data`, it is never a class method call),
+    // so it carries none of that dual-compilation conflict.
+    //
+    // This is recursive rather than the more obvious `while (i < count)`
+    // because of a movecheck/dataflow.cppm limitation (empirically
+    // confirmed against this compiler, not a documented scpp language
+    // restriction like ch05.5's dereference rules): a `while` loop
+    // anywhere inside a function that also contains a
+    // `[[scpp::unsafe]] { }` block (or is itself `[[scpp::unsafe]]`)
+    // causes the move checker to lose track of unsafe context for every
+    // extern "C" call and raw-pointer operation from that loop onward --
+    // including calls textually after the loop, and even calls with no
+    // data dependency on the loop at all -- misreporting them as outside
+    // any unsafe context. Recursion (ordinary function calls, not a loop
+    // back-edge in the same function's control-flow graph) does not
+    // trigger this. Root cause, for whoever eventually fixes this (out of
+    // scope for this library): check_function's worklist-based CFG
+    // fixed-point loop (dataflow.cppm) visits every block once up front
+    // regardless of predecessor readiness, so a loop header's back-edge
+    // predecessor is still default-constructed (unsafe_depth == 0) the
+    // first time the header is joined; join_states (state.cppm) combines
+    // predecessors' unsafe_depth via plain `std::min`, so that transient
+    // 0 permanently drags the joined depth down to 0 and the fixed point
+    // never recovers, since nothing downstream can push a `min`-joined
+    // value back up. Reported to the project owner as a compiler bug
+    // separate from this library's own scope; kept as a plain recursive
+    // helper here rather than worked around some other way, since scpp
+    // has no other iteration construct available (`for` is reserved but
+    // not yet implemented, per src/lexer.cppm/src/ast.cppm).
+    [[scpp::unsafe]] static void fill_type_handles(void** handles, const Type* types, int i, int count) {
+        if (i >= count) {
+            return;
+        }
+        handles[i] = types[i].handle();
+        Type::fill_type_handles(handles, types, i + 1, count);
+    }
+};
+
+// A non-owning reference to an LLVM constant value. Like Type, a Constant
+// is uniqued and owned by its Context for that Context's entire lifetime
+// (there is no LLVMDisposeValue in llvm-c/Core.h, since ordinary
+// llvm::Value ownership varies -- Instructions are owned by their parent
+// BasicBlock, Arguments by their parent Function -- but Constants
+// specifically are always Context-owned, exactly like Type), so Value is
+// freely copyable, with the same explicit-destructor/copy-constructor/
+// copy-assignment shape as Type above, for the same spec §11.5(1) reason.
+export class Value {
+private:
+    void* handle_{};
+
+public:
+    // Constructed via the const_* factories below; public for the same
+    // reason Type's raw-handle constructor is (see Type's own comment).
+    Value(void* handle) {
+        this->handle_ = handle;
+        return;
+    }
+
+    Value(const Value& other) {
+        this->handle_ = other.handle_;
+        return;
+    }
+
+    Value& operator=(const Value& other) {
+        this->handle_ = other.handle_;
+        return *this;
+    }
+
+    virtual ~Value() {
+        return;
+    }
+
+    // llvm::ConstantInt::get(int_type, value, sign_extend), via LLVM-C's
+    // LLVMConstInt.
+    static Value const_int(const Type& int_type, unsigned long value, bool sign_extend) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            int sign_extend_flag = 0;
+            if (sign_extend) {
+                sign_extend_flag = 1;
+            }
+            handle = LLVMConstInt(int_type.handle(), value, sign_extend_flag);
+        }
+        Value result{handle};
+        return result;
+    }
+
+    // llvm::ConstantFP::get(real_type, value), via LLVM-C's LLVMConstReal.
+    static Value const_real(const Type& real_type, double value) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMConstReal(real_type.handle(), value);
+        }
+        Value result{handle};
+        return result;
+    }
+
+    // llvm::Constant::getNullValue(type), via LLVM-C's LLVMConstNull.
+    static Value const_null(const Type& type) {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMConstNull(type.handle());
+        }
+        Value result{handle};
+        return result;
+    }
+
+    // llvm::Value::getType(), via LLVM-C's LLVMTypeOf -- the only way to
+    // observe a Value's Type back once constructed, since Value itself
+    // stores no separate copy of it.
+    Type type_of() const {
+        void* handle{};
+        [[scpp::unsafe]] {
+            handle = LLVMTypeOf(this->handle_);
+        }
+        Type result{handle};
+        return result;
+    }
+
+    // Prints this value as human-readable LLVM IR text to stdout (via
+    // std::println), matching llvm::Value::print(llvm::outs()) --
+    // LLVM-C's LLVMPrintValueToString does the formatting. See Module::
+    // print's own identical pattern above.
+    void print() const {
+        char* ir{};
+        [[scpp::unsafe]] {
+            ir = LLVMPrintValueToString(this->handle_);
+        }
+        std::println("{}", ir);
+        [[scpp::unsafe]] {
+            LLVMDisposeMessage(ir);
+        }
+        return;
+    }
+
+    void* handle() const {
+        return this->handle_;
+    }
+
+    // --- Raw-handle counterparts, for the scpp compiler's own codegen -----
+    // See Context::create_handle's comment above for why every method in
+    // this section takes/returns raw handles rather than Type/Value
+    // objects.
+    static void* const_int_handle(void* int_type, unsigned long value, bool sign_extend) {
+        [[scpp::unsafe]] {
+            int sign_extend_flag = 0;
+            if (sign_extend) {
+                sign_extend_flag = 1;
+            }
+            return LLVMConstInt(int_type, value, sign_extend_flag);
+        }
+    }
+
+    static void* const_real_handle(void* real_type, double value) {
+        [[scpp::unsafe]] {
+            return LLVMConstReal(real_type, value);
+        }
+    }
+
+    static void* const_null_handle(void* type) {
+        [[scpp::unsafe]] {
+            return LLVMConstNull(type);
+        }
+    }
+
+    // llvm::ConstantPointerNull::get(pointer_type), via LLVM-C's
+    // LLVMConstPointerNull -- distinct from const_null_handle above
+    // (which covers every Constant kind, pointers included, via
+    // LLVMConstNull); both exist since the compiler's own codegen calls
+    // both spellings at different call sites, matching upstream LLVM's
+    // own API surface exactly rather than consolidating them into one.
+    static void* const_pointer_null_handle(void* pointer_type) {
+        [[scpp::unsafe]] {
+            return LLVMConstPointerNull(pointer_type);
+        }
+    }
+
+    // llvm::ConstantExpr::getBitCast(constant_val, to_type), via LLVM-C's
+    // LLVMConstBitCast -- a *constant-expression* bitcast (valid only
+    // between a global's initializer/address and another type, unlike
+    // Builder::bitcast below, which emits a runtime instruction).
+    static void* const_bitcast_handle(void* constant_val, void* to_type) {
+        [[scpp::unsafe]] {
+            return LLVMConstBitCast(constant_val, to_type);
+        }
+    }
+
+    // llvm::ConstantArray::get(element_type, constant_vals), via LLVM-C's
+    // LLVMConstArray2. `constant_vals`/`length` mirror LLVMConstArray2's
+    // own raw-pointer-plus-count shape directly (no Value-object
+    // marshalling needed, unlike Type::get_function/get_struct above --
+    // see their own comment for why those two differ).
+    static void* const_array_handle(void* element_type, void** constant_vals, unsigned long length) {
+        [[scpp::unsafe]] {
+            return LLVMConstArray2(element_type, constant_vals, length);
+        }
+    }
+
+    // llvm::ConstantStruct::get(struct_type equivalent, constant_vals),
+    // via LLVM-C's LLVMConstStructInContext -- an *anonymous* constant
+    // struct (its type is inferred from `constant_vals`' own types), like
+    // Type::get_struct_handle's anonymous (not create_named_struct_handle)
+    // counterpart above.
+    static void* const_struct_handle(void* context, void** constant_vals, unsigned int count, bool packed) {
+        [[scpp::unsafe]] {
+            int packed_flag = 0;
+            if (packed) {
+                packed_flag = 1;
+            }
+            return LLVMConstStructInContext(context, constant_vals, count, packed_flag);
+        }
+    }
+
+    // llvm::UndefValue::get(type), via LLVM-C's LLVMGetUndef.
+    static void* get_undef_handle(void* type) {
+        [[scpp::unsafe]] {
+            return LLVMGetUndef(type);
+        }
+    }
+
+    // llvm::Value::getType(), via LLVM-C's LLVMTypeOf.
+    static void* type_of_handle(void* value) {
+        [[scpp::unsafe]] {
+            return LLVMTypeOf(value);
+        }
+    }
+
+    // llvm::Value::setName(name), via LLVM-C's LLVMSetValueName2.
+    static void set_name_handle(void* val, const char* name, unsigned long name_len) {
+        [[scpp::unsafe]] {
+            LLVMSetValueName2(val, name, name_len);
+        }
+        return;
+    }
+
+    // llvm::Value::getName(), via LLVM-C's LLVMGetValueName2 -- writes
+    // the name's length to caller-owned `out_length` (matching
+    // LLVMGetValueName2's own out-parameter shape) and returns the name
+    // itself (owned by `val`'s parent Module -- not caller-owned, unlike
+    // LLVMPrintTypeToString/LLVMPrintValueToString's malloc'd strings
+    // above, so this is never passed to LLVMDisposeMessage).
+    static const char* name_of_handle(void* val, unsigned long* out_length) {
+        [[scpp::unsafe]] {
+            return LLVMGetValueName2(val, out_length);
+        }
+    }
+
+    // llvm::GlobalValue::setLinkage(linkage), via LLVM-C's LLVMSetLinkage.
+    static void set_linkage_handle(void* global, Linkage linkage) {
+        [[scpp::unsafe]] {
+            LLVMSetLinkage(global, static_cast<int>(linkage));
+        }
+        return;
+    }
+
+    // llvm::GlobalValue::getValueType(), via LLVM-C's
+    // LLVMGlobalGetValueType -- the pointee type a GlobalVariable/
+    // Function was declared to hold (distinct from type_of_handle above,
+    // which would return the *pointer* type of the global itself).
+    static void* global_value_type_handle(void* global) {
+        [[scpp::unsafe]] {
+            return LLVMGlobalGetValueType(global);
+        }
+    }
+
+    // llvm::Instruction::getAlign()/llvm::GlobalObject::getAlignment(),
+    // via LLVM-C's LLVMGetAlignment (works on both allocas/loads/stores
+    // and GlobalVariables).
+    static unsigned int alignment_handle(void* v) {
+        [[scpp::unsafe]] {
+            return LLVMGetAlignment(v);
+        }
+    }
+
+    static void set_alignment_handle(void* v, unsigned int bytes) {
+        [[scpp::unsafe]] {
+            LLVMSetAlignment(v, bytes);
+        }
+        return;
+    }
+
+    // llvm::Value::use_empty()/use_begin(), via LLVM-C's LLVMGetFirstUse --
+    // returns null if `v` has no uses at all. The compiler's own codegen
+    // (statements.cppm) only ever null-checks this result (to tell whether
+    // a just-created basic-block-as-value has already been branched to),
+    // never walks the use-list itself, so no LLVMGetNextUse wrapper is
+    // needed yet.
+    static void* first_use_handle(void* v) {
+        [[scpp::unsafe]] {
+            return LLVMGetFirstUse(v);
+        }
+    }
+
+    // llvm::Instruction::getNextNode(), via LLVM-C's
+    // LLVMGetNextInstruction -- returns null once past the last
+    // instruction of `inst`'s basic block. debug.cppm walks a block's
+    // instructions with this to attach a source location to every one
+    // emitted so far once it learns their line/column, since the
+    // scpp::Codegen expression/statement emitters that create them run
+    // before their own enclosing statement's debug info is available.
+    static void* next_instruction_handle(void* inst) {
+        [[scpp::unsafe]] {
+            return LLVMGetNextInstruction(inst);
+        }
+    }
+
+    // llvm::Value::getMetadata() equivalent for wrapping a Value itself
+    // as an MDNode operand, via LLVM-C's LLVMValueAsMetadata --
+    // debug.cppm needs this to pass an alloca's address (an ordinary
+    // Value) to DIBuilder::insert_declare_record_at_end_handle, whose
+    // `storage` parameter upstream is itself unwrapped back out of a
+    // ValueAsMetadata node internally by LLVM, but LLVM-C's own
+    // LLVMDIBuilderInsertDeclareRecordAtEnd signature still takes the
+    // plain LLVMValueRef directly -- this wrapper exists for the one
+    // other call site debug.cppm has, building a `variables:` DINode
+    // list entry.
+    static void* as_metadata_handle(void* val) {
+        [[scpp::unsafe]] {
+            return LLVMValueAsMetadata(val);
+        }
+    }
+
+    // llvm::isa<AllocaInst>() equivalent, via LLVM-C's own macro-
+    // generated "type cast" function LLVMIsAAllocaInst -- despite the
+    // name, this returns the *value itself* (unchanged) when `val` is
+    // in fact an AllocaInst, or null otherwise; it is never a bool
+    // upstream. debug.cppm only ever null-checks the result (to decide
+    // whether a local variable's declared storage is a plain stack
+    // alloca, eligible for a `dbg_declare` record, or something else
+    // entirely), so this wrapper mirrors that exact "value-or-null"
+    // shape rather than translating it into an actual bool.
+    static void* is_alloca_inst_handle(void* val) {
+        [[scpp::unsafe]] {
+            return LLVMIsAAllocaInst(val);
+        }
+    }
+};
+
+// Wraps a single llvm::Module. Move-only, same reasoning as Context.
+export class Module {
+private:
+    void* handle_{};
+
+public:
+    // llvm::Module's constructor: `new llvm::Module(name, *context)`, via
+    // LLVM-C's LLVMModuleCreateWithNameInContext. `context` must outlive
+    // this Module.
+    Module(const char* name, const Context& context) {
+        [[scpp::unsafe]] {
+            this->handle_ = LLVMModuleCreateWithNameInContext(name, context.handle());
+        }
+        return;
+    }
+
+    virtual ~Module() {
+        [[scpp::unsafe]] {
+            LLVMDisposeModule(this->handle_);
+        }
+        return;
+    }
+
+    // Prints this module's IR as human-readable text to stdout (via
+    // std::println), matching llvm::Module::print(llvm::outs(), ...) --
+    // LLVM-C's LLVMPrintModuleToString does the formatting.
+    void print() const {
+        char* ir{};
+        [[scpp::unsafe]] {
+            ir = LLVMPrintModuleToString(this->handle_);
+        }
+        std::println("{}", ir);
+        [[scpp::unsafe]] {
+            LLVMDisposeMessage(ir);
+        }
+        return;
+    }
+
+    // llvm::verifyModule's own "true if broken" convention, inverted into
+    // std::expected's idiom: a valid module returns a (trivially true)
+    // success value; a broken module prints the detailed LLVM diagnostic
+    // to stdout (this partition has no std::string to carry it back to
+    // the caller as structured data yet -- see std.scpp's own :string
+    // partition, not currently re-exported by `import std;`) and returns
+    // scpp::llvm::error::verification_failed.
+    std::expected<bool, error> verify() const {
+        char* message{};
+        int broken = 0;
+        // 2 == LLVMReturnStatusAction (llvm-c/Analysis.h's
+        // LLVMVerifierFailureAction enum: AbortProcessAction = 0,
+        // PrintMessageAction = 1, ReturnStatusAction = 2) -- "verifier
+        // will just return 1 [on failure]", never aborting the process or
+        // printing to stderr itself. scpp has no mechanism to import a C
+        // enum's value by name, so this constant is memorialized here as
+        // a plain literal instead.
+        int return_status_action = 2;
+        [[scpp::unsafe]] {
+            broken = LLVMVerifyModule(this->handle_, return_status_action, &message);
+        }
+        if (broken != 0) {
+            std::println("{}", message);
+            [[scpp::unsafe]] {
+                LLVMDisposeMessage(message);
+            }
+            error code = scpp::llvm::error::verification_failed;
+            std::unexpected<error> error_value{code};
+            std::expected<bool, error> result{error_value};
+            return result;
+        }
+        [[scpp::unsafe]] {
+            LLVMDisposeMessage(message);
+        }
+        std::expected<bool, error> result{true};
+        return result;
+    }
+
+    // llvm::DataLayout::getPointerSize(address_space), via LLVM-C's
+    // LLVMGetModuleDataLayout + LLVMPointerSizeForAS.
+    unsigned int pointer_size(unsigned int address_space) const {
+        [[scpp::unsafe]] {
+            void* data_layout = LLVMGetModuleDataLayout(this->handle_);
+            return LLVMPointerSizeForAS(data_layout, address_space);
+        }
+    }
+
+    // llvm::DataLayout::getPointerABIAlignment(address_space).value() --
+    // llvm-c/Target.h has no function with this exact shape (a data
+    // layout plus a bare address space), but LLVMABIAlignmentOfType
+    // queried against an opaque pointer type *for that same address
+    // space* reads the exact same per-address-space entry in the
+    // DataLayout's own pointer-alignment table, so this composes two
+    // already-official LLVM-C calls instead of needing any wrapper of
+    // our own.
+    unsigned int pointer_abi_alignment(unsigned int address_space) const {
+        [[scpp::unsafe]] {
+            void* data_layout = LLVMGetModuleDataLayout(this->handle_);
+            void* context = LLVMGetModuleContext(this->handle_);
+            void* pointer_type = LLVMPointerTypeInContext(context, address_space);
+            return LLVMABIAlignmentOfType(data_layout, pointer_type);
+        }
+    }
+
+    // llvm::DataLayout::getABITypeAlign(type).value(), via LLVM-C's
+    // LLVMGetModuleDataLayout + LLVMABIAlignmentOfType.
+    unsigned int abi_type_align(const Type& type) const {
+        [[scpp::unsafe]] {
+            void* data_layout = LLVMGetModuleDataLayout(this->handle_);
+            return LLVMABIAlignmentOfType(data_layout, type.handle());
+        }
+    }
+
+    // llvm::DataLayout::getTypeAllocSize(type), via LLVM-C's
+    // LLVMGetModuleDataLayout + LLVMABISizeOfType.
+    unsigned long type_alloc_size(const Type& type) const {
+        [[scpp::unsafe]] {
+            void* data_layout = LLVMGetModuleDataLayout(this->handle_);
+            return LLVMABISizeOfType(data_layout, type.handle());
+        }
+    }
+
+    // llvm::DataLayout::getTypeSizeInBits(type), via LLVM-C's
+    // LLVMGetModuleDataLayout + LLVMSizeOfTypeInBits.
+    unsigned long type_size_in_bits(const Type& type) const {
+        [[scpp::unsafe]] {
+            void* data_layout = LLVMGetModuleDataLayout(this->handle_);
+            return LLVMSizeOfTypeInBits(data_layout, type.handle());
+        }
+    }
+
+    // --- Raw-handle counterparts, for the scpp compiler's own codegen -----
+    // See Context::create_handle's comment above for why every method in
+    // this section takes/returns raw handles rather than Context/Type/
+    // Module objects.
+    static void* create_handle(const char* name, void* context) {
+        [[scpp::unsafe]] {
+            return LLVMModuleCreateWithNameInContext(name, context);
+        }
+    }
+
+    static void dispose_handle(void* mod) {
+        [[scpp::unsafe]] {
+            LLVMDisposeModule(mod);
+        }
+        return;
+    }
+
+    // llvm::Module::getContext(), via LLVM-C's LLVMGetModuleContext.
+    static void* context_handle(void* mod) {
+        [[scpp::unsafe]] {
+            return LLVMGetModuleContext(mod);
+        }
+    }
+
+    // Unlike ir_to_string()/print() above (this partition's original,
+    // ergonomic wrappers for ordinary scpp users, which print straight to
+    // stdout), this returns LLVMPrintModuleToString's raw malloc'd C
+    // string, since the compiler's own codegen (Codegen::module_ir())
+    // wraps it into a std::string of its own rather than printing it
+    // unconditionally. Caller must dispose_message_handle the result
+    // exactly once.
+    static char* ir_to_string_handle(void* mod) {
+        [[scpp::unsafe]] {
+            return LLVMPrintModuleToString(mod);
+        }
+    }
+
+    // Frees any malloc'd C string LLVM-C hands back by pointer -- not
+    // specific to Module at all (also used for LLVMPrintTypeToString/
+    // LLVMPrintValueToString's results, and LLVMVerifyModule's
+    // diagnostic message via verify_handle below), but placed here since
+    // Module::ir_to_string_handle is its most common source in the
+    // compiler's own codegen.
+    static void dispose_message_handle(char* message) {
+        [[scpp::unsafe]] {
+            LLVMDisposeMessage(message);
+        }
+        return;
+    }
+
+    // llvm::verifyModule, via LLVM-C's LLVMVerifyModule -- unlike
+    // verify() above (this partition's original, ergonomic
+    // std::expected-returning wrapper for ordinary scpp users, which
+    // prints the diagnostic straight to stdout on failure), this returns
+    // the raw components LLVMVerifyModule itself produces: a bool ("did
+    // it verify") plus the diagnostic message as a malloc'd C string via
+    // `out_message` (mirroring LLVMVerifyModule's own
+    // LLVMReturnStatusAction convention exactly -- see verify()'s own
+    // comment for why 2 is memorialized as a plain literal here), since
+    // the compiler's own codegen needs to fold that message into its own
+    // CodegenError exception rather than have it printed unconditionally.
+    // `*out_message` must be dispose_message_handle'd exactly once
+    // regardless of the return value (LLVMVerifyModule always allocates
+    // it, even when empty).
+    static bool verify_handle(void* mod, char** out_message) {
+        [[scpp::unsafe]] {
+            int return_status_action = 2;
+            int broken = LLVMVerifyModule(mod, return_status_action, out_message);
+            return broken == 0;
+        }
+    }
+
+    // llvm::DataLayout's own string form, via LLVM-C's
+    // LLVMGetModuleDataLayout -- the raw LLVMTargetDataRef handle itself
+    // (not any one query against it), for DataLayout's own handle-based
+    // query methods below (DataLayout::pointer_size_handle et al.) to
+    // take as their first argument, mirroring the compiler's own existing
+    // `data_layout_ref(module)` internal helper (layout.cppm/
+    // expressions.cppm/debug.cppm) exactly.
+    static void* data_layout_handle(void* mod) {
+        [[scpp::unsafe]] {
+            return LLVMGetModuleDataLayout(mod);
+        }
+    }
+
+    static void set_target_handle(void* mod, const char* triple) {
+        [[scpp::unsafe]] {
+            LLVMSetTarget(mod, triple);
+        }
+        return;
+    }
+
+    static void set_data_layout_handle(void* mod, const char* data_layout_str) {
+        [[scpp::unsafe]] {
+            LLVMSetDataLayout(mod, data_layout_str);
+        }
+        return;
+    }
+
+    // llvm::Module::addModuleFlag(behavior, key, val), via LLVM-C's
+    // LLVMAddModuleFlag -- takes `behavior` as a plain `int` rather than
+    // a named enum, matching verify_handle's own return_status_action
+    // precedent above: debug.cppm (this method's only planned caller,
+    // not yet converted -- see this partition's top-of-file scope note)
+    // uses only LLVMModuleFlagBehaviorWarning (value 1) of
+    // LLVMModuleFlagBehavior's 6 enumerators, too narrow a sliver to
+    // justify a whole new enum class for a single value.
+    static void add_module_flag_handle(void* mod, int behavior, const char* key, unsigned long key_len, void* val) {
+        [[scpp::unsafe]] {
+            LLVMAddModuleFlag(mod, behavior, key, key_len, val);
+        }
+        return;
+    }
+};
+
+// A raw-handle-only accessor for llvm::DataLayout queries, for the scpp
+// compiler's own codegen -- mirrors llvm-c/Target.h's own
+// LLVMTargetDataRef-taking functions directly (Module's own
+// pointer_size/pointer_abi_alignment/abi_type_align/type_alloc_size/
+// type_size_in_bits methods above compose these against a Module handle
+// each time, exactly like the compiler's own pre-existing
+// data_layout_ref(module) + *OfType(...) two-step call pattern -- see
+// Module::data_layout_handle's own comment above), rather than an
+// ergonomic Module-composing convenience, since the compiler's codegen
+// already caches a single data-layout handle locally across several
+// calls in some functions instead of re-deriving it from the module each
+// time.
+export class DataLayout {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~DataLayout() {
+        return;
+    }
+
+    static unsigned int pointer_size_handle(void* data_layout, unsigned int address_space) {
+        [[scpp::unsafe]] {
+            return LLVMPointerSizeForAS(data_layout, address_space);
+        }
+    }
+
+    static unsigned int abi_alignment_of_type_handle(void* data_layout, void* type) {
+        [[scpp::unsafe]] {
+            return LLVMABIAlignmentOfType(data_layout, type);
+        }
+    }
+
+    static unsigned long abi_size_of_type_handle(void* data_layout, void* type) {
+        [[scpp::unsafe]] {
+            return LLVMABISizeOfType(data_layout, type);
+        }
+    }
+
+    static unsigned long size_of_type_in_bits_handle(void* data_layout, void* type) {
+        [[scpp::unsafe]] {
+            return LLVMSizeOfTypeInBits(data_layout, type);
+        }
+    }
+
+    // llvm::DataLayout::getStringRepresentation(), via LLVM-C's
+    // LLVMCopyStringRepOfTargetData -- driver.cppm's only caller of this
+    // (unlike every query above, all queried against a Module's *own*,
+    // already-attached DataLayout via Module::data_layout_handle) needs
+    // this for a *standalone* DataLayout it just built straight from a
+    // TargetMachine, before that Module even exists yet, via
+    // TargetMachine::create_data_layout_handle below -- to stamp the
+    // resulting string onto the new Module with Module::set_data_layout_handle.
+    // Returns a malloc'd C string, like LLVMPrintTypeToString/
+    // LLVMPrintValueToString above -- dispose_message_handle it once done.
+    static char* copy_string_rep_handle(void* data_layout) {
+        [[scpp::unsafe]] {
+            return LLVMCopyStringRepOfTargetData(data_layout);
+        }
+    }
+
+    // llvm::DataLayout's own destructor, via LLVM-C's
+    // LLVMDisposeTargetData -- only ever needed for the standalone
+    // DataLayout create_data_layout_handle above builds (a Module's own,
+    // returned by Module::data_layout_handle, is owned by that Module and
+    // never disposed of separately).
+    static void dispose_handle(void* data_layout) {
+        [[scpp::unsafe]] {
+            LLVMDisposeTargetData(data_layout);
+        }
+        return;
+    }
+};
+
+// llvm::Target, via LLVM-C's llvm-c/TargetMachine.h -- host/native target
+// discovery for driver.cppm's own needs (locating and initializing the
+// backend that will actually generate machine code), distinct from the
+// Type/Value/BasicBlock/Function/GlobalVariable *IR-construction*
+// classes above.
+export class Target {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~Target() {
+        return;
+    }
+
+    // llvm::InitializeNativeTarget(), via the scpp_llvm_initialize_native_target
+    // shim (see native_target_init.cpp and this partition's extern "C"
+    // declaration comment for why a shim, here only). Returns an
+    // ergonomic "did it succeed" bool, inverting the raw LLVM-C
+    // "0 = success" convention -- like Module::verify_handle's own
+    // `broken == 0` above.
+    static bool initialize_native_handle() {
+        [[scpp::unsafe]] {
+            return scpp_llvm_initialize_native_target() == 0;
+        }
+    }
+
+    // llvm::InitializeNativeTargetAsmPrinter(), via the
+    // scpp_llvm_initialize_native_asm_printer shim -- see
+    // initialize_native_handle's own comment just above.
+    static bool initialize_native_asm_printer_handle() {
+        [[scpp::unsafe]] {
+            return scpp_llvm_initialize_native_asm_printer() == 0;
+        }
+    }
+
+    // llvm::sys::getDefaultTargetTriple(), via LLVM-C's
+    // LLVMGetDefaultTargetTriple -- the host's own triple (e.g.
+    // "x86_64-unknown-linux-gnu"), for TargetMachine::create_handle
+    // below and host_target_triple() (scpp.driver's own public query).
+    // Returns a malloc'd C string -- dispose_message_handle it once done,
+    // like LLVMPrintTypeToString/LLVMPrintValueToString above.
+    static char* default_triple_handle() {
+        [[scpp::unsafe]] {
+            return LLVMGetDefaultTargetTriple();
+        }
+    }
+
+    // llvm::TargetRegistry::lookupTarget(triple, error), via LLVM-C's
+    // LLVMGetTargetFromTriple -- writes the found Target to `*out_target`
+    // (left unwritten on failure) and returns an ergonomic "did it
+    // succeed" bool, inverting the raw LLVM-C "0 = success" convention,
+    // like initialize_native_handle above. `*out_error` is a malloc'd C
+    // string (present or not regardless of success/failure, per LLVM-C's
+    // own doc comment on this function) -- dispose_message_handle it
+    // once done.
+    static bool from_triple_handle(const char* triple, void** out_target, char** out_error) {
+        [[scpp::unsafe]] {
+            return LLVMGetTargetFromTriple(triple, out_target, out_error) == 0;
+        }
+    }
+};
+
+// llvm::TargetMachine, via LLVM-C's llvm-c/TargetMachine.h --
+// construction/disposal of the backend driver.cppm's own
+// emit_object_file_for_program lowers a Codegen-produced Module through,
+// plus the two operations (a fresh DataLayout, and final object-file
+// emission) it needs that Target above doesn't cover.
+export class TargetMachine {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~TargetMachine() {
+        return;
+    }
+
+    // llvm::Target::createTargetMachine(...), via LLVM-C's
+    // LLVMCreateTargetMachine. `reloc`/`code_model` are LLVMRelocMode/
+    // LLVMCodeModel -- see this partition's own extern "C" declaration
+    // comment above for why they stay plain `int` (driver.cppm only
+    // ever passes one single named value for each).
+    static void* create_handle(void* target, const char* triple, const char* cpu, const char* features,
+                                CodeGenOptLevel level, int reloc, int code_model) {
+        [[scpp::unsafe]] {
+            return LLVMCreateTargetMachine(target, triple, cpu, features, static_cast<int>(level), reloc, code_model);
+        }
+    }
+
+    // llvm::TargetMachine's own destructor, via LLVM-C's
+    // LLVMDisposeTargetMachine.
+    static void dispose_handle(void* target_machine) {
+        [[scpp::unsafe]] {
+            LLVMDisposeTargetMachine(target_machine);
+        }
+        return;
+    }
+
+    // llvm::TargetMachine::createDataLayout(), via LLVM-C's
+    // LLVMCreateTargetDataLayout -- a standalone DataLayout (see
+    // DataLayout::copy_string_rep_handle/dispose_handle above) reflecting
+    // this exact TargetMachine's own target-specific layout choices, for
+    // driver.cppm to stamp onto the Module it's about to build via
+    // Codegen::set_target before any codegen actually runs.
+    static void* create_data_layout_handle(void* target_machine) {
+        [[scpp::unsafe]] {
+            return LLVMCreateTargetDataLayout(target_machine);
+        }
+    }
+
+    // llvm::TargetMachine's own addPassesToEmitFile pipeline, via
+    // LLVM-C's LLVMTargetMachineEmitToFile -- alone replaces the
+    // raw_fd_ostream + legacy::PassManager + addPassesToEmitFile dance
+    // the native LLVM C++ API required (see driver.cppm's own top-of-
+    // file comment). `codegen_file_type` is LLVMCodeGenFileType -- see
+    // this partition's own extern "C" declaration comment above for why
+    // it stays plain `int` (driver.cppm only ever requests
+    // LLVMObjectFile). Returns an ergonomic "did it succeed" bool,
+    // inverting the raw LLVM-C "0 = success" convention, like
+    // Target::initialize_native_handle/from_triple_handle above.
+    // `*out_error` is a malloc'd C string, present only on failure --
+    // dispose_message_handle it once done.
+    static bool emit_to_file_handle(void* target_machine, void* mod, const char* filename, int codegen_file_type,
+                                     char** out_error) {
+        [[scpp::unsafe]] {
+            return LLVMTargetMachineEmitToFile(target_machine, mod, filename, codegen_file_type, out_error) == 0;
+        }
+    }
+};
+
+// llvm::DIBuilder, via LLVM-C's llvm-c/DebugInfo.h -- construction/
+// finalization/disposal of the builder itself, plus every debug-info
+// metadata node (compile unit, file, basic/pointer/array/subroutine/
+// unspecified types, local/parameter variables, expressions, source
+// locations, subprograms) src/compiler/codegen/debug.cppm needs to
+// migrate off raw LLVM-C entirely. Every method takes/returns the same
+// plain `void*` handles as Context/Type/Value/Module/Builder/etc.'s own
+// `_handle`-suffixed methods above, for the same reason (see this
+// partition's top-of-file scope note).
+export class DIBuilder {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~DIBuilder() {
+        return;
+    }
+
+    static void* create_handle(void* mod) {
+        [[scpp::unsafe]] {
+            return LLVMCreateDIBuilder(mod);
+        }
+    }
+
+    // Must be called (see finalize_handle below) before this.
+    static void dispose_handle(void* dibuilder) {
+        [[scpp::unsafe]] {
+            LLVMDisposeDIBuilder(dibuilder);
+        }
+        return;
+    }
+
+    static void finalize_handle(void* dibuilder) {
+        [[scpp::unsafe]] {
+            LLVMDIBuilderFinalize(dibuilder);
+        }
+        return;
+    }
+
+    // The debug-info format version this LLVM release emits/understands
+    // -- not itself a DIBuilder operation (no `dibuilder` parameter),
+    // but grouped here since its only use (debug.cppm's
+    // initialize_debug_info) is stamping it into the module's own
+    // "Debug Info Version" flag alongside the DIBuilder-driven compile
+    // unit it creates in the same breath.
+    static unsigned int debug_metadata_version_handle() {
+        [[scpp::unsafe]] {
+            return LLVMDebugMetadataVersion();
+        }
+    }
+
+    static void* create_file_handle(void* dibuilder, const char* filename, unsigned long filename_len,
+                                     const char* directory, unsigned long directory_len) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreateFile(dibuilder, filename, filename_len, directory, directory_len);
+        }
+    }
+
+    // `lang`/`kind` are LLVMDWARFSourceLanguage/LLVMDWARFEmissionKind
+    // upstream -- see this class's own extern "C" declaration comment
+    // above for why they stay plain `int` here.
+    static void* create_compile_unit_handle(void* dibuilder, int lang, void* file_ref, const char* producer,
+                                             unsigned long producer_len, bool is_optimized, const char* flags,
+                                             unsigned long flags_len, unsigned int runtime_ver,
+                                             const char* split_name, unsigned long split_name_len, int kind,
+                                             unsigned int dwo_id, bool split_debug_inlining,
+                                             bool debug_info_for_profiling, const char* sys_root,
+                                             unsigned long sys_root_len, const char* sdk, unsigned long sdk_len) {
+        [[scpp::unsafe]] {
+            int is_optimized_flag = 0;
+            if (is_optimized) {
+                is_optimized_flag = 1;
+            }
+            int split_debug_inlining_flag = 0;
+            if (split_debug_inlining) {
+                split_debug_inlining_flag = 1;
+            }
+            int debug_info_for_profiling_flag = 0;
+            if (debug_info_for_profiling) {
+                debug_info_for_profiling_flag = 1;
+            }
+            return LLVMDIBuilderCreateCompileUnit(dibuilder, lang, file_ref, producer, producer_len,
+                                                   is_optimized_flag, flags, flags_len, runtime_ver, split_name,
+                                                   split_name_len, kind, dwo_id, split_debug_inlining_flag,
+                                                   debug_info_for_profiling_flag, sys_root, sys_root_len, sdk,
+                                                   sdk_len);
+        }
+    }
+
+    // `encoding` is LLVMDWARFTypeEncoding (a bare `unsigned` upstream,
+    // with no enumerators of its own -- see debug.cppm's own DW_ATE_*
+    // constants), `flags` is LLVMDIFlags -- both stay plain `int`/
+    // `unsigned int` for the same reason as `lang`/`kind` above.
+    static void* create_basic_type_handle(void* dibuilder, const char* name, unsigned long name_len,
+                                           unsigned long size_in_bits, unsigned int encoding, int flags) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreateBasicType(dibuilder, name, name_len, size_in_bits, encoding, flags);
+        }
+    }
+
+    static void* create_unspecified_type_handle(void* dibuilder, const char* name, unsigned long name_len) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreateUnspecifiedType(dibuilder, name, name_len);
+        }
+    }
+
+    static void* create_pointer_type_handle(void* dibuilder, void* pointee_ty, unsigned long size_in_bits,
+                                             unsigned int align_in_bits, unsigned int address_space,
+                                             const char* name, unsigned long name_len) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreatePointerType(dibuilder, pointee_ty, size_in_bits, align_in_bits, address_space,
+                                                   name, name_len);
+        }
+    }
+
+    static void* get_or_create_subrange_handle(void* dibuilder, long lower_bound, long count) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderGetOrCreateSubrange(dibuilder, lower_bound, count);
+        }
+    }
+
+    static void* get_or_create_array_handle(void* dibuilder, void** data, unsigned long num_elements) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderGetOrCreateArray(dibuilder, data, num_elements);
+        }
+    }
+
+    static void* create_array_type_handle(void* dibuilder, unsigned long size, unsigned int align_in_bits, void* ty,
+                                           void** subscripts, unsigned int num_subscripts) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreateArrayType(dibuilder, size, align_in_bits, ty, subscripts, num_subscripts);
+        }
+    }
+
+    // `flags` is LLVMDIFlags -- see create_basic_type_handle's own
+    // comment above.
+    static void* create_subroutine_type_handle(void* dibuilder, void* file, void** parameter_types,
+                                                unsigned int num_parameter_types, int flags) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreateSubroutineType(dibuilder, file, parameter_types, num_parameter_types, flags);
+        }
+    }
+
+    static void* create_debug_location_handle(void* ctx, unsigned int line, unsigned int column, void* scope,
+                                               void* inlined_at) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreateDebugLocation(ctx, line, column, scope, inlined_at);
+        }
+    }
+
+    // `flags` is LLVMDIFlags -- see create_basic_type_handle's own
+    // comment above.
+    static void* create_parameter_variable_handle(void* dibuilder, void* scope, const char* name,
+                                                   unsigned long name_len, unsigned int arg_no, void* file,
+                                                   unsigned int line_no, void* ty, bool always_preserve, int flags) {
+        [[scpp::unsafe]] {
+            int always_preserve_flag = 0;
+            if (always_preserve) {
+                always_preserve_flag = 1;
+            }
+            return LLVMDIBuilderCreateParameterVariable(dibuilder, scope, name, name_len, arg_no, file, line_no, ty,
+                                                         always_preserve_flag, flags);
+        }
+    }
+
+    // `flags` is LLVMDIFlags -- see create_basic_type_handle's own
+    // comment above.
+    static void* create_auto_variable_handle(void* dibuilder, void* scope, const char* name, unsigned long name_len,
+                                              void* file, unsigned int line_no, void* ty, bool always_preserve,
+                                              int flags, unsigned int align_in_bits) {
+        [[scpp::unsafe]] {
+            int always_preserve_flag = 0;
+            if (always_preserve) {
+                always_preserve_flag = 1;
+            }
+            return LLVMDIBuilderCreateAutoVariable(dibuilder, scope, name, name_len, file, line_no, ty,
+                                                    always_preserve_flag, flags, align_in_bits);
+        }
+    }
+
+    static void* create_expression_handle(void* dibuilder, unsigned long* addr, unsigned long length) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderCreateExpression(dibuilder, addr, length);
+        }
+    }
+
+    // Return value (LLVMDbgRecordRef upstream, a distinct handle type
+    // from LLVMMetadataRef) is a `void*` here like everything else in
+    // this class; debug.cppm's own only two call sites both discard it.
+    static void* insert_declare_record_at_end_handle(void* dibuilder, void* storage, void* var_info, void* expr,
+                                                      void* debug_loc, void* block) {
+        [[scpp::unsafe]] {
+            return LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder, storage, var_info, expr, debug_loc, block);
+        }
+    }
+
+    // `flags` is LLVMDIFlags -- see create_basic_type_handle's own
+    // comment above.
+    static void* create_function_handle(void* dibuilder, void* scope, const char* name, unsigned long name_len,
+                                         const char* linkage_name, unsigned long linkage_name_len, void* file,
+                                         unsigned int line_no, void* ty, bool is_local_to_unit, bool is_definition,
+                                         unsigned int scope_line, int flags, bool is_optimized) {
+        [[scpp::unsafe]] {
+            int is_local_to_unit_flag = 0;
+            if (is_local_to_unit) {
+                is_local_to_unit_flag = 1;
+            }
+            int is_definition_flag = 0;
+            if (is_definition) {
+                is_definition_flag = 1;
+            }
+            int is_optimized_flag = 0;
+            if (is_optimized) {
+                is_optimized_flag = 1;
+            }
+            return LLVMDIBuilderCreateFunction(dibuilder, scope, name, name_len, linkage_name, linkage_name_len,
+                                                file, line_no, ty, is_local_to_unit_flag, is_definition_flag,
+                                                scope_line, flags, is_optimized_flag);
+        }
+    }
+};
+
+// A non-owning reference to an LLVM basic block. Like BasicBlock's real
+// LLVM-C counterpart (LLVMBasicBlockRef), this is owned by its parent
+// Function for that Function's entire lifetime -- there is no
+// LLVMDisposeBasicBlock in llvm-c/Core.h for ordinary use (only
+// LLVMDeleteBasicBlock/LLVMRemoveBasicBlockFromParent, neither needed by
+// the compiler's own codegen -- confirmed absent from its call-site
+// audit) -- so, like BasicBlock/Function/GlobalVariable/Attribute/
+// Intrinsic below, this is a purely-static utility class of raw-handle-
+// in/raw-handle-out methods rather than an instantiable wrapper (see
+// Context::create_handle's own comment on why the *_handle convention
+// exists at all).
+export class BasicBlock {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~BasicBlock() {
+        return;
+    }
+
+    // llvm::BasicBlock::Create(context, name, parent), via LLVM-C's
+    // LLVMAppendBasicBlockInContext -- appends the new block to the end
+    // of `fn`'s existing block list (there is no llvm-c/Core.h function
+    // to insert one elsewhere in the list that the compiler's own
+    // codegen needs -- confirmed absent from its call-site audit).
+    static void* create_handle(void* context, void* fn, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMAppendBasicBlockInContext(context, fn, name);
+        }
+    }
+
+    // llvm::BasicBlock::getParent(), via LLVM-C's
+    // LLVMGetBasicBlockParent.
+    static void* parent_handle(void* block) {
+        [[scpp::unsafe]] {
+            return LLVMGetBasicBlockParent(block);
+        }
+    }
+
+    // llvm::BasicBlock::getTerminator(), via LLVM-C's
+    // LLVMGetBasicBlockTerminator -- nullptr if `block` has no terminator
+    // instruction yet (matching LLVMGetBasicBlockTerminator's own
+    // documented behavior).
+    static void* terminator_handle(void* block) {
+        [[scpp::unsafe]] {
+            return LLVMGetBasicBlockTerminator(block);
+        }
+    }
+
+    // llvm::BasicBlock::begin() equivalent, via LLVM-C's
+    // LLVMGetFirstInstruction -- nullptr if `block` is empty.
+    static void* first_instruction_handle(void* block) {
+        [[scpp::unsafe]] {
+            return LLVMGetFirstInstruction(block);
+        }
+    }
+
+    // llvm::BasicBlock's implicit conversion to llvm::Value* (a
+    // BasicBlock is usable wherever a label value is expected, e.g. as
+    // an indirectbr/blockaddress operand), via LLVM-C's
+    // LLVMBasicBlockAsValue.
+    static void* as_value_handle(void* block) {
+        [[scpp::unsafe]] {
+            return LLVMBasicBlockAsValue(block);
+        }
+    }
+};
+
+// A non-owning reference to an LLVM function. Like BasicBlock above, a
+// Function is owned by its parent Module for that Module's entire
+// lifetime, so this is a purely-static utility class of raw-handle-in/
+// raw-handle-out methods, not an instantiable wrapper.
+export class Function {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~Function() {
+        return;
+    }
+
+    // llvm::Function::Create(fn_type, ..., name, module), via LLVM-C's
+    // LLVMAddFunction.
+    static void* add_handle(void* mod, const char* name, void* fn_type) {
+        [[scpp::unsafe]] {
+            return LLVMAddFunction(mod, name, fn_type);
+        }
+    }
+
+    // llvm::Module::getFunction(name), via LLVM-C's
+    // LLVMGetNamedFunction -- nullptr if no such function has been added
+    // to `mod` yet.
+    static void* get_named_handle(void* mod, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMGetNamedFunction(mod, name);
+        }
+    }
+
+    // llvm::Function::arg_size(), via LLVM-C's LLVMCountParams.
+    static unsigned int param_count_handle(void* fn) {
+        [[scpp::unsafe]] {
+            return LLVMCountParams(fn);
+        }
+    }
+
+    // llvm::Function::getArg(index), via LLVM-C's LLVMGetParam.
+    static void* param_handle(void* fn, unsigned int index) {
+        [[scpp::unsafe]] {
+            return LLVMGetParam(fn, index);
+        }
+    }
+
+    // llvm::Function::getEntryBlock(), via LLVM-C's
+    // LLVMGetEntryBasicBlock.
+    static void* entry_block_handle(void* fn) {
+        [[scpp::unsafe]] {
+            return LLVMGetEntryBasicBlock(fn);
+        }
+    }
+
+    // llvm::Function::setSubprogram(sp), via LLVM-C's LLVMSetSubprogram
+    // -- attaches a DIBuilder::create_function_handle-created DISubprogram
+    // node to `func` as its debug-info counterpart, so later
+    // instructions/variables scoped to it can refer back to it.
+    static void set_subprogram_handle(void* func, void* sp) {
+        [[scpp::unsafe]] {
+            LLVMSetSubprogram(func, sp);
+        }
+        return;
+    }
+};
+
+// A non-owning reference to an LLVM global variable. Like Function
+// above, a GlobalVariable is owned by its parent Module for that
+// Module's entire lifetime, so this is a purely-static utility class of
+// raw-handle-in/raw-handle-out methods, not an instantiable wrapper.
+// Value's own set_linkage_handle/set_alignment_handle/
+// global_value_type_handle/set_name_handle above apply equally to a
+// GlobalVariable's handle (a GlobalVariable *is* a Value, per LLVM's own
+// class hierarchy) -- only construction and the two operations with no
+// equivalent elsewhere are duplicated here.
+export class GlobalVariable {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~GlobalVariable() {
+        return;
+    }
+
+    // llvm::GlobalVariable's constructor: `new llvm::GlobalVariable(
+    // *module, type, ...)`, via LLVM-C's LLVMAddGlobal (address space 0
+    // -- the compiler's own codegen never needs LLVMAddGlobalInAddressSpace,
+    // confirmed absent from its call-site audit).
+    static void* add_handle(void* mod, void* type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMAddGlobal(mod, type, name);
+        }
+    }
+
+    // llvm::GlobalVariable::setInitializer(constant_val), via LLVM-C's
+    // LLVMSetInitializer.
+    static void set_initializer_handle(void* global_var, void* constant_val) {
+        [[scpp::unsafe]] {
+            LLVMSetInitializer(global_var, constant_val);
+        }
+        return;
+    }
+
+    // llvm::GlobalVariable::setConstant(is_constant), via LLVM-C's
+    // LLVMSetGlobalConstant.
+    static void set_constant_handle(void* global_var, bool is_constant) {
+        [[scpp::unsafe]] {
+            int is_constant_flag = 0;
+            if (is_constant) {
+                is_constant_flag = 1;
+            }
+            LLVMSetGlobalConstant(global_var, is_constant_flag);
+        }
+        return;
+    }
+};
+
+// llvm::Attribute construction/attachment, via llvm-c/Core.h's
+// LLVMCreateEnumAttribute/LLVMGetEnumAttributeKindForName/
+// LLVMAddAttributeAtIndex -- a purely-static utility class of raw-
+// handle-in/raw-handle-out methods, like BasicBlock/Function/
+// GlobalVariable above (an Attribute, once created, is owned by
+// whichever Context created it, for that Context's entire lifetime,
+// exactly like Type/Constant).
+export class Attribute {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~Attribute() {
+        return;
+    }
+
+    // llvm::Attribute::get(context, kind_id, val), via LLVM-C's
+    // LLVMCreateEnumAttribute -- `val` is only meaningful for attributes
+    // that carry an integer payload (e.g. `align`); 0 for a plain,
+    // valueless attribute (e.g. `noreturn`), matching upstream LLVM's own
+    // convention.
+    static void* create_enum_handle(void* context, unsigned int kind_id, unsigned long val) {
+        [[scpp::unsafe]] {
+            return LLVMCreateEnumAttribute(context, kind_id, val);
+        }
+    }
+
+    // llvm::Attribute::getAttrKindFromName(name), via LLVM-C's
+    // LLVMGetEnumAttributeKindForName -- looks up e.g. "noreturn"'s
+    // numeric kind ID, for create_enum_handle above (LLVM-C has no
+    // function to create an enum attribute directly from its string
+    // name).
+    static unsigned int enum_kind_for_name_handle(const char* name, unsigned long name_len) {
+        [[scpp::unsafe]] {
+            return LLVMGetEnumAttributeKindForName(name, name_len);
+        }
+    }
+
+    // llvm::Function::addAttributeAtIndex(idx, attr), via LLVM-C's
+    // LLVMAddAttributeAtIndex. `idx` is LLVMAttributeIndex, a plain
+    // `unsigned` in llvm-c/Core.h (not a distinct opaque handle type
+    // needing its own alias) -- LLVMAttributeReturnIndex is 0,
+    // LLVMAttributeFunctionIndex is all-bits-set (i.e. `(unsigned)(-1)`);
+    // neither is memorialized as a named constant here since the
+    // compiler's own codegen call sites already spell out which one they
+    // mean via a local variable/literal, exactly as they do today for
+    // LLVMReturnStatusAction (see Module::verify's own comment above).
+    static void add_at_index_handle(void* f, unsigned int idx, void* a) {
+        [[scpp::unsafe]] {
+            LLVMAddAttributeAtIndex(f, idx, a);
+        }
+        return;
+    }
+};
+
+// llvm::Intrinsic::ID lookup/declaration, via llvm-c/Core.h's
+// LLVMLookupIntrinsicID/LLVMGetIntrinsicDeclaration -- a purely-static
+// utility class of raw-handle-in/raw-handle-out methods, like Attribute
+// above.
+export class Intrinsic {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~Intrinsic() {
+        return;
+    }
+
+    // llvm::Function::lookupIntrinsicID(name), via LLVM-C's
+    // LLVMLookupIntrinsicID -- 0 if `name` doesn't name a known
+    // intrinsic (matching LLVMLookupIntrinsicID's own documented
+    // behavior).
+    static unsigned int lookup_id_handle(const char* name, unsigned long name_len) {
+        [[scpp::unsafe]] {
+            return LLVMLookupIntrinsicID(name, name_len);
+        }
+    }
+
+    // llvm::Intrinsic::getOrInsertDeclaration(module, id, param_types),
+    // via LLVM-C's LLVMGetIntrinsicDeclaration. `param_types`/
+    // `param_count` mirror LLVMGetIntrinsicDeclaration's own raw-
+    // pointer-plus-count shape directly (no Type-object marshalling
+    // needed, unlike Type::get_function/get_struct above -- see their
+    // own comment for why those two differ); pass (nullptr, 0) for a
+    // non-overloaded intrinsic.
+    static void* get_declaration_handle(void* mod, unsigned int id, void** param_types, unsigned long param_count) {
+        [[scpp::unsafe]] {
+            return LLVMGetIntrinsicDeclaration(mod, id, param_types, param_count);
+        }
+    }
+};
+
+// llvm::IRBuilder<>'s full instruction-emission surface, via llvm-c/
+// Core.h's LLVMBuildXxx family -- a purely-static utility class of raw-
+// handle-in/raw-handle-out methods, like BasicBlock/Function/
+// GlobalVariable/Attribute/Intrinsic above (an IRBuilder itself, unlike
+// the values/blocks/functions it builds, *is* independently constructed/
+// destroyed -- create_handle/dispose_handle below -- but still never
+// needs to be anything other than a bare handle to the compiler's own
+// codegen, which already stores its builder_ field as a raw
+// LLVMBuilderRef).
+export class Builder {
+public:
+    // spec §11.5(1): every class must declare an explicit virtual
+    // destructor, even a purely-static utility class like this one that
+    // is never actually instantiated.
+    virtual ~Builder() {
+        return;
+    }
+
+    // llvm::IRBuilder<>'s constructor, via LLVM-C's
+    // LLVMCreateBuilderInContext.
+    static void* create_handle(void* context) {
+        [[scpp::unsafe]] {
+            return LLVMCreateBuilderInContext(context);
+        }
+    }
+
+    static void dispose_handle(void* builder) {
+        [[scpp::unsafe]] {
+            LLVMDisposeBuilder(builder);
+        }
+        return;
+    }
+
+    // llvm::IRBuilder<>::SetInsertPoint(block), via LLVM-C's
+    // LLVMPositionBuilderAtEnd -- positions `builder` to insert new
+    // instructions at the end of `block`.
+    static void position_at_end_handle(void* builder, void* block) {
+        [[scpp::unsafe]] {
+            LLVMPositionBuilderAtEnd(builder, block);
+        }
+        return;
+    }
+
+    // llvm::IRBuilder<>::SetInsertPoint(instr), via LLVM-C's
+    // LLVMPositionBuilderBefore -- positions `builder` to insert new
+    // instructions immediately before `instr`, in whichever block
+    // `instr` already belongs to.
+    static void position_before_handle(void* builder, void* instr) {
+        [[scpp::unsafe]] {
+            LLVMPositionBuilderBefore(builder, instr);
+        }
+        return;
+    }
+
+    // llvm::IRBuilder<>::GetInsertBlock(), via LLVM-C's
+    // LLVMGetInsertBlock.
+    static void* insert_block_handle(void* builder) {
+        [[scpp::unsafe]] {
+            return LLVMGetInsertBlock(builder);
+        }
+    }
+
+    // llvm::IRBuilder<>::getCurrentDebugLocation(), via LLVM-C's
+    // LLVMGetCurrentDebugLocation2 -- declared in llvm-c/Core.h (not
+    // DebugInfo.h, despite its name), since a debug location is just
+    // metadata attached to whichever instruction `builder` emits next,
+    // not a DIBuilder-specific concept; usable independently of the
+    // DIBuilder class below.
+    static void* current_debug_location_handle(void* builder) {
+        [[scpp::unsafe]] {
+            return LLVMGetCurrentDebugLocation2(builder);
+        }
+    }
+
+    // llvm::IRBuilder<>::SetCurrentDebugLocation(loc), via LLVM-C's
+    // LLVMSetCurrentDebugLocation2 -- see current_debug_location_handle
+    // above for why this is declared in Core.h, not DebugInfo.h.
+    static void set_current_debug_location_handle(void* builder, void* loc) {
+        [[scpp::unsafe]] {
+            LLVMSetCurrentDebugLocation2(builder, loc);
+        }
+        return;
+    }
+
+    // --- Arithmetic -------------------------------------------------------
+    static void* add(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildAdd(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* sub(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildSub(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* mul(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildMul(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* sdiv(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildSDiv(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* udiv(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildUDiv(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* fadd(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFAdd(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* fsub(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFSub(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* fmul(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFMul(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* fdiv(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFDiv(builder, lhs, rhs, name);
+        }
+    }
+
+    // Named bit_and/bit_or/bit_not, not and/or/not: the latter three are
+    // reserved alternative-spelling keywords in real C++ (`<iso646.h>`'s
+    // tokens are built into the grammar itself, spec-equivalent to
+    // `&&`/`||`/`!`), so they cannot be used as identifiers -- confirmed
+    // by attempting exactly that and observing real clang++ reject it.
+    static void* bit_and(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildAnd(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* bit_or(void* builder, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildOr(builder, lhs, rhs, name);
+        }
+    }
+
+    static void* neg(void* builder, void* v, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildNeg(builder, v, name);
+        }
+    }
+
+    static void* fneg(void* builder, void* v, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFNeg(builder, v, name);
+        }
+    }
+
+    static void* bit_not(void* builder, void* v, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildNot(builder, v, name);
+        }
+    }
+
+    // --- Comparison ---------------------------------------------------
+    static void* icmp(void* builder, IntPredicate predicate, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildICmp(builder, static_cast<int>(predicate), lhs, rhs, name);
+        }
+    }
+
+    static void* fcmp(void* builder, RealPredicate predicate, void* lhs, void* rhs, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFCmp(builder, static_cast<int>(predicate), lhs, rhs, name);
+        }
+    }
+
+    // --- Casts ----------------------------------------------------------
+    static void* bitcast(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildBitCast(builder, val, dest_type, name);
+        }
+    }
+
+    static void* trunc(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildTrunc(builder, val, dest_type, name);
+        }
+    }
+
+    static void* sext(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildSExt(builder, val, dest_type, name);
+        }
+    }
+
+    static void* zext(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildZExt(builder, val, dest_type, name);
+        }
+    }
+
+    static void* fpext(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFPExt(builder, val, dest_type, name);
+        }
+    }
+
+    static void* fptrunc(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFPTrunc(builder, val, dest_type, name);
+        }
+    }
+
+    static void* fptosi(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFPToSI(builder, val, dest_type, name);
+        }
+    }
+
+    static void* fptoui(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildFPToUI(builder, val, dest_type, name);
+        }
+    }
+
+    static void* sitofp(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildSIToFP(builder, val, dest_type, name);
+        }
+    }
+
+    static void* uitofp(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildUIToFP(builder, val, dest_type, name);
+        }
+    }
+
+    static void* ptrtoint(void* builder, void* val, void* dest_type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildPtrToInt(builder, val, dest_type, name);
+        }
+    }
+
+    // --- Memory -----------------------------------------------------------
+    static void* alloca(void* builder, void* type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildAlloca(builder, type, name);
+        }
+    }
+
+    static void* load(void* builder, void* type, void* pointer_val, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildLoad2(builder, type, pointer_val, name);
+        }
+    }
+
+    static void* store(void* builder, void* val, void* ptr) {
+        [[scpp::unsafe]] {
+            return LLVMBuildStore(builder, val, ptr);
+        }
+    }
+
+    // llvm::IRBuilder<>::CreateGEP(type, pointer, indices), via LLVM-C's
+    // LLVMBuildGEP2. `indices`/`num_indices` mirror LLVMBuildGEP2's own
+    // raw-pointer-plus-count shape directly (no Value-object marshalling
+    // needed, unlike Type::get_function/get_struct above -- see their
+    // own comment for why those two differ).
+    static void* gep(void* builder, void* type, void* pointer, void** indices, unsigned int num_indices,
+                      const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildGEP2(builder, type, pointer, indices, num_indices, name);
+        }
+    }
+
+    static void* struct_gep(void* builder, void* type, void* pointer, unsigned int idx, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildStructGEP2(builder, type, pointer, idx, name);
+        }
+    }
+
+    static void* memset(void* builder, void* ptr, void* val, void* len, unsigned int align) {
+        [[scpp::unsafe]] {
+            return LLVMBuildMemSet(builder, ptr, val, len, align);
+        }
+    }
+
+    // --- Aggregates -------------------------------------------------------
+    static void* extract_value(void* builder, void* agg_val, unsigned int index, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildExtractValue(builder, agg_val, index, name);
+        }
+    }
+
+    static void* insert_value(void* builder, void* agg_val, void* elt_val, unsigned int index, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildInsertValue(builder, agg_val, elt_val, index, name);
+        }
+    }
+
+    // --- Control flow -----------------------------------------------------
+    static void* br(void* builder, void* dest) {
+        [[scpp::unsafe]] {
+            return LLVMBuildBr(builder, dest);
+        }
+    }
+
+    static void* cond_br(void* builder, void* if_val, void* then_block, void* else_block) {
+        [[scpp::unsafe]] {
+            return LLVMBuildCondBr(builder, if_val, then_block, else_block);
+        }
+    }
+
+    static void* ret(void* builder, void* v) {
+        [[scpp::unsafe]] {
+            return LLVMBuildRet(builder, v);
+        }
+    }
+
+    static void* ret_void(void* builder) {
+        [[scpp::unsafe]] {
+            return LLVMBuildRetVoid(builder);
+        }
+    }
+
+    static void* unreachable(void* builder) {
+        [[scpp::unsafe]] {
+            return LLVMBuildUnreachable(builder);
+        }
+    }
+
+    static void* phi(void* builder, void* type, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildPhi(builder, type, name);
+        }
+    }
+
+    // llvm::PHINode::addIncoming(incoming_values, incoming_blocks), via
+    // LLVM-C's LLVMAddIncoming. `incoming_values`/`incoming_blocks`/
+    // `count` mirror LLVMAddIncoming's own raw-pointer-plus-count shape
+    // directly (no Value/BasicBlock-object marshalling needed, unlike
+    // Type::get_function/get_struct above -- see their own comment for
+    // why those two differ).
+    static void add_incoming(void* phi_node, void** incoming_values, void** incoming_blocks, unsigned int count) {
+        [[scpp::unsafe]] {
+            LLVMAddIncoming(phi_node, incoming_values, incoming_blocks, count);
+        }
+        return;
+    }
+
+    static void* select(void* builder, void* if_val, void* then_val, void* else_val, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildSelect(builder, if_val, then_val, else_val, name);
+        }
+    }
+
+    // llvm::IRBuilder<>::CreateCall(fn_type, fn, args), via LLVM-C's
+    // LLVMBuildCall2. `args`/`num_args` mirror LLVMBuildCall2's own
+    // raw-pointer-plus-count shape directly (no Value-object marshalling
+    // needed, unlike Type::get_function/get_struct above -- see their
+    // own comment for why those two differ); pass (nullptr, 0) for a
+    // no-argument call.
+    static void* call(void* builder, void* fn_type, void* fn, void** args, unsigned int num_args, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildCall2(builder, fn_type, fn, args, num_args, name);
+        }
+    }
+
+    // llvm::IRBuilder<>::CreateGlobalString(str), via LLVM-C's
+    // LLVMBuildGlobalString -- creates a new module-level, private,
+    // null-terminated `[N x i8]` global constant holding `str` and
+    // returns a pointer to it (distinct from
+    // llvm::IRBuilder<>::CreateGlobalStringPtr, which additionally
+    // bitcasts to `i8*`; the compiler's own codegen only ever needs the
+    // former, confirmed from its call-site audit).
+    static void* global_string(void* builder, const char* str, const char* name) {
+        [[scpp::unsafe]] {
+            return LLVMBuildGlobalString(builder, str, name);
+        }
+    }
+};
+
+} // namespace scpp::llvm

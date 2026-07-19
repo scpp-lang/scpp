@@ -115,6 +115,9 @@
 #ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
 #error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_LLVM_NATIVE_LIBRARY_FILES
+#error "SCPP_LLVM_NATIVE_LIBRARY_FILES must be defined by the build"
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -288,13 +291,37 @@ struct InvocationSpec {
     std::optional<fs::path> stderr_expected_file;
 };
 
+// SCPP_LLVM_NATIVE_LIBRARY_FILES is one whitespace-separated string of
+// absolute paths (llvm-config's own `--libfiles` output convention, see
+// CMakeLists.txt). Importing "scpp" above resolves to its full package
+// build (all four partitions, including :llvm, compiled into one merged
+// object -- libs/scpp/scpp.toml has no per-partition object granularity),
+// so any case that ends up needing rand/io/enum_cast also transitively
+// needs :llvm's real LLVM-C symbols satisfied at final link time, exactly
+// like tests/llvm_lib_test.cpp's own build_link_flags() one directory up.
+std::vector<std::string> split_whitespace(const std::string& text) {
+    std::vector<std::string> parts;
+    std::istringstream stream(text);
+    std::string token;
+    while (stream >> token) {
+        parts.push_back(token);
+    }
+    return parts;
+}
+
 std::vector<std::string> default_std_build_args() {
-    return {"--import", std::string("std=") + SCPP_STDLIB_STD_MODULE_PATH,
-            "--import", std::string("scpp=") + SCPP_STDLIB_SCPP_MODULE_PATH,
-            "--import", std::string("std:string=") + SCPP_STDLIB_STD_STRING_MODULE_PATH,
-            "--import", std::string("std:memory=") + SCPP_STDLIB_STD_MEMORY_MODULE_PATH,
-            "--import", std::string("std:functional=") + SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH,
-            "--import", std::string("std:thread=") + SCPP_STDLIB_STD_THREAD_MODULE_PATH};
+    std::vector<std::string> args = {
+        "--import", std::string("std=") + SCPP_STDLIB_STD_MODULE_PATH,
+        "--import", std::string("scpp=") + SCPP_STDLIB_SCPP_MODULE_PATH,
+        "--import", std::string("std:string=") + SCPP_STDLIB_STD_STRING_MODULE_PATH,
+        "--import", std::string("std:memory=") + SCPP_STDLIB_STD_MEMORY_MODULE_PATH,
+        "--import", std::string("std:functional=") + SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH,
+        "--import", std::string("std:thread=") + SCPP_STDLIB_STD_THREAD_MODULE_PATH};
+    for (const std::string& lib : split_whitespace(SCPP_LLVM_NATIVE_LIBRARY_FILES)) {
+        args.push_back("--link");
+        args.push_back(lib);
+    }
+    return args;
 }
 
 std::vector<std::string> parse_token_file(const fs::path& path) {

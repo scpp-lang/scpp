@@ -1,20 +1,17 @@
 module;
 
-// Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
-// interface -- the DataLayout and type-construction operations in this
-// file go through its llvm-c/Core.h and llvm-c/Target.h functions
-// directly below instead of any native LLVM C++ header. See
-// libs/README.md for why this project binds straight to LLVM-C wherever
-// it already covers what's needed -- including pointer ABI alignment
-// (see pointer_abi_alignment_for_as below): a rigorous, function-by-
-// function empirical audit found LLVM-C fully covers every LLVM
-// operation this project's codegen needs, so there is no custom wrapper
-// of any kind here.
-#include <llvm-c/Core.h>
-#include <llvm-c/Target.h>
+// LLVM's stable llvm-c surface still defines the operations used here;
+// this file now reaches them via the imported scpp module's :llvm
+// partition (libs/scpp/llvm/) instead of including LLVM headers
+// directly. See libs/README.md for why this project stays on that LLVM-C
+// surface wherever it already covers what's needed -- including pointer
+// ABI alignment (see pointer_abi_alignment_for_as below): a rigorous,
+// function-by-function empirical audit found that surface fully covers
+// every LLVM operation this project's codegen needs.
 
 module scpp.compiler.codegen:layout;
 
+import scpp;
 import std;
 import :api;
 
@@ -22,21 +19,20 @@ namespace scpp {
 
 namespace {
 
-LLVMTargetDataRef data_layout_ref(LLVMModuleRef module) { return LLVMGetModuleDataLayout(module); }
+void* data_layout_ref(void* module) { return scpp::llvm::Module::data_layout_handle(module); }
 
 // llvm::DataLayout::getPointerABIAlignment(address_space).value() has no
-// function in llvm-c/Target.h with this exact shape (a data layout plus a
-// bare address space), but LLVMABIAlignmentOfType() queried against an
-// opaque pointer type *for that same address space* reads the exact same
-// per-address-space entry in the DataLayout's own pointer-alignment
-// table -- empirically confirmed identical (via a standalone LLVM-C++ vs.
+// llvm-c function with this exact shape (a data layout plus a bare
+// address space), but querying ABI alignment against an opaque pointer
+// type *for that same address space* reads the exact same per-address-
+// space entry in the DataLayout's own pointer-alignment table --
+// empirically confirmed identical (via a standalone LLVM-C++ vs.
 // LLVM-C comparison program) across several representative data layouts
 // and address spaces, including a synthetic one with an unusual, non-
-// default alignment. So this composes two already-official LLVM-C calls
-// instead of needing any wrapper of our own.
-unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_space) {
-    return LLVMABIAlignmentOfType(LLVMGetModuleDataLayout(module),
-                                  LLVMPointerTypeInContext(LLVMGetModuleContext(module), address_space));
+// default alignment.
+unsigned pointer_abi_alignment_for_as(void* module, unsigned address_space) {
+    return scpp::llvm::DataLayout::abi_alignment_of_type_handle(scpp::llvm::Module::data_layout_handle(module),
+                                  scpp::llvm::Type::get_pointer_handle(scpp::llvm::Module::context_handle(module), address_space));
 }
 
 } // namespace
@@ -79,7 +75,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
 
     [[nodiscard]] TargetLayoutInfo Codegen::current_target_layout_info() const
 {
-        return TargetLayoutInfo{LLVMPointerSizeForAS(data_layout_ref(module_), 0),
+        return TargetLayoutInfo{scpp::llvm::DataLayout::pointer_size_handle(data_layout_ref(module_), 0),
                                 pointer_abi_alignment_for_as(module_, 0)};
     }
 
@@ -101,12 +97,12 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
             auto it = structs_.find(type.name);
             if (it != structs_.end()) return it->second.abi_align;
         }
-        LLVMTypeRef llvm_type = const_cast<Codegen*>(this)->to_llvm_type(type);
-        return LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type);
+        void* llvm_type = const_cast<Codegen*>(this)->to_llvm_type(type);
+        return scpp::llvm::DataLayout::abi_alignment_of_type_handle(data_layout_ref(module_), llvm_type);
     }
 
 
-    LLVMValueRef Codegen::codegen_sizeof_value(const Expr& expr)
+    void* Codegen::codegen_sizeof_value(const Expr& expr)
 {
         Type queried_type;
         if (expr.sizeof_operand_is_type) {
@@ -123,18 +119,18 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
         if (!layout.has_value()) {
             throw CodegenError("cannot apply 'sizeof' to this type in this version", current_loc_);
         }
-        return LLVMConstInt(to_llvm_type(named_type("size_t")), layout->size_bytes, /*SignExtend=*/0);
+        return scpp::llvm::Value::const_int_handle(to_llvm_type(named_type("size_t")), layout->size_bytes, /*SignExtend=*/false);
     }
 
 
-    LLVMValueRef Codegen::codegen_alignof_value(const Expr& expr)
+    void* Codegen::codegen_alignof_value(const Expr& expr)
 {
         if (program_ == nullptr) throw CodegenError("internal error: alignof requires program type information", current_loc_);
         std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, expr.type, current_target_layout_info());
         if (!layout.has_value()) {
             throw CodegenError("cannot apply 'alignof' to this type in this version", current_loc_);
         }
-        return LLVMConstInt(to_llvm_type(named_type("size_t")), layout->abi_align_bytes, /*SignExtend=*/0);
+        return scpp::llvm::Value::const_int_handle(to_llvm_type(named_type("size_t")), layout->abi_align_bytes, /*SignExtend=*/false);
     }
 
 
@@ -198,7 +194,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
         info.is_union = def.is_union;
         info.is_packed = def.is_packed;
         std::vector<std::string> in_progress;
-        std::vector<LLVMTypeRef> llvm_field_types;
+        std::vector<void*> llvm_field_types;
         llvm_field_types.reserve(def.fields.size() * 2);
         if (!def.is_union) {
             std::size_t offset = 0;
@@ -213,15 +209,15 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                                             "of trivial types are allowed here; see spec ch04)",
                         current_loc_);
                 }
-                LLVMTypeRef field_type = to_llvm_type(field.type);
-                std::size_t field_size = LLVMABISizeOfType(data_layout_ref(module_), field_type);
+                void* field_type = to_llvm_type(field.type);
+                std::size_t field_size = scpp::llvm::DataLayout::abi_size_of_type_handle(data_layout_ref(module_), field_type);
                 std::size_t field_align = def.is_packed ? 1
                                                    : std::max(alignment_bytes_for_type(field.type),
                                                               static_cast<std::size_t>(field.resolved_alignment));
                 std::size_t aligned_offset = align_up(offset, field_align);
                 if (aligned_offset > offset) {
                     llvm_field_types.push_back(
-                        LLVMArrayType2(LLVMInt8TypeInContext(context_), aligned_offset - offset));
+                        scpp::llvm::Type::get_array_handle(scpp::llvm::Type::get_int8_handle(context_), aligned_offset - offset));
                     offset = aligned_offset;
                 }
                 info.field_names.push_back(field.name);
@@ -235,10 +231,10 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
             std::size_t final_align = def.is_packed ? 1 : overall_align;
             std::size_t final_size = align_up(offset, final_align);
             if (final_size > offset) {
-                llvm_field_types.push_back(LLVMArrayType2(LLVMInt8TypeInContext(context_), final_size - offset));
+                llvm_field_types.push_back(scpp::llvm::Type::get_array_handle(scpp::llvm::Type::get_int8_handle(context_), final_size - offset));
             }
-            LLVMTypeRef struct_type = LLVMStructCreateNamed(context_, ("struct." + def.name).c_str());
-            LLVMStructSetBody(struct_type, llvm_field_types.data(), static_cast<unsigned>(llvm_field_types.size()),
+            void* struct_type = scpp::llvm::Type::create_named_struct_handle(context_, ("struct." + def.name).c_str());
+            scpp::llvm::Type::set_struct_body_handle(struct_type, llvm_field_types.data(), static_cast<unsigned>(llvm_field_types.size()),
                               def.is_packed);
             info.llvm_type = struct_type;
             info.abi_align = static_cast<unsigned>(final_align);
@@ -269,11 +265,11 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
             std::size_t align_value = def.is_packed ? 1 : std::max<std::size_t>(1, def.resolved_alignment);
             std::size_t max_size = 0;
             std::size_t max_rep_align = 0;
-            LLVMTypeRef rep_type = llvm_field_types[0];
-            std::size_t rep_size = LLVMABISizeOfType(data_layout_ref(module_), rep_type);
+            void* rep_type = llvm_field_types[0];
+            std::size_t rep_size = scpp::llvm::DataLayout::abi_size_of_type_handle(data_layout_ref(module_), rep_type);
             for (std::size_t i = 0; i < llvm_field_types.size(); ++i) {
-                LLVMTypeRef field_type = llvm_field_types[i];
-                std::size_t field_size = LLVMABISizeOfType(data_layout_ref(module_), field_type);
+                void* field_type = llvm_field_types[i];
+                std::size_t field_size = scpp::llvm::DataLayout::abi_size_of_type_handle(data_layout_ref(module_), field_type);
                 std::size_t field_align = info.field_alignments[i];
                 if (field_size > max_size) max_size = field_size;
                 if (field_align > align_value) align_value = field_align;
@@ -286,13 +282,13 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
             }
             if (align_value == 0) align_value = 1;
             std::size_t union_size = ((max_size + align_value - 1) / align_value) * align_value;
-            std::vector<LLVMTypeRef> storage_fields;
+            std::vector<void*> storage_fields;
             storage_fields.push_back(rep_type);
             if (union_size > rep_size) {
-                storage_fields.push_back(LLVMArrayType2(LLVMInt8TypeInContext(context_), union_size - rep_size));
+                storage_fields.push_back(scpp::llvm::Type::get_array_handle(scpp::llvm::Type::get_int8_handle(context_), union_size - rep_size));
             }
-            LLVMTypeRef union_type = LLVMStructCreateNamed(context_, ("union." + def.name).c_str());
-            LLVMStructSetBody(union_type, storage_fields.data(), static_cast<unsigned>(storage_fields.size()),
+            void* union_type = scpp::llvm::Type::create_named_struct_handle(context_, ("union." + def.name).c_str());
+            scpp::llvm::Type::set_struct_body_handle(union_type, storage_fields.data(), static_cast<unsigned>(storage_fields.size()),
                               def.is_packed);
             info.llvm_type = union_type;
             info.abi_align = static_cast<unsigned>(align_value);
@@ -308,7 +304,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
         declaring_aggregates_.insert(def.name);
         StructInfo info;
         info.has_ordinary_vtable = !def.is_interface;
-        std::vector<LLVMTypeRef> llvm_field_types;
+        std::vector<void*> llvm_field_types;
         std::size_t offset = 0;
         std::size_t overall_align = std::max<std::size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<std::size_t>(def.resolved_alignment));
         if (const BaseSpecifier* base = def.direct_ordinary_base()) {
@@ -317,26 +313,26 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
             info.field_types = base_info.field_types;
             info.field_alignments = base_info.field_alignments;
             info.field_physical_indices = base_info.field_physical_indices;
-            unsigned base_field_count = LLVMCountStructElementTypes(base_info.llvm_type);
+            unsigned base_field_count = scpp::llvm::Type::struct_element_count_handle(base_info.llvm_type);
             llvm_field_types.resize(base_field_count);
-            LLVMGetStructElementTypes(base_info.llvm_type, llvm_field_types.data());
-            offset = LLVMABISizeOfType(data_layout_ref(module_), base_info.llvm_type);
+            scpp::llvm::Type::get_struct_element_types_handle(base_info.llvm_type, llvm_field_types.data());
+            offset = scpp::llvm::DataLayout::abi_size_of_type_handle(data_layout_ref(module_), base_info.llvm_type);
             overall_align = std::max(overall_align, static_cast<std::size_t>(base_info.abi_align));
         }
         if (info.has_ordinary_vtable && llvm_field_types.empty()) {
-            llvm_field_types.push_back(LLVMPointerTypeInContext(context_, 0));
-            offset = LLVMABISizeOfType(data_layout_ref(module_), llvm_field_types.back());
+            llvm_field_types.push_back(scpp::llvm::Type::get_pointer_handle(context_, 0));
+            offset = scpp::llvm::DataLayout::abi_size_of_type_handle(data_layout_ref(module_), llvm_field_types.back());
             overall_align = std::max(overall_align,
                                      static_cast<std::size_t>(pointer_abi_alignment_for_as(module_, 0)));
         }
         for (const ClassField& field : def.fields) {
-            LLVMTypeRef field_type = to_llvm_type(field.type);
-            std::size_t field_size = LLVMABISizeOfType(data_layout_ref(module_), field_type);
+            void* field_type = to_llvm_type(field.type);
+            std::size_t field_size = scpp::llvm::DataLayout::abi_size_of_type_handle(data_layout_ref(module_), field_type);
             std::size_t field_align = std::max(alignment_bytes_for_type(field.type), static_cast<std::size_t>(field.resolved_alignment));
             std::size_t aligned_offset = align_up(offset, field_align);
             if (aligned_offset > offset) {
                 llvm_field_types.push_back(
-                    LLVMArrayType2(LLVMInt8TypeInContext(context_), aligned_offset - offset));
+                    scpp::llvm::Type::get_array_handle(scpp::llvm::Type::get_int8_handle(context_), aligned_offset - offset));
                 offset = aligned_offset;
             }
             info.field_names.push_back(field.name);
@@ -349,11 +345,11 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
         }
         std::size_t final_size = align_up(offset, overall_align);
         if (final_size > offset) {
-            llvm_field_types.push_back(LLVMArrayType2(LLVMInt8TypeInContext(context_), final_size - offset));
+            llvm_field_types.push_back(scpp::llvm::Type::get_array_handle(scpp::llvm::Type::get_int8_handle(context_), final_size - offset));
         }
-        LLVMTypeRef class_type = LLVMStructCreateNamed(context_, ("class." + def.name).c_str());
-        LLVMStructSetBody(class_type, llvm_field_types.data(), static_cast<unsigned>(llvm_field_types.size()),
-                          /*Packed=*/0);
+        void* class_type = scpp::llvm::Type::create_named_struct_handle(context_, ("class." + def.name).c_str());
+        scpp::llvm::Type::set_struct_body_handle(class_type, llvm_field_types.data(), static_cast<unsigned>(llvm_field_types.size()),
+                          /*Packed=*/false);
         info.llvm_type = class_type;
         info.abi_align = static_cast<unsigned>(overall_align);
         structs_[def.name] = std::move(info);
@@ -361,7 +357,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
     }
 
 
-    LLVMTypeRef Codegen::to_llvm_type(const Type& type)
+    void* Codegen::to_llvm_type(const Type& type)
 {
         switch (type.kind) {
             case TypeKind::Function:
@@ -382,12 +378,12 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 // makes it auto-dereference on every use (see
                 // codegen_lvalue's Identifier case) and enforces borrow
                 // discipline (scpp.movecheck), not the IR shape itself.
-                return LLVMPointerTypeInContext(context_, 0);
+                return scpp::llvm::Type::get_pointer_handle(context_, 0);
             case TypeKind::FunctionPointer: {
-                std::vector<LLVMTypeRef> params;
+                std::vector<void*> params;
                 params.reserve(type.function_params.size());
                 for (const Type& param : type.function_params) params.push_back(to_llvm_type(param));
-                return LLVMPointerTypeInContext(context_, 0);
+                return scpp::llvm::Type::get_pointer_handle(context_, 0);
             }
             case TypeKind::Span: {
                 // A non-owning {data pointer, element count} pair -- a
@@ -398,14 +394,14 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 // codegen_lvalue, not routed through StructInfo). LLVM
                 // deduplicates identical literal struct types itself, so
                 // there's no need to cache this beyond calling
-                // LLVMStructTypeInContext each time.
-                LLVMTypeRef fields[] = {LLVMPointerTypeInContext(context_, 0), LLVMInt64TypeInContext(context_)};
-                return LLVMStructTypeInContext(context_, fields, 2, /*Packed=*/0);
+                // scpp::llvm::Type::get_struct_handle each time.
+                void* fields[] = {scpp::llvm::Type::get_pointer_handle(context_, 0), scpp::llvm::Type::get_int64_handle(context_)};
+                return scpp::llvm::Type::get_struct_handle(context_, fields, 2, /*Packed=*/false);
             }
             case TypeKind::Array:
-                return LLVMArrayType2(to_llvm_type(*type.element), type.array_size);
+                return scpp::llvm::Type::get_array_handle(to_llvm_type(*type.element), type.array_size);
             case TypeKind::Named:
-                if (type.name == "int") return LLVMInt32TypeInContext(context_);
+                if (type.name == "int") return scpp::llvm::Type::get_int32_handle(context_);
                 // A full byte (i8), matching real C++'s sizeof(bool)==1
                 // and the spec's false=0/true=1 invariant (ch06) -- not
                 // i1, even though LLVM's own icmp/br/select instructions
@@ -415,13 +411,13 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 // down to i1 first, and every comparison/logical result
                 // gets zext'd back up to i8 before being stored, passed,
                 // or returned as an ordinary bool value.
-                if (type.name == "bool") return LLVMInt8TypeInContext(context_);
+                if (type.name == "bool") return scpp::llvm::Type::get_int8_handle(context_);
                 // A signed 8-bit scalar, matching the common (e.g.
                 // x86-64 Linux/Clang) default for plain `char` -- no
                 // implicit promotion to/from `int` exists yet (matching
                 // the same pre-existing lack of promotion between `bool`
                 // and `int`), so this is the type's only representation.
-                if (type.name == "char") return LLVMInt8TypeInContext(context_);
+                if (type.name == "char") return scpp::llvm::Type::get_int8_handle(context_);
                 // ch06 §6: the rest of the numeric family -- LLVM natively
                 // supports arbitrary-width integers, so every fixed-width
                 // signed/unsigned pair just maps to the same-width
@@ -433,19 +429,19 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 // target (ch06's own deliberate anti-LP64/LLP64-pitfall
                 // fix), unlike `size_t`/`ptrdiff_t` below, which are
                 // meant to track the pointer width.
-                if (type.name == "int8_t" || type.name == "uint8_t") return LLVMInt8TypeInContext(context_);
-                if (type.name == "int16_t" || type.name == "uint16_t") return LLVMInt16TypeInContext(context_);
+                if (type.name == "int8_t" || type.name == "uint8_t") return scpp::llvm::Type::get_int8_handle(context_);
+                if (type.name == "int16_t" || type.name == "uint16_t") return scpp::llvm::Type::get_int16_handle(context_);
                 if (type.name == "int32_t" || type.name == "uint32_t" || type.name == "unsigned int") {
-                    return LLVMInt32TypeInContext(context_);
+                    return scpp::llvm::Type::get_int32_handle(context_);
                 }
                 if (type.name == "int64_t" || type.name == "uint64_t" || type.name == "long" ||
                     type.name == "unsigned long") {
-                    return LLVMInt64TypeInContext(context_);
+                    return scpp::llvm::Type::get_int64_handle(context_);
                 }
-                if (type.name == "float" || type.name == "float32_t") return LLVMFloatTypeInContext(context_);
-                if (type.name == "double" || type.name == "float64_t") return LLVMDoubleTypeInContext(context_);
+                if (type.name == "float" || type.name == "float32_t") return scpp::llvm::Type::get_float_handle(context_);
+                if (type.name == "double" || type.name == "float64_t") return scpp::llvm::Type::get_double_handle(context_);
                 if (type.name == "size_t" || type.name == "ptrdiff_t") {
-                    return LLVMIntTypeInContext(context_, 8 * LLVMPointerSizeForAS(data_layout_ref(module_), 0));
+                    return scpp::llvm::Type::get_int_handle(context_, 8 * scpp::llvm::DataLayout::pointer_size_handle(data_layout_ref(module_), 0));
                 }
                 if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
                     return to_llvm_type(enum_def->underlying_type);
@@ -460,7 +456,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 // parameter loop and codegen_stmt's VarDecl case -- so
                 // this is never actually asked to allocate storage for a
                 // void value.
-                if (type.name == "void") return LLVMVoidTypeInContext(context_);
+                if (type.name == "void") return scpp::llvm::Type::get_void_handle(context_);
                 {
                     auto it = structs_.find(type.name);
                     if (it != structs_.end()) return it->second.llvm_type;
@@ -503,47 +499,47 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
     }
 
 
-    LLVMValueRef Codegen::create_load(LLVMTypeRef type, LLVMValueRef ptr, std::optional<unsigned> alignment,
+    void* Codegen::create_load(void* type, void* ptr, std::optional<unsigned> alignment,
                                 const std::string& name)
 {
-        LLVMValueRef load = LLVMBuildLoad2(builder_, type, ptr, name.c_str());
-        if (alignment.has_value()) LLVMSetAlignment(load, *alignment);
+        void* load = scpp::llvm::Builder::load(builder_, type, ptr, name.c_str());
+        if (alignment.has_value()) scpp::llvm::Value::set_alignment_handle(load, *alignment);
         return load;
     }
 
 
-    LLVMValueRef Codegen::create_store(LLVMValueRef value, LLVMValueRef ptr, std::optional<unsigned> alignment)
+    void* Codegen::create_store(void* value, void* ptr, std::optional<unsigned> alignment)
 {
-        LLVMValueRef store = LLVMBuildStore(builder_, value, ptr);
-        if (alignment.has_value()) LLVMSetAlignment(store, *alignment);
+        void* store = scpp::llvm::Builder::store(builder_, value, ptr);
+        if (alignment.has_value()) scpp::llvm::Value::set_alignment_handle(store, *alignment);
         return store;
     }
 
 
-    LLVMValueRef Codegen::build_call(LLVMValueRef callee, std::vector<LLVMValueRef> args, const std::string& name)
+    void* Codegen::build_call(void* callee, std::vector<void*> args, const std::string& name)
 {
-        return build_call(LLVMGlobalGetValueType(callee), callee, std::move(args), name);
+        return build_call(scpp::llvm::Value::global_value_type_handle(callee), callee, std::move(args), name);
     }
 
 
-    LLVMValueRef Codegen::build_call(LLVMTypeRef fn_type, LLVMValueRef callee, std::vector<LLVMValueRef> args,
+    void* Codegen::build_call(void* fn_type, void* callee, std::vector<void*> args,
                             const std::string& name)
 {
-        return LLVMBuildCall2(builder_, fn_type, callee, args.data(), static_cast<unsigned>(args.size()), name.c_str());
+        return scpp::llvm::Builder::call(builder_, fn_type, callee, args.data(), static_cast<unsigned>(args.size()), name.c_str());
     }
 
 
-    void Codegen::zero_initialize_storage(LLVMValueRef ptr, const Type& type, std::optional<unsigned> alignment)
+    void Codegen::zero_initialize_storage(void* ptr, const Type& type, std::optional<unsigned> alignment)
 {
-        LLVMTypeRef llvm_type = to_llvm_type(type);
+        void* llvm_type = to_llvm_type(type);
         switch (type.kind) {
             case TypeKind::Named:
             case TypeKind::Array:
             case TypeKind::Span: {
-                std::uint64_t size = LLVMABISizeOfType(data_layout_ref(module_), llvm_type);
-                LLVMBuildMemSet(builder_, ptr,
-                                LLVMConstInt(LLVMInt8TypeInContext(context_), 0, /*SignExtend=*/0),
-                                LLVMConstInt(LLVMInt64TypeInContext(context_), size, /*SignExtend=*/0),
+                std::uint64_t size = scpp::llvm::DataLayout::abi_size_of_type_handle(data_layout_ref(module_), llvm_type);
+                scpp::llvm::Builder::memset(builder_, ptr,
+                                scpp::llvm::Value::const_int_handle(scpp::llvm::Type::get_int8_handle(context_), 0, /*SignExtend=*/false),
+                                scpp::llvm::Value::const_int_handle(scpp::llvm::Type::get_int64_handle(context_), size, /*SignExtend=*/false),
                                 alignment.value_or(1));
                 if (type.kind == TypeKind::Named && class_has_ordinary_vtable(type.name)) {
                     initialize_ordinary_vtable_pointer(type.name, ptr);
@@ -551,7 +547,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 return;
             }
             default:
-                create_store(LLVMConstNull(llvm_type), ptr, alignment);
+                create_store(scpp::llvm::Value::const_null_handle(llvm_type), ptr, alignment);
                 return;
         }
     }

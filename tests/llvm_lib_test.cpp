@@ -1,16 +1,26 @@
-// End-to-end proof that libs/scpp_llvm/ is independently usable by an
+// End-to-end proof that libs/scpp/llvm/ is independently usable by an
 // ordinary scpp program, exactly as a real scpp user would use it: shells
 // out to the real `scpp` compiler binary to build
-// tests/llvm_lib_test_source/main.scpp against `import scpp.llvm;`,
-// passing the same `--import`/`--link` flags any consumer of this package
-// would need today (see libs/scpp_llvm/scpp.toml's own comment on why
-// those `--link` flags aren't yet automatic), then runs the resulting
-// binary and checks its stdout. This is deliberately a separate binary
-// from driver_test (which exercises scpp::compile_to_executable() and the
+// tests/llvm_lib_test_source/main.scpp against `import scpp;`, passing
+// the same `--import`/`--link` flags any consumer of this package would
+// need today (see libs/scpp/scpp.toml's own comment on why those `--link`
+// flags aren't yet fully automatic), then runs the resulting binary and
+// checks its stdout. This is deliberately a separate binary from
+// driver_test (which exercises scpp::compile_to_executable() and the
 // std/scpp libraries in-process): unlike those, this test's whole point
 // is to prove the *real* CLI-driven, --import/--link-based workflow an
-// external scpp_llvm.scpp consumer would follow actually works, not just
-// that the C++ driver API does.
+// external scpp consumer would follow actually works, not just that the
+// C++ driver API does.
+//
+// This imports the *prebuilt* scpp.scppm interface (SCPP_STDLIB_SCPP_INTERFACE_PATH,
+// the same one driver_test's prebuilt_module_import_paths() uses) rather
+// than raw scpp.scpp source: the scpp compiler's own import resolution
+// auto-discovers and links the co-located libscpp.scppa archive for any
+// prebuilt-interface import (see driver.cppm's Driver::archive_for()),
+// and that archive already folds in llvm/native_target_init.cpp's
+// compiled object code (libs/scpp/scpp.toml's `[additional_objs.
+// scpp-native]` step) -- so, unlike the official LLVM libraries
+// themselves, this program needs no separate --link for that shim.
 //
 // `popen`/`pclose`/`FILE*` are POSIX extensions, not part of ISO C++'s
 // standard library (they have no `import std;` module form), so `<cstdio>`
@@ -27,8 +37,8 @@ import std;
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
 #endif
-#ifndef SCPP_LLVM_MODULE_PATH
-#error "SCPP_LLVM_MODULE_PATH must be defined by the build"
+#ifndef SCPP_STDLIB_SCPP_INTERFACE_PATH
+#error "SCPP_STDLIB_SCPP_INTERFACE_PATH must be defined by the build"
 #endif
 #ifndef SCPP_LLVM_NATIVE_LIBRARY_FILES
 #error "SCPP_LLVM_NATIVE_LIBRARY_FILES must be defined by the build"
@@ -72,10 +82,19 @@ RunResult run_command_capture(const std::string& command) {
 
 // SCPP_LLVM_NATIVE_LIBRARY_FILES is one whitespace-separated string of
 // absolute paths (llvm-config's own `--libfiles` output convention, see the
-// top-level CMakeLists.txt); every real scpp_llvm.scpp consumer needs each
-// of these as its own `--link` flag, since libs/scpp_llvm/'s scpp bindings
+// top-level CMakeLists.txt); every real scpp:llvm consumer needs each of
+// these as its own `--link` flag, since libs/scpp/llvm's scpp bindings
 // call official LLVM-C functions directly (there is no wrapper archive of
-// our own to link in addition).
+// our own to link in addition) -- this project's own manifest mechanism
+// has no way to declare "consumers also need external system library X at
+// final link time" yet (see libs/scpp/scpp.toml's own comment), so real
+// LLVM's own libraries stay an explicit `--link` a consumer supplies by
+// hand. The one confirmed gap native_target_init.cpp bridges (see its own
+// top-of-file comment) needs no such treatment here: importing the
+// *prebuilt* scpp.scppm interface below (rather than raw source) makes
+// the scpp compiler auto-discover and link the co-located libscpp.scppa
+// archive, which already has that shim's compiled object code folded in
+// (libs/scpp/scpp.toml's `[additional_objs.scpp-native]` step).
 std::vector<std::string> split_whitespace(const std::string& text) {
     std::vector<std::string> parts;
     std::istringstream stream(text);
@@ -100,17 +119,17 @@ void run_end_to_end_test() {
     std::filesystem::path binary = std::filesystem::path(SCPP_LLVM_LIB_TEST_WORK_DIR) / "llvm_lib_test_bin";
 
     std::string build_command = std::string(SCPP_BINARY_PATH) + " " + source.string() + " -o " + binary.string() +
-                                " --import std=" + SCPP_STDLIB_STD_MODULE_PATH + " --import scpp.llvm=" +
-                                SCPP_LLVM_MODULE_PATH + build_link_flags() + " 2>&1";
+                                " --import std=" + SCPP_STDLIB_STD_MODULE_PATH + " --import scpp=" +
+                                SCPP_STDLIB_SCPP_INTERFACE_PATH + build_link_flags() + " 2>&1";
     RunResult build_result = run_command_capture(build_command);
     expect(build_result.exit_code == 0,
-           "libs/scpp_llvm/ example program compiles, got exit " + std::to_string(build_result.exit_code) + ": '" +
+           "libs/scpp/llvm/ example program compiles, got exit " + std::to_string(build_result.exit_code) + ": '" +
                build_result.stdout_text + "'");
     if (build_result.exit_code != 0) return;
 
     RunResult run_result = run_command_capture(binary.string() + " 2>&1");
     expect(run_result.exit_code == 0,
-           "libs/scpp_llvm/ example program runs to completion, got exit " + std::to_string(run_result.exit_code) +
+           "libs/scpp/llvm/ example program runs to completion, got exit " + std::to_string(run_result.exit_code) +
                ": '" + run_result.stdout_text + "'");
 
     const std::string& output = run_result.stdout_text;

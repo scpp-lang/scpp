@@ -37,6 +37,9 @@ import std;
 #ifndef SCPP_STDLIB_SCPP_INTERFACE_PATH
 #error "SCPP_STDLIB_SCPP_INTERFACE_PATH must be defined by the build"
 #endif
+#ifndef SCPP_LLVM_NATIVE_LIBRARY_FILES
+#error "SCPP_LLVM_NATIVE_LIBRARY_FILES must be defined by the build"
+#endif
 namespace {
 
 int failures = 0;
@@ -90,8 +93,28 @@ std::unordered_map<std::string, std::string> prebuilt_module_import_paths() {
     return {{"std", SCPP_STDLIB_STD_INTERFACE_PATH}, {"scpp", SCPP_STDLIB_SCPP_INTERFACE_PATH}};
 }
 
+// SCPP_LLVM_NATIVE_LIBRARY_FILES is one whitespace-separated string of
+// absolute paths (llvm-config's own `--libfiles` output convention, see
+// the top-level CMakeLists.txt). The prebuilt libscpp.scppa this test
+// links against (via prebuilt_module_import_paths() below) is one merged
+// object for the *whole* "scpp" module -- all four partitions, including
+// :llvm, compiled together (libs/scpp/scpp.toml has no per-partition
+// object granularity yet) -- so even these rand-/io-/enum_cast-only tests
+// transitively need :llvm's real LLVM-C symbols satisfied at final link
+// time, exactly like tests/llvm_lib_test.cpp's own build_link_flags()
+// needs for its explicit `--link` flags.
+std::vector<std::string> split_whitespace(const std::string& text) {
+    std::vector<std::string> parts;
+    std::istringstream stream(text);
+    std::string token;
+    while (stream >> token) {
+        parts.push_back(token);
+    }
+    return parts;
+}
+
 std::vector<std::string> std_link_inputs() {
-    return {};
+    return split_whitespace(SCPP_LLVM_NATIVE_LIBRARY_FILES);
 }
 
 class TestModuleCache {
