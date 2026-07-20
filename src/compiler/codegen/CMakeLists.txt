@@ -21,6 +21,8 @@ target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
 # here explicitly too, alongside llvm_core -- not relying solely on
 # llvm_core's own PUBLIC link to llvm_types (libs/llvm/CMakeLists.txt),
 # so this target's own CMake dependency graph accurately reflects its
-# real, direct module dependency.
-target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr llvm_core llvm_types ${LLVM_LIBS})
+# real, direct module dependency. Likewise, orchestration.cppm and
+# debug.cppm themselves `import llvm.debug_info;` directly, so llvm_debug_info
+# is linked here explicitly too, for the same reason.
+target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr llvm_core llvm_types llvm_debug_info ${LLVM_LIBS})
 target_compile_features(scpp_codegen PRIVATE cxx_std_23)
