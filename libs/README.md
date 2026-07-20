@@ -187,13 +187,14 @@ a complete, working example (built and run by `ctest`), and
 `scpp_llvm/scpp.toml`'s own comments for exactly how those `--link` inputs are
 resolved there.
 
-## The `llvm.types`, `llvm.core`, `llvm.debug_info`, and `llvm.target` modules (modules `llvm.types`, `llvm.core`, `llvm.debug_info`, `llvm.target`)
+## The `llvm.types`, `llvm.core`, `llvm.debug_info`, `llvm.target`, and `llvm.target_machine` modules (modules `llvm.types`, `llvm.core`, `llvm.debug_info`, `llvm.target`, `llvm.target_machine`)
 
 `libs/llvm/` is a third category, distinct from both `std`/`scpp` above
 (scpp-buildable workspace members) and `scpp_llvm/` below (an ergonomic,
 scpp-facing RAII wrapper package): it is one or more plain, ordinary C++20
 modules, compiled directly by real clang++ via dedicated CMake targets
-(`llvm_types`, `llvm_core`, `llvm_debug_info`, `llvm_target`, see
+(`llvm_types`, `llvm_core`, `llvm_debug_info`, `llvm_target`,
+`llvm_target_machine`, see
 `libs/llvm/CMakeLists.txt`, wired into the root via
 `add_subdirectory(libs/llvm)`), never by scpp itself -- unlike `std`/`scpp`
 above, there is no aspiration for these files to also be scpp-parseable. It
@@ -262,14 +263,47 @@ eventual self-hosting.
   at all -- `scpp_llvm_target_initialize_native_target`/
   `scpp_llvm_target_initialize_native_asm_printer` -- bridging a genuine
   ABI gap; see "Native target/AsmPrinter initialization" below.
+- File: `llvm/target_machine.cpp`, module `llvm.target_machine` -- a
+  fresh, standalone, top-level module, not nested inside or a partition
+  of `scpp`/`std`/`scpp.llvm`/`llvm.types`/`llvm.core`/`llvm.debug_info`/
+  `llvm.target`. Contains hand-written `extern "C"` declarations
+  mechanically mirroring the specific subset of real
+  `llvm-c/TargetMachine.h` actually referenced by `src/driver.cppm` today
+  -- the sole consumer of this header anywhere in the project (target-
+  triple lookup, target-machine creation/disposal, data-layout-from-
+  target-machine, object-file emission, and the 4 supporting enums) --
+  not a blanket re-declaration of TargetMachine.h's much larger surface
+  (the whole `LLVMTargetMachineOptionsRef` family, `LLVMGetFirstTarget`/
+  `NextTarget`/`FromName`, `LLVMTargetHasJIT`/`HasTargetMachine`/
+  `HasAsmBackend`, `LLVMGetTargetMachineTarget`/`Triple`/`CPU`/
+  `FeatureString`, `LLVMSetTargetMachine*`,
+  `LLVMTargetMachineEmitToMemoryBuffer`, `LLVMNormalizeTargetTriple`,
+  `LLVMGetHostCPUName`/`Features`, and `LLVMAddAnalysisPasses` are all
+  deliberately not declared). Like `core.cpp`, `debug_info.cpp`, and
+  `target.cpp`, `target_machine.cpp` itself has zero `#include` of any
+  real `llvm-c/*.h` header, and only plainly `import llvm.types;`/
+  `import llvm.target;` (same reasoning as `llvm.debug_info`/
+  `llvm.target` -- see `target_machine.cpp`'s own header comment).
+  `LLVMTargetRef`/`LLVMTarget` and `LLVMTargetMachineRef`/
+  `LLVMOpaqueTargetMachine` are genuinely TargetMachine.h's own
+  declarations (not Types.h's or Target.h's), so they are declared in
+  this module rather than added to `llvm.types` or `llvm.target` --
+  mirroring how `LLVMTargetDataRef`/`LLVMOpaqueTargetData` stays in
+  `llvm.target` rather than `llvm.types` for the same reason. Note real
+  TargetMachine.h's own naming inconsistency, kept byte-for-byte here
+  since each tag must match upstream exactly: `LLVMTargetRef`'s pointee
+  tag is spelled plain `LLVMTarget` (no `Opaque` prefix, unlike almost
+  every other opaque handle across any of these five modules) -- the same
+  kind of upstream quirk `llvm.types` already documents for its own
+  `LLVMOpaqueAttributeRef`.
 - Unlike `scpp_llvm/core/`'s RAII wrapper classes (which deliberately
   share a single `void*` underneath their own type-safe wrapper layer),
-  none of the four modules has any such wrapper: their raw `LLVM*Ref`
+  none of the five modules has any such wrapper: their raw `LLVM*Ref`
   declarations *are* the public surface those ten files (and `api.cppm`)
   call/use directly, exactly as they did through the real header, so every
   opaque handle kind (`LLVMContextRef`, `LLVMModuleRef`, `LLVMTypeRef`,
-  `LLVMTargetDataRef`, ...) is declared as its own distinct pointer type,
-  never a shared `void*`.
+  `LLVMTargetDataRef`, `LLVMTargetMachineRef`, ...) is declared as its own
+  distinct pointer type, never a shared `void*`.
 - The opaque handle struct tags live in `llvm.types`'s own global module
   fragment (before `export module llvm.types;`), not its purview, and the
   pointer aliases (`using LLVMContextRef = ...`) plus `LLVMBool` are
@@ -285,16 +319,43 @@ eventual self-hosting.
   either file's own extension or of scpp's grammar -- verified
   empirically against this project's own real build, not just reasoned
   about in isolation. `llvm.target` applies the exact same split to the
-  one new opaque handle struct tag it introduces directly
+  one new opaque handle struct tag it introduced directly
   (`LLVMOpaqueTargetData`, genuinely Target.h's own declaration, not
   Types.h's -- see below): the tag lives in `target.cpp`'s own global
   module fragment, and only its pointer alias (`LLVMTargetDataRef`) is
-  exported from the purview -- required because src/driver.cppm still
-  combines `import llvm.target;` with a raw
-  `#include <llvm-c/TargetMachine.h>` that itself transitively
-  `#include`s its own, unattached copy of `llvm-c/Target.h` (and
-  therefore of `LLVMOpaqueTargetData` too); verified empirically against
-  this project's own real build, exactly as for `llvm.types`'s tags.
+  exported from the purview -- required, at the time `llvm.target` was
+  introduced, because src/driver.cppm still combined
+  `import llvm.target;` with a raw `#include <llvm-c/TargetMachine.h>`
+  that itself transitively `#include`d its own, unattached copy of
+  `llvm-c/Target.h` (and therefore of `LLVMOpaqueTargetData` too);
+  verified empirically against this project's own real build, exactly as
+  for `llvm.types`'s tags. `llvm.target_machine` applies the same split
+  again to the two new opaque handle struct tags it introduces directly
+  (`LLVMTarget`/`LLVMOpaqueTargetMachine`, genuinely TargetMachine.h's own
+  declarations -- see below): both tags live in `target_machine.cpp`'s
+  own global module fragment, and only their pointer aliases
+  (`LLVMTargetRef`/`LLVMTargetMachineRef`) are exported from the purview.
+  This module's own introduction is what finally removes
+  src/driver.cppm's `#include <llvm-c/TargetMachine.h>` -- the specific
+  competing include the previous sentence describes -- so this split is
+  retained not because any live competing declaration remains in that
+  file today (there is none any more), but as the same uniform, defensive
+  convention every `llvm.*` module applies to every opaque handle tag it
+  introduces, future-proofing against any not-yet-existing consumer that
+  might reintroduce a competing raw `#include` later. This also surfaces
+  a new wrinkle none of the four prior modules ever hit: src/driver.cppm
+  was the first consumer, across all five modules, to name a bare opaque
+  struct tag (`LLVMOpaqueTargetMachine`) directly -- as the pointee type
+  of a `std::unique_ptr` -- rather than only its exported pointer alias;
+  since a global-module-fragment declaration is reachable but not
+  *visible* to ordinary unqualified name lookup, that one call site was
+  rewritten to `std::remove_pointer_t<LLVMTargetMachineRef>` (from
+  `<type_traits>`, already reachable via src/driver.cppm's own pre-existing
+  `import std;`) instead of exporting the tag directly, preserving the
+  same module-attachment safety net for no loss of functionality; see
+  `target_machine.cpp`'s own header comment for the fuller argument.
+  Verified directly against this project's own real build, not just
+  reasoned about in isolation, exactly as for `llvm.target`'s own tag.
 - `llvm.core` keeps only its genuinely Core.h-specific declarations
   (`LLVMAttributeIndex`, the ~118 functions, the 5 enums) and depends on
   `llvm.types` (`export import llvm.types;`) for every opaque handle type
@@ -311,7 +372,14 @@ eventual self-hosting.
   `LLVMOpaqueTargetData`, the 7 functions) and depends on `llvm.types`
   (plain `import llvm.types;`, not re-exported, same reasoning as
   `llvm.debug_info`) for every other opaque handle type it uses in its own
-  signatures -- see `target.cpp`'s own header comment.
+  signatures -- see `target.cpp`'s own header comment. `llvm.target_machine`
+  likewise keeps only its genuinely TargetMachine.h-specific declarations
+  (`LLVMTargetRef`/`LLVMTarget`, `LLVMTargetMachineRef`/
+  `LLVMOpaqueTargetMachine`, the 4 enums, the 6 functions) and depends on
+  both `llvm.types` and `llvm.target` (plain `import`s, not re-exported,
+  same reasoning as `llvm.debug_info`/`llvm.target`) for every other
+  opaque handle type it uses in its own signatures -- see
+  `target_machine.cpp`'s own header comment.
 
 ### Native target/AsmPrinter initialization -- an ABI gap in `llvm.target`
 
@@ -347,10 +415,12 @@ specific architecture's concrete symbol names instead (the only
 alternative needing no shim at all) was rejected: it would silently break
 on any host LLVM wasn't built natively for that one architecture.
 
-The other `llvm-c/*.h` headers still `#include`d by those same nine files
-today (`TargetMachine.h`, `Analysis.h`) are deliberately untouched by
-these modules -- out of scope for now, left for their own later, equally
-narrow `llvm.<name>` follow-ups.
+The other `llvm-c/*.h` header still `#include`d by one of those same nine
+files today (`Analysis.h`, in `src/compiler/codegen/orchestration.cppm`)
+is deliberately untouched by these modules -- out of scope for now, left
+for its own later, equally narrow follow-up. (`TargetMachine.h`,
+previously also on this list, has since been migrated to
+`llvm.target_machine` -- see its own bullet and header comment above.)
 
 ## Testing policy
 

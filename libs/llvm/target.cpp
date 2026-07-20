@@ -92,19 +92,27 @@
 // same struct tag denote the same entity only if both are attached to the
 // same named module, or neither is attached to any named module"
 // rationale), applied here to a tag this module owns directly rather than
-// one reused from `llvm.types`: src/driver.cppm, this module's one
-// consumer that still combines `import llvm.target;` with a raw
-// `#include <llvm-c/TargetMachine.h>` (itself transitively `#include`ing
-// its own, unattached copy of llvm-c/Target.h, and therefore of
-// `LLVMOpaqueTargetData` too), would otherwise fail to build with
-// "declaration 'LLVMOpaqueTargetData' attached to named module
-// 'llvm.target' cannot be attached to other modules" -- exactly the
-// failure mode `llvm.types`'s own header comment describes an earlier
-// version of `llvm.core` hitting for its own tags. Declaring the tag
-// unattached here instead keeps both copies agreeing, denoting one and
-// the same type, exactly as before this module existed. Verified directly
-// against this project's own real build, not just reasoned about in
-// isolation.
+// one reused from `llvm.types`: at the time this module was introduced,
+// src/driver.cppm, its one consumer, still combined `import llvm.target;`
+// with a raw `#include <llvm-c/TargetMachine.h>` (itself transitively
+// `#include`ing its own, unattached copy of llvm-c/Target.h, and
+// therefore of `LLVMOpaqueTargetData` too), which would otherwise have
+// failed to build with "declaration 'LLVMOpaqueTargetData' attached to
+// named module 'llvm.target' cannot be attached to other modules" --
+// exactly the failure mode `llvm.types`'s own header comment describes an
+// earlier version of `llvm.core` hitting for its own tags. Declaring the
+// tag unattached here instead kept both copies agreeing, denoting one and
+// the same type. src/driver.cppm's own `#include <llvm-c/TargetMachine.h>`
+// has since been replaced by `import llvm.target_machine;` (see that
+// module, same directory), removing the specific live conflict described
+// above -- but the unattached placement here is retained regardless, as
+// the same uniform, defensive convention every `llvm.*` module applies to
+// every opaque handle tag it introduces, independent of whether any
+// current consumer happens to have a competing unattached copy today (see
+// `llvm.target_machine`'s own header comment for the fuller version of
+// this same argument, written for its own two new tags). Verified
+// directly against this project's own real build, not just reasoned
+// about in isolation.
 //
 // Native target/AsmPrinter initialization: real llvm-c/Target.h's
 // `LLVMInitializeNativeTarget()`/`LLVMInitializeNativeAsmPrinter()` are

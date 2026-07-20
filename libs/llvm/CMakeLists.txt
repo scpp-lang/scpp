@@ -99,6 +99,28 @@ add_library(llvm_target_native_init STATIC native_target_init.cpp)
 target_include_directories(llvm_target_native_init SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(llvm_target_native_init PRIVATE ${LLVM_DEFINITIONS_LIST})
 target_compile_features(llvm_target_native_init PRIVATE cxx_std_23)
+# native_target_init.cpp's compiled object code itself references real,
+# concrete-architecture LLVM symbols (e.g. LLVMInitializeX86Target, via the
+# LLVMInitializeNativeTarget()/LLVMInitializeNativeAsmPrinter() inline
+# bodies it calls through to -- see that file's own header comment) that
+# only ${LLVM_LIBS} (below, resolved by the root CMakeLists.txt's own
+# llvm_map_components_to_libnames) ultimately define. This target never
+# declared that real dependency explicitly before llvm_target_machine
+# (below) existed, relying instead on every final executable's own,
+# separately-specified link line happening to place ${LLVM_LIBS} after
+# this target's archive -- true by accident of argument order, not by any
+# CMake-tracked dependency edge. Introducing llvm_target_machine as a
+# second, sibling path by which a consumer (scpp_driver, see root
+# CMakeLists.txt) reaches this same target (llvm_target_machine also
+# privately depends on llvm_target, which privately depends on this one)
+# empirically changed CMake's own link-line linearization enough to
+# violate that accidental ordering and break the real build -- confirmed
+# by reverting to the pre-llvm_target_machine tree and observing the
+# link succeed unchanged. Declaring the real dependency explicitly here
+# instead makes CMake itself respect the required "consumer before
+# provider" archive order no matter how many separate paths a future
+# consumer might use to reach this target.
+target_link_libraries(llvm_target_native_init PRIVATE ${LLVM_LIBS})
 
 # `llvm.target`: a real, directly-clang++-compiled C++20 module (target.cpp)
 # hand-declaring the specific official llvm-c/Target.h surface this
@@ -135,3 +157,40 @@ target_sources(llvm_target
             target.cpp)
 target_link_libraries(llvm_target PRIVATE llvm_types llvm_target_native_init)
 target_compile_features(llvm_target PRIVATE cxx_std_23)
+
+# `llvm.target_machine`: a real, directly-clang++-compiled C++20 module
+# (target_machine.cpp) hand-declaring the specific official
+# llvm-c/TargetMachine.h surface this compiler's own driver source
+# (src/driver.cppm, the sole consumer) needs, so it can
+# `import llvm.target_machine;` instead of
+# `#include <llvm-c/TargetMachine.h>` -- scpp (the language) has no
+# preprocessor/#include at all, so raw #include in this compiler's own
+# sources is a self-hosting blocker. Declares only extern "C" bindings, no
+# LLVM-C symbol *definitions* of its own, so it needs neither
+# ${LLVM_INCLUDE_DIRS} nor ${LLVM_LIBS} itself -- consumers (see root
+# CMakeLists.txt) already link ${LLVM_LIBS} for the other, still-
+# #include'd llvm-c/*.h headers, which resolves this module's declarations
+# too at final link time.
+#
+# target_machine.cpp is a plain, ordinary C++ file (unlike `.scpp` sources
+# elsewhere under libs/), so CMake recognizes its `.cpp` extension as C++
+# on its own -- no `set_source_files_properties(... LANGUAGE CXX)` needed.
+# target_machine.cpp itself only `import llvm.types;`/`import llvm.target;`
+# (not `export import` either, same reasoning as `llvm.debug_info`'s own
+# debug_info.cpp and `llvm.target`'s own target.cpp -- see that file's own
+# header comment), so `llvm_target_machine` links PRIVATE against both
+# `llvm_types` and `llvm_target`: this still gives CMake's module
+# dependency scanner the BMI-ordering edge it needs (target_machine.cpp's
+# own BMI can't be built before types.cpp's/target.cpp's), without also
+# propagating a re-export this module never performs to
+# `llvm_target_machine`'s own consumers, which already reach every one of
+# `llvm.types`'s/`llvm.target`'s aliases through their own separate,
+# direct links to `llvm_core` (which does re-export `llvm.types`) and
+# `llvm_target`.
+add_library(llvm_target_machine)
+target_sources(llvm_target_machine
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            target_machine.cpp)
+target_link_libraries(llvm_target_machine PRIVATE llvm_types llvm_target)
+target_compile_features(llvm_target_machine PRIVATE cxx_std_23)

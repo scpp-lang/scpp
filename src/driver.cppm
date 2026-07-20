@@ -2,25 +2,26 @@ module;
 
 // Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
 // interface -- the TargetMachine construction and object-file emission
-// this file performs go through its llvm-c/Target.h (`import
-// llvm.target;` below) and llvm-c/TargetMachine.h functions directly
-// below instead of any native LLVM C++ header (llvm::TargetRegistry,
-// llvm::TargetMachine, llvm::legacy::PassManager, etc.); the few
-// llvm-c/Core.h pieces this file also touches (LLVMModuleRef,
-// LLVMDisposeMessage) come from `import llvm.core;` instead, see below.
-// See libs/README.md for why this project binds straight to LLVM-C
-// wherever it already covers what's needed -- including
-// LLVMTargetMachineEmitToFile, which alone replaces the raw_fd_ostream +
-// legacy::PassManager + addPassesToEmitFile dance the native C++ API
-// required: a rigorous, function-by-function empirical audit found
-// LLVM-C fully covers every LLVM operation this project's driver needs.
-#include <llvm-c/TargetMachine.h>
+// this file performs go through its llvm-c/TargetMachine.h (`import
+// llvm.target_machine;` below) and llvm-c/Target.h (`import
+// llvm.target;` below) functions directly instead of any native LLVM C++
+// header (llvm::TargetRegistry, llvm::TargetMachine,
+// llvm::legacy::PassManager, etc.); the few llvm-c/Core.h pieces this
+// file also touches (LLVMModuleRef, LLVMDisposeMessage) come from
+// `import llvm.core;` instead, see below. See libs/README.md for why
+// this project binds straight to LLVM-C wherever it already covers
+// what's needed -- including LLVMTargetMachineEmitToFile, which alone
+// replaces the raw_fd_ostream + legacy::PassManager + addPassesToEmitFile
+// dance the native C++ API required: a rigorous, function-by-function
+// empirical audit found LLVM-C fully covers every LLVM operation this
+// project's driver needs.
 
 export module scpp.driver;
 
 import std;
 import llvm.core;
 import llvm.target;
+import llvm.target_machine;
 import scpp.ast;
 import scpp.compiler.codegen;
 import scpp.constexpr_engine;
@@ -2199,8 +2200,15 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
         // gives target_machine the exact same "always freed, even if an
         // exception unwinds through codegen.generate() below" exception
         // safety the original llvm::TargetMachine unique_ptr had, without
-        // needing a bespoke RAII wrapper type.
-        std::unique_ptr<LLVMOpaqueTargetMachine, void (*)(LLVMTargetMachineRef)> target_machine(
+        // needing a bespoke RAII wrapper type. std::remove_pointer_t
+        // recovers the pointee type from the exported LLVMTargetMachineRef
+        // alias rather than naming the opaque LLVMOpaqueTargetMachine
+        // struct tag directly: that tag lives in llvm.target_machine's own
+        // global module fragment (unattached, never exported -- see
+        // target_machine.cpp's own header comment), so it is reachable
+        // through the alias but not nameable by ordinary unqualified
+        // lookup here.
+        std::unique_ptr<std::remove_pointer_t<LLVMTargetMachineRef>, void (*)(LLVMTargetMachineRef)> target_machine(
             LLVMCreateTargetMachine(target, triple.c_str(), "generic", "", codegen_opt_level_for(opt_level),
                                      LLVMRelocPIC, LLVMCodeModelDefault),
             &LLVMDisposeTargetMachine);
