@@ -1,11 +1,10 @@
 // target.cpp
 //
 // `llvm.target`: a fresh, standalone, top-level module -- not a partition
-// or nested submodule of either `scpp` (this project's own
-// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`),
-// `scpp.llvm` (the separate, ergonomic RAII wrapper package at
-// libs/scpp_llvm/), or `llvm.core`/`llvm.types`/`llvm.debug_info` (the
-// three sibling modules in this same directory). Its only job is to give
+// or nested submodule of `scpp` (this project's own
+// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`) or
+// `llvm.core`/`llvm.types`/`llvm.debug_info` (the three sibling modules
+// in this same directory). Its only job is to give
 // this compiler's own real-C++ `src/*.cppm` files a way to reach official
 // LLVM-C's `llvm-c/Target.h` surface via `import llvm.target;` instead of
 // `#include <llvm-c/Target.h>` -- scpp (the language) has no
@@ -67,18 +66,14 @@
 // `llvm.types` (see core.cpp's own header comment), it is declared here,
 // in this module, rather than added to `llvm.types`.
 //
-// Contrast with libs/scpp_llvm/: that package wraps LLVM-C in ergonomic,
-// RAII scpp classes (Context/Module/Type/Value) for scpp *user* programs,
-// and deliberately declares every opaque handle as a shared `void*`
-// underneath those classes -- real type safety there comes from the
-// wrapper classes, not the raw handles. This module has no such wrapper:
-// its raw `LLVM*Ref` declarations *are* the public surface all four
-// consumers call directly, exactly as they did through the real header,
-// so `LLVMTargetDataRef` (declared by this module) is its own distinct
+// This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
+// declarations *are* the public surface all four consumers call
+// directly, exactly as they did through the real header, so
+// `LLVMTargetDataRef` (declared by this module) is its own distinct
 // pointer type from every other handle kind (never a shared `void*`) --
-// otherwise the compiler could no longer catch e.g. an `LLVMTargetDataRef`
-// accidentally passed where an `LLVMTypeRef` was expected, silently
-// trading a compile error for a runtime bug.
+// otherwise the compiler could no longer catch e.g. an
+// `LLVMTargetDataRef` accidentally passed where an `LLVMTypeRef` was
+// expected, silently trading a compile error for a runtime bug.
 //
 // Module-attachment note: `LLVMOpaqueTargetData` -- the one new opaque
 // handle struct tag this module introduces -- lives in this file's own

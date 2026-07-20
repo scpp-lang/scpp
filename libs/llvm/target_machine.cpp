@@ -1,11 +1,10 @@
 // target_machine.cpp
 //
 // `llvm.target_machine`: a fresh, standalone, top-level module -- not a
-// partition or nested submodule of either `scpp` (this project's own
-// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`),
-// `scpp.llvm` (the separate, ergonomic RAII wrapper package at
-// libs/scpp_llvm/), or `llvm.core`/`llvm.types`/`llvm.debug_info`/
-// `llvm.target` (the four sibling modules in this same directory). Its
+// partition or nested submodule of `scpp` (this project's own
+// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`) or
+// `llvm.core`/`llvm.types`/`llvm.debug_info`/`llvm.target` (the four
+// sibling modules in this same directory). Its
 // only job is to give this compiler's own real-C++ `src/*.cppm` files a
 // way to reach official LLVM-C's `llvm-c/TargetMachine.h` surface via
 // `import llvm.target_machine;` instead of
@@ -108,12 +107,8 @@
 // above), since src/driver.cppm calls the older, simpler
 // `LLVMCreateTargetMachine` overload directly instead.
 //
-// Contrast with libs/scpp_llvm/: that package wraps LLVM-C in ergonomic,
-// RAII scpp classes (Context/Module/Type/Value) for scpp *user* programs,
-// and deliberately declares every opaque handle as a shared `void*`
-// underneath those classes -- real type safety there comes from the
-// wrapper classes, not the raw handles. This module has no such wrapper:
-// its raw `LLVM*Ref` declarations *are* the public surface
+// This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
+// declarations *are* the public surface
 // src/driver.cppm calls directly, exactly as it did through the real
 // header, so `LLVMTargetRef` and `LLVMTargetMachineRef` (declared by this
 // module) are each their own distinct pointer type, and distinct from

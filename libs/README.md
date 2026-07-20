@@ -1,6 +1,6 @@
 # libs — scpp's library modules
 
-This directory contains scpp's shipped library modules: the real-`std` module under `libs/std/`, plus scpp-specific extensions under `libs/scpp/`. Native helper libraries live here too. `libs/scpp_llvm/` is a standalone package (not a member of the `std`/`scpp` workspace below) providing ergonomic scpp bindings to LLVM; see its own section near the end of this file. `libs/llvm/` is a third, distinct category: plain C++20 modules compiled directly by real clang++ (never by scpp itself) that let this compiler's own `src/*.cppm` sources replace `#include <llvm-c/*.h>` with `import llvm.<name>;`; see its own section below.
+This directory contains scpp's shipped library modules: the real-`std` module under `libs/std/`, plus scpp-specific extensions under `libs/scpp/`. Native helper libraries live here too. `libs/llvm/` is a second, distinct category: plain C++20 modules compiled directly by real clang++ (never by scpp itself) that let this compiler's own `src/*.cppm` sources replace `#include <llvm-c/*.h>` with `import llvm.<name>;`; see its own section below.
 
 The project convention is:
 
@@ -24,9 +24,6 @@ The project convention is:
 | `scpp/scpp.scpp` | Primary interface unit of module `scpp`; re-exports scpp-specific partitions |
 | `scpp/rand/` | `scpp:rand` partition with `scpp::rand::uniform_int_distribution<int>` |
 | `CMakeLists.txt` | Only stages a temporary workspace under the build tree, runs `scpp build --lib`, and copies final artifacts back to stable `build/libs` paths |
-| `scpp_llvm/scpp.toml` | `scpp-llvm` package manifest (standalone, not a workspace member yet -- see its own section below) |
-| `scpp_llvm/scpp_llvm.scpp` | Primary interface unit of module `scpp.llvm`; re-exports its partitions |
-| `scpp_llvm/core/` | `scpp.llvm:core` partition: ergonomic scpp wrapper classes binding directly to official LLVM-C |
 | `llvm/types.cpp` | Module `llvm.types`: hand-written opaque handle struct tags/aliases mirroring the `llvm-c/Types.h` subset `llvm.core`, `llvm.debug_info`, and `src/compiler/codegen/api.cppm` use -- plain clang++-compiled, not a workspace member |
 | `llvm/core.cpp` | Module `llvm.core`: hand-written `extern "C"` mirror of the `llvm-c/Core.h` subset this compiler's own codegen uses, depending on `llvm.types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
 | `llvm/debug_info.cpp` | Module `llvm.debug_info`: hand-written `extern "C"` mirror of the `llvm-c/DebugInfo.h` subset this compiler's own codegen uses, depending on `llvm.types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
@@ -95,103 +92,10 @@ Notes:
 - Pure scpp implementation
 - Provides `std::unique_ptr<T>` and `std::make_unique<T>(...)`
 
-## The `scpp-llvm` package (module `scpp.llvm`)
-
-The package/`[[lib]]` manifest name is `scpp-llvm` (hyphen), while the
-module a consumer actually `import`s is the dotted `scpp.llvm` -- these are
-deliberately different spellings of two independent identifiers in scpp's
-build model (see `scpp_llvm/scpp.toml`'s own header comment): only the
-module name is what an `import` statement resolves against and is subject
-to scpp's module-name grammar (`Identifier ('.' Identifier)*`, no
-hyphens); the manifest `name` is pure package metadata -- used only for
-dependency-graph bookkeeping and this package's output archive filename --
-and is parsed as an arbitrary TOML string with no identifier-grammar
-restriction at all, the same way an npm/cargo package can be hyphenated
-(`serde-json`) even though the language identifier it maps to cannot be
-(`serde_json`). Both names are deliberately distinct from bare `llvm`, and
-the module name's dotted form mirrors this project's own compiler-internal
-module naming (`scpp.ast`, `scpp.compiler.codegen`, etc., see
-`src/*.cppm`) -- specifically to avoid any naming collision/confusion with
-official upstream LLVM itself when a consumer writes `import scpp.llvm;`
-and uses `scpp::llvm::core::...` -- this is our own curated scpp binding
-package *around* LLVM, not LLVM. (The package's directory and `.scpp`
-filenames stay underscore-based, `scpp_llvm/`, unrelated to either naming
-choice above -- see "Layout" above.)
-
-Unlike `std`/`scpp` above, `scpp-llvm` is not (yet) a member of
-`libs/scpp.toml`'s workspace -- see `scpp_llvm/scpp.toml`'s own header
-comment for why (in short: its consumers need real LLVM's own native
-library at final link time, and there is no manifest-level mechanism yet
-for a package to propagate that requirement automatically). It is still a
-real, independently buildable and importable scpp package today, just one
-that (for now) requires a couple of extra explicit `--link` flags from its
-consumers.
-
-It exists to make scpp's from-scratch LLVM bindings (originally built for the
-compiler's own codegen) directly reusable by any scpp program that wants to
-do LLVM-based codegen/JIT/tooling, not just the compiler itself -- one
-canonical implementation, at least two consumers.
-
-Official LLVM-C functions (`llvm-c/*.h`) are themselves already a stable,
-cross-language `extern "C"` interface, designed precisely for binding from
-other languages -- so `scpp_llvm/core/scpp_llvm_core.scpp` (the
-`scpp.llvm:core` partition) declares `extern "C"` bindings (ch06 SS6.2)
-straight to those official `LLVM*` functions, with zero indirection through
-any custom C++ shim of our own, and wraps them in idiomatic, RAII scpp
-classes -- `scpp::llvm::core::Context`/`Type`/`Value`/`Module` today. This
-partition, aggregated by `scpp_llvm/scpp_llvm.scpp`, is the only part of
-this package ordinary scpp consumers ever interact with directly.
-
-This "bind straight to LLVM-C" design isn't an assumption -- it's the
-conclusion of a rigorous, function-by-function empirical audit of every
-`llvm::`-namespaced operation the scpp compiler's own codegen uses (dozens of
-`IRBuilder` methods, `Module`/`Function`/`Type`/`DIBuilder` construction, etc.
-across `src/compiler/codegen/*.cppm` and `src/compiler/debug.cppm`), checked
-against actual LLVM-C signatures and semantics (including compiled-and-run
-test programs for the trickiest cases). That audit found LLVM-C fully covers
-everything needed, with zero genuine gaps -- including
-`Module::pointer_abi_alignment` below, which an earlier round of this
-project mistakenly concluded needed a hand-written `extern "C"` gap-filler of
-our own; empirical testing proved that wrong (`LLVMABIAlignmentOfType`
-queried against an opaque pointer type for a given address space reads the
-exact same `DataLayout` entry a direct per-address-space query would), so it
-now simply composes two official LLVM-C calls instead. Should a genuine
-coverage gap ever be found for some future piece of functionality, the plan
-is to add a minimal, hand-written `extern "C"` C++ shim at that point
-(analogous in spirit to rustc's `rustc_llvm` wrapper) covering only that
-specific gap -- not a blanket re-wrap of everything LLVM-C already provides.
-
-Current scope is deliberately small (a `Context`; an empty `Module`;
-scalar `Type`s (`i1`/`i8`/`i16`/`i32`/`i64`/`float`/`double`/`void`) plus
-pointer/array/(anonymous) struct/function derived `Type`s; simple `Value`
-constants (`const_int`/`const_real`/`const_null`); `Module::print()`/
-`Module::verify()`; and a `DataLayout`-backed size/alignment query
-surface) -- a first, provable slice, not the full `IRBuilder`/`Function`/
-`BasicBlock`/`GlobalVariable`/`DIBuilder` surface the compiler's own
-codegen will eventually need. The scpp compiler's own codegen does not use
-this package -- see `src/compiler/codegen/`'s own comments for that
-separate, ongoing migration; it does, like this package, bind directly to
-official LLVM-C for the DataLayout/Verifier queries it has converted so far.
-
-Consuming it today looks like:
-
-```sh
-scpp app.scpp -o app \
-  --import std=libs/std/std.scpp \
-  --import scpp.llvm=libs/scpp_llvm/scpp_llvm.scpp \
-  --link <path(s) to LLVM's own native library, e.g. from \`llvm-config --libfiles\`>
-```
-
-See `tests/llvm_lib_test.cpp` and `tests/llvm_lib_test_source/main.scpp` for
-a complete, working example (built and run by `ctest`), and
-`scpp_llvm/scpp.toml`'s own comments for exactly how those `--link` inputs are
-resolved there.
-
 ## The `llvm.types`, `llvm.core`, `llvm.debug_info`, `llvm.target`, and `llvm.target_machine` modules (modules `llvm.types`, `llvm.core`, `llvm.debug_info`, `llvm.target`, `llvm.target_machine`)
 
-`libs/llvm/` is a third category, distinct from both `std`/`scpp` above
-(scpp-buildable workspace members) and `scpp_llvm/` below (an ergonomic,
-scpp-facing RAII wrapper package): it is one or more plain, ordinary C++20
+`libs/llvm/` is a distinct category from `std`/`scpp` above
+(scpp-buildable workspace members): it is one or more plain, ordinary C++20
 modules, compiled directly by real clang++ via dedicated CMake targets
 (`llvm_types`, `llvm_core`, `llvm_debug_info`, `llvm_target`,
 `llvm_target_machine`, see
@@ -206,7 +110,7 @@ eventual self-hosting.
 
 - File: `llvm/types.cpp`, module `llvm.types` -- a fresh, standalone,
   top-level module, not nested inside or a partition of `scpp`/`std`/
-  `scpp.llvm`/`llvm.core`/`llvm.debug_info`. Contains hand-written opaque
+  `llvm.core`/`llvm.debug_info`. Contains hand-written opaque
   handle struct tags and pointer-alias `typedef`s mechanically mirroring
   the specific subset of real `llvm-c/Types.h` referenced by `llvm.core`
   (below), `llvm.debug_info` (below), and `src/compiler/codegen/api.cppm`
@@ -219,7 +123,7 @@ eventual self-hosting.
   source of truth all three depend on instead.
 - File: `llvm/core.cpp`, module `llvm.core` -- a fresh, standalone,
   top-level module, not nested inside or a partition of `scpp`/`std`/
-  `scpp.llvm`/`llvm.types`/`llvm.debug_info`.
+  `llvm.types`/`llvm.debug_info`.
 - Contains hand-written `extern "C"` declarations mechanically mirroring
   the specific subset of real `llvm-c/Core.h` actually referenced by
   `src/driver.cppm` and `src/compiler/codegen/{layout,orchestration,debug,
@@ -232,7 +136,7 @@ eventual self-hosting.
   rather than a re-export of someone else's macros.
 - File: `llvm/debug_info.cpp`, module `llvm.debug_info` -- a fresh,
   standalone, top-level module, not nested inside or a partition of
-  `scpp`/`std`/`scpp.llvm`/`llvm.types`/`llvm.core`. Contains hand-written
+  `scpp`/`std`/`llvm.types`/`llvm.core`. Contains hand-written
   `extern "C"` declarations mechanically mirroring the specific subset of
   real `llvm-c/DebugInfo.h` actually referenced by
   `src/compiler/codegen/{orchestration,debug}.cppm` today -- not a blanket
@@ -246,7 +150,7 @@ eventual self-hosting.
   comment for the full rationale.
 - File: `llvm/target.cpp`, module `llvm.target` -- a fresh, standalone,
   top-level module, not nested inside or a partition of
-  `scpp`/`std`/`scpp.llvm`/`llvm.types`/`llvm.core`/`llvm.debug_info`.
+  `scpp`/`std`/`llvm.types`/`llvm.core`/`llvm.debug_info`.
   Contains hand-written `extern "C"` declarations mechanically mirroring
   the specific subset of real `llvm-c/Target.h` actually referenced by
   `src/driver.cppm` and `src/compiler/codegen/{layout,debug,expressions}.cppm`
@@ -265,7 +169,7 @@ eventual self-hosting.
   ABI gap; see "Native target/AsmPrinter initialization" below.
 - File: `llvm/target_machine.cpp`, module `llvm.target_machine` -- a
   fresh, standalone, top-level module, not nested inside or a partition
-  of `scpp`/`std`/`scpp.llvm`/`llvm.types`/`llvm.core`/`llvm.debug_info`/
+  of `scpp`/`std`/`llvm.types`/`llvm.core`/`llvm.debug_info`/
   `llvm.target`. Contains hand-written `extern "C"` declarations
   mechanically mirroring the specific subset of real
   `llvm-c/TargetMachine.h` actually referenced by `src/driver.cppm` today
@@ -296,14 +200,12 @@ eventual self-hosting.
   every other opaque handle across any of these five modules) -- the same
   kind of upstream quirk `llvm.types` already documents for its own
   `LLVMOpaqueAttributeRef`.
-- Unlike `scpp_llvm/core/`'s RAII wrapper classes (which deliberately
-  share a single `void*` underneath their own type-safe wrapper layer),
-  none of the five modules has any such wrapper: their raw `LLVM*Ref`
-  declarations *are* the public surface those ten files (and `api.cppm`)
-  call/use directly, exactly as they did through the real header, so every
-  opaque handle kind (`LLVMContextRef`, `LLVMModuleRef`, `LLVMTypeRef`,
-  `LLVMTargetDataRef`, `LLVMTargetMachineRef`, ...) is declared as its own
-  distinct pointer type, never a shared `void*`.
+- None of the five modules declares any RAII wrapper of its own: their raw
+  `LLVM*Ref` declarations *are* the public surface those ten files (and
+  `api.cppm`) call/use directly, exactly as they did through the real
+  header, so every opaque handle kind (`LLVMContextRef`, `LLVMModuleRef`,
+  `LLVMTypeRef`, `LLVMTargetDataRef`, `LLVMTargetMachineRef`, ...) is
+  declared as its own distinct pointer type, never a shared `void*`.
 - The opaque handle struct tags live in `llvm.types`'s own global module
   fragment (before `export module llvm.types;`), not its purview, and the
   pointer aliases (`using LLVMContextRef = ...`) plus `LLVMBool` are

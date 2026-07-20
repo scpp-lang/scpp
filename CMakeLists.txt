@@ -49,7 +49,6 @@ set(SCPP_STDLIB_STD_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libstd.scppa"
 set(SCPP_STDLIB_SCPP_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp/scpp.scpp")
 set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/scpp.scppm")
 set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libs/libscpp.scppa")
-set(SCPP_LLVM_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp_llvm/scpp_llvm.scpp")
 
 add_compile_options(-Wall -Wextra -Wpedantic)
 set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
@@ -62,17 +61,6 @@ find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 llvm_map_components_to_libnames(LLVM_LIBS core support target native)
 
-# Real, absolute path(s) to LLVM's own native library file(s), needed to run
-# a scpp binary that links against libs/scpp_llvm/ (see llvm_lib_test
-# below): its scpp bindings call official LLVM-C functions directly, so
-# its final link needs LLVM's real libraries. CMake targets elsewhere in
-# this project link via the LLVM_LIBS *CMake target names* above, but
-# --link (scpp's own linker-input CLI flag) needs literal file paths
-# instead, so resolve them via llvm-config here.
-execute_process(
-    COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-config" --libfiles core support target native
-    OUTPUT_VARIABLE SCPP_LLVM_NATIVE_LIBRARY_FILES
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
 list(INSERT CMAKE_FIND_LIBRARY_SUFFIXES 0 ".a")
 find_library(SQLITE3_LIB NAMES sqlite3 REQUIRED)
 find_path(SQLITE3_INCLUDE_DIR NAMES sqlite3.h REQUIRED)
@@ -230,27 +218,6 @@ target_compile_definitions(driver_test PRIVATE
     SCPP_STDLIB_SCPP_INTERFACE_PATH="${SCPP_STDLIB_SCPP_INTERFACE_PATH}")
 
 add_test(NAME driver_test COMMAND driver_test)
-
-# Proves libs/scpp_llvm/ works end to end via the real, CLI-driven
-# --import/--link workflow an external scpp_llvm.scpp consumer would
-# follow -- see tests/llvm_lib_test.cpp and
-# tests/llvm_lib_test_source/main.scpp.
-# Deliberately depends on the scpp executable (not scpp_driver's in-process
-# API, unlike driver_test above), and reuses SCPP_LLVM_NATIVE_LIBRARY_FILES
-# (resolved above via llvm-config) for the same real LLVM .so path(s)
-# --link needs at final link time.
-add_executable(llvm_lib_test tests/llvm_lib_test.cpp)
-target_compile_features(llvm_lib_test PRIVATE cxx_std_23)
-target_compile_definitions(llvm_lib_test PRIVATE
-    SCPP_BINARY_PATH="$<TARGET_FILE:scpp>"
-    SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
-    SCPP_LLVM_MODULE_PATH="${SCPP_LLVM_MODULE_PATH}"
-    SCPP_LLVM_NATIVE_LIBRARY_FILES="${SCPP_LLVM_NATIVE_LIBRARY_FILES}"
-    SCPP_LLVM_LIB_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/llvm_lib_test_source"
-    SCPP_LLVM_LIB_TEST_WORK_DIR="${CMAKE_CURRENT_BINARY_DIR}/llvm_lib_test-work")
-add_dependencies(llvm_lib_test scpp)
-
-add_test(NAME llvm_lib_test COMMAND llvm_lib_test)
 
 # Builds the shipped std/scpp manifest workspace and copies its produced
 # artifacts into build/libs. Library behavior itself is covered by tests/, not demos.
