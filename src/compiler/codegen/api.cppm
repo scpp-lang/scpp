@@ -2,18 +2,19 @@ module;
 
 // This partition only *declares* the Codegen class -- every member uses
 // LLVM-C's own opaque reference types (LLVMValueRef, LLVMTypeRef, ...)
-// rather than LLVM's native C++ classes, so only the lightweight typedef
-// header is needed here, not any of LLVM's heavier C++ API headers (those
-// are only needed by the .cppm partitions that actually call LLVM-C
-// functions -- see e.g. orchestration.cppm). A rigorous, function-by-
-// function empirical audit (see libs/README.md) found official LLVM-C
+// rather than LLVM's native C++ classes, so only `import llvm.types;`
+// below (the lightweight, Types.h-only sibling of `llvm.core`; see
+// libs/llvm/) is needed here, not any of LLVM's heavier C++ API headers
+// (those are only needed by the .cppm partitions that actually call
+// LLVM-C functions -- see e.g. orchestration.cppm). A rigorous, function-
+// by-function empirical audit (see libs/README.md) found official LLVM-C
 // fully covers every LLVM operation this project's codegen needs, so
 // there is no custom wrapper of any kind anywhere in this module.
-#include <llvm-c/Types.h>
 
 export module scpp.compiler.codegen:api;
 
 import std;
+import llvm.types;
 import scpp.ast;
 import scpp.constexpr_engine;
 import :errors;
