@@ -1,0 +1,52 @@
+// native_target_init.cpp
+//
+// A small, deliberate exception to `llvm.target`'s own "bind straight to
+// official LLVM-C, no custom wrapper of any kind" rule (see target.cpp's
+// own top-of-file comment) -- and the *only* one in this directory. Real
+// LLVM-C's `LLVMInitializeNativeTarget()`/`LLVMInitializeNativeAsmPrinter()`
+// (llvm-c/Target.h) are `static inline` functions defined entirely *in
+// that header*, expanding (via the LLVM_NATIVE_TARGET/
+// LLVM_NATIVE_ASMPRINTER macros, themselves set by LLVM's own build
+// configuration) to whichever concrete backend the host was actually
+// built for -- e.g. LLVMInitializeX86Target() on this machine. Unlike
+// every other function `llvm.target` declares (target.cpp, same
+// directory), there is therefore no real, ABI-stable, exported
+// `LLVMInitializeNativeTarget`/`LLVMInitializeNativeAsmPrinter` symbol in
+// LLVM's own compiled libraries to declare `extern "C"` and link against
+// directly -- confirmed empirically (`nm -D --defined-only
+// libLLVM-22.so | grep LLVMInitializeNative` finds nothing, while the
+// concrete-architecture symbol it expands to on this host,
+// `LLVMInitializeX86Target`, *is* a real, exported symbol). Hard-coding
+// `llvm.target`'s own extern "C" declarations to one specific
+// architecture's concrete symbol names (the only alternative that needs
+// no shim at all) would silently break this module -- and src/driver.cppm,
+// the one caller that needs "native, whatever this host is"
+// initialization rather than a specific architecture -- on any host LLVM
+// wasn't built natively for x86, so that option was rejected.
+//
+// This file is deliberately plain, ordinary C++ (a `.cpp`, not a `.scpp`)
+// -- unlike target.cpp, it is never `import`ed by anything (scpp or real
+// C++ alike), only compiled to object code and linked in via its own
+// small static library (`llvm_target_native_init`, see
+// libs/llvm/CMakeLists.txt), and it is *not* part of `llvm_target`'s own
+// FILE_SET cxx_modules -- it is not, and does not need to be,
+// dual-compilable the way libs/std/*.scpp or libs/scpp/*.scpp are. That
+// is exactly what lets it `#include <llvm-c/Target.h>` and reach the two
+// real inline functions at all: unlike target.cpp itself (which has zero
+// `#include` of any real llvm-c/*.h header, by design -- see its own
+// header comment), this file's only reason to exist is to reach those
+// two inline bodies, so it must `#include` the real header to do so. It
+// re-exports their result under new, distinct `extern "C"` names
+// (`scpp_llvm_target_*` below) that target.cpp's own `extern "C"` block
+// declares, and src/driver.cppm calls directly in place of the real
+// `LLVMInitializeNativeTarget`/`LLVMInitializeNativeAsmPrinter` names --
+// the smallest possible shim for this one confirmed gap.
+#include <llvm-c/Target.h>
+
+extern "C" {
+
+LLVMBool scpp_llvm_target_initialize_native_target() { return LLVMInitializeNativeTarget(); }
+
+LLVMBool scpp_llvm_target_initialize_native_asm_printer() { return LLVMInitializeNativeAsmPrinter(); }
+
+} // extern "C"
