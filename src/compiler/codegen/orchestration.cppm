@@ -4,19 +4,21 @@ module;
 // interface -- this file (Codegen's constructor/destructor, target
 // setup, top-level generate()/module_ir()) does everything through
 // llvm-c/Analysis.h's LLVMVerifyModule directly below (Core.h's own
-// functions come from `import llvm.core;` instead, see below), so it no
-// longer needs any native LLVM C++ header at all. See libs/README.md for
-// why this project binds straight to LLVM-C wherever it already covers
-// what's needed, with no wrapper of our own in between -- a rigorous,
+// functions come from `import llvm.core;`, and the one DebugInfo.h
+// function this file calls -- LLVMDisposeDIBuilder -- comes from
+// `import llvm.debug_info;`, both instead, see below), so it no longer
+// needs any native LLVM C++ header at all. See libs/README.md for why
+// this project binds straight to LLVM-C wherever it already covers what's
+// needed, with no wrapper of our own in between -- a rigorous,
 // function-by-function empirical audit found LLVM-C fully covers every
 // LLVM operation this project's codegen needs.
 #include <llvm-c/Analysis.h>
-#include <llvm-c/DebugInfo.h>
 
 module scpp.compiler.codegen:orchestration;
 
 import std;
 import llvm.core;
+import llvm.debug_info;
 import :api;
 
 namespace scpp {

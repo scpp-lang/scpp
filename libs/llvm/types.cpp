@@ -37,36 +37,43 @@
 // depend on it instead of each keeping their own copy.
 //
 // Scope: only the specific Types.h declarations actually referenced today,
-// across all of `llvm.core` (core.cpp) and `src/compiler/codegen/api.cppm`
-// combined -- not a blanket re-declaration of Types.h's much larger surface
-// (real Types.h also declares e.g. `LLVMMemoryBufferRef`,
-// `LLVMNamedMDNodeRef`, `LLVMOperandBundleRef`, `LLVMDiagnosticInfoRef`,
-// `LLVMComdatRef`, `LLVMPassManagerRef`, `LLVMBinaryRef`,
-// `LLVMDbgRecordRef`, none of which either file needs). Every handle kind
-// below except `LLVMOpaqueDIBuilder`/`LLVMDIBuilderRef` was already
-// declared by `llvm.core` prior to this module's introduction (verified
-// function-by-function and signature-by-signature against
+// across all of `llvm.core` (core.cpp), `llvm.debug_info` (debug_info.cpp,
+// same directory), and `src/compiler/codegen/api.cppm` combined -- not a
+// blanket re-declaration of Types.h's much larger surface (real Types.h
+// also declares e.g. `LLVMMemoryBufferRef`, `LLVMNamedMDNodeRef`,
+// `LLVMOperandBundleRef`, `LLVMDiagnosticInfoRef`, `LLVMComdatRef`,
+// `LLVMPassManagerRef`, `LLVMBinaryRef`, none of which any of the three
+// need). Every handle kind below except `LLVMOpaqueDIBuilder`/
+// `LLVMDIBuilderRef` and `LLVMOpaqueDbgRecord`/`LLVMDbgRecordRef` was
+// already declared by `llvm.core` prior to this module's introduction
+// (verified function-by-function and signature-by-signature against
 // src/driver.cppm and src/compiler/codegen/{layout,orchestration,debug,
 // functions,object_model,lifetime,statements,expressions}.cppm when
 // `llvm.core` was first created); `LLVMOpaqueDIBuilder`/`LLVMDIBuilderRef`
-// is newly added here because `src/compiler/codegen/api.cppm` declares a
-// raw `LLVMDIBuilderRef dibuilder_` member on its `Codegen` class, and that
+// is added here because `src/compiler/codegen/api.cppm` declares a raw
+// `LLVMDIBuilderRef dibuilder_` member on its `Codegen` class, and that
 // type is genuinely from Types.h (`typedef struct LLVMOpaqueDIBuilder
 // *LLVMDIBuilderRef;`), not Core.h -- `llvm.core` itself never calls any
-// DebugInfo-builder function (those live in the separate, still out-of-
-// scope llvm-c/DebugInfo.h, left for its own later `llvm.debuginfo`
-// follow-up), so this handle kind was never part of `llvm.core`'s own
-// prior survey.
+// DebugInfo-builder function (those live in the separate llvm-c/DebugInfo.h,
+// see `llvm.debug_info` below), so this handle kind was never part of
+// `llvm.core`'s own prior survey. `LLVMOpaqueDbgRecord`/`LLVMDbgRecordRef`
+// is added here for the same reason, but for `llvm.debug_info` instead:
+// `LLVMDIBuilderInsertDeclareRecordAtEnd` (llvm-c/DebugInfo.h, called by
+// src/compiler/codegen/debug.cppm) returns `LLVMDbgRecordRef`, and that
+// type, too, is genuinely from Types.h (`typedef struct LLVMOpaqueDbgRecord
+// *LLVMDbgRecordRef;`), not DebugInfo.h -- so it belongs here, this
+// project's single real source of truth for Types.h's declarations, rather
+// than as a private copy re-declared inside debug_info.cpp itself.
 //
 // Contrast with libs/scpp_llvm/: that package wraps LLVM-C in ergonomic,
 // RAII scpp classes (Context/Module/Type/Value) for scpp *user* programs,
 // and deliberately declares every opaque handle as a shared `void*`
 // underneath those classes -- real type safety there comes from the
 // wrapper classes, not the raw handles. This module has no such wrapper:
-// its raw `LLVM*Ref` declarations *are* the public surface `llvm.core` and
-// `api.cppm` call/use directly, exactly as they did through the real
-// header, so each opaque handle kind below is declared as its own
-// distinct pointer type (never a shared `void*`) -- otherwise the compiler
+// its raw `LLVM*Ref` declarations *are* the public surface `llvm.core`,
+// `llvm.debug_info`, and `api.cppm` call/use directly, exactly as they did
+// through the real header, so each opaque handle kind below is declared as
+// its own distinct pointer type (never a shared `void*`) -- otherwise the compiler
 // could no longer catch e.g. an `LLVMTypeRef` accidentally passed where an
 // `LLVMValueRef` was expected, silently trading a compile error for a
 // runtime bug.
@@ -88,13 +95,14 @@
 // at all, and is a real ISO C++20 modules rule, unrelated to this file's
 // own `.cpp`/`.scpp` extension or to scpp's own grammar: every file that
 // depends on this module -- directly (`api.cppm`) or indirectly, through
-// `llvm.core`'s own `import llvm.types;` (core.cpp) -- is, in turn,
+// `llvm.core`'s own `import llvm.types;` (core.cpp) or `llvm.debug_info`'s
+// own `import llvm.types;` (debug_info.cpp, same directory) -- is, in turn,
 // `import`ed by consumers (the nine files listed above) that still keep a
 // *different* llvm-c header #include'd alongside `import llvm.core;`
-// (Target.h, TargetMachine.h, DebugInfo.h, Analysis.h all transitively
-// #include their own copy of llvm-c/Types.h), so the very same struct tags
-// declared here are *also* declared, separately, by the real system
-// header, unattached to any module, in each of those files. Two
+// (Target.h, TargetMachine.h, Analysis.h all transitively #include their
+// own copy of llvm-c/Types.h), so the very same struct tags declared here
+// are *also* declared, separately, by the real system header, unattached
+// to any module, in each of those files. Two
 // declarations of the same class/struct tag denote the same entity only
 // if both are attached to the same named module, or neither is attached
 // to any named module (a plain `#include`, wherever it appears, is always
@@ -129,6 +137,7 @@ struct LLVMOpaqueBuilder;
 struct LLVMOpaqueDIBuilder;
 struct LLVMOpaqueUse;
 struct LLVMOpaqueAttributeRef;
+struct LLVMOpaqueDbgRecord;
 
 export module llvm.types;
 
@@ -157,6 +166,7 @@ export using LLVMBuilderRef = LLVMOpaqueBuilder*;
 export using LLVMDIBuilderRef = LLVMOpaqueDIBuilder*;
 export using LLVMUseRef = LLVMOpaqueUse*;
 export using LLVMAttributeRef = LLVMOpaqueAttributeRef*;
+export using LLVMDbgRecordRef = LLVMOpaqueDbgRecord*;
 
 // ---------------------------------------------------------------------
 // LLVMBool (llvm-c/Types.h)
