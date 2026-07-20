@@ -194,3 +194,42 @@ target_sources(llvm_target_machine
             target_machine.cpp)
 target_link_libraries(llvm_target_machine PRIVATE llvm_types llvm_target)
 target_compile_features(llvm_target_machine PRIVATE cxx_std_23)
+
+# `llvm.analysis`: a real, directly-clang++-compiled C++20 module
+# (analysis.cpp) hand-declaring the specific official llvm-c/Analysis.h
+# surface this compiler's own codegen source
+# (src/compiler/codegen/orchestration.cppm, the sole consumer) needs, so it
+# can `import llvm.analysis;` instead of `#include <llvm-c/Analysis.h>` --
+# scpp (the language) has no preprocessor/#include at all, so raw #include
+# in this compiler's own sources is a self-hosting blocker. This module's
+# own introduction removes the last such #include anywhere in src/. Declares
+# only an extern "C" binding, no LLVM-C symbol *definition* of its own, so
+# it needs neither ${LLVM_INCLUDE_DIRS} nor ${LLVM_LIBS} itself -- and
+# unlike `llvm.target`'s own native-target-init gap, LLVMVerifyModule is a
+# real, exported symbol in LLVM's own compiled libraries with no
+# native-init-style shim needed (confirmed via `nm -D --defined-only
+# libLLVM-22.so | grep LLVMVerifyModule`) -- consumers (see
+# src/compiler/codegen/CMakeLists.txt, root CMakeLists.txt) already link
+# ${LLVM_LIBS} for the other, still-#include'd llvm-c/*.h headers (before
+# this change) or their own still-`import`ed llvm.* modules (after), which
+# resolves this module's declaration too at final link time.
+#
+# analysis.cpp is a plain, ordinary C++ file (unlike `.scpp` sources
+# elsewhere under libs/), so CMake recognizes its `.cpp` extension as C++
+# on its own -- no `set_source_files_properties(... LANGUAGE CXX)` needed.
+# analysis.cpp itself only `import llvm.types;` (not `export import`, same
+# reasoning as `llvm.debug_info`'s/`llvm.target`'s/`llvm.target_machine`'s
+# own sources -- see that file's own header comment), so `llvm_analysis`
+# links PRIVATE against `llvm_types`: this still gives CMake's module
+# dependency scanner the BMI-ordering edge it needs (analysis.cpp's own BMI
+# can't be built before types.cpp's), without also propagating a re-export
+# this module never performs to `llvm_analysis`'s own consumers, which
+# already reach every one of `llvm.types`'s aliases through their own
+# separate, direct link to `llvm_core` (which does re-export `llvm.types`).
+add_library(llvm_analysis)
+target_sources(llvm_analysis
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            analysis.cpp)
+target_link_libraries(llvm_analysis PRIVATE llvm_types)
+target_compile_features(llvm_analysis PRIVATE cxx_std_23)

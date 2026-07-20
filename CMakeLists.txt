@@ -110,9 +110,9 @@ target_compile_features(scpp_mir PRIVATE cxx_std_23)
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
 # `llvm_core`/`llvm_types`/`llvm_debug_info`/`llvm_target`/
-# `llvm_target_machine` (modules `llvm.core`/`llvm.types`/
-# `llvm.debug_info`/`llvm.target`/`llvm.target_machine`) -- see
-# libs/llvm/CMakeLists.txt.
+# `llvm_target_machine`/`llvm_analysis` (modules `llvm.core`/`llvm.types`/
+# `llvm.debug_info`/`llvm.target`/`llvm.target_machine`/`llvm.analysis`) --
+# see libs/llvm/CMakeLists.txt.
 add_subdirectory(libs/llvm)
 
 add_subdirectory(src/compiler/codegen)

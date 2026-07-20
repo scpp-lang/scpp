@@ -3,22 +3,23 @@ module;
 // Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
 // interface -- this file (Codegen's constructor/destructor, target
 // setup, top-level generate()/module_ir()) does everything through
-// llvm-c/Analysis.h's LLVMVerifyModule directly below (Core.h's own
-// functions come from `import llvm.core;`, and the one DebugInfo.h
-// function this file calls -- LLVMDisposeDIBuilder -- comes from
-// `import llvm.debug_info;`, both instead, see below), so it no longer
-// needs any native LLVM C++ header at all. See libs/README.md for why
-// this project binds straight to LLVM-C wherever it already covers what's
-// needed, with no wrapper of our own in between -- a rigorous,
-// function-by-function empirical audit found LLVM-C fully covers every
-// LLVM operation this project's codegen needs.
-#include <llvm-c/Analysis.h>
+// llvm-c/Analysis.h's LLVMVerifyModule (`import llvm.analysis;` below;
+// Core.h's own functions come from `import llvm.core;`, and the one
+// DebugInfo.h function this file calls -- LLVMDisposeDIBuilder -- comes
+// from `import llvm.debug_info;`, both instead, see below), so it no
+// longer needs any native LLVM C++ header, nor any raw llvm-c/*.h
+// #include, at all. See libs/README.md for why this project binds
+// straight to LLVM-C wherever it already covers what's needed, with no
+// wrapper of our own in between -- a rigorous, function-by-function
+// empirical audit found LLVM-C fully covers every LLVM operation this
+// project's codegen needs.
 
 module scpp.compiler.codegen:orchestration;
 
 import std;
 import llvm.core;
 import llvm.debug_info;
+import llvm.analysis;
 import :api;
 
 namespace scpp {
