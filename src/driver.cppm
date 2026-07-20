@@ -2,25 +2,25 @@ module;
 
 // Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
 // interface -- the TargetMachine construction and object-file emission
-// this file performs go through its llvm-c/Target.h and
-// llvm-c/TargetMachine.h functions directly below instead of any native
-// LLVM C++ header (llvm::TargetRegistry, llvm::TargetMachine,
-// llvm::legacy::PassManager, etc.); the few llvm-c/Core.h pieces this
-// file also touches (LLVMModuleRef, LLVMDisposeMessage) come from
-// `import llvm.core;` instead, see below. See libs/README.md for why
-// this project binds straight to LLVM-C wherever it already covers
-// what's needed -- including LLVMTargetMachineEmitToFile, which alone
-// replaces the raw_fd_ostream + legacy::PassManager + addPassesToEmitFile
-// dance the native C++ API required: a rigorous, function-by-function
-// empirical audit found LLVM-C fully covers every LLVM operation this
-// project's driver needs.
-#include <llvm-c/Target.h>
+// this file performs go through its llvm-c/Target.h (`import
+// llvm.target;` below) and llvm-c/TargetMachine.h functions directly
+// below instead of any native LLVM C++ header (llvm::TargetRegistry,
+// llvm::TargetMachine, llvm::legacy::PassManager, etc.); the few
+// llvm-c/Core.h pieces this file also touches (LLVMModuleRef,
+// LLVMDisposeMessage) come from `import llvm.core;` instead, see below.
+// See libs/README.md for why this project binds straight to LLVM-C
+// wherever it already covers what's needed -- including
+// LLVMTargetMachineEmitToFile, which alone replaces the raw_fd_ostream +
+// legacy::PassManager + addPassesToEmitFile dance the native C++ API
+// required: a rigorous, function-by-function empirical audit found
+// LLVM-C fully covers every LLVM operation this project's driver needs.
 #include <llvm-c/TargetMachine.h>
 
 export module scpp.driver;
 
 import std;
 import llvm.core;
+import llvm.target;
 import scpp.ast;
 import scpp.compiler.codegen;
 import scpp.constexpr_engine;
@@ -2173,8 +2173,15 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     try {
         check_moves(program);
 
-        LLVMInitializeNativeTarget();
-        LLVMInitializeNativeAsmPrinter();
+        // Real llvm-c/Target.h's own LLVMInitializeNativeTarget/
+        // LLVMInitializeNativeAsmPrinter are header-only `static inline`
+        // functions with no real, exported ABI symbol to declare/link
+        // against -- llvm.target's own scpp_llvm_target_initialize_*
+        // bridge calls through to them via a small shim compiled with the
+        // real header available; see libs/llvm/target.cpp's and
+        // libs/llvm/native_target_init.cpp's own header comments.
+        scpp_llvm_target_initialize_native_target();
+        scpp_llvm_target_initialize_native_asm_printer();
 
         char* default_triple_c = LLVMGetDefaultTargetTriple();
         std::string triple = default_triple_c;

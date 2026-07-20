@@ -2,24 +2,24 @@ module;
 
 // Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
 // interface -- the DataLayout numeric queries in this file go through its
-// llvm-c/Target.h functions directly below instead of llvm::DataLayout,
-// so this file no longer needs the heavier <llvm/IR/DataLayout.h> or any
-// other native LLVM C++ header. See libs/README.md for why this project
-// binds straight to LLVM-C wherever it already covers what's needed --
-// including pointer ABI alignment (see pointer_abi_alignment_for_as
-// below) and every DIBuilder debug-info operation this file performs
-// (`import llvm.debug_info;` below; Core.h's own functions come from
-// `import llvm.core;` instead, see below): a rigorous, function-by-function
-// empirical audit found LLVM-C fully covers every LLVM operation this
-// project's codegen needs, so there is no custom wrapper of any kind
-// here.
-#include <llvm-c/Target.h>
+// llvm-c/Target.h functions directly below (`import llvm.target;`)
+// instead of llvm::DataLayout, so this file no longer needs the heavier
+// <llvm/IR/DataLayout.h> or any other native LLVM C++ header. See
+// libs/README.md for why this project binds straight to LLVM-C wherever
+// it already covers what's needed -- including pointer ABI alignment (see
+// pointer_abi_alignment_for_as below) and every DIBuilder debug-info
+// operation this file performs (`import llvm.debug_info;` below; Core.h's
+// own functions come from `import llvm.core;` instead, see below): a
+// rigorous, function-by-function empirical audit found LLVM-C fully
+// covers every LLVM operation this project's codegen needs, so there is
+// no custom wrapper of any kind here.
 
 module scpp.compiler.codegen:debug;
 
 import std;
 import llvm.core;
 import llvm.debug_info;
+import llvm.target;
 import :api;
 
 namespace scpp {
@@ -154,19 +154,20 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 LLVMMetadataRef pointee = type.pointee ? debug_type_for(*type.pointee) : nullptr;
                 result = LLVMDIBuilderCreatePointerType(
                     dibuilder_, pointee, 8ULL * LLVMPointerSizeForAS(data_layout_ref(module_), 0),
-                    static_cast<uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8), /*AddressSpace=*/0, "", 0);
+                    static_cast<std::uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8), /*AddressSpace=*/0, "",
+                    0);
                 break;
             }
             case TypeKind::Array: {
                 LLVMMetadataRef element = debug_type_for(*type.element);
                 LLVMMetadataRef subrange =
-                    LLVMDIBuilderGetOrCreateSubrange(dibuilder_, 0, static_cast<int64_t>(type.array_size));
+                    LLVMDIBuilderGetOrCreateSubrange(dibuilder_, 0, static_cast<std::int64_t>(type.array_size));
                 LLVMMetadataRef subscripts = LLVMDIBuilderGetOrCreateArray(dibuilder_, &subrange, 1);
                 LLVMTypeRef llvm_type = to_llvm_type(type);
                 result = LLVMDIBuilderCreateArrayType(
                     dibuilder_, LLVMSizeOfTypeInBits(data_layout_ref(module_), llvm_type),
-                    static_cast<uint32_t>(LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type) * 8), element,
-                    &subscripts, 1);
+                    static_cast<std::uint32_t>(LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type) * 8),
+                    element, &subscripts, 1);
                 break;
             }
             case TypeKind::Span: {
@@ -184,7 +185,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                 result = type.kind == TypeKind::FunctionPointer
                              ? LLVMDIBuilderCreatePointerType(
                                    dibuilder_, subroutine, 8ULL * LLVMPointerSizeForAS(data_layout_ref(module_), 0),
-                                   static_cast<uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8),
+                                   static_cast<std::uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8),
                                    /*AddressSpace=*/0, "", 0)
                              : subroutine;
                 break;
@@ -290,7 +291,7 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
         LLVMMetadataRef fn_type = LLVMDIBuilderCreateSubroutineType(
             dibuilder_, nullptr, type_elems.data(), static_cast<unsigned>(type_elems.size()), LLVMDIFlagZero);
         LLVMMetadataRef file = debug_file_for_loc(fn.loc);
-        size_t linkage_name_len = 0;
+        std::size_t linkage_name_len = 0;
         const char* linkage_name = LLVMGetValueName2(llvm_fn, &linkage_name_len);
         LLVMMetadataRef subprogram = LLVMDIBuilderCreateFunction(
             dibuilder_, file, fn.name.c_str(), fn.name.size(), linkage_name, linkage_name_len, file,

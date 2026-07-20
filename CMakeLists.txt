@@ -109,7 +109,9 @@ target_compile_features(scpp_mir PRIVATE cxx_std_23)
 
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
-# `llvm_core` (module `llvm.core`) -- see libs/llvm/CMakeLists.txt.
+# `llvm_core`/`llvm_types`/`llvm_debug_info`/`llvm_target` (modules
+# `llvm.core`/`llvm.types`/`llvm.debug_info`/`llvm.target`) -- see
+# libs/llvm/CMakeLists.txt.
 add_subdirectory(libs/llvm)
 
 add_subdirectory(src/compiler/codegen)
@@ -129,7 +131,11 @@ target_sources(scpp_driver
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/driver.cppm)
-target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_constexpr llvm_core ${LLVM_LIBS})
+# driver.cppm itself `import llvm.target;` directly (for LLVMTargetDataRef
+# and the native-target-init bridge), so llvm_target is linked here
+# explicitly too, alongside llvm_core -- not relying on any transitive
+# path, since llvm_core and llvm_target are unrelated sibling modules.
+target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_constexpr llvm_core llvm_target ${LLVM_LIBS})
 target_compile_features(scpp_driver PRIVATE cxx_std_23)
 
 add_library(scpp_project)
