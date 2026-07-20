@@ -1,30 +1,34 @@
 module;
 
-// Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
-// interface -- this file (Codegen's constructor/destructor, target
-// setup, top-level generate()/module_ir()) does everything through
-// llvm-c/Core.h and llvm-c/Analysis.h's LLVMVerifyModule directly below,
-// so it no longer needs any native LLVM C++ header at all. See
-// libs/README.md for why this project binds straight to LLVM-C wherever
-// it already covers what's needed, with no wrapper of our own in between
-// -- a rigorous, function-by-function empirical audit found LLVM-C fully
-// covers every LLVM operation this project's codegen needs.
-#include <llvm-c/Analysis.h>
-#include <llvm-c/Core.h>
-#include <llvm-c/DebugInfo.h>
+// This file (Codegen's constructor/destructor, target setup, top-level
+// generate()/module_ir()) has no `module;` global-module-fragment
+// #includes at all: every LLVM operation it needs -- context/module/
+// builder construction and disposal, target-triple/data-layout setup,
+// global-variable and llvm.global_ctors construction, module
+// verification and IR printing -- goes through libs/scpp/llvm/'s
+// :llvm partition of the scpp module instead of raw llvm-c/*.h
+// declarations, so it no longer needs any #include (of a real LLVM-C
+// header or otherwise) at all. See libs/README.md for why this project
+// binds straight to LLVM-C wherever it already covers what's needed,
+// with no wrapper of our own in between beyond libs/scpp/llvm/'s own
+// ergonomic, RAII-style surface -- a rigorous, function-by-function
+// empirical audit found LLVM-C fully covers every LLVM operation this
+// project's codegen needs, and libs/scpp/llvm/ now covers every one of
+// *those* in turn.
 
 module scpp.compiler.codegen:orchestration;
 
 import std;
+import scpp;
 import :api;
 
 namespace scpp {
 
 
     Codegen::Codegen(const std::string& module_name, std::string source_path , bool emit_debug_info)
-        : context_(LLVMContextCreate()),
-          module_(LLVMModuleCreateWithNameInContext(module_name.c_str(), context_)),
-          builder_(LLVMCreateBuilderInContext(context_)),
+        : context_(scpp::llvm::Context::create_handle()),
+          module_(scpp::llvm::Module::create_handle(module_name.c_str(), context_)),
+          builder_(scpp::llvm::Builder::create_handle(context_)),
           source_path_(std::move(source_path)),
           emit_debug_info_(emit_debug_info)
 {}
@@ -47,21 +51,21 @@ namespace scpp {
     // while it runs, so the context must outlive it.
     Codegen::~Codegen()
 {
-        if (dibuilder_ != nullptr) LLVMDisposeDIBuilder(dibuilder_);
-        LLVMDisposeBuilder(builder_);
-        LLVMDisposeModule(module_);
-        LLVMContextDispose(context_);
+        if (dibuilder_ != nullptr) scpp::llvm::DIBuilder::dispose_handle(dibuilder_);
+        scpp::llvm::Builder::dispose_handle(builder_);
+        scpp::llvm::Module::dispose_handle(module_);
+        scpp::llvm::Context::dispose_handle(context_);
     }
 
 
     void Codegen::set_target(const std::string& triple, const std::string& data_layout)
 {
-        LLVMSetTarget(module_, triple.c_str());
-        LLVMSetDataLayout(module_, data_layout.c_str());
+        scpp::llvm::Module::set_target_handle(module_, triple.c_str());
+        scpp::llvm::Module::set_data_layout_handle(module_, data_layout.c_str());
     }
 
 
-    LLVMModuleRef Codegen::generate(const Program& program)
+    void* Codegen::generate(const Program& program)
 {
         // Structs are declared first (validated + turned into named LLVM
         // struct types) since function signatures and locals may reference
@@ -125,13 +129,13 @@ namespace scpp {
         }
         for (const GlobalVar& global : program.globals) {
             if (global.decl == nullptr) continue;
-            LLVMTypeRef llvm_type = to_llvm_type(global.decl->type);
-            LLVMValueRef init = LLVMConstNull(llvm_type);
-            LLVMValueRef variable = LLVMAddGlobal(module_, llvm_type, mangle_global_symbol_name(global.decl->var_name).c_str());
-            LLVMSetLinkage(variable, LLVMInternalLinkage);
-            LLVMSetGlobalConstant(variable, /*IsConstant=*/0);
-            LLVMSetInitializer(variable, init);
-            if (global.decl->resolved_alignment != 0) LLVMSetAlignment(variable, global.decl->resolved_alignment);
+            void* llvm_type = to_llvm_type(global.decl->type);
+            void* init = scpp::llvm::Value::const_null_handle(llvm_type);
+            void* variable = scpp::llvm::GlobalVariable::add_handle(module_, llvm_type, mangle_global_symbol_name(global.decl->var_name).c_str());
+            scpp::llvm::Value::set_linkage_handle(variable, scpp::llvm::Linkage::internal);
+            scpp::llvm::GlobalVariable::set_constant_handle(variable, /*IsConstant=*/false);
+            scpp::llvm::GlobalVariable::set_initializer_handle(variable, init);
+            if (global.decl->resolved_alignment != 0) scpp::llvm::Value::set_alignment_handle(variable, global.decl->resolved_alignment);
             globals_.emplace(global.decl->var_name, GlobalSlot{variable, global.decl->type,
                                                                global.decl->is_const || global.decl->is_constexpr});
         }
@@ -192,10 +196,10 @@ namespace scpp {
         }
         finalize_debug_info();
         char* error_message = nullptr;
-        LLVMBool broken = LLVMVerifyModule(module_, LLVMReturnStatusAction, &error_message);
+        bool ok = scpp::llvm::Module::verify_handle(module_, &error_message);
         std::string error(error_message != nullptr ? error_message : "");
-        LLVMDisposeMessage(error_message);
-        if (broken) {
+        scpp::llvm::Module::dispose_message_handle(error_message);
+        if (!ok) {
             throw CodegenError("module verification failed: " + error,
                 current_loc_);
         }
@@ -205,9 +209,9 @@ namespace scpp {
 
     std::string Codegen::module_ir() const
 {
-        char* ir_cstr = LLVMPrintModuleToString(module_);
+        char* ir_cstr = scpp::llvm::Module::ir_to_string_handle(module_);
         std::string ir(ir_cstr != nullptr ? ir_cstr : "");
-        LLVMDisposeMessage(ir_cstr);
+        scpp::llvm::Module::dispose_message_handle(ir_cstr);
         return ir;
     }
 
@@ -368,7 +372,7 @@ namespace scpp {
     }
 
 
-    [[nodiscard]] LLVMValueRef Codegen::codegen_function_pointer_value_for_target(const Expr& expr, const Type& target_type)
+    [[nodiscard]] void* Codegen::codegen_function_pointer_value_for_target(const Expr& expr, const Type& target_type)
 {
         std::optional<Type> source_type = resolve_function_designator_type(expr, target_type);
         if (!source_type.has_value()) return nullptr;
@@ -385,7 +389,7 @@ namespace scpp {
             if (!same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) continue;
             auto name_it = overload_names_.find(&fn);
             if (name_it == overload_names_.end()) continue;
-            LLVMValueRef callee = LLVMGetNamedFunction(module_, name_it->second.c_str());
+            void* callee = scpp::llvm::Function::get_named_handle(module_, name_it->second.c_str());
             if (callee == nullptr) continue;
             return callee;
         }
@@ -585,11 +589,11 @@ namespace scpp {
         }
         if (!needs_initializer) return;
 
-        LLVMTypeRef fn_type = LLVMFunctionType(LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
-        LLVMValueRef init_fn = LLVMAddFunction(module_, "__scpp_global_init", fn_type);
-        LLVMSetLinkage(init_fn, LLVMInternalLinkage);
-        LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context_, init_fn, "entry");
-        LLVMPositionBuilderAtEnd(builder_, entry);
+        void* fn_type = scpp::llvm::Type::get_function_handle(scpp::llvm::Type::get_void_handle(context_), nullptr, 0, /*IsVarArg=*/false);
+        void* init_fn = scpp::llvm::Function::add_handle(module_, "__scpp_global_init", fn_type);
+        scpp::llvm::Value::set_linkage_handle(init_fn, scpp::llvm::Linkage::internal);
+        void* entry = scpp::llvm::BasicBlock::create_handle(context_, init_fn, "entry");
+        scpp::llvm::Builder::position_at_end_handle(builder_, entry);
         current_function_def_ = nullptr;
         current_global_namespace_path_.clear();
 
@@ -603,7 +607,7 @@ namespace scpp {
             }
             if (global.decl->init == nullptr) continue;
             if (global.decl->type.kind == TypeKind::Reference) {
-                LLVMValueRef referent = codegen_lvalue(*global.decl->init).ptr;
+                void* referent = codegen_lvalue(*global.decl->init).ptr;
                 create_store(referent, it->second.global, std::nullopt);
                 continue;
             }
@@ -612,24 +616,24 @@ namespace scpp {
                                                               : alignment_for_type(global.decl->type));
         }
 
-        LLVMBuildRetVoid(builder_);
+        scpp::llvm::Builder::ret_void(builder_);
         current_global_namespace_path_.clear();
 
-        LLVMTypeRef ptr_type = LLVMPointerTypeInContext(context_, 0);
-        LLVMTypeRef ctor_field_types[] = {LLVMInt32TypeInContext(context_), ptr_type, ptr_type};
-        LLVMTypeRef ctor_ty = LLVMStructTypeInContext(context_, ctor_field_types, 3, /*Packed=*/0);
-        LLVMValueRef ctor_fields[] = {
-            LLVMConstInt(LLVMInt32TypeInContext(context_), 65535, /*SignExtend=*/0),
-            LLVMConstBitCast(init_fn, ptr_type),
-            LLVMConstPointerNull(ptr_type),
+        void* ptr_type = scpp::llvm::Type::get_pointer_handle(context_, 0);
+        void* ctor_field_types[] = {scpp::llvm::Type::get_int32_handle(context_), ptr_type, ptr_type};
+        void* ctor_ty = scpp::llvm::Type::get_struct_handle(context_, ctor_field_types, 3, /*Packed=*/false);
+        void* ctor_fields[] = {
+            scpp::llvm::Value::const_int_handle(scpp::llvm::Type::get_int32_handle(context_), 65535, /*SignExtend=*/false),
+            scpp::llvm::Value::const_bitcast_handle(init_fn, ptr_type),
+            scpp::llvm::Value::const_pointer_null_handle(ptr_type),
         };
-        LLVMValueRef ctor_entry = LLVMConstStructInContext(context_, ctor_fields, 3, /*Packed=*/0);
-        LLVMTypeRef array_ty = LLVMArrayType2(ctor_ty, 1);
-        LLVMValueRef ctors_initializer = LLVMConstArray2(ctor_ty, &ctor_entry, 1);
-        LLVMValueRef ctors_global = LLVMAddGlobal(module_, array_ty, "llvm.global_ctors");
-        LLVMSetLinkage(ctors_global, LLVMAppendingLinkage);
-        LLVMSetGlobalConstant(ctors_global, /*IsConstant=*/1);
-        LLVMSetInitializer(ctors_global, ctors_initializer);
+        void* ctor_entry = scpp::llvm::Value::const_struct_handle(context_, ctor_fields, 3, /*Packed=*/false);
+        void* array_ty = scpp::llvm::Type::get_array_handle(ctor_ty, 1);
+        void* ctors_initializer = scpp::llvm::Value::const_array_handle(ctor_ty, &ctor_entry, 1);
+        void* ctors_global = scpp::llvm::GlobalVariable::add_handle(module_, array_ty, "llvm.global_ctors");
+        scpp::llvm::Value::set_linkage_handle(ctors_global, scpp::llvm::Linkage::appending);
+        scpp::llvm::GlobalVariable::set_constant_handle(ctors_global, /*IsConstant=*/true);
+        scpp::llvm::GlobalVariable::set_initializer_handle(ctors_global, ctors_initializer);
     }
 
 } // namespace scpp

@@ -15,11 +15,15 @@ additional_objs = "scpp-native"
 [additional_objs.scpp-native]
 input = [
     "io/scpp_io_wrapper.cpp",
+    "llvm/native_target_init.cpp",
 ]
 output = [
     "scpp_io_wrapper.o",
+    "native_target_init.o",
 ]
 command = """\
 ${CXX:-c++} -std=c++26 -O2 -c \
-io/scpp_io_wrapper.cpp
+io/scpp_io_wrapper.cpp && \
+${CXX:-c++} -std=c++26 -O2 $(llvm-config-22 --cppflags) -c \
+llvm/native_target_init.cpp
 """
