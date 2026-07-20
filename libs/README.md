@@ -1,6 +1,6 @@
 # libs — scpp's library modules
 
-This directory contains scpp's shipped library modules: the real-`std` module under `libs/std/`, plus scpp-specific extensions under `libs/scpp/`. Native helper libraries live here too. `libs/scpp_llvm/` is a standalone package (not a member of the `std`/`scpp` workspace below) providing ergonomic scpp bindings to LLVM; see its own section near the end of this file.
+This directory contains scpp's shipped library modules: the real-`std` module under `libs/std/`, plus scpp-specific extensions under `libs/scpp/`. Native helper libraries live here too. `libs/scpp_llvm/` is a standalone package (not a member of the `std`/`scpp` workspace below) providing ergonomic scpp bindings to LLVM; see its own section near the end of this file. `libs/llvm/` is a third, distinct category: plain C++20 modules compiled directly by real clang++ (never by scpp itself) that let this compiler's own `src/*.cppm` sources replace `#include <llvm-c/*.h>` with `import llvm.<name>;`; see its own section below.
 
 The project convention is:
 
@@ -27,6 +27,7 @@ The project convention is:
 | `scpp_llvm/scpp.toml` | `scpp-llvm` package manifest (standalone, not a workspace member yet -- see its own section below) |
 | `scpp_llvm/scpp_llvm.scpp` | Primary interface unit of module `scpp.llvm`; re-exports its partitions |
 | `scpp_llvm/core/` | `scpp.llvm:core` partition: ergonomic scpp wrapper classes binding directly to official LLVM-C |
+| `llvm/core.cpp` | Module `llvm.core`: hand-written `extern "C"` mirror of the `llvm-c/Core.h` subset this compiler's own codegen uses -- plain clang++-compiled, not a workspace member |
 
 ## Manifest workspace
 
@@ -181,6 +182,56 @@ See `tests/llvm_lib_test.cpp` and `tests/llvm_lib_test_source/main.scpp` for
 a complete, working example (built and run by `ctest`), and
 `scpp_llvm/scpp.toml`'s own comments for exactly how those `--link` inputs are
 resolved there.
+
+## The `llvm.core` module (module `llvm.core`)
+
+`libs/llvm/` is a third category, distinct from both `std`/`scpp` above
+(scpp-buildable workspace members) and `scpp_llvm/` below (an ergonomic,
+scpp-facing RAII wrapper package): it is one or more plain, ordinary C++20
+modules, compiled directly by real clang++ via a dedicated CMake target
+(`llvm_core`, see `libs/llvm/CMakeLists.txt`, wired into the root via
+`add_subdirectory(libs/llvm)`), never by scpp itself -- unlike `std`/`scpp`
+above, there is no aspiration for these files to also be scpp-parseable. It
+exists solely so this compiler's own `src/*.cppm` codegen files can replace
+a raw `#include <llvm-c/*.h>` with `import llvm.<name>;` -- scpp (the
+language) has no preprocessor/`#include` at all, so any raw `#include` left
+in the compiler's own sources is a hard blocker for eventual self-hosting.
+
+- File: `llvm/core.cpp`, module `llvm.core` -- a fresh, standalone,
+  top-level module, not nested inside or a partition of `scpp`/`std`/
+  `scpp.llvm`.
+- Contains hand-written `extern "C"` declarations mechanically mirroring
+  the specific subset of real `llvm-c/Core.h` (and its `Types.h`
+  prerequisites) actually referenced by `src/driver.cppm` and
+  `src/compiler/codegen/{layout,orchestration,debug,functions,
+  object_model,lifetime,statements,expressions}.cppm` today -- not a
+  blanket re-declaration of Core.h's much larger surface. `core.cpp`
+  itself has zero `#include` of any real `llvm-c/*.h` header -- a
+  deliberate choice, not a requirement of the `.cpp` extension -- so
+  its declarations are the single, self-contained source of truth this
+  module exports, rather than a re-export of someone else's macros.
+- Unlike `scpp_llvm/core/`'s RAII wrapper classes (which deliberately
+  share a single `void*` underneath their own type-safe wrapper layer),
+  this module has no wrapper: its raw `LLVM*Ref` declarations *are* the
+  public surface those nine files call directly, exactly as they did
+  through the real header, so every opaque handle kind (`LLVMContextRef`,
+  `LLVMModuleRef`, `LLVMTypeRef`, ...) is declared as its own distinct
+  pointer type, never a shared `void*`.
+- The opaque handle struct tags live in this file's own global module
+  fragment (before `export module llvm.core;`), not its purview, and the
+  pointer aliases (`using LLVMContextRef = ...`) are `export`ed from the
+  purview instead -- required so the same struct tags, also reachable
+  unattached via whichever other `llvm-c/*.h` header a given consumer
+  still `#include`s alongside `import llvm.core;`, denote one and the
+  same type instead of two conflicting, "attached to different modules"
+  entities (see `core.cpp`'s own header comment for the full rationale).
+  This split is a real ISO C++20 modules requirement, independent of
+  `core.cpp`'s own extension or of scpp's grammar.
+
+The other `llvm-c/*.h` headers still `#include`d by those same nine files
+today (`Target.h`, `TargetMachine.h`, `DebugInfo.h`, `Analysis.h`) are
+deliberately untouched by this module -- out of scope for now, left for
+their own later, equally narrow `llvm.<name>` follow-ups.
 
 ## Testing policy
 

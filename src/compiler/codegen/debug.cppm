@@ -7,17 +7,19 @@ module;
 // other native LLVM C++ header. See libs/README.md for why this project
 // binds straight to LLVM-C wherever it already covers what's needed --
 // including pointer ABI alignment (see pointer_abi_alignment_for_as
-// below) and every DIBuilder debug-info operation this file performs: a
-// rigorous, function-by-function empirical audit found LLVM-C fully
-// covers every LLVM operation this project's codegen needs, so there is
-// no custom wrapper of any kind here.
-#include <llvm-c/Core.h>
+// below) and every DIBuilder debug-info operation this file performs
+// (llvm-c/DebugInfo.h below; Core.h's own functions come from `import
+// llvm.core;` instead, see below): a rigorous, function-by-function
+// empirical audit found LLVM-C fully covers every LLVM operation this
+// project's codegen needs, so there is no custom wrapper of any kind
+// here.
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/Target.h>
 
 module scpp.compiler.codegen:debug;
 
 import std;
+import llvm.core;
 import :api;
 
 namespace scpp {

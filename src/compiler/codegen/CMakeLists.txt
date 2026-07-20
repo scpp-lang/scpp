@@ -16,5 +16,5 @@ target_sources(scpp_codegen
             statements.cppm)
 target_include_directories(scpp_codegen SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
-target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr ${LLVM_LIBS})
+target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr llvm_core ${LLVM_LIBS})
 target_compile_features(scpp_codegen PRIVATE cxx_std_23)
