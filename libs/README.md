@@ -27,7 +27,8 @@ The project convention is:
 | `scpp_llvm/scpp.toml` | `scpp-llvm` package manifest (standalone, not a workspace member yet -- see its own section below) |
 | `scpp_llvm/scpp_llvm.scpp` | Primary interface unit of module `scpp.llvm`; re-exports its partitions |
 | `scpp_llvm/core/` | `scpp.llvm:core` partition: ergonomic scpp wrapper classes binding directly to official LLVM-C |
-| `llvm/core.cpp` | Module `llvm.core`: hand-written `extern "C"` mirror of the `llvm-c/Core.h` subset this compiler's own codegen uses -- plain clang++-compiled, not a workspace member |
+| `llvm/types.cpp` | Module `llvm.types`: hand-written opaque handle struct tags/aliases mirroring the `llvm-c/Types.h` subset `llvm.core` and `src/compiler/codegen/api.cppm` use -- plain clang++-compiled, not a workspace member |
+| `llvm/core.cpp` | Module `llvm.core`: hand-written `extern "C"` mirror of the `llvm-c/Core.h` subset this compiler's own codegen uses, depending on `llvm.types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
 
 ## Manifest workspace
 
@@ -183,54 +184,77 @@ a complete, working example (built and run by `ctest`), and
 `scpp_llvm/scpp.toml`'s own comments for exactly how those `--link` inputs are
 resolved there.
 
-## The `llvm.core` module (module `llvm.core`)
+## The `llvm.types` and `llvm.core` modules (modules `llvm.types`, `llvm.core`)
 
 `libs/llvm/` is a third category, distinct from both `std`/`scpp` above
 (scpp-buildable workspace members) and `scpp_llvm/` below (an ergonomic,
 scpp-facing RAII wrapper package): it is one or more plain, ordinary C++20
-modules, compiled directly by real clang++ via a dedicated CMake target
-(`llvm_core`, see `libs/llvm/CMakeLists.txt`, wired into the root via
-`add_subdirectory(libs/llvm)`), never by scpp itself -- unlike `std`/`scpp`
-above, there is no aspiration for these files to also be scpp-parseable. It
-exists solely so this compiler's own `src/*.cppm` codegen files can replace
-a raw `#include <llvm-c/*.h>` with `import llvm.<name>;` -- scpp (the
-language) has no preprocessor/`#include` at all, so any raw `#include` left
-in the compiler's own sources is a hard blocker for eventual self-hosting.
+modules, compiled directly by real clang++ via dedicated CMake targets
+(`llvm_types`, `llvm_core`, see `libs/llvm/CMakeLists.txt`, wired into the
+root via `add_subdirectory(libs/llvm)`), never by scpp itself -- unlike
+`std`/`scpp` above, there is no aspiration for these files to also be
+scpp-parseable. It exists solely so this compiler's own `src/*.cppm`
+codegen/driver files can replace a raw `#include <llvm-c/*.h>` with
+`import llvm.<name>;` -- scpp (the language) has no preprocessor/
+`#include` at all, so any raw `#include` left in the compiler's own
+sources is a hard blocker for eventual self-hosting.
 
+- File: `llvm/types.cpp`, module `llvm.types` -- a fresh, standalone,
+  top-level module, not nested inside or a partition of `scpp`/`std`/
+  `scpp.llvm`/`llvm.core`. Contains hand-written opaque handle struct
+  tags and pointer-alias `typedef`s mechanically mirroring the specific
+  subset of real `llvm-c/Types.h` referenced by `llvm.core` (below) and by
+  `src/compiler/codegen/api.cppm` (which needs raw handle types, e.g.
+  `LLVMContextRef`, `LLVMDIBuilderRef`, for its `Codegen` class's members,
+  but no Core.h function) -- not a blanket re-declaration of Types.h's
+  much larger surface. This module used to not exist: `llvm.core`
+  declared its own private copy of this same surface directly, and
+  `api.cppm` got a second, independent copy via its own
+  `#include <llvm-c/Types.h>`; `llvm.types` is now the single, real
+  source of truth both depend on instead.
 - File: `llvm/core.cpp`, module `llvm.core` -- a fresh, standalone,
   top-level module, not nested inside or a partition of `scpp`/`std`/
-  `scpp.llvm`.
+  `scpp.llvm`/`llvm.types`.
 - Contains hand-written `extern "C"` declarations mechanically mirroring
-  the specific subset of real `llvm-c/Core.h` (and its `Types.h`
-  prerequisites) actually referenced by `src/driver.cppm` and
-  `src/compiler/codegen/{layout,orchestration,debug,functions,
-  object_model,lifetime,statements,expressions}.cppm` today -- not a
-  blanket re-declaration of Core.h's much larger surface. `core.cpp`
+  the specific subset of real `llvm-c/Core.h` actually referenced by
+  `src/driver.cppm` and `src/compiler/codegen/{layout,orchestration,debug,
+  functions,object_model,lifetime,statements,expressions}.cppm` today --
+  not a blanket re-declaration of Core.h's much larger surface. `core.cpp`
   itself has zero `#include` of any real `llvm-c/*.h` header -- a
-  deliberate choice, not a requirement of the `.cpp` extension -- so
-  its declarations are the single, self-contained source of truth this
-  module exports, rather than a re-export of someone else's macros.
+  deliberate choice, not a requirement of the `.cpp` extension -- so,
+  together with the `llvm.types` module it depends on, its declarations
+  are the single, self-contained source of truth this module exports,
+  rather than a re-export of someone else's macros.
 - Unlike `scpp_llvm/core/`'s RAII wrapper classes (which deliberately
   share a single `void*` underneath their own type-safe wrapper layer),
-  this module has no wrapper: its raw `LLVM*Ref` declarations *are* the
-  public surface those nine files call directly, exactly as they did
-  through the real header, so every opaque handle kind (`LLVMContextRef`,
-  `LLVMModuleRef`, `LLVMTypeRef`, ...) is declared as its own distinct
-  pointer type, never a shared `void*`.
-- The opaque handle struct tags live in this file's own global module
-  fragment (before `export module llvm.core;`), not its purview, and the
-  pointer aliases (`using LLVMContextRef = ...`) are `export`ed from the
-  purview instead -- required so the same struct tags, also reachable
-  unattached via whichever other `llvm-c/*.h` header a given consumer
-  still `#include`s alongside `import llvm.core;`, denote one and the
-  same type instead of two conflicting, "attached to different modules"
-  entities (see `core.cpp`'s own header comment for the full rationale).
-  This split is a real ISO C++20 modules requirement, independent of
-  `core.cpp`'s own extension or of scpp's grammar.
+  neither module has any such wrapper: their raw `LLVM*Ref` declarations
+  *are* the public surface those nine files (and `api.cppm`) call/use
+  directly, exactly as they did through the real header, so every opaque
+  handle kind (`LLVMContextRef`, `LLVMModuleRef`, `LLVMTypeRef`, ...) is
+  declared as its own distinct pointer type, never a shared `void*`.
+- The opaque handle struct tags live in `llvm.types`'s own global module
+  fragment (before `export module llvm.types;`), not its purview, and the
+  pointer aliases (`using LLVMContextRef = ...`) plus `LLVMBool` are
+  `export`ed from the purview instead -- required so the same struct
+  tags, also reachable unattached via whichever other `llvm-c/*.h` header
+  a given consumer still `#include`s alongside `import llvm.core;`,
+  denote one and the same type instead of two conflicting, "attached to
+  different modules" entities (see `types.cpp`'s own header comment for
+  the full rationale, including why this still holds transitively now
+  that `llvm.core` reaches these tags through `import llvm.types;` plus
+  its own `export import llvm.types;` re-export, rather than declaring
+  them itself). This split is a real ISO C++20 modules requirement,
+  independent of either file's own extension or of scpp's grammar --
+  verified empirically against this project's own real build, not just
+  reasoned about in isolation.
+- `llvm.core` keeps only its genuinely Core.h-specific declarations
+  (`LLVMAttributeIndex`, the ~118 functions, the 5 enums) and depends on
+  `llvm.types` (`export import llvm.types;`) for every opaque handle type
+  it uses in its own signatures -- see `core.cpp`'s own header comment.
 
 The other `llvm-c/*.h` headers still `#include`d by those same nine files
 today (`Target.h`, `TargetMachine.h`, `DebugInfo.h`, `Analysis.h`) are
-deliberately untouched by this module -- out of scope for now, left for
+deliberately untouched by these modules -- out of scope for now, left for
 their own later, equally narrow `llvm.<name>` follow-ups.
 
 ## Testing policy
