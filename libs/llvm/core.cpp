@@ -1,0 +1,372 @@
+// core.cpp
+//
+// `llvm.core`: a fresh, standalone, top-level module -- not a partition or
+// nested submodule of either `scpp` (this project's own compiler-internal
+// modules, e.g. `scpp.ast`, `scpp.compiler.codegen`) or `scpp.llvm` (the
+// separate, ergonomic RAII wrapper package at libs/scpp_llvm/). Its only
+// job is to give this compiler's own real-C++ `src/*.cppm` files a way to
+// reach official LLVM-C's `llvm-c/Core.h` surface via `import llvm.core;`
+// instead of `#include <llvm-c/Core.h>` -- scpp (the language) has no
+// preprocessor/#include at all, so any raw #include left in this
+// compiler's own sources is a hard blocker for eventual self-hosting.
+//
+// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// only by real clang++ (see the `llvm_core` CMake target in
+// libs/llvm/CMakeLists.txt) and never fed to the scpp compiler itself --
+// unlike libs/std/*.scpp, libs/scpp/*.scpp, or libs/scpp_llvm/*.scpp,
+// there is no aspiration here for this specific file to also be
+// scpp-parseable today. `export module llvm.core;` below is nonetheless
+// unrestricted, standard C++20 module syntax -- real ISO C++, nothing
+// scpp-specific about it -- so the resulting compiled module interface
+// will still be `import`able the same way from scpp-compiled code, once
+// these nine files themselves eventually get rewritten in scpp; only this
+// file's own *source* needs never be scpp-parseable.
+//
+// Scope: only the specific Core.h (and its Types.h prerequisites)
+// declarations actually referenced today by src/driver.cppm and
+// src/compiler/codegen/{layout,orchestration,debug,functions,object_model,
+// lifetime,statements,expressions}.cppm -- surveyed function-by-function
+// and signature-by-signature against those nine files, not a blanket
+// re-declaration of Core.h's much larger surface. The other six
+// llvm-c/*.h headers still #include'd by those same nine files
+// (Target.h, TargetMachine.h, DebugInfo.h, Analysis.h) are deliberately
+// untouched -- out of scope for this change, left for their own later,
+// equally narrow `llvm.<name>` follow-ups.
+//
+// Contrast with libs/scpp_llvm/: that package wraps LLVM-C in ergonomic,
+// RAII scpp classes (Context/Module/Type/Value) for scpp *user* programs,
+// and deliberately declares every opaque handle as a shared `void*`
+// underneath those classes -- real type safety there comes from the
+// wrapper classes, not the raw handles. This module has no such wrapper:
+// its raw `LLVM*Ref` declarations *are* the public surface every one of
+// the nine files above calls directly, exactly as they did through the
+// real header, so each opaque handle kind below is declared as its own
+// distinct pointer type (never a shared `void*`) -- otherwise the compiler
+// could no longer catch e.g. an `LLVMTypeRef` accidentally passed where an
+// `LLVMValueRef` was expected, silently trading a compile error for a
+// runtime bug.
+// ---------------------------------------------------------------------
+// Global module fragment: opaque handle struct tags (llvm-c/Types.h)
+// ---------------------------------------------------------------------
+// Each handle kind gets its own never-defined, bodyless forward
+// declaration, exactly mirroring real llvm-c/Types.h's own pattern (e.g.
+// `typedef struct LLVMOpaqueContext *LLVMContextRef;`, where
+// `LLVMOpaqueContext` itself is never completed anywhere): nothing ever
+// instantiates or defines these types; only pointers to them are formed.
+//
+// These tags live here, in this file's *global module fragment* (the
+// `module;` ... declarations ... before `export module llvm.core;`
+// below), deliberately *not* in the module purview, and are never
+// `export`ed directly (a global module fragment cannot export anything;
+// only the pointer aliases further below are exported). This placement is
+// not cosmetic -- it is the one thing that makes this whole module work
+// at all, and is a real ISO C++20 modules rule, unrelated to this file's
+// own `.cpp`/`.scpp` extension or to scpp's own grammar: every one of the
+// nine files this module replaces an #include in still keeps a
+// *different* llvm-c header #include'd alongside `import llvm.core;`
+// (Target.h, TargetMachine.h, DebugInfo.h, Analysis.h all transitively
+// #include their own copy of llvm-c/Types.h, and even the four files with
+// no such header of their own reach one transitively through the
+// also-out-of-scope src/compiler/codegen/api.cppm), so the very same
+// struct tags declared here are *also* declared, separately, by the real
+// system header, unattached to any module, in each of those files. Two
+// declarations of the same class/struct tag denote the same entity only
+// if both are attached to the same named module, or neither is attached
+// to any named module (a plain `#include`, wherever it appears, is always
+// "attached to no module"); a first attempt at this module that
+// `export`ed these tags directly from the purview learned this the hard
+// way, failing to build every one of the nine files with "declaration
+// '...' attached to named module 'llvm.core' cannot be attached to other
+// modules" -- an entity attached to `llvm.core` can never denote the same
+// type as the real header's own unattached copy. Declaring the tags here,
+// in the global module fragment, keeps this module's own copies
+// unattached too, exactly like the real header's, so the two agree and
+// safely denote one and the same type everywhere both are visible in the
+// same translation unit -- verified directly against this project's own
+// real build below, not just in isolation.
+module;
+
+// NOTE: real llvm-c/Types.h spells this specific struct tag
+// "LLVMOpaqueAttributeRef", not "LLVMOpaqueAttribute" like every sibling
+// tag below -- an inconsistency in the upstream header itself, kept
+// byte-for-byte here since the tag name must match upstream exactly for
+// the two declarations to denote the same type when a file combines this
+// import with a still-#include'd llvm-c header that also declares it.
+struct LLVMOpaqueContext;
+struct LLVMOpaqueModule;
+struct LLVMOpaqueType;
+struct LLVMOpaqueValue;
+struct LLVMOpaqueBasicBlock;
+struct LLVMOpaqueMetadata;
+struct LLVMOpaqueBuilder;
+struct LLVMOpaqueUse;
+struct LLVMOpaqueAttributeRef;
+
+export module llvm.core;
+
+import std;
+
+// ---------------------------------------------------------------------
+// Opaque handle pointer aliases (llvm-c/Types.h)
+// ---------------------------------------------------------------------
+// Unlike the struct tags above, these pointer aliases *are* declared in
+// the module purview and `export`ed directly: a type-alias (or C
+// `typedef`) redeclaration is always well-formed as long as every
+// redeclaration in scope denotes the exact same type, with none of the
+// struct tags' cross-module attachment restriction above -- so a file
+// that sees both this module's `export using LLVMContextRef = ...` and a
+// still-#include'd llvm-c header's own `typedef struct LLVMOpaqueContext
+// *LLVMContextRef;` simply sees two harmless, agreeing redeclarations of
+// the same alias, not a conflict. Each alias is still its own distinct
+// pointer type from every other one below (never a shared `void*`), so
+// the compiler continues to reject e.g. an `LLVMTypeRef` passed where an
+// `LLVMValueRef` is expected, exactly as real LLVM-C's own headers do.
+export using LLVMContextRef = LLVMOpaqueContext*;
+export using LLVMModuleRef = LLVMOpaqueModule*;
+export using LLVMTypeRef = LLVMOpaqueType*;
+export using LLVMValueRef = LLVMOpaqueValue*;
+export using LLVMBasicBlockRef = LLVMOpaqueBasicBlock*;
+export using LLVMMetadataRef = LLVMOpaqueMetadata*;
+export using LLVMBuilderRef = LLVMOpaqueBuilder*;
+export using LLVMUseRef = LLVMOpaqueUse*;
+export using LLVMAttributeRef = LLVMOpaqueAttributeRef*;
+
+// ---------------------------------------------------------------------
+// LLVMBool / attribute index (llvm-c/Types.h, llvm-c/Core.h)
+// ---------------------------------------------------------------------
+export using LLVMBool = int;
+export using LLVMAttributeIndex = unsigned;
+
+// Real llvm-c/Core.h declares this via an anonymous `enum { LLVMAttributeReturnIndex
+// = 0U, LLVMAttributeFunctionIndex = -1 };`; only LLVMAttributeFunctionIndex
+// (the "apply to the called function itself, not a parameter" sentinel) is
+// referenced by this project's codegen, so only it is reproduced here, as a
+// plain constant rather than an enum.
+export constexpr int LLVMAttributeFunctionIndex = -1;
+
+// ---------------------------------------------------------------------
+// Enums (llvm-c/Core.h)
+// ---------------------------------------------------------------------
+// Real llvm-c/Core.h declares these as old-style, unscoped C `enum`s, whose
+// enumerators (e.g. `LLVMIntegerTypeKind`, `LLVMExternalLinkage`) every
+// existing call site across the nine files above -- and the real header
+// itself -- reaches unqualified, with no `LLVMTypeKind::` (or similar)
+// prefix. Kept as plain, unscoped `enum` here to match exactly: it
+// preserves that same unqualified lookup and matches real LLVM-C's own
+// ABI/value contract exactly, with no call-site changes needed beyond the
+// include-to-import swap this task calls for.
+//
+// Only the enumerators actually referenced by the nine files are declared
+// below, each given its exact real numeric value explicitly (never left to
+// auto-increment), so that any omitted enumerator never shifts the value
+// of one that is declared.
+
+export enum LLVMTypeKind {
+    LLVMFloatTypeKind = 2,
+    LLVMDoubleTypeKind = 3,
+    LLVMIntegerTypeKind = 8,
+};
+
+export enum LLVMLinkage {
+    LLVMExternalLinkage = 0,
+    LLVMAppendingLinkage = 7,
+    LLVMInternalLinkage = 8,
+    LLVMPrivateLinkage = 9,
+};
+
+export enum LLVMIntPredicate {
+    LLVMIntEQ = 32,
+    LLVMIntNE = 33,
+    LLVMIntUGT = 34,
+    LLVMIntUGE = 35,
+    LLVMIntULT = 36,
+    LLVMIntULE = 37,
+    LLVMIntSGT = 38,
+    LLVMIntSGE = 39,
+    LLVMIntSLT = 40,
+    LLVMIntSLE = 41,
+};
+
+export enum LLVMRealPredicate {
+    LLVMRealOEQ = 1,
+    LLVMRealOGT = 2,
+    LLVMRealOGE = 3,
+    LLVMRealOLT = 4,
+    LLVMRealOLE = 5,
+    LLVMRealONE = 6,
+};
+
+export enum LLVMModuleFlagBehavior {
+    LLVMModuleFlagBehaviorWarning = 1,
+};
+
+// ---------------------------------------------------------------------
+// Functions (llvm-c/Core.h)
+// ---------------------------------------------------------------------
+// A single `extern "C" { ... }` block, matching real llvm-c/Core.h's own
+// linkage-specification for every one of these symbols -- they are
+// implemented by, and this project ultimately links against, LLVM's own
+// compiled static libraries (see LLVM_LIBS in root CMakeLists.txt), not by
+// this module. Real C++ exports every declaration nested inside an
+// `export extern "C" { ... }` block, so no per-line `export` repetition is
+// needed for each of the ~118 declarations below to be part of this
+// module's public interface. (This deliberately differs from
+// libs/scpp_llvm/core/scpp_llvm_core.scpp's own `extern "C"` block, which
+// is intentionally *not* exported there -- that package hides its raw
+// LLVM-C bindings behind ergonomic wrapper classes and only exports those;
+// this module has no such wrapper; the raw bindings themselves are the
+// public surface.)
+export extern "C" {
+
+// Context
+LLVMContextRef LLVMContextCreate(void);
+void LLVMContextDispose(LLVMContextRef C);
+LLVMContextRef LLVMGetModuleContext(LLVMModuleRef M);
+
+// Error handling
+void LLVMDisposeMessage(char* Message);
+
+// Modules
+LLVMModuleRef LLVMModuleCreateWithNameInContext(const char* ModuleID, LLVMContextRef C);
+void LLVMDisposeModule(LLVMModuleRef M);
+void LLVMSetDataLayout(LLVMModuleRef M, const char* DataLayoutStr);
+void LLVMSetTarget(LLVMModuleRef M, const char* Triple);
+void LLVMAddModuleFlag(LLVMModuleRef M, LLVMModuleFlagBehavior Behavior, const char* Key, std::size_t KeyLen,
+                       LLVMMetadataRef Val);
+char* LLVMPrintModuleToString(LLVMModuleRef M);
+LLVMValueRef LLVMGetNamedFunction(LLVMModuleRef M, const char* Name);
+LLVMValueRef LLVMAddFunction(LLVMModuleRef M, const char* Name, LLVMTypeRef FunctionTy);
+LLVMValueRef LLVMAddGlobal(LLVMModuleRef M, LLVMTypeRef Ty, const char* Name);
+LLVMValueRef LLVMGetIntrinsicDeclaration(LLVMModuleRef Mod, unsigned ID, LLVMTypeRef* ParamTypes,
+                                         std::size_t ParamCount);
+unsigned LLVMLookupIntrinsicID(const char* Name, std::size_t NameLen);
+
+// Types
+LLVMTypeRef LLVMVoidTypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMInt1TypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMInt8TypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMInt16TypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMInt32TypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMInt64TypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMIntTypeInContext(LLVMContextRef C, unsigned NumBits);
+LLVMTypeRef LLVMFloatTypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMDoubleTypeInContext(LLVMContextRef C);
+LLVMTypeRef LLVMPointerTypeInContext(LLVMContextRef C, unsigned AddressSpace);
+LLVMTypeRef LLVMFunctionType(LLVMTypeRef ReturnType, LLVMTypeRef* ParamTypes, unsigned ParamCount,
+                             LLVMBool IsVarArg);
+LLVMTypeRef LLVMArrayType2(LLVMTypeRef ElementType, std::uint64_t ElementCount);
+LLVMTypeRef LLVMStructTypeInContext(LLVMContextRef C, LLVMTypeRef* ElementTypes, unsigned ElementCount,
+                                    LLVMBool Packed);
+LLVMTypeRef LLVMStructCreateNamed(LLVMContextRef C, const char* Name);
+void LLVMStructSetBody(LLVMTypeRef StructTy, LLVMTypeRef* ElementTypes, unsigned ElementCount, LLVMBool Packed);
+unsigned LLVMCountStructElementTypes(LLVMTypeRef StructTy);
+void LLVMGetStructElementTypes(LLVMTypeRef StructTy, LLVMTypeRef* Dest);
+LLVMTypeKind LLVMGetTypeKind(LLVMTypeRef Ty);
+unsigned LLVMGetIntTypeWidth(LLVMTypeRef IntegerTy);
+
+// Values / constants / globals / functions
+LLVMTypeRef LLVMTypeOf(LLVMValueRef Val);
+const char* LLVMGetValueName2(LLVMValueRef Val, std::size_t* Length);
+void LLVMSetValueName2(LLVMValueRef Val, const char* Name, std::size_t NameLen);
+LLVMValueRef LLVMConstInt(LLVMTypeRef IntTy, unsigned long long N, LLVMBool SignExtend);
+LLVMValueRef LLVMConstReal(LLVMTypeRef RealTy, double N);
+LLVMValueRef LLVMConstNull(LLVMTypeRef Ty);
+LLVMValueRef LLVMConstPointerNull(LLVMTypeRef Ty);
+LLVMValueRef LLVMGetUndef(LLVMTypeRef Ty);
+LLVMValueRef LLVMConstBitCast(LLVMValueRef ConstantVal, LLVMTypeRef ToType);
+LLVMValueRef LLVMConstArray2(LLVMTypeRef ElementTy, LLVMValueRef* ConstantVals, std::uint64_t Length);
+LLVMValueRef LLVMConstStructInContext(LLVMContextRef C, LLVMValueRef* ConstantVals, unsigned Count,
+                                      LLVMBool Packed);
+void LLVMSetInitializer(LLVMValueRef GlobalVar, LLVMValueRef ConstantVal);
+void LLVMSetGlobalConstant(LLVMValueRef GlobalVar, LLVMBool IsConstant);
+void LLVMSetLinkage(LLVMValueRef Global, LLVMLinkage Linkage);
+unsigned LLVMGetAlignment(LLVMValueRef V);
+void LLVMSetAlignment(LLVMValueRef V, unsigned Bytes);
+LLVMTypeRef LLVMGlobalGetValueType(LLVMValueRef Global);
+unsigned LLVMCountParams(LLVMValueRef Fn);
+LLVMValueRef LLVMGetParam(LLVMValueRef Fn, unsigned Index);
+LLVMUseRef LLVMGetFirstUse(LLVMValueRef Val);
+
+// Instructions / value-subclass cast (LLVMIsA... family)
+LLVMValueRef LLVMIsAAllocaInst(LLVMValueRef Val);
+
+// Basic blocks
+LLVMBasicBlockRef LLVMAppendBasicBlockInContext(LLVMContextRef C, LLVMValueRef Fn, const char* Name);
+LLVMValueRef LLVMBasicBlockAsValue(LLVMBasicBlockRef BB);
+LLVMValueRef LLVMGetBasicBlockParent(LLVMBasicBlockRef BB);
+LLVMValueRef LLVMGetBasicBlockTerminator(LLVMBasicBlockRef BB);
+LLVMBasicBlockRef LLVMGetEntryBasicBlock(LLVMValueRef Fn);
+LLVMValueRef LLVMGetFirstInstruction(LLVMBasicBlockRef BB);
+LLVMValueRef LLVMGetNextInstruction(LLVMValueRef Inst);
+
+// Instruction builders (IRBuilder)
+LLVMBuilderRef LLVMCreateBuilderInContext(LLVMContextRef C);
+void LLVMDisposeBuilder(LLVMBuilderRef Builder);
+void LLVMPositionBuilderAtEnd(LLVMBuilderRef Builder, LLVMBasicBlockRef Block);
+void LLVMPositionBuilderBefore(LLVMBuilderRef Builder, LLVMValueRef Instr);
+LLVMBasicBlockRef LLVMGetInsertBlock(LLVMBuilderRef Builder);
+LLVMMetadataRef LLVMGetCurrentDebugLocation2(LLVMBuilderRef Builder);
+void LLVMSetCurrentDebugLocation2(LLVMBuilderRef Builder, LLVMMetadataRef Loc);
+LLVMValueRef LLVMBuildRet(LLVMBuilderRef B, LLVMValueRef V);
+LLVMValueRef LLVMBuildRetVoid(LLVMBuilderRef B);
+LLVMValueRef LLVMBuildBr(LLVMBuilderRef B, LLVMBasicBlockRef Dest);
+LLVMValueRef LLVMBuildCondBr(LLVMBuilderRef B, LLVMValueRef If, LLVMBasicBlockRef Then, LLVMBasicBlockRef Else);
+LLVMValueRef LLVMBuildUnreachable(LLVMBuilderRef B);
+LLVMValueRef LLVMBuildAdd(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildFAdd(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildSub(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildFSub(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildMul(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildFMul(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildUDiv(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildSDiv(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildFDiv(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildNeg(LLVMBuilderRef B, LLVMValueRef V, const char* Name);
+LLVMValueRef LLVMBuildFNeg(LLVMBuilderRef B, LLVMValueRef V, const char* Name);
+LLVMValueRef LLVMBuildNot(LLVMBuilderRef B, LLVMValueRef V, const char* Name);
+LLVMValueRef LLVMBuildAnd(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildOr(LLVMBuilderRef B, LLVMValueRef LHS, LLVMValueRef RHS, const char* Name);
+LLVMValueRef LLVMBuildAlloca(LLVMBuilderRef B, LLVMTypeRef Ty, const char* Name);
+LLVMValueRef LLVMBuildLoad2(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef PointerVal, const char* Name);
+LLVMValueRef LLVMBuildStore(LLVMBuilderRef B, LLVMValueRef Val, LLVMValueRef Ptr);
+LLVMValueRef LLVMBuildGEP2(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Pointer, LLVMValueRef* Indices,
+                           unsigned NumIndices, const char* Name);
+LLVMValueRef LLVMBuildStructGEP2(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Pointer, unsigned Idx,
+                                 const char* Name);
+LLVMValueRef LLVMBuildTrunc(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildZExt(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildSExt(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildFPToUI(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildFPToSI(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildUIToFP(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildSIToFP(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildFPTrunc(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildFPExt(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildPtrToInt(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildBitCast(LLVMBuilderRef B, LLVMValueRef Val, LLVMTypeRef DestTy, const char* Name);
+LLVMValueRef LLVMBuildICmp(LLVMBuilderRef B, LLVMIntPredicate Op, LLVMValueRef LHS, LLVMValueRef RHS,
+                           const char* Name);
+LLVMValueRef LLVMBuildFCmp(LLVMBuilderRef B, LLVMRealPredicate Op, LLVMValueRef LHS, LLVMValueRef RHS,
+                           const char* Name);
+LLVMValueRef LLVMBuildPhi(LLVMBuilderRef B, LLVMTypeRef Ty, const char* Name);
+void LLVMAddIncoming(LLVMValueRef PhiNode, LLVMValueRef* IncomingValues, LLVMBasicBlockRef* IncomingBlocks,
+                     unsigned Count);
+LLVMValueRef LLVMBuildCall2(LLVMBuilderRef B, LLVMTypeRef FnTy, LLVMValueRef Fn, LLVMValueRef* Args,
+                            unsigned NumArgs, const char* Name);
+LLVMValueRef LLVMBuildSelect(LLVMBuilderRef B, LLVMValueRef If, LLVMValueRef Then, LLVMValueRef Else,
+                             const char* Name);
+LLVMValueRef LLVMBuildExtractValue(LLVMBuilderRef B, LLVMValueRef AggVal, unsigned Index, const char* Name);
+LLVMValueRef LLVMBuildInsertValue(LLVMBuilderRef B, LLVMValueRef AggVal, LLVMValueRef EltVal, unsigned Index,
+                                  const char* Name);
+LLVMValueRef LLVMBuildGlobalString(LLVMBuilderRef B, const char* Str, const char* Name);
+LLVMValueRef LLVMBuildMemSet(LLVMBuilderRef B, LLVMValueRef Ptr, LLVMValueRef Val, LLVMValueRef Len, unsigned Align);
+
+// Metadata
+LLVMMetadataRef LLVMValueAsMetadata(LLVMValueRef Val);
+
+// Attributes
+unsigned LLVMGetEnumAttributeKindForName(const char* Name, std::size_t SLen);
+LLVMAttributeRef LLVMCreateEnumAttribute(LLVMContextRef C, unsigned KindID, std::uint64_t Val);
+void LLVMAddAttributeAtIndex(LLVMValueRef F, LLVMAttributeIndex Idx, LLVMAttributeRef A);
+
+} // extern "C"

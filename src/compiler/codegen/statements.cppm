@@ -1,10 +1,9 @@
 module;
 
-#include <llvm-c/Core.h>
-
 module scpp.compiler.codegen:statements;
 
 import std;
+import llvm.core;
 import :api;
 
 namespace scpp {
