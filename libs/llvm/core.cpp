@@ -1,9 +1,8 @@
 // core.cpp
 //
 // `llvm.core`: a fresh, standalone, top-level module -- not a partition or
-// nested submodule of either `scpp` (this project's own compiler-internal
-// modules, e.g. `scpp.ast`, `scpp.compiler.codegen`) or `scpp.llvm` (the
-// separate, ergonomic RAII wrapper package at libs/scpp_llvm/). Its only
+// nested submodule of `scpp` (this project's own compiler-internal
+// modules, e.g. `scpp.ast`, `scpp.compiler.codegen`). Its only
 // job is to give this compiler's own real-C++ `src/*.cppm` files a way to
 // reach official LLVM-C's `llvm-c/Core.h` surface via `import llvm.core;`
 // instead of `#include <llvm-c/Core.h>` -- scpp (the language) has no
@@ -13,7 +12,7 @@
 // This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
 // only by real clang++ (see the `llvm_core` CMake target in
 // libs/llvm/CMakeLists.txt) and never fed to the scpp compiler itself --
-// unlike libs/std/*.scpp, libs/scpp/*.scpp, or libs/scpp_llvm/*.scpp,
+// unlike libs/std/*.scpp or libs/scpp/*.scpp,
 // there is no aspiration here for this specific file to also be
 // scpp-parseable today. `export module llvm.core;` below is nonetheless
 // unrestricted, standard C++20 module syntax -- real ISO C++, nothing
@@ -46,18 +45,14 @@
 // signatures below. See types.cpp's own header comment for the full
 // history and for why it, not this file, now owns those declarations.
 //
-// Contrast with libs/scpp_llvm/: that package wraps LLVM-C in ergonomic,
-// RAII scpp classes (Context/Module/Type/Value) for scpp *user* programs,
-// and deliberately declares every opaque handle as a shared `void*`
-// underneath those classes -- real type safety there comes from the
-// wrapper classes, not the raw handles. This module has no such wrapper:
-// its raw `LLVM*Ref` declarations *are* the public surface every one of
-// the nine files above calls directly, exactly as they did through the
-// real header, so each opaque handle kind (declared by `llvm.types`,
-// re-exported here) is its own distinct pointer type (never a shared
-// `void*`) -- otherwise the compiler could no longer catch e.g. an
-// `LLVMTypeRef` accidentally passed where an `LLVMValueRef` was expected,
-// silently trading a compile error for a runtime bug.
+// This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
+// declarations *are* the public surface every one of the nine files
+// above calls directly, exactly as they did through the real header, so
+// each opaque handle kind (declared by `llvm.types`, re-exported here)
+// is its own distinct pointer type (never a shared `void*`) --
+// otherwise the compiler could no longer catch e.g. an `LLVMTypeRef`
+// accidentally passed where an `LLVMValueRef` was expected, silently
+// trading a compile error for a runtime bug.
 //
 // Module-attachment note: this module's own global module fragment below
 // is now empty -- the opaque handle struct tags it used to declare there
@@ -178,12 +173,7 @@ export enum LLVMModuleFlagBehavior {
 // this module. Real C++ exports every declaration nested inside an
 // `export extern "C" { ... }` block, so no per-line `export` repetition is
 // needed for each of the ~118 declarations below to be part of this
-// module's public interface. (This deliberately differs from
-// libs/scpp_llvm/core/scpp_llvm_core.scpp's own `extern "C"` block, which
-// is intentionally *not* exported there -- that package hides its raw
-// LLVM-C bindings behind ergonomic wrapper classes and only exports those;
-// this module has no such wrapper; the raw bindings themselves are the
-// public surface.)
+// module's public interface.
 export extern "C" {
 
 // Context

@@ -1,7 +1,7 @@
 // types.cpp
 //
 // `llvm.types`: a fresh, standalone, top-level module -- not a partition or
-// nested submodule of `scpp`, `scpp.llvm`, or `llvm.core` (the sibling
+// nested submodule of `scpp` or `llvm.core` (the sibling
 // module in this same directory). Its only job is to give this compiler's
 // own real-C++ `src/*.cppm` files, and `llvm.core` itself, a way to reach
 // official LLVM-C's `llvm-c/Types.h` surface via `import llvm.types;`
@@ -65,18 +65,14 @@
 // project's single real source of truth for Types.h's declarations, rather
 // than as a private copy re-declared inside debug_info.cpp itself.
 //
-// Contrast with libs/scpp_llvm/: that package wraps LLVM-C in ergonomic,
-// RAII scpp classes (Context/Module/Type/Value) for scpp *user* programs,
-// and deliberately declares every opaque handle as a shared `void*`
-// underneath those classes -- real type safety there comes from the
-// wrapper classes, not the raw handles. This module has no such wrapper:
-// its raw `LLVM*Ref` declarations *are* the public surface `llvm.core`,
-// `llvm.debug_info`, and `api.cppm` call/use directly, exactly as they did
-// through the real header, so each opaque handle kind below is declared as
-// its own distinct pointer type (never a shared `void*`) -- otherwise the compiler
-// could no longer catch e.g. an `LLVMTypeRef` accidentally passed where an
-// `LLVMValueRef` was expected, silently trading a compile error for a
-// runtime bug.
+// This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
+// declarations *are* the public surface `llvm.core`, `llvm.debug_info`,
+// and `api.cppm` call/use directly, exactly as they did through the real
+// header, so each opaque handle kind below is declared as its own
+// distinct pointer type (never a shared `void*`) -- otherwise the
+// compiler could no longer catch e.g. an `LLVMTypeRef` accidentally
+// passed where an `LLVMValueRef` was expected, silently trading a
+// compile error for a runtime bug.
 // ---------------------------------------------------------------------
 // Global module fragment: opaque handle struct tags (llvm-c/Types.h)
 // ---------------------------------------------------------------------

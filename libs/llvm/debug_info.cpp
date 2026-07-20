@@ -1,10 +1,9 @@
 // debug_info.cpp
 //
 // `llvm.debug_info`: a fresh, standalone, top-level module -- not a
-// partition or nested submodule of either `scpp` (this project's own
-// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`),
-// `scpp.llvm` (the separate, ergonomic RAII wrapper package at
-// libs/scpp_llvm/), or `llvm.core`/`llvm.types` (the two sibling modules in
+// partition or nested submodule of `scpp` (this project's own
+// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`) or
+// `llvm.core`/`llvm.types` (the two sibling modules in
 // this same directory). Its only job is to give this compiler's own
 // real-C++ `src/*.cppm` files a way to reach official LLVM-C's
 // `llvm-c/DebugInfo.h` surface via `import llvm.debug_info;` instead of
@@ -64,19 +63,14 @@
 // away for `llvm.core`'s own non-exported internals (see core.cpp's own
 // closing comment on that point).
 //
-// Contrast with libs/scpp_llvm/: that package wraps LLVM-C in ergonomic,
-// RAII scpp classes (Context/Module/Type/Value) for scpp *user* programs,
-// and deliberately declares every opaque handle as a shared `void*`
-// underneath those classes -- real type safety there comes from the
-// wrapper classes, not the raw handles. This module has no such wrapper:
-// its raw `LLVM*Ref` declarations *are* the public surface both
-// orchestration.cppm and debug.cppm call directly, exactly as they did
-// through the real header, so every opaque handle kind involved (declared
-// by `llvm.types`, reused here via plain `import`) is its own distinct
-// pointer type (never a shared `void*`) -- otherwise the compiler could no
-// longer catch e.g. an `LLVMMetadataRef` accidentally passed where an
-// `LLVMValueRef` was expected, silently trading a compile error for a
-// runtime bug.
+// This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
+// declarations *are* the public surface both orchestration.cppm and
+// debug.cppm call directly, exactly as they did through the real header,
+// so every opaque handle kind involved (declared by `llvm.types`, reused
+// here via plain `import`) is its own distinct pointer type (never a
+// shared `void*`) -- otherwise the compiler could no longer catch e.g. an
+// `LLVMMetadataRef` accidentally passed where an `LLVMValueRef` was
+// expected, silently trading a compile error for a runtime bug.
 //
 // Module-attachment note: this module's own global module fragment below
 // is empty. The one opaque handle struct tag its own declarations need
@@ -171,12 +165,7 @@ export using LLVMDWARFTypeEncoding = unsigned;
 // this module. Real C++ exports every declaration nested inside an
 // `export extern "C" { ... }` block, so no per-line `export` repetition is
 // needed for each of the 20 declarations below to be part of this module's
-// public interface. (This deliberately differs from
-// libs/scpp_llvm/core/scpp_llvm_core.scpp's own `extern "C"` block, which
-// is intentionally *not* exported there -- that package hides its raw
-// LLVM-C bindings behind ergonomic wrapper classes and only exports those;
-// this module has no such wrapper; the raw bindings themselves are the
-// public surface.)
+// public interface.
 export extern "C" {
 
 // Debug metadata version
