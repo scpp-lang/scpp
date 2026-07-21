@@ -1,103 +1,112 @@
 // core.cpp
 //
-// `llvm.core`: a fresh, standalone, top-level module -- not a partition or
-// nested submodule of `scpp` (this project's own compiler-internal
-// modules, e.g. `scpp.ast`, `scpp.compiler.codegen`). Its only
+// `llvm:core`: the `:core` partition of module `llvm` (see llvm.cpp, the
+// primary module interface unit, same directory) -- not a standalone,
+// top-level module of its own any more (see types.cpp's own "Module
+// consolidation / attachment note" for the general background). Its only
 // job is to give this compiler's own real-C++ `src/*.cppm` files a way to
-// reach official LLVM-C's `llvm-c/Core.h` surface via `import llvm.core;`
-// instead of `#include <llvm-c/Core.h>` -- scpp (the language) has no
+// reach official LLVM-C's `llvm-c/Core.h` surface via `import llvm;`
+// (which re-exports every partition, this one included) instead of
+// `#include <llvm-c/Core.h>` -- scpp (the language) has no
 // preprocessor/#include at all, so any raw #include left in this
 // compiler's own sources is a hard blocker for eventual self-hosting.
 //
 // This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
-// only by real clang++ (see the `llvm_core` CMake target in
-// libs/llvm/CMakeLists.txt) and never fed to the scpp compiler itself --
-// unlike libs/std/*.scpp or libs/scpp/*.scpp,
-// there is no aspiration here for this specific file to also be
-// scpp-parseable today. `export module llvm.core;` below is nonetheless
-// unrestricted, standard C++20 module syntax -- real ISO C++, nothing
-// scpp-specific about it -- so the resulting compiled module interface
-// will still be `import`able the same way from scpp-compiled code, once
-// these nine files themselves eventually get rewritten in scpp; only this
-// file's own *source* needs never be scpp-parseable.
+// only by real clang++ (see the single `llvm` CMake target in
+// libs/llvm/CMakeLists.txt, which compiles this file together with
+// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// and never fed to the scpp compiler itself -- unlike libs/std/*.scpp or
+// libs/scpp/*.scpp, there is no aspiration here for this specific file to
+// also be scpp-parseable today. `export module llvm:core;` below is
+// nonetheless unrestricted, standard C++20 module-partition syntax -- real
+// ISO C++, nothing scpp-specific about it -- so the resulting compiled
+// module interface will still be `import`able the same way from
+// scpp-compiled code, once these files themselves eventually get
+// rewritten in scpp; only this file's own *source* needs never be
+// scpp-parseable.
 //
 // Scope: only the specific Core.h declarations actually referenced today
 // by src/driver.cppm and src/compiler/codegen/{layout,orchestration,debug,
 // functions,object_model,lifetime,statements,expressions}.cppm --
 // surveyed function-by-function and signature-by-signature against those
 // nine files, not a blanket re-declaration of Core.h's much larger
-// surface. The other six llvm-c/*.h headers still #include'd by those
-// same nine files (Target.h, TargetMachine.h, DebugInfo.h, Analysis.h)
-// are deliberately untouched -- out of scope for this change, left for
-// their own later, equally narrow `llvm.<name>` follow-ups.
+// surface. The other five llvm-c/*.h headers this consolidated `llvm`
+// module also now covers (Types.h, Target.h, TargetMachine.h, DebugInfo.h,
+// Analysis.h) are declared by this module's other five partitions instead
+// (`:types`, `:target`, `:target_machine`, `:debug_info`, `:analysis` --
+// see each partition's own `.cpp` file, same directory).
 //
-// Depends on `llvm.types` (types.cpp, same directory) for every opaque
+// Depends on `llvm:types` (types.cpp, same directory) for every opaque
 // handle struct tag and pointer alias below (LLVMContextRef, LLVMModuleRef,
 // LLVMTypeRef, ...) plus LLVMBool: those are genuinely llvm-c/Types.h's own
-// declarations, not Core.h's. An earlier version of this file declared its
-// own private copy of them directly (duplicating a second, independent
-// copy that src/compiler/codegen/api.cppm also needed and got via its own
-// `#include <llvm-c/Types.h>`); `llvm.types` is now the single, real
-// source of truth for that surface instead, and `export import llvm.types;`
-// below re-exports it wholesale, reproducing this module's own previous
+// declarations, not Core.h's. An earlier version of this file (when it was
+// still its own standalone module, `llvm.core`) declared its own private
+// copy of them directly (duplicating a second, independent copy that
+// src/compiler/codegen/api.cppm also needed and got via its own
+// `#include <llvm-c/Types.h>`); `llvm:types` is now the single, real
+// source of truth for that surface instead, and `export import :types;`
+// below re-exports it wholesale, reproducing this partition's own previous
 // public surface exactly, for every existing consumer, while also giving
-// this module itself the aliases it needs for its own ~118 function
+// this partition itself the aliases it needs for its own ~118 function
 // signatures below. See types.cpp's own header comment for the full
 // history and for why it, not this file, now owns those declarations.
 //
 // This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
 // declarations *are* the public surface every one of the nine files
 // above calls directly, exactly as they did through the real header, so
-// each opaque handle kind (declared by `llvm.types`, re-exported here)
+// each opaque handle kind (declared by `llvm:types`, re-exported here)
 // is its own distinct pointer type (never a shared `void*`) --
 // otherwise the compiler could no longer catch e.g. an `LLVMTypeRef`
 // accidentally passed where an `LLVMValueRef` was expected, silently
 // trading a compile error for a runtime bug.
 //
-// Module-attachment note: this module's own global module fragment below
-// is now empty -- the opaque handle struct tags it used to declare there
-// directly (LLVMOpaqueContext, ...) now live in `llvm.types`'s own global
-// module fragment instead (see types.cpp's header comment for the full
-// "two declarations of the same struct tag denote the same entity only if
-// both are attached to the same named module, or neither is attached to
-// any named module" rationale this design depends on -- discovered the
-// hard way by an earlier version of this file that tried exporting the
-// tags directly from its own purview, and failed to build every one of
-// the nine files above with "declaration '...' attached to named module
-// 'llvm.core' cannot be attached to other modules"). Re-exporting
-// `llvm.types` here via `export import`, rather than this module
-// re-declaring its own copy of the pointer aliases, does *not* reintroduce
-// that original conflict: this module never needs to *name* the raw
-// struct tags itself (only the aliases, which it gets pre-formed from
-// `llvm.types`), and a declaration's "attached to no module" status is a
-// property of *where* it is physically declared (`llvm.types`'s global
-// module fragment), not of how many `import`/`export import` hops
-// separate that declaration from a translation unit that ultimately sees
-// it reachably -- so the nine files above that still combine
-// `import llvm.core;` with a raw #include of Target.h/TargetMachine.h/
-// DebugInfo.h/Analysis.h (each of which transitively #includes its own
-// unattached copy of llvm-c/Types.h) continue to see one, single,
-// agreeing entity for each handle kind, exactly as before this module
-// existed. Verified directly against this project's own real build, not
-// just in isolation.
+// Module consolidation / attachment note: before the six `llvm.<name>`
+// modules (PRs #290-295) were merged into six partitions of one module
+// `llvm` (see llvm.cpp), this file's own global module fragment was
+// already empty -- the opaque handle struct tags this partition itself
+// relies on (LLVMOpaqueContext, ...) already lived in `llvm.types`'s own
+// global module fragment instead (see types.cpp's header comment for the
+// full "two declarations of the same struct tag denote the same entity
+// only if both are attached to the same named module, or neither is
+// attached to any named module" rationale this design depends on --
+// discovered the hard way by an earlier version of this file that tried
+// exporting the tags directly from its own purview, and failed to build
+// every one of the nine files above with "declaration '...' attached to
+// named module 'llvm.core' cannot be attached to other modules").
+// Re-exporting `llvm:types` here via `export import`, rather than this
+// partition re-declaring its own copy of the pointer aliases, does not
+// change with this consolidation: this partition still never needs to
+// *name* the raw struct tags itself (only the aliases, which it gets
+// pre-formed from `llvm:types`), and now that `:core` and `:types` are
+// both partitions of the very same module `llvm`, a declaration attached
+// to partition `:types` is, per C++20's own module rules, considered
+// attached to module `llvm` as a whole -- an even simpler guarantee than
+// the cross-module "attached to no module" reasoning this file's own
+// comment previously relied on, since it no longer matters whether any
+// declaration is attached or unattached at all: every one of the nine
+// files above, whether it reaches these tags solely through
+// `import llvm;` or (historically) also combined that with some other
+// llvm-c header's own transitive, unattached copy, continues to see one,
+// single, agreeing entity for each handle kind. Verified directly against
+// this project's own real build, not just reasoned about in isolation.
 module;
 
-export module llvm.core;
+export module llvm:core;
 
 import std;
 
 // Re-exports every opaque handle pointer alias (LLVMContextRef, ...) and
-// LLVMBool from `llvm.types` (types.cpp) as part of this module's own
+// LLVMBool from `llvm:types` (types.cpp) as part of this partition's own
 // public interface -- see this file's own header comment above, and
 // types.cpp's header comment, for the full rationale.
-export import llvm.types;
+export import :types;
 
 // ---------------------------------------------------------------------
 // Attribute index (llvm-c/Core.h)
 // ---------------------------------------------------------------------
-// Unlike LLVMBool (genuinely from llvm-c/Types.h, see `llvm.types` above),
+// Unlike LLVMBool (genuinely from llvm-c/Types.h, see `llvm:types` above),
 // real llvm-c/Core.h declares `typedef unsigned LLVMAttributeIndex;`
-// itself, so it stays here rather than moving to `llvm.types`.
+// itself, so it stays here rather than moving to `llvm:types`.
 export using LLVMAttributeIndex = unsigned;
 
 // Real llvm-c/Core.h declares this via an anonymous `enum { LLVMAttributeReturnIndex

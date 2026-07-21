@@ -16,18 +16,14 @@ target_sources(scpp_codegen
             statements.cppm)
 target_include_directories(scpp_codegen SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
-# api.cppm itself `import llvm.types;` directly (for LLVMDIBuilderRef,
-# not otherwise reachable through llvm_core), so llvm_types is linked
-# here explicitly too, alongside llvm_core -- not relying solely on
-# llvm_core's own PUBLIC link to llvm_types (libs/llvm/CMakeLists.txt),
-# so this target's own CMake dependency graph accurately reflects its
-# real, direct module dependency. Likewise, orchestration.cppm and
-# debug.cppm themselves `import llvm.debug_info;` directly, so llvm_debug_info
-# is linked here explicitly too, for the same reason. layout.cppm,
-# debug.cppm, and expressions.cppm themselves `import llvm.target;`
-# directly, so llvm_target is linked here explicitly too, likewise.
-# orchestration.cppm itself `import llvm.analysis;` directly (for
-# LLVMVerifyModule), so llvm_analysis is linked here explicitly too, for
-# the same reason.
-target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr llvm_core llvm_types llvm_debug_info llvm_target llvm_analysis ${LLVM_LIBS})
+# Every one of these eleven partition files that needs any LLVM-C surface
+# at all (api.cppm, orchestration.cppm, debug.cppm, layout.cppm,
+# expressions.cppm, functions.cppm, object_model.cppm, lifetime.cppm,
+# statements.cppm) reaches it via a single `import llvm;` -- the one,
+# consolidated module covering every piece of LLVM-C surface this
+# project's codegen needs (see libs/llvm/CMakeLists.txt) -- so the single
+# `llvm` target is linked here explicitly, alongside ${LLVM_LIBS} for the
+# real LLVM-C symbols every partition's own declarations ultimately
+# resolve to.
+target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr llvm ${LLVM_LIBS})
 target_compile_features(scpp_codegen PRIVATE cxx_std_23)

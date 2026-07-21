@@ -3,20 +3,20 @@ module;
 // Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
 // interface -- every LLVM operation this file needs (IRBuilder-style
 // instruction construction, constants, types, intrinsics, DataLayout
-// numeric queries) goes through its llvm-c/Target.h functions directly
-// below (`import llvm.target;`; Core.h's own functions come from
-// `import llvm.core;` instead, see below) rather than any native LLVM C++
-// header. See libs/README.md for why this project binds straight to
-// LLVM-C wherever it already covers what's needed -- a rigorous,
-// function-by-function empirical audit found LLVM-C fully covers every
-// LLVM operation this project's codegen needs, so there is no custom
-// wrapper of any kind anywhere in this project.
+// numeric queries) goes through module `llvm`'s own `:target` partition's
+// functions directly below (Core.h's own functions come from its `:core`
+// partition instead) rather than any native LLVM C++ header, all reached
+// via the single `import llvm;` below (module `llvm` re-exports every
+// partition, see libs/llvm/llvm.cpp). See libs/README.md for why this
+// project binds straight to LLVM-C wherever it already covers what's
+// needed -- a rigorous, function-by-function empirical audit found
+// LLVM-C fully covers every LLVM operation this project's codegen needs,
+// so there is no custom wrapper of any kind anywhere in this project.
 
 module scpp.compiler.codegen:expressions;
 
 import std;
-import llvm.core;
-import llvm.target;
+import llvm;
 import :api;
 
 namespace scpp {

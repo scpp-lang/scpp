@@ -1,25 +1,25 @@
 module;
 
 // Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
-// interface -- the DataLayout numeric queries in this file go through its
-// llvm-c/Target.h functions directly below (`import llvm.target;`)
+// interface -- the DataLayout numeric queries in this file go through
+// module `llvm`'s own `:target` partition's functions directly below
 // instead of llvm::DataLayout, so this file no longer needs the heavier
 // <llvm/IR/DataLayout.h> or any other native LLVM C++ header. See
 // libs/README.md for why this project binds straight to LLVM-C wherever
 // it already covers what's needed -- including pointer ABI alignment (see
 // pointer_abi_alignment_for_as below) and every DIBuilder debug-info
-// operation this file performs (`import llvm.debug_info;` below; Core.h's
-// own functions come from `import llvm.core;` instead, see below): a
-// rigorous, function-by-function empirical audit found LLVM-C fully
-// covers every LLVM operation this project's codegen needs, so there is
-// no custom wrapper of any kind here.
+// operation this file performs (from the same module's `:debug_info`
+// partition; Core.h's own functions come from its `:core` partition
+// instead), all reached via the single `import llvm;` below (module
+// `llvm` re-exports every partition, see libs/llvm/llvm.cpp): a rigorous,
+// function-by-function empirical audit found LLVM-C fully covers every
+// LLVM operation this project's codegen needs, so there is no custom
+// wrapper of any kind here.
 
 module scpp.compiler.codegen:debug;
 
 import std;
-import llvm.core;
-import llvm.debug_info;
-import llvm.target;
+import llvm;
 import :api;
 
 namespace scpp {
