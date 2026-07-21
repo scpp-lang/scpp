@@ -539,6 +539,40 @@ void run_module_system_tests() {
         std::filesystem::remove(lib_path);
     }
 
+    {
+        std::string case_name = "module_record_forward_declarations_reconcile_to_full_definitions";
+        cases_run++;
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module records;\n"
+            "namespace records {\n"
+            "    export struct Node;\n"
+            "    struct Node { int value; Node* next; };\n"
+            "    export Node make_node(int value) {\n"
+            "        Node node{};\n"
+            "        node.value = value;\n"
+            "        return node;\n"
+            "    }\n"
+            "}\n");
+        std::string main_source =
+            "import records;\n"
+            "int main() {\n"
+            "    records::Node node = records::make_node(7);\n"
+            "    return node.value - 7;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"records", lib_path.string()}});
+            RunResult run = run_command_capture(exe_path.string() + " 2>&1");
+            std::filesystem::remove(exe_path);
+            expect(run.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(run.exit_code));
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(lib_path);
+    }
+
     // Importing a module whose own module declaration doesn't match the
     // requested name is rejected (a mismatched --import name=path).
     {

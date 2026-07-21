@@ -17,10 +17,13 @@ namespace scpp {
 void validate_class_semantics(const Program& program, const Signatures& signatures);
 
 [[maybe_unused]] [[nodiscard]] const StructDef* find_struct_def(const Program& program, const std::string& struct_name) {
+    const StructDef* forward_decl = nullptr;
     for (const StructDef& def : program.structs) {
-        if (def.name == struct_name) return &def;
+        if (def.name != struct_name) continue;
+        if (!def.is_forward_declaration) return &def;
+        if (forward_decl == nullptr) forward_decl = &def;
     }
-    return nullptr;
+    return forward_decl;
 }
 
 [[nodiscard]] bool type_forms_interface_object(const Type& type, const Program& program) {

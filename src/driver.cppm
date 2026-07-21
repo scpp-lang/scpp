@@ -35,7 +35,7 @@ struct DriverError : std::runtime_error {
     explicit DriverError(const std::string& message) : std::runtime_error(message) {}
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 6;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 7;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -916,6 +916,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     write_string(out, def.owning_module);
     write_u32_le(out, static_cast<std::uint32_t>(def.template_params.size()));
     for (const GenericTypeParam& param : def.template_params) write_generic_type_param(out, param);
+    write_u8(out, def.is_forward_declaration ? 1u : 0u);
     write_string(out, def.template_owner_id);
     write_u8(out, def.thread_movable_override ? 1u : 0u);
     write_u8(out, def.thread_shareable_override ? 1u : 0u);
@@ -947,6 +948,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
     def.template_params.reserve(template_param_count);
     for (std::uint32_t i = 0; i < template_param_count; i++) def.template_params.push_back(read_generic_type_param(in, context + " template param"));
+    def.is_forward_declaration = read_u8(in, context + " is_forward_declaration") != 0u;
     def.template_owner_id = read_string(in, context + " template owner id");
     def.thread_movable_override = read_u8(in, context + " thread movable override") != 0u;
     def.thread_shareable_override = read_u8(in, context + " thread shareable override") != 0u;

@@ -231,6 +231,8 @@ private:
     // above already handles the separate recursive-inheritance variadic
     // family.
     std::unordered_map<std::string, std::vector<GenericTypeParam>> ordinary_generic_type_template_params_;
+    enum class RecordTagKind { Struct, Class, Union };
+    std::unordered_map<std::string, RecordTagKind> record_tag_kinds_;
     // ch05 §5.11: every full-header-form generic function's own declared
     // template parameter list (`template<size_t I, typename Head,
     // typename... Tail> Head& get(...)`), keyed by its qualified name --
@@ -1443,6 +1445,7 @@ private:
 
     [[nodiscard]] bool same_struct_identity(const StructDef& a, const StructDef& b) const {
         if (a.name != b.name || a.namespace_path != b.namespace_path || a.is_union != b.is_union ||
+            a.is_forward_declaration != b.is_forward_declaration ||
             a.is_packed != b.is_packed || a.thread_movable_override != b.thread_movable_override ||
             a.thread_shareable_override != b.thread_shareable_override || a.is_nodiscard != b.is_nodiscard ||
             a.nodiscard_reason != b.nodiscard_reason ||
@@ -1453,6 +1456,43 @@ private:
             if (a.fields[i].name != b.fields[i].name || !types_equal(a.fields[i].type, b.fields[i].type)) return false;
         }
         return true;
+    }
+
+    [[nodiscard]] static std::string_view record_tag_keyword(RecordTagKind kind) {
+        switch (kind) {
+            case RecordTagKind::Struct: return "struct";
+            case RecordTagKind::Class: return "class";
+            case RecordTagKind::Union: return "union";
+        }
+        return "record";
+    }
+
+    void register_record_tag_kind(const std::string& name, RecordTagKind kind, const SourceLocation& loc) {
+        auto [it, inserted] = record_tag_kinds_.emplace(name, kind);
+        if (!inserted && it->second != kind) {
+            throw ParseError(loc.line, loc.column,
+                             "'" + name + "' was previously declared as " +
+                                 std::string(record_tag_keyword(it->second)) + " and cannot later be declared as " +
+                                 std::string(record_tag_keyword(kind)));
+        }
+    }
+
+    [[nodiscard]] bool exported_forward_struct_exists(const Program& program, const std::string& name) const {
+        for (const StructDef& def : program.structs) {
+            if (def.name == name && def.is_forward_declaration && def.is_exported) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool exported_forward_class_exists(const Program& program, const std::string& name) const {
+        for (const ClassDef& def : program.classes) {
+            if (def.name == name && def.is_forward_declaration && def.is_exported &&
+                def.template_params.empty() && !def.is_variadic_primary_template && !def.is_variadic_specialization &&
+                !def.is_partial_specialization) {
+                return true;
+            }
+        }
+        return false;
     }
 
     [[nodiscard]] bool same_class_identity(const ClassDef& a, const ClassDef& b) const {
@@ -2482,7 +2522,10 @@ private:
         }
         for (const StructDef& def : imported.structs) {
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
-            if (def.is_exported) struct_names_.insert(def.name);
+            if (def.is_exported) {
+                struct_names_.insert(def.name);
+                register_record_tag_kind(def.name, def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, def.loc);
+            }
             if (def.is_exported && !def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
@@ -2506,6 +2549,7 @@ private:
             if (def.is_exported) {
                 struct_names_.insert(def.name);
                 class_names_.insert(def.name);
+                register_record_tag_kind(def.name, RecordTagKind::Class, def.loc);
             }
             if (def.is_exported && (!def.template_params.empty() || def.is_variadic_primary_template)) {
                 generic_type_names_.insert(def.name);
@@ -2616,6 +2660,7 @@ private:
         }
         for (StructDef& def : partition.structs) {
             struct_names_.insert(def.name);
+            register_record_tag_kind(def.name, def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, def.loc);
             if (!def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
@@ -2634,6 +2679,7 @@ private:
         for (ClassDef& def : partition.classes) {
             struct_names_.insert(def.name);
             class_names_.insert(def.name);
+            register_record_tag_kind(def.name, RecordTagKind::Class, def.loc);
             if (!def.template_params.empty() || def.is_variadic_primary_template) {
                 generic_type_names_.insert(def.name);
                 if (def.is_variadic_primary_template) {
@@ -2744,7 +2790,7 @@ private:
             reject_unsafe_if_requested("a 'struct' declaration");
             SourceLocation loc = current_loc();
             StructDef def = parse_struct_def(program, {}, std::move(leading_alignments));
-            def.is_exported = is_exported;
+            def.is_exported = is_exported || exported_forward_struct_exists(program, def.name);
             check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwEnum)) {
@@ -3211,6 +3257,7 @@ private:
         }
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
+        register_record_tag_kind(def.name, RecordTagKind::Struct, loc);
         // Register the (fully-qualified) name before parsing the body so
         // a field can refer to the enclosing struct via a pointer (e.g.
         // `Node* next;`).
@@ -3254,6 +3301,22 @@ private:
             const Token& tok = maybe_base_clause_tok;
             throw ParseError(tok.line, tok.column,
                              "a declaration introduced by 'struct' shall not have a base-clause (spec §11.1(2.1))");
+        }
+
+        if (match(TokenKind::Semicolon)) {
+            if (is_generic) {
+                throw ParseError(loc.line, loc.column,
+                                 "an ordinary bodyless forward declaration is only supported for a non-generic "
+                                 "'struct' in this version");
+            }
+            if (def.is_packed || !def.alignment_specs.empty() || def.thread_movable_override || def.thread_shareable_override ||
+                def.is_nodiscard) {
+                throw ParseError(loc.line, loc.column,
+                                 "scpp struct layout/thread/nodiscard attributes are not supported on a bodyless "
+                                 "forward declaration");
+            }
+            def.is_forward_declaration = true;
+            return def;
         }
 
         parse_record_body_into(
@@ -3317,6 +3380,7 @@ private:
         }
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
+        register_record_tag_kind(def.name, RecordTagKind::Union, loc);
         struct_names_.insert(def.name);
 
         expect(TokenKind::LBrace, "'{'");
@@ -4415,6 +4479,7 @@ private:
         // registration order as parse_struct_def.
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
+        register_record_tag_kind(qualified_class_name, RecordTagKind::Class, loc);
         if (is_generic) {
             bool saw_type = false;
             bool saw_non_type = false;
@@ -4457,10 +4522,28 @@ private:
             def.thread_movable_if_shareable_expr = std::move(class_attrs.thread_movable_if_shareable_expr);
         }
         def.namespace_path = namespace_stack_;
-        def.is_exported = is_exported;
+        def.is_exported = is_exported || exported_forward_class_exists(program, qualified_class_name);
         def.template_params = template_params;
         if (is_generic) def.template_owner_id = next_generic_template_owner_id();
         check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+
+        if (match(TokenKind::Semicolon)) {
+            if (is_generic) {
+                throw ParseError(loc.line, loc.column,
+                                 "an ordinary bodyless forward declaration is only supported for a non-generic "
+                                 "'class' in this version");
+            }
+            if (!def.alignment_specs.empty() || def.thread_movable_override || def.thread_shareable_override ||
+                def.thread_movable_if_movable_expr || def.thread_movable_if_shareable_expr || def.is_interface ||
+                def.is_nodiscard) {
+                throw ParseError(loc.line, loc.column,
+                                 "scpp class layout/thread/interface/nodiscard attributes are not supported on a "
+                                 "bodyless forward declaration");
+            }
+            def.is_forward_declaration = true;
+            program.classes.push_back(std::move(def));
+            return;
+        }
 
         // ch05 §5.14: `class Derived : public/private Base { ... };` --
         // real C++ single-inheritance syntax verbatim. `Base` must

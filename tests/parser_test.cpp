@@ -589,6 +589,46 @@ void test_template_specialization_static_member_call_parses() {
            "template_specialization_static_member_call_parses: expected specialized static make function");
 }
 
+void test_struct_forward_declaration_parses_and_reconciles() {
+    scpp::Program program = scpp::parse(
+        "struct Node;\n"
+        "struct Node { Node* next; int value; };\n");
+    expect(program.structs.size() == 2,
+           "struct_forward_declaration_parses_and_reconciles: expected forward declaration plus definition");
+    expect(program.structs[0].is_forward_declaration,
+           "struct_forward_declaration_parses_and_reconciles: first declaration should be forward-only");
+    expect(!program.structs[1].is_forward_declaration,
+           "struct_forward_declaration_parses_and_reconciles: second declaration should be the full definition");
+    expect(program.structs[1].fields.size() == 2,
+           "struct_forward_declaration_parses_and_reconciles: full definition should keep its fields");
+}
+
+void test_class_forward_declaration_parses_and_reconciles() {
+    scpp::Program program = scpp::parse(
+        "class Box;\n"
+        "class Box {\n"
+        "public:\n"
+        "    virtual ~Box() { return; }\n"
+        "    Box* next{};\n"
+        "};\n");
+    expect(program.classes.size() == 2,
+           "class_forward_declaration_parses_and_reconciles: expected forward declaration plus definition");
+    expect(program.classes[0].is_forward_declaration,
+           "class_forward_declaration_parses_and_reconciles: first declaration should be forward-only");
+    expect(!program.classes[1].is_forward_declaration,
+           "class_forward_declaration_parses_and_reconciles: second declaration should be the full definition");
+}
+
+void test_record_forward_declaration_tag_mismatch_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("struct Box;\nclass Box { public: virtual ~Box() { return; } };\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "record_forward_declaration_tag_mismatch_is_rejected: expected a ParseError");
+}
+
 // ch01 §1.3 (1): `[[scpp::unsafe]]` may only appertain to a compound-
 // statement or a function's own declaration -- appertaining to a
 // struct/class declaration is ill-formed.
@@ -4022,6 +4062,9 @@ int main() {
     test_nodiscard_function_and_method_attributes_parse();
     test_static_member_function_parses_without_this();
     test_template_specialization_static_member_call_parses();
+    test_struct_forward_declaration_parses_and_reconciles();
+    test_class_forward_declaration_parses_and_reconciles();
+    test_record_forward_declaration_tag_mismatch_is_rejected();
     test_unsafe_attribute_on_struct_is_rejected();
     test_thread_safety_attribute_on_struct_parses();
     test_thread_safety_attributes_on_class_parse();

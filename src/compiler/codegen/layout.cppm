@@ -193,6 +193,10 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
 
     void Codegen::declare_struct(const StructDef& def)
 {
+        if (def.is_forward_declaration) {
+            throw CodegenError("forward-declared struct '" + def.name + "' requires a full definition before layout is needed",
+                current_loc_);
+        }
         if (declaring_aggregates_.contains(def.name)) return;
         declaring_aggregates_.insert(def.name);
         StructInfo info;
@@ -305,6 +309,10 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
 
     void Codegen::declare_class(const ClassDef& def)
 {
+        if (def.is_forward_declaration) {
+            throw CodegenError("forward-declared class '" + def.name + "' requires a full definition before layout is needed",
+                current_loc_);
+        }
         if (declaring_aggregates_.contains(def.name)) return;
         declaring_aggregates_.insert(def.name);
         StructInfo info;
@@ -467,20 +475,36 @@ unsigned pointer_abi_alignment_for_as(LLVMModuleRef module, unsigned address_spa
                     if (it != structs_.end()) return it->second.llvm_type;
                 }
                 if (!declaring_aggregates_.contains(type.name) && program_ != nullptr) {
+                    const StructDef* struct_def = nullptr;
                     for (const StructDef& def : program_->structs) {
-                        if (def.name == type.name && def.template_params.empty()) {
-                            declare_struct(def);
-                            auto it = structs_.find(type.name);
-                            if (it != structs_.end()) return it->second.llvm_type;
+                        if (def.name != type.name || !def.template_params.empty()) continue;
+                        if (!def.is_forward_declaration) {
+                            struct_def = &def;
+                            break;
                         }
+                        if (struct_def == nullptr) struct_def = &def;
                     }
+                    if (struct_def != nullptr) {
+                        declare_struct(*struct_def);
+                        auto it = structs_.find(type.name);
+                        if (it != structs_.end()) return it->second.llvm_type;
+                    }
+                    const ClassDef* class_def = nullptr;
                     for (const ClassDef& def : program_->classes) {
-                        if (def.name == type.name && def.template_params.empty() && !def.is_synthetic_check_only &&
-                            !def.is_concept_witness) {
-                            declare_class(def);
-                            auto it = structs_.find(type.name);
-                            if (it != structs_.end()) return it->second.llvm_type;
+                        if (def.name != type.name || !def.template_params.empty() || def.is_synthetic_check_only ||
+                            def.is_concept_witness) {
+                            continue;
                         }
+                        if (!def.is_forward_declaration) {
+                            class_def = &def;
+                            break;
+                        }
+                        if (class_def == nullptr) class_def = &def;
+                    }
+                    if (class_def != nullptr) {
+                        declare_class(*class_def);
+                        auto it = structs_.find(type.name);
+                        if (it != structs_.end()) return it->second.llvm_type;
                     }
                 }
                 throw CodegenError("unsupported type '" + type.name + "'",
