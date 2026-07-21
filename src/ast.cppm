@@ -1079,6 +1079,11 @@ struct StructDef {
     // monomorphized struct injected into Program::structs by the
     // Monomorphizer, with its own distinct mangled name.
     std::vector<GenericTypeParam> template_params;
+    // True for an ordinary bodyless forward declaration with no field list
+    // yet (e.g. `struct Node;`). Such a declaration introduces the name so
+    // later source may form pointers/references to it before a matching full
+    // definition appears, but contributes no layout on its own.
+    bool is_forward_declaration = false;
     // Non-empty only for this template definition's own identity while it
     // remains symbolic (generic). Lets later compiler passes distinguish
     // multiple template definitions sharing the same exposed name. Empty on
@@ -1503,10 +1508,13 @@ struct TypeLayoutInfo {
         }
 
         [[nodiscard]] const StructDef* find_struct(std::string_view name) const {
+            const StructDef* forward_decl = nullptr;
             for (const StructDef& def : program.structs) {
-                if (def.name == name) return &def;
+                if (def.name != name) continue;
+                if (!def.is_forward_declaration) return &def;
+                if (forward_decl == nullptr) forward_decl = &def;
             }
-            return nullptr;
+            return forward_decl;
         }
 
         [[nodiscard]] const ClassDef* find_class(std::string_view name) const {
@@ -1576,6 +1584,10 @@ struct TypeLayoutInfo {
                     visiting_named_types.insert(current.name);
                     auto clear_visit = [&]() { visiting_named_types.erase(current.name); };
                     if (const StructDef* def = find_struct(current.name)) {
+                        if (def->is_forward_declaration) {
+                            clear_visit();
+                            return std::nullopt;
+                        }
                         if (!def->is_union) {
                             std::uint64_t offset = 0;
                             std::uint64_t overall_align = 1;

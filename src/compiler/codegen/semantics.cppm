@@ -7,12 +7,14 @@ import :api;
 
 namespace scpp {
 
-    const StructDef* Codegen::find_struct_def(const std::string& name) const
-{
+    const StructDef* Codegen::find_struct_def(const std::string& name) const {
+        const StructDef* forward_decl = nullptr;
         for (const StructDef& def : program_->structs) {
-            if (def.name == name) return &def;
+            if (def.name != name) continue;
+            if (!def.is_forward_declaration) return &def;
+            if (forward_decl == nullptr) forward_decl = &def;
         }
-        return nullptr;
+        return forward_decl;
     }
 
 

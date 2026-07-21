@@ -104,6 +104,7 @@ namespace scpp {
         std::unordered_set<std::string> witness_class_names;
         std::unordered_set<std::string> generic_type_template_names;
         for (const StructDef& def : program.structs) {
+            if (def.is_forward_declaration) continue;
             if (!def.template_params.empty()) {
                 generic_type_template_names.insert(def.name);
                 continue;
@@ -123,6 +124,7 @@ namespace scpp {
                 generic_type_template_names.insert(def.name);
                 continue;
             }
+            if (def.is_forward_declaration) continue;
             if (def.is_synthetic_check_only) continue;
             declare_class(def);
         }
