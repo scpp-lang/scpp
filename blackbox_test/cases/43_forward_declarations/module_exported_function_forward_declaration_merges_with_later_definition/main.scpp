@@ -1,0 +1,7 @@
+// An exported ordinary forward declaration can be defined later without a
+// second `export`; importers still see the function as exported.
+import mathlib;
+
+int main() {
+    return mathlib::is_even(6) - 1;
+}

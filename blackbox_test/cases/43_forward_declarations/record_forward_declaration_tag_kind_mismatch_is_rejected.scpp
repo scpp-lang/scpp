@@ -1,0 +1,8 @@
+// A forward declaration fixes the record tag kind too: a later `class`
+// definition cannot redefine the same name after `struct Name;`.
+struct Widget;
+
+class Widget {
+public:
+    int value;
+};

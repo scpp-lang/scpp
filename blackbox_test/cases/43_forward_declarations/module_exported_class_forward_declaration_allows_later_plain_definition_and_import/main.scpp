@@ -1,0 +1,8 @@
+// An exported class forward declaration is enough for the later plain full
+// definition to remain visible and usable by importers.
+import boxes;
+
+int main() {
+    boxes::Box box = boxes::make_box(7);
+    return box.value - 7;
+}

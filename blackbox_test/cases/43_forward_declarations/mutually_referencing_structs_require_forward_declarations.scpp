@@ -1,0 +1,30 @@
+// Two records that mention each other by pointer need a forward declaration
+// so each name is known before the later full definition arrives.
+struct Right;
+
+struct Left {
+    Right* peer;
+    int value;
+};
+
+struct Right {
+    Left* peer;
+    int value;
+};
+
+int main() {
+    Left left{};
+    Right right{};
+    left.peer = &right;
+    right.peer = &left;
+    left.value = 4;
+    right.value = 6;
+    int score = 0;
+    if (left.peer == &right) {
+        score = score + 1;
+    }
+    if (right.peer == &left) {
+        score = score + 2;
+    }
+    return left.value + right.value - 7 - score;
+}

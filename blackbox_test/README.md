@@ -140,6 +140,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `40_operator_arrow` | `operator->`: recursive arrow chaining, cv-correct selection, ordinary-vs-unsafe call gating, and raw-pointer leaf requirements |
 | `41_global_variables` | file-scope/global variable declarations: plain globals, const globals, cross-function mutation, and `alignas` acceptance/rejection rules |
 | `42_array_bound_expressions` | array declarators (ch05 §9.4): literal/`sizeof`/`alignof`/arithmetic/global-`constexpr`-named-constant bounds applied uniformly at local-variable, struct/class-field, and function-parameter sites; rejection of non-constant, zero, negative, and self-referential-incomplete-type bounds; a generic type's `sizeof(T)`-dependent bound resolved independently per instantiation; a ternary bound over two template parameters' `sizeof`s resolving correctly for both branches (each selected by a different instantiation); and the current local-`constexpr`-as-later-local-bound scope boundary |
+| `43_forward_declarations` | ordinary function forward declarations at namespace/module scope, exported-forward-declaration reconciliation, struct/class forward declarations, tag-kind mismatch diagnostics, and the deliberate permissive by-value-use-before-later-definition behavior |
 
 ## Testing philosophy
 
