@@ -1,26 +1,27 @@
 // target_machine.cpp
 //
-// `llvm.target_machine`: a fresh, standalone, top-level module -- not a
-// partition or nested submodule of `scpp` (this project's own
-// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`) or
-// `llvm.core`/`llvm.types`/`llvm.debug_info`/`llvm.target` (the four
-// sibling modules in this same directory). Its
-// only job is to give this compiler's own real-C++ `src/*.cppm` files a
-// way to reach official LLVM-C's `llvm-c/TargetMachine.h` surface via
-// `import llvm.target_machine;` instead of
-// `#include <llvm-c/TargetMachine.h>` -- scpp (the language) has no
-// preprocessor/#include at all, so any raw #include left in this
+// `llvm:target_machine`: the `:target_machine` partition of module `llvm`
+// (see llvm.cpp, the primary module interface unit, same directory) --
+// not a standalone, top-level module of its own any more (see types.cpp's
+// own "Module consolidation / attachment note" for the general
+// background; this file's own version of that note is below). Its only
+// job is to give this compiler's own real-C++ `src/*.cppm` files a way to
+// reach official LLVM-C's `llvm-c/TargetMachine.h` surface via
+// `import llvm;` (which re-exports every partition, this one included)
+// instead of `#include <llvm-c/TargetMachine.h>` -- scpp (the language)
+// has no preprocessor/#include at all, so any raw #include left in this
 // compiler's own sources is a hard blocker for eventual self-hosting.
 //
 // This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
-// only by real clang++ (see the `llvm_target_machine` CMake target in
-// libs/llvm/CMakeLists.txt) and never fed to the scpp compiler itself --
-// exactly like `llvm.core`'s core.cpp, `llvm.types`'s types.cpp,
-// `llvm.debug_info`'s debug_info.cpp, and `llvm.target`'s target.cpp,
+// only by real clang++ (see the single `llvm` CMake target in
+// libs/llvm/CMakeLists.txt, which compiles this file together with
+// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// and never fed to the scpp compiler itself -- exactly like `llvm:core`'s
+// core.cpp, `llvm:types`'s types.cpp, and `llvm:target`'s target.cpp,
 // there is no aspiration here for this specific file to also be
-// scpp-parseable today. `export module llvm.target_machine;` below is
-// nonetheless unrestricted, standard C++20 module syntax -- real ISO
-// C++, nothing scpp-specific about it -- so the resulting compiled
+// scpp-parseable today. `export module llvm:target_machine;` below is
+// nonetheless unrestricted, standard C++20 module-partition syntax -- real
+// ISO C++, nothing scpp-specific about it -- so the resulting compiled
 // module interface will still be `import`able the same way from
 // scpp-compiled code, once these files themselves eventually get
 // rewritten in scpp; only this file's own *source* needs never be
@@ -43,63 +44,50 @@
 // `...GlobalISel`/`...GlobalISelAbort`/`...MachineOutliner`,
 // `LLVMTargetMachineEmitToMemoryBuffer`, `LLVMNormalizeTargetTriple`,
 // `LLVMGetHostCPUName`/`...Features`, and `LLVMAddAnalysisPasses`, none
-// of which src/driver.cppm needs). The other still-`#include`d
-// llvm-c/*.h header referenced by this project's own sources
-// (Analysis.h, in src/compiler/codegen/orchestration.cppm, a different
-// file entirely) is deliberately untouched -- out of scope for this
-// change, left for its own later, equally narrow follow-up. This
-// module's own introduction leaves that single header as the only
-// `#include <llvm-c/*.h>` left anywhere in this project's own compiler
-// *sources* still awaiting a migration like this one
-// (`native_target_init.cpp`, same directory, keeps its own separate,
-// deliberate, permanent `#include <llvm-c/Target.h>` -- see its own
-// header comment -- but that one is never `import`ed by anything and was
-// always meant to be a permanent bridge, not a temporary stepping stone
-// like this file).
+// of which src/driver.cppm needs).
 //
-// Depends on `llvm.types` (types.cpp, same directory) for `LLVMModuleRef`
+// Depends on `llvm:types` (types.cpp, same directory) for `LLVMModuleRef`
 // (the module handle `LLVMTargetMachineEmitToFile` below emits) and
 // `LLVMBool` (the shared boolean-result convention `LLVMGetTargetFromTriple`
 // and `LLVMTargetMachineEmitToFile` below both return): those are
 // genuinely llvm-c/Types.h's own declarations, not TargetMachine.h's --
-// exactly the same reasoning `llvm.core`, `llvm.debug_info`, and
-// `llvm.target` already rely on for their own `import llvm.types;` (see
-// core.cpp/debug_info.cpp/target.cpp). Also depends on `llvm.target`
+// exactly the same reasoning `llvm:core`, `llvm:debug_info`, and
+// `llvm:target` already rely on for their own `import :types;` (see
+// core.cpp/debug_info.cpp/target.cpp). Also depends on `llvm:target`
 // (target.cpp, same directory) for `LLVMTargetDataRef` (the data-layout
 // handle `LLVMCreateTargetDataLayout` below returns): that one is
 // genuinely llvm-c/Target.h's own declaration (`typedef struct
 // LLVMOpaqueTargetData *LLVMTargetDataRef;`), not TargetMachine.h's --
 // real llvm-c/TargetMachine.h itself only reaches it by its own
 // `#include "llvm-c/Target.h"`, exactly mirroring how this module reaches
-// it by `import llvm.target;` instead of re-declaring a second, private
-// copy. Like `llvm.debug_info` and `llvm.target` themselves, this module
+// it by `import :target;` instead of re-declaring a second, private copy.
+// Like `llvm:debug_info` and `llvm:target` themselves, this partition
 // does *not* `export import` either dependency: src/driver.cppm, its one
 // current consumer, already reaches every one of these three aliases
-// through its own separate `import llvm.core;` (which re-exports
-// `llvm.types`) and `import llvm.target;` (declared directly), so
+// through its own single `import llvm;` (which brings in every partition,
+// `:core` -- re-exporting `:types` -- and `:target` included), so
 // re-exporting the same names a second time here would only widen this
-// module's own public surface with no consumer needing it through this
-// path -- a plain `import` still makes every one of those aliases
-// nameable within this file's own module purview below (which is all
-// this file itself needs), and reachable to any importer of this module
-// that sees one of the `export`ed function signatures below mentioning
-// them.
+// partition's own public surface with no consumer needing it through this
+// path -- a plain `import` still makes every one of those aliases nameable
+// within this file's own module purview below (which is all this file
+// itself needs), and reachable to any importer of this module that sees
+// one of the `export`ed function signatures below mentioning them.
 //
 // `LLVMTargetRef` and `LLVMTargetMachineRef`, unlike every alias reused
 // above, are genuinely TargetMachine.h's *own* declarations
 // (`typedef struct LLVMTarget *LLVMTargetRef;` and `typedef struct
 // LLVMOpaqueTargetMachine *LLVMTargetMachineRef;`) -- so, mirroring how
-// `LLVMTargetDataRef`/`LLVMOpaqueTargetData` stays in `llvm.target`
-// rather than moving to `llvm.types` (see target.cpp's own header
-// comment), they are declared here, in this module, rather than added to
-// `llvm.types` or `llvm.target`. Note the real header's own naming
+// `LLVMTargetDataRef`/`LLVMOpaqueTargetData` stays in `llvm:target`
+// rather than moving to `llvm:types` (see target.cpp's own header
+// comment), they are declared here, in this partition, rather than added
+// to `llvm:types` or `llvm:target`. Note the real header's own naming
 // inconsistency, kept byte-for-byte here since each tag name must match
 // upstream exactly for the two declarations to denote the same type:
 // `LLVMTargetRef`'s pointee tag is spelled plain `LLVMTarget` (no
 // `Opaque` prefix, unlike almost every other opaque handle across any of
-// these five modules), while `LLVMTargetMachineRef`'s pointee tag is
+// these six partitions), while `LLVMTargetMachineRef`'s pointee tag is
 // spelled `LLVMOpaqueTargetMachine` (with the usual prefix) -- exactly
-// the same kind of upstream quirk `llvm.types` already documents for its
+// the same kind of upstream quirk `llvm:types` already documents for its
 // own `LLVMOpaqueAttributeRef` (see types.cpp's own header comment).
 // `LLVMCreateTargetMachineOptions`'s own pointee tag,
 // `LLVMOpaqueTargetMachineOptions`, is not declared at all: the whole
@@ -108,91 +96,115 @@
 // `LLVMCreateTargetMachine` overload directly instead.
 //
 // This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
-// declarations *are* the public surface
-// src/driver.cppm calls directly, exactly as it did through the real
-// header, so `LLVMTargetRef` and `LLVMTargetMachineRef` (declared by this
-// module) are each their own distinct pointer type, and distinct from
-// every handle kind reused from `llvm.types`/`llvm.target` too (never a
-// shared `void*`) -- otherwise the compiler could no longer catch e.g. an
-// `LLVMTargetRef` accidentally passed where an `LLVMTargetMachineRef` was
-// expected, silently trading a compile error for a runtime bug.
+// declarations *are* the public surface src/driver.cppm calls directly,
+// exactly as it did through the real header, so `LLVMTargetRef` and
+// `LLVMTargetMachineRef` (declared by this module) are each their own
+// distinct pointer type, and distinct from every handle kind reused from
+// `llvm:types`/`llvm:target` too (never a shared `void*`) -- otherwise
+// the compiler could no longer catch e.g. an `LLVMTargetRef` accidentally
+// passed where an `LLVMTargetMachineRef` was expected, silently trading a
+// compile error for a runtime bug.
 //
-// Module-attachment note: both `LLVMTarget` and `LLVMOpaqueTargetMachine`
-// -- the two new opaque handle struct tags this module introduces -- live
-// in this file's own *global module fragment* (the `module;` ...
-// declarations ... before `export module llvm.target_machine;` below),
-// deliberately *not* in the module purview, and are never `export`ed
-// directly (a global module fragment cannot export anything; only
-// `LLVMTargetRef`/`LLVMTargetMachineRef`, the pointer aliases further
-// below, are exported). This mirrors exactly the same rule `llvm.types`
-// and `llvm.target` already established for their own struct tags (see
-// types.cpp's/target.cpp's own header comments for the full "two
-// declarations of the same struct tag denote the same entity only if
-// both are attached to the same named module, or neither is attached to
-// any named module" rationale) -- applied here even though, unlike every
-// prior module's introduction, src/driver.cppm's own edit (see below)
-// removes the *last* `#include <llvm-c/*.h>` in that file, leaving no
-// other, competing, unattached declaration of either tag anywhere in that
-// translation unit any more. An unattached global-module-fragment
-// declaration is well-formed and self-sufficient on its own, whether or
-// not some other unattached copy of the same tag also happens to exist
-// elsewhere in the same translation unit, so this placement remains
-// correct (and future-proofs this module the same way `llvm.target`'s own
-// tag is future-proofed, against any not-yet-existing future consumer
-// that might combine `import llvm.target_machine;` with some other real,
-// still-`#include`d header transitively reaching the same tags
-// unattached) even though the specific historical trigger -- a
-// still-`#include`d TargetMachine.h/Target.h transitively reaching the
-// same tags unattached in the *same* file that also imports the module --
-// no longer applies to src/driver.cppm today. Verified directly against
-// this project's own real build, not just reasoned about in isolation.
+// Module consolidation / attachment note: before the six `llvm.<name>`
+// modules (PRs #290-295) were merged into six partitions of one module
+// `llvm` (see llvm.cpp), both `LLVMTarget` and `LLVMOpaqueTargetMachine`
+// -- the two opaque handle struct tags this partition introduces -- lived
+// in this file's own *global module fragment* (a `module;` ...
+// declarations ... block before the module-declaration), deliberately
+// unattached to any module, rather than declared in the module purview --
+// mirroring the same rule `llvm.types` and `llvm.target` already
+// established for their own struct tags (see types.cpp's/target.cpp's own
+// header comments for the full "two declarations of the same struct tag
+// denote the same entity only if both are attached to the same named
+// module, or neither is attached to any named module" rationale). This
+// was applied even though, unlike either prior module's own introduction,
+// src/driver.cppm's own edit at the time removed the *last*
+// `#include <llvm-c/*.h>` in that file, leaving no other, competing,
+// unattached declaration of either tag anywhere in that translation unit
+// any more -- kept anyway as the same uniform, defensive convention every
+// `llvm.*` module applied to every opaque handle tag it introduced,
+// future-proofing against any not-yet-existing future consumer that might
+// reintroduce a competing raw `#include` later.
 //
-// This *does*, however, surface a new wrinkle none of the four prior
-// modules ever hit: unlike every existing consumer of any of those four
-// modules -- which only ever spell each opaque handle kind through its
-// exported pointer-alias name (`LLVMContextRef`, `LLVMTargetDataRef`,
-// ...), never the bare struct tag itself -- src/driver.cppm's own
-// pre-existing code spells `LLVMOpaqueTargetMachine` directly, as the
-// pointee type of a `std::unique_ptr`
+// That defensive future-proofing is no longer needed, for reasons beyond
+// "no consumer happens to have a competing #include today" (already true
+// when this partition's own module was first introduced) -- see types.cpp's
+// own "Module consolidation / attachment note" for the fuller version of
+// the argument, written for `:types`'s own tags. This project's `src/`
+// sources have had, and can only ever have, zero raw `#include <llvm-c/*.h>`
+// left in them at all: scpp (the language) has no preprocessor/#include of
+// its own, so any raw #include in this compiler's own sources is a
+// permanent, structural blocker for the self-hosting this whole
+// multi-partition `llvm` module exists to enable, not a temporary gap
+// that might reopen. Independently: now that `:target_machine` and every
+// sibling partition that might someday also need one of these two tags
+// are all part of the very same module `llvm`, a declaration attached to
+// partition `:target_machine` is, per C++20's own module rules,
+// considered attached to module `llvm` as a whole -- so it already agrees
+// with any hypothetical future redeclaration in another `llvm:*`
+// partition's own purview, with no global-module-fragment indirection
+// required. The one remaining `#include <llvm-c/Target.h>` anywhere in
+// this project (native_target_init.cpp, same directory) does not change
+// this either: it is a deliberately plain, never-`import`ed `.cpp` that
+// never imports this module (or any `llvm:*` partition), compiled as its
+// own, wholly separate translation unit into its own small static
+// library, so its own unattached copies of these tags never coexist, in
+// any single translation unit, with this partition's own declarations.
+//
+// With that, both `LLVMTarget` and `LLVMOpaqueTargetMachine` are declared
+// directly in this partition's own module purview (attached to module
+// `llvm`, like every other declaration in every `llvm:*` partition)
+// rather than in a global module fragment -- simpler, with no remaining
+// conflict to guard against; only their pointer aliases
+// (`LLVMTargetRef`/`LLVMTargetMachineRef`) are `export`ed. Verified
+// empirically against this project's own full clean build, not just
+// reasoned about in isolation.
+//
+// This *does* still preserve one real wrinkle, unrelated to attachment:
+// src/driver.cppm's own pre-existing code spells `LLVMOpaqueTargetMachine`
+// directly, as the pointee type of a `std::unique_ptr`
 // (`std::unique_ptr<LLVMOpaqueTargetMachine, void (*)(LLVMTargetMachineRef)>`),
 // to name the type `LLVMDisposeTargetMachine` (the deleter) operates on.
-// A global-module-fragment declaration is reachable but, unlike an
-// exported declaration, is not *visible* to ordinary unqualified name
-// lookup in an importer that has no other route to the same name -- so,
-// once src/driver.cppm's own `#include <llvm-c/TargetMachine.h>` is gone,
-// plainly writing the bare `LLVMOpaqueTargetMachine` identifier there
-// would no longer resolve to anything, breaking the build. Rather than
-// exporting the tag directly from this module's purview (which would
-// abandon the module-attachment safety net above for no real benefit,
-// since nothing else needs the bare tag nameable), src/driver.cppm's own
-// one call site is updated instead, from the bare tag name to
+// A module-purview declaration that is not `export`ed is reachable but,
+// like a global-module-fragment declaration, not *visible* to ordinary
+// unqualified name lookup in an importer that has no other route to the
+// same name -- attachment and exportedness are independent C++20 module
+// properties, so moving the tag from the global module fragment into the
+// purview changes neither the diagnosis nor the fix here. src/driver.cppm's
+// own one call site therefore still spells this type as
 // `std::remove_pointer_t<LLVMTargetMachineRef>` -- the identical type,
 // computed from the exported (and therefore genuinely visible) alias
-// instead of the unattached (reachable-only) tag, needing no unqualified
+// instead of the unexported (reachable-only) tag, needing no unqualified
 // lookup of the tag's own name at all. `std::remove_pointer_t` comes from
 // `<type_traits>`, already reachable via src/driver.cppm's own
-// pre-existing `import std;`. Verified directly against this project's
-// own real build, not just reasoned about in isolation -- exactly the
-// same empirical discipline every one of the four prior modules already
-// applied.
+// pre-existing `import std;`.
 module;
 
+export module llvm:target_machine;
+
+import :types;
+import :target;
+
+// ---------------------------------------------------------------------
+// Opaque handle struct tags (llvm-c/TargetMachine.h)
+// ---------------------------------------------------------------------
+// Declared here, in this partition's own module purview (attached to
+// module `llvm`, see this file's own "Module consolidation / attachment
+// note" above), but never `export`ed directly: src/driver.cppm, the one
+// consumer that used to need the bare `LLVMOpaqueTargetMachine` name
+// directly, now spells it as `std::remove_pointer_t<LLVMTargetMachineRef>`
+// instead (see this file's own header comment) -- so nothing outside this
+// file needs to *name* either raw tag any more.
 struct LLVMOpaqueTargetMachine;
 struct LLVMTarget;
-
-export module llvm.target_machine;
-
-import llvm.types;
-import llvm.target;
 
 // ---------------------------------------------------------------------
 // Opaque handle pointer aliases (llvm-c/TargetMachine.h)
 // ---------------------------------------------------------------------
-// Unlike the struct tags above, these pointer aliases *are* declared in
-// the module purview and `export`ed directly: a type-alias redeclaration
-// is always well-formed as long as every redeclaration in scope denotes
-// the exact same type, with none of the struct tags' cross-module
-// attachment restriction above.
+// Unlike the struct tags above, these pointer aliases *are* exported
+// directly: a type-alias redeclaration is always well-formed as long as
+// every redeclaration in scope denotes the exact same type, with none of
+// the struct tags' cross-module attachment restriction above.
 export using LLVMTargetMachineRef = LLVMOpaqueTargetMachine*;
 export using LLVMTargetRef = LLVMTarget*;
 

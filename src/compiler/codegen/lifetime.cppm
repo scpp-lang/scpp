@@ -3,7 +3,7 @@ module;
 module scpp.compiler.codegen:lifetime;
 
 import std;
-import llvm.core;
+import llvm;
 import :api;
 
 namespace scpp {

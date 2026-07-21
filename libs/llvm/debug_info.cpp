@@ -1,27 +1,29 @@
 // debug_info.cpp
 //
-// `llvm.debug_info`: a fresh, standalone, top-level module -- not a
-// partition or nested submodule of `scpp` (this project's own
-// compiler-internal modules, e.g. `scpp.ast`, `scpp.compiler.codegen`) or
-// `llvm.core`/`llvm.types` (the two sibling modules in
-// this same directory). Its only job is to give this compiler's own
-// real-C++ `src/*.cppm` files a way to reach official LLVM-C's
-// `llvm-c/DebugInfo.h` surface via `import llvm.debug_info;` instead of
-// `#include <llvm-c/DebugInfo.h>` -- scpp (the language) has no
+// `llvm:debug_info`: the `:debug_info` partition of module `llvm` (see
+// llvm.cpp, the primary module interface unit, same directory) -- not a
+// standalone, top-level module of its own any more (see types.cpp's own
+// "Module consolidation / attachment note" for the general background).
+// Its only job is to give this compiler's own real-C++ `src/*.cppm` files
+// a way to reach official LLVM-C's `llvm-c/DebugInfo.h` surface via
+// `import llvm;` (which re-exports every partition, this one included)
+// instead of `#include <llvm-c/DebugInfo.h>` -- scpp (the language) has no
 // preprocessor/#include at all, so any raw #include left in this
 // compiler's own sources is a hard blocker for eventual self-hosting.
 //
 // This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
-// only by real clang++ (see the `llvm_debug_info` CMake target in
-// libs/llvm/CMakeLists.txt) and never fed to the scpp compiler itself --
-// exactly like `llvm.core`'s core.cpp and `llvm.types`'s types.cpp, there
-// is no aspiration here for this specific file to also be scpp-parseable
-// today. `export module llvm.debug_info;` below is nonetheless
-// unrestricted, standard C++20 module syntax -- real ISO C++, nothing
-// scpp-specific about it -- so the resulting compiled module interface
-// will still be `import`able the same way from scpp-compiled code, once
-// these files themselves eventually get rewritten in scpp; only this
-// file's own *source* needs never be scpp-parseable.
+// only by real clang++ (see the single `llvm` CMake target in
+// libs/llvm/CMakeLists.txt, which compiles this file together with
+// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// and never fed to the scpp compiler itself -- exactly like `llvm:core`'s
+// core.cpp and `llvm:types`'s types.cpp, there is no aspiration here for
+// this specific file to also be scpp-parseable today. `export module
+// llvm:debug_info;` below is nonetheless unrestricted, standard C++20
+// module-partition syntax -- real ISO C++, nothing scpp-specific about it
+// -- so the resulting compiled module interface will still be
+// `import`able the same way from scpp-compiled code, once these files
+// themselves eventually get rewritten in scpp; only this file's own
+// *source* needs never be scpp-parseable.
 //
 // Scope: only the specific DebugInfo.h declarations actually referenced
 // today by src/compiler/codegen/{orchestration,debug}.cppm -- surveyed
@@ -32,77 +34,67 @@
 // `LLVMDIBuilderCreateStructType`, `LLVMDIBuilderCreateReplaceableCompositeType`,
 // `LLVMDIBuilderCreateGlobalVariableExpression`, the whole
 // `LLVMDIBuilderInsert*Record*` family beyond `...AtEnd` for a declare
-// record, and dozens more, none of which either file needs). The other
-// still-`#include`d llvm-c headers in those same two files (Target.h,
-// Analysis.h) are deliberately untouched -- out of scope for this change,
-// left for their own later, equally narrow follow-ups.
+// record, and dozens more, none of which either file needs).
 //
-// Depends on `llvm.types` (types.cpp, same directory) for every opaque
+// Depends on `llvm:types` (types.cpp, same directory) for every opaque
 // handle pointer alias used below (LLVMContextRef, LLVMModuleRef,
 // LLVMValueRef, LLVMBasicBlockRef, LLVMMetadataRef, LLVMDIBuilderRef,
 // LLVMDbgRecordRef) plus LLVMBool: those are genuinely llvm-c/Types.h's own
-// declarations, not DebugInfo.h's -- exactly the same reasoning `llvm.core`
-// already relies on for its own `import llvm.types;` (see core.cpp).
+// declarations, not DebugInfo.h's -- exactly the same reasoning `llvm:core`
+// already relies on for its own `import :types;` (see core.cpp).
 // `LLVMDbgRecordRef` specifically (the return type of
-// `LLVMDIBuilderInsertDeclareRecordAtEnd` below) is newly added to
-// `llvm.types` by this same change, rather than declared privately here,
-// so that module remains the single, real source of truth for every
-// Types.h declaration any of these `llvm.*` modules need -- see types.cpp's
-// own header comment for the full rationale. Unlike `llvm.core`, this
-// module does *not* `export import llvm.types;`: both current consumers
-// (orchestration.cppm, debug.cppm) already reach every one of those aliases
-// through their own separate `import llvm.core;` (which itself re-exports
-// `llvm.types`), so re-exporting the same names a second time here would
-// only widen this module's own public surface with no consumer needing it
-// through this path -- a plain `import llvm.types;` still makes every one
-// of those aliases nameable within this file's own module purview below
-// (which is all this file itself needs), and reachable (though not
-// separately nameable via this module alone) to any importer of this
-// module that sees one of the `export`ed function signatures below
-// mentioning them, exactly as reachability already works one hop further
-// away for `llvm.core`'s own non-exported internals (see core.cpp's own
-// closing comment on that point).
+// `LLVMDIBuilderInsertDeclareRecordAtEnd` below) is declared by
+// `llvm:types` rather than declared privately here, so that partition
+// remains the single, real source of truth for every Types.h declaration
+// any of these `llvm:*` partitions need -- see types.cpp's own header
+// comment for the full rationale. Unlike `llvm:core`, this partition does
+// *not* `export import :types;`: both current consumers
+// (orchestration.cppm, debug.cppm) already reach every one of those
+// aliases through their own single `import llvm;` (which brings in every
+// partition, `:core` -- itself re-exporting `:types` -- included), so
+// re-exporting the same names a second time here would only widen this
+// partition's own public surface with no consumer needing it through this
+// path -- a plain `import :types;` still makes every one of those aliases
+// nameable within this file's own module purview below (which is all this
+// file itself needs), and reachable to any importer of this module that
+// sees one of the `export`ed function signatures below mentioning them.
 //
 // This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
 // declarations *are* the public surface both orchestration.cppm and
 // debug.cppm call directly, exactly as they did through the real header,
-// so every opaque handle kind involved (declared by `llvm.types`, reused
+// so every opaque handle kind involved (declared by `llvm:types`, reused
 // here via plain `import`) is its own distinct pointer type (never a
 // shared `void*`) -- otherwise the compiler could no longer catch e.g. an
 // `LLVMMetadataRef` accidentally passed where an `LLVMValueRef` was
 // expected, silently trading a compile error for a runtime bug.
 //
-// Module-attachment note: this module's own global module fragment below
-// is empty. The one opaque handle struct tag its own declarations need
-// beyond what `llvm.types` already declared prior to this change
-// (`LLVMOpaqueDbgRecord`, for `LLVMDbgRecordRef`) is a genuine Types.h
-// symbol -- and Types.h's own struct tags are still pervasively,
-// transitively `#include`d, unattached, by the other llvm-c headers still
-// directly `#include`d alongside this module in orchestration.cppm
-// (Analysis.h) and debug.cppm (Target.h), so (exactly as types.cpp's own
-// header comment explains at length) that tag belongs in `llvm.types`'s
-// global module fragment, not a second, private copy declared here -- see
-// this file's own "Depends on `llvm.types`" paragraph above. The four
-// small enum-like types this file *does* declare
-// directly below in its own module purview (`LLVMDIFlags`,
-// `LLVMDWARFSourceLanguage`, `LLVMDWARFEmissionKind`,
-// `LLVMDWARFTypeEncoding`) do not need the same global-module-fragment
-// treatment: unlike Types.h's struct tags, they are genuinely
-// DebugInfo.h's own declarations, and neither Target.h nor Analysis.h (the
-// only other llvm-c headers still `#include`d by these two files) declares
-// or transitively `#include`s any of them -- so, once this change removes
-// the only `#include <llvm-c/DebugInfo.h>` in each of the two files, there
-// is no other, competing, unattached declaration of these four types left
-// anywhere in either translation unit for this module's own attached
-// copies to conflict with. Verified directly against this project's own
-// real build, not just in isolation -- exactly the same empirical
-// discipline `llvm.core` and `llvm.types` already applied.
+// Module-attachment note: this partition's own global module fragment
+// below is empty, and needs no tag placement decision of its own: the one
+// opaque handle struct tag its own declarations need beyond what
+// `llvm:types` already declares (`LLVMOpaqueDbgRecord`, for
+// `LLVMDbgRecordRef`) is a genuine Types.h symbol declared once, by
+// `llvm:types` itself (see types.cpp's own "Module consolidation /
+// attachment note" for the full rationale of why that tag lives in its
+// module purview, attached to module `llvm`, rather than a global module
+// fragment) -- not a second, private copy declared here. The four small
+// enum-like types this file *does* declare directly below in its own
+// module purview (`LLVMDIFlags`, `LLVMDWARFSourceLanguage`,
+// `LLVMDWARFEmissionKind`, `LLVMDWARFTypeEncoding`) never needed any
+// global-module-fragment treatment of their own even before this
+// consolidation: unlike Types.h's struct tags, they are genuinely
+// DebugInfo.h's own declarations, and every one of the ten consumer files
+// under src/ has migrated its last `#include <llvm-c/*.h>` to an
+// `import`, so there is no other, competing, unattached declaration of
+// these four types anywhere in any translation unit for this partition's
+// own attached copies to conflict with. Verified directly against this
+// project's own real build, not just in isolation -- exactly the same
+// empirical discipline `llvm:core` and `llvm:types` already applied.
 module;
 
-export module llvm.debug_info;
+export module llvm:debug_info;
 
 import std;
-import llvm.types;
+import :types;
 
 // ---------------------------------------------------------------------
 // Enums and small typedefs (llvm-c/DebugInfo.h)
@@ -150,7 +142,7 @@ export enum LLVMDWARFEmissionKind {
 
 // Real llvm-c/DebugInfo.h declares `typedef unsigned LLVMDWARFTypeEncoding;`
 // -- a plain type alias (like `LLVMBool`/`LLVMAttributeIndex` in
-// `llvm.types`/`llvm.core`), not a class/struct/enum, so it has none of the
+// `llvm:types`/`llvm:core`), not a class/struct/enum, so it has none of the
 // struct tags' cross-module attachment restriction and can be declared
 // directly here, exported, with no global-module-fragment placement needed.
 export using LLVMDWARFTypeEncoding = unsigned;

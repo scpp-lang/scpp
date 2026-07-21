@@ -2,26 +2,26 @@ module;
 
 // Official LLVM-C (llvm-c/*.h) is itself already a stable, extern "C"
 // interface -- the TargetMachine construction and object-file emission
-// this file performs go through its llvm-c/TargetMachine.h (`import
-// llvm.target_machine;` below) and llvm-c/Target.h (`import
-// llvm.target;` below) functions directly instead of any native LLVM C++
-// header (llvm::TargetRegistry, llvm::TargetMachine,
-// llvm::legacy::PassManager, etc.); the few llvm-c/Core.h pieces this
-// file also touches (LLVMModuleRef, LLVMDisposeMessage) come from
-// `import llvm.core;` instead, see below. See libs/README.md for why
-// this project binds straight to LLVM-C wherever it already covers
-// what's needed -- including LLVMTargetMachineEmitToFile, which alone
-// replaces the raw_fd_ostream + legacy::PassManager + addPassesToEmitFile
-// dance the native C++ API required: a rigorous, function-by-function
-// empirical audit found LLVM-C fully covers every LLVM operation this
-// project's driver needs.
+// this file performs go through its llvm-c/TargetMachine.h (module
+// `llvm`'s `:target_machine` partition) and llvm-c/Target.h (`:target`
+// partition) functions directly instead of any native LLVM C++ header
+// (llvm::TargetRegistry, llvm::TargetMachine, llvm::legacy::PassManager,
+// etc.); the few llvm-c/Core.h pieces this file also touches
+// (LLVMModuleRef, LLVMDisposeMessage) come from the same module's
+// `:core` partition instead -- all reached via the single `import llvm;`
+// below (module `llvm` re-exports every partition, see
+// libs/llvm/llvm.cpp). See libs/README.md for why this project binds
+// straight to LLVM-C wherever it already covers what's needed --
+// including LLVMTargetMachineEmitToFile, which alone replaces the
+// raw_fd_ostream + legacy::PassManager + addPassesToEmitFile dance the
+// native C++ API required: a rigorous, function-by-function empirical
+// audit found LLVM-C fully covers every LLVM operation this project's
+// driver needs.
 
 export module scpp.driver;
 
 import std;
-import llvm.core;
-import llvm.target;
-import llvm.target_machine;
+import llvm;
 import scpp.ast;
 import scpp.compiler.codegen;
 import scpp.constexpr_engine;
@@ -2177,10 +2177,11 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
         // Real llvm-c/Target.h's own LLVMInitializeNativeTarget/
         // LLVMInitializeNativeAsmPrinter are header-only `static inline`
         // functions with no real, exported ABI symbol to declare/link
-        // against -- llvm.target's own scpp_llvm_target_initialize_*
-        // bridge calls through to them via a small shim compiled with the
-        // real header available; see libs/llvm/target.cpp's and
-        // libs/llvm/native_target_init.cpp's own header comments.
+        // against -- the `llvm` module's own `:target` partition's
+        // scpp_llvm_target_initialize_* bridge calls through to them via
+        // a small shim compiled with the real header available; see
+        // libs/llvm/target.cpp's and libs/llvm/native_target_init.cpp's
+        // own header comments.
         scpp_llvm_target_initialize_native_target();
         scpp_llvm_target_initialize_native_asm_printer();
 
@@ -2203,11 +2204,11 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
         // needing a bespoke RAII wrapper type. std::remove_pointer_t
         // recovers the pointee type from the exported LLVMTargetMachineRef
         // alias rather than naming the opaque LLVMOpaqueTargetMachine
-        // struct tag directly: that tag lives in llvm.target_machine's own
-        // global module fragment (unattached, never exported -- see
-        // target_machine.cpp's own header comment), so it is reachable
-        // through the alias but not nameable by ordinary unqualified
-        // lookup here.
+        // struct tag directly: that tag is declared in the `llvm` module's
+        // own `:target_machine` partition, in that partition's module
+        // purview but never exported (see target_machine.cpp's own header
+        // comment), so it is reachable through the alias but not nameable
+        // by ordinary unqualified lookup here.
         std::unique_ptr<std::remove_pointer_t<LLVMTargetMachineRef>, void (*)(LLVMTargetMachineRef)> target_machine(
             LLVMCreateTargetMachine(target, triple.c_str(), "generic", "", codegen_opt_level_for(opt_level),
                                      LLVMRelocPIC, LLVMCodeModelDefault),
