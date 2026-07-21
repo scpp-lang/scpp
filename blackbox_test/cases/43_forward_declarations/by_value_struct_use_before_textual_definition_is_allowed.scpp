@@ -1,0 +1,15 @@
+// scpp deliberately does not enforce C++'s strict source-order incomplete-
+// type rule here: a local variable can use the type by value before the
+// later full definition appears, as long as the same translation unit does
+// define it later.
+struct Token;
+
+int main() {
+    Token token{};
+    token.value = 7;
+    return token.value - 7;
+}
+
+struct Token {
+    int value;
+};

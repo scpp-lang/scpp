@@ -1,0 +1,12 @@
+// A module-scope ordinary forward declaration must reconcile with a later
+// definition whose declarator matches exactly; changing the parameter type
+// is a hard compile error.
+export module mathlib;
+
+namespace mathlib {
+    export int value(int x);
+
+    char value(int x) {
+        return 0;
+    }
+}

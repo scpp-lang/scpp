@@ -1,0 +1,20 @@
+export module boxes;
+
+namespace boxes {
+    export class Box;
+    export Box make_box(int value);
+
+    class Box {
+    public:
+        virtual ~Box() {
+            return;
+        }
+        int value;
+    };
+
+    Box make_box(int value) {
+        Box box{};
+        box.value = value;
+        return box;
+    }
+}
