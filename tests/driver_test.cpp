@@ -500,6 +500,45 @@ void run_module_system_tests() {
         std::filesystem::remove(lib_path);
     }
 
+    // Ordinary forward declarations should work inside a module interface
+    // unit too, including an exported declaration whose later definition
+    // omits a second `export`.
+    {
+        std::string case_name = "module_forward_declarations_enable_mutual_recursion";
+        cases_run++;
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module mathlib;\n"
+            "namespace mathlib {\n"
+            "    export int is_even(int x);\n"
+            "    int is_odd(int x);\n"
+            "    int is_even(int x) {\n"
+            "        if (x == 0) return 1;\n"
+            "        return is_odd(x - 1);\n"
+            "    }\n"
+            "    int is_odd(int x) {\n"
+            "        if (x == 0) return 0;\n"
+            "        return is_even(x - 1);\n"
+            "    }\n"
+            "}\n");
+        std::string main_source =
+            "import mathlib;\n"
+            "int main() {\n"
+            "    return mathlib::is_even(6) - 1;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"mathlib", lib_path.string()}});
+            RunResult run = run_command_capture(exe_path.string() + " 2>&1");
+            std::filesystem::remove(exe_path);
+            expect(run.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(run.exit_code));
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(lib_path);
+    }
+
     // Importing a module whose own module declaration doesn't match the
     // requested name is rejected (a mismatched --import name=path).
     {
