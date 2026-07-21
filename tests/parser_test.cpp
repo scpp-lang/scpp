@@ -2068,6 +2068,50 @@ void test_bare_extern_declaration_is_namespace_qualified() {
            "bare_extern_declaration_is_namespace_qualified: expected qualified name");
 }
 
+void test_module_forward_declarations_reconcile_to_definitions() {
+    scpp::Program program = scpp::parse(
+        "export module mathlib;\n"
+        "namespace mathlib {\n"
+        "    export int is_even(int x);\n"
+        "    int is_odd(int x);\n"
+        "    int is_even(int x) { if (x == 0) return 1; return is_odd(x - 1); }\n"
+        "    int is_odd(int x) { if (x == 0) return 0; return is_even(x - 1); }\n"
+        "}\n");
+    expect(program.functions.size() == 2,
+           "module_forward_declarations_reconcile_to_definitions: expected only the two definitions");
+    const scpp::Function* even = nullptr;
+    const scpp::Function* odd = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "mathlib::is_even") even = &fn;
+        if (fn.name == "mathlib::is_odd") odd = &fn;
+    }
+    expect(even != nullptr, "module_forward_declarations_reconcile_to_definitions: expected mathlib::is_even");
+    expect(odd != nullptr, "module_forward_declarations_reconcile_to_definitions: expected mathlib::is_odd");
+    expect(even != nullptr && even->body != nullptr,
+           "module_forward_declarations_reconcile_to_definitions: is_even should keep its definition body");
+    expect(odd != nullptr && odd->body != nullptr,
+           "module_forward_declarations_reconcile_to_definitions: is_odd should keep its definition body");
+    expect(even != nullptr && even->is_exported,
+           "module_forward_declarations_reconcile_to_definitions: export on the forward declaration should survive");
+    expect(odd != nullptr && !odd->is_exported,
+           "module_forward_declarations_reconcile_to_definitions: non-exported helper should stay private");
+}
+
+void test_module_forward_declaration_mismatched_definition_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "export module mathlib;\n"
+            "namespace mathlib {\n"
+            "    export int value(int x);\n"
+            "    int value(char x) { return x; }\n"
+            "}\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "module_forward_declaration_mismatched_definition_is_rejected: expected a ParseError");
+}
+
 // ch11 §11.4: `export module name:part;` declares an interface
 // partition -- module_name stays just the base dotted name, with the
 // part after ':' recorded separately in partition_name.
@@ -4081,6 +4125,8 @@ int main() {
     test_export_without_any_module_declaration_is_rejected();
     test_bare_extern_declaration_is_module_extern();
     test_bare_extern_declaration_is_namespace_qualified();
+    test_module_forward_declarations_reconcile_to_definitions();
+    test_module_forward_declaration_mismatched_definition_is_rejected();
     test_partition_declaration_sets_partition_name();
     test_implementation_partition_declaration();
     test_partition_import_outside_module_is_rejected();

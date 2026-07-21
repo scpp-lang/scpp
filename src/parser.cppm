@@ -1487,13 +1487,25 @@ private:
         return joined;
     }
 
-    [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Program& program, const Function& fn) const {
-        return program.module_name.empty() && fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c &&
-               !fn.is_module_extern && !fn.is_exported && (fn.params.empty() || fn.params[0].name != "this");
+    [[nodiscard]] bool parsing_compiled_module_interface() const {
+        return source_path_ != nullptr && source_path_->size() >= 6 &&
+               source_path_->substr(source_path_->size() - 6) == ".scppm";
+    }
+
+    [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Function& fn) const {
+        return !parsing_compiled_module_interface() && fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c &&
+               !fn.is_module_extern && (fn.params.empty() || fn.params[0].name != "this");
     }
 
     [[nodiscard]] static bool is_bodyless_extern_c_declaration(const Function& fn) {
         return fn.is_extern_c && fn.body == nullptr;
+    }
+
+    [[nodiscard]] bool same_function_declarator(const Function& a, const Function& b) const {
+        return a.name == b.name && params_equal(a.params, b.params) && a.has_varargs == b.has_varargs &&
+               a.member_owner_class == b.member_owner_class && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
+               a.is_static == b.is_static && a.access == b.access &&
+               same_template_param_shape(a.template_params, b.template_params);
     }
 
     // Multiple identical bodyless `extern "C"` declarations all describe
@@ -1542,7 +1554,7 @@ private:
         for (std::size_t i = 0; i < program.functions.size(); i++) {
             if (consumed[i]) continue;
             Function& fn = program.functions[i];
-            if (!is_bodyless_free_function_forward_decl(program, fn)) {
+            if (!is_bodyless_free_function_forward_decl(fn)) {
                 reconciled.push_back(std::move(fn));
                 consumed[i] = true;
                 continue;
@@ -1551,14 +1563,24 @@ private:
             for (std::size_t j = i + 1; j < program.functions.size(); j++) {
                 Function& candidate = program.functions[j];
                 if (!same_function_signature(fn, candidate)) continue;
-                if (is_bodyless_free_function_forward_decl(program, candidate)) {
+                if (is_bodyless_free_function_forward_decl(candidate)) {
                     consumed[j] = true;
                     continue;
                 }
                 reconciled.push_back(std::move(candidate));
+                reconciled.back().is_exported = reconciled.back().is_exported || fn.is_exported;
                 consumed[j] = true;
                 merged = true;
                 break;
+            }
+            if (!merged) {
+                for (std::size_t j = i + 1; j < program.functions.size(); j++) {
+                    Function& candidate = program.functions[j];
+                    if (!same_function_declarator(fn, candidate)) continue;
+                    throw ParseError(candidate.loc.line, candidate.loc.column,
+                                     "definition of ordinary forward declaration '" + fn.name +
+                                        "' does not match its earlier declaration exactly");
+                }
             }
             if (!merged) {
                 throw ParseError(fn.loc.line, fn.loc.column,
@@ -4994,8 +5016,10 @@ private:
 
     // Parses one function declaration or definition's `<return-type>
     // <name>(<params>)` followed by either `;` (a bodyless declaration --
-    // legal when `is_extern_c` (ch02 §2.1) or `is_module_extern` (bare
-    // `extern`, ch11 §11.6)) or `{ <body> }` (an ordinary definition).
+    // legal for `extern "C"` (ch02 §2.1), bare `extern` (ch11 §11.6), or
+    // an ordinary forward declaration later reconciled against a matching
+    // definition in the same translation unit) or `{ <body> }` (an
+    // ordinary definition).
     // `is_extern_c`/`is_module_extern` are decided and consumed by the
     // caller (parse_top_level_function_or_extern_group) before this
     // runs, since their combination affects *which* prefixes were
