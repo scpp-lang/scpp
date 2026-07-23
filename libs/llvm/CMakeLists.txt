@@ -1,12 +1,12 @@
 # `llvm`: a single, real, directly-clang++-compiled C++20 module, split
-# across a primary module interface unit (llvm.cpp) and six partitions
-# (types.cpp, core.cpp, debug_info.cpp, target.cpp, target_machine.cpp,
-# analysis.cpp -- each hand-declaring one specific slice of official
+# across a primary module interface unit (llvm.scpp) and six partitions
+# (types.scpp, core.scpp, debug_info.scpp, target.scpp, target_machine.scpp,
+# analysis.scpp -- each hand-declaring one specific slice of official
 # LLVM-C's surface, see each file's own header comment), so this
 # compiler's own driver/codegen sources can reach all of it via a single
 # `import llvm;` instead of `#include <llvm-c/*.h>` -- scpp (the
 # language) has no preprocessor/#include at all, so raw #include in this
-# compiler's own sources is a self-hosting blocker. See llvm.cpp's own
+# compiler's own sources is a self-hosting blocker. See llvm.scpp's own
 # header comment for the full rationale of why this is one module with
 # six partitions rather than six independent modules (as it originally
 # was, across PRs #290-295, before this consolidation): in short, the six
@@ -16,10 +16,10 @@
 # `import llvm.<name>;` per piece, more accurately reflects that they were
 # always one cohesive LLVM-C binding surface.
 #
-# Every one of the seven `.cpp` files below is a plain, ordinary C++ file
-# (unlike `.scpp` sources elsewhere under libs/), so CMake recognizes each
-# one's `.cpp` extension as C++ on its own -- no
-# `set_source_files_properties(... LANGUAGE CXX)` needed. None of the six
+# Every one of the seven `.scpp` files below is still a plain, ordinary C++
+# file (unlike the scpp-compiled `.scpp` sources elsewhere under libs/), so
+# this directory explicitly forces each one's `.scpp` extension back to C++
+# with `set_source_files_properties(... LANGUAGE CXX)`. None of the six
 # partitions declare any LLVM-C symbol *definitions* of their own (only
 # extern "C" bindings and opaque-handle/enum declarations), so this
 # target needs neither ${LLVM_INCLUDE_DIRS} nor ${LLVM_LIBS} itself --
@@ -31,7 +31,7 @@
 # explicitly.
 #
 # A single FILE_SET cxx_modules lists the primary interface unit
-# (llvm.cpp) together with all six partition files, exactly mirroring the
+# (llvm.scpp) together with all six partition files, exactly mirroring the
 # established primary-interface-plus-partitions pattern already used
 # elsewhere in this codebase for a single CMake target spanning multiple
 # partition files (see src/compiler/codegen/CMakeLists.txt's own
@@ -44,37 +44,45 @@
 # mechanism this project already relies on elsewhere for `import std;` --
 # no manual ordering of the FILES list below, nor any inter-partition
 # target_link_libraries edge, is needed for that alone.
+set(LLVM_MODULE_SOURCES
+    llvm.scpp
+    core.scpp
+    types.scpp
+    debug_info.scpp
+    target.scpp
+    target_machine.scpp
+    analysis.scpp)
+
+set_source_files_properties(
+    ${LLVM_MODULE_SOURCES}
+    native_target_init.scpp
+    PROPERTIES LANGUAGE CXX)
+
 add_library(llvm)
 target_sources(llvm
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            llvm.cpp
-            core.cpp
-            types.cpp
-            debug_info.cpp
-            target.cpp
-            target_machine.cpp
-            analysis.cpp)
+            ${LLVM_MODULE_SOURCES})
 target_compile_features(llvm PRIVATE cxx_std_23)
 
 # `llvm_target_native_init`: a tiny, separate static library bridging the
-# one confirmed gap in `:target`'s own official-LLVM-C surface (target.cpp,
-# same directory) -- see native_target_init.cpp's own header comment for
-# the full rationale. Unlike every `llvm:*` partition `.cpp` file above,
-# native_target_init.cpp is a deliberately plain, never-`import`ed .cpp
+# one confirmed gap in `:target`'s own official-LLVM-C surface (target.scpp,
+# same directory) -- see native_target_init.scpp's own header comment for
+# the full rationale. Unlike every `llvm:*` partition `.scpp` file above,
+# native_target_init.scpp is a deliberately plain, never-`import`ed `.scpp`
 # that itself `#include`s the real <llvm-c/Target.h> (needing
 # ${LLVM_INCLUDE_DIRS}/${LLVM_DEFINITIONS_LIST} to do so, unlike every
 # file in the single FILE_SET cxx_modules above), so it cannot be part of
-# that FILE_SET -- it is compiled as an ordinary source file into its own
+# that FILE_SET -- it is compiled as ordinary C++ source into its own
 # small static library instead. LLVM_INCLUDE_DIRS and
 # LLVM_DEFINITIONS_LIST are both resolved by the root CMakeLists.txt's
 # find_package(LLVM REQUIRED CONFIG) (before this subdirectory is added),
 # and are visible here via ordinary CMake directory-variable scoping.
-add_library(llvm_target_native_init STATIC native_target_init.cpp)
+add_library(llvm_target_native_init STATIC native_target_init.scpp)
 target_include_directories(llvm_target_native_init SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(llvm_target_native_init PRIVATE ${LLVM_DEFINITIONS_LIST})
 target_compile_features(llvm_target_native_init PRIVATE cxx_std_23)
-# native_target_init.cpp's compiled object code itself references real,
+# native_target_init.scpp's compiled object code itself references real,
 # concrete-architecture LLVM symbols (e.g. LLVMInitializeX86Target, via the
 # LLVMInitializeNativeTarget()/LLVMInitializeNativeAsmPrinter() inline
 # bodies it calls through to -- see that file's own header comment) that
@@ -100,7 +108,7 @@ target_compile_features(llvm_target_native_init PRIVATE cxx_std_23)
 # is one and the same `llvm` target above.
 target_link_libraries(llvm_target_native_init PRIVATE ${LLVM_LIBS})
 
-# The consolidated `llvm` target's own `:target` partition (target.cpp)
+# The consolidated `llvm` target's own `:target` partition (target.scpp)
 # needs `llvm_target_native_init`'s two bridge symbols
 # (scpp_llvm_target_initialize_native_target/_asm_printer) resolved at
 # link time -- the same real dependency the former, separate `llvm_target`

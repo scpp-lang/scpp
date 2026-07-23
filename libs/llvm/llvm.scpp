@@ -1,4 +1,4 @@
-// llvm.cpp
+// llvm.scpp
 //
 // `llvm`: the primary interface unit of a single, unified C++20 module
 // consolidating what used to be six separate, standalone, top-level
@@ -7,8 +7,8 @@
 // across PRs #290-295) into six partitions (`:core`, `:types`,
 // `:debug_info`, `:target`, `:target_machine`, `:analysis`) of this one
 // module instead. Concrete surface area lives in those dedicated interface
-// partitions (same directory: core.cpp, types.cpp, debug_info.cpp,
-// target.cpp, target_machine.cpp, analysis.cpp), which this file simply
+// partitions (same directory: core.scpp, types.scpp, debug_info.scpp,
+// target.scpp, target_machine.scpp, analysis.scpp), which this file simply
 // re-exports for consumers of `import llvm;` -- exactly the same
 // primary-interface-unit-plus-partitions shape already established
 // elsewhere in this repo for `import std;` (libs/std/std.scpp) and
@@ -16,10 +16,10 @@
 // internal modules (e.g. src/compiler/codegen/codegen.cppm,
 // src/compiler/movecheck/movecheck.cppm).
 //
-// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// This is a plain, ordinary C++ source file kept under a `.scpp` extension and compiled
 // only by real clang++ (see the single `llvm` CMake target in
 // libs/llvm/CMakeLists.txt, which compiles this file together with all six
-// `llvm:*` partition `.cpp` files below into one module) and never fed to
+// `llvm:*` partition `.scpp` files below into one module) and never fed to
 // the scpp compiler itself -- there is no aspiration here for this
 // specific file to also be scpp-parseable today, unlike std.scpp/scpp.scpp
 // above. `export module llvm;` below is nonetheless unrestricted, standard

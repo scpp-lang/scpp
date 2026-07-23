@@ -1,8 +1,8 @@
-// core.cpp
+// core.scpp
 //
-// `llvm:core`: the `:core` partition of module `llvm` (see llvm.cpp, the
+// `llvm:core`: the `:core` partition of module `llvm` (see llvm.scpp, the
 // primary module interface unit, same directory) -- not a standalone,
-// top-level module of its own any more (see types.cpp's own "Module
+// top-level module of its own any more (see types.scpp's own "Module
 // consolidation / attachment note" for the general background). Its only
 // job is to give this compiler's own real-C++ `src/*.cppm` files a way to
 // reach official LLVM-C's `llvm-c/Core.h` surface via `import llvm;`
@@ -11,10 +11,10 @@
 // preprocessor/#include at all, so any raw #include left in this
 // compiler's own sources is a hard blocker for eventual self-hosting.
 //
-// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// This is a plain, ordinary C++ source file kept under a `.scpp` extension and compiled
 // only by real clang++ (see the single `llvm` CMake target in
 // libs/llvm/CMakeLists.txt, which compiles this file together with
-// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// llvm.scpp and every other `llvm:*` partition `.scpp` file into one module)
 // and never fed to the scpp compiler itself -- unlike libs/std/*.scpp or
 // libs/scpp/*.scpp, there is no aspiration here for this specific file to
 // also be scpp-parseable today. `export module llvm:core;` below is
@@ -34,9 +34,9 @@
 // module also now covers (Types.h, Target.h, TargetMachine.h, DebugInfo.h,
 // Analysis.h) are declared by this module's other five partitions instead
 // (`:types`, `:target`, `:target_machine`, `:debug_info`, `:analysis` --
-// see each partition's own `.cpp` file, same directory).
+// see each partition's own `.scpp` file, same directory).
 //
-// Depends on `llvm:types` (types.cpp, same directory) for every opaque
+// Depends on `llvm:types` (types.scpp, same directory) for every opaque
 // handle struct tag and pointer alias below (LLVMContextRef, LLVMModuleRef,
 // LLVMTypeRef, ...) plus LLVMBool: those are genuinely llvm-c/Types.h's own
 // declarations, not Core.h's. An earlier version of this file (when it was
@@ -48,7 +48,7 @@
 // below re-exports it wholesale, reproducing this partition's own previous
 // public surface exactly, for every existing consumer, while also giving
 // this partition itself the aliases it needs for its own ~118 function
-// signatures below. See types.cpp's own header comment for the full
+// signatures below. See types.scpp's own header comment for the full
 // history and for why it, not this file, now owns those declarations.
 //
 // This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
@@ -62,10 +62,10 @@
 //
 // Module consolidation / attachment note: before the six `llvm.<name>`
 // modules (PRs #290-295) were merged into six partitions of one module
-// `llvm` (see llvm.cpp), this file's own global module fragment was
+// `llvm` (see llvm.scpp), this file's own global module fragment was
 // already empty -- the opaque handle struct tags this partition itself
 // relies on (LLVMOpaqueContext, ...) already lived in `llvm.types`'s own
-// global module fragment instead (see types.cpp's header comment for the
+// global module fragment instead (see types.scpp's header comment for the
 // full "two declarations of the same struct tag denote the same entity
 // only if both are attached to the same named module, or neither is
 // attached to any named module" rationale this design depends on --
@@ -96,9 +96,9 @@ export module llvm:core;
 import std;
 
 // Re-exports every opaque handle pointer alias (LLVMContextRef, ...) and
-// LLVMBool from `llvm:types` (types.cpp) as part of this partition's own
+// LLVMBool from `llvm:types` (types.scpp) as part of this partition's own
 // public interface -- see this file's own header comment above, and
-// types.cpp's header comment, for the full rationale.
+// types.scpp's header comment, for the full rationale.
 export import :types;
 
 // ---------------------------------------------------------------------

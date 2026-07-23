@@ -157,6 +157,8 @@ install(TARGETS scpp
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/libs/"
     DESTINATION "share/scpp/libs"
     FILES_MATCHING
+        PATTERN "llvm" EXCLUDE
+        PATTERN "llvm/*" EXCLUDE
         PATTERN "*.scpp")
 
 install(FILES

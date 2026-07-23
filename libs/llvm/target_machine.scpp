@@ -1,8 +1,8 @@
-// target_machine.cpp
+// target_machine.scpp
 //
 // `llvm:target_machine`: the `:target_machine` partition of module `llvm`
-// (see llvm.cpp, the primary module interface unit, same directory) --
-// not a standalone, top-level module of its own any more (see types.cpp's
+// (see llvm.scpp, the primary module interface unit, same directory) --
+// not a standalone, top-level module of its own any more (see types.scpp's
 // own "Module consolidation / attachment note" for the general
 // background; this file's own version of that note is below). Its only
 // job is to give this compiler's own real-C++ `src/*.cppm` files a way to
@@ -12,12 +12,12 @@
 // has no preprocessor/#include at all, so any raw #include left in this
 // compiler's own sources is a hard blocker for eventual self-hosting.
 //
-// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// This is a plain, ordinary C++ source file kept under a `.scpp` extension and compiled
 // only by real clang++ (see the single `llvm` CMake target in
 // libs/llvm/CMakeLists.txt, which compiles this file together with
-// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// llvm.scpp and every other `llvm:*` partition `.scpp` file into one module)
 // and never fed to the scpp compiler itself -- exactly like `llvm:core`'s
-// core.cpp, `llvm:types`'s types.cpp, and `llvm:target`'s target.cpp,
+// core.scpp, `llvm:types`'s types.scpp, and `llvm:target`'s target.scpp,
 // there is no aspiration here for this specific file to also be
 // scpp-parseable today. `export module llvm:target_machine;` below is
 // nonetheless unrestricted, standard C++20 module-partition syntax -- real
@@ -46,15 +46,15 @@
 // `LLVMGetHostCPUName`/`...Features`, and `LLVMAddAnalysisPasses`, none
 // of which src/driver.cppm needs).
 //
-// Depends on `llvm:types` (types.cpp, same directory) for `LLVMModuleRef`
+// Depends on `llvm:types` (types.scpp, same directory) for `LLVMModuleRef`
 // (the module handle `LLVMTargetMachineEmitToFile` below emits) and
 // `LLVMBool` (the shared boolean-result convention `LLVMGetTargetFromTriple`
 // and `LLVMTargetMachineEmitToFile` below both return): those are
 // genuinely llvm-c/Types.h's own declarations, not TargetMachine.h's --
 // exactly the same reasoning `llvm:core`, `llvm:debug_info`, and
 // `llvm:target` already rely on for their own `import :types;` (see
-// core.cpp/debug_info.cpp/target.cpp). Also depends on `llvm:target`
-// (target.cpp, same directory) for `LLVMTargetDataRef` (the data-layout
+// core.scpp/debug_info.scpp/target.scpp). Also depends on `llvm:target`
+// (target.scpp, same directory) for `LLVMTargetDataRef` (the data-layout
 // handle `LLVMCreateTargetDataLayout` below returns): that one is
 // genuinely llvm-c/Target.h's own declaration (`typedef struct
 // LLVMOpaqueTargetData *LLVMTargetDataRef;`), not TargetMachine.h's --
@@ -78,7 +78,7 @@
 // (`typedef struct LLVMTarget *LLVMTargetRef;` and `typedef struct
 // LLVMOpaqueTargetMachine *LLVMTargetMachineRef;`) -- so, mirroring how
 // `LLVMTargetDataRef`/`LLVMOpaqueTargetData` stays in `llvm:target`
-// rather than moving to `llvm:types` (see target.cpp's own header
+// rather than moving to `llvm:types` (see target.scpp's own header
 // comment), they are declared here, in this partition, rather than added
 // to `llvm:types` or `llvm:target`. Note the real header's own naming
 // inconsistency, kept byte-for-byte here since each tag name must match
@@ -88,7 +88,7 @@
 // these six partitions), while `LLVMTargetMachineRef`'s pointee tag is
 // spelled `LLVMOpaqueTargetMachine` (with the usual prefix) -- exactly
 // the same kind of upstream quirk `llvm:types` already documents for its
-// own `LLVMOpaqueAttributeRef` (see types.cpp's own header comment).
+// own `LLVMOpaqueAttributeRef` (see types.scpp's own header comment).
 // `LLVMCreateTargetMachineOptions`'s own pointee tag,
 // `LLVMOpaqueTargetMachineOptions`, is not declared at all: the whole
 // `LLVMTargetMachineOptionsRef` family is out of this module's scope (see
@@ -107,13 +107,13 @@
 //
 // Module consolidation / attachment note: before the six `llvm.<name>`
 // modules (PRs #290-295) were merged into six partitions of one module
-// `llvm` (see llvm.cpp), both `LLVMTarget` and `LLVMOpaqueTargetMachine`
+// `llvm` (see llvm.scpp), both `LLVMTarget` and `LLVMOpaqueTargetMachine`
 // -- the two opaque handle struct tags this partition introduces -- lived
 // in this file's own *global module fragment* (a `module;` ...
 // declarations ... block before the module-declaration), deliberately
 // unattached to any module, rather than declared in the module purview --
 // mirroring the same rule `llvm.types` and `llvm.target` already
-// established for their own struct tags (see types.cpp's/target.cpp's own
+// established for their own struct tags (see types.scpp's/target.scpp's own
 // header comments for the full "two declarations of the same struct tag
 // denote the same entity only if both are attached to the same named
 // module, or neither is attached to any named module" rationale). This
@@ -128,7 +128,7 @@
 //
 // That defensive future-proofing is no longer needed, for reasons beyond
 // "no consumer happens to have a competing #include today" (already true
-// when this partition's own module was first introduced) -- see types.cpp's
+// when this partition's own module was first introduced) -- see types.scpp's
 // own "Module consolidation / attachment note" for the fuller version of
 // the argument, written for `:types`'s own tags. This project's `src/`
 // sources have had, and can only ever have, zero raw `#include <llvm-c/*.h>`
@@ -144,8 +144,8 @@
 // with any hypothetical future redeclaration in another `llvm:*`
 // partition's own purview, with no global-module-fragment indirection
 // required. The one remaining `#include <llvm-c/Target.h>` anywhere in
-// this project (native_target_init.cpp, same directory) does not change
-// this either: it is a deliberately plain, never-`import`ed `.cpp` that
+// this project (native_target_init.scpp, same directory) does not change
+// this either: it is a deliberately plain, never-`import`ed `.scpp` that
 // never imports this module (or any `llvm:*` partition), compiled as its
 // own, wholly separate translation unit into its own small static
 // library, so its own unattached copies of these tags never coexist, in
