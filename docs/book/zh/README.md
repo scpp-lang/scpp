@@ -37,7 +37,7 @@
   - [把模块拆到不同文件中](ch07-05-separating-modules-into-different-files.md)
 
 - 数组、缓冲区与视图
-  - 定长数组
+  - [定长数组](ch08-01-fixed-size-arrays.md)
   - 把文本当作 `char` 与 C 兼容缓冲区处理
   - 用 `std::span` 借用视图
 

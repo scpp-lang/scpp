@@ -37,7 +37,7 @@
   - [把模組拆到不同檔案中](ch07-05-separating-modules-into-different-files.md)
 
 - 陣列、緩衝區與視圖
-  - 固定大小陣列
+  - [固定大小陣列](ch08-01-fixed-size-arrays.md)
   - 把文字當成 `char` 與 C 相容緩衝區處理
   - 用 `std::span` 借用視圖
 

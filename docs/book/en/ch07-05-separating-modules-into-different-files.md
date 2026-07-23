@@ -262,4 +262,4 @@ modules rather than individual items.
 
 ---
 
-[← Previous: Using `import` and Qualified Names](ch07-04-using-import-and-qualified-names.md) · [Table of Contents](README.md)
+[← Previous: Using `import` and Qualified Names](ch07-04-using-import-and-qualified-names.md) · [Table of Contents](README.md) · [Next: Fixed-Size Arrays →](ch08-01-fixed-size-arrays.md)
