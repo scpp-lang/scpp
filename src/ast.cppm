@@ -4,12 +4,12 @@ export module scpp.ast;
 
 import std;
 
-export namespace scpp {
+namespace scpp {
 
-struct Expr;
-struct Stmt;
-using ExprPtr = std::unique_ptr<Expr>;
-using StmtPtr = std::unique_ptr<Stmt>;
+export struct Expr;
+export struct Stmt;
+export using ExprPtr = std::unique_ptr<Expr>;
+export using StmtPtr = std::unique_ptr<Stmt>;
 
 // A 1-based (line, column) position in the original source file, exactly
 // like Clang/GCC's own diagnostics -- {0, 0} (the default) means "no
@@ -21,7 +21,7 @@ using StmtPtr = std::unique_ptr<Stmt>;
 // thrown ParseError/DataflowError/CodegenError can always report exactly
 // where its problem is -- see cli.cppm's print_diagnostic for how this
 // gets rendered (a source-line excerpt with a caret, like `clang -c`).
-struct SourceLocation {
+export struct SourceLocation {
     int line = 0;
     int column = 0;
     std::shared_ptr<const std::string> source_path;
@@ -35,18 +35,18 @@ struct SourceLocation {
 
 };
 
-[[nodiscard]] inline SourceLocation make_source_location(int line, int column,
+export [[nodiscard]] inline SourceLocation make_source_location(int line, int column,
                                                         std::shared_ptr<const std::string> source_path = {}) {
     return SourceLocation{line, column, std::move(source_path)};
 }
 
-enum class ReceiverRefQualifier {
+export enum class ReceiverRefQualifier {
     None,
     LValue,
     RValue,
 };
 
-enum class TypeKind {
+export enum class TypeKind {
     Named,     // scalar (int/bool) or a user-declared struct name
     Pointer,   // T*
     Function,  // Ret(Args...) as a symbolic type argument / specialization pattern
@@ -62,7 +62,7 @@ enum class TypeKind {
 // Type stays copyable: Param/StructField/Stmt store Type by value, and
 // copying a pointer/array type is just a cheap refcount bump, not a deep
 // clone.
-struct Type {
+export struct Type {
     TypeKind kind = TypeKind::Named;
 
     // Named
@@ -198,7 +198,7 @@ struct Type {
     bool is_pack_expansion = false;
 };
 
-struct AlignmentSpecifier {
+export struct AlignmentSpecifier {
     SourceLocation loc;
     bool operand_is_type = false;
     Type type;
@@ -211,7 +211,7 @@ struct AlignmentSpecifier {
     AlignmentSpecifier& operator=(AlignmentSpecifier&&) = default;
 };
 
-struct LifetimeAnnotation {
+export struct LifetimeAnnotation {
     // Empty when no `[[scpp::lifetime(...)]]` is present on this
     // declaration. Otherwise the raw identifier spelled in source --
     // either the reserved word `any` or a user-written, declaration-
@@ -224,14 +224,14 @@ struct LifetimeAnnotation {
     bool operator==(const LifetimeAnnotation&) const = default;
 };
 
-[[nodiscard]] inline Type named_type(std::string name) {
+export [[nodiscard]] inline Type named_type(std::string name) {
     Type type;
     type.kind = TypeKind::Named;
     type.name = std::move(name);
     return type;
 }
 
-struct Param {
+export struct Param {
     Type type;
     std::string name;
     LifetimeAnnotation lifetime;
@@ -284,7 +284,7 @@ struct Param {
 // blanket capture's free variables even refer to) has run -- by the
 // time movecheck's own per-function checking or codegen ever sees a
 // Lambda Expr node, this list is always the complete, final capture set.
-struct LambdaCapture {
+export struct LambdaCapture {
     std::string name;
     bool by_reference = false;
     // Non-null only for an init-capture; null for a plain `[name]`/
@@ -293,7 +293,7 @@ struct LambdaCapture {
     ExprPtr init;
 };
 
-enum class LambdaCaptureMode {
+export enum class LambdaCaptureMode {
     None,       // only the explicitly-listed captures -- e.g. `[]`, `[x]`.
     ByValue,    // `[=]` or a mixed `[=, &y]` -- every other free variable
                 // referenced in the body is implicitly captured by value.
@@ -302,7 +302,7 @@ enum class LambdaCaptureMode {
                  // reference.
 };
 
-enum class ExprKind {
+export enum class ExprKind {
     IntegerLiteral,
     // A floating-point literal (`1.5`) -- value stored in `float_value`
     // (ch06 §6: defaults to a bare `double`-typed prvalue, same as real
@@ -360,7 +360,7 @@ enum class ExprKind {
                 // `sizeof_operand_is_type` below.
 };
 
-enum class BinaryOp {
+export enum class BinaryOp {
     Add,
     Sub,
     Mul,
@@ -376,7 +376,7 @@ enum class BinaryOp {
     Assign,
 };
 
-enum class UnaryOp {
+export enum class UnaryOp {
     Neg,
     Not,
     Deref, // `*p` -- either a raw pointer `T*` (only inside `unsafe { }`,
@@ -406,7 +406,7 @@ enum class UnaryOp {
 // meaningful, per `is_type`; `value` is restricted to the same small,
 // purpose-scoped expression shape as Type::non_type_args (an integer
 // literal, or a `+` of one) -- see movecheck's evaluate_non_type_arg.
-struct ExplicitTemplateArg {
+export struct ExplicitTemplateArg {
     bool is_type = true;
     Type type;                 // meaningful when is_type
     std::shared_ptr<Expr> value; // meaningful when !is_type
@@ -415,7 +415,7 @@ struct ExplicitTemplateArg {
 // A single expression node. Only the fields relevant to `kind` are populated;
 // this keeps the AST as a flat, easy-to-pattern-match tagged union without
 // needing a class hierarchy for the minimal M1 subset.
-struct Expr {
+export struct Expr {
     ExprKind kind;
 
     // Where this expression begins in the source file (see
@@ -541,7 +541,7 @@ struct Expr {
     StmtPtr lambda_body;
 };
 
-enum class StmtKind {
+export enum class StmtKind {
     VarDecl,
     Return,
     If,
@@ -552,19 +552,19 @@ enum class StmtKind {
     Block,
 };
 
-enum class FunctionEvalMode {
+export enum class FunctionEvalMode {
     RuntimeOnly,
     Constexpr,
     Consteval,
 };
 
-enum class IfMode {
+export enum class IfMode {
     Runtime,
     ConstevalTrue,
     ConstevalFalse,
 };
 
-struct Stmt {
+export struct Stmt {
     StmtKind kind;
 
     // Where this statement begins in the source file -- same purpose as
@@ -631,14 +631,14 @@ struct Stmt {
     bool is_unsafe = false;
 };
 
-struct GlobalVar {
+export struct GlobalVar {
     StmtPtr decl;
     std::vector<std::string> namespace_path;
     bool is_exported = false;
     std::string owning_module;
 };
 
-struct Initializer {
+export struct Initializer {
     // `= expr`
     ExprPtr expr;
     // `{}` / `{args...}`
@@ -652,7 +652,7 @@ struct Initializer {
     Initializer& operator=(Initializer&&) = default;
 };
 
-struct MemberInitializer {
+export struct MemberInitializer {
     std::string member_name;
     Initializer initializer;
     SourceLocation loc;
@@ -666,7 +666,7 @@ struct MemberInitializer {
 
 [[nodiscard]] inline StmtPtr clone_initializer_stmt(const Stmt& stmt);
 
-[[nodiscard]] inline ExprPtr clone_initializer_expr(const Expr& expr) {
+export [[nodiscard]] inline ExprPtr clone_initializer_expr(const Expr& expr) {
     auto clone = std::make_unique<Expr>();
     clone->kind = expr.kind;
     clone->loc = expr.loc;
@@ -732,7 +732,7 @@ struct MemberInitializer {
     return clone;
 }
 
-[[nodiscard]] inline GlobalVar clone_global_var(const GlobalVar& global) {
+export [[nodiscard]] inline GlobalVar clone_global_var(const GlobalVar& global) {
     GlobalVar clone;
     if (global.decl) clone.decl = clone_initializer_stmt(*global.decl);
     clone.namespace_path = global.namespace_path;
@@ -782,7 +782,7 @@ inline Initializer& Initializer::operator=(const Initializer& other) {
 // a full-header-form generic *function*'s own template parameter (see
 // Function::template_params) -- the exact same shape (bare/constrained
 // type parameter, or non-type parameter) applies identically there.
-struct GenericTypeParam {
+export struct GenericTypeParam {
     std::string name;
     std::string concept_name; // empty = bare (type parameter only)
     bool is_pack = false;
@@ -790,18 +790,18 @@ struct GenericTypeParam {
     Type non_type_type; // meaningful only when is_non_type is true
 };
 
-enum class AccessSpecifier {
+export enum class AccessSpecifier {
     Public,
     Private,
 };
 
-enum class BaseClassKind {
+export enum class BaseClassKind {
     Unknown,
     OrdinaryClass,
     Interface,
 };
 
-struct BaseSpecifier {
+export struct BaseSpecifier {
     Type base_type;
     AccessSpecifier access = AccessSpecifier::Private;
     bool is_virtual = false;
@@ -812,13 +812,13 @@ struct BaseSpecifier {
     std::string pack_arg_name;
 };
 
-struct ClassUsingDeclaration {
+export struct ClassUsingDeclaration {
     std::string base_name;
     std::string member_name;
     AccessSpecifier access = AccessSpecifier::Private;
 };
 
-struct TypeAliasDecl {
+export struct TypeAliasDecl {
     SourceLocation loc;
     Type underlying_type;
     std::string name;
@@ -827,7 +827,7 @@ struct TypeAliasDecl {
     std::string owning_module;
 };
 
-struct Function {
+export struct Function {
     Type return_type;
     std::string name;
     // Where this function's declaration begins -- same purpose as
@@ -1040,7 +1040,7 @@ struct Function {
     std::string owning_module;
 };
 
-struct StructField {
+export struct StructField {
     SourceLocation loc;
     Type type;
     std::string name;
@@ -1050,7 +1050,7 @@ struct StructField {
     std::uint64_t resolved_alignment = 0;
 };
 
-struct StructDef {
+export struct StructDef {
     SourceLocation loc;
     std::string name;
     std::vector<StructField> fields;
@@ -1117,7 +1117,7 @@ struct StructDef {
     std::string nodiscard_reason;
 };
 
-struct ClassField {
+export struct ClassField {
     SourceLocation loc;
     Type type;
     std::string name;
@@ -1149,7 +1149,7 @@ struct ClassField {
 // both resolve to it by recomputing the identical scheme from the
 // receiver's/declared variable's static type, not by consulting this
 // struct or any separate registry.
-struct ClassDef {
+export struct ClassDef {
     SourceLocation loc;
     std::string name;
     std::vector<ClassField> fields;
@@ -1294,7 +1294,7 @@ struct ClassDef {
 // thing anyway). Arbitrary expressions, type-requirements
 // (`typename T::Foo;`), and nested requirements (arbitrary boolean
 // constant-expressions) are explicitly out of scope for v0.1.
-struct ConceptRequirement {
+export struct ConceptRequirement {
     std::string method_name;
     // The call's own argument types (e.g. `f(x)` where `x: int` ->
     // {int}) -- excludes the implicit receiver (the placeholder itself),
@@ -1329,7 +1329,7 @@ struct ConceptRequirement {
 // no other way to spell a concept declaration itself, so this header is
 // unavoidable here even though ch05 §5.11 otherwise avoids introducing
 // the general `template<...>` machinery).
-struct ConceptDef {
+export struct ConceptDef {
     std::string name;
     // The template header's own type-parameter name, e.g. "T" in
     // `template<typename T>` -- recorded so the parser can recognize
@@ -1356,12 +1356,12 @@ struct ConceptDef {
     std::string owning_module;
 };
 
-struct EnumVariant {
+export struct EnumVariant {
     std::string name;
     long long value = 0;
 };
 
-struct EnumDef {
+export struct EnumDef {
     std::string name;
     Type underlying_type = named_type("int");
     std::vector<EnumVariant> variants;
@@ -1374,7 +1374,7 @@ struct EnumDef {
 // ch11 §11.8: one `import name;` / `export import name;` declaration,
 // or (ch11 §11.4) a same-module partition import (`import :part;` /
 // `export import :part;`).
-struct ImportDecl {
+export struct ImportDecl {
     // The imported module's dotted name (e.g. "std", "org.lotx.cmath"),
     // exactly as written -- this is also the key the driver's
     // ModuleResolver/import-path mapping (`--import name=path`) is
@@ -1407,7 +1407,7 @@ struct ImportDecl {
     bool is_partition = false;
 };
 
-struct Program {
+export struct Program {
     std::vector<StructDef> structs;
     std::vector<ClassDef> classes;
     std::vector<EnumDef> enums;
@@ -1458,7 +1458,7 @@ struct Program {
     std::vector<ImportDecl> imports;
 };
 
-[[nodiscard]] inline const GlobalVar* find_visible_global(const Program* program, const std::vector<std::string>& namespace_path,
+export [[nodiscard]] inline const GlobalVar* find_visible_global(const Program* program, const std::vector<std::string>& namespace_path,
                                                           const std::string& name, bool explicit_global_qualification = false) {
     if (program == nullptr) return nullptr;
     auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
@@ -1488,17 +1488,17 @@ struct Program {
     return nullptr;
 }
 
-struct TargetLayoutInfo {
+export struct TargetLayoutInfo {
     std::uint64_t pointer_size_bytes = sizeof(void*);
     std::uint64_t pointer_align_bytes = alignof(void*);
 };
 
-struct TypeLayoutInfo {
+export struct TypeLayoutInfo {
     std::uint64_t size_bytes = 0;
     std::uint64_t abi_align_bytes = 1;
 };
 
-[[nodiscard]] inline std::optional<TypeLayoutInfo> layout_of_type(const Program& program, const Type& type,
+export [[nodiscard]] inline std::optional<TypeLayoutInfo> layout_of_type(const Program& program, const Type& type,
                                                                   TargetLayoutInfo target = {}) {
     struct LayoutComputer {
         const Program& program;
