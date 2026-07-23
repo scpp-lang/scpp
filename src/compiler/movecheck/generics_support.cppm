@@ -220,17 +220,18 @@ StmtPtr clone_stmt(const Stmt& stmt) {
 // than shared across modules, same existing precedent as this file's
 // own independently-duplicated types_equal.
 [[nodiscard]] std::string mangle_type_for_clone_name(const Type& type) {
+    std::string const_prefix = type.is_const_qualified ? "const_" : "";
     switch (type.kind) {
         case TypeKind::Named: {
-            if (type.template_args.empty()) return type.name;
-            std::string result = type.name;
+            if (type.template_args.empty()) return const_prefix + type.name;
+            std::string result = const_prefix + type.name;
             for (const Type& arg : type.template_args) result += "_" + mangle_type_for_clone_name(arg);
             return result;
         }
         case TypeKind::Pointer:
-            return mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
+            return const_prefix + mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_pointee ? "_ptr" : "_cptr");
         case TypeKind::Function: {
-            std::string result = mangle_type_for_clone_name(*type.function_return) + "_fntype";
+            std::string result = const_prefix + mangle_type_for_clone_name(*type.function_return) + "_fntype";
             for (const Type& param : type.function_params) result += "_" + mangle_type_for_clone_name(param);
             if (type.is_const_function) result += "_const";
             if (type.function_ref_qualifier == ReceiverRefQualifier::LValue) result += "_lrefq";
@@ -238,17 +239,18 @@ StmtPtr clone_stmt(const Stmt& stmt) {
             return result;
         }
         case TypeKind::FunctionPointer: {
-            std::string result = mangle_type_for_clone_name(*type.function_return) +
+            std::string result = const_prefix + mangle_type_for_clone_name(*type.function_return) +
                                  (type.is_unsafe_function_pointer ? "_ufnptr" : "_fnptr");
             for (const Type& param : type.function_params) result += "_" + mangle_type_for_clone_name(param);
             return result;
         }
         case TypeKind::Reference:
-            return mangle_type_for_clone_name(*type.pointee) +
+            return const_prefix + mangle_type_for_clone_name(*type.pointee) +
                    (type.is_rvalue_ref ? "_rref" : (type.is_mutable_ref ? "_ref" : "_cref"));
-        case TypeKind::Span: return mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_ref ? "_span" : "_cspan");
+        case TypeKind::Span:
+            return const_prefix + mangle_type_for_clone_name(*type.pointee) + (type.is_mutable_ref ? "_span" : "_cspan");
         case TypeKind::Array:
-            return mangle_type_for_clone_name(*type.element) + "_arr" + std::to_string(type.array_size);
+            return const_prefix + mangle_type_for_clone_name(*type.element) + "_arr" + std::to_string(type.array_size);
     }
     return "?";
 }

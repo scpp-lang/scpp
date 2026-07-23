@@ -686,6 +686,7 @@ namespace scpp {
     [[nodiscard]] bool Codegen::types_equal(const Type& a, const Type& b)
 {
         if (a.kind != b.kind) return false;
+        if (a.is_const_qualified != b.is_const_qualified) return false;
         switch (a.kind) {
             case TypeKind::Named:
                 if (a.name != b.name || a.template_args.size() != b.template_args.size()) return false;

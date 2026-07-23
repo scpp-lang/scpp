@@ -1023,7 +1023,7 @@ private:
                     return bind_type_pattern(param.name, concrete, bindings);
                 }
             }
-            if (pattern.kind != concrete.kind) return false;
+            if (pattern.kind != concrete.kind || pattern.is_const_qualified != concrete.is_const_qualified) return false;
             switch (pattern.kind) {
                 case TypeKind::Named:
                     if (pattern.name != concrete.name || pattern.non_type_args.size() != concrete.non_type_args.size()) {
@@ -2556,7 +2556,7 @@ private:
             }
         }
 
-        if (pattern.kind != concrete.kind) return false;
+        if (pattern.kind != concrete.kind || pattern.is_const_qualified != concrete.is_const_qualified) return false;
         switch (pattern.kind) {
             case TypeKind::Named: {
                 const std::vector<Type>* concrete_template_args = &concrete.template_args;

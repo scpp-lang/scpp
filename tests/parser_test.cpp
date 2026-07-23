@@ -3203,6 +3203,49 @@ void test_explicit_template_function_designator_parses() {
            "explicit_template_function_designator_parses: expected identifier with one explicit template arg");
 }
 
+void test_const_qualified_template_type_argument_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Box { public: virtual ~Box() { return; } };\n"
+        "int main() {\n"
+        "    Box<const int> box{};\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr && main_fn->body != nullptr,
+           "const_qualified_template_type_argument_parses: expected main body");
+    const scpp::Stmt* decl = main_fn->body->statements[0].get();
+    expect(decl->kind == scpp::StmtKind::VarDecl && decl->type.kind == scpp::TypeKind::Named &&
+               decl->type.template_args.size() == 1,
+           "const_qualified_template_type_argument_parses: expected Box with one template arg");
+    expect(decl->type.template_args[0].kind == scpp::TypeKind::Named &&
+               decl->type.template_args[0].name == "int" &&
+               decl->type.template_args[0].is_const_qualified,
+           "const_qualified_template_type_argument_parses: expected template arg 'const int'");
+}
+
+void test_const_qualified_explicit_template_argument_parses() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "int thunk(T x) { return x; }\n"
+        "int main() {\n"
+        "    int (*fp)(int) = thunk<const int>;\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr && main_fn->body != nullptr,
+           "const_qualified_explicit_template_argument_parses: expected main body");
+    const scpp::Stmt* decl = main_fn->body->statements[0].get();
+    expect(decl->kind == scpp::StmtKind::VarDecl && decl->init != nullptr &&
+               decl->init->explicit_template_args.size() == 1 &&
+               decl->init->explicit_template_args[0].is_type,
+           "const_qualified_explicit_template_argument_parses: expected one explicit type arg");
+    expect(decl->init->explicit_template_args[0].type.kind == scpp::TypeKind::Named &&
+               decl->init->explicit_template_args[0].type.name == "int" &&
+               decl->init->explicit_template_args[0].type.is_const_qualified,
+           "const_qualified_explicit_template_argument_parses: expected explicit arg 'const int'");
+}
+
 void test_global_qualified_call_parses() {
     scpp::Program program = scpp::parse(
         "int main() {\n"
@@ -4382,6 +4425,8 @@ int main() {
     test_full_header_wrapped_template_parameter_pack_parses();
     test_abbreviated_generic_parameter_pack_and_fold_parse();
     test_explicit_type_template_argument_call_parses();
+    test_const_qualified_template_type_argument_parses();
+    test_const_qualified_explicit_template_argument_parses();
     test_explicit_template_argument_call_with_multiple_value_args_parses();
     test_explicit_non_type_template_argument_call_parses();
     test_variadic_specialization_with_leading_non_type_param_parses();
