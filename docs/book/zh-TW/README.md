@@ -34,7 +34,7 @@
   - [用模組控制作用域與可見性](ch07-02-control-scope-and-privacy-with-modules.md)
   - [在模組樹中參照項目的路徑](ch07-03-paths-for-referring-to-items-in-module-tree.md)
   - [使用 `import` 與限定名稱](ch07-04-using-import-and-qualified-names.md)
-  - 把模組拆到不同檔案中
+  - [把模組拆到不同檔案中](ch07-05-separating-modules-into-different-files.md)
 
 - 陣列、緩衝區與視圖
   - 固定大小陣列

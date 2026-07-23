@@ -404,4 +404,4 @@ needs to spread across more than one.
 
 ---
 
-[← Previous: Paths for Referring to Items in the Module Tree](ch07-03-paths-for-referring-to-items-in-module-tree.md) · [Table of Contents](README.md)
+[← Previous: Paths for Referring to Items in the Module Tree](ch07-03-paths-for-referring-to-items-in-module-tree.md) · [Table of Contents](README.md) · [Next: Separating Modules into Different Files →](ch07-05-separating-modules-into-different-files.md)
