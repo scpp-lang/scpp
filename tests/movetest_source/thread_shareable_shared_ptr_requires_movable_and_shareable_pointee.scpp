@@ -1,0 +1,26 @@
+import std;
+
+class [[scpp::thread_shareable]] ShareableOnly {
+private:
+    int* raw_{};
+
+public:
+    ShareableOnly(int* raw) {
+        this->raw_ = raw;
+        return;
+    }
+
+    virtual ~ShareableOnly() { return; }
+};
+
+template<typename T>
+void broadcast(const T& x [[scpp::thread_shareable]]) {
+    return;
+}
+
+int main() {
+    int value = 1;
+    std::shared_ptr<ShareableOnly> p = std::make_shared<ShareableOnly>(&value);
+    broadcast(p);
+    return 0;
+}

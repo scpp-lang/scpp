@@ -13,6 +13,7 @@ additional_objs = "std-native"
 input = [
     "string/scpp_string_wrapper.cpp",
     "charconv/scpp_charconv_wrapper.cpp",
+    "memory/scpp_shared_ptr_wrapper.cpp",
     "thread/scpp_thread_wrapper.cpp",
     "print/scpp_print_wrapper.cpp",
     "random/scpp_random_wrapper.cpp",
@@ -20,6 +21,7 @@ input = [
 output = [
     "scpp_string_wrapper.o",
     "scpp_charconv_wrapper.o",
+    "scpp_shared_ptr_wrapper.o",
     "scpp_thread_wrapper.o",
     "scpp_print_wrapper.o",
     "scpp_random_wrapper.o",
@@ -28,6 +30,7 @@ command = """\
 ${CXX:-c++} -std=c++26 -O2 -c \
 string/scpp_string_wrapper.cpp \
 charconv/scpp_charconv_wrapper.cpp \
+memory/scpp_shared_ptr_wrapper.cpp \
 thread/scpp_thread_wrapper.cpp \
 print/scpp_print_wrapper.cpp \
 random/scpp_random_wrapper.cpp
