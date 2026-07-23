@@ -135,6 +135,8 @@ module;
 
 export module llvm:types;
 
+namespace llvm {
+
 // ---------------------------------------------------------------------
 // Opaque handle struct tags (llvm-c/Types.h)
 // ---------------------------------------------------------------------
@@ -206,3 +208,5 @@ export using LLVMDbgRecordRef = LLVMOpaqueDbgRecord*;
 // llvm-c/Core.h declares itself and therefore stays behind in `llvm:core`
 // (see core.scpp), this one is genuinely Types.h's own declaration.
 export using LLVMBool = int;
+
+} // namespace llvm

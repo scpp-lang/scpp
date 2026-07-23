@@ -1,15 +1,15 @@
 module;
 
 // This partition only *declares* the Codegen class -- every member uses
-// LLVM-C's own opaque reference types (LLVMValueRef, LLVMTypeRef, ...)
-// rather than LLVM's native C++ classes, so only `import llvm;` below
+// llvm::LLVM-C's own opaque reference types (llvm::LLVMValueRef, llvm::LLVMTypeRef, ...)
+// rather than llvm::LLVM's native C++ classes, so only `import llvm;` below
 // (module `llvm`; this partition only actually needs the Types.h surface
 // from `llvm`'s own `:types` partition, reached transitively through
 // `:core`'s own re-export -- see libs/llvm/) is needed here, not any of
-// LLVM's heavier C++ API headers (those are only needed by the .cppm
-// partitions that actually call LLVM-C functions -- see e.g.
+// llvm::LLVM's heavier C++ API headers (those are only needed by the .cppm
+// partitions that actually call llvm::LLVM-C functions -- see e.g.
 // orchestration.cppm). A rigorous, function-by-function empirical audit
-// (see libs/README.md) found official LLVM-C fully covers every LLVM
+// (see libs/README.md) found official llvm::LLVM-C fully covers every llvm::LLVM
 // operation this project's codegen needs, so there is no custom wrapper
 // of any kind anywhere in this module.
 
@@ -28,11 +28,11 @@ public:
     explicit Codegen(const std::string& module_name, std::string source_path = {}, bool emit_debug_info = false)
         ;
 
-    // context_/module_/builder_/dibuilder_ are now plain LLVM-C handles
-    // (LLVMContextRef etc.), not std::unique_ptr, so Codegen must dispose
+    // context_/module_/builder_/dibuilder_ are now plain llvm::LLVM-C handles
+    // (llvm::LLVMContextRef etc.), not std::unique_ptr, so Codegen must dispose
     // them itself (~Codegen, defined in orchestration.cppm alongside the
     // constructor). A shallow member-wise copy of these handles would let
-    // two Codegen instances both dispose the same underlying LLVM context/
+    // two Codegen instances both dispose the same underlying llvm::LLVM context/
     // module/builder -- a double-free -- so copying is disallowed. Every
     // real usage (driver.cppm, codegen_test.cpp, driver_test.cpp) only
     // ever constructs one plain named local and never moves or copies it,
@@ -48,25 +48,25 @@ public:
     // Sets the target triple and data layout on the module. Must be called
     // (if at all) before generate(), since generate() may need
     // target-accurate type sizes (e.g. for std::make_unique's malloc
-    // call). Optional: without it, the module keeps LLVM's default,
+    // call). Optional: without it, the module keeps llvm::LLVM's default,
     // non-target-specific data layout, which is fine for callers (like
     // codegen_test) that only inspect the generated IR text and don't need
     // bit-perfect target sizing. Takes the triple and data layout as plain
     // strings (rather than llvm::Triple/llvm::DataLayout) so this API
-    // boundary needs no LLVM C++ headers on either side -- a caller still
-    // using LLVM's C++ TargetMachine API (as driver.cppm currently does)
+    // boundary needs no llvm::LLVM C++ headers on either side -- a caller still
+    // using llvm::LLVM's C++ TargetMachine API (as driver.cppm currently does)
     // can get both via triple.str() and data_layout.getStringRepresentation().
     void set_target(const std::string& triple, const std::string& data_layout);
 
-    LLVMModuleRef generate(const Program& program);
+    llvm::LLVMModuleRef generate(const Program& program);
 
-    // Renders the generated module as LLVM IR text. Exposed so callers (and
-    // tests) don't need to include LLVM headers directly.
+    // Renders the generated module as llvm::LLVM IR text. Exposed so callers (and
+    // tests) don't need to include llvm::LLVM headers directly.
     std::string module_ir() const;
 
 private:
     struct StructInfo {
-        LLVMTypeRef llvm_type = nullptr;
+        llvm::LLVMTypeRef llvm_type = nullptr;
         std::vector<std::string> field_names;
         std::vector<Type> field_types;
         std::vector<unsigned> field_alignments;
@@ -102,26 +102,26 @@ private:
         }
     };
 
-    // A storage location: an LLVM pointer plus the scpp-level Type stored
-    // there. Needed (rather than just an LLVMValueRef) so Member/Subscript
+    // A storage location: an llvm::LLVM pointer plus the scpp-level Type stored
+    // there. Needed (rather than just an llvm::LLVMValueRef) so Member/Subscript
     // chains can resolve field indices and element types as they walk down
     // (e.g. `p.inner.x` needs to know `p.inner`'s struct type to find `x`).
     struct LValue {
-        LLVMValueRef ptr;
+        llvm::LLVMValueRef ptr;
         Type type;
         std::optional<unsigned> alignment;
     };
 
-    // codegen_call's result: the raw LLVM call value, plus the resolved
+    // codegen_call's result: the raw llvm::LLVM call value, plus the resolved
     // callee's own AST-level Function (its return type is what codegen_
     // expr/codegen_lvalue's own Call cases need next, e.g. to decide
     // whether to auto-dereference a reference-returning result -- see
     // codegen_call's own comment for why a method call's receiver can
     // only ever be resolved once, so both must come from a single call).
     struct CallResult {
-        LLVMValueRef value;
+        llvm::LLVMValueRef value;
         const Function* callee_def; // nullptr only if truly unknown (defensive; codegen_call already
-                                     // required a matching LLVM function to exist)
+                                     // required a matching llvm::LLVM function to exist)
     };
 
     [[nodiscard]] static bool is_scalar_type_name(const std::string& name);
@@ -132,7 +132,7 @@ private:
     [[nodiscard]] static bool is_enum_cast_store_builtin_name(const std::string& name);
 
     struct LocalSlot {
-        LLVMValueRef alloca;
+        llvm::LLVMValueRef alloca;
         Type type;
         bool is_const = false;
         // spec §6.4: non-null only for a class-typed local whose own
@@ -145,11 +145,11 @@ private:
         // §6.3/§6.4) -- a class with no destructor at all needs no such
         // tracking, since there's nothing to conditionally skip; null
         // for every non-class-typed local for the same reason.
-        LLVMValueRef moved_flag = nullptr;
+        llvm::LLVMValueRef moved_flag = nullptr;
     };
 
     struct GlobalSlot {
-        LLVMValueRef global = nullptr;
+        llvm::LLVMValueRef global = nullptr;
         Type type;
         bool is_const = false;
     };
@@ -179,31 +179,31 @@ private:
     // thrown CodegenError can report a location; never consulted by any
     // actual codegen decision.
     SourceLocation current_loc_;
-    LLVMContextRef context_;
-    LLVMModuleRef module_;
-    LLVMBuilderRef builder_;
+    llvm::LLVMContextRef context_;
+    llvm::LLVMModuleRef module_;
+    llvm::LLVMBuilderRef builder_;
     // Unlike context_/module_/builder_ (unconditionally set by every
     // constructor call), dibuilder_ is only assigned a real value by
     // initialize_debug_info() when emit_debug_info_ is true -- so it
-    // needs an explicit null default here (a raw LLVMDIBuilderRef has no
+    // needs an explicit null default here (a raw llvm::LLVMDIBuilderRef has no
     // implicit-nullptr default the way its former std::unique_ptr did)
     // for the destructor's own null-check (see orchestration.cppm) to be
     // correct when debug info is disabled.
-    LLVMDIBuilderRef dibuilder_ = nullptr;
-    LLVMMetadataRef compile_unit_ = nullptr;
-    LLVMMetadataRef compile_unit_file_ = nullptr;
-    LLVMMetadataRef current_debug_scope_ = nullptr;
-    LLVMMetadataRef current_subprogram_ = nullptr;
+    llvm::LLVMDIBuilderRef dibuilder_ = nullptr;
+    llvm::LLVMMetadataRef compile_unit_ = nullptr;
+    llvm::LLVMMetadataRef compile_unit_file_ = nullptr;
+    llvm::LLVMMetadataRef current_debug_scope_ = nullptr;
+    llvm::LLVMMetadataRef current_subprogram_ = nullptr;
     std::string source_path_;
     bool emit_debug_info_ = false;
     std::map<std::string, LocalSlot> locals_;
     std::unordered_map<std::string, GlobalSlot> globals_;
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_set<std::string> declaring_aggregates_;
-    // ch05 §5.10: each Function's actual LLVM symbol name -- the plain
+    // ch05 §5.10: each Function's actual llvm::LLVM symbol name -- the plain
     // `fn.name` unchanged for the overwhelmingly common case (exactly one
     // function under that name; critically, this is what keeps `main`/
-    // `extern "C"` functions' names exactly as declared, since LLVM
+    // `extern "C"` functions' names exactly as declared, since llvm::LLVM
     // requires every function in a module to have a unique name but
     // these are never intentionally duplicated), or, for 2+ functions
     // genuinely sharing a name (overloading), a name disambiguated with
@@ -223,31 +223,31 @@ private:
     // freed at Return, same as before.
     std::vector<std::vector<std::string>> scope_stack_;
     struct LoopFrame {
-        LLVMBasicBlockRef cond_block;
-        LLVMBasicBlockRef end_block;
+        llvm::LLVMBasicBlockRef cond_block;
+        llvm::LLVMBasicBlockRef end_block;
         std::size_t scope_depth;
     };
     std::vector<LoopFrame> loop_stack_;
-    std::unordered_map<std::string, LLVMMetadataRef> debug_type_cache_;
-    std::unordered_map<std::string, LLVMMetadataRef> debug_file_cache_;
-    LLVMTypeRef interface_representation_llvm_type_ = nullptr;
-    std::unordered_map<std::string, LLVMTypeRef> interface_dispatch_table_types_;
+    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_type_cache_;
+    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_file_cache_;
+    llvm::LLVMTypeRef interface_representation_llvm_type_ = nullptr;
+    std::unordered_map<std::string, llvm::LLVMTypeRef> interface_dispatch_table_types_;
     std::unordered_map<std::string, std::vector<const Function*>> interface_dispatch_methods_cache_;
     std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> interface_slot_indices_cache_;
-    std::unordered_map<std::string, LLVMValueRef> interface_dispatch_tables_;
-    std::unordered_map<std::string, LLVMValueRef> interface_dispatch_thunks_;
-    std::unordered_map<std::string, LLVMTypeRef> ordinary_vtable_types_;
+    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_tables_;
+    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_thunks_;
+    std::unordered_map<std::string, llvm::LLVMTypeRef> ordinary_vtable_types_;
     std::unordered_map<std::string, std::vector<const Function*>> ordinary_virtual_methods_cache_;
     std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> ordinary_slot_indices_cache_;
-    std::unordered_map<std::string, LLVMValueRef> ordinary_vtables_;
-    std::unordered_map<std::string, LLVMValueRef> ordinary_destructor_thunks_;
+    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_vtables_;
+    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_destructor_thunks_;
     std::vector<std::string> current_global_namespace_path_;
 
     [[nodiscard]] std::string default_debug_source_path() const;
 
-    [[nodiscard]] LLVMMetadataRef debug_file_for_path(const std::string& path);
+    [[nodiscard]] llvm::LLVMMetadataRef debug_file_for_path(const std::string& path);
 
-    [[nodiscard]] LLVMMetadataRef debug_file_for_program();
+    [[nodiscard]] llvm::LLVMMetadataRef debug_file_for_program();
 
     [[nodiscard]] const std::vector<std::string>& current_lookup_namespace_path() const;
 
@@ -256,30 +256,30 @@ private:
 
     [[nodiscard]] std::string mangle_global_symbol_name(const std::string& name) const;
 
-    [[nodiscard]] LLVMMetadataRef debug_file_for_loc(const SourceLocation& loc);
+    [[nodiscard]] llvm::LLVMMetadataRef debug_file_for_loc(const SourceLocation& loc);
 
     void initialize_debug_info();
 
     void finalize_debug_info();
 
-    [[nodiscard]] LLVMMetadataRef debug_type_for(const Type& type);
+    [[nodiscard]] llvm::LLVMMetadataRef debug_type_for(const Type& type);
 
     void refresh_debug_location(SourceLocation loc);
 
-    void maybe_emit_parameter_debug_decl(const Param& param, LLVMValueRef slot, unsigned index);
+    void maybe_emit_parameter_debug_decl(const Param& param, llvm::LLVMValueRef slot, unsigned index);
 
-    void maybe_emit_local_debug_decl(const std::string& name, const Type& type, LLVMValueRef slot, SourceLocation loc);
+    void maybe_emit_local_debug_decl(const std::string& name, const Type& type, llvm::LLVMValueRef slot, SourceLocation loc);
 
     // Hoists named local-variable storage to the function entry block so
-    // LLVM can describe it with one stable frame-base location even when
+    // llvm::LLVM can describe it with one stable frame-base location even when
     // the declaration itself lives in a nested scope whose initializer
     // emits its own control flow (e.g. checked arithmetic overflow
     // diamonds). Preserves declaration order among existing entry-block
     // allocas for tests/IR readability.
-    LLVMValueRef create_entry_block_alloca(LLVMTypeRef type, const std::string& name,
+    llvm::LLVMValueRef create_entry_block_alloca(llvm::LLVMTypeRef type, const std::string& name,
                                                 std::optional<unsigned> alignment = std::nullopt);
 
-    void attach_debug_subprogram(LLVMValueRef llvm_fn, const Function& fn);
+    void attach_debug_subprogram(llvm::LLVMValueRef llvm_fn, const Function& fn);
 
     const StructDef* find_struct_def(const std::string& name) const;
 
@@ -301,13 +301,13 @@ private:
 
     [[nodiscard]] std::string current_enclosing_class_name() const;
 
-    [[nodiscard]] LLVMTypeRef interface_representation_type();
+    [[nodiscard]] llvm::LLVMTypeRef interface_representation_type();
 
-    [[nodiscard]] LLVMValueRef build_interface_value(LLVMValueRef object_ptr, LLVMValueRef dispatch_ptr);
+    [[nodiscard]] llvm::LLVMValueRef build_interface_value(llvm::LLVMValueRef object_ptr, llvm::LLVMValueRef dispatch_ptr);
 
-    [[nodiscard]] LLVMValueRef extract_interface_object_ptr(LLVMValueRef interface_value);
+    [[nodiscard]] llvm::LLVMValueRef extract_interface_object_ptr(llvm::LLVMValueRef interface_value);
 
-    [[nodiscard]] LLVMValueRef extract_interface_dispatch_ptr(LLVMValueRef interface_value);
+    [[nodiscard]] llvm::LLVMValueRef extract_interface_dispatch_ptr(llvm::LLVMValueRef interface_value);
 
     [[nodiscard]] bool has_accessible_base_conversion(const std::string& source_name, const std::string& target_name,
                                                       std::string_view current_class) const;
@@ -319,11 +319,11 @@ private:
 
     [[nodiscard]] const Function* resolve_converting_constructor_by_type(const std::string& class_name, const Expr& arg);
 
-    void store_constexpr_value_into(LLVMValueRef dest_ptr, const Type& dest_type, const ConstexprValue& value);
+    void store_constexpr_value_into(llvm::LLVMValueRef dest_ptr, const Type& dest_type, const ConstexprValue& value);
 
-    LLVMValueRef codegen_consteval_class_value(const Expr& expr, const std::string& class_name);
+    llvm::LLVMValueRef codegen_consteval_class_value(const Expr& expr, const std::string& class_name);
 
-    LLVMValueRef codegen_constructed_class_value(const std::string& class_name, const std::vector<ExprPtr>& args,
+    llvm::LLVMValueRef codegen_constructed_class_value(const std::string& class_name, const std::vector<ExprPtr>& args,
                                                  const Function* ctor_def, const Expr* original_expr = nullptr);
 
     // Infers `expr`'s scpp type, for function-overload resolution
@@ -361,9 +361,9 @@ private:
 
     [[nodiscard]] std::size_t alignment_bytes_for_type(const Type& type) const;
 
-    LLVMValueRef codegen_sizeof_value(const Expr& expr);
+    llvm::LLVMValueRef codegen_sizeof_value(const Expr& expr);
 
-    LLVMValueRef codegen_alignof_value(const Expr& expr);
+    llvm::LLVMValueRef codegen_alignof_value(const Expr& expr);
 
     [[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr);
 
@@ -433,7 +433,7 @@ private:
     void declare_struct(const StructDef& def);
 
     // Registers a `class`'s layout the same way declare_struct does for a
-    // `struct` (a named LLVM struct type, keyed into the same `structs_`
+    // `struct` (a named llvm::LLVM struct type, keyed into the same `structs_`
     // map -- ch04 §4.2's `class` and `struct` are both fixed-layout
     // aggregates at the codegen level; only field access control and
     // participation in move/borrow/lifetime checking, both handled
@@ -460,29 +460,29 @@ private:
     // plain bitcast, with no pointer adjustment.
     void declare_class(const ClassDef& def);
 
-    LLVMTypeRef to_llvm_type(const Type& type);
+    llvm::LLVMTypeRef to_llvm_type(const Type& type);
 
     [[nodiscard]] std::optional<unsigned> alignment_for_type(const Type& type) const;
 
-    LLVMValueRef create_load(LLVMTypeRef type, LLVMValueRef ptr, std::optional<unsigned> alignment,
+    llvm::LLVMValueRef create_load(llvm::LLVMTypeRef type, llvm::LLVMValueRef ptr, std::optional<unsigned> alignment,
                                 const std::string& name = "");
 
-    LLVMValueRef create_store(LLVMValueRef value, LLVMValueRef ptr, std::optional<unsigned> alignment);
+    llvm::LLVMValueRef create_store(llvm::LLVMValueRef value, llvm::LLVMValueRef ptr, std::optional<unsigned> alignment);
 
-    // LLVMBuildCall2 needs the callee's function type explicitly, unlike
+    // llvm::LLVMBuildCall2 needs the callee's function type explicitly, unlike
     // IRBuilder::CreateCall(Function*, ...), which infers it from the
     // callee. This overload is for the common case of calling a known
     // global function by value, whose own type (retrievable via
-    // LLVMGlobalGetValueType) is its function type.
-    LLVMValueRef build_call(LLVMValueRef callee, std::vector<LLVMValueRef> args, const std::string& name = "");
+    // llvm::LLVMGlobalGetValueType) is its function type.
+    llvm::LLVMValueRef build_call(llvm::LLVMValueRef callee, std::vector<llvm::LLVMValueRef> args, const std::string& name = "");
 
     // Overload for calling through an already-known function type, e.g. an
     // indirect call through a function-pointer value (vtable/interface
     // dispatch) that carries no function type of its own to query.
-    LLVMValueRef build_call(LLVMTypeRef fn_type, LLVMValueRef callee, std::vector<LLVMValueRef> args,
+    llvm::LLVMValueRef build_call(llvm::LLVMTypeRef fn_type, llvm::LLVMValueRef callee, std::vector<llvm::LLVMValueRef> args,
                             const std::string& name = "");
 
-    void zero_initialize_storage(LLVMValueRef ptr, const Type& type, std::optional<unsigned> alignment = std::nullopt);
+    void zero_initialize_storage(llvm::LLVMValueRef ptr, const Type& type, std::optional<unsigned> alignment = std::nullopt);
 
     // A reference's referent may not itself be another reference:
     // reference-to-reference aliasing analysis is still out of scope for
@@ -545,7 +545,7 @@ private:
 
     [[nodiscard]] std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs) const;
 
-    // A short, LLVM-identifier-safe (alphanumeric/underscore only, no
+    // A short, llvm::LLVM-identifier-safe (alphanumeric/underscore only, no
     // spaces) encoding of `type`, used only to build a *disambiguating*
     // symbol-name suffix for a *local* (non-cross-module) overloaded
     // function (see build_overload_names) -- unlike ch11 §11.9's real
@@ -561,7 +561,7 @@ private:
 
     [[nodiscard]] const std::vector<const Function*>& interface_dispatch_methods(const std::string& interface_name);
 
-    [[nodiscard]] LLVMTypeRef interface_dispatch_table_type(const std::string& interface_name);
+    [[nodiscard]] llvm::LLVMTypeRef interface_dispatch_table_type(const std::string& interface_name);
 
     [[nodiscard]] std::optional<std::size_t> interface_method_slot_index(const std::string& interface_name,
                                                                     const Function& method);
@@ -570,35 +570,35 @@ private:
 
     [[nodiscard]] const Function* resolve_interface_slot_provider(const std::string& class_name, const std::string& slot_key) const;
 
-    [[nodiscard]] LLVMTypeRef interface_dispatch_function_type(const Function& method);
+    [[nodiscard]] llvm::LLVMTypeRef interface_dispatch_function_type(const Function& method);
 
     [[nodiscard]] bool interface_destructor_uses_raw_this(const Function& fn) const;
 
     [[nodiscard]] bool class_has_ordinary_vtable(const std::string& class_name) const;
 
-    [[nodiscard]] LLVMTypeRef llvm_param_type_for_function(const Function& fn, const Param& param, std::size_t index);
+    [[nodiscard]] llvm::LLVMTypeRef llvm_param_type_for_function(const Function& fn, const Param& param, std::size_t index);
 
-    [[nodiscard]] LLVMValueRef get_or_create_interface_dispatch_thunk(const std::string& concrete_class_name,
+    [[nodiscard]] llvm::LLVMValueRef get_or_create_interface_dispatch_thunk(const std::string& concrete_class_name,
                                                                          const Function& target);
 
-    [[nodiscard]] LLVMValueRef get_or_create_interface_destructor_thunk(const std::string& concrete_class_name,
+    [[nodiscard]] llvm::LLVMValueRef get_or_create_interface_destructor_thunk(const std::string& concrete_class_name,
                                                                             const Function& interface_destructor);
 
     [[nodiscard]] const std::vector<const Function*>& ordinary_virtual_methods(const std::string& class_name);
 
-    [[nodiscard]] LLVMTypeRef ordinary_vtable_type(const std::string& class_name);
+    [[nodiscard]] llvm::LLVMTypeRef ordinary_vtable_type(const std::string& class_name);
 
     [[nodiscard]] std::optional<std::size_t> ordinary_method_slot_index(const std::string& class_name, const Function& method);
 
-    [[nodiscard]] LLVMValueRef get_or_create_ordinary_destructor_thunk(const std::string& concrete_class_name);
+    [[nodiscard]] llvm::LLVMValueRef get_or_create_ordinary_destructor_thunk(const std::string& concrete_class_name);
 
-    [[nodiscard]] LLVMValueRef get_or_create_ordinary_vtable(const std::string& class_name);
+    [[nodiscard]] llvm::LLVMValueRef get_or_create_ordinary_vtable(const std::string& class_name);
 
-    void initialize_ordinary_vtable_pointer(const std::string& class_name, LLVMValueRef object_ptr);
+    void initialize_ordinary_vtable_pointer(const std::string& class_name, llvm::LLVMValueRef object_ptr);
 
-    [[nodiscard]] LLVMValueRef interface_dispatch_entry_for(const std::string& concrete_class_name, const Function& method);
+    [[nodiscard]] llvm::LLVMValueRef interface_dispatch_entry_for(const std::string& concrete_class_name, const Function& method);
 
-    [[nodiscard]] LLVMValueRef get_or_create_interface_dispatch_table(const std::string& concrete_class_name,
+    [[nodiscard]] llvm::LLVMValueRef get_or_create_interface_dispatch_table(const std::string& concrete_class_name,
                                                                                const std::string& interface_name);
 
     [[nodiscard]] static Type function_pointer_type_from_signature(const Type& return_type,
@@ -610,7 +610,7 @@ private:
     [[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr,
                                                                        const std::optional<Type>& target_type = std::nullopt);
 
-    [[nodiscard]] LLVMValueRef codegen_function_pointer_value_for_target(const Expr& expr, const Type& target_type);
+    [[nodiscard]] llvm::LLVMValueRef codegen_function_pointer_value_for_target(const Expr& expr, const Type& target_type);
 
     // The full, human-readable-spelled-out type text ch11 §11.9's real
     // mangling scheme requires (e.g. "int", "const int&",
@@ -670,24 +670,24 @@ private:
     // Function::forwards_to stub (an inherited method a derived class
     // doesn't itself override, synthesized by movecheck's
     // synthesize_inherited_method_forwards) -- calls the real target
-    // function directly, forwarding every LLVM argument (including
+    // function directly, forwarding every llvm::LLVM argument (including
     // `this`) completely unchanged: the derived class's own flattened,
     // base-first layout (declare_class) already makes its leading bytes
     // byte-identical to the base's own full layout, so no pointer
-    // adjustment/bitcast is needed at all (LLVM's opaque pointers carry
+    // adjustment/bitcast is needed at all (llvm::LLVM's opaque pointers carry
     // no type information to begin with). `fn.body` is always null for
     // one of these (see Function::forwards_to's own comment) -- this is
     // the *only* place that ever runs for it, never codegen_stmt/
     // codegen_expr.
     void define_forwarding_function(const Function& fn);
 
-    void codegen_stmt(const Stmt& stmt, LLVMValueRef current_function);
+    void codegen_stmt(const Stmt& stmt, llvm::LLVMValueRef current_function);
 
     // Builds and emits the actual `call` instruction for `expr` (a Call
     // expression naming a real, non-builtin function -- callers handle
     // `print_int`/`print_bool` themselves before reaching here), binding
     // each reference-typed argument to its address rather than its
-    // value. The raw LLVM result: if the callee returns a reference,
+    // value. The raw llvm::LLVM result: if the callee returns a reference,
     // that result is still just the *address* at this point (see
     // to_llvm_type's Reference case) -- it's up to the caller to decide
     // whether to dereference it (codegen_expr, for a value context) or
@@ -709,7 +709,7 @@ private:
     // implicit first (`this`) argument, ahead of the explicit ones.
     CallResult codegen_call(const Expr& expr);
 
-    // Builds the LLVM argument list for a call to `callee_def` (nullable
+    // Builds the llvm::LLVM argument list for a call to `callee_def` (nullable
     // -- an unresolvable callee still needs *some* argument list, just
     // with no reference-parameter information to consult), given how many
     // leading parameters are already spoken for before `args[0]` --
@@ -736,11 +736,11 @@ private:
     // using that address as-is avoids double-wrapping it in yet another
     // temporary, which would produce "a pointer to a pointer to the
     // closure" instead of "a pointer to the closure".
-    LLVMValueRef codegen_materialize_rvalue_reference_source(const Expr& expr);
+    llvm::LLVMValueRef codegen_materialize_rvalue_reference_source(const Expr& expr);
 
-    LLVMValueRef codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type);
+    llvm::LLVMValueRef codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type);
 
-    void codegen_copy_construct_class(LLVMValueRef dest_ptr, LLVMValueRef src_ptr, const std::string& class_name);
+    void codegen_copy_construct_class(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name);
 
     [[nodiscard]] bool is_constructor_function(const Function& fn) const;
 
@@ -759,14 +759,14 @@ private:
                                                                                const ClassDef& interface_def) const;
 
     void emit_complete_object_interface_initializers(const ClassDef& most_derived_def, const Function* ctor_def,
-                                                     LLVMValueRef object_ptr);
+                                                     llvm::LLVMValueRef object_ptr);
 
-    [[nodiscard]] LLVMValueRef load_this_object_ptr();
+    [[nodiscard]] llvm::LLVMValueRef load_this_object_ptr();
 
-    [[nodiscard]] LValue codegen_raw_member_storage(LLVMValueRef object_ptr, const std::string& class_name,
+    [[nodiscard]] LValue codegen_raw_member_storage(llvm::LLVMValueRef object_ptr, const std::string& class_name,
                                                     const ClassField& field);
 
-    [[nodiscard]] LValue codegen_raw_member_storage(LLVMValueRef object_ptr, const std::string& class_name,
+    [[nodiscard]] LValue codegen_raw_member_storage(llvm::LLVMValueRef object_ptr, const std::string& class_name,
                                                     const StructField& field);
 
     void initialize_reference_storage(const LValue& target, const Expr& expr);
@@ -786,7 +786,7 @@ private:
     void initialize_storage(const LValue& target, const Initializer& init);
 
     template <typename FieldT>
-    void emit_default_initializers_for_record_fields(LLVMValueRef object_ptr, const std::string& class_name,
+    void emit_default_initializers_for_record_fields(llvm::LLVMValueRef object_ptr, const std::string& class_name,
                                                      const std::vector<FieldT>& fields) {
         for (const FieldT& field : fields) {
             if (!field.default_initializer) continue;
@@ -799,24 +799,24 @@ private:
 
     [[nodiscard]] bool class_has_any_constructor(const std::string& class_name) const;
 
-    void emit_default_initializers_for_class_storage(LLVMValueRef object_ptr, const ClassDef& class_def,
+    void emit_default_initializers_for_class_storage(llvm::LLVMValueRef object_ptr, const ClassDef& class_def,
                                                     bool initialize_virtual_interface_bases);
 
-    LLVMValueRef codegen_class_value_for_boundary(const Expr& expr, const Type& target_type,
+    llvm::LLVMValueRef codegen_class_value_for_boundary(const Expr& expr, const Type& target_type,
                                                   bool allow_implicit_converting_ctor = false);
 
-    LLVMValueRef codegen_interface_value_for_target(const Expr& expr, const Type& target_type);
+    llvm::LLVMValueRef codegen_interface_value_for_target(const Expr& expr, const Type& target_type);
 
-    LLVMValueRef codegen_span_value_for_target(const Expr& expr, const Type& target_type);
+    llvm::LLVMValueRef codegen_span_value_for_target(const Expr& expr, const Type& target_type);
 
-    LLVMValueRef codegen_contextual_bool_value(const Expr& expr);
+    llvm::LLVMValueRef codegen_contextual_bool_value(const Expr& expr);
 
-    LLVMValueRef codegen_contextual_bool_i1(const Expr& expr);
+    llvm::LLVMValueRef codegen_contextual_bool_i1(const Expr& expr);
 
-    std::vector<LLVMValueRef> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
+    std::vector<llvm::LLVMValueRef> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
                                                   std::size_t param_offset);
 
-    std::vector<LLVMValueRef> codegen_call_args_for_types(const std::vector<ExprPtr>& args,
+    std::vector<llvm::LLVMValueRef> codegen_call_args_for_types(const std::vector<ExprPtr>& args,
                                                           const std::vector<Type>& param_types);
 
     // Reads `lv`'s value for use as an ordinary rvalue. An array decays to
@@ -832,10 +832,10 @@ private:
     // every "resolve an lvalue, then read its value" call site below
     // (Identifier/Subscript, Member's struct-field fallback) so all of
     // them treat an array-typed result the same way.
-    LLVMValueRef load_value(const LValue& lv);
+    llvm::LLVMValueRef load_value(const LValue& lv);
 
     // `bool` is stored/passed/returned as a full byte (i8; see
-    // to_llvm_type), but LLVM's branch/select instructions require a
+    // to_llvm_type), but llvm::LLVM's branch/select instructions require a
     // 1-bit condition -- this narrows an i8 bool value (guaranteed by
     // the false=0/true=1 invariant, ch06, to already be exactly 0 or 1)
     // down to i1 right before such a use. Requires the input to actually
@@ -851,20 +851,20 @@ private:
     // need real expression-type inference, which doesn't exist anywhere
     // in this codebase yet (a much bigger undertaking than this narrow
     // width check). Left as a known limitation rather than expanded scope.
-    LLVMValueRef bool_to_i1(LLVMValueRef v);
+    llvm::LLVMValueRef bool_to_i1(llvm::LLVMValueRef v);
 
     // The inverse of bool_to_i1: widens an i1 (an icmp result, or another
     // logical operation already in the 1-bit domain) back up to the i8
     // representation every ordinary bool value uses -- the choke point
     // every comparison/logical operator goes through before its result
     // is stored, passed, or returned as an actual `bool`.
-    LLVMValueRef i1_to_bool(LLVMValueRef v);
+    llvm::LLVMValueRef i1_to_bool(llvm::LLVMValueRef v);
 
     [[nodiscard]] bool enum_value_fits_source_type(const Type& source_type, long long enum_value);
 
-    LLVMValueRef build_integral_enum_match(LLVMValueRef source, const Type& source_type, long long enum_value);
+    llvm::LLVMValueRef build_integral_enum_match(llvm::LLVMValueRef source, const Type& source_type, long long enum_value);
 
-    LLVMValueRef enum_variant_constant(LLVMTypeRef enum_storage_type, const Type& underlying_type, long long enum_value);
+    llvm::LLVMValueRef enum_variant_constant(llvm::LLVMTypeRef enum_storage_type, const Type& underlying_type, long long enum_value);
 
     CallResult codegen_enum_cast_store_builtin(const Expr& expr, const Function& callee_def);
 
@@ -873,7 +873,7 @@ private:
     // C++'s own literal-suffix rules (and, more directly, how Rust
     // treats an unsuffixed integer/float literal as unconstrained until
     // context picks a concrete type): generates the constant directly in
-    // `target_type`'s own LLVM representation when the source shape is a
+    // `target_type`'s own llvm::LLVM representation when the source shape is a
     // literal and the target is a scalar Named type, so `int64_t x = 5;`
     // needs no separate cast at all -- this is *type inference for an
     // otherwise-untyped constant*, not an implicit conversion of an
@@ -885,15 +885,15 @@ private:
     // exactly as before. Shared by every site that already knows its own
     // target type up front: a VarDecl initializer, a plain assignment's
     // RHS, and std::make_unique<T>(...)'s scalar argument.
-    LLVMValueRef codegen_value_for_target(const Expr& expr, const Type& target_type);
+    llvm::LLVMValueRef codegen_value_for_target(const Expr& expr, const Type& target_type);
 
-    // Verifies `value`'s LLVM type exactly matches `expected` before it's
+    // Verifies `value`'s llvm::LLVM type exactly matches `expected` before it's
     // stored into a place declared as `expected` (a VarDecl initializer,
     // a plain assignment's RHS, or std::make_unique<T>(...)'s scalar
     // argument) -- scpp has no implicit conversion between distinct
     // scalar types (bool/char/int are all separate, ch06), and, unlike a
     // mismatched call argument/return value/binary operand (all already
-    // rejected by LLVM's own module verifier), a *store*'s address
+    // rejected by llvm::LLVM's own module verifier), a *store*'s address
     // operand is an opaque `ptr` with no embedded pointee type for the
     // verifier to check against -- an unchecked width-mismatched store
     // would instead silently corrupt whatever memory follows the
@@ -906,11 +906,11 @@ private:
     // tell apart two scalar types that happen to share a width (bool vs.
     // char, both i8) -- a known, accepted limitation, not a soundness
     // gap, since same-width scalars can never corrupt memory this way.
-    void check_store_type(LLVMValueRef value, LLVMTypeRef expected, const std::string& what);
+    void check_store_type(llvm::LLVMValueRef value, llvm::LLVMTypeRef expected, const std::string& what);
 
     void define_global_initializers(const Program& program);
 
-    LLVMValueRef codegen_expr(const Expr& expr);
+    llvm::LLVMValueRef codegen_expr(const Expr& expr);
 
     // ch05 §5.12: constructs a resolved Lambda literal's own closure
     // value -- allocates a fresh temporary, then directly stores each
@@ -929,13 +929,13 @@ private:
     // Reference-typed field does not auto-dereference the way
     // Identifier access already does -- storing the address directly
     // here avoids ever going through that path. Returns the closure's
-    // own address (an `LLVMValueRef`, like any other class-typed
+    // own address (an `llvm::LLVMValueRef`, like any other class-typed
     // value in this codebase -- see codegen_expr's Lambda case, and
     // codegen_lvalue's own Lambda case for an IIFE's receiver, ch05
     // §5.12's `[](...){...}()`).
-    LLVMValueRef codegen_construct_lambda(const Expr& expr, LLVMValueRef existing_storage = nullptr);
+    llvm::LLVMValueRef codegen_construct_lambda(const Expr& expr, llvm::LLVMValueRef existing_storage = nullptr);
 
-    LLVMValueRef codegen_new_expr(const Expr& expr);
+    llvm::LLVMValueRef codegen_new_expr(const Expr& expr);
 
     void codegen_delete_expr(const Expr& expr);
 
@@ -949,11 +949,11 @@ private:
     // error, unlike a missing constructor for constructor-call syntax
     // (VarDecl's own check) -- a destructor is optional, a constructor
     // call always names one explicitly.
-    LLVMValueRef find_destructor(const std::string& class_name);
+    llvm::LLVMValueRef find_destructor(const std::string& class_name);
 
     [[nodiscard]] const Function* find_destructor_ast(const std::string& class_name) const;
 
-    void emit_interface_destructor_dispatch_call(const std::string& interface_name, LLVMValueRef interface_value);
+    void emit_interface_destructor_dispatch_call(const std::string& interface_name, llvm::LLVMValueRef interface_value);
 
     // spec §6.5: codegen's own counterpart to movecheck's identically-
     // named helpers (has_user_declared_copy_ctor/copy_assign/dtor and
@@ -988,7 +988,7 @@ private:
     // regardless of its own fields; a reference field is simply rebound
     // to the same referent the source has, exactly like move
     // construction's own identical reasoning).
-    void codegen_memberwise_copy_construct(LLVMValueRef dest_ptr, LLVMValueRef src_ptr,
+    void codegen_memberwise_copy_construct(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr,
                                             const std::string& class_name);
 
     // spec §6.5(6): the compiler-provided copy assignment operator --
@@ -1002,11 +1002,11 @@ private:
     // never copy-assignable), so there is nothing to release first the
     // way move assignment's own codegen_release_nested_unique_ptrs needs
     // to.
-    void codegen_memberwise_copy_assign(LLVMValueRef dest_ptr, LLVMValueRef src_ptr, const std::string& class_name);
+    void codegen_memberwise_copy_assign(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name);
 
     [[nodiscard]] bool class_has_destructor_in_chain(const std::string& class_name);
 
-    void emit_destructor_chain_calls(const std::string& class_name, LLVMValueRef object_ptr);
+    void emit_destructor_chain_calls(const std::string& class_name, llvm::LLVMValueRef object_ptr);
 
     // spec §6.4: a fresh, zero-initialized (`false`) `i1` slot for
     // tracking whether a class-typed local has been moved-out, so
@@ -1015,14 +1015,14 @@ private:
     // "its destructor, if declared, is not invoked for it"). Returns
     // null when neither the class nor any of its bases declares a
     // destructor at all.
-    LLVMValueRef create_moved_flag_if_has_destructor(const std::string& class_name);
+    llvm::LLVMValueRef create_moved_flag_if_has_destructor(const std::string& class_name);
 
     // spec §6.3/§6.4/ch05 §5.14: emits the whole most-derived-to-base
     // destructor chain guarded by `!moved_flag` when present, matching
     // real C++'s reverse-of-construction destruction order for a derived
     // object's base subobjects.
-    void codegen_call_destructor_chain_unless_moved(const std::string& class_name, LLVMValueRef object_ptr,
-                                                    LLVMValueRef moved_flag);
+    void codegen_call_destructor_chain_unless_moved(const std::string& class_name, llvm::LLVMValueRef object_ptr,
+                                                    llvm::LLVMValueRef moved_flag);
 
     // spec §6.4(5): move-assignment's own "replace the value of each
     // member" step needs the *destination*'s old state torn down first
@@ -1040,8 +1040,8 @@ private:
     // self-move-assignment (`x = std::move(x)`) sets it true while
     // evaluating the RHS Move expression, so the old-value teardown
     // correctly becomes a no-op exactly as the spec/book require.
-    void codegen_destroy_old_class_state_for_move_assign(LLVMValueRef ptr, const std::string& class_name,
-                                                         LLVMValueRef moved_flag = nullptr);
+    void codegen_destroy_old_class_state_for_move_assign(llvm::LLVMValueRef ptr, const std::string& class_name,
+                                                         llvm::LLVMValueRef moved_flag = nullptr);
 
     // Releases every *currently in-scope* unique_ptr local's owned
     // resource, and runs every currently-in-scope class-typed local's
@@ -1107,11 +1107,11 @@ private:
     // never pushed onto scope_stack_, only onto locals_.
     void emit_scope_cleanup_to_depth(std::size_t target_depth);
 
-    LLVMValueRef get_or_declare_malloc();
+    llvm::LLVMValueRef get_or_declare_malloc();
 
-    LLVMValueRef get_or_declare_free();
+    llvm::LLVMValueRef get_or_declare_free();
 
-    LLVMValueRef get_or_declare_abort();
+    llvm::LLVMValueRef get_or_declare_abort();
 
     // Emits a runtime bounds check for a `std::span<T>` subscript (spec
     // ch08's "insert runtime bounds checks by default" decision): if
@@ -1127,7 +1127,7 @@ private:
     // it carries none of the "corrupted bookkeeping leaking into
     // surrounding checked code" risk that keeps movecheck's own checks
     // unconditional.
-    void emit_span_bounds_check(LLVMValueRef index, LLVMValueRef size);
+    void emit_span_bounds_check(llvm::LLVMValueRef index, llvm::LLVMValueRef size);
 
     // Attempts to read `expr` as a compile-time-constant integer without
     // any general constant-expression evaluation (that broader job
@@ -1155,10 +1155,10 @@ private:
     // constant out-of-bounds index is instead rejected earlier,
     // unconditionally, as a compile-time CodegenError (see
     // try_eval_constant_index's caller in codegen_lvalue).
-    void emit_array_bounds_check(LLVMValueRef index, long long bound);
+    void emit_array_bounds_check(llvm::LLVMValueRef index, long long bound);
 
     // ch06 §6: the numeric family's own signed/unsigned/floating
-    // classification, by scpp type name -- LLVM draws no signed/
+    // classification, by scpp type name -- llvm::LLVM draws no signed/
     // unsigned distinction at the *type* level (only i8/i16/i32/i64),
     // so every integer arithmetic/comparison/division instruction that
     // cares about signedness (sdiv vs udiv, icmp slt vs icmp ult, ...)
@@ -1189,7 +1189,7 @@ private:
 
     // ch06 §6: the actual conversion instruction for `static_cast<T>(expr)`/
     // `(T)expr`, given `value` already evaluated as `source_type`'s own
-    // LLVM representation -- dispatches on the (source, target) type
+    // llvm::LLVM representation -- dispatches on the (source, target) type
     // pair exactly like a real compiler's own cast-kind selection:
     // int<->int (sext/zext for widening -- signedness from the *source*
     // type, matching real C++'s own conversion rules; trunc for
@@ -1198,7 +1198,7 @@ private:
     // (fpext widening / fptrunc narrowing), and float<->int (sitofp/
     // uitofp, fptosi/fptoui, signedness from whichever side is the
     // integer one).
-    LLVMValueRef codegen_scalar_cast(LLVMValueRef value, const Type& source_type, const Type& target_type);
+    llvm::LLVMValueRef codegen_scalar_cast(llvm::LLVMValueRef value, const Type& source_type, const Type& target_type);
 
     // `+`/`-`/`*` on a floating-point type (ch06 §6): IEEE-754 arithmetic
     // has no UB-on-overflow concept to guard against at all (overflow
@@ -1206,7 +1206,7 @@ private:
     // well-defined by the standard itself) -- so, unlike the integer
     // path below, there is nothing to check regardless of unsafe
     // context; always the plain fadd/fsub/fmul instruction.
-    LLVMValueRef codegen_float_arith(BinaryOp op, LLVMValueRef lhs, LLVMValueRef rhs);
+    llvm::LLVMValueRef codegen_float_arith(BinaryOp op, llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs);
 
     // `+`/`-`/`*` (ch05 §5.8): overflow-checked by default (aborting,
     // via the same panic mechanism as emit_span_bounds_check, on
@@ -1215,13 +1215,13 @@ private:
     // (unsafe_depth_ > 0) -- achieved simply by using the plain
     // CreateAdd/CreateSub/CreateMul instructions, which (unlike real
     // Clang's) never get an `nsw`/`nuw` flag anywhere in this codebase, so
-    // they're already well-defined, wrapping LLVM IR on their own.
+    // they're already well-defined, wrapping llvm::LLVM IR on their own.
     // `is_checked` is false for `bool`/`char` (ch06: no arithmetic is
     // defined for either yet, pre-existing, unchanged scope) -- every
     // other integer width, signed or unsigned, is checked regardless of
     // width (generalized from this codebase's original int-only, i32-only
     // scope now that the rest of the numeric family exists).
-    LLVMValueRef codegen_checked_arith(BinaryOp op, LLVMValueRef lhs, LLVMValueRef rhs, bool is_unsigned,
+    llvm::LLVMValueRef codegen_checked_arith(BinaryOp op, llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned,
                                         bool is_checked);
 
     // `/` (ch05 §5.8): `b == 0` always abort() -- unconditionally, in
@@ -1236,11 +1236,11 @@ private:
     // any integer width via getBitWidth()/getSignedMinValue() rather
     // than a hardcoded int32_t::min(). `is_checked` is false for
     // `bool`/`char` -- see codegen_checked_arith's identical reasoning.
-    LLVMValueRef codegen_checked_div(LLVMValueRef lhs, LLVMValueRef rhs, bool is_unsigned, bool is_checked);
+    llvm::LLVMValueRef codegen_checked_div(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned, bool is_checked);
 
-    LLVMValueRef codegen_pointer_offset(LLVMValueRef base_ptr, LLVMValueRef offset, const Type& pointer_type, bool negate_offset);
+    llvm::LLVMValueRef codegen_pointer_offset(llvm::LLVMValueRef base_ptr, llvm::LLVMValueRef offset, const Type& pointer_type, bool negate_offset);
 
-    LLVMValueRef codegen_pointer_difference(LLVMValueRef lhs_ptr, LLVMValueRef rhs_ptr, const Type& pointer_type);
+    llvm::LLVMValueRef codegen_pointer_difference(llvm::LLVMValueRef lhs_ptr, llvm::LLVMValueRef rhs_ptr, const Type& pointer_type);
 
     // Computes the storage location (pointer + scpp Type) of an lvalue
     // expression, i.e. anything that can appear on the left of `=` or be
@@ -1256,13 +1256,13 @@ private:
     // before the language grows a real string type (tracked for M2+). All
     // three return the usual `printf` result (an i32) so they can be used
     // like any other call.
-    LLVMValueRef codegen_builtin_print(const Expr& expr);
+    llvm::LLVMValueRef codegen_builtin_print(const Expr& expr);
 
-    LLVMValueRef get_or_declare_printf();
+    llvm::LLVMValueRef get_or_declare_printf();
 
-    LLVMValueRef codegen_binary(const Expr& expr);
+    llvm::LLVMValueRef codegen_binary(const Expr& expr);
 
-    LLVMValueRef codegen_short_circuit(const Expr& expr);
+    llvm::LLVMValueRef codegen_short_circuit(const Expr& expr);
 };
 
 } // namespace scpp

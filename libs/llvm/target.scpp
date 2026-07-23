@@ -169,6 +169,8 @@ export module llvm:target;
 
 import :types;
 
+namespace llvm {
+
 // ---------------------------------------------------------------------
 // Opaque handle struct tag (llvm-c/Target.h)
 // ---------------------------------------------------------------------
@@ -235,3 +237,5 @@ LLVMBool scpp_llvm_target_initialize_native_target();
 LLVMBool scpp_llvm_target_initialize_native_asm_printer();
 
 } // extern "C"
+
+} // namespace llvm
