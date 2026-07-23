@@ -42,6 +42,13 @@ const scpp::StructDef* find_struct_named(const scpp::Program& program, std::stri
     return nullptr;
 }
 
+const scpp::TypeAliasDecl* find_type_alias_named(const scpp::Program& program, std::string_view name) {
+    for (const scpp::TypeAliasDecl& alias : program.type_aliases) {
+        if (alias.name == name) return &alias;
+    }
+    return nullptr;
+}
+
 std::string read_file(const std::string& path) {
     std::ifstream file(path);
     std::ostringstream buffer;
@@ -3928,6 +3935,73 @@ void test_namespace_relative_qualified_generic_type_declaration_parses() {
            "namespace_relative_qualified_generic_type_declaration_parses: expected <int, bool> template args");
 }
 
+void test_type_alias_declaration_parses_and_resolves() {
+    scpp::Program program = scpp::parse(
+        "using Word = unsigned long;\n"
+        "using WordRef = Word&;\n"
+        "alignas(Word) Word global = 41;\n"
+        "Word id(WordRef value) { return value; }\n"
+        "int main() {\n"
+        "    Word local = global;\n"
+        "    return sizeof(Word) == sizeof(unsigned long) ? id(local) - 41 : 1;\n"
+        "}\n");
+    expect(program.type_aliases.size() == 2, "type_alias_declaration_parses_and_resolves: expected 2 aliases");
+    const scpp::TypeAliasDecl* word = find_type_alias_named(program, "Word");
+    expect(word != nullptr, "type_alias_declaration_parses_and_resolves: expected alias 'Word'");
+    if (word != nullptr) {
+        expect(is_named_type(word->underlying_type, "unsigned long"),
+               "type_alias_declaration_parses_and_resolves: Word should alias unsigned long");
+    }
+    const scpp::TypeAliasDecl* word_ref = find_type_alias_named(program, "WordRef");
+    expect(word_ref != nullptr, "type_alias_declaration_parses_and_resolves: expected alias 'WordRef'");
+    if (word_ref != nullptr) {
+        expect(word_ref->underlying_type.kind == scpp::TypeKind::Reference &&
+                   word_ref->underlying_type.pointee != nullptr &&
+                   is_named_type(*word_ref->underlying_type.pointee, "unsigned long"),
+               "type_alias_declaration_parses_and_resolves: WordRef should alias unsigned long&");
+    }
+    expect(program.globals.size() == 1, "type_alias_declaration_parses_and_resolves: expected one global");
+    if (!program.globals.empty() && program.globals[0].decl != nullptr) {
+        expect(is_named_type(program.globals[0].decl->type, "unsigned long"),
+               "type_alias_declaration_parses_and_resolves: global should use aliased underlying type");
+        expect(program.globals[0].decl->alignment_specs.size() == 1 &&
+                   program.globals[0].decl->alignment_specs[0].operand_is_type &&
+                   is_named_type(program.globals[0].decl->alignment_specs[0].type, "unsigned long"),
+               "type_alias_declaration_parses_and_resolves: alignas(Word) should resolve to unsigned long");
+    }
+    const scpp::Function* id = find_function_named(program, "id");
+    expect(id != nullptr, "type_alias_declaration_parses_and_resolves: expected function id");
+    if (id != nullptr) {
+        expect(is_named_type(id->return_type, "unsigned long"),
+               "type_alias_declaration_parses_and_resolves: alias return type should resolve");
+        expect(id->params.size() == 1 && id->params[0].type.kind == scpp::TypeKind::Reference &&
+                   id->params[0].type.pointee != nullptr && is_named_type(*id->params[0].type.pointee, "unsigned long"),
+               "type_alias_declaration_parses_and_resolves: alias parameter type should resolve");
+    }
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "type_alias_declaration_parses_and_resolves: expected main");
+    if (main_fn != nullptr && !main_fn->body->statements.empty()) {
+        const scpp::Stmt& decl = *main_fn->body->statements[0];
+        expect(decl.kind == scpp::StmtKind::VarDecl && is_named_type(decl.type, "unsigned long"),
+               "type_alias_declaration_parses_and_resolves: local alias type should resolve");
+    }
+}
+
+void test_exported_type_alias_inside_namespace_parses() {
+    scpp::Program program = scpp::parse(
+        "export module demo;\n"
+        "namespace demo {\n"
+        "    export using Word = int;\n"
+        "}\n");
+    expect(program.type_aliases.size() == 1, "exported_type_alias_inside_namespace_parses: expected 1 alias");
+    if (program.type_aliases.size() != 1) return;
+    const scpp::TypeAliasDecl& alias = program.type_aliases[0];
+    expect(alias.is_exported, "exported_type_alias_inside_namespace_parses: alias should be exported");
+    expect(alias.name == "demo::Word", "exported_type_alias_inside_namespace_parses: alias should be namespace-qualified");
+    expect(is_named_type(alias.underlying_type, "int"),
+           "exported_type_alias_inside_namespace_parses: alias should preserve underlying type");
+}
+
 void test_break_and_continue_parse_inside_loop() {
     scpp::Program program = scpp::parse(
         "int main() {\n"
@@ -4244,6 +4318,8 @@ int main() {
     test_variadic_specialization_with_leading_non_type_param_parses();
     test_phase1_ast_metadata_fields_are_storable();
     test_namespace_relative_qualified_generic_type_declaration_parses();
+    test_type_alias_declaration_parses_and_resolves();
+    test_exported_type_alias_inside_namespace_parses();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

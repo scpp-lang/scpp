@@ -2892,6 +2892,56 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_build_module_with_exported_type_alias_partition_roundtrips";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_with_exported_type_alias_partition_roundtrips";
+        std::filesystem::path module_source = root / "partmod.scpp";
+        std::filesystem::path partition_source = root / "types_any_name.scpp";
+        std::filesystem::path interface_path = root / "partmod.scppm";
+        std::filesystem::path archive_path = root / "libpartmod.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                       "export module partmod;\n"
+                       "export import :types;\n"
+                       "namespace partmod {\n"
+                       "    export Word plus_one(Word value) { return value + 1; }\n"
+                       "}\n");
+        write_text_file(partition_source,
+                       "export module partmod:types;\n"
+                       "namespace partmod {\n"
+                       "    export using Word = int;\n"
+                       "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                               " --interface-out " + interface_path.string() + " --archive-out " +
+                               archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module with exported alias partition should succeed, got '" +
+                   emit_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                       "import partmod;\n"
+                       "int main() {\n"
+                       "    partmod::Word value = 41;\n"
+                       "    return partmod::plus_one(value) - 42;\n"
+                       "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                               exe_path.string() + " --import partmod=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer should be able to use imported exported type alias, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected alias-partition artifact-linked binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_build_module_with_generic_payload_roundtrips_without_sources";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_build_module_with_generic_payload_roundtrips_without_sources";
@@ -3861,6 +3911,39 @@ void run_cli_extension_tests() {
         expect(run_result.exit_code == 0,
                case_name + ": expected discovered-module binary to exit 0, got " +
                    std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_compile_type_aliases_are_transparent";
+        std::filesystem::path root = std::filesystem::current_path() / "cli_compile_type_aliases_are_transparent";
+        std::filesystem::path main_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(main_source,
+                        "using Word = int;\n"
+                        "using WordRef = Word&;\n"
+                        "using WordPtr = Word*;\n"
+                        "Word add(WordRef lhs, Word rhs) {\n"
+                        "    return lhs + rhs;\n"
+                        "}\n"
+                        "int main() {\n"
+                        "    alignas(Word) Word x = 20;\n"
+                        "    Word y = 21;\n"
+                        "    WordPtr ptr = &y;\n"
+                        "    Word sum = add(x, y);\n"
+                        "    return sizeof(Word) == sizeof(int) ? sum - 41 : 1;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + main_source.string() + " -o " +
+                                exe_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": direct compile with aliases should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected alias-using executable to exit 0, got " + std::to_string(run_result.exit_code));
         std::filesystem::remove_all(root);
     }
 

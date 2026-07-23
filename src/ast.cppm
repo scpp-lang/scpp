@@ -818,6 +818,15 @@ struct ClassUsingDeclaration {
     AccessSpecifier access = AccessSpecifier::Private;
 };
 
+struct TypeAliasDecl {
+    SourceLocation loc;
+    Type underlying_type;
+    std::string name;
+    std::vector<std::string> namespace_path;
+    bool is_exported = false;
+    std::string owning_module;
+};
+
 struct Function {
     Type return_type;
     std::string name;
@@ -1402,6 +1411,7 @@ struct Program {
     std::vector<StructDef> structs;
     std::vector<ClassDef> classes;
     std::vector<EnumDef> enums;
+    std::vector<TypeAliasDecl> type_aliases;
     std::vector<Function> functions;
     std::vector<GlobalVar> globals;
     // ch05 §5.11: every `concept` declaration parsed from this file (or
