@@ -2843,6 +2843,55 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_build_module_with_flat_partition_roundtrips_without_sources";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_with_flat_partition_roundtrips_without_sources";
+        std::filesystem::path module_source = root / "partmod.scpp";
+        std::filesystem::path partition_source = root / "helper_any_name.scpp";
+        std::filesystem::path interface_path = root / "partmod.scppm";
+        std::filesystem::path archive_path = root / "libpartmod.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module partmod;\n"
+                        "export import :helper;\n"
+                        "namespace partmod {\n"
+                        "    export int primary_fn() { return helper_fn() + 1; }\n"
+                        "}\n");
+        write_text_file(partition_source,
+                        "export module partmod:helper;\n"
+                        "namespace partmod {\n"
+                        "    export int helper_fn() { return 41; }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": flat same-directory partition build-module should succeed, got '" +
+                   emit_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                        "import partmod;\n"
+                        "int main() {\n"
+                        "    return partmod::primary_fn() + partmod::helper_fn() - 83;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import partmod=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": source-free flat partition consumer build should succeed, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected flat partition artifact-linked binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_build_module_with_generic_payload_roundtrips_without_sources";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_build_module_with_generic_payload_roundtrips_without_sources";
@@ -3784,6 +3833,38 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_import_module_scans_declared_name_not_filename";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_import_module_scans_declared_name_not_filename";
+        std::filesystem::path lib_dir = root / "lib";
+        std::filesystem::path module_source = lib_dir / "named_anything.scpp";
+        std::filesystem::path main_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(lib_dir);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    export int answer() { return 42; }\n"
+                        "}\n");
+        write_text_file(main_source,
+                        "import helper;\n"
+                        "int main() { return helper::answer() - 42; }\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) +
+                                                     " main.scpp -o app -I lib 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": content-based module discovery under -I should succeed, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected discovered-module binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_project_build_builds_manifest_bin";
         std::filesystem::path root = std::filesystem::current_path() / "cli_project_build_builds_manifest_bin";
         std::filesystem::path src_dir = root / "src";
@@ -3821,6 +3902,62 @@ void run_cli_extension_tests() {
         RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected manifest-built executable to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_project_build_lib_with_flat_partition_layout_succeeds";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_project_build_lib_with_flat_partition_layout_succeeds";
+        std::filesystem::path iface_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "demo" / "modules" / "demo.scppm";
+        std::filesystem::path archive_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "demo" / "archives" / "libdemo.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"demo\"\n"
+                        "\n"
+                        "[[lib]]\n"
+                        "name = \"demo\"\n"
+                        "sources = [\"**/*.scpp\"]\n");
+        write_text_file(root / "demo.scpp",
+                        "export module demo;\n"
+                        "export import :part;\n"
+                        "namespace demo {\n"
+                        "    export int primary() { return answer() + 1; }\n"
+                        "}\n");
+        write_text_file(root / "part.scpp",
+                        "export module demo:part;\n"
+                        "namespace demo {\n"
+                        "    export int answer() { return 41; }\n"
+                        "}\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": flat same-directory partition package build should succeed, got '" +
+                   build_result.stdout_text + "'");
+        expect(std::filesystem::exists(iface_path), case_name + ": expected manifest-built demo interface");
+        expect(std::filesystem::exists(archive_path), case_name + ": expected manifest-built demo archive");
+        write_text_file(consumer_source,
+                        "import demo;\n"
+                        "int main() { return demo::primary() + demo::answer() - 83; }\n");
+        RunResult consumer_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                       shell_quote(SCPP_BINARY_PATH) + " main.scpp -o app --import demo=" +
+                                                       shell_quote(iface_path.string()) + " 2>&1");
+        expect(consumer_build.exit_code == 0,
+               case_name + ": expected consumer of flat-layout built package to compile, got '" +
+                   consumer_build.stdout_text + "'");
+        RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected flat-layout package consumer to exit 0, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove_all(root);
     }

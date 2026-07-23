@@ -61,22 +61,48 @@ namespace scpp {
     return program.module_name + ":" + program.partition_name;
 }
 
-[[nodiscard]] std::optional<std::string> declared_module_name_from_source(std::string_view source) {
-    std::vector<Token> tokens = tokenize(source);
+struct ScannedModuleDecl {
+    std::string module_name;
+    std::string partition_name;
+};
+
+[[nodiscard]] std::optional<ScannedModuleDecl> scan_declared_module_from_tokens(const std::vector<Token>& tokens) {
     std::size_t i = 0;
-    if (i < tokens.size() && tokens[i].kind == TokenKind::KwExport) i++;
+    if (i + 1 < tokens.size() && tokens[i].kind == TokenKind::KwModule && tokens[i + 1].kind == TokenKind::Semicolon) {
+        i += 2;
+    }
+    if (i < tokens.size() && tokens[i].kind == TokenKind::KwExport && i + 1 < tokens.size() &&
+        tokens[i + 1].kind == TokenKind::KwModule) {
+        i++;
+    }
     if (i >= tokens.size() || tokens[i].kind != TokenKind::KwModule) return std::nullopt;
     i++;
     if (i >= tokens.size() || tokens[i].kind != TokenKind::Identifier) return std::nullopt;
-    std::string name(tokens[i].text);
+    ScannedModuleDecl decl;
+    decl.module_name = std::string(tokens[i].text);
     i++;
     while (i + 1 < tokens.size() && tokens[i].kind == TokenKind::Dot && tokens[i + 1].kind == TokenKind::Identifier) {
-        name += ".";
-        name += std::string(tokens[i + 1].text);
+        decl.module_name += ".";
+        decl.module_name += std::string(tokens[i + 1].text);
         i += 2;
     }
-    if (i < tokens.size() && tokens[i].kind == TokenKind::Colon) return name;
-    return name;
+    if (i < tokens.size() && tokens[i].kind == TokenKind::Colon) {
+        i++;
+        if (i >= tokens.size() || tokens[i].kind != TokenKind::Identifier) return std::nullopt;
+        decl.partition_name = std::string(tokens[i].text);
+    }
+    return decl;
+}
+
+[[nodiscard]] std::optional<ScannedModuleDecl> scan_declared_module_from_source(std::string_view source) {
+    return scan_declared_module_from_tokens(tokenize(source));
+}
+
+[[nodiscard]] std::optional<std::string> declared_module_name_from_source(std::string_view source) {
+    if (std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(source); decl.has_value()) {
+        return decl->module_name;
+    }
+    return std::nullopt;
 }
 
 void write_u32_le(std::ostream& out, std::uint32_t value) {
@@ -1875,6 +1901,15 @@ public:
         return partition;
     }
 
+    [[nodiscard]] std::optional<std::string> source_path_for_partition(const std::string& key) {
+        auto path_it = import_paths_.find(key);
+        if (path_it != import_paths_.end()) return path_it->second;
+        if (std::optional<std::string> inferred = infer_partition_path(key); inferred.has_value()) {
+            return *inferred;
+        }
+        return std::nullopt;
+    }
+
     // Every module actually resolved so far, in first-resolved order (a
     // transitively-imported module is resolved -- and so appears here --
     // strictly before whatever imported it, since resolve() recurses
@@ -1956,7 +1991,81 @@ public:
     }
 
 private:
-    [[nodiscard]] std::optional<std::string> infer_module_path(const std::string& module_name) const {
+    void register_discovered_source(const std::string& key, const std::string& path) {
+        auto it = discovered_source_paths_.find(key);
+        if (it == discovered_source_paths_.end()) {
+            discovered_source_paths_.emplace(key, path);
+            return;
+        }
+        if (absolute_source_path(it->second) == absolute_source_path(path)) return;
+        std::vector<std::string>& conflicts = discovered_source_path_conflicts_[key];
+        if (conflicts.empty()) conflicts.push_back(it->second);
+        if (std::find(conflicts.begin(), conflicts.end(), path) == conflicts.end()) conflicts.push_back(path);
+    }
+
+    [[nodiscard]] std::optional<std::string> lookup_discovered_source_path(const std::string& key) const {
+        auto conflict_it = discovered_source_path_conflicts_.find(key);
+        if (conflict_it != discovered_source_path_conflicts_.end() && !conflict_it->second.empty()) {
+            throw DriverError("multiple source files declare '" + key + "': " + std::accumulate(
+                                  std::next(conflict_it->second.begin()), conflict_it->second.end(), conflict_it->second.front(),
+                                  [](std::string acc, const std::string& path) { return std::move(acc) + ", " + path; }));
+        }
+        auto it = discovered_source_paths_.find(key);
+        if (it == discovered_source_paths_.end()) return std::nullopt;
+        return it->second;
+    }
+
+    void scan_source_root(const std::filesystem::path& root) {
+        std::filesystem::path normalized_root = root.lexically_normal();
+        if (normalized_root.empty()) normalized_root = ".";
+        std::string root_key = normalized_root.string();
+        if (scanned_source_roots_.contains(root_key)) return;
+        scanned_source_roots_.insert(root_key);
+        if (!std::filesystem::exists(normalized_root)) return;
+        std::error_code ec;
+        std::filesystem::recursive_directory_iterator it(normalized_root, ec);
+        std::filesystem::recursive_directory_iterator end;
+        while (!ec && it != end) {
+            const std::filesystem::directory_entry& entry = *it;
+            if (entry.is_directory(ec)) {
+                if (entry.path().filename() == ".scpp") it.disable_recursion_pending();
+                it.increment(ec);
+                continue;
+            }
+            if (!entry.is_regular_file(ec)) {
+                it.increment(ec);
+                continue;
+            }
+            if (entry.path().extension() != ".scpp") {
+                it.increment(ec);
+                continue;
+            }
+            LoadedModuleFile loaded = read_module_file(entry.path().string());
+            if (std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(loaded.interface_source);
+                decl.has_value()) {
+                std::string key = decl->module_name;
+                if (!decl->partition_name.empty()) key += ":" + decl->partition_name;
+                register_discovered_source(key, entry.path().lexically_normal().string());
+            }
+            it.increment(ec);
+        }
+    }
+
+    void ensure_module_source_root_scanned(const std::string& module_name) {
+        auto module_it = import_paths_.find(module_name);
+        if (module_it == import_paths_.end()) return;
+        std::filesystem::path module_path(module_it->second);
+        if (module_path.extension() != ".scpp") return;
+        scan_source_root(module_path.parent_path());
+    }
+
+    void ensure_search_dirs_scanned() {
+        if (search_dirs_scanned_) return;
+        search_dirs_scanned_ = true;
+        for (const std::string& dir : import_search_dirs_) scan_source_root(dir);
+    }
+
+    [[nodiscard]] std::optional<std::string> infer_module_path(const std::string& module_name) {
         for (const std::string& dir : import_search_dirs_) {
             std::filesystem::path base(dir);
             std::filesystem::path interface_candidate = base / (module_name + ".scppm");
@@ -1964,26 +2073,28 @@ private:
             std::filesystem::path source_candidate = base / (module_name + ".scpp");
             if (std::filesystem::exists(source_candidate)) return source_candidate.string();
         }
-        return std::nullopt;
+        ensure_search_dirs_scanned();
+        return lookup_discovered_source_path(module_name);
     }
 
-    [[nodiscard]] std::optional<std::string> infer_partition_path(const std::string& key) const {
+    [[nodiscard]] std::optional<std::string> infer_partition_path(const std::string& key) {
         std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
-        std::string partition_name = key.substr(colon + 1);
-        auto module_it = import_paths_.find(module_name);
-        if (module_it == import_paths_.end()) return std::nullopt;
-        std::filesystem::path module_path(module_it->second);
-        std::filesystem::path candidate =
-            module_path.parent_path() / partition_name /
-            (module_path.stem().string() + "_" + partition_name + module_path.extension().string());
-        if (!std::filesystem::exists(candidate)) return std::nullopt;
-        return candidate.string();
+        ensure_module_source_root_scanned(module_name);
+        if (std::optional<std::string> discovered = lookup_discovered_source_path(key); discovered.has_value()) {
+            return *discovered;
+        }
+        ensure_search_dirs_scanned();
+        return lookup_discovered_source_path(key);
     }
 
     std::unordered_map<std::string, std::string> import_paths_;
     std::vector<std::string> import_search_dirs_;
+    std::unordered_map<std::string, std::string> discovered_source_paths_;
+    std::unordered_map<std::string, std::vector<std::string>> discovered_source_path_conflicts_;
+    std::unordered_set<std::string> scanned_source_roots_;
+    bool search_dirs_scanned_ = false;
     std::unordered_map<std::string, Program> cache_;
     std::unordered_map<std::string, std::string> resolved_paths_;
     std::unordered_set<std::string> resolving_;
@@ -2003,14 +2114,6 @@ private:
     return text.substr(0, prefix.size()) == prefix;
 }
 
-[[nodiscard]] std::string partition_path_from_primary(const std::string& module_source_path, const std::string& partition_name) {
-    std::filesystem::path module_path(module_source_path);
-    std::filesystem::path candidate =
-        module_path.parent_path() / partition_name /
-        (module_path.stem().string() + "_" + partition_name + module_path.extension().string());
-    return candidate.string();
-}
-
 [[nodiscard]] bool is_partition_import_line(std::string_view trimmed) {
     return starts_with(trimmed, "export import :") || starts_with(trimmed, "import :");
 }
@@ -2020,12 +2123,13 @@ private:
     return starts_with(trimmed, "export import ") || starts_with(trimmed, "import ");
 }
 
-std::string render_module_interface_file(const Program& program, const std::string& file_path,
+std::string render_module_interface_file(const Program& program, ModuleCache& cache, const std::string& file_path,
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
                                          std::unordered_set<std::string>& expanded_partition_paths);
 
-std::string inline_partition_imports(const Program& program, const std::string& module_source_path, std::string_view source,
+std::string inline_partition_imports(const Program& program, ModuleCache& cache, const std::string& module_source_path,
+                                     std::string_view source,
                                      bool keep_concrete_bodies, std::unordered_set<std::string>& expanded_partition_paths) {
     std::ostringstream out;
     std::size_t line_start = 0;
@@ -2040,13 +2144,15 @@ std::string inline_partition_imports(const Program& program, const std::string& 
             std::size_t semi = trimmed.find(';', colon);
             std::string partition_name = trimmed.substr(colon + 1, semi == std::string::npos ? std::string::npos
                                                                                             : semi - (colon + 1));
-            std::string partition_path = absolute_source_path(partition_path_from_primary(module_source_path, partition_name));
-            if (!std::filesystem::exists(partition_path)) {
+            std::string key = program.module_name + ":" + partition_name;
+            std::optional<std::string> partition_path = cache.source_path_for_partition(key);
+            if (!partition_path.has_value()) {
                 throw DriverError("cannot find partition '" + program.module_name + ":" + partition_name +
                                   "' while writing module interface artifacts");
             }
-            if (expanded_partition_paths.insert(partition_path).second) {
-                out << render_module_interface_file(program, partition_path, module_source_path, keep_concrete_bodies,
+            std::string absolute_partition_path = absolute_source_path(*partition_path);
+            if (expanded_partition_paths.insert(absolute_partition_path).second) {
+                out << render_module_interface_file(program, cache, absolute_partition_path, module_source_path, keep_concrete_bodies,
                                                     /*keep_module_declaration=*/false, expanded_partition_paths);
             }
         } else {
@@ -2059,7 +2165,7 @@ std::string inline_partition_imports(const Program& program, const std::string& 
     return out.str();
 }
 
-std::string render_module_interface_file(const Program& program, const std::string& file_path,
+std::string render_module_interface_file(const Program& program, ModuleCache& cache, const std::string& file_path,
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
                                          std::unordered_set<std::string>& expanded_partition_paths) {
@@ -2085,7 +2191,8 @@ std::string render_module_interface_file(const Program& program, const std::stri
                 if (had_newline) out << '\n';
             }
         } else {
-            out << inline_partition_imports(program, module_source_path, line, keep_concrete_bodies, expanded_partition_paths);
+            out << inline_partition_imports(program, cache, module_source_path, line, keep_concrete_bodies,
+                                            expanded_partition_paths);
             if (had_newline) out << '\n';
         }
         if (!had_newline) break;
@@ -2136,10 +2243,10 @@ std::string hoist_non_partition_imports(std::string source) {
     return out.str();
 }
 
-std::string build_merged_interface_source(const Program& program, const std::string& module_source_path,
+std::string build_merged_interface_source(const Program& program, ModuleCache& cache, const std::string& module_source_path,
                                           bool keep_concrete_bodies) {
     std::unordered_set<std::string> expanded_partition_paths;
-    return hoist_non_partition_imports(render_module_interface_file(program, module_source_path, module_source_path,
+    return hoist_non_partition_imports(render_module_interface_file(program, cache, module_source_path, module_source_path,
                                                                     keep_concrete_bodies,
                                                                     /*keep_module_declaration=*/true,
                                                                     expanded_partition_paths));
@@ -2328,7 +2435,7 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
                           (program.module_name.empty() ? std::string("<non-module>") : module_key(program)) + "'");
     }
     std::string merged_interface_source =
-        build_merged_interface_source(program, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
+        build_merged_interface_source(program, cache, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
     write_scppm_file(program, merged_interface_source, interface_path);
     emit_module_archive_for_program(program, archive_path, opt_level);
 }
