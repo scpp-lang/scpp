@@ -1962,6 +1962,35 @@ void test_plain_module_declaration_is_implementation_unit() {
     expect(program.is_module_impl, "plain_module_declaration_is_implementation_unit: should be an implementation unit");
 }
 
+void test_global_module_fragment_before_interface_module_declaration() {
+    scpp::Program program = scpp::parse("module;\nexport module std;\n");
+    expect(program.module_name == "std",
+           "global_module_fragment_before_interface_module_declaration: module_name should be 'std'");
+    expect(program.is_module_interface,
+           "global_module_fragment_before_interface_module_declaration: should remain an interface unit");
+}
+
+void test_global_module_fragment_before_partition_declaration() {
+    scpp::Program program = scpp::parse("module;\nexport module mylib.math:trig;\n");
+    expect(program.module_name == "mylib.math",
+           "global_module_fragment_before_partition_declaration: expected 'mylib.math'");
+    expect(program.partition_name == "trig",
+           "global_module_fragment_before_partition_declaration: expected 'trig'");
+    expect(program.is_module_interface,
+           "global_module_fragment_before_partition_declaration: should be an interface partition");
+}
+
+void test_global_module_fragment_without_following_module_declaration_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("module;\nint main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw,
+           "global_module_fragment_without_following_module_declaration_is_rejected: expected a ParseError");
+}
+
 // A file with no module declaration at all is unaffected -- module_name
 // stays empty, matching every scpp file before this chapter.
 void test_no_module_declaration_leaves_module_name_empty() {
@@ -4228,6 +4257,9 @@ int main() {
     test_export_module_declaration();
     test_dotted_module_name_declaration();
     test_plain_module_declaration_is_implementation_unit();
+    test_global_module_fragment_before_interface_module_declaration();
+    test_global_module_fragment_before_partition_declaration();
+    test_global_module_fragment_without_following_module_declaration_is_rejected();
     test_no_module_declaration_leaves_module_name_empty();
     test_namespace_qualifies_struct_name();
     test_nested_namespace_one_liner_qualifies_function_name();

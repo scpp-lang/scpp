@@ -2404,8 +2404,21 @@ private:
     // `program.module_name` stays empty and every existing behavior is
     // unaffected.
     void parse_module_declaration(Program& program) {
+        bool saw_global_module_fragment = false;
+        if (check(TokenKind::KwModule) && peek_at(1).kind == TokenKind::Semicolon) {
+            advance(); // 'module'
+            advance(); // ';'
+            saw_global_module_fragment = true;
+        }
         bool leading_export = check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::KwModule;
-        if (!leading_export && !check(TokenKind::KwModule)) return;
+        if (!leading_export && !check(TokenKind::KwModule)) {
+            if (saw_global_module_fragment) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                 "a global module fragment ('module;') must be followed by a module declaration");
+            }
+            return;
+        }
         if (leading_export) advance(); // 'export'
         advance(); // 'module'
         std::string dotted(expect(TokenKind::Identifier, "module name").text);
