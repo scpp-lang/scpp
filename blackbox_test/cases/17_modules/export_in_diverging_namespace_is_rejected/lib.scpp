@@ -1,0 +1,9 @@
+// Exported declarations may live in a namespace unrelated to the module's
+// dotted name.
+export module org.lotx.cmath;
+
+namespace org::lotx::other {
+    export int helper() {
+        return 1;
+    }
+}

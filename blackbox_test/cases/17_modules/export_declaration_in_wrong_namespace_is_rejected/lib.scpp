@@ -1,0 +1,9 @@
+// Exported declarations remain reachable even when their namespace does not
+// match the module name.
+export module foo;
+
+namespace bar {
+    export int helper() {
+        return 5;
+    }
+}

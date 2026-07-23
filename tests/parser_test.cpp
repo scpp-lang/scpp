@@ -2076,33 +2076,23 @@ void test_export_class_propagates_to_methods() {
     expect(program.functions[0].is_exported, "export_class_propagates_to_methods: ctor should inherit is_exported");
 }
 
-// ch11 §11.5: exported declarations must live in a namespace whose prefix
-// matches the module name.
-void test_export_in_non_matching_namespace_is_rejected() {
-    bool threw = false;
-    try {
-        scpp::parse("export module std;\nnamespace other { export int f() { return 0; } }");
-    } catch (const scpp::ParseError&) {
-        threw = true;
-    }
-    expect(threw, "export_in_non_matching_namespace_is_rejected: expected a ParseError");
+// Exported declarations may live in any namespace; export validity is not
+// tied to the module's dotted name.
+void test_export_in_non_matching_namespace_is_allowed() {
+    scpp::Program program = scpp::parse("export module std;\nnamespace other { export int f() { return 0; } }");
+    expect(program.functions.size() == 1, "export_in_non_matching_namespace_is_allowed: expected 1 function");
+    expect(program.functions[0].is_exported, "export_in_non_matching_namespace_is_allowed: should be exported");
 }
 
-// ch11 §11.5: `export` with no enclosing namespace at all (while inside
-// a module) is also rejected -- "lives in the required namespace" can't
-// be satisfied by "no namespace".
-void test_export_with_no_namespace_is_rejected() {
-    bool threw = false;
-    try {
-        scpp::parse("export module std;\nexport int f() { return 0; }");
-    } catch (const scpp::ParseError&) {
-        threw = true;
-    }
-    expect(threw, "export_with_no_namespace_is_rejected: expected a ParseError");
+// Global-scope exports are also allowed in a module interface.
+void test_export_with_no_namespace_is_allowed() {
+    scpp::Program program = scpp::parse("export module std;\nexport int f() { return 0; }");
+    expect(program.functions.size() == 1, "export_with_no_namespace_is_allowed: expected 1 function");
+    expect(program.functions[0].is_exported, "export_with_no_namespace_is_allowed: should be exported");
 }
 
-// ch11 §11.5: a namespace nested *deeper* than the module's own name is
-// still fine (a prefix requirement, not exact-match).
+// Namespaces that happen to nest under the module name still continue to
+// work; they're just no longer special-cased.
 void test_export_in_deeper_nested_namespace_is_allowed() {
     scpp::Program program = scpp::parse(
         "export module org.lotx.cmath;\n"
@@ -4268,8 +4258,8 @@ int main() {
     test_no_export_prefix_leaves_function_not_exported();
     test_export_group_marks_multiple_declarations_exported();
     test_export_class_propagates_to_methods();
-    test_export_in_non_matching_namespace_is_rejected();
-    test_export_with_no_namespace_is_rejected();
+    test_export_in_non_matching_namespace_is_allowed();
+    test_export_with_no_namespace_is_allowed();
     test_export_in_deeper_nested_namespace_is_allowed();
     test_export_without_any_module_declaration_is_rejected();
     test_bare_extern_declaration_is_module_extern();
