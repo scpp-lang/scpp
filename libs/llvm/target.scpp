@@ -1,8 +1,8 @@
-// target.cpp
+// target.scpp
 //
-// `llvm:target`: the `:target` partition of module `llvm` (see llvm.cpp,
+// `llvm:target`: the `:target` partition of module `llvm` (see llvm.scpp,
 // the primary module interface unit, same directory) -- not a standalone,
-// top-level module of its own any more (see types.cpp's own "Module
+// top-level module of its own any more (see types.scpp's own "Module
 // consolidation / attachment note" for the general background; this file's
 // own version of that note is below). Its only job is to give this
 // compiler's own real-C++ `src/*.cppm` files a way to reach official
@@ -12,12 +12,12 @@
 // at all, so any raw #include left in this compiler's own sources is a
 // hard blocker for eventual self-hosting.
 //
-// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// This is a plain, ordinary C++ source file kept under a `.scpp` extension and compiled
 // only by real clang++ (see the single `llvm` CMake target in
 // libs/llvm/CMakeLists.txt, which compiles this file together with
-// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// llvm.scpp and every other `llvm:*` partition `.scpp` file into one module)
 // and never fed to the scpp compiler itself -- exactly like `llvm:core`'s
-// core.cpp and `llvm:types`'s types.cpp, there is no aspiration here for
+// core.scpp and `llvm:types`'s types.scpp, there is no aspiration here for
 // this specific file to also be scpp-parseable today. `export module
 // llvm:target;` below is nonetheless unrestricted, standard C++20
 // module-partition syntax -- real ISO C++, nothing scpp-specific about it
@@ -43,12 +43,12 @@
 // aggregates, and `LLVMByteOrdering`/`LLVMTargetLibraryInfoRef`, none of
 // which any of the four files need).
 //
-// Depends on `llvm:types` (types.cpp, same directory) for every opaque
+// Depends on `llvm:types` (types.scpp, same directory) for every opaque
 // handle pointer alias used below (LLVMModuleRef, LLVMTypeRef) plus
 // LLVMBool: those are genuinely llvm-c/Types.h's own declarations, not
 // Target.h's -- exactly the same reasoning `llvm:core` and
 // `llvm:debug_info` already rely on for their own `import :types;` (see
-// core.cpp/debug_info.cpp). Unlike `llvm:core`, this partition does *not*
+// core.scpp/debug_info.scpp). Unlike `llvm:core`, this partition does *not*
 // `export import :types;`: every current consumer (driver.cppm,
 // layout.cppm, debug.cppm, expressions.cppm) already reaches both aliases
 // through its own single `import llvm;` (which brings in every partition,
@@ -56,14 +56,14 @@
 // the same names a second time here would only widen this partition's own
 // public surface with no consumer needing it through this path --
 // exactly the same reasoning `llvm:debug_info` already applied (see
-// debug_info.cpp's own header comment).
+// debug_info.scpp's own header comment).
 //
 // LLVMTargetDataRef, unlike every alias `llvm:types` itself declares, is
 // genuinely Target.h's *own* declaration (`typedef struct
 // LLVMOpaqueTargetData *LLVMTargetDataRef;`, declared directly in
 // llvm-c/Target.h, not llvm-c/Types.h) -- so, mirroring how
 // `LLVMAttributeIndex` stays in `llvm:core` rather than moving to
-// `llvm:types` (see core.cpp's own header comment), it is declared here,
+// `llvm:types` (see core.scpp's own header comment), it is declared here,
 // in this partition, rather than added to `llvm:types`.
 //
 // This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
@@ -77,12 +77,12 @@
 //
 // Module consolidation / attachment note: before the six `llvm.<name>`
 // modules (PRs #290-295) were merged into six partitions of one module
-// `llvm` (see llvm.cpp), `LLVMOpaqueTargetData` -- the one opaque handle
+// `llvm` (see llvm.scpp), `LLVMOpaqueTargetData` -- the one opaque handle
 // struct tag this partition introduces -- lived in this file's own
 // *global module fragment* (a `module;` ... declaration ... block before
 // the module-declaration), deliberately unattached to any module, rather
 // than declared in the module purview -- mirroring the same rule
-// `llvm.types` established for its own struct tags (see types.cpp's own
+// `llvm.types` established for its own struct tags (see types.scpp's own
 // header comment for the full "two declarations of the same struct tag
 // denote the same entity only if both are attached to the same named
 // module, or neither is attached to any named module" rationale). At the
@@ -98,7 +98,7 @@
 // unattached kept both copies agreeing, denoting one and the same type.
 //
 // That specific trigger no longer applies, for two independent reasons --
-// see types.cpp's own "Module consolidation / attachment note" for the
+// see types.scpp's own "Module consolidation / attachment note" for the
 // fuller version of both, written for `:types`'s own tags. First,
 // src/driver.cppm's own `#include <llvm-c/TargetMachine.h>` was replaced
 // by `import llvm.target_machine;` (later folded into this same `llvm`
@@ -114,8 +114,8 @@
 // hypothetical future redeclaration in another `llvm:*` partition's own
 // purview, with no global-module-fragment indirection required. The one
 // remaining `#include <llvm-c/Target.h>` anywhere in this project
-// (native_target_init.cpp, same directory) does not change this: it is a
-// deliberately plain, never-`import`ed `.cpp` that never imports this
+// (native_target_init.scpp, same directory) does not change this: it is a
+// deliberately plain, never-`import`ed `.scpp` that never imports this
 // module (or any `llvm:*` partition) either, compiled as its own, wholly
 // separate translation unit into its own small static library, so its own
 // unattached copy of this same tag never coexists, in any single
@@ -147,9 +147,9 @@
 // `LLVMInitializeX86Target`, *is* a real, exported symbol). Declaring
 // ordinary `extern "C"` prototypes for the two real names the normal way,
 // as this module does for every other Target.h function below, would
-// therefore fail to link. `native_target_init.cpp` (same directory)
+// therefore fail to link. `native_target_init.scpp` (same directory)
 // bridges this one gap: a small, deliberately plain, never-`import`ed
-// `.cpp` that itself `#include`s the real `<llvm-c/Target.h>` (something
+// `.scpp` that itself `#include`s the real `<llvm-c/Target.h>` (something
 // this module's own source never does) to reach the two real inline
 // function bodies, and re-exports each one's result under a new, distinct
 // `extern "C"` name (`scpp_llvm_target_initialize_native_target`/
@@ -159,7 +159,7 @@
 // libs/llvm/CMakeLists.txt) linked into the consolidated `llvm` target's
 // own compiled output. src/driver.cppm -- the one consumer needing
 // "native, whatever this host is" initialization -- calls these two new
-// names directly in place of the real ones; see native_target_init.cpp's
+// names directly in place of the real ones; see native_target_init.scpp's
 // own header comment for the full rationale, including why hard-coding
 // one specific architecture's own concrete symbol names instead (the only
 // alternative needing no shim at all) was rejected.
@@ -222,7 +222,7 @@ unsigned LLVMABIAlignmentOfType(LLVMTargetDataRef TD, LLVMTypeRef Ty);
 // These two names are *not* real llvm-c/Target.h symbols -- there is no
 // such exported symbol anywhere in LLVM's own compiled libraries, see this
 // file's own header comment above for the full rationale. They are this
-// module's own bridge to native_target_init.cpp's two, newly-defined, real
+// module's own bridge to native_target_init.scpp's two, newly-defined, real
 // `extern "C"` symbols (compiled into the separate `llvm_target_native_init`
 // static library, linked into the consolidated `llvm` target's own
 // compiled output, see libs/llvm/CMakeLists.txt), one call deeper than the

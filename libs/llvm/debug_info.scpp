@@ -1,8 +1,8 @@
-// debug_info.cpp
+// debug_info.scpp
 //
 // `llvm:debug_info`: the `:debug_info` partition of module `llvm` (see
-// llvm.cpp, the primary module interface unit, same directory) -- not a
-// standalone, top-level module of its own any more (see types.cpp's own
+// llvm.scpp, the primary module interface unit, same directory) -- not a
+// standalone, top-level module of its own any more (see types.scpp's own
 // "Module consolidation / attachment note" for the general background).
 // Its only job is to give this compiler's own real-C++ `src/*.cppm` files
 // a way to reach official LLVM-C's `llvm-c/DebugInfo.h` surface via
@@ -11,12 +11,12 @@
 // preprocessor/#include at all, so any raw #include left in this
 // compiler's own sources is a hard blocker for eventual self-hosting.
 //
-// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// This is a plain, ordinary C++ source file kept under a `.scpp` extension and compiled
 // only by real clang++ (see the single `llvm` CMake target in
 // libs/llvm/CMakeLists.txt, which compiles this file together with
-// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// llvm.scpp and every other `llvm:*` partition `.scpp` file into one module)
 // and never fed to the scpp compiler itself -- exactly like `llvm:core`'s
-// core.cpp and `llvm:types`'s types.cpp, there is no aspiration here for
+// core.scpp and `llvm:types`'s types.scpp, there is no aspiration here for
 // this specific file to also be scpp-parseable today. `export module
 // llvm:debug_info;` below is nonetheless unrestricted, standard C++20
 // module-partition syntax -- real ISO C++, nothing scpp-specific about it
@@ -36,17 +36,17 @@
 // `LLVMDIBuilderInsert*Record*` family beyond `...AtEnd` for a declare
 // record, and dozens more, none of which either file needs).
 //
-// Depends on `llvm:types` (types.cpp, same directory) for every opaque
+// Depends on `llvm:types` (types.scpp, same directory) for every opaque
 // handle pointer alias used below (LLVMContextRef, LLVMModuleRef,
 // LLVMValueRef, LLVMBasicBlockRef, LLVMMetadataRef, LLVMDIBuilderRef,
 // LLVMDbgRecordRef) plus LLVMBool: those are genuinely llvm-c/Types.h's own
 // declarations, not DebugInfo.h's -- exactly the same reasoning `llvm:core`
-// already relies on for its own `import :types;` (see core.cpp).
+// already relies on for its own `import :types;` (see core.scpp).
 // `LLVMDbgRecordRef` specifically (the return type of
 // `LLVMDIBuilderInsertDeclareRecordAtEnd` below) is declared by
 // `llvm:types` rather than declared privately here, so that partition
 // remains the single, real source of truth for every Types.h declaration
-// any of these `llvm:*` partitions need -- see types.cpp's own header
+// any of these `llvm:*` partitions need -- see types.scpp's own header
 // comment for the full rationale. Unlike `llvm:core`, this partition does
 // *not* `export import :types;`: both current consumers
 // (orchestration.cppm, debug.cppm) already reach every one of those
@@ -73,7 +73,7 @@
 // opaque handle struct tag its own declarations need beyond what
 // `llvm:types` already declares (`LLVMOpaqueDbgRecord`, for
 // `LLVMDbgRecordRef`) is a genuine Types.h symbol declared once, by
-// `llvm:types` itself (see types.cpp's own "Module consolidation /
+// `llvm:types` itself (see types.scpp's own "Module consolidation /
 // attachment note" for the full rationale of why that tag lives in its
 // module purview, attached to module `llvm`, rather than a global module
 // fragment) -- not a second, private copy declared here. The four small

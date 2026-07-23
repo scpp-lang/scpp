@@ -1,6 +1,6 @@
-// types.cpp
+// types.scpp
 //
-// `llvm:types`: the `:types` partition of module `llvm` (see llvm.cpp, the
+// `llvm:types`: the `:types` partition of module `llvm` (see llvm.scpp, the
 // primary module interface unit, same directory) -- not a standalone,
 // top-level module of its own any more (see "Module consolidation" below).
 // Its only job is to give this compiler's own real-C++ `src/*.cppm` files,
@@ -11,12 +11,12 @@
 // #include left in this compiler's own sources is a hard blocker for
 // eventual self-hosting.
 //
-// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// This is a plain, ordinary C++ source file kept under a `.scpp` extension and compiled
 // only by real clang++ (see the single `llvm` CMake target in
 // libs/llvm/CMakeLists.txt, which compiles this file together with
-// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// llvm.scpp and every other `llvm:*` partition `.scpp` file into one module)
 // and never fed to the scpp compiler itself -- exactly like `llvm:core`'s
-// own core.cpp, there is no aspiration here for this specific file to also
+// own core.scpp, there is no aspiration here for this specific file to also
 // be scpp-parseable today. `export module llvm:types;` below is
 // nonetheless unrestricted, standard C++20 module-partition syntax -- real
 // ISO C++, nothing scpp-specific about it -- so the resulting compiled
@@ -38,12 +38,12 @@
 // independent time to get them, duplicating `llvm.core`'s private copy
 // instead of sharing it. This module fixed that: it became the single,
 // real source of truth for Types.h's declarations, and both `llvm:core`
-// (via `import :types;`, see core.cpp) and
+// (via `import :types;`, see core.scpp) and
 // `src/compiler/codegen/api.cppm` (via `import llvm;`) depend on it
 // instead of each keeping their own copy.
 //
 // Scope: only the specific Types.h declarations actually referenced today,
-// across all of `llvm:core` (core.cpp), `llvm:debug_info` (debug_info.cpp,
+// across all of `llvm:core` (core.scpp), `llvm:debug_info` (debug_info.scpp,
 // same directory), and `src/compiler/codegen/api.cppm` combined -- not a
 // blanket re-declaration of Types.h's much larger surface (real Types.h
 // also declares e.g. `LLVMMemoryBufferRef`, `LLVMNamedMDNodeRef`,
@@ -69,7 +69,7 @@
 // type, too, is genuinely from Types.h (`typedef struct LLVMOpaqueDbgRecord
 // *LLVMDbgRecordRef;`), not DebugInfo.h -- so it belongs here, this
 // project's single real source of truth for Types.h's declarations, rather
-// than as a private copy re-declared inside debug_info.cpp itself.
+// than as a private copy re-declared inside debug_info.scpp itself.
 //
 // This module declares no RAII wrapper of its own: its raw `LLVM*Ref`
 // declarations *are* the public surface `llvm:core`, `llvm:debug_info`,
@@ -82,7 +82,7 @@
 //
 // Module consolidation / attachment note: before the six `llvm.<name>`
 // modules (PRs #290-295) were merged into six partitions of one module
-// `llvm` (see llvm.cpp), every opaque handle struct tag below lived in
+// `llvm` (see llvm.scpp), every opaque handle struct tag below lived in
 // this file's *global module fragment* (a `module;` ... declarations ...
 // block before the module-declaration), deliberately unattached to any
 // module, rather than declared directly in the module purview -- and
@@ -115,8 +115,8 @@
 // own purview would already agree with this one, with no global-module-
 // fragment indirection needed to make that so. The one remaining
 // `#include <llvm-c/Target.h>` anywhere in this project
-// (native_target_init.cpp, same directory) does not change this: it is a
-// deliberately plain, never-`import`ed `.cpp` that never imports this
+// (native_target_init.scpp, same directory) does not change this: it is a
+// deliberately plain, never-`import`ed `.scpp` that never imports this
 // module (or any `llvm:*` partition) either, compiled as its own, wholly
 // separate translation unit into its own small static library, so its own
 // unattached copies of these same tags (reached transitively through its
@@ -204,5 +204,5 @@ export using LLVMDbgRecordRef = LLVMOpaqueDbgRecord*;
 // Real llvm-c/Types.h itself declares `typedef int LLVMBool;` -- unlike
 // `LLVMAttributeIndex` (`typedef unsigned LLVMAttributeIndex;`), which real
 // llvm-c/Core.h declares itself and therefore stays behind in `llvm:core`
-// (see core.cpp), this one is genuinely Types.h's own declaration.
+// (see core.scpp), this one is genuinely Types.h's own declaration.
 export using LLVMBool = int;

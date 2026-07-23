@@ -1,8 +1,8 @@
-// analysis.cpp
+// analysis.scpp
 //
 // `llvm:analysis`: the `:analysis` partition of module `llvm` (see
-// llvm.cpp, the primary module interface unit, same directory) -- not a
-// standalone, top-level module of its own any more (see types.cpp's own
+// llvm.scpp, the primary module interface unit, same directory) -- not a
+// standalone, top-level module of its own any more (see types.scpp's own
 // "Module consolidation / attachment note" for the general background).
 // Its only job is to give this compiler's own real-C++ `src/*.cppm` files
 // a way to reach official LLVM-C's `llvm-c/Analysis.h` surface via
@@ -11,14 +11,14 @@
 // preprocessor/#include at all, so any raw #include left in this
 // compiler's own sources is a hard blocker for eventual self-hosting.
 //
-// This is a plain, ordinary C++ file (a `.cpp`, not a `.scpp`), compiled
+// This is a plain, ordinary C++ source file kept under a `.scpp` extension and compiled
 // only by real clang++ (see the single `llvm` CMake target in
 // libs/llvm/CMakeLists.txt, which compiles this file together with
-// llvm.cpp and every other `llvm:*` partition `.cpp` file into one module)
+// llvm.scpp and every other `llvm:*` partition `.scpp` file into one module)
 // and never fed to the scpp compiler itself -- exactly like `llvm:core`'s
-// core.cpp, `llvm:types`'s types.cpp, `llvm:debug_info`'s debug_info.cpp,
-// `llvm:target`'s target.cpp, and `llvm:target_machine`'s
-// target_machine.cpp, there is no aspiration here for this specific file
+// core.scpp, `llvm:types`'s types.scpp, `llvm:debug_info`'s debug_info.scpp,
+// `llvm:target`'s target.scpp, and `llvm:target_machine`'s
+// target_machine.scpp, there is no aspiration here for this specific file
 // to also be scpp-parseable today. `export module llvm:analysis;` below
 // is nonetheless unrestricted, standard C++20 module-partition syntax --
 // real ISO C++, nothing scpp-specific about it -- so the resulting
@@ -44,20 +44,20 @@
 // `#include`d by any `src/*.cppm` file, after `llvm:core`/`llvm:types`
 // (Core.h/Types.h), `llvm:debug_info` (DebugInfo.h), and
 // `llvm:target`/`llvm:target_machine` (Target.h/TargetMachine.h) each
-// already migrated their own narrow slice (`native_target_init.cpp`, same
+// already migrated their own narrow slice (`native_target_init.scpp`, same
 // directory, keeps its own separate, deliberate, permanent
 // `#include <llvm-c/Target.h>` -- see its own header comment -- but that
 // one is never `import`ed by anything, was always meant to be a permanent
 // bridge rather than a temporary stepping stone like this file was, and is
 // not part of `src/` itself).
 //
-// Depends on `llvm:types` (types.cpp, same directory) for `LLVMModuleRef`
+// Depends on `llvm:types` (types.scpp, same directory) for `LLVMModuleRef`
 // (the module handle `LLVMVerifyModule` below checks) and `LLVMBool` (its
 // return type): those are genuinely llvm-c/Types.h's own declarations, not
 // Analysis.h's -- exactly the same reasoning `llvm:core`, `llvm:debug_info`,
 // `llvm:target`, and `llvm:target_machine` already rely on for their own
-// `import :types;` (see core.cpp/debug_info.cpp/target.cpp/
-// target_machine.cpp). Like `llvm:debug_info`, `llvm:target`, and
+// `import :types;` (see core.scpp/debug_info.scpp/target.scpp/
+// target_machine.scpp). Like `llvm:debug_info`, `llvm:target`, and
 // `llvm:target_machine` themselves, this partition does *not*
 // `export import :types;`: its one current consumer (orchestration.cppm)
 // already reaches both aliases through its own single `import llvm;`
@@ -73,17 +73,17 @@
 // `LLVMVerifierFailureAction`, unlike `LLVMModuleRef`/`LLVMBool`, is
 // genuinely Analysis.h's *own* declaration (a small, three-value anonymous
 // C `enum`), so -- mirroring how `LLVMAttributeIndex` stays in `llvm:core`
-// rather than moving to `llvm:types` (see core.cpp's own header comment) --
+// rather than moving to `llvm:types` (see core.scpp's own header comment) --
 // it is declared directly here, in this partition's own purview, rather
 // than added to `llvm:types`. Unlike an opaque handle's struct tag, a
 // plain enum declaration has none of the cross-module attachment
-// restriction discussed at length in types.cpp's own header comment (that
+// restriction discussed at length in types.scpp's own header comment (that
 // restriction is specific to class/struct/union tags, not enums), so it
 // needs no global-module-fragment placement of its own. This partition
 // introduces no new opaque handle struct tag at all -- its one function
 // below only takes/returns handle kinds `llvm:types` already declares --
 // so this file's own global module fragment is empty, exactly like
-// `llvm:core`'s own core.cpp.
+// `llvm:core`'s own core.scpp.
 //
 // This module declares no RAII wrapper of its own: its raw
 // `LLVMVerifyModule` declaration *is* the public surface
