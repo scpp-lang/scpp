@@ -1,0 +1,26 @@
+manifest-version = 1
+
+[package]
+name = "llvm"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../std" }
+
+[[lib]]
+name = "llvm"
+sources = ["**/*.scpp"]
+additional_objs = "llvm-native"
+
+[additional_objs.llvm-native]
+input = [
+    "native_target_init.scpp",
+]
+output = [
+    "native_target_init.o",
+]
+command = """\
+LLVM_CONFIG=${LLVM_CONFIG:-$(command -v llvm-config-22 || command -v llvm-config)} && \
+${CXX:-c++} -x c++ -std=c++26 -O2 -c native_target_init.scpp -o native_target_init.o \
+$($LLVM_CONFIG --cxxflags)
+"""

@@ -231,37 +231,46 @@ export using LLVMTargetRef = LLVMTarget*;
 // each enumerator's value), not just read off the header's declaration
 // order.
 
-export enum LLVMCodeGenOptLevel {
+export enum class LLVMCodeGenOptLevel {
     LLVMCodeGenLevelNone = 0,
     LLVMCodeGenLevelLess = 1,
     LLVMCodeGenLevelDefault = 2,
     LLVMCodeGenLevelAggressive = 3,
 };
+export constexpr llvm::LLVMCodeGenOptLevel LLVMCodeGenLevelNone = llvm::LLVMCodeGenOptLevel::LLVMCodeGenLevelNone;
+export constexpr llvm::LLVMCodeGenOptLevel LLVMCodeGenLevelLess = llvm::LLVMCodeGenOptLevel::LLVMCodeGenLevelLess;
+export constexpr llvm::LLVMCodeGenOptLevel LLVMCodeGenLevelDefault =
+    llvm::LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault;
+export constexpr llvm::LLVMCodeGenOptLevel LLVMCodeGenLevelAggressive =
+    llvm::LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive;
 
 // Only `LLVMRelocPIC` (position-independent code, the one relocation mode
 // src/driver.cppm ever requests) is reproduced below; real
 // llvm-c/TargetMachine.h's own `LLVMRelocMode` also declares
 // LLVMRelocDefault/Static/DynamicNoPic/ROPI/RWPI/ROPI_RWPI, none of which
 // this project's driver needs.
-export enum LLVMRelocMode {
+export enum class LLVMRelocMode {
     LLVMRelocPIC = 2,
 };
+export constexpr llvm::LLVMRelocMode LLVMRelocPIC = llvm::LLVMRelocMode::LLVMRelocPIC;
 
 // Only `LLVMCodeModelDefault` (src/driver.cppm never requests a
 // non-default code model) is reproduced below; real
 // llvm-c/TargetMachine.h's own `LLVMCodeModel` also declares
 // JITDefault/Tiny/Small/Kernel/Medium/Large.
-export enum LLVMCodeModel {
+export enum class LLVMCodeModel {
     LLVMCodeModelDefault = 0,
 };
+export constexpr llvm::LLVMCodeModel LLVMCodeModelDefault = llvm::LLVMCodeModel::LLVMCodeModelDefault;
 
 // Only `LLVMObjectFile` (src/driver.cppm always emits a native object
 // file, never a textual assembly file) is reproduced below; real
 // llvm-c/TargetMachine.h's own `LLVMCodeGenFileType` also declares
 // LLVMAssemblyFile.
-export enum LLVMCodeGenFileType {
+export enum class LLVMCodeGenFileType {
     LLVMObjectFile = 1,
 };
+export constexpr llvm::LLVMCodeGenFileType LLVMObjectFile = llvm::LLVMCodeGenFileType::LLVMObjectFile;
 
 // ---------------------------------------------------------------------
 // Functions (llvm-c/TargetMachine.h)
@@ -289,7 +298,7 @@ LLVMBool LLVMTargetMachineEmitToFile(LLVMTargetMachineRef T, LLVMModuleRef M, co
                                      LLVMCodeGenFileType codegen, char** ErrorMessage);
 
 // Triple
-char* LLVMGetDefaultTargetTriple(void);
+char* LLVMGetDefaultTargetTriple();
 
 } // extern "C"
 

@@ -121,9 +121,11 @@ namespace llvm {
 // header and printing each enumerator's value), not just read off the
 // header's declaration order -- rather than left to depend on every other,
 // undeclared enumerator's own position.
-export enum LLVMVerifierFailureAction {
+export enum class LLVMVerifierFailureAction {
     LLVMReturnStatusAction = 2,
 };
+export constexpr llvm::LLVMVerifierFailureAction LLVMReturnStatusAction =
+    llvm::LLVMVerifierFailureAction::LLVMReturnStatusAction;
 
 // ---------------------------------------------------------------------
 // Functions (llvm-c/Analysis.h)

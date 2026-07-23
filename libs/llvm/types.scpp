@@ -204,7 +204,7 @@ export using LLVMDbgRecordRef = LLVMOpaqueDbgRecord*;
 // LLVMBool (llvm-c/Types.h)
 // ---------------------------------------------------------------------
 // Real llvm-c/Types.h itself declares `typedef int LLVMBool;` -- unlike
-// `LLVMAttributeIndex` (`typedef unsigned LLVMAttributeIndex;`), which real
+// `LLVMAttributeIndex` (`typedef unsigned int LLVMAttributeIndex;`), which real
 // llvm-c/Core.h declares itself and therefore stays behind in `llvm:core`
 // (see core.scpp), this one is genuinely Types.h's own declaration.
 export using LLVMBool = int;
