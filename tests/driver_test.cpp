@@ -3487,15 +3487,12 @@ void run_cli_extension_tests() {
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
-        // ch11 §11.5: an exported function's namespace must match its own
-        // module's name -- deliberately violated here so the error is
-        // rooted in lib.scpp itself, not main.scpp.
+        // Deliberately malformed imported module source so the diagnostic
+        // is rooted in lib.scpp itself, not main.scpp.
         write_text_file(module_path,
                         "export module lib;\n"
-                        "namespace wrong {\n"
-                        "    export int helper() { return 1; }\n"
-                        "}\n");
-        write_text_file(source_path, "import lib;\nint main() { return lib::helper(); }\n");
+                        "int helper( {\n");
+        write_text_file(source_path, "import lib;\nint main() { return 0; }\n");
         // `cd` into root and use bare relative arguments below (unlike
         // every other test in this file, which prefixes every path with
         // std::filesystem::current_path()) -- the bug this regresses only
@@ -3503,8 +3500,7 @@ void run_cli_extension_tests() {
         // spelling, exactly like an ordinary entry-file argument.
         RunResult build_result = run_command_capture("cd " + root.string() + " && " + std::string(SCPP_BINARY_PATH) +
                                                      " main.scpp -o app --import lib=lib.scpp 2>&1");
-        expect(build_result.exit_code != 0,
-               case_name + ": expected the namespace/module mismatch to fail the build");
+        expect(build_result.exit_code != 0, case_name + ": expected malformed imported source to fail the build");
         // Before this fix, a diagnostic rooted in an imported file always
         // printed a fully-resolved absolute path even when --import
         // name=path was given a bare relative one, unlike an equivalent

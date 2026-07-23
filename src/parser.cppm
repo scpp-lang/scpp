@@ -806,7 +806,7 @@ private:
         alias.namespace_path = namespace_stack_;
         alias.is_exported = is_exported;
         program.type_aliases.push_back(std::move(alias));
-        check_export_namespace(program, is_exported, namespace_stack_, loc, "type alias '" + qualified_name + "'");
+        check_export_context(program, is_exported, namespace_stack_, loc, "type alias '" + qualified_name + "'");
     }
 
     [[nodiscard]] ExprPtr make_bool_literal_expr(SourceLocation loc, bool value) {
@@ -1846,18 +1846,11 @@ private:
         return segments;
     }
 
-    // ch11 §11.5: the export/namespace validation pass -- purely
-    // syntactic, no borrow-checker involvement. An `export`-marked
-    // declaration only actually exports if its namespace_path, segment
-    // for segment, starts with the enclosing module's own dotted name
-    // (a *prefix* requirement, not exact-match: deeper nesting beyond
-    // the module's own name, e.g. `org::lotx::cmath::trig`, is fine).
-    // `export` and "lives in the required namespace" are two
-    // independent, both-mandatory gates -- getting either wrong is a
-    // compile error, caught here immediately rather than deferred to a
-    // later pass.
-    void check_export_namespace(const Program& program, bool is_exported,
-                                 const std::vector<std::string>& namespace_path, SourceLocation loc,
+    // `export` is only meaningful inside a module unit; once we're in a
+    // module, real C++ places no namespace-shape restriction on the
+    // exported declaration itself, so neither do we.
+    void check_export_context(const Program& program, bool is_exported,
+                                 const std::vector<std::string>& /*namespace_path*/, SourceLocation loc,
                                  const std::string& what) const {
         if (!is_exported) return;
         if (program.module_name.empty()) {
@@ -1865,34 +1858,6 @@ private:
                               "'export' on " + what +
                                   " has no effect: this file has no 'export module'/'module' declaration "
                                   "(ch11 §11.3)");
-        }
-        if (namespace_path.empty()) {
-            throw ParseError(loc.line, loc.column,
-                              "exported " + what + " must be declared inside a namespace -- ch11 §11.5");
-        }
-        std::string module_name = program.module_name;
-        std::size_t partition = module_name.find(':');
-        if (partition != std::string::npos) module_name = module_name.substr(0, partition);
-        std::vector<std::string> module_namespace;
-        std::size_t start = 0;
-        while (start <= module_name.size()) {
-            std::size_t dot = module_name.find('.', start);
-            std::string piece = module_name.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
-            if (!piece.empty()) module_namespace.push_back(piece);
-            if (dot == std::string::npos) break;
-            start = dot + 1;
-        }
-        if (module_namespace.size() > namespace_path.size()) {
-            throw ParseError(loc.line, loc.column,
-                             "exported " + what + " must be declared in namespace matching module '" +
-                                 program.module_name + "' -- ch11 §11.5");
-        }
-        for (std::size_t i = 0; i < module_namespace.size(); i++) {
-            if (module_namespace[i] != namespace_path[i]) {
-                throw ParseError(loc.line, loc.column,
-                                 "exported " + what + " must be declared in namespace matching module '" +
-                                     program.module_name + "' -- ch11 §11.5");
-            }
         }
     }
 
@@ -2931,7 +2896,7 @@ private:
             SourceLocation loc = current_loc();
             StructDef def = parse_struct_def(program, {}, std::move(leading_alignments));
             def.is_exported = is_exported || exported_forward_struct_exists(program, def.name);
-            check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
+            check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwEnum)) {
             reject_unsafe_if_requested("an 'enum class' declaration");
@@ -2940,14 +2905,14 @@ private:
             SourceLocation loc = current_loc();
             EnumDef def = parse_enum_def();
             def.is_exported = is_exported;
-            check_export_namespace(program, is_exported, def.namespace_path, loc, "enum class '" + def.name + "'");
+            check_export_context(program, is_exported, def.namespace_path, loc, "enum class '" + def.name + "'");
             program.enums.push_back(std::move(def));
         } else if (check(TokenKind::KwUnion)) {
             reject_unsafe_if_requested("a 'union' declaration");
             SourceLocation loc = current_loc();
             StructDef def = parse_union_def(std::move(leading_alignments));
             def.is_exported = is_exported;
-            check_export_namespace(program, is_exported, def.namespace_path, loc, "union '" + def.name + "'");
+            check_export_context(program, is_exported, def.namespace_path, loc, "union '" + def.name + "'");
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwClass)) {
             reject_unsafe_if_requested("a 'class' declaration");
@@ -3029,7 +2994,7 @@ private:
                 std::vector<GenericTypeParam> template_params = parse_generic_type_header();
                 StructDef def = parse_struct_def(program, std::move(template_params));
                 def.is_exported = is_exported;
-                check_export_namespace(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
+                check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
                 program.structs.push_back(std::move(def));
             } else if (after_header_kind == TokenKind::KwUnion) {
                 reject_unsafe_if_requested("a 'union' declaration");
@@ -3066,7 +3031,7 @@ private:
                     global.namespace_path = namespace_stack_;
                     global.is_exported = is_exported;
                     SourceLocation loc = global.decl->loc;
-                    check_export_namespace(program, is_exported, global.namespace_path, loc,
+                    check_export_context(program, is_exported, global.namespace_path, loc,
                                            "variable '" + global.decl->var_name + "'");
                     program.globals.push_back(std::move(global));
                     return;
@@ -3142,7 +3107,7 @@ private:
                 fn.name = qualify_name(fn.name);
                 fn.namespace_path = namespace_stack_;
                 fn.is_exported = is_exported;
-                check_export_namespace(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+                check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
                 program.functions.push_back(std::move(fn));
                 return;
             }
@@ -3180,7 +3145,7 @@ private:
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
         fn.is_exported = is_exported;
-        check_export_namespace(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+        check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
         program.functions.push_back(std::move(fn));
     }
 
@@ -4006,7 +3971,7 @@ private:
         fn.is_exported = is_exported;
         fn.template_params = template_params;
         fn.is_generic_template = true;
-        check_export_namespace(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+        check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
         generic_function_template_params_[fn.name] = template_params;
 
         for (const GenericTypeParam& p : template_params) {
@@ -4033,7 +3998,7 @@ private:
         def.template_param_name = template_param_name;
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
-        check_export_namespace(program, is_exported, def.namespace_path, loc, "concept '" + def.name + "'");
+        check_export_context(program, is_exported, def.namespace_path, loc, "concept '" + def.name + "'");
         concept_names_.insert(def.name);
         // The witness class shares the concept's own fully-qualified
         // name -- a concept and a class/struct can never collide in
@@ -4230,7 +4195,7 @@ private:
         def.template_params = template_params;
         def.template_owner_id = next_generic_template_owner_id();
         def.is_variadic_primary_template = true;
-        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
         program.classes.push_back(std::move(def));
     }
 
@@ -4348,7 +4313,7 @@ private:
         def.template_params = template_params;
         def.template_owner_id = next_generic_template_owner_id();
         def.is_variadic_specialization = true;
-        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
         // ch05 §5.14: the recursive case's own base clause, `: private
         // Tuple<Tail...>` or (with a leading non-type parameter, e.g.
@@ -4456,7 +4421,7 @@ private:
         def.template_params = std::move(template_params);
         def.template_owner_id = next_generic_template_owner_id();
         def.is_forward_declaration = true;
-        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
         program.classes.push_back(std::move(def));
     }
 
@@ -4548,7 +4513,7 @@ private:
         def.template_owner_id = next_generic_template_owner_id();
         def.is_partial_specialization = true;
         def.specialization_template_args = std::move(specialization_args);
-        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
         parse_named_class_base_clause(program, def.base_specifiers);
 
@@ -4665,7 +4630,7 @@ private:
         def.is_exported = is_exported || exported_forward_class_exists(program, qualified_class_name);
         def.template_params = template_params;
         if (is_generic) def.template_owner_id = next_generic_template_owner_id();
-        check_export_namespace(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
 
         if (match(TokenKind::Semicolon)) {
             if (is_generic) {

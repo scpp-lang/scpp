@@ -1,0 +1,6 @@
+// Global-scope exports are allowed in a module interface.
+export module foo;
+
+export int helper() {
+    return 5;
+}
