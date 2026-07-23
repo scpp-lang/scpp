@@ -252,4 +252,4 @@ src/mathlib.scpp:3:8: error: cannot 'export import' partition 'mathlib:detail': 
 
 ---
 
-[← 上一章：使用 `import` 与限定名](ch07-04-using-import-and-qualified-names.md) · [目录](README.md)
+[← 上一章：使用 `import` 与限定名](ch07-04-using-import-and-qualified-names.md) · [目录](README.md) · [下一章：定长数组 →](ch08-01-fixed-size-arrays.md)

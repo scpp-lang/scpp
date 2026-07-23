@@ -37,7 +37,7 @@
   - [Separating Modules into Different Files](ch07-05-separating-modules-into-different-files.md)
 
 - Arrays, Buffers, and Views
-  - Fixed-Size Arrays
+  - [Fixed-Size Arrays](ch08-01-fixed-size-arrays.md)
   - Text as `char` and C-Compatible Buffers
   - Borrowed Views with `std::span`
 
