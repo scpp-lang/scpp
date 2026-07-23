@@ -383,4 +383,4 @@ src/main.scpp:2:16: error: expected ';' but found 'as'
 
 ---
 
-[← 上一章：在模組樹中參照項目的路徑](ch07-03-paths-for-referring-to-items-in-module-tree.md) · [目錄](README.md)
+[← 上一章：在模組樹中參照項目的路徑](ch07-03-paths-for-referring-to-items-in-module-tree.md) · [目錄](README.md) · [下一章：把模組拆到不同檔案中 →](ch07-05-separating-modules-into-different-files.md)

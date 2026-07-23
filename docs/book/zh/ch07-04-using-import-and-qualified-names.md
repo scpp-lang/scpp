@@ -383,5 +383,5 @@ src/main.scpp:2:16: error: expected ';' but found 'as'
 
 ---
 
-[← 上一章：在模块树中引用条目的路径](ch07-03-paths-for-referring-to-items-in-module-tree.md) · [目录](README.md)
+[← 上一章：在模块树中引用条目的路径](ch07-03-paths-for-referring-to-items-in-module-tree.md) · [目录](README.md) · [下一章：把模块拆到不同文件中 →](ch07-05-separating-modules-into-different-files.md)
 

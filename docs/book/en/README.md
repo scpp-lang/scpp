@@ -34,7 +34,7 @@
   - [Control Scope and Privacy with Modules](ch07-02-control-scope-and-privacy-with-modules.md)
   - [Paths for Referring to Items in the Module Tree](ch07-03-paths-for-referring-to-items-in-module-tree.md)
   - [Using `import` and Qualified Names](ch07-04-using-import-and-qualified-names.md)
-  - Separating Modules into Different Files
+  - [Separating Modules into Different Files](ch07-05-separating-modules-into-different-files.md)
 
 - Arrays, Buffers, and Views
   - Fixed-Size Arrays
