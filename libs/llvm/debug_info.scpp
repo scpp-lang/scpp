@@ -114,10 +114,12 @@ namespace llvm {
 // are declared below, each given its exact real numeric value explicitly
 // (never left to auto-increment), so that any omitted enumerator never
 // shifts the value of one that is declared.
-export enum LLVMDIFlags {
+export enum class LLVMDIFlags {
     LLVMDIFlagZero = 0,
-    LLVMDIFlagPrototyped = 1 << 8,
+    LLVMDIFlagPrototyped = 256,
 };
+export constexpr llvm::LLVMDIFlags LLVMDIFlagZero = llvm::LLVMDIFlags::LLVMDIFlagZero;
+export constexpr llvm::LLVMDIFlags LLVMDIFlagPrototyped = llvm::LLVMDIFlags::LLVMDIFlagPrototyped;
 
 // Real llvm-c/DebugInfo.h declares this as a large anonymous C `enum`
 // (`typedef enum { LLVMDWARFSourceLanguageC89, ... } LLVMDWARFSourceLanguage;`)
@@ -127,9 +129,11 @@ export enum LLVMDIFlags {
 // only it is reproduced here, given its exact real position-derived value
 // (40) explicitly rather than left to depend on every other, undeclared
 // enumerator's own position.
-export enum LLVMDWARFSourceLanguage {
+export enum class LLVMDWARFSourceLanguage {
     LLVMDWARFSourceLanguageC_plus_plus_17 = 40,
 };
+export constexpr llvm::LLVMDWARFSourceLanguage LLVMDWARFSourceLanguageC_plus_plus_17 =
+    llvm::LLVMDWARFSourceLanguage::LLVMDWARFSourceLanguageC_plus_plus_17;
 
 // Real llvm-c/DebugInfo.h declares this as
 // `typedef enum { LLVMDWARFEmissionNone = 0, LLVMDWARFEmissionFull,
@@ -138,16 +142,18 @@ export enum LLVMDWARFSourceLanguage {
 // info, never line-tables-only or none) is referenced, so only it is
 // reproduced here, with its exact real auto-incremented value (1) given
 // explicitly.
-export enum LLVMDWARFEmissionKind {
+export enum class LLVMDWARFEmissionKind {
     LLVMDWARFEmissionFull = 1,
 };
+export constexpr llvm::LLVMDWARFEmissionKind LLVMDWARFEmissionFull =
+    llvm::LLVMDWARFEmissionKind::LLVMDWARFEmissionFull;
 
-// Real llvm-c/DebugInfo.h declares `typedef unsigned LLVMDWARFTypeEncoding;`
+// Real llvm-c/DebugInfo.h declares `typedef unsigned int LLVMDWARFTypeEncoding;`
 // -- a plain type alias (like `LLVMBool`/`LLVMAttributeIndex` in
 // `llvm:types`/`llvm:core`), not a class/struct/enum, so it has none of the
 // struct tags' cross-module attachment restriction and can be declared
 // directly here, exported, with no global-module-fragment placement needed.
-export using LLVMDWARFTypeEncoding = unsigned;
+export using LLVMDWARFTypeEncoding = unsigned int;
 
 // ---------------------------------------------------------------------
 // Functions (llvm-c/DebugInfo.h)
@@ -163,7 +169,7 @@ export using LLVMDWARFTypeEncoding = unsigned;
 export extern "C" {
 
 // Debug metadata version
-unsigned LLVMDebugMetadataVersion(void);
+unsigned int LLVMDebugMetadataVersion();
 
 // DIBuilder construction / lifetime
 LLVMDIBuilderRef LLVMCreateDIBuilder(LLVMModuleRef M);
@@ -173,59 +179,59 @@ void LLVMDIBuilderFinalize(LLVMDIBuilderRef Builder);
 // Compile unit / file
 LLVMMetadataRef LLVMDIBuilderCreateCompileUnit(
     LLVMDIBuilderRef Builder, LLVMDWARFSourceLanguage Lang, LLVMMetadataRef FileRef, const char* Producer,
-    std::size_t ProducerLen, LLVMBool isOptimized, const char* Flags, std::size_t FlagsLen, unsigned RuntimeVer,
-    const char* SplitName, std::size_t SplitNameLen, LLVMDWARFEmissionKind Kind, unsigned DWOId,
-    LLVMBool SplitDebugInlining, LLVMBool DebugInfoForProfiling, const char* SysRoot, std::size_t SysRootLen,
-    const char* SDK, std::size_t SDKLen);
-LLVMMetadataRef LLVMDIBuilderCreateFile(LLVMDIBuilderRef Builder, const char* Filename, std::size_t FilenameLen,
-                                       const char* Directory, std::size_t DirectoryLen);
+    unsigned long ProducerLen, LLVMBool isOptimized, const char* Flags, unsigned long FlagsLen, unsigned int RuntimeVer,
+    const char* SplitName, unsigned long SplitNameLen, LLVMDWARFEmissionKind Kind, unsigned int DWOId,
+    LLVMBool SplitDebugInlining, LLVMBool DebugInfoForProfiling, const char* SysRoot, unsigned long SysRootLen,
+    const char* SDK, unsigned long SDKLen);
+LLVMMetadataRef LLVMDIBuilderCreateFile(LLVMDIBuilderRef Builder, const char* Filename, unsigned long FilenameLen,
+                                       const char* Directory, unsigned long DirectoryLen);
 
 // Subprogram (function)
 LLVMMetadataRef LLVMDIBuilderCreateFunction(LLVMDIBuilderRef Builder, LLVMMetadataRef Scope, const char* Name,
-                                            std::size_t NameLen, const char* LinkageName,
-                                            std::size_t LinkageNameLen, LLVMMetadataRef File, unsigned LineNo,
+                                            unsigned long NameLen, const char* LinkageName,
+                                            unsigned long LinkageNameLen, LLVMMetadataRef File, unsigned int LineNo,
                                             LLVMMetadataRef Ty, LLVMBool IsLocalToUnit, LLVMBool IsDefinition,
-                                            unsigned ScopeLine, LLVMDIFlags Flags, LLVMBool IsOptimized);
+                                            unsigned int ScopeLine, LLVMDIFlags Flags, LLVMBool IsOptimized);
 void LLVMSetSubprogram(LLVMValueRef Func, LLVMMetadataRef SP);
 
 // Debug locations
-LLVMMetadataRef LLVMDIBuilderCreateDebugLocation(LLVMContextRef Ctx, unsigned Line, unsigned Column,
+LLVMMetadataRef LLVMDIBuilderCreateDebugLocation(LLVMContextRef Ctx, unsigned int Line, unsigned int Column,
                                                  LLVMMetadataRef Scope, LLVMMetadataRef InlinedAt);
 
 // Types
 LLVMMetadataRef LLVMDIBuilderCreateSubroutineType(LLVMDIBuilderRef Builder, LLVMMetadataRef File,
-                                                  LLVMMetadataRef* ParameterTypes, unsigned NumParameterTypes,
+                                                  LLVMMetadataRef* ParameterTypes, unsigned int NumParameterTypes,
                                                   LLVMDIFlags Flags);
-LLVMMetadataRef LLVMDIBuilderCreateArrayType(LLVMDIBuilderRef Builder, std::uint64_t Size,
-                                            std::uint32_t AlignInBits, LLVMMetadataRef Ty,
-                                            LLVMMetadataRef* Subscripts, unsigned NumSubscripts);
+LLVMMetadataRef LLVMDIBuilderCreateArrayType(LLVMDIBuilderRef Builder, unsigned long Size,
+                                            unsigned int AlignInBits, LLVMMetadataRef Ty,
+                                            LLVMMetadataRef* Subscripts, unsigned int NumSubscripts);
 LLVMMetadataRef LLVMDIBuilderCreateUnspecifiedType(LLVMDIBuilderRef Builder, const char* Name,
-                                                   std::size_t NameLen);
-LLVMMetadataRef LLVMDIBuilderCreateBasicType(LLVMDIBuilderRef Builder, const char* Name, std::size_t NameLen,
-                                            std::uint64_t SizeInBits, LLVMDWARFTypeEncoding Encoding,
+                                                   unsigned long NameLen);
+LLVMMetadataRef LLVMDIBuilderCreateBasicType(LLVMDIBuilderRef Builder, const char* Name, unsigned long NameLen,
+                                            unsigned long SizeInBits, LLVMDWARFTypeEncoding Encoding,
                                             LLVMDIFlags Flags);
 LLVMMetadataRef LLVMDIBuilderCreatePointerType(LLVMDIBuilderRef Builder, LLVMMetadataRef PointeeTy,
-                                               std::uint64_t SizeInBits, std::uint32_t AlignInBits,
-                                               unsigned AddressSpace, const char* Name, std::size_t NameLen);
+                                               unsigned long SizeInBits, unsigned int AlignInBits,
+                                               unsigned int AddressSpace, const char* Name, unsigned long NameLen);
 
 // Subranges / arrays of DI nodes
-LLVMMetadataRef LLVMDIBuilderGetOrCreateSubrange(LLVMDIBuilderRef Builder, std::int64_t LowerBound,
-                                                 std::int64_t Count);
+LLVMMetadataRef LLVMDIBuilderGetOrCreateSubrange(LLVMDIBuilderRef Builder, long LowerBound,
+                                                 long Count);
 LLVMMetadataRef LLVMDIBuilderGetOrCreateArray(LLVMDIBuilderRef Builder, LLVMMetadataRef* Data,
-                                             std::size_t NumElements);
+                                             unsigned long NumElements);
 
 // Expressions
-LLVMMetadataRef LLVMDIBuilderCreateExpression(LLVMDIBuilderRef Builder, std::uint64_t* Addr, std::size_t Length);
+LLVMMetadataRef LLVMDIBuilderCreateExpression(LLVMDIBuilderRef Builder, unsigned long* Addr, unsigned long Length);
 
 // Variables (parameters / locals) and their declare-record insertion
 LLVMMetadataRef LLVMDIBuilderCreateParameterVariable(LLVMDIBuilderRef Builder, LLVMMetadataRef Scope,
-                                                     const char* Name, std::size_t NameLen, unsigned ArgNo,
-                                                     LLVMMetadataRef File, unsigned LineNo, LLVMMetadataRef Ty,
+                                                     const char* Name, unsigned long NameLen, unsigned int ArgNo,
+                                                     LLVMMetadataRef File, unsigned int LineNo, LLVMMetadataRef Ty,
                                                      LLVMBool AlwaysPreserve, LLVMDIFlags Flags);
 LLVMMetadataRef LLVMDIBuilderCreateAutoVariable(LLVMDIBuilderRef Builder, LLVMMetadataRef Scope, const char* Name,
-                                                std::size_t NameLen, LLVMMetadataRef File, unsigned LineNo,
+                                                unsigned long NameLen, LLVMMetadataRef File, unsigned int LineNo,
                                                 LLVMMetadataRef Ty, LLVMBool AlwaysPreserve, LLVMDIFlags Flags,
-                                                std::uint32_t AlignInBits);
+                                                unsigned int AlignInBits);
 LLVMDbgRecordRef LLVMDIBuilderInsertDeclareRecordAtEnd(LLVMDIBuilderRef Builder, LLVMValueRef Storage,
                                                        LLVMMetadataRef VarInfo, LLVMMetadataRef Expr,
                                                        LLVMMetadataRef DebugLoc, LLVMBasicBlockRef Block);

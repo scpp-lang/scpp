@@ -211,10 +211,10 @@ export extern "C" {
 LLVMTargetDataRef LLVMGetModuleDataLayout(LLVMModuleRef M);
 void LLVMDisposeTargetData(LLVMTargetDataRef TD);
 char* LLVMCopyStringRepOfTargetData(LLVMTargetDataRef TD);
-unsigned LLVMPointerSizeForAS(LLVMTargetDataRef TD, unsigned AS);
-unsigned long long LLVMSizeOfTypeInBits(LLVMTargetDataRef TD, LLVMTypeRef Ty);
-unsigned long long LLVMABISizeOfType(LLVMTargetDataRef TD, LLVMTypeRef Ty);
-unsigned LLVMABIAlignmentOfType(LLVMTargetDataRef TD, LLVMTypeRef Ty);
+unsigned int LLVMPointerSizeForAS(LLVMTargetDataRef TD, unsigned int AS);
+unsigned long LLVMSizeOfTypeInBits(LLVMTargetDataRef TD, LLVMTypeRef Ty);
+unsigned long LLVMABISizeOfType(LLVMTargetDataRef TD, LLVMTypeRef Ty);
+unsigned int LLVMABIAlignmentOfType(LLVMTargetDataRef TD, LLVMTypeRef Ty);
 
 } // extern "C"
 
