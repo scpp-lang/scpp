@@ -98,7 +98,7 @@ public:
     }
 };
 
-export template<typename T>
+template<typename T>
 void __shared_ptr_detail_destroy(void* erased) {
     [[scpp::unsafe]] {
         T* typed = static_cast<T*>(erased);
@@ -107,7 +107,7 @@ void __shared_ptr_detail_destroy(void* erased) {
     return;
 }
 
-export template<typename T>
+template<typename T>
 void* __shared_ptr_detail_erase(T* ptr) {
     [[scpp::unsafe]] {
         return static_cast<void*>(ptr);
