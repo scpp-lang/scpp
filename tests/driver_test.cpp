@@ -3437,8 +3437,25 @@ void run_cli_extension_tests() {
         RunResult result = run_command_capture(std::string(SCPP_BINARY_PATH) + " parse " + source_path.string() + " 2>&1");
         std::filesystem::remove(source_path);
         expect(result.exit_code != 0, case_name + ": expected non-zero exit");
-        expect(result.stdout_text.find("must use the .scpp extension") != std::string::npos,
-               case_name + ": expected extension error, got '" + result.stdout_text + "'");
+        expect(result.stdout_text.find("otherwise pass --source <path>") != std::string::npos,
+               case_name + ": expected --source hint, got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "cli_source_flag_builds_cpp_input";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_source_flag_builds_cpp_input.cpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_source_flag_builds_cpp_input_exe";
+        cases_run++;
+        write_text_file(source_path, "int main() { return 0; }\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " --source " +
+                                                     source_path.string() + " -o " + exe_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": expected --source primary input build to succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected built executable to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
     }
 
     {
@@ -3558,6 +3575,67 @@ void run_cli_extension_tests() {
         std::filesystem::remove(module_path);
         std::filesystem::remove(exe_path);
         std::filesystem::remove(module_dir);
+    }
+
+    {
+        std::string case_name = "cli_build_accepts_mixed_positional_and_source_inputs";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_accepts_mixed_positional_and_source_inputs";
+        std::filesystem::path source_path = root / "main.scpp";
+        std::filesystem::path helper_path = root / "helper.cpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(source_path, "import helper;\nint main() { return helper::value() - 9; }\n");
+        write_text_file(helper_path,
+                        "export module helper;\n"
+                        "namespace helper { export int value() { return 9; } }\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
+                                                     " --source " + helper_path.string() + " -o " + exe_path.string() +
+                                                     " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": expected mixed positional/--source build to succeed, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected built executable to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_build_module_source_flag_accepts_cpp_input";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_source_flag_accepts_cpp_input";
+        std::filesystem::path module_path = root / "helper.cpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path source_path = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_path,
+                        "export module helper;\n"
+                        "namespace helper { export int value() { return 11; } }\n");
+        RunResult emit_result = run_command_capture(std::string(SCPP_BINARY_PATH) +
+                                                    " build-module --source " + module_path.string() +
+                                                    " --interface-out " + interface_path.string() +
+                                                    " --archive-out " + archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": expected build-module --source to succeed, got '" + emit_result.stdout_text + "'");
+        expect(std::filesystem::exists(interface_path), case_name + ": expected .scppm output");
+        expect(std::filesystem::exists(archive_path), case_name + ": expected .scppa output");
+        write_text_file(source_path, "import helper;\nint main() { return helper::value() - 11; }\n");
+        RunResult build_result = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() +
+                                                     " -o " + exe_path.string() + " --import helper=" +
+                                                     interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": expected consumer of .cpp-built module to compile, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected consumer executable to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
     }
 
     {
@@ -3979,6 +4057,50 @@ void run_cli_extension_tests() {
                                                      shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
         expect(build_result.exit_code == 0,
                case_name + ": scpp build should succeed, got '" + build_result.stdout_text + "'");
+        expect(std::filesystem::exists(exe_path), case_name + ": expected manifest-built executable");
+        expect(std::filesystem::exists(helper_iface), case_name + ": expected helper .scppm output");
+        expect(std::filesystem::exists(helper_archive), case_name + ": expected helper .scppa output");
+        RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected manifest-built executable to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        std::string case_name = "cli_project_build_builds_manifest_bin_with_cpp_named_sources";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_project_build_builds_manifest_bin_with_cpp_named_sources";
+        std::filesystem::path src_dir = root / "src";
+        std::filesystem::path exe_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "hello";
+        std::filesystem::path helper_iface =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "modules" / "helper.scppm";
+        std::filesystem::path helper_archive =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "archives" / "libhelper.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(src_dir);
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"hello\"\n"
+                        "\n"
+                        "[[bin]]\n"
+                        "name = \"hello\"\n"
+                        "sources = [\"src/**/*.cpp\"]\n");
+        write_text_file(src_dir / "helper.cpp",
+                        "export module helper;\n"
+                        "namespace helper { export int value() { return 42; } }\n");
+        write_text_file(src_dir / "main.cpp",
+                        "import helper;\n"
+                        "int main() { return helper::value() - 42; }\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": manifest build with .cpp-named sources should succeed, got '" +
+                   build_result.stdout_text + "'");
         expect(std::filesystem::exists(exe_path), case_name + ": expected manifest-built executable");
         expect(std::filesystem::exists(helper_iface), case_name + ": expected helper .scppm output");
         expect(std::filesystem::exists(helper_archive), case_name + ": expected helper .scppa output");
