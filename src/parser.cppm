@@ -2823,6 +2823,32 @@ private:
         }
     }
 
+    void parse_exported_top_level_entry(Program& program, bool inherited_export) {
+        if (check(TokenKind::KwNamespace)) {
+            parse_namespace_block(program, inherited_export);
+            return;
+        }
+        if (check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::LBrace) {
+            // `export { <item> <item> ... }` -- groups several
+            // declarations under one export marker (ch11 §11.3),
+            // equivalent to writing `export` before each
+            // individually.
+            advance(); // 'export'
+            advance(); // '{'
+            while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+                parse_exported_top_level_entry(program, /*inherited_export=*/true);
+            }
+            expect(TokenKind::RBrace, "'}'");
+            return;
+        }
+        bool is_exported = inherited_export || match(TokenKind::KwExport);
+        if (check(TokenKind::KwNamespace)) {
+            parse_namespace_block(program, is_exported);
+            return;
+        }
+        parse_top_level_item(program, is_exported);
+    }
+
     // The main "loop over top-level declarations" body, shared between
     // file scope (`inside_namespace=false`, terminated only by
     // EndOfFile -- a stray '}' here is left unconsumed, surfacing as an
@@ -2831,25 +2857,7 @@ private:
     // also terminated by the block's own closing '}').
     void parse_top_level_items(Program& program, bool inside_namespace = false) {
         while (!check(TokenKind::EndOfFile) && !(inside_namespace && check(TokenKind::RBrace))) {
-            if (check(TokenKind::KwNamespace)) {
-                parse_namespace_block(program);
-                continue;
-            }
-            if (check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::LBrace) {
-                // `export { <item> <item> ... }` -- groups several
-                // declarations under one export marker (ch11 §11.3),
-                // equivalent to writing `export` before each
-                // individually.
-                advance(); // 'export'
-                advance(); // '{'
-                while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-                    parse_top_level_item(program, /*is_exported=*/true);
-                }
-                expect(TokenKind::RBrace, "'}'");
-                continue;
-            }
-            bool is_exported = match(TokenKind::KwExport);
-            parse_top_level_item(program, is_exported);
+            parse_exported_top_level_entry(program, /*inherited_export=*/false);
         }
     }
 
@@ -3049,12 +3057,11 @@ private:
     // one-line nested form (all of `a::b::c` in one declaration) --
     // pushes every segment onto namespace_stack_, parses a nested
     // sequence of top-level items (recursively allowing further nested
-    // namespace blocks), then pops them back off. No `export` may
-    // precede `namespace` itself -- only individual declarations
-    // *inside* it can be exported (ch11 §11.5); namespace and export are
-    // independent axes, both required for an exported declaration to
-    // actually export (see the export/namespace validation pass).
-    void parse_namespace_block(Program& program) {
+    // namespace blocks), then pops them back off. When
+    // `export_contents=true`, this is the sugar form `export namespace
+    // ... { ... }`: every direct top-level item inside the block behaves
+    // as though it had its own leading `export`.
+    void parse_namespace_block(Program& program, bool export_contents = false) {
         expect(TokenKind::KwNamespace, "'namespace'");
         std::size_t pushed = 0;
         for (;;) {
@@ -3064,7 +3071,13 @@ private:
             if (!match(TokenKind::ColonColon)) break;
         }
         expect(TokenKind::LBrace, "'{'");
-        parse_top_level_items(program, /*inside_namespace=*/true);
+        if (export_contents) {
+            while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+                parse_exported_top_level_entry(program, /*inherited_export=*/true);
+            }
+        } else {
+            parse_top_level_items(program, /*inside_namespace=*/true);
+        }
         expect(TokenKind::RBrace, "'}'");
         for (std::size_t i = 0; i < pushed; i++) namespace_stack_.pop_back();
     }
