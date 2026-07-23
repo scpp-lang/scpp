@@ -2060,6 +2060,51 @@ void test_export_group_marks_multiple_declarations_exported() {
            "export_group_marks_multiple_declarations_exported: both should be exported");
 }
 
+// `export namespace ns { ... }` is sugar for exporting the direct
+// declarations inside the namespace block.
+void test_export_namespace_block_marks_direct_members_exported() {
+    scpp::Program program = scpp::parse(
+        "export module demo;\n"
+        "export namespace demo {\n"
+        "    int f() { return 0; }\n"
+        "    class Box { public: Box() { return; } };\n"
+        "}\n");
+    expect(program.functions.size() == 2,
+           "export_namespace_block_marks_direct_members_exported: expected 2 functions including ctor");
+    expect(program.classes.size() == 1, "export_namespace_block_marks_direct_members_exported: expected 1 class");
+    expect(program.functions[0].is_exported && program.functions[1].is_exported,
+           "export_namespace_block_marks_direct_members_exported: functions should be exported");
+    expect(program.classes[0].is_exported,
+           "export_namespace_block_marks_direct_members_exported: class should be exported");
+}
+
+// Whole-namespace export is equivalent to spelling `export` on each direct
+// declaration individually.
+void test_export_namespace_block_matches_per_declaration_exports() {
+    scpp::Program block_program = scpp::parse(
+        "export module demo;\n"
+        "export namespace demo {\n"
+        "    int f() { return 0; }\n"
+        "    class Box { public: Box() { return; } };\n"
+        "}\n");
+    scpp::Program per_decl_program = scpp::parse(
+        "export module demo;\n"
+        "namespace demo {\n"
+        "    export int f() { return 0; }\n"
+        "    export class Box { public: Box() { return; } };\n"
+        "}\n");
+    expect(block_program.functions.size() == per_decl_program.functions.size(),
+           "export_namespace_block_matches_per_declaration_exports: function counts should match");
+    expect(block_program.classes.size() == per_decl_program.classes.size(),
+           "export_namespace_block_matches_per_declaration_exports: class counts should match");
+    expect(block_program.functions[0].name == per_decl_program.functions[0].name &&
+               block_program.functions[0].is_exported == per_decl_program.functions[0].is_exported,
+           "export_namespace_block_matches_per_declaration_exports: primary function export should match");
+    expect(block_program.classes[0].name == per_decl_program.classes[0].name &&
+               block_program.classes[0].is_exported == per_decl_program.classes[0].is_exported,
+           "export_namespace_block_matches_per_declaration_exports: class export should match");
+}
+
 // ch11 §11.3: `export class Name { ... };` exports the whole class --
 // every synthesized method inherits is_exported, not just the class
 // name entry itself.
@@ -4257,6 +4302,8 @@ int main() {
     test_export_prefix_marks_function_exported();
     test_no_export_prefix_leaves_function_not_exported();
     test_export_group_marks_multiple_declarations_exported();
+    test_export_namespace_block_marks_direct_members_exported();
+    test_export_namespace_block_matches_per_declaration_exports();
     test_export_class_propagates_to_methods();
     test_export_in_non_matching_namespace_is_allowed();
     test_export_with_no_namespace_is_allowed();

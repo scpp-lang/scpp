@@ -895,6 +895,36 @@ void run_module_system_tests() {
     }
 
     {
+        std::string case_name = "export_namespace_block_exports_members";
+        cases_run++;
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module exportnsblock;\n"
+            "export namespace inner {\n"
+            "    int increment(int x) { return x + 1; }\n"
+            "    int helper(int x) { return increment(x); }\n"
+            "}\n");
+        std::string main_source =
+            "import exportnsblock;\n"
+            "int main() {\n"
+            "    return inner::helper(41) - 42;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"exportnsblock", lib_path.string()}});
+            RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+            std::filesystem::remove(exe_path);
+            expect(run_result.exit_code == 0,
+                   case_name + ": expected export-namespace members to import and run, got " +
+                       std::to_string(run_result.exit_code));
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        }
+        std::filesystem::remove(lib_path);
+    }
+
+    {
         std::string case_name = "direct_and_transitive_partition_reexports_do_not_duplicate_decls";
         cases_run++;
         std::filesystem::path base_path = write_temp_file(case_name, "base",
