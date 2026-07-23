@@ -189,6 +189,11 @@ private:
     // already-declared concept (concepts, like every other declaration
     // this parser handles, must be declared before use).
     std::unordered_set<std::string> concept_names_;
+    // Namespace/module-scope `using Alias = Type;` declarations, keyed by
+    // their fully-qualified alias name. The parser resolves aliases eagerly
+    // while parsing later type uses, so downstream phases see the aliased
+    // underlying Type directly rather than a distinct "alias type" node.
+    std::unordered_map<std::string, Type> type_aliases_;
     // ch05 §5.11: true once parse_param_type has seen at least one bare
     // (unconstrained) `auto` parameter anywhere in the program --
     // consulted by parse_program at the very end to decide whether to
@@ -781,6 +786,29 @@ private:
                                                                current_access});
     }
 
+    void parse_type_alias_decl(Program& program, bool is_exported) {
+        const Token& using_tok = expect(TokenKind::KwUsing, "'using'");
+        SourceLocation loc{using_tok.line, using_tok.column, source_path_};
+        std::string bare_name(expect(TokenKind::Identifier, "alias name").text);
+        std::string qualified_name = qualify_name(bare_name);
+        expect(TokenKind::Assign, "'='");
+        Type underlying_type = parse_type();
+        expect(TokenKind::Semicolon, "';'");
+        if (type_aliases_.contains(qualified_name) || struct_names_.contains(qualified_name) || concept_names_.contains(qualified_name)) {
+            throw ParseError(using_tok.line, using_tok.column,
+                             "'" + qualified_name + "' is already declared as a type or concept");
+        }
+        type_aliases_.emplace(qualified_name, underlying_type);
+        TypeAliasDecl alias;
+        alias.loc = loc;
+        alias.underlying_type = std::move(underlying_type);
+        alias.name = qualified_name;
+        alias.namespace_path = namespace_stack_;
+        alias.is_exported = is_exported;
+        program.type_aliases.push_back(std::move(alias));
+        check_export_namespace(program, is_exported, namespace_stack_, loc, "type alias '" + qualified_name + "'");
+    }
+
     [[nodiscard]] ExprPtr make_bool_literal_expr(SourceLocation loc, bool value) {
         auto expr = std::make_unique<Expr>();
         expr->kind = ExprKind::BoolLiteral;
@@ -1234,8 +1262,52 @@ private:
         return joined;
     }
 
+    [[nodiscard]] std::optional<Type> resolve_visible_type_alias(const std::string& spelled_name) const {
+        if (spelled_name.empty()) return std::nullopt;
+        auto lookup = [&](const std::string& candidate) -> std::optional<Type> {
+            auto it = type_aliases_.find(candidate);
+            if (it == type_aliases_.end()) return std::nullopt;
+            return it->second;
+        };
+        if (spelled_name.contains("::")) {
+            if (std::optional<Type> alias = lookup(spelled_name); alias.has_value()) return alias;
+            if (!namespace_stack_.empty()) {
+                for (std::size_t depth = namespace_stack_.size(); depth > 0; depth--) {
+                    std::string candidate;
+                    for (std::size_t i = 0; i < depth; i++) {
+                        candidate += namespace_stack_[i];
+                        candidate += "::";
+                    }
+                    candidate += spelled_name;
+                    if (std::optional<Type> alias = lookup(candidate); alias.has_value()) return alias;
+                }
+            }
+            return std::nullopt;
+        }
+        if (std::optional<Type> alias = lookup(spelled_name); alias.has_value()) return alias;
+        if (!namespace_stack_.empty()) {
+            for (std::size_t depth = namespace_stack_.size(); depth > 0; depth--) {
+                std::string candidate;
+                for (std::size_t i = 0; i < depth; i++) {
+                    candidate += namespace_stack_[i];
+                    candidate += "::";
+                }
+                candidate += spelled_name;
+                if (std::optional<Type> alias = lookup(candidate); alias.has_value()) return alias;
+            }
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] std::string resolve_visible_type_name(const std::string& spelled_name) const {
         if (spelled_name.empty()) return {};
+        auto alias_underlying_name = [&](const Type& type) -> std::string {
+            if (type.kind != TypeKind::Named || !type.template_args.empty() || !type.non_type_args.empty() ||
+                type.is_pack_expansion) {
+                return {};
+            }
+            return type.name;
+        };
         if (spelled_name.contains("::")) {
             if (struct_names_.contains(spelled_name)) return spelled_name;
             if (!namespace_stack_.empty()) {
@@ -1248,6 +1320,9 @@ private:
                     candidate += spelled_name;
                     if (struct_names_.contains(candidate)) return candidate;
                 }
+            }
+            if (std::optional<Type> alias = resolve_visible_type_alias(spelled_name); alias.has_value()) {
+                return alias_underlying_name(*alias);
             }
             return {};
         }
@@ -1263,11 +1338,14 @@ private:
                 if (struct_names_.contains(candidate)) return candidate;
             }
         }
+        if (std::optional<Type> alias = resolve_visible_type_alias(spelled_name); alias.has_value()) {
+            return alias_underlying_name(*alias);
+        }
         return {};
     }
 
     [[nodiscard]] bool is_visible_type_name(const std::string& spelled_name) const {
-        return !resolve_visible_type_name(spelled_name).empty();
+        return !resolve_visible_type_name(spelled_name).empty() || resolve_visible_type_alias(spelled_name).has_value();
     }
 
     [[nodiscard]] std::optional<std::string>
@@ -1982,8 +2060,16 @@ private:
                                           " template argument(s) in this order (ch05 §5.14)");
                 }
             }
-        } else if (tok.kind == TokenKind::Identifier && is_visible_type_name(peek_qualified_name())) {
-            type.name = resolve_visible_type_name(parse_qualified_name());
+        } else if (tok.kind == TokenKind::Identifier) {
+            std::string spelled_name = peek_qualified_name();
+            if (std::optional<Type> alias = resolve_visible_type_alias(spelled_name); alias.has_value()) {
+                parse_qualified_name();
+                type = *alias;
+            } else if (is_visible_type_name(spelled_name)) {
+                type.name = resolve_visible_type_name(parse_qualified_name());
+            } else {
+                throw ParseError(tok.line, tok.column, "expected a type name");
+            }
         } else {
             throw ParseError(tok.line, tok.column, "expected a type name");
         }
@@ -2573,6 +2659,24 @@ private:
             clone.is_exported = is_reexport && clone.is_exported;
             program.classes.push_back(std::move(clone));
         }
+        for (const TypeAliasDecl& alias : imported.type_aliases) {
+            if (!alias.is_exported) continue;
+            type_aliases_[alias.name] = alias.underlying_type;
+            std::string effective_owner = alias.owning_module.empty() ? imported_name : alias.owning_module;
+            auto existing =
+                std::find_if(program.type_aliases.begin(), program.type_aliases.end(), [&](const TypeAliasDecl& current) {
+                    return current.owning_module == effective_owner && current.name == alias.name &&
+                           types_equal(current.underlying_type, alias.underlying_type);
+                });
+            if (existing != program.type_aliases.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && alias.is_exported);
+                continue;
+            }
+            TypeAliasDecl clone = alias;
+            if (clone.owning_module.empty()) clone.owning_module = imported_name;
+            clone.is_exported = is_reexport && clone.is_exported;
+            program.type_aliases.push_back(std::move(clone));
+        }
         for (const Function& fn : imported.functions) {
             if (!fn.is_exported && !fn.is_compile_time_dependency) continue;
             if (fn.is_exported && !fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
@@ -2699,6 +2803,20 @@ private:
             def.is_exported = is_reexport && def.is_exported;
             program.classes.push_back(std::move(def));
         }
+        for (TypeAliasDecl& alias : partition.type_aliases) {
+            type_aliases_[alias.name] = alias.underlying_type;
+            auto existing =
+                std::find_if(program.type_aliases.begin(), program.type_aliases.end(), [&](const TypeAliasDecl& current) {
+                    return current.owning_module == alias.owning_module && current.name == alias.name &&
+                           types_equal(current.underlying_type, alias.underlying_type);
+                });
+            if (existing != program.type_aliases.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && alias.is_exported);
+                continue;
+            }
+            alias.is_exported = is_reexport && alias.is_exported;
+            program.type_aliases.push_back(std::move(alias));
+        }
         for (Function& fn : partition.functions) {
             auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {
                 return current.owning_module == fn.owning_module && current.loc.source_path_text() == fn.loc.source_path_text() &&
@@ -2786,7 +2904,16 @@ private:
                                       "(ch01 §1.3)");
             }
         };
-        if (check(TokenKind::KwStruct)) {
+        if (check(TokenKind::KwUsing)) {
+            reject_unsafe_if_requested("a type alias declaration");
+            reject_alignment_specifiers(leading_alignments, "a type alias declaration");
+            reject_packed_attribute(leading_attrs, attr_start_tok, "a type alias declaration");
+            if (requested_nodiscard) {
+                throw ParseError(attr_start_tok.line, attr_start_tok.column,
+                                 "'[[nodiscard]]' cannot appertain to a type alias declaration");
+            }
+            parse_type_alias_decl(program, is_exported);
+        } else if (check(TokenKind::KwStruct)) {
             reject_unsafe_if_requested("a 'struct' declaration");
             SourceLocation loc = current_loc();
             StructDef def = parse_struct_def(program, {}, std::move(leading_alignments));
