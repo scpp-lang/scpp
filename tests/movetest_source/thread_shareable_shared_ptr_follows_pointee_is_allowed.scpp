@@ -1,0 +1,12 @@
+import std;
+
+template<typename T>
+void broadcast(const T& x [[scpp::thread_shareable]]) {
+    return;
+}
+
+int main() {
+    std::shared_ptr<int> p = std::make_shared<int>(5);
+    broadcast(p);
+    return 0;
+}

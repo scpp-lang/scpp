@@ -1,0 +1,6 @@
+import std;
+
+int main() {
+    std::shared_ptr<const std::string> text = std::make_shared<const std::string>("ok");
+    return text->length() - 2;
+}

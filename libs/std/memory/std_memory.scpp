@@ -1,12 +1,44 @@
 // std_memory.scpp
 //
-// The `:memory` interface partition of the "std" module: a pure-scpp
-// `std::unique_ptr<T>` and `std::make_unique<T>(...)`, consumed via
+// The `:memory` interface partition of the "std" module: `std::unique_ptr<T>`
+// and `std::shared_ptr<T>` wrappers consumed via
 // `import std;` through std.scpp's `export import :memory;` aggregation,
 // exactly like std::string's own `:string` partition.
 export module std:memory;
 
+extern "C" {
+    void* scpp_shared_ptr_count_new();
+    void scpp_shared_ptr_count_acquire(void* handle);
+    int scpp_shared_ptr_count_release(void* handle);
+    int scpp_shared_ptr_count_use_count(const void* handle);
+}
+
 namespace std {
+
+void* __shared_ptr_count_new() {
+    [[scpp::unsafe]] {
+        return scpp_shared_ptr_count_new();
+    }
+}
+
+void __shared_ptr_count_acquire(void* handle) {
+    [[scpp::unsafe]] {
+        scpp_shared_ptr_count_acquire(handle);
+    }
+    return;
+}
+
+bool __shared_ptr_count_release(void* handle) {
+    [[scpp::unsafe]] {
+        return scpp_shared_ptr_count_release(handle) != 0;
+    }
+}
+
+int __shared_ptr_count_use_count(const void* handle) {
+    [[scpp::unsafe]] {
+        return scpp_shared_ptr_count_use_count(handle);
+    }
+}
 
 export template<typename T>
 class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shareable(T))]]
@@ -66,6 +98,205 @@ public:
     }
 };
 
+export template<typename T>
+void __shared_ptr_detail_destroy(void* erased) {
+    [[scpp::unsafe]] {
+        T* typed = static_cast<T*>(erased);
+        delete typed;
+    }
+    return;
+}
+
+export template<typename T>
+void* __shared_ptr_detail_erase(T* ptr) {
+    [[scpp::unsafe]] {
+        return static_cast<void*>(ptr);
+    }
+}
+
+class __shared_handle {
+private:
+    void* control_{};
+    void (*destroy_)(void*){};
+
+    void release_current() {
+        void* empty_control{};
+        if (this->control_ == empty_control) return;
+        bool destroy_pointee = std::__shared_ptr_count_release(this->control_);
+        void (*empty_destroy)(void*){};
+        this->control_ = empty_control;
+        if (destroy_pointee && this->destroy_ != empty_destroy) {
+            this->destroy_(this->ptr_);
+        }
+        void* empty_ptr{};
+        this->ptr_ = empty_ptr;
+        this->destroy_ = empty_destroy;
+        return;
+    }
+
+public:
+    void* ptr_{};
+
+    __shared_handle() { return; }
+
+    __shared_handle(void* ptr, void (*destroy)(void*)) {
+        void* empty_ptr{};
+        void* empty_control{};
+        this->ptr_ = ptr;
+        this->destroy_ = destroy;
+        if (ptr == empty_ptr) {
+            this->control_ = empty_control;
+        } else {
+            this->control_ = std::__shared_ptr_count_new();
+        }
+        return;
+    }
+
+    __shared_handle(const __shared_handle& other) {
+        this->ptr_ = other.ptr_;
+        this->control_ = other.control_;
+        this->destroy_ = other.destroy_;
+        void* empty_control{};
+        if (this->control_ != empty_control) std::__shared_ptr_count_acquire(this->control_);
+        return;
+    }
+
+    __shared_handle shared_copy() const {
+        __shared_handle copy{};
+        copy.ptr_ = this->ptr_;
+        copy.control_ = this->control_;
+        copy.destroy_ = this->destroy_;
+        void* empty_control{};
+        if (copy.control_ != empty_control) std::__shared_ptr_count_acquire(copy.control_);
+        return std::move(copy);
+    }
+
+    void copy_from(const __shared_handle& other) {
+        void* other_control = other.control_;
+        void* empty_control{};
+        if (other_control != empty_control) std::__shared_ptr_count_acquire(other_control);
+        this->release_current();
+        this->ptr_ = other.ptr_;
+        this->control_ = other_control;
+        this->destroy_ = other.destroy_;
+        return;
+    }
+
+    void operator=(const __shared_handle& other) {
+        this->copy_from(other);
+        return;
+    }
+
+    virtual ~__shared_handle() {
+        this->release_current();
+        return;
+    }
+
+    int use_count() const {
+        void* empty_control{};
+        if (this->control_ == empty_control) return 0;
+        return std::__shared_ptr_count_use_count(this->control_);
+    }
+
+    void reset() {
+        this->release_current();
+        return;
+    }
+
+    void reset(void* ptr, void (*destroy)(void*)) {
+        void* empty_ptr{};
+        void* empty_control{};
+        this->release_current();
+        this->ptr_ = ptr;
+        this->destroy_ = destroy;
+        if (ptr == empty_ptr) {
+            this->control_ = empty_control;
+        } else {
+            this->control_ = std::__shared_ptr_count_new();
+        }
+        return;
+    }
+};
+
+export template<typename T>
+class [[scpp::thread_movable_if(scpp::is_thread_movable(T) && scpp::is_thread_shareable(T),
+                                scpp::is_thread_movable(T) && scpp::is_thread_shareable(T))]]
+shared_ptr {
+private:
+    T* ptr_{};
+    __shared_handle handle_{};
+
+public:
+    shared_ptr() { return; }
+
+    shared_ptr(T* ptr) {
+        this->ptr_ = ptr;
+        this->handle_.reset(std::__shared_ptr_detail_erase<T>(ptr), std::__shared_ptr_detail_destroy<T>);
+        return;
+    }
+
+    void operator=(const shared_ptr<T>& other) {
+        __shared_handle copied = other.__copy_handle();
+        this->ptr_ = other.get();
+        this->handle_.copy_from(copied);
+        return;
+    }
+
+    virtual ~shared_ptr() {
+        this->handle_.reset();
+        return;
+    }
+
+    T& operator*() {
+        [[scpp::unsafe]] {
+            return *this->ptr_;
+        }
+    }
+
+    const T& operator*() const {
+        [[scpp::unsafe]] {
+            return *this->ptr_;
+        }
+    }
+
+    T* operator->() [[scpp::lifetime(self)]] {
+        return this->ptr_;
+    }
+
+    const T* operator->() const [[scpp::lifetime(self)]] {
+        return this->ptr_;
+    }
+
+    T* get() {
+        return this->ptr_;
+    }
+
+    const T* get() const {
+        return this->ptr_;
+    }
+
+    __shared_handle __copy_handle() const {
+        return this->handle_.shared_copy();
+    }
+
+    int use_count() const {
+        return this->handle_.use_count();
+    }
+
+    void reset() {
+        T* empty_ptr{};
+        this->ptr_ = empty_ptr;
+        this->handle_.reset();
+        return;
+    }
+
+    void reset(T* ptr) {
+        this->ptr_ = ptr;
+        this->handle_.reset(std::__shared_ptr_detail_erase<T>(ptr), std::__shared_ptr_detail_destroy<T>);
+        return;
+    }
+};
+
 export template<typename T, typename... Args>
 std::unique_ptr<T> make_unique(Args... args) {
     T* raw{};
@@ -73,6 +304,16 @@ std::unique_ptr<T> make_unique(Args... args) {
         raw = new T(args...);
     }
     std::unique_ptr<T> result{raw};
+    return std::move(result);
+}
+
+export template<typename T, typename... Args>
+std::shared_ptr<T> make_shared(Args... args) {
+    T* raw{};
+    [[scpp::unsafe]] {
+        raw = new T(args...);
+    }
+    std::shared_ptr<T> result{raw};
     return std::move(result);
 }
 

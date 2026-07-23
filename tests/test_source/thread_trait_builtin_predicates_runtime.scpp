@@ -1,9 +1,28 @@
 import std;
 
+class [[scpp::thread_shareable]] ShareableOnly {
+private:
+    int* raw_{};
+
+public:
+    ShareableOnly(int* raw) {
+        this->raw_ = raw;
+        return;
+    }
+
+    virtual ~ShareableOnly() { return; }
+};
+
 int main() {
     print_bool(scpp::is_thread_movable(int));
     print_bool(scpp::is_thread_shareable(int));
     print_bool(scpp::is_thread_movable(std::unique_ptr<int>));
     print_bool(scpp::is_thread_shareable(std::unique_ptr<int>));
+    print_bool(scpp::is_thread_movable(std::shared_ptr<int>));
+    print_bool(scpp::is_thread_shareable(std::shared_ptr<int>));
+    print_bool(scpp::is_thread_movable(ShareableOnly));
+    print_bool(scpp::is_thread_shareable(ShareableOnly));
+    print_bool(scpp::is_thread_movable(std::shared_ptr<ShareableOnly>));
+    print_bool(scpp::is_thread_shareable(std::shared_ptr<ShareableOnly>));
     return 0;
 }
