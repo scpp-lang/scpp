@@ -145,6 +145,12 @@ struct Type {
     // `unsafe { }` -- see movecheck's assignment_target_is_read_only.
     bool is_mutable_pointee = true;
 
+    // Top-level `const` on a non-reference, non-pointer type, e.g.
+    // `const std::string` when used as a generic/template type argument.
+    // Distinct from Stmt::is_const, which marks an immutable local
+    // variable declaration rather than a type-level qualifier.
+    bool is_const_qualified = false;
+
     // ch05 §5.14: non-empty only for a *not-yet-resolved* generic-type
     // instantiation, e.g. `Vec<int>` parsed as `Type{Named, "Vec"}` with
     // `template_args == [Type{Named,"int"}]` -- `name` still names the

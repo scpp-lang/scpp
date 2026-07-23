@@ -486,6 +486,7 @@ void write_type(std::ostream& out, const Type& type) {
     write_u8(out, type.is_mutable_ref ? 1u : 0u);
     write_u8(out, type.is_rvalue_ref ? 1u : 0u);
     write_u8(out, type.is_mutable_pointee ? 1u : 0u);
+    write_u8(out, type.is_const_qualified ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(type.template_args.size()));
     for (const Type& arg : type.template_args) write_type(out, arg);
     write_u32_le(out, static_cast<std::uint32_t>(type.non_type_args.size()));
@@ -518,6 +519,7 @@ void write_type(std::ostream& out, const Type& type) {
     type.is_mutable_ref = read_u8(in, context + " mutable ref") != 0u;
     type.is_rvalue_ref = read_u8(in, context + " rvalue ref") != 0u;
     type.is_mutable_pointee = read_u8(in, context + " mutable pointee") != 0u;
+    type.is_const_qualified = read_u8(in, context + " const qualified") != 0u;
     std::uint32_t template_arg_count = read_u32_le(in, context + " template arg count");
     type.template_args.reserve(template_arg_count);
     for (std::uint32_t i = 0; i < template_arg_count; i++) type.template_args.push_back(read_type(in, context + " template arg"));
@@ -1166,6 +1168,7 @@ void write_function(std::ostream& out, const Function& fn) {
         a.is_unsafe_function_pointer != b.is_unsafe_function_pointer || a.is_const_function != b.is_const_function ||
         a.function_ref_qualifier != b.function_ref_qualifier || a.is_mutable_ref != b.is_mutable_ref ||
         a.is_rvalue_ref != b.is_rvalue_ref || a.is_mutable_pointee != b.is_mutable_pointee ||
+        a.is_const_qualified != b.is_const_qualified ||
         a.is_pack_expansion != b.is_pack_expansion || a.template_args.size() != b.template_args.size() ||
         a.non_type_args.size() != b.non_type_args.size() || a.function_params.size() != b.function_params.size()) {
         return false;

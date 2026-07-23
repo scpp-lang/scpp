@@ -1084,9 +1084,10 @@ private:
     }
 
     [[nodiscard]] std::string type_to_string(const Type& type) const {
+        std::string const_prefix = type.is_const_qualified ? "const " : "";
         switch (type.kind) {
         case TypeKind::Named: {
-            std::string result = type.name;
+            std::string result = const_prefix + type.name;
             if (!type.template_args.empty()) {
                 result += "<";
                 for (std::size_t i = 0; i < type.template_args.size(); i++) {
@@ -1098,10 +1099,11 @@ private:
             return result;
         }
         case TypeKind::Pointer:
-            return (type.is_mutable_pointee ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
+            return const_prefix + (type.is_mutable_pointee ? std::string() : std::string("const ")) +
+                   type_to_string(*type.pointee) +
                    "*";
         case TypeKind::Function: {
-            std::string result = type_to_string(*type.function_return) + "(";
+            std::string result = const_prefix + type_to_string(*type.function_return) + "(";
             for (std::size_t i = 0; i < type.function_params.size(); i++) {
                 if (i != 0) result += ", ";
                 result += type_to_string(type.function_params[i]);
@@ -1110,7 +1112,7 @@ private:
             return result;
         }
         case TypeKind::FunctionPointer: {
-            std::string result = type_to_string(*type.function_return) + " (*";
+            std::string result = const_prefix + type_to_string(*type.function_return) + " (*";
             result += ")(";
             for (std::size_t i = 0; i < type.function_params.size(); i++) {
                 if (i != 0) result += ", ";
@@ -1119,13 +1121,14 @@ private:
             result += ")";
             return result;
         }
-        case TypeKind::Array: return type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
+        case TypeKind::Array: return const_prefix + type_to_string(*type.element) + "[" + std::to_string(type.array_size) + "]";
         case TypeKind::Reference:
             if (type.is_rvalue_ref) return type_to_string(*type.pointee) + "&&";
-            return (type.is_mutable_ref ? std::string() : std::string("const ")) + type_to_string(*type.pointee) +
-                   "&";
+            return const_prefix + (type.is_mutable_ref ? std::string() : std::string("const ")) +
+                   type_to_string(*type.pointee) + "&";
         case TypeKind::Span:
-            return std::string("std::span<") + (type.is_mutable_ref ? std::string() : std::string("const ")) +
+            return const_prefix + std::string("std::span<") +
+                   (type.is_mutable_ref ? std::string() : std::string("const ")) +
                    type_to_string(*type.pointee) + ">";
         }
         return "<unknown-type>";
@@ -1361,7 +1364,8 @@ private:
         if (a.name != b.name || a.is_mutable_ref != b.is_mutable_ref ||
             a.is_mutable_pointee != b.is_mutable_pointee || a.array_size != b.array_size ||
             a.is_pack_expansion != b.is_pack_expansion || a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
-            a.is_const_function != b.is_const_function || a.function_ref_qualifier != b.function_ref_qualifier) {
+            a.is_const_function != b.is_const_function || a.function_ref_qualifier != b.function_ref_qualifier ||
+            a.is_rvalue_ref != b.is_rvalue_ref || a.is_const_qualified != b.is_const_qualified) {
             return false;
         }
         if (a.template_args.size() != b.template_args.size() || a.non_type_args.size() != b.non_type_args.size() ||
@@ -2071,14 +2075,15 @@ private:
     // T*` and `T*` are genuinely distinct types (ch05 §5.7, ch08 Q9),
     // not unified the way an earlier draft of that section assumed.
     // A bare `const T` (no `&`/`&&`/`*` at all) is rejected *unless* the
-    // caller opts in via `out_bare_const` (non-null): only
-    // parse_var_decl does, for a `const`-qualified local variable (spec
-    // ch05/ch06 -- an immutable local, distinct from a borrow/pointer's
-    // own, already-tracked read-only-ness) -- every other caller
-    // (a parameter, struct/class field, return type, or nested type
-    // argument) leaves this null and keeps the original rejection,
-    // since scpp has no other const-qualification for those yet.
-    Type parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr) {
+    // caller opts in: either via `out_bare_const` (non-null), which
+    // parse_var_decl uses for a `const`-qualified local variable (spec
+    // ch05/ch06 -- an immutable local, distinct from a type-level
+    // qualifier), or via `allow_const_qualified_value_type`, which
+    // parse_template_type_argument uses so `const T` can appear as a
+    // generic/template type argument. Every other caller (a parameter,
+    // struct/class field, or return type) keeps the original rejection.
+    Type parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr,
+                    bool allow_const_qualified_value_type = false) {
         bool has_const_prefix = match(TokenKind::KwConst);
         Type type = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
 
@@ -2118,6 +2123,10 @@ private:
         if (has_const_prefix && type.kind != TypeKind::Pointer) {
             if (out_bare_const != nullptr) {
                 *out_bare_const = true;
+                return type;
+            }
+            if (allow_const_qualified_value_type) {
+                type.is_const_qualified = true;
                 return type;
             }
             const Token& tok = peek();
@@ -2319,7 +2328,8 @@ private:
     }
 
     Type parse_template_type_argument() {
-        Type type = parse_type();
+        Type type = parse_type(/*allow_rvalue_ref=*/false, /*out_bare_const=*/nullptr,
+                               /*allow_const_qualified_value_type=*/true);
         if (check(TokenKind::LParen)) {
             type = parse_function_type_suffix(std::move(type));
         }

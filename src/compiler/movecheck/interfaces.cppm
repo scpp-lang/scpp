@@ -116,7 +116,7 @@ private:
     [[nodiscard]] static std::string type_key(const Type& type) {
         switch (type.kind) {
             case TypeKind::Named: {
-                std::string result = type.name;
+                std::string result = type.is_const_qualified ? std::string("const ") + type.name : type.name;
                 if (!type.non_type_args.empty() || !type.template_args.empty()) {
                     result += "<";
                     bool first = true;
@@ -136,16 +136,20 @@ private:
                 return result;
             }
             case TypeKind::Pointer:
-                return std::string(type.is_mutable_pointee ? "ptr(" : "ptr_const(") +
+                return std::string(type.is_const_qualified ? "const_" : "") +
+                       std::string(type.is_mutable_pointee ? "ptr(" : "ptr_const(") +
                        (type.pointee ? type_key(*type.pointee) : std::string("?")) + ")";
             case TypeKind::Reference:
-                return std::string(type.is_rvalue_ref ? "rvref(" : (type.is_mutable_ref ? "ref(" : "cref(")) +
+                return std::string(type.is_const_qualified ? "const_" : "") +
+                       std::string(type.is_rvalue_ref ? "rvref(" : (type.is_mutable_ref ? "ref(" : "cref(")) +
                        (type.pointee ? type_key(*type.pointee) : std::string("?")) + ")";
             case TypeKind::Array:
-                return std::string("array(") + (type.element ? type_key(*type.element) : std::string("?")) + ")";
+                return std::string(type.is_const_qualified ? "const_" : "") +
+                       std::string("array(") + (type.element ? type_key(*type.element) : std::string("?")) + ")";
             case TypeKind::Function:
             case TypeKind::FunctionPointer: {
-                std::string result = type.kind == TypeKind::Function ? "fn(" : "fnptr(";
+                std::string result = type.is_const_qualified ? "const_" : "";
+                result += type.kind == TypeKind::Function ? "fn(" : "fnptr(";
                 for (std::size_t i = 0; i < type.function_params.size(); i++) {
                     if (i != 0) result += ",";
                     result += type_key(type.function_params[i]);
@@ -155,7 +159,8 @@ private:
                 return result;
             }
             case TypeKind::Span:
-                return std::string(type.is_mutable_ref ? "span(" : "cspan(") +
+                return std::string(type.is_const_qualified ? "const_" : "") +
+                       std::string(type.is_mutable_ref ? "span(" : "cspan(") +
                        (type.pointee ? type_key(*type.pointee) : std::string("?")) + ")";
         }
         return "?";
