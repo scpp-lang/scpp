@@ -640,6 +640,12 @@ struct SourceInfo {
     std::vector<std::string> imported_modules;
 };
 
+struct ScannedModuleDecl {
+    std::string module_name;
+    std::string partition_name;
+    bool is_interface = false;
+};
+
 struct BuiltModule {
     std::string name;
     std::filesystem::path source_path;
@@ -1040,12 +1046,13 @@ std::vector<std::filesystem::path> expand_source_patterns(const std::filesystem:
     return std::vector<std::filesystem::path>(paths.begin(), paths.end());
 }
 
-SourceInfo classify_source(const std::filesystem::path& path) {
-    SourceInfo info;
-    info.path = normalized_path(path);
-    std::string source = read_file(info.path);
-    std::vector<scpp::Token> tokens = scpp::tokenize(source);
+std::optional<ScannedModuleDecl> scan_declared_module(const std::vector<scpp::Token>& tokens,
+                                                      const std::filesystem::path& path_for_errors) {
     std::size_t i = 0;
+    if (i + 1 < tokens.size() && tokens[i].kind == scpp::TokenKind::KwModule &&
+        tokens[i + 1].kind == scpp::TokenKind::Semicolon) {
+        i += 2;
+    }
     bool exported_module = false;
     if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::KwExport) {
         if (i + 1 < tokens.size() && tokens[i + 1].kind == scpp::TokenKind::KwModule) {
@@ -1053,29 +1060,44 @@ SourceInfo classify_source(const std::filesystem::path& path) {
             i++;
         }
     }
-    if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::KwModule) {
+    if (i >= tokens.size() || tokens[i].kind != scpp::TokenKind::KwModule) return std::nullopt;
+    i++;
+    if (i >= tokens.size() || tokens[i].kind != scpp::TokenKind::Identifier) return std::nullopt;
+
+    ScannedModuleDecl decl;
+    decl.module_name = std::string(tokens[i].text);
+    decl.is_interface = exported_module;
+    i++;
+    while (i + 1 < tokens.size() && tokens[i].kind == scpp::TokenKind::Dot &&
+           tokens[i + 1].kind == scpp::TokenKind::Identifier) {
+        decl.module_name += ".";
+        decl.module_name += std::string(tokens[i + 1].text);
+        i += 2;
+    }
+    if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::Colon) {
         i++;
-        if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::Identifier) {
-            info.module_name = std::string(tokens[i].text);
-            i++;
-            while (i + 1 < tokens.size() && tokens[i].kind == scpp::TokenKind::Dot &&
-                   tokens[i + 1].kind == scpp::TokenKind::Identifier) {
-                info.module_name += ".";
-                info.module_name += std::string(tokens[i + 1].text);
-                i += 2;
-            }
-            if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::Colon) {
-                i++;
-                if (i >= tokens.size() || tokens[i].kind != scpp::TokenKind::Identifier) {
-                    throw BuildError("invalid partition declaration in '" + info.path.string() + "'");
-                }
-                info.partition_name = std::string(tokens[i].text);
-                info.kind = exported_module ? SourceInfo::Kind::InterfacePartition
-                                            : SourceInfo::Kind::ImplementationPartition;
-            } else {
-                info.kind = exported_module ? SourceInfo::Kind::PrimaryInterface
-                                            : SourceInfo::Kind::ImplementationUnit;
-            }
+        if (i >= tokens.size() || tokens[i].kind != scpp::TokenKind::Identifier) {
+            throw BuildError("invalid partition declaration in '" + path_for_errors.string() + "'");
+        }
+        decl.partition_name = std::string(tokens[i].text);
+    }
+    return decl;
+}
+
+SourceInfo classify_source(const std::filesystem::path& path) {
+    SourceInfo info;
+    info.path = normalized_path(path);
+    std::string source = read_file(info.path);
+    std::vector<scpp::Token> tokens = scpp::tokenize(source);
+    if (std::optional<ScannedModuleDecl> decl = scan_declared_module(tokens, info.path); decl.has_value()) {
+        info.module_name = decl->module_name;
+        info.partition_name = decl->partition_name;
+        if (!decl->partition_name.empty()) {
+            info.kind = decl->is_interface ? SourceInfo::Kind::InterfacePartition
+                                           : SourceInfo::Kind::ImplementationPartition;
+        } else {
+            info.kind = decl->is_interface ? SourceInfo::Kind::PrimaryInterface
+                                           : SourceInfo::Kind::ImplementationUnit;
         }
     }
 
@@ -1163,6 +1185,31 @@ std::unordered_set<std::string> local_primary_module_names(const std::vector<Sou
     return names;
 }
 
+std::unordered_map<std::string, std::string> local_source_import_paths(const std::vector<SourceInfo>& sources) {
+    std::unordered_map<std::string, std::string> import_paths;
+    for (const SourceInfo& source : sources) {
+        std::optional<std::string> key;
+        switch (source.kind) {
+            case SourceInfo::Kind::PrimaryInterface:
+                key = source.module_name;
+                break;
+            case SourceInfo::Kind::InterfacePartition:
+            case SourceInfo::Kind::ImplementationPartition:
+                key = source.module_name + ":" + source.partition_name;
+                break;
+            case SourceInfo::Kind::ImplementationUnit:
+            case SourceInfo::Kind::Plain:
+                break;
+        }
+        if (!key.has_value()) continue;
+        auto [it, inserted] = import_paths.emplace(*key, source.path.string());
+        if (!inserted && it->second != source.path.string()) {
+            throw BuildError("multiple source files declare '" + *key + "' within one manifest target");
+        }
+    }
+    return import_paths;
+}
+
 bool source_uses_stdlib(const SourceInfo& source) {
     return std::find(source.imported_modules.begin(), source.imported_modules.end(), "std") != source.imported_modules.end();
 }
@@ -1229,6 +1276,9 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
 
     std::vector<std::string> build_order = topo_sort_modules(primary_modules);
     std::unordered_map<std::string, std::string> import_paths = base_import_paths;
+    for (const auto& [name, path] : local_source_import_paths(sources)) {
+        import_paths[name] = path;
+    }
     std::unordered_map<std::string, int> indegree;
     std::unordered_map<std::string, std::vector<std::string>> dependents;
     for (const auto& [name, _] : primary_modules) indegree[name] = 0;
