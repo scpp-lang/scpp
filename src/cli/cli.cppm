@@ -171,10 +171,114 @@ std::string read_file(std::string_view path) {
     return buffer.str();
 }
 
+[[nodiscard]] bool is_implicit_source_path(std::string_view path) {
+    return std::filesystem::path(std::string(path)).extension() == ".scpp";
+}
+
 bool require_scpp_input_path(std::string_view path, std::string_view role) {
-    if (std::filesystem::path(std::string(path)).extension() == ".scpp") return true;
-    std::cerr << "error: " << role << " must use the .scpp extension, got '" << path << "'\n";
+    if (is_implicit_source_path(path)) return true;
+    std::cerr << "error: unrecognized positional " << role << " '" << path
+              << "'; positional source inputs must use the .scpp extension, otherwise pass --source <path>\n";
     return false;
+}
+
+struct ScannedModuleDecl {
+    std::string module_name;
+    std::string partition_name;
+};
+
+std::optional<ScannedModuleDecl> scan_declared_module_from_source(const std::string& source) {
+    std::vector<scpp::Token> tokens = scpp::tokenize(source);
+    std::size_t i = 0;
+    if (i + 1 < tokens.size() && tokens[i].kind == scpp::TokenKind::KwModule &&
+        tokens[i + 1].kind == scpp::TokenKind::Semicolon) {
+        i += 2;
+    }
+    if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::KwExport) {
+        if (i + 1 < tokens.size() && tokens[i + 1].kind == scpp::TokenKind::KwModule) i++;
+    }
+    if (i >= tokens.size() || tokens[i].kind != scpp::TokenKind::KwModule) return std::nullopt;
+    i++;
+    if (i >= tokens.size() || tokens[i].kind != scpp::TokenKind::Identifier) return std::nullopt;
+
+    ScannedModuleDecl decl;
+    decl.module_name = std::string(tokens[i].text);
+    i++;
+    while (i + 1 < tokens.size() && tokens[i].kind == scpp::TokenKind::Dot &&
+           tokens[i + 1].kind == scpp::TokenKind::Identifier) {
+        decl.module_name += ".";
+        decl.module_name += std::string(tokens[i + 1].text);
+        i += 2;
+    }
+    if (i < tokens.size() && tokens[i].kind == scpp::TokenKind::Colon) {
+        i++;
+        if (i >= tokens.size() || tokens[i].kind != scpp::TokenKind::Identifier) return std::nullopt;
+        decl.partition_name = std::string(tokens[i].text);
+    }
+    return decl;
+}
+
+bool validate_import_paths(const std::unordered_map<std::string, std::string>& import_paths) {
+    for (const auto& [module_name, path] : import_paths) {
+        std::string extension = std::filesystem::path(path).extension().string();
+        if (extension == ".scpp" || extension == ".scppm") continue;
+        std::cerr << "error: import path for module '" << module_name
+                  << "' must use the .scpp or .scppm extension, got '" << path << "'\n";
+        return false;
+    }
+    return true;
+}
+
+bool append_explicit_source_imports(const std::vector<std::string>& source_paths,
+                                    std::unordered_map<std::string, std::string>& import_paths) {
+    for (std::size_t i = 1; i < source_paths.size(); i++) {
+        std::string source;
+        try {
+            source = read_file(source_paths[i]);
+        } catch (const std::exception& e) {
+            std::cerr << "error: " << e.what() << "\n";
+            return false;
+        }
+        std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(source);
+        if (!decl.has_value()) {
+            std::cerr << "error: supplemental source '" << source_paths[i]
+                      << "' must declare a module or partition so it can be imported; only the first source may be a plain translation unit\n";
+            return false;
+        }
+        std::string key = decl->module_name;
+        if (!decl->partition_name.empty()) key += ":" + decl->partition_name;
+        auto [it, inserted] = import_paths.emplace(key, source_paths[i]);
+        if (!inserted && it->second != source_paths[i]) {
+            std::cerr << "error: source inputs conflict for module '" << key << "': '" << it->second
+                      << "' and '" << source_paths[i] << "'\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+enum class SourceArgParseResult {
+    NotSource,
+    AddedSource,
+    Error,
+};
+
+SourceArgParseResult maybe_collect_source_arg(std::string_view arg, int& i, int argc, char** argv,
+                                             std::vector<std::string>& source_paths, std::string_view role = "input") {
+    if (arg == "--source") {
+        if (i + 1 >= argc) {
+            std::cerr << "error: --source requires <path>\n";
+            return SourceArgParseResult::Error;
+        }
+        source_paths.emplace_back(argv[++i]);
+        return SourceArgParseResult::AddedSource;
+    }
+    if (!arg.empty() && arg[0] != '-') {
+        if (!require_scpp_input_path(arg, role)) return SourceArgParseResult::Error;
+        source_paths.emplace_back(arg);
+        return SourceArgParseResult::AddedSource;
+    }
+    return SourceArgParseResult::NotSource;
 }
 
 // Renders a Clang/GCC-style diagnostic: "path:line:col: error: message",
@@ -255,7 +359,6 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
 }
 
 int run_lex(std::string_view path) {
-    if (!require_scpp_input_path(path, "input file")) return 1;
     std::string source;
     try {
         source = read_file(path);
@@ -507,7 +610,6 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
 }
 
 int run_parse(std::string_view path) {
-    if (!require_scpp_input_path(path, "input file")) return 1;
     std::string source;
     try {
         source = read_file(path);
@@ -554,15 +656,6 @@ int run_build(std::string_view input_path, std::string_view output_path,
               const std::vector<std::string>& extra_link_inputs,
               const std::unordered_map<std::string, std::string>& import_paths,
               const std::vector<std::string>& import_search_dirs, bool static_link, bool emit_debug_info) {
-    if (!require_scpp_input_path(input_path, "input file")) return 1;
-    for (const auto& [module_name, path] : import_paths) {
-        std::string extension = std::filesystem::path(path).extension().string();
-        if (extension != ".scpp" && extension != ".scppm") {
-            std::cerr << "error: import path for module '" << module_name
-                      << "' must use the .scpp or .scppm extension, got '" << path << "'\n";
-            return 1;
-        }
-    }
     std::string source;
     try {
         source = read_file(input_path);
@@ -593,7 +686,6 @@ int run_build(std::string_view input_path, std::string_view output_path,
 int run_build_module(std::string_view input_path, std::string_view interface_path, std::string_view archive_path,
                      const std::unordered_map<std::string, std::string>& import_paths,
                      const std::vector<std::string>& import_search_dirs) {
-    if (!require_scpp_input_path(input_path, "input file")) return 1;
     if (std::filesystem::path(std::string(interface_path)).extension() != ".scppm") {
         std::cerr << "error: module interface output must use the .scppm extension, got '" << interface_path << "'\n";
         return 1;
@@ -601,14 +693,6 @@ int run_build_module(std::string_view input_path, std::string_view interface_pat
     if (std::filesystem::path(std::string(archive_path)).extension() != ".scppa") {
         std::cerr << "error: module archive output must use the .scppa extension, got '" << archive_path << "'\n";
         return 1;
-    }
-    for (const auto& [module_name, path] : import_paths) {
-        std::string extension = std::filesystem::path(path).extension().string();
-        if (extension != ".scpp" && extension != ".scppm") {
-            std::cerr << "error: import path for module '" << module_name
-                      << "' must use the .scpp or .scppm extension, got '" << path << "'\n";
-            return 1;
-        }
     }
     std::string source;
     try {
@@ -646,29 +730,56 @@ constexpr std::string_view version = SCPP_VERSION;
 int run(int argc, char** argv) {
     std::string_view name = argc > 0 ? argv[0] : "scpp";
     if (argc >= 2 && std::string_view(argv[1]) == "lex") {
-        if (argc != 3) {
-            std::cerr << "error: lex requires <file.scpp>\n";
+        std::vector<std::string> source_paths;
+        for (int i = 2; i < argc; i++) {
+            std::string_view arg = argv[i];
+            switch (maybe_collect_source_arg(arg, i, argc, argv, source_paths, "input file")) {
+                case SourceArgParseResult::AddedSource: break;
+                case SourceArgParseResult::Error: return 1;
+                case SourceArgParseResult::NotSource:
+                    std::cerr << "error: unknown lex option '" << arg << "'\n";
+                    return 1;
+            }
+        }
+        if (source_paths.empty()) {
+            std::cerr << "error: lex requires a source file (pass <file.scpp> or --source <path>)\n";
             return 1;
         }
-        return run_lex(argv[2]);
+        if (source_paths.size() != 1) {
+            std::cerr << "error: lex accepts exactly one source file, got " << source_paths.size() << "\n";
+            return 1;
+        }
+        return run_lex(source_paths.front());
     }
     if (argc >= 2 && std::string_view(argv[1]) == "parse") {
-        if (argc != 3) {
-            std::cerr << "error: parse requires <file.scpp>\n";
+        std::vector<std::string> source_paths;
+        for (int i = 2; i < argc; i++) {
+            std::string_view arg = argv[i];
+            switch (maybe_collect_source_arg(arg, i, argc, argv, source_paths, "input file")) {
+                case SourceArgParseResult::AddedSource: break;
+                case SourceArgParseResult::Error: return 1;
+                case SourceArgParseResult::NotSource:
+                    std::cerr << "error: unknown parse option '" << arg << "'\n";
+                    return 1;
+            }
+        }
+        if (source_paths.empty()) {
+            std::cerr << "error: parse requires a source file (pass <file.scpp> or --source <path>)\n";
             return 1;
         }
-        return run_parse(argv[2]);
+        if (source_paths.size() != 1) {
+            std::cerr << "error: parse accepts exactly one source file, got " << source_paths.size() << "\n";
+            return 1;
+        }
+        return run_parse(source_paths.front());
     }
     if (argc >= 2 && std::string_view(argv[1]) == "build-module") {
-        if (argc < 3) {
-            std::cerr << "error: build-module requires <file.scpp>\n";
-            return 1;
-        }
         std::string_view interface_path;
         std::string_view archive_path;
+        std::vector<std::string> source_paths;
         std::unordered_map<std::string, std::string> import_paths;
         std::vector<std::string> import_search_dirs;
-        for (int i = 3; i < argc; i++) {
+        for (int i = 2; i < argc; i++) {
             std::string_view arg = argv[i];
             if (arg == "-I" && i + 1 < argc) {
                 import_search_dirs.emplace_back(argv[++i]);
@@ -685,9 +796,18 @@ int run(int argc, char** argv) {
                 }
                 import_paths.emplace(std::string(mapping.substr(0, eq)), std::string(mapping.substr(eq + 1)));
             } else {
-                std::cerr << "error: unknown build-module option '" << arg << "'\n";
-                return 1;
+                switch (maybe_collect_source_arg(arg, i, argc, argv, source_paths, "input file")) {
+                    case SourceArgParseResult::AddedSource: break;
+                    case SourceArgParseResult::Error: return 1;
+                    case SourceArgParseResult::NotSource:
+                        std::cerr << "error: unknown build-module option '" << arg << "'\n";
+                        return 1;
+                }
             }
+        }
+        if (source_paths.empty()) {
+            std::cerr << "error: build-module requires a source file (pass <file.scpp> or --source <path>)\n";
+            return 1;
         }
         if (interface_path.empty()) {
             std::cerr << "error: build-module requires --interface-out <file.scppm>\n";
@@ -697,7 +817,9 @@ int run(int argc, char** argv) {
             std::cerr << "error: build-module requires --archive-out <file.scppa>\n";
             return 1;
         }
-        return run_build_module(argv[2], interface_path, archive_path, import_paths, import_search_dirs);
+        if (!validate_import_paths(import_paths)) return 1;
+        if (!append_explicit_source_imports(source_paths, import_paths)) return 1;
+        return run_build_module(source_paths.front(), interface_path, archive_path, import_paths, import_search_dirs);
     }
     if (argc >= 2 && std::string_view(argv[1]) == "build") {
         scpp::ProjectBuildOptions options;
@@ -735,12 +857,13 @@ int run(int argc, char** argv) {
     }
     if (argc >= 2) {
         std::string_view output_path = "a.out";
+        std::vector<std::string> source_paths;
         std::vector<std::string> extra_link_inputs;
         std::unordered_map<std::string, std::string> import_paths;
         std::vector<std::string> import_search_dirs;
         bool static_link = false;
         bool emit_debug_info = false;
-        for (int i = 2; i < argc; i++) {
+        for (int i = 1; i < argc; i++) {
             std::string_view arg = argv[i];
             if (arg == "-o" && i + 1 < argc) {
                 output_path = argv[++i];
@@ -766,11 +889,22 @@ int run(int argc, char** argv) {
                 }
                 import_paths.emplace(std::string(mapping.substr(0, eq)), std::string(mapping.substr(eq + 1)));
             } else {
-                std::cerr << "error: unknown option '" << arg << "'\n";
-                return 1;
+                switch (maybe_collect_source_arg(arg, i, argc, argv, source_paths, "input file")) {
+                    case SourceArgParseResult::AddedSource: break;
+                    case SourceArgParseResult::Error: return 1;
+                    case SourceArgParseResult::NotSource:
+                        std::cerr << "error: unknown option '" << arg << "'\n";
+                        return 1;
+                }
             }
         }
-        return run_build(argv[1], output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
+        if (source_paths.empty()) {
+            std::cerr << "error: build requires a source file (pass <file.scpp> or --source <path>)\n";
+            return 1;
+        }
+        if (!validate_import_paths(import_paths)) return 1;
+        if (!append_explicit_source_imports(source_paths, import_paths)) return 1;
+        return run_build(source_paths.front(), output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
                          emit_debug_info);
     }
 
@@ -779,14 +913,14 @@ int run(int argc, char** argv) {
     }
 
     std::cout << "Hello from " << name << " " << version << "!\n";
-    std::cout << "Usage: " << name << " lex <file.scpp>\n";
-    std::cout << "       " << name << " parse <file.scpp>\n";
+    std::cout << "Usage: " << name << " lex <file.scpp>|--source <file>\n";
+    std::cout << "       " << name << " parse <file.scpp>|--source <file>\n";
     std::cout << "       " << name
-              << " <file.scpp> [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
+              << " <file.scpp> [<more.scpp>...] [--source <file>]... [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
     std::cout << "       " << name
               << " build [--workspace] [-p <package>] [--lib [<name>]] [--bin <name>] [--profile <name>] [--release]\n";
     std::cout << "       " << name
-              << " build-module <file.scpp> --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
+              << " build-module <file.scpp> [<more.scpp>...] [--source <file>]... --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
     return 0;
 }
 
