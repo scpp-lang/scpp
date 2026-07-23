@@ -1,0 +1,41 @@
+import std;
+
+class Tracker {
+private:
+    int* destroyed_{};
+
+public:
+    Tracker(int* destroyed) {
+        this->destroyed_ = destroyed;
+        return;
+    }
+
+    virtual ~Tracker() {
+        [[scpp::unsafe]] {
+            *this->destroyed_ = *this->destroyed_ + 1;
+        }
+        return;
+    }
+
+    int value() const {
+        return 41;
+    }
+};
+
+int main() {
+    int destroyed = 0;
+    std::shared_ptr<Tracker> owner = std::make_shared<Tracker>(&destroyed);
+    if (owner.use_count() != 1) return 1;
+    {
+        std::shared_ptr<Tracker> copy{};
+        copy = owner;
+        if (owner.use_count() != 2) return 2;
+        if ((*copy).value() != 41) return 3;
+        if (copy->value() != 41) return 4;
+        std::shared_ptr<Tracker> moved = std::move(copy);
+        if (moved.use_count() != 2) return 5;
+    }
+    if (owner.use_count() != 1) return 6;
+    owner.reset();
+    return destroyed == 1 ? 0 : 7;
+}

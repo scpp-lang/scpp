@@ -3095,6 +3095,52 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_build_module_roundtrips_shared_ptr_const_string";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_roundtrips_shared_ptr_const_string";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "import std;\n"
+                        "namespace helper {\n"
+                        "    export using ConstStringPtr = std::shared_ptr<const std::string>;\n"
+                        "    export ConstStringPtr make_text() {\n"
+                        "        return std::make_shared<const std::string>(\"ok\");\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                        "import std;\n"
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    helper::ConstStringPtr value = helper::make_text();\n"
+                        "    return value->length() - 2;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build from .scppm should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected shared_ptr const-string binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_prebuilt_variadic_consteval_constructor_and_runtime_method_work";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_prebuilt_variadic_consteval_constructor_and_runtime_method_work";
