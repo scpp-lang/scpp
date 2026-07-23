@@ -96,6 +96,8 @@ export module llvm:debug_info;
 import std;
 import :types;
 
+namespace llvm {
+
 // ---------------------------------------------------------------------
 // Enums and small typedefs (llvm-c/DebugInfo.h)
 // ---------------------------------------------------------------------
@@ -229,3 +231,5 @@ LLVMDbgRecordRef LLVMDIBuilderInsertDeclareRecordAtEnd(LLVMDIBuilderRef Builder,
                                                        LLVMMetadataRef DebugLoc, LLVMBasicBlockRef Block);
 
 } // extern "C"
+
+} // namespace llvm

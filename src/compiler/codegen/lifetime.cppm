@@ -8,26 +8,26 @@ import :api;
 
 namespace scpp {
 
-    LLVMValueRef Codegen::codegen_materialize_rvalue_reference_source(const Expr& expr)
+    llvm::LLVMValueRef Codegen::codegen_materialize_rvalue_reference_source(const Expr& expr)
 {
         if (expr.kind == ExprKind::Lambda) return codegen_expr(expr);
         // Also reuses std::move's own codegen unchanged, including its
         // "null out the source slot" side effect when the moved value is
         // itself a std::unique_ptr/class.
-        LLVMValueRef value = codegen_expr(expr);
-        LLVMValueRef temp = create_entry_block_alloca(LLVMTypeOf(value), "rvaluetmp");
-        LLVMBuildStore(builder_, value, temp);
+        llvm::LLVMValueRef value = codegen_expr(expr);
+        llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "rvaluetmp");
+        llvm::LLVMBuildStore(builder_, value, temp);
         return temp;
     }
 
 
-    LLVMValueRef Codegen::codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type)
+    llvm::LLVMValueRef Codegen::codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type)
 {
         if (produces_rvalue_of_type(expr, target_type)) {
             return codegen_materialize_rvalue_reference_source(expr);
         }
-        LLVMTypeRef llvm_type = to_llvm_type(target_type);
-        LLVMValueRef temp = create_entry_block_alloca(llvm_type, "constreftmp");
+        llvm::LLVMTypeRef llvm_type = to_llvm_type(target_type);
+        llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "constreftmp");
         if (is_named_record_type(target_type)) {
             create_store(codegen_class_value_for_boundary(expr, target_type, /*allow_implicit_converting_ctor=*/true), temp,
                          alignment_for_type(target_type));
@@ -38,10 +38,10 @@ namespace scpp {
     }
 
 
-    void Codegen::codegen_copy_construct_class(LLVMValueRef dest_ptr, LLVMValueRef src_ptr, const std::string& class_name)
+    void Codegen::codegen_copy_construct_class(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name)
 {
         if (const Function* user_ctor = find_user_declared_copy_ctor_ast(class_name)) {
-            LLVMValueRef ctor = LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+            llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
             build_call(ctor, {dest_ptr, src_ptr});
         } else {
             codegen_memberwise_copy_construct(dest_ptr, src_ptr, class_name);
@@ -49,7 +49,7 @@ namespace scpp {
     }
 
 
-    LLVMValueRef Codegen::find_destructor(const std::string& class_name)
+    llvm::LLVMValueRef Codegen::find_destructor(const std::string& class_name)
 {
         for (const Function& fn : program_->functions) {
             if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
@@ -58,7 +58,7 @@ namespace scpp {
                 this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
                 continue;
             }
-            return LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
+            return llvm::LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
         }
         return nullptr;
     }
@@ -79,7 +79,7 @@ namespace scpp {
     }
 
 
-    void Codegen::emit_interface_destructor_dispatch_call(const std::string& interface_name, LLVMValueRef interface_value)
+    void Codegen::emit_interface_destructor_dispatch_call(const std::string& interface_name, llvm::LLVMValueRef interface_value)
 {
         const Function* destructor = find_destructor_ast(interface_name);
         if (destructor == nullptr) return;
@@ -87,15 +87,15 @@ namespace scpp {
         if (!slot_index.has_value()) {
             throw CodegenError("missing destructor dispatch slot for interface '" + interface_name + "'", current_loc_);
         }
-        LLVMValueRef object_ptr = extract_interface_object_ptr(interface_value);
-        LLVMValueRef dispatch_ptr = extract_interface_dispatch_ptr(interface_value);
-        LLVMTypeRef thunk_type = interface_dispatch_function_type(*destructor);
-        LLVMTypeRef table_type = interface_dispatch_table_type(interface_name);
-        LLVMTypeRef i32_ty = LLVMInt32TypeInContext(context_);
-        LLVMValueRef slot_indices[] = {LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
-                                       LLVMConstInt(i32_ty, static_cast<unsigned>(*slot_index), /*SignExtend=*/0)};
-        LLVMValueRef slot_ptr = LLVMBuildGEP2(builder_, table_type, dispatch_ptr, slot_indices, 2, "iface.dtor.slot");
-        LLVMValueRef target_ptr = LLVMBuildLoad2(builder_, LLVMPointerTypeInContext(context_, 0), slot_ptr, "iface.dtor.target");
+        llvm::LLVMValueRef object_ptr = extract_interface_object_ptr(interface_value);
+        llvm::LLVMValueRef dispatch_ptr = extract_interface_dispatch_ptr(interface_value);
+        llvm::LLVMTypeRef thunk_type = interface_dispatch_function_type(*destructor);
+        llvm::LLVMTypeRef table_type = interface_dispatch_table_type(interface_name);
+        llvm::LLVMTypeRef i32_ty = llvm::LLVMInt32TypeInContext(context_);
+        llvm::LLVMValueRef slot_indices[] = {llvm::LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
+                                       llvm::LLVMConstInt(i32_ty, static_cast<unsigned>(*slot_index), /*SignExtend=*/0)};
+        llvm::LLVMValueRef slot_ptr = llvm::LLVMBuildGEP2(builder_, table_type, dispatch_ptr, slot_indices, 2, "iface.dtor.slot");
+        llvm::LLVMValueRef target_ptr = llvm::LLVMBuildLoad2(builder_, llvm::LLVMPointerTypeInContext(context_, 0), slot_ptr, "iface.dtor.target");
         build_call(thunk_type, target_ptr, {object_ptr});
     }
 
@@ -193,52 +193,52 @@ namespace scpp {
     }
 
 
-    void Codegen::codegen_memberwise_copy_construct(LLVMValueRef dest_ptr, LLVMValueRef src_ptr,
+    void Codegen::codegen_memberwise_copy_construct(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr,
                                             const std::string& class_name)
 {
         const StructInfo& info = structs_.at(class_name);
         if (info.has_ordinary_vtable) initialize_ordinary_vtable_pointer(class_name, dest_ptr);
         for (std::size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
-            LLVMValueRef dest_field = LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr, info.physical_field_index(i),
+            llvm::LLVMValueRef dest_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr, info.physical_field_index(i),
                                                           info.field_names[i].c_str());
-            LLVMValueRef src_field = LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
+            llvm::LLVMValueRef src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
                                                          info.field_names[i].c_str());
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name)) {
-                    LLVMValueRef ctor = LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+                    llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
                     build_call(ctor, {dest_field, src_field});
                 } else {
                     codegen_memberwise_copy_construct(dest_field, src_field, field_type.name);
                 }
             } else {
-                LLVMTypeRef llvm_field_type = to_llvm_type(field_type);
-                LLVMValueRef value = LLVMBuildLoad2(builder_, llvm_field_type, src_field, "copiedfield");
+                llvm::LLVMTypeRef llvm_field_type = to_llvm_type(field_type);
+                llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_field, "copiedfield");
                 create_store(value, dest_field, std::nullopt);
             }
         }
     }
 
 
-    void Codegen::codegen_memberwise_copy_assign(LLVMValueRef dest_ptr, LLVMValueRef src_ptr, const std::string& class_name)
+    void Codegen::codegen_memberwise_copy_assign(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name)
 {
         const StructInfo& info = structs_.at(class_name);
         for (std::size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
-            LLVMValueRef dest_field = LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr, info.physical_field_index(i),
+            llvm::LLVMValueRef dest_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr, info.physical_field_index(i),
                                                           info.field_names[i].c_str());
-            LLVMValueRef src_field = LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
+            llvm::LLVMValueRef src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
                                                          info.field_names[i].c_str());
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
                 if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name)) {
-                    LLVMValueRef op = LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
+                    llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
                     build_call(op, {dest_field, src_field});
                 } else {
                     codegen_memberwise_copy_assign(dest_field, src_field, field_type.name);
                 }
             } else {
-                LLVMTypeRef llvm_field_type = to_llvm_type(field_type);
-                LLVMValueRef value = LLVMBuildLoad2(builder_, llvm_field_type, src_field, "copiedfield");
+                llvm::LLVMTypeRef llvm_field_type = to_llvm_type(field_type);
+                llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_field, "copiedfield");
                 create_store(value, dest_field, std::nullopt);
             }
         }
@@ -260,9 +260,9 @@ namespace scpp {
     }
 
 
-    void Codegen::emit_destructor_chain_calls(const std::string& class_name, LLVMValueRef object_ptr)
+    void Codegen::emit_destructor_chain_calls(const std::string& class_name, llvm::LLVMValueRef object_ptr)
 {
-        if (LLVMValueRef dtor = find_destructor(class_name)) {
+        if (llvm::LLVMValueRef dtor = find_destructor(class_name)) {
             build_call(dtor, {object_ptr});
         }
         const ClassDef* def = find_class_def(class_name);
@@ -273,7 +273,7 @@ namespace scpp {
             std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*def);
             for (auto it = interface_bases.rbegin(); it != interface_bases.rend(); ++it) {
                 if (*it == nullptr) continue;
-                if (LLVMValueRef dtor = find_destructor((*it)->name)) {
+                if (llvm::LLVMValueRef dtor = find_destructor((*it)->name)) {
                     build_call(dtor, {object_ptr});
                 }
             }
@@ -281,36 +281,36 @@ namespace scpp {
     }
 
 
-    LLVMValueRef Codegen::create_moved_flag_if_has_destructor(const std::string& class_name)
+    llvm::LLVMValueRef Codegen::create_moved_flag_if_has_destructor(const std::string& class_name)
 {
         if (!class_has_destructor_in_chain(class_name)) return nullptr;
-        LLVMValueRef flag = create_entry_block_alloca(LLVMInt1TypeInContext(context_), "movedflag");
-        LLVMBuildStore(builder_, LLVMConstInt(LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
+        llvm::LLVMValueRef flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
+        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
         return flag;
     }
 
 
-    void Codegen::codegen_call_destructor_chain_unless_moved(const std::string& class_name, LLVMValueRef object_ptr,
-                                                    LLVMValueRef moved_flag)
+    void Codegen::codegen_call_destructor_chain_unless_moved(const std::string& class_name, llvm::LLVMValueRef object_ptr,
+                                                    llvm::LLVMValueRef moved_flag)
 {
         if (moved_flag == nullptr) {
             emit_destructor_chain_calls(class_name, object_ptr);
             return;
         }
-        LLVMValueRef was_moved = LLVMBuildLoad2(builder_, LLVMInt1TypeInContext(context_), moved_flag, "wasmoved");
-        LLVMValueRef current_fn = LLVMGetBasicBlockParent(LLVMGetInsertBlock(builder_));
-        LLVMBasicBlockRef then_bb = LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
-        LLVMBasicBlockRef merge_bb = LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
-        LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
-        LLVMPositionBuilderAtEnd(builder_, then_bb);
+        llvm::LLVMValueRef was_moved = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt1TypeInContext(context_), moved_flag, "wasmoved");
+        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
+        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
+        llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
         emit_destructor_chain_calls(class_name, object_ptr);
-        LLVMBuildBr(builder_, merge_bb);
-        LLVMPositionBuilderAtEnd(builder_, merge_bb);
+        llvm::LLVMBuildBr(builder_, merge_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
     }
 
 
-    void Codegen::codegen_destroy_old_class_state_for_move_assign(LLVMValueRef ptr, const std::string& class_name,
-                                                         LLVMValueRef moved_flag)
+    void Codegen::codegen_destroy_old_class_state_for_move_assign(llvm::LLVMValueRef ptr, const std::string& class_name,
+                                                         llvm::LLVMValueRef moved_flag)
 {
         if (class_has_destructor_in_chain(class_name)) {
             codegen_call_destructor_chain_unless_moved(class_name, ptr, moved_flag);
@@ -323,7 +323,7 @@ namespace scpp {
         for (std::size_t i = 0; i < info.field_types.size(); i++) {
             const Type& field_type = info.field_types[i];
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                LLVMValueRef field_ptr = LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
+                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
                                                              info.field_names[i].c_str());
                 codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
             }

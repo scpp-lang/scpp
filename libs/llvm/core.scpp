@@ -101,6 +101,8 @@ import std;
 // types.scpp's header comment, for the full rationale.
 export import :types;
 
+namespace llvm {
+
 // ---------------------------------------------------------------------
 // Attribute index (llvm-c/Core.h)
 // ---------------------------------------------------------------------
@@ -337,3 +339,5 @@ LLVMAttributeRef LLVMCreateEnumAttribute(LLVMContextRef C, unsigned KindID, std:
 void LLVMAddAttributeAtIndex(LLVMValueRef F, LLVMAttributeIndex Idx, LLVMAttributeRef A);
 
 } // extern "C"
+
+} // namespace llvm

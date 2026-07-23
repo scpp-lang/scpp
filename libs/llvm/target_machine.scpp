@@ -185,6 +185,8 @@ export module llvm:target_machine;
 import :types;
 import :target;
 
+namespace llvm {
+
 // ---------------------------------------------------------------------
 // Opaque handle struct tags (llvm-c/TargetMachine.h)
 // ---------------------------------------------------------------------
@@ -290,3 +292,5 @@ LLVMBool LLVMTargetMachineEmitToFile(LLVMTargetMachineRef T, LLVMModuleRef M, co
 char* LLVMGetDefaultTargetTriple(void);
 
 } // extern "C"
+
+} // namespace llvm

@@ -95,6 +95,8 @@ export module llvm:analysis;
 
 import :types;
 
+namespace llvm {
+
 // ---------------------------------------------------------------------
 // Enums (llvm-c/Analysis.h)
 // ---------------------------------------------------------------------
@@ -138,3 +140,5 @@ export extern "C" {
 LLVMBool LLVMVerifyModule(LLVMModuleRef M, LLVMVerifierFailureAction Action, char** OutMessage);
 
 } // extern "C"
+
+} // namespace llvm
