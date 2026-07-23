@@ -152,74 +152,177 @@ void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>&
     for (const scpp::Type& param : type.function_params) collect_type_names(param, out);
 }
 
-void collect_stmt_edges(const scpp::Stmt& stmt, std::unordered_set<std::string>& function_names,
+void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::string>& known_function_names,
+                        const std::unordered_set<std::string>& bound_names,
+                        std::unordered_set<std::string>& function_names,
                         std::unordered_set<std::string>& type_names);
 
-void collect_expr_edges(const scpp::Expr& expr, std::unordered_set<std::string>& function_names,
+void collect_expr_edges(const scpp::Expr& expr, const std::unordered_set<std::string>& known_function_names,
+                        const std::unordered_set<std::string>& bound_names,
+                        std::unordered_set<std::string>& function_names,
+                        std::unordered_set<std::string>& type_names);
+
+void collect_type_edges(const scpp::Type& type, const std::unordered_set<std::string>& known_function_names,
+                        const std::unordered_set<std::string>& bound_names,
+                        std::unordered_set<std::string>& function_names,
                         std::unordered_set<std::string>& type_names) {
-    collect_type_names(expr.type, type_names);
-    if (expr.kind == scpp::ExprKind::Call && !expr.name.empty()) function_names.insert(expr.name);
-    if (expr.kind == scpp::ExprKind::New) collect_type_names(expr.type, type_names);
-    if (expr.lhs) collect_expr_edges(*expr.lhs, function_names, type_names);
-    if (expr.rhs) collect_expr_edges(*expr.rhs, function_names, type_names);
-    if (expr.third) collect_expr_edges(*expr.third, function_names, type_names);
-    for (const auto& arg : expr.args) collect_expr_edges(*arg, function_names, type_names);
-    if (expr.lambda_body) collect_stmt_edges(*expr.lambda_body, function_names, type_names);
+    if (type.kind == scpp::TypeKind::Named && !type.name.empty()) type_names.insert(type.name);
+    if (type.pointee) collect_type_edges(*type.pointee, known_function_names, bound_names, function_names, type_names);
+    if (type.function_return) {
+        collect_type_edges(*type.function_return, known_function_names, bound_names, function_names, type_names);
+    }
+    for (const scpp::Type& arg : type.template_args) {
+        collect_type_edges(arg, known_function_names, bound_names, function_names, type_names);
+    }
+    for (const scpp::Type& param : type.function_params) {
+        collect_type_edges(param, known_function_names, bound_names, function_names, type_names);
+    }
+    for (const std::shared_ptr<scpp::Expr>& arg : type.non_type_args) {
+        if (arg) collect_expr_edges(*arg, known_function_names, bound_names, function_names, type_names);
+    }
 }
 
-void collect_stmt_edges(const scpp::Stmt& stmt, std::unordered_set<std::string>& function_names,
+[[nodiscard]] bool identifier_expr_might_name_function(const scpp::Expr& expr,
+                                                       const std::unordered_set<std::string>& known_function_names,
+                                                       const std::unordered_set<std::string>& bound_names) {
+    if (expr.kind != scpp::ExprKind::Identifier || expr.name.empty()) return false;
+    if (!known_function_names.contains(expr.name)) return false;
+    if (expr.explicit_global_qualification || expr.name.find("::") != std::string::npos) return true;
+    return !bound_names.contains(expr.name);
+}
+
+void collect_expr_edges(const scpp::Expr& expr, const std::unordered_set<std::string>& known_function_names,
+                        const std::unordered_set<std::string>& bound_names,
+                        std::unordered_set<std::string>& function_names,
                         std::unordered_set<std::string>& type_names) {
-    collect_type_names(stmt.type, type_names);
-    if (stmt.init) collect_expr_edges(*stmt.init, function_names, type_names);
-    for (const auto& ctor_arg : stmt.ctor_args) collect_expr_edges(*ctor_arg, function_names, type_names);
+    collect_type_edges(expr.type, known_function_names, bound_names, function_names, type_names);
+    if ((expr.kind == scpp::ExprKind::Call || identifier_expr_might_name_function(expr, known_function_names, bound_names)) &&
+        !expr.name.empty()) {
+        function_names.insert(expr.name);
+    }
+    if (expr.kind == scpp::ExprKind::New) {
+        collect_type_edges(expr.type, known_function_names, bound_names, function_names, type_names);
+    }
+    if (expr.lhs) collect_expr_edges(*expr.lhs, known_function_names, bound_names, function_names, type_names);
+    if (expr.rhs) collect_expr_edges(*expr.rhs, known_function_names, bound_names, function_names, type_names);
+    if (expr.third) collect_expr_edges(*expr.third, known_function_names, bound_names, function_names, type_names);
+    for (const auto& arg : expr.args) {
+        collect_expr_edges(*arg, known_function_names, bound_names, function_names, type_names);
+    }
+    for (const scpp::ExplicitTemplateArg& arg : expr.explicit_template_args) {
+        if (arg.is_type) {
+            collect_type_edges(arg.type, known_function_names, bound_names, function_names, type_names);
+        } else if (arg.value) {
+            collect_expr_edges(*arg.value, known_function_names, bound_names, function_names, type_names);
+        }
+    }
+    std::unordered_set<std::string> lambda_bound_names = bound_names;
+    for (const scpp::LambdaCapture& capture : expr.lambda_captures) {
+        if (capture.init) collect_expr_edges(*capture.init, known_function_names, bound_names, function_names, type_names);
+        lambda_bound_names.insert(capture.name);
+    }
+    for (const scpp::Param& param : expr.lambda_params) {
+        collect_type_edges(param.type, known_function_names, lambda_bound_names, function_names, type_names);
+        lambda_bound_names.insert(param.name);
+    }
+    if (expr.lambda_body) {
+        collect_stmt_edges(*expr.lambda_body, known_function_names, lambda_bound_names, function_names, type_names);
+    }
+}
+
+void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::string>& known_function_names,
+                        const std::unordered_set<std::string>& bound_names,
+                        std::unordered_set<std::string>& function_names,
+                        std::unordered_set<std::string>& type_names) {
+    collect_type_edges(stmt.type, known_function_names, bound_names, function_names, type_names);
+    if (stmt.init) collect_expr_edges(*stmt.init, known_function_names, bound_names, function_names, type_names);
+    for (const auto& ctor_arg : stmt.ctor_args) {
+        collect_expr_edges(*ctor_arg, known_function_names, bound_names, function_names, type_names);
+    }
     if (stmt.has_ctor_args && stmt.type.kind == scpp::TypeKind::Named && !stmt.type.name.empty()) {
         function_names.insert(stmt.type.name + "_new");
     }
-    if (stmt.expr) collect_expr_edges(*stmt.expr, function_names, type_names);
-    if (stmt.condition) collect_expr_edges(*stmt.condition, function_names, type_names);
-    if (stmt.then_branch) collect_stmt_edges(*stmt.then_branch, function_names, type_names);
-    if (stmt.else_branch) collect_stmt_edges(*stmt.else_branch, function_names, type_names);
-    for (const auto& nested : stmt.statements) collect_stmt_edges(*nested, function_names, type_names);
-}
-
-void collect_function_signature_types(const scpp::Function& fn, std::unordered_set<std::string>& type_names) {
-    collect_type_names(fn.return_type, type_names);
-    for (const scpp::Param& param : fn.params) collect_type_names(param.type, type_names);
-}
-
-void collect_function_reachable_edges(const scpp::Function& fn, std::unordered_set<std::string>& function_names,
-                                     std::unordered_set<std::string>& type_names) {
-    collect_function_signature_types(fn, type_names);
-    for (const scpp::MemberInitializer& init : fn.member_initializers) {
-        if (init.initializer.expr) collect_expr_edges(*init.initializer.expr, function_names, type_names);
-        for (const scpp::ExprPtr& arg : init.initializer.brace_args) collect_expr_edges(*arg, function_names, type_names);
+    if (stmt.expr) collect_expr_edges(*stmt.expr, known_function_names, bound_names, function_names, type_names);
+    if (stmt.condition) {
+        collect_expr_edges(*stmt.condition, known_function_names, bound_names, function_names, type_names);
     }
-    if (fn.body) collect_stmt_edges(*fn.body, function_names, type_names);
+    if (stmt.then_branch) {
+        collect_stmt_edges(*stmt.then_branch, known_function_names, bound_names, function_names, type_names);
+    }
+    if (stmt.else_branch) {
+        collect_stmt_edges(*stmt.else_branch, known_function_names, bound_names, function_names, type_names);
+    }
+    std::unordered_set<std::string> block_bound_names = bound_names;
+    if (stmt.kind == scpp::StmtKind::VarDecl && !stmt.var_name.empty()) block_bound_names.insert(stmt.var_name);
+    for (const auto& nested : stmt.statements) {
+        collect_stmt_edges(*nested, known_function_names, block_bound_names, function_names, type_names);
+        if (nested->kind == scpp::StmtKind::VarDecl && !nested->var_name.empty()) {
+            block_bound_names.insert(nested->var_name);
+        }
+    }
 }
 
-void collect_class_reachable_edges(const scpp::ClassDef& def, std::unordered_set<std::string>& function_names,
+void collect_function_signature_types(const scpp::Function& fn,
+                                     const std::unordered_set<std::string>& known_function_names,
+                                     std::unordered_set<std::string>& function_names,
+                                     std::unordered_set<std::string>& type_names) {
+    std::unordered_set<std::string> empty_bound_names;
+    collect_type_edges(fn.return_type, known_function_names, empty_bound_names, function_names, type_names);
+    for (const scpp::Param& param : fn.params) {
+        collect_type_edges(param.type, known_function_names, empty_bound_names, function_names, type_names);
+    }
+}
+
+void collect_function_reachable_edges(const scpp::Function& fn, const std::unordered_set<std::string>& known_function_names,
+                                     std::unordered_set<std::string>& function_names,
+                                     std::unordered_set<std::string>& type_names) {
+    collect_function_signature_types(fn, known_function_names, function_names, type_names);
+    std::unordered_set<std::string> bound_names;
+    for (const scpp::Param& param : fn.params) {
+        if (!param.name.empty()) bound_names.insert(param.name);
+    }
+    for (const scpp::MemberInitializer& init : fn.member_initializers) {
+        if (init.initializer.expr) {
+            collect_expr_edges(*init.initializer.expr, known_function_names, bound_names, function_names, type_names);
+        }
+        for (const scpp::ExprPtr& arg : init.initializer.brace_args) {
+            collect_expr_edges(*arg, known_function_names, bound_names, function_names, type_names);
+        }
+    }
+    if (fn.body) collect_stmt_edges(*fn.body, known_function_names, bound_names, function_names, type_names);
+}
+
+void collect_class_reachable_edges(const scpp::ClassDef& def, const std::unordered_set<std::string>& known_function_names,
+                                   std::unordered_set<std::string>& function_names,
                                    std::unordered_set<std::string>& type_names) {
+    std::unordered_set<std::string> empty_bound_names;
     for (const scpp::ClassField& field : def.fields) {
-        collect_type_names(field.type, type_names);
+        collect_type_edges(field.type, known_function_names, empty_bound_names, function_names, type_names);
         if (!field.default_initializer) continue;
-        if (field.default_initializer->expr) collect_expr_edges(*field.default_initializer->expr, function_names, type_names);
-        for (const scpp::ExprPtr& arg : field.default_initializer->brace_args) collect_expr_edges(*arg, function_names, type_names);
+        if (field.default_initializer->expr) {
+            collect_expr_edges(*field.default_initializer->expr, known_function_names, empty_bound_names, function_names,
+                               type_names);
+        }
+        for (const scpp::ExprPtr& arg : field.default_initializer->brace_args) {
+            collect_expr_edges(*arg, known_function_names, empty_bound_names, function_names, type_names);
+        }
         if (field.default_initializer->has_brace_args && field.type.kind == scpp::TypeKind::Named && !field.type.name.empty()) {
             function_names.insert(field.type.name + "_new");
         }
     }
     for (const scpp::BaseSpecifier& base : def.base_specifiers) {
-        collect_type_names(base.base_type, type_names);
-        for (const std::shared_ptr<scpp::Expr>& arg : base.base_type.non_type_args) {
-            if (arg) collect_expr_edges(*arg, function_names, type_names);
-        }
+        collect_type_edges(base.base_type, known_function_names, empty_bound_names, function_names, type_names);
     }
-    for (const scpp::Type& arg : def.specialization_template_args) collect_type_names(arg, type_names);
+    for (const scpp::Type& arg : def.specialization_template_args) {
+        collect_type_edges(arg, known_function_names, empty_bound_names, function_names, type_names);
+    }
     if (def.thread_movable_if_movable_expr) {
-        collect_expr_edges(*def.thread_movable_if_movable_expr, function_names, type_names);
+        collect_expr_edges(*def.thread_movable_if_movable_expr, known_function_names, empty_bound_names, function_names,
+                           type_names);
     }
     if (def.thread_movable_if_shareable_expr) {
-        collect_expr_edges(*def.thread_movable_if_shareable_expr, function_names, type_names);
+        collect_expr_edges(*def.thread_movable_if_shareable_expr, known_function_names, empty_bound_names, function_names,
+                           type_names);
     }
 }
 
@@ -242,12 +345,14 @@ void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
 CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
     CompileTimePayloadPlan plan;
     std::unordered_map<std::string, std::vector<std::size_t>> function_indices_by_name;
+    std::unordered_set<std::string> known_function_names;
     std::unordered_map<std::string, const EnumDef*> enums_by_name;
     std::unordered_map<std::string, const StructDef*> structs_by_name;
     std::unordered_map<std::string, const ClassDef*> classes_by_name;
     std::unordered_multimap<std::string, std::size_t> methods_by_owner;
     for (std::size_t i = 0; i < program.functions.size(); i++) {
         function_indices_by_name[program.functions[i].name].push_back(i);
+        known_function_names.insert(program.functions[i].name);
         if (!program.functions[i].member_owner_class.empty()) {
             methods_by_owner.emplace(program.functions[i].member_owner_class, i);
         }
@@ -298,7 +403,7 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
             const Function& fn = program.functions[worklist[next_function_index++]];
             std::unordered_set<std::string> local_function_names;
             std::unordered_set<std::string> local_type_names;
-            collect_function_reachable_edges(fn, local_function_names, local_type_names);
+            collect_function_reachable_edges(fn, known_function_names, local_function_names, local_type_names);
             for (const std::string& callee : local_function_names) enqueue_functions_by_name(callee);
             for (const std::string& type_name : local_type_names) enqueue_type(type_name);
         }
@@ -322,7 +427,7 @@ CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
             if (auto it = classes_by_name.find(type_name); it != classes_by_name.end()) {
                 std::unordered_set<std::string> nested_function_names;
                 std::unordered_set<std::string> nested_type_names;
-                collect_class_reachable_edges(*it->second, nested_function_names, nested_type_names);
+                collect_class_reachable_edges(*it->second, known_function_names, nested_function_names, nested_type_names);
                 for (const std::string& nested_name : nested_type_names) enqueue_type(nested_name);
                 for (const std::string& function_name : nested_function_names) enqueue_functions_by_name(function_name);
                 auto [begin, end] = methods_by_owner.equal_range(type_name);
