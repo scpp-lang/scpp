@@ -797,6 +797,8 @@ private:
             clone.is_nodiscard = method_tmpl.is_nodiscard;
             clone.nodiscard_reason = method_tmpl.nodiscard_reason;
             clone.owning_module = program_.module_name.empty() ? std::string() : method_tmpl.owning_module;
+            clone.visibility_module = method_tmpl.visibility_module.empty() ? method_tmpl.owning_module
+                                                                            : method_tmpl.visibility_module;
             clone.eval_mode = method_tmpl.eval_mode;
             clone.is_generic_template = method_tmpl.is_generic_template;
             clone.template_params = method_tmpl.template_params;
@@ -1913,6 +1915,8 @@ private:
                 clone.owning_module =
                     instantiate_imported_generic_locally(named_concretes, method_tmpl.owning_module) ? std::string()
                                                                                                       : method_tmpl.owning_module;
+                clone.visibility_module = method_tmpl.visibility_module.empty() ? method_tmpl.owning_module
+                                                                                : method_tmpl.visibility_module;
                 clone.eval_mode = method_tmpl.eval_mode;
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
@@ -2074,6 +2078,8 @@ private:
                 clone.is_nodiscard = method_tmpl.is_nodiscard;
                 clone.nodiscard_reason = method_tmpl.nodiscard_reason;
                 clone.owning_module = method_tmpl.owning_module;
+                clone.visibility_module = method_tmpl.visibility_module.empty() ? method_tmpl.owning_module
+                                                                                : method_tmpl.visibility_module;
                 clone.eval_mode = method_tmpl.eval_mode;
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
@@ -2549,9 +2555,43 @@ private:
         std::unordered_map<std::string, Type>& type_bindings, std::unordered_map<std::string, int>& value_bindings,
         std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
         (void)value_bindings;
-        if (pattern.kind == TypeKind::Named && pattern.template_args.empty() && pattern.non_type_args.empty()) {
+        std::function<bool(const std::vector<Type>&, const std::vector<Type>&)> deduce_type_list =
+            [&](const std::vector<Type>& patterns, const std::vector<Type>& concretes) -> bool {
+            if (!patterns.empty()) {
+                const Type& last = patterns.back();
+                if (last.is_pack_expansion && last.kind == TypeKind::Named && last.template_args.empty() &&
+                    last.non_type_args.empty()) {
+                    for (const GenericTypeParam& tp : template_params) {
+                        if (!tp.is_pack || tp.is_non_type || tp.name != last.name) continue;
+                        if (concretes.size() + 1 < patterns.size()) return false;
+                        for (std::size_t i = 0; i + 1 < patterns.size(); i++) {
+                            if (!deduce_template_bindings_from_type_pattern(
+                                    patterns[i], concretes[i], template_params, type_bindings, value_bindings,
+                                    pack_bindings)) {
+                                return false;
+                            }
+                        }
+                        std::vector<Type> pack_slice(
+                            concretes.begin() + static_cast<std::ptrdiff_t>(patterns.size() - 1), concretes.end());
+                        return bind_type_pack_binding(pack_bindings, tp.name, pack_slice);
+                    }
+                }
+            }
+            if (patterns.size() != concretes.size()) return false;
+            for (std::size_t i = 0; i < patterns.size(); i++) {
+                if (!deduce_template_bindings_from_type_pattern(
+                        patterns[i], concretes[i], template_params, type_bindings, value_bindings, pack_bindings)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        if (!pattern.is_pack_expansion && pattern.kind == TypeKind::Named && pattern.template_args.empty() &&
+            pattern.non_type_args.empty()) {
             for (const GenericTypeParam& tp : template_params) {
-                if (tp.is_non_type || tp.is_pack || tp.name != pattern.name) continue;
+                if (tp.is_non_type || tp.name != pattern.name) continue;
+                if (tp.is_pack) return bind_type_pack_binding(pack_bindings, tp.name, {concrete});
                 return bind_type_binding(type_bindings, tp.name, concrete);
             }
         }
@@ -2568,22 +2608,7 @@ private:
                     concrete_template_args = &it->second.type_args;
                 }
                 if (!pattern.non_type_args.empty()) return false;
-                std::size_t pi = 0;
-                std::size_t ci = 0;
-                for (; pi < pattern.template_args.size(); pi++, ci++) {
-                    if (pattern.template_args[pi].is_pack_expansion) {
-                        std::vector<Type> remaining_types;
-                        for (; ci < concrete_template_args->size(); ci++) remaining_types.push_back((*concrete_template_args)[ci]);
-                        return bind_type_pack_binding(pack_bindings, pattern.template_args[pi].name, remaining_types);
-                    }
-                    if (ci >= concrete_template_args->size()) return false;
-                    if (!deduce_template_bindings_from_type_pattern(pattern.template_args[pi], (*concrete_template_args)[ci],
-                                                                    template_params, type_bindings, value_bindings,
-                                                                    pack_bindings)) {
-                        return false;
-                    }
-                }
-                return ci == concrete_template_args->size();
+                return deduce_type_list(pattern.template_args, *concrete_template_args);
             }
             case TypeKind::Pointer:
                 return pattern.is_mutable_pointee == concrete.is_mutable_pointee && pattern.pointee && concrete.pointee &&
@@ -2609,21 +2634,13 @@ private:
                     (pattern.kind == TypeKind::Function &&
                      (pattern.is_const_function != concrete.is_const_function ||
                       pattern.function_ref_qualifier != concrete.function_ref_qualifier)) ||
-                    pattern.function_params.size() != concrete.function_params.size() || !pattern.function_return ||
-                    !concrete.function_return ||
+                    !pattern.function_return || !concrete.function_return ||
                     !deduce_template_bindings_from_type_pattern(*pattern.function_return, *concrete.function_return,
-                                                                template_params, type_bindings, value_bindings,
-                                                                pack_bindings)) {
+                                                               template_params, type_bindings, value_bindings,
+                                                               pack_bindings)) {
                     return false;
                 }
-                for (std::size_t i = 0; i < pattern.function_params.size(); i++) {
-                    if (!deduce_template_bindings_from_type_pattern(pattern.function_params[i], concrete.function_params[i],
-                                                                    template_params, type_bindings, value_bindings,
-                                                                    pack_bindings)) {
-                        return false;
-                    }
-                }
-                return true;
+                return deduce_type_list(pattern.function_params, concrete.function_params);
         }
         return false;
     }
@@ -2740,9 +2757,31 @@ private:
                             std::optional<Type> arg_type = infer_expr_type(*args[arg_cursor], body, signatures_);
                             if (!arg_type.has_value()) continue;
                             Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                            Type replacement = named;
+                            const Type& pack_param_type = tmpl.params[i].type;
+                            const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
+                                                                                                  : pack_param_type;
+                            bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
+                                               underlying.kind == TypeKind::Named &&
+                                               underlying.template_args.empty() && underlying.non_type_args.empty() &&
+                                               underlying.name == *pack_type_name;
+                            if (pack_type_name.has_value() && !direct_pack) {
+                                std::unordered_map<std::string, Type> arg_type_bindings;
+                                std::unordered_map<std::string, int> arg_value_bindings;
+                                std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
+                                if (!deduce_template_bindings_from_type_pattern(underlying, named, tmpl.template_params,
+                                                                                arg_type_bindings, arg_value_bindings,
+                                                                                arg_pack_bindings)) {
+                                    continue;
+                                }
+                                auto pack_it = arg_pack_bindings.find(*pack_type_name);
+                                if (pack_it == arg_pack_bindings.end() || pack_it->second.size() != 1) continue;
+                                replacement = pack_it->second.front();
+                            }
                             Type substituted = pack_type_name.has_value()
-                                                   ? substitute_type_param(tmpl.params[i].type, *pack_type_name, named)
+                                                   ? substitute_type_param(tmpl.params[i].type, *pack_type_name, replacement)
                                                    : tmpl.params[i].type;
+                            substituted = resolve_generic_type(std::move(substituted), loc);
                             concrete_pack_param_types[i].push_back(std::move(substituted));
                         }
                         continue;
@@ -2801,6 +2840,7 @@ private:
                 clone.is_unsafe = tmpl.is_unsafe;
                 clone.is_nodiscard = tmpl.is_nodiscard;
                 clone.nodiscard_reason = tmpl.nodiscard_reason;
+                clone.visibility_module = tmpl.visibility_module.empty() ? tmpl.owning_module : tmpl.visibility_module;
                 clone.member_owner_class = class_name;
                 clone.is_static = tmpl.is_static;
                 clone.access = tmpl.access;
@@ -2906,6 +2946,7 @@ private:
         clone.is_nodiscard = tmpl.is_nodiscard;
         clone.nodiscard_reason = tmpl.nodiscard_reason;
         clone.owning_module = tmpl.owning_module;
+        clone.visibility_module = tmpl.visibility_module.empty() ? tmpl.owning_module : tmpl.visibility_module;
         clone.eval_mode = tmpl.eval_mode;
         clone.member_owner_class = tmpl.member_owner_class;
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
@@ -3022,7 +3063,8 @@ private:
             auto pack_it = pack_bindings.find(*pack_type_name);
             if (pack_it == pack_bindings.end()) continue;
             for (const Type& concrete : pack_it->second) {
-                concrete_pack_param_types[i].push_back(substitute_type_param(tmpl.params[i].type, *pack_type_name, concrete));
+                concrete_pack_param_types[i].push_back(
+                    resolve_generic_type(substitute_type_param(tmpl.params[i].type, *pack_type_name, concrete), tmpl.loc));
             }
         }
     }
@@ -3036,7 +3078,7 @@ private:
 
     [[nodiscard]] bool compile_time_dependency_visible(const Function& fn, const Body& body) const {
         if (!fn.is_compile_time_dependency) return true;
-        if (!fn.owning_module.empty() && fn.owning_module == body.function_owning_module) return true;
+        if (!fn.owning_module.empty() && fn.owning_module == body.function_visibility_module) return true;
         return !body.function_source_path.empty() && body.function_source_path == fn.loc.source_path_text();
     }
 
@@ -3071,11 +3113,36 @@ private:
                 if (stable_tmpl.params[i].is_parameter_pack) {
                     std::optional<std::string> pack_type_name =
                         referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
+                    const Type& pack_param_type = stable_tmpl.params[i].type;
+                    const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
+                                                                                         : pack_param_type;
+                    bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
+                                       underlying.kind == TypeKind::Named && underlying.template_args.empty() &&
+                                       underlying.non_type_args.empty() && underlying.name == *pack_type_name;
                     std::vector<Type> deduced_pack_types;
                     for (; arg_cursor < expr.args.size(); arg_cursor++) {
                         std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                         if (!arg_type.has_value()) return false;
-                        deduced_pack_types.push_back(arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
+                        Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                        if (pack_type_name.has_value() && !direct_pack) {
+                            std::unordered_map<std::string, Type> arg_type_bindings;
+                            std::unordered_map<std::string, int> arg_value_bindings;
+                            std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
+                            if (!deduce_template_bindings_from_type_pattern(
+                                    underlying, concrete, stable_tmpl.template_params, arg_type_bindings,
+                                    arg_value_bindings, arg_pack_bindings)) {
+                                return false;
+                            }
+                            for (const auto& [name, type] : arg_type_bindings) {
+                                if (!bind_type_binding(resolution.type_bindings, name, type)) return false;
+                            }
+                            auto pack_it = arg_pack_bindings.find(*pack_type_name);
+                            if (pack_it == arg_pack_bindings.end()) return false;
+                            deduced_pack_types.insert(
+                                deduced_pack_types.end(), pack_it->second.begin(), pack_it->second.end());
+                        } else {
+                            deduced_pack_types.push_back(concrete);
+                        }
                     }
                     if (pack_type_name.has_value() &&
                         !bind_type_pack_binding(resolution.pack_bindings, *pack_type_name, deduced_pack_types)) {
@@ -3357,6 +3424,7 @@ private:
 
         expr.name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, explicit_pack_bindings,
                                                           concrete_pack_param_types);
+        expr.explicit_global_qualification = false;
         expr.explicit_template_args.clear();
     }
 
@@ -3391,17 +3459,50 @@ private:
             if (stable_tmpl.params[i].is_parameter_pack) {
                 std::optional<std::string> pack_type_name =
                     referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
+                const Type& pack_param_type = stable_tmpl.params[i].type;
+                const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
+                                                                                     : pack_param_type;
+                bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
+                                   underlying.kind == TypeKind::Named && underlying.template_args.empty() &&
+                                   underlying.non_type_args.empty() && underlying.name == *pack_type_name;
                 std::vector<Type> deduced_pack_types;
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) continue;
-                    deduced_pack_types.push_back(arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
+                    Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    if (pack_type_name.has_value() && !direct_pack) {
+                        std::unordered_map<std::string, Type> arg_type_bindings;
+                        std::unordered_map<std::string, int> arg_value_bindings;
+                        std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
+                        if (!deduce_template_bindings_from_type_pattern(
+                                underlying, concrete, stable_tmpl.template_params, arg_type_bindings,
+                                arg_value_bindings, arg_pack_bindings)) {
+                            throw DataflowError("cannot deduce template parameter pack types for generic function '" +
+                                                    stable_tmpl.name + "' from this argument list",
+                                expr.loc);
+                        }
+                        for (const auto& [name, type] : arg_type_bindings) {
+                            if (!bind_type_binding(type_bindings, name, type)) {
+                                throw DataflowError("deduced type for template parameter of generic function '" +
+                                                        stable_tmpl.name + "' disagrees across arguments",
+                                    expr.loc);
+                            }
+                        }
+                        auto pack_it = arg_pack_bindings.find(*pack_type_name);
+                        if (pack_it == arg_pack_bindings.end()) {
+                            throw DataflowError("cannot deduce template parameter pack types for generic function '" +
+                                                    stable_tmpl.name + "' from this argument list",
+                                expr.loc);
+                        }
+                        deduced_pack_types.insert(deduced_pack_types.end(), pack_it->second.begin(), pack_it->second.end());
+                    } else {
+                        deduced_pack_types.push_back(concrete);
+                    }
                 }
-                if (pack_type_name.has_value() &&
-                    !bind_type_pack_binding(pack_bindings, *pack_type_name, deduced_pack_types)) {
-                    throw DataflowError("deduced types for template parameter pack '" + *pack_type_name +
-                                            "' of generic function '" + stable_tmpl.name + "' disagree across arguments",
-                        expr.loc);
+                if (pack_type_name.has_value() && !bind_type_pack_binding(pack_bindings, *pack_type_name, deduced_pack_types)) {
+                        throw DataflowError("deduced template parameter pack types for generic function '" +
+                                                stable_tmpl.name + "' disagree across arguments",
+                            expr.loc);
                 }
                 continue;
             }
@@ -3741,6 +3842,11 @@ private:
         // comment): a nested generic-to-generic call is left targeting
         // the original, codegen-excluded template instead.
         if (!allow_generic_monomorphization) return;
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs &&
+            expr.lhs->kind == ExprKind::Identifier && !expr.lhs->explicit_template_args.empty()) {
+            walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization);
+            return;
+        }
         if (expr.kind == ExprKind::Identifier && !expr.explicit_template_args.empty()) {
             auto template_it = generic_template_indices_.find(expr.name);
             if (template_it == generic_template_indices_.end()) return;
@@ -4602,6 +4708,7 @@ private:
         clone.is_nodiscard = tmpl.is_nodiscard;
         clone.nodiscard_reason = tmpl.nodiscard_reason;
         clone.owning_module = tmpl.owning_module;
+        clone.visibility_module = tmpl.visibility_module.empty() ? tmpl.owning_module : tmpl.visibility_module;
         clone.eval_mode = tmpl.eval_mode;
         clone.member_owner_class = tmpl.member_owner_class;
         clone.is_static = tmpl.is_static;

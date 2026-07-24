@@ -1,0 +1,32 @@
+class Adder {
+public:
+    virtual ~Adder() { return; }
+
+    Adder(int& value) : value{value} {
+        return;
+    }
+
+    int call(int x) const {
+        return x + this->value;
+    }
+private:
+    int& value;
+};
+
+Adder* clone(const Adder& source) {
+    [[scpp::unsafe]] {
+        return new Adder(source);
+    }
+}
+
+int main() {
+    int value = 5;
+    Adder a{value};
+    Adder* p = clone(a);
+    int result = 0;
+    [[scpp::unsafe]] {
+        result = p->call(7);
+        delete p;
+    }
+    return result - 12;
+}

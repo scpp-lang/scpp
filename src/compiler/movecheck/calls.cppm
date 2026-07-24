@@ -284,7 +284,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body) {
     if (!candidate.is_compile_time_dependency) return true;
-    if (!candidate.owning_module.empty() && candidate.owning_module == body.function_owning_module) return true;
+    if (!candidate.owning_module.empty() && candidate.owning_module == body.function_visibility_module) return true;
     return !body.function_source_path.empty() && body.function_source_path == candidate.loc.source_path_text();
 }
 
@@ -678,6 +678,22 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr, const Type& target_type,
                                                                    const Body& body, const Signatures& signatures) {
+    auto signature_set_for_name = [&](std::string_view name) -> const std::vector<FunctionSignature>* {
+        auto it = signatures.find(std::string(name));
+        return it == signatures.end() ? nullptr : &it->second;
+    };
+    auto lookup_name = [&](std::string_view name) -> const std::vector<FunctionSignature>* {
+        if (const auto* direct = signature_set_for_name(name)) return direct;
+        std::size_t pos = name.rfind("::");
+        return pos == std::string_view::npos ? nullptr : signature_set_for_name(name.substr(pos + 2));
+    };
+    auto same_lookup_name = [](std::string_view lhs, std::string_view rhs) {
+        auto tail = [](std::string_view name) {
+            std::size_t pos = name.rfind("::");
+            return pos == std::string_view::npos ? name : name.substr(pos + 2);
+        };
+        return lhs == rhs || tail(lhs) == tail(rhs);
+    };
     const Expr* source = &expr;
     if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
     if (source->kind != ExprKind::Identifier || body.local_types.contains(source->name)) return std::nullopt;
@@ -685,12 +701,88 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         nullptr) {
         return std::nullopt;
     }
-    auto it = signatures.find(source->name);
-    if (it == signatures.end()) return std::nullopt;
-    for (const FunctionSignature& sig : it->second) {
+    const auto* candidates = lookup_name(source->name);
+    if (candidates == nullptr) return std::nullopt;
+    for (const FunctionSignature& sig : *candidates) {
         if (!compile_time_dependency_visible_in_body(sig, body)) continue;
         Type candidate = function_pointer_type_from_signature(sig);
         if (same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) return candidate;
+    }
+    if (body.program != nullptr && !source->explicit_template_args.empty()) {
+        bool saw_visible_generic_template = false;
+        auto substitute_type = [&](const auto& self, Type type,
+                                   const std::unordered_map<std::string, Type>& type_bindings) -> Type {
+            if (type.kind == TypeKind::Named) {
+                auto bound = type_bindings.find(type.name);
+                if (bound != type_bindings.end()) return bound->second;
+                for (Type& arg : type.template_args) arg = self(self, arg, type_bindings);
+            }
+            if (type.pointee) type.pointee = std::make_shared<Type>(self(self, *type.pointee, type_bindings));
+            if (type.element) type.element = std::make_shared<Type>(self(self, *type.element, type_bindings));
+            if (type.function_return) {
+                type.function_return = std::make_shared<Type>(self(self, *type.function_return, type_bindings));
+            }
+            for (Type& param : type.function_params) param = self(self, param, type_bindings);
+            return type;
+        };
+        for (const Function& fn : body.program->functions) {
+            if (!same_lookup_name(fn.name, source->name) || fn.template_params.empty()) continue;
+            std::string fn_visibility_module = fn.visibility_module.empty() ? fn.owning_module : fn.visibility_module;
+            bool same_module = !fn_visibility_module.empty() && fn_visibility_module == body.function_visibility_module;
+            bool same_source = !body.function_source_path.empty() && body.function_source_path == fn.loc.source_path_text();
+            if (!fn.is_exported && !same_module && !same_source) continue;
+            saw_visible_generic_template = true;
+            std::unordered_map<std::string, Type> type_bindings;
+            std::unordered_map<std::string, std::vector<Type>> pack_bindings;
+            std::size_t explicit_index = 0;
+            bool ok = true;
+            for (const GenericTypeParam& tp : fn.template_params) {
+                if (tp.is_pack) {
+                    if (tp.is_non_type) {
+                        ok = false;
+                        break;
+                    }
+                    while (explicit_index < source->explicit_template_args.size()) {
+                        const ExplicitTemplateArg& arg = source->explicit_template_args[explicit_index++];
+                        if (!arg.is_type) {
+                            ok = false;
+                            break;
+                        }
+                        pack_bindings[tp.name].push_back(arg.type);
+                    }
+                    break;
+                }
+                if (explicit_index >= source->explicit_template_args.size()) {
+                    ok = false;
+                    break;
+                }
+                const ExplicitTemplateArg& arg = source->explicit_template_args[explicit_index++];
+                if (tp.is_non_type || !arg.is_type) {
+                    ok = false;
+                    break;
+                }
+                type_bindings[tp.name] = arg.type;
+            }
+            if (!ok || explicit_index != source->explicit_template_args.size()) continue;
+            Type candidate;
+            candidate.kind = TypeKind::FunctionPointer;
+            candidate.function_return = std::make_shared<Type>(substitute_type(substitute_type, fn.return_type, type_bindings));
+            candidate.is_unsafe_function_pointer = fn.is_unsafe || fn.is_extern_c;
+            for (const Param& param : fn.params) {
+                if (param.is_parameter_pack && param.type.kind == TypeKind::Named) {
+                    auto pack_it = pack_bindings.find(param.type.name);
+                    if (pack_it == pack_bindings.end()) {
+                        ok = false;
+                        break;
+                    }
+                    for (const Type& bound : pack_it->second) candidate.function_params.push_back(bound);
+                    continue;
+                }
+                candidate.function_params.push_back(substitute_type(substitute_type, param.type, type_bindings));
+            }
+            if (ok && same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) return candidate;
+        }
+        if (saw_visible_generic_template) return target_type;
     }
     return std::nullopt;
 }

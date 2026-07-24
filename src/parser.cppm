@@ -1506,6 +1506,63 @@ private:
         return false;
     }
 
+    void collect_hidden_function_designators_in_expr(const Expr& expr, std::unordered_set<std::string>& out) const {
+        if (expr.kind == ExprKind::Identifier && !expr.explicit_template_args.empty()) {
+            out.insert(expr.name);
+        }
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs != nullptr &&
+            expr.lhs->kind == ExprKind::Identifier && !expr.lhs->explicit_template_args.empty()) {
+            out.insert(expr.lhs->name);
+        }
+        if (expr.lhs) collect_hidden_function_designators_in_expr(*expr.lhs, out);
+        if (expr.rhs) collect_hidden_function_designators_in_expr(*expr.rhs, out);
+        if (expr.third) collect_hidden_function_designators_in_expr(*expr.third, out);
+        for (const ExprPtr& arg : expr.args) {
+            if (arg) collect_hidden_function_designators_in_expr(*arg, out);
+        }
+    }
+
+    void collect_hidden_function_designators_in_stmt(const Stmt& stmt, std::unordered_set<std::string>& out) const {
+        switch (stmt.kind) {
+            case StmtKind::Block:
+                for (const StmtPtr& child : stmt.statements) {
+                    if (child) collect_hidden_function_designators_in_stmt(*child, out);
+                }
+                return;
+            case StmtKind::VarDecl:
+                if (stmt.init) collect_hidden_function_designators_in_expr(*stmt.init, out);
+                for (const ExprPtr& arg : stmt.ctor_args) {
+                    if (arg) collect_hidden_function_designators_in_expr(*arg, out);
+                }
+                return;
+            case StmtKind::ExprStmt:
+            case StmtKind::Return:
+                if (stmt.expr) collect_hidden_function_designators_in_expr(*stmt.expr, out);
+                return;
+            case StmtKind::If:
+                if (stmt.condition) collect_hidden_function_designators_in_expr(*stmt.condition, out);
+                if (stmt.then_branch) collect_hidden_function_designators_in_stmt(*stmt.then_branch, out);
+                if (stmt.else_branch) collect_hidden_function_designators_in_stmt(*stmt.else_branch, out);
+                return;
+            case StmtKind::While:
+                if (stmt.condition) collect_hidden_function_designators_in_expr(*stmt.condition, out);
+                if (stmt.then_branch) collect_hidden_function_designators_in_stmt(*stmt.then_branch, out);
+                return;
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                return;
+        }
+    }
+
+    [[nodiscard]] std::unordered_set<std::string> imported_hidden_function_designators(const Program& imported) const {
+        std::unordered_set<std::string> out;
+        for (const Function& fn : imported.functions) {
+            if (!imported_function_body_must_stay_available(imported, fn) || fn.body == nullptr) continue;
+            collect_hidden_function_designators_in_stmt(*fn.body, out);
+        }
+        return out;
+    }
+
     [[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) const {
         if (a.size() != b.size()) return false;
         for (std::size_t i = 0; i < a.size(); i++) {
@@ -2542,6 +2599,7 @@ private:
         clone.namespace_path = fn.namespace_path;
         clone.is_exported = is_reexport && fn.is_exported;
         clone.owning_module = fn.owning_module.empty() ? fallback_owning_module : fn.owning_module;
+        clone.visibility_module = fn.visibility_module.empty() ? clone.owning_module : fn.visibility_module;
         return clone;
     }
 
@@ -2577,6 +2635,7 @@ private:
     // modules.
     void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
                                 bool is_reexport) {
+        std::unordered_set<std::string> hidden_function_designators = imported_hidden_function_designators(imported);
         for (const EnumDef& def : imported.enums) {
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
             if (def.is_exported) struct_names_.insert(def.name);
@@ -2666,9 +2725,11 @@ private:
             program.type_aliases.push_back(std::move(clone));
         }
         for (const Function& fn : imported.functions) {
-            if (!fn.is_exported && !fn.is_compile_time_dependency) continue;
-            if (fn.is_exported && !fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
             bool keep_body = imported_function_body_must_stay_available(imported, fn);
+            bool needs_hidden_compile_time_visibility =
+                !fn.is_exported && hidden_function_designators.contains(fn.name);
+            if (!fn.is_exported && !fn.is_compile_time_dependency && !needs_hidden_compile_time_visibility) continue;
+            if (fn.is_exported && !fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
             std::string effective_owner = fn.owning_module.empty() ? imported_name : fn.owning_module;
             auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {
                 return current.owning_module == effective_owner && current.loc.source_path_text() == fn.loc.source_path_text() &&
@@ -2677,10 +2738,13 @@ private:
             });
             if (existing != program.functions.end()) {
                 existing->is_exported = existing->is_exported || (is_reexport && fn.is_exported);
-                existing->is_compile_time_dependency = existing->is_compile_time_dependency || fn.is_compile_time_dependency;
+                existing->is_compile_time_dependency =
+                    existing->is_compile_time_dependency || fn.is_compile_time_dependency || needs_hidden_compile_time_visibility;
                 continue;
             }
-            program.functions.push_back(clone_function_declaration(fn, imported_name, is_reexport, keep_body));
+            Function clone = clone_function_declaration(fn, imported_name, is_reexport, keep_body);
+            clone.is_compile_time_dependency = clone.is_compile_time_dependency || needs_hidden_compile_time_visibility;
+            program.functions.push_back(std::move(clone));
         }
         for (const GlobalVar& global : imported.globals) {
             if (!global.is_exported) continue;

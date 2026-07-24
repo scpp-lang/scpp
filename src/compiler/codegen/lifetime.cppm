@@ -146,12 +146,19 @@ namespace scpp {
 
     [[nodiscard]] bool Codegen::is_copy_constructible(const std::string& class_name)
 {
+        auto has_direct_reference_field = [&](const std::vector<Type>& field_types) {
+            for (const Type& field_type : field_types) {
+                if (field_type.kind == TypeKind::Reference) return true;
+            }
+            return false;
+        };
         if (find_user_declared_copy_ctor_ast(class_name) != nullptr) return true;
-        if (has_user_declared_dtor(class_name) || find_user_declared_copy_assign_ast(class_name) != nullptr) {
+        if (find_user_declared_copy_assign_ast(class_name) != nullptr) {
             return false;
         }
         auto it = structs_.find(class_name);
         if (it == structs_.end()) return false;
+        if (has_user_declared_dtor(class_name) && !has_direct_reference_field(it->second.field_types)) return false;
         for (const Type& field_type : it->second.field_types) {
             if (!is_field_copy_constructible(field_type)) return false;
         }

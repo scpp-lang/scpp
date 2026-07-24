@@ -321,12 +321,19 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
 // recursive note) -- a user-declared copy constructor always wins
 // regardless of fields (it's the user's own code, not compiler-derived).
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program) {
+    auto has_direct_reference_field = [&](const auto& fields) {
+        for (const auto& field : fields) {
+            if (field.type.kind == TypeKind::Reference) return true;
+        }
+        return false;
+    };
     if (has_user_declared_copy_ctor(class_name, program)) return true;
-    if (has_user_declared_dtor(class_name, program) || has_user_declared_copy_assign(class_name, program)) {
+    if (has_user_declared_copy_assign(class_name, program)) {
         return false;
     }
     for (const ClassDef& def : program.classes) {
         if (def.name != class_name) continue;
+        if (has_user_declared_dtor(class_name, program) && !has_direct_reference_field(def.fields)) return false;
         for (const ClassField& f : def.fields) {
             if (!is_field_copy_constructible(f.type, program)) return false;
         }
@@ -334,6 +341,7 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
     }
     for (const StructDef& def : program.structs) {
         if (def.name != class_name) continue;
+        if (has_user_declared_dtor(class_name, program) && !has_direct_reference_field(def.fields)) return false;
         for (const StructField& f : def.fields) {
             if (!is_field_copy_constructible(f.type, program)) return false;
         }
@@ -738,7 +746,7 @@ void validate_operator_arrow_signature(const Function& fn) {
         sig.is_nodiscard = fn.is_nodiscard;
         sig.nodiscard_reason = fn.nodiscard_reason;
         sig.is_compile_time_dependency = fn.is_compile_time_dependency;
-        sig.owning_module = fn.owning_module;
+        sig.owning_module = fn.visibility_module.empty() ? fn.owning_module : fn.visibility_module;
         sig.member_owner_class = fn.member_owner_class;
         sig.is_static = fn.is_static;
         sig.access = fn.access;
