@@ -5497,6 +5497,102 @@ int main() {
     }
 }
 
+void run_vector_tests() {
+    {
+        std::string case_name = "std_vector_operator_index_aborts_out_of_bounds";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::vector<int> values{};
+    values.push_back(1);
+    return values[1];
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code != 0,
+               case_name + ": expected non-zero exit code, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_vector_at_aborts_out_of_bounds";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::vector<int> values{};
+    values.push_back(1);
+    return values.at(-1);
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code != 0,
+               case_name + ": expected non-zero exit code, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "build_module_roundtrips_std_vector_api";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "vectorlib.scpp";
+        std::filesystem::path interface_path = root / "vectorlib.scppm";
+        std::filesystem::path archive_path = root / "libvectorlib.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module vectorlib;\n"
+                        "import std;\n"
+                        "namespace vectorlib {\n"
+                        "export class Box {\n"
+                        "public:\n"
+                        "    std::vector<int> values{};\n"
+                        "    Box() { return; }\n"
+                        "    virtual ~Box() { return; }\n"
+                        "};\n"
+                        "export const Box& values_box(const Box& box) {\n"
+                        "    return box;\n"
+                        "}\n"
+                        "export int sum(const std::vector<int>& values) {\n"
+                        "    int total = 0;\n"
+                        "    int i = 0;\n"
+                        "    while (i < values.size()) {\n"
+                        "        total = total + values[i];\n"
+                        "        i = i + 1;\n"
+                        "    }\n"
+                        "    return total;\n"
+                        "}\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                        "import std;\n"
+                        "import vectorlib;\n"
+                        "int main() {\n"
+                        "    vectorlib::Box box{};\n"
+                        "    box.values.push_back(1);\n"
+                        "    box.values.push_back(2);\n"
+                        "    box.values.push_back(3);\n"
+                        "    return vectorlib::sum(vectorlib::values_box(box).values) == 6 ? 0 : 1;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import vectorlib=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected exit code 0, got " + std::to_string(run_result.exit_code) +
+                   " stdout='" + run_result.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -5968,6 +6064,7 @@ int main() {
     run_static_member_function_tests();
     run_default_argument_tests();
     run_random_tests();
+    run_vector_tests();
     run_expected_tests();
     run_io_tests();
     run_enum_tests();

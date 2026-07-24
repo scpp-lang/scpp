@@ -1,0 +1,27 @@
+import std;
+
+class RawPtrBox {
+private:
+    int* raw_{};
+
+public:
+    RawPtrBox(int* raw) {
+        this->raw_ = raw;
+        return;
+    }
+
+    RawPtrBox(const RawPtrBox& other) {
+        this->raw_ = other.raw_;
+        return;
+    }
+
+    virtual ~RawPtrBox() { return; }
+};
+
+int main() {
+    print_bool(scpp::is_thread_movable(std::vector<int>));
+    print_bool(scpp::is_thread_shareable(std::vector<int>));
+    print_bool(scpp::is_thread_movable(std::vector<RawPtrBox>));
+    print_bool(scpp::is_thread_shareable(std::vector<RawPtrBox>));
+    return 0;
+}

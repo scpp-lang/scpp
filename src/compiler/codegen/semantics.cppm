@@ -258,6 +258,19 @@ namespace {
                 if (effective.kind == TypeKind::Array) return *effective.element;
                 if (effective.kind == TypeKind::Span) return *effective.pointee;
                 if (effective.kind == TypeKind::Pointer) return *effective.pointee;
+                if (effective.kind == TypeKind::Named &&
+                    (effective.name == "std::vector" || effective.name == "vector" ||
+                     effective.name.starts_with("std::vector.") || effective.name.starts_with("vector."))) {
+                    if (effective.template_args.size() == 1) return effective.template_args[0];
+                    auto struct_it = structs_.find(effective.name);
+                    if (struct_it != structs_.end()) {
+                        const StructInfo& info = struct_it->second;
+                        if (std::optional<std::size_t> data_index_opt = info.find_field_index("data_"); data_index_opt.has_value()) {
+                            const Type& field_type = info.field_types[*data_index_opt];
+                            if (field_type.kind == TypeKind::Pointer && field_type.pointee) return *field_type.pointee;
+                        }
+                    }
+                }
                 return std::nullopt;
             }
 

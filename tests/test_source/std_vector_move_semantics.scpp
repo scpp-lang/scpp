@@ -1,0 +1,49 @@
+import std;
+
+class Counter {
+private:
+    int* copied_{};
+    int value_{};
+
+public:
+    Counter(int* copied, int value) {
+        this->copied_ = copied;
+        this->value_ = value;
+        return;
+    }
+
+    Counter(const Counter& other) {
+        this->copied_ = other.copied_;
+        this->value_ = other.value_;
+        [[scpp::unsafe]] {
+            *this->copied_ = *this->copied_ + 1;
+        }
+        return;
+    }
+
+    virtual ~Counter() { return; }
+
+    int value() const {
+        return this->value_;
+    }
+};
+
+int main() {
+    int copied = 0;
+    Counter seed{&copied, 42};
+    std::vector<Counter> values{};
+    values.push_back(seed);
+    if (copied != 1) return 1;
+
+    std::vector<Counter> moved = std::move(values);
+    if (copied != 1) return 2;
+    if (moved.size() != 1) return 3;
+    if (moved[0].value() != 42) return 4;
+
+    std::vector<Counter> assigned{};
+    assigned = std::move(moved);
+    if (copied != 1) return 5;
+    if (assigned.size() != 1) return 6;
+    if (assigned[0].value() != 42) return 7;
+    return 0;
+}

@@ -1794,6 +1794,43 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::Subscript: {
                 LValue base = codegen_lvalue(*expr.lhs);
+                if (base.type.kind == TypeKind::Named &&
+                    (base.type.name == "std::vector" || base.type.name == "vector" ||
+                     base.type.name.starts_with("std::vector.") || base.type.name.starts_with("vector."))) {
+                    auto struct_it = structs_.find(base.type.name);
+                    if (struct_it == structs_.end()) {
+                        throw CodegenError("unknown vector layout", current_loc_);
+                    }
+                    const StructInfo& info = struct_it->second;
+                    std::optional<std::size_t> data_index_opt = info.find_field_index("data_");
+                    std::optional<std::size_t> size_index_opt = info.find_field_index("size_");
+                    if (!data_index_opt.has_value() || !size_index_opt.has_value()) {
+                        throw CodegenError("vector layout missing required fields", current_loc_);
+                    }
+                    const Type& data_field_type = info.field_types[*data_index_opt];
+                    if (data_field_type.kind != TypeKind::Pointer || !data_field_type.pointee) {
+                        throw CodegenError("vector data_ field is not a pointer", current_loc_);
+                    }
+                    const Type& element_type = *data_field_type.pointee;
+                    llvm::LLVMValueRef data_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, base.ptr,
+                                                                            info.physical_field_index(*data_index_opt),
+                                                                            "vec.dataptr");
+                    llvm::LLVMValueRef size_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, base.ptr,
+                                                                            info.physical_field_index(*size_index_opt),
+                                                                            "vec.sizeptr");
+                    llvm::LLVMValueRef data = llvm::LLVMBuildLoad2(builder_, llvm::LLVMPointerTypeInContext(context_, 0),
+                                                                   data_ptr, "vec.data");
+                    llvm::LLVMValueRef size32 = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt32TypeInContext(context_),
+                                                                     size_ptr, "vec.size32");
+                    llvm::LLVMValueRef size = llvm::LLVMBuildSExt(builder_, size32, llvm::LLVMInt64TypeInContext(context_),
+                                                                  "vec.size");
+                    llvm::LLVMValueRef index = codegen_expr(*expr.rhs);
+                    emit_span_bounds_check(index, size);
+                    llvm::LLVMValueRef gep_indices_vec[] = {index};
+                    llvm::LLVMValueRef elem_ptr =
+                        llvm::LLVMBuildGEP2(builder_, to_llvm_type(element_type), data, gep_indices_vec, 1, "vecelem");
+                    return LValue{elem_ptr, element_type, alignment_for_type(element_type)};
+                }
                 if (base.type.kind == TypeKind::Span) {
                     llvm::LLVMTypeRef span_type = to_llvm_type(base.type);
                     llvm::LLVMValueRef size_ptr = llvm::LLVMBuildStructGEP2(builder_, span_type, base.ptr, 1, "sizeptr");

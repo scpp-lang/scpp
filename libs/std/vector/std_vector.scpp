@@ -1,0 +1,241 @@
+export module std:vector;
+
+import :cstdlib;
+
+extern "C" {
+    void* scpp_vector_allocate(uint64_t bytes, uint64_t align);
+    void scpp_vector_deallocate(void* ptr, uint64_t align);
+    void scpp_vector_relocate_bytes(void* dst, void* src, uint64_t bytes);
+}
+
+namespace std {
+
+void* __vector_allocate(uint64_t bytes, uint64_t align) {
+    [[scpp::unsafe]] {
+        return scpp_vector_allocate(bytes, align);
+    }
+}
+
+void __vector_deallocate(void* ptr, uint64_t align) {
+    [[scpp::unsafe]] {
+        scpp_vector_deallocate(ptr, align);
+    }
+    return;
+}
+
+void __vector_relocate_bytes(void* dst, void* src, uint64_t bytes) {
+    [[scpp::unsafe]] {
+        scpp_vector_relocate_bytes(dst, src, bytes);
+    }
+    return;
+}
+
+export template<typename T>
+class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shareable(T))]] vector {
+private:
+    T* data_{};
+    int size_{};
+    int capacity_{};
+    uint64_t elem_size_{sizeof(T)};
+    uint64_t elem_align_{alignof(T)};
+
+    void __check_index(int index) const {
+        if (index < 0 || index >= this->size_) {
+            std::abort();
+        }
+        return;
+    }
+
+    T* __allocate_for(int capacity) {
+        T* empty{};
+        if (capacity <= 0) return empty;
+        [[scpp::unsafe]] {
+            return static_cast<T*>(std::__vector_allocate(static_cast<uint64_t>(capacity) * this->elem_size_,
+                                                          this->elem_align_));
+        }
+    }
+
+    void __destroy_live_elements() {
+        int i = this->size_;
+        while (i > 0) {
+            i = i - 1;
+            [[scpp::unsafe]] {
+                T* slot = &this->data_[i];
+                slot->~T();
+            }
+        }
+        this->size_ = 0;
+        return;
+    }
+
+    void __deallocate_storage() {
+        T* empty{};
+        if (this->data_ != empty) {
+            [[scpp::unsafe]] {
+                std::__vector_deallocate(static_cast<void*>(this->data_), this->elem_align_);
+            }
+        }
+        this->data_ = empty;
+        this->capacity_ = 0;
+        return;
+    }
+
+    void __grow_to(int new_capacity) {
+        T* fresh = this->__allocate_for(new_capacity);
+        T* old_data = this->data_;
+        if (this->size_ > 0) {
+            uint64_t bytes = static_cast<uint64_t>(this->size_) * this->elem_size_;
+            [[scpp::unsafe]] {
+                std::__vector_relocate_bytes(static_cast<void*>(fresh), static_cast<void*>(old_data), bytes);
+            }
+        }
+        T* empty{};
+        this->data_ = fresh;
+        this->capacity_ = new_capacity;
+        if (old_data != empty) {
+            [[scpp::unsafe]] {
+                std::__vector_deallocate(static_cast<void*>(old_data), this->elem_align_);
+            }
+        }
+        return;
+    }
+
+    void __ensure_capacity_for_one_more() {
+        if (this->size_ < this->capacity_) return;
+        int next_capacity = this->capacity_ == 0 ? 1 : this->capacity_ * 2;
+        this->__grow_to(next_capacity);
+        return;
+    }
+
+    T* __copy_data_from(const std::vector<T>& other) {
+        int other_size = other.size();
+        T* fresh = this->__allocate_for(other_size);
+        int i = 0;
+        while (i < other_size) {
+            [[scpp::unsafe]] {
+                new (&fresh[i]) T(other.at(i));
+            }
+            i = i + 1;
+        }
+        return fresh;
+    }
+
+public:
+    vector() { return; }
+
+    vector(const std::vector<T>& other) {
+        this->data_ = this->__copy_data_from(other);
+        this->size_ = other.size();
+        this->capacity_ = other.size();
+        return;
+    }
+
+    void operator=(const std::vector<T>& other) {
+        T* copied = this->__copy_data_from(other);
+        this->__destroy_live_elements();
+        this->__deallocate_storage();
+        this->data_ = copied;
+        this->size_ = other.size();
+        this->capacity_ = other.size();
+        return;
+    }
+
+    virtual ~vector() {
+        this->__destroy_live_elements();
+        this->__deallocate_storage();
+        return;
+    }
+
+    void push_back(const T& value) {
+        this->__ensure_capacity_for_one_more();
+        [[scpp::unsafe]] {
+            new (&this->data_[this->size_]) T(value);
+        }
+        this->size_ = this->size_ + 1;
+        return;
+    }
+
+    void push_back(T&& value) {
+        this->__ensure_capacity_for_one_more();
+        [[scpp::unsafe]] {
+            new (&this->data_[this->size_]) T(std::move(value));
+        }
+        this->size_ = this->size_ + 1;
+        return;
+    }
+
+    void pop_back() {
+        if (this->size_ == 0) {
+            std::abort();
+        }
+        this->size_ = this->size_ - 1;
+        [[scpp::unsafe]] {
+            T* slot = &this->data_[this->size_];
+            slot->~T();
+        }
+        return;
+    }
+
+    int size() const {
+        return this->size_;
+    }
+
+    int capacity() const {
+        return this->capacity_;
+    }
+
+    bool empty() const {
+        return this->size_ == 0;
+    }
+
+    void clear() {
+        this->__destroy_live_elements();
+        return;
+    }
+
+    T& at(int index) {
+        this->__check_index(index);
+        [[scpp::unsafe]] {
+            return this->data_[index];
+        }
+    }
+
+    const T& at(int index) const {
+        this->__check_index(index);
+        [[scpp::unsafe]] {
+            return this->data_[index];
+        }
+    }
+
+    T* data() {
+        return this->data_;
+    }
+
+    const T* data() const {
+        return this->data_;
+    }
+
+    T* begin() {
+        return this->data_;
+    }
+
+    const T* begin() const {
+        return this->data_;
+    }
+
+    T* end() {
+        if (this->size_ == 0) return this->data_;
+        [[scpp::unsafe]] {
+            return this->data_ + this->size_;
+        }
+    }
+
+    const T* end() const {
+        if (this->size_ == 0) return this->data_;
+        [[scpp::unsafe]] {
+            return this->data_ + this->size_;
+        }
+    }
+};
+
+} // namespace std
