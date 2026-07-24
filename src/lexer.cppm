@@ -43,19 +43,24 @@ enum class TokenKind {
             // literal/expression in one arithmetic/comparison op isn't
             // supported -- use a char literal (`'a'`) or another `char`
             // value on both sides instead.
-    // ch06 §6: the rest of the numeric family's own *keyword* members --
-    // real C++ keywords in their own right (unlike int8_t/uint8_t/.../
-    // size_t/ptrdiff_t/float32_t/float64_t below, ordinary <cstdint>/
-    // <cstddef>/<stdfloat> typedef names, not keywords at all in real
-    // C++ -- those are instead recognized as pre-registered identifiers,
-    // see Parser's own constructor). `unsigned` is only ever legal
-    // directly before `int`/`long` (ch06: the bare one-word shorthand
-    // isn't valid scpp) -- parse_unqualified_type enforces this, not the
-    // lexer.
+    // ch06 §6: the rest of the numeric family's own keyword spellings.
+    // `unsigned` is only ever legal directly before `int`/`long` (ch06:
+    // the bare one-word shorthand isn't valid scpp) -- parse_
+    // unqualified_type enforces this, not the lexer. The fixed-width
+    // integer names are promoted to true keywords too, even though real
+    // C++ exposes them as typedef names.
     KwLong,
     KwFloat,
     KwDouble,
     KwUnsigned,
+    KwInt8T,
+    KwUInt8T,
+    KwInt16T,
+    KwUInt16T,
+    KwInt32T,
+    KwUInt32T,
+    KwInt64T,
+    KwUInt64T,
     KwVoid, // ch02 §2.1: valid only as a function return type or as a
             // pointer's pointee (`void*`) -- never as a bare
             // variable/parameter/field type. Needed for `extern "C"`
@@ -254,6 +259,14 @@ private:
         if (text == "float") return TokenKind::KwFloat;
         if (text == "double") return TokenKind::KwDouble;
         if (text == "unsigned") return TokenKind::KwUnsigned;
+        if (text == "int8_t") return TokenKind::KwInt8T;
+        if (text == "uint8_t") return TokenKind::KwUInt8T;
+        if (text == "int16_t") return TokenKind::KwInt16T;
+        if (text == "uint16_t") return TokenKind::KwUInt16T;
+        if (text == "int32_t") return TokenKind::KwInt32T;
+        if (text == "uint32_t") return TokenKind::KwUInt32T;
+        if (text == "int64_t") return TokenKind::KwInt64T;
+        if (text == "uint64_t") return TokenKind::KwUInt64T;
         if (text == "void") return TokenKind::KwVoid;
         if (text == "return") return TokenKind::KwReturn;
         if (text == "if") return TokenKind::KwIf;

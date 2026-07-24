@@ -257,6 +257,62 @@ void test_static_local_var_decl_parses_and_allows_no_initializer() {
            "static_local_var_decl_parses_and_allows_no_initializer: no explicit initializer should be preserved");
 }
 
+void test_fixed_width_integer_keywords_and_std_qualification_parse() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Box {};\n"
+        "struct Pair {\n"
+        "    std::int64_t lhs;\n"
+        "    uint32_t rhs;\n"
+        "};\n"
+        "int64_t add(std::int64_t lhs, std::uint32_t rhs) {\n"
+        "    Box<std::int64_t> a{};\n"
+        "    Box<int64_t> b{};\n"
+        "    std::int64_t x = lhs;\n"
+        "    uint32_t y = rhs;\n"
+        "    return x + (std::int64_t)y;\n"
+        "}\n");
+    const scpp::StructDef* pair = find_struct_named(program, "Pair");
+    expect(pair != nullptr, "fixed_width_integer_keywords_and_std_qualification_parse: expected Pair");
+    if (pair == nullptr) return;
+    expect(pair->fields.size() == 2, "fixed_width_integer_keywords_and_std_qualification_parse: expected 2 Pair fields");
+    if (pair->fields.size() == 2) {
+        expect(is_named_type(pair->fields[0].type, "int64_t"),
+               "fixed_width_integer_keywords_and_std_qualification_parse: lhs should canonicalize to int64_t");
+        expect(is_named_type(pair->fields[1].type, "uint32_t"),
+               "fixed_width_integer_keywords_and_std_qualification_parse: rhs should canonicalize to uint32_t");
+    }
+    const scpp::Function* add = find_function_named(program, "add");
+    expect(add != nullptr, "fixed_width_integer_keywords_and_std_qualification_parse: expected add");
+    if (add == nullptr) return;
+    expect(is_named_type(add->return_type, "int64_t"),
+           "fixed_width_integer_keywords_and_std_qualification_parse: return type should canonicalize to int64_t");
+    expect(add->params.size() == 2, "fixed_width_integer_keywords_and_std_qualification_parse: expected 2 params");
+    if (add->params.size() == 2) {
+        expect(is_named_type(add->params[0].type, "int64_t"),
+               "fixed_width_integer_keywords_and_std_qualification_parse: param lhs should canonicalize to int64_t");
+        expect(is_named_type(add->params[1].type, "uint32_t"),
+               "fixed_width_integer_keywords_and_std_qualification_parse: param rhs should canonicalize to uint32_t");
+    }
+    expect(add->body != nullptr && add->body->statements.size() == 5,
+           "fixed_width_integer_keywords_and_std_qualification_parse: expected 5 statements");
+    if (add->body == nullptr || add->body->statements.size() != 5) return;
+    const scpp::Stmt& a_decl = *add->body->statements[0];
+    const scpp::Stmt& b_decl = *add->body->statements[1];
+    const scpp::Stmt& x_decl = *add->body->statements[2];
+    const scpp::Stmt& y_decl = *add->body->statements[3];
+    expect(a_decl.kind == scpp::StmtKind::VarDecl && a_decl.type.template_args.size() == 1 &&
+               a_decl.type.name == "Box" && is_named_type(a_decl.type.template_args[0], "int64_t"),
+           "fixed_width_integer_keywords_and_std_qualification_parse: Box<std::int64_t> should canonicalize to Box<int64_t>");
+    expect(b_decl.kind == scpp::StmtKind::VarDecl && b_decl.type.template_args.size() == 1 &&
+               b_decl.type.name == "Box" && is_named_type(b_decl.type.template_args[0], "int64_t"),
+           "fixed_width_integer_keywords_and_std_qualification_parse: Box<int64_t> should stay Box<int64_t>");
+    expect(x_decl.kind == scpp::StmtKind::VarDecl && is_named_type(x_decl.type, "int64_t"),
+           "fixed_width_integer_keywords_and_std_qualification_parse: local x should canonicalize to int64_t");
+    expect(y_decl.kind == scpp::StmtKind::VarDecl && is_named_type(y_decl.type, "uint32_t"),
+           "fixed_width_integer_keywords_and_std_qualification_parse: local y should canonicalize to uint32_t");
+}
+
 void test_valid_local_initializer_forms_parse() {
     scpp::Program program = scpp::parse(
         "struct Pair { int first; int second; };\n"
@@ -4295,6 +4351,7 @@ int main() {
     test_class_var_decl_with_paren_init_is_rejected();
     test_bare_local_var_decl_is_rejected();
     test_static_local_var_decl_parses_and_allows_no_initializer();
+    test_fixed_width_integer_keywords_and_std_qualification_parse();
     test_valid_local_initializer_forms_parse();
     test_class_default_member_initializers_parse();
     test_constructor_member_initializer_list_parses();

@@ -2812,6 +2812,63 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_build_module_roundtrips_fixed_width_builtin_keywords";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    export template<typename T>\n"
+                        "    class Box {\n"
+                        "    public:\n"
+                        "        virtual ~Box() = default;\n"
+                        "        T value;\n"
+                        "    };\n"
+                        "    export Box<std::int64_t> make_box(std::int64_t value) {\n"
+                        "        Box<int64_t> box{};\n"
+                        "        box.value = value;\n"
+                        "        return box;\n"
+                        "    }\n"
+                        "    export std::int64_t add_one(uint32_t value) {\n"
+                        "        return (int64_t)value + 1;\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        expect(std::filesystem::exists(interface_path), case_name + ": expected .scppm output");
+        expect(std::filesystem::exists(archive_path), case_name + ": expected .scppa output");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int64_t read_box(const helper::Box<int64_t>& box) { return box.value; }\n"
+                        "int main() {\n"
+                        "    helper::Box<std::int64_t> lhs = helper::make_box(helper::add_one((std::uint32_t)41));\n"
+                        "    return (int)(read_box(lhs) - 42);\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build from .scppm should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected fixed-width consumer binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_build_module_with_partition_roundtrips_without_sources";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_build_module_with_partition_roundtrips_without_sources";
