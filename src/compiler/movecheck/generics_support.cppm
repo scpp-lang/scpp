@@ -57,7 +57,7 @@ ExprPtr clone_expr(const Expr& expr) {
         clone->lambda_captures.push_back(std::move(cloned_capture));
     }
     clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-    clone->lambda_params = expr.lambda_params;
+    for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
     clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
     clone->lambda_is_mutable = expr.lambda_is_mutable;
     if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
@@ -100,7 +100,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.return_lifetime = fn.return_lifetime;
     clone.name = fn.name;
     clone.loc = fn.loc;
-    clone.params = fn.params;
+    for (const Param& param : fn.params) clone.params.push_back(deep_clone_param(param));
     clone.body = fn.body ? clone_stmt(*fn.body) : nullptr;
     clone.is_extern_c = fn.is_extern_c;
     clone.is_module_extern = fn.is_module_extern;

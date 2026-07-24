@@ -59,6 +59,19 @@ void check_moves_impl(const Program& program);
     return find_visible_global(body.program, body.function_namespace_path, name, explicit_global_qualification);
 }
 
+[[nodiscard]] bool function_signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
+                                                             std::size_t param_offset) {
+    if (sig.param_types.size() < param_offset) return false;
+    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
+    std::size_t min_required = fixed_param_count;
+    while (min_required > 0 && sig.param_default_exprs[param_offset + min_required - 1] != nullptr) {
+        min_required--;
+    }
+    if (arg_count < min_required) return false;
+    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
+    return sig.has_varargs || arg_count <= fixed_param_count;
+}
+
 [[nodiscard]] std::optional<Type> find_visible_global_type(const std::string& name, bool explicit_global_qualification,
                                                            const Body& body) {
     const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);
@@ -510,9 +523,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
     BorrowMap in_call_borrows;
-    for (std::size_t i = 0; i < expr.args.size(); i++) {
-        const Expr& arg = *expr.args[i];
-        std::size_t param_index = i + callee.param_offset;
+    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) {
         bool param_is_reference =
             sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
         bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
@@ -604,7 +615,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                     enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
                                                                    signatures, state.current_loc);
                 }
-                continue;
+                return;
             }
             apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
 
@@ -636,6 +647,15 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         if (report_errors && sig != nullptr) {
             enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
                                                            signatures, state.current_loc);
+        }
+    };
+    for (std::size_t i = 0; i < expr.args.size(); i++) apply_one_argument(*expr.args[i], i + callee.param_offset);
+    if (sig != nullptr) {
+        for (std::size_t param_index = expr.args.size() + callee.param_offset; param_index < sig->param_types.size();
+             param_index++) {
+            if (sig->param_default_exprs[param_index] == nullptr) break;
+            ExprPtr default_arg = deep_clone_expr_with_loc(*sig->param_default_exprs[param_index], state.current_loc);
+            apply_one_argument(*default_arg, param_index);
         }
     }
 }
@@ -675,7 +695,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         std::vector<const FunctionSignature*> visible_arity_matches;
         for (const FunctionSignature& candidate : candidates) {
             if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-            if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+            if (!function_signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
             visible_arity_matches.push_back(&candidate);
         }
         if (visible_arity_matches.size() == 1) {
@@ -685,7 +705,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         if (sig == nullptr) {
             for (const FunctionSignature& candidate : candidates) {
                 if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-                if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+                if (!function_signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
                 bool all_match = true;
                 for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
                     all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
@@ -731,12 +751,10 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     bool constructed_state_can_carry_lifetimes =
         report_errors && body.program != nullptr &&
         type_contains_lifetime_carrying_state(named_type(class_name), *body.program);
-    for (std::size_t i = 0; i < ctor_args.size(); i++) {
-        const Expr& arg = *ctor_args[i];
+    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) {
         if (constructed_state_can_carry_lifetimes) {
             reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state");
         }
-        std::size_t param_index = i + 1;
         bool param_is_reference =
             sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
         bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
@@ -771,6 +789,14 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         if (report_errors && sig != nullptr) {
             enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "constructor", class_name, body,
                                                            signatures, state.current_loc);
+        }
+    };
+    for (std::size_t i = 0; i < ctor_args.size(); i++) apply_one_argument(*ctor_args[i], i + 1);
+    if (sig != nullptr) {
+        for (std::size_t param_index = ctor_args.size() + 1; param_index < sig->param_types.size(); param_index++) {
+            if (sig->param_default_exprs[param_index] == nullptr) break;
+            ExprPtr default_arg = deep_clone_expr_with_loc(*sig->param_default_exprs[param_index], state.current_loc);
+            apply_one_argument(*default_arg, param_index);
         }
     }
 }
@@ -1195,7 +1221,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                                     state.current_loc);
                             }
                         }
-                    }
+                    };
                 }
                 return;
             }
@@ -1227,7 +1253,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                             }
                         }
                     }
-                }
+                };
             }
             // ch04 §4.2: real, unrestricted C++ access control -- a
             // member variable may be `public` or `private` in any

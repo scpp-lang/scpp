@@ -5243,6 +5243,97 @@ int main() { return 0; }
     }
 }
 
+void run_default_argument_tests() {
+    {
+        std::string case_name = "default_argument_literals_and_multiple_trailing_omissions_work";
+        RunResult result = compile_and_run(
+            "int sum3(int a, int b = 2, int c = 3) {\n"
+            "    return a + b + c;\n"
+            "}\n"
+            "int main() {\n"
+            "    return sum3(1) + sum3(1, 4) + sum3(1, 4, 5) - 24;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "default_argument_expression_is_evaluated_at_each_call_site";
+        RunResult result = compile_and_run(
+            "int next_value() {\n"
+            "    static int counter = 40;\n"
+            "    counter = counter + 1;\n"
+            "    return counter;\n"
+            "}\n"
+            "int take(int value = next_value()) {\n"
+            "    return value;\n"
+            "}\n"
+            "int main() {\n"
+            "    return take() + take() - 83;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "default_argument_empty_braces_value_initializes_parameter";
+        RunResult result = compile_and_run(
+            "int zero(int value = {}) {\n"
+            "    return value;\n"
+            "}\n"
+            "int main() {\n"
+            "    return zero();\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "generic_function_default_argument_works";
+        RunResult result = compile_and_run(
+            "template<typename T>\n"
+            "T add_default(T value, int extra = 1) {\n"
+            "    return value + extra;\n"
+            "}\n"
+            "int main() {\n"
+            "    return add_default(41) - 42;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "constructor_default_argument_works";
+        RunResult result = compile_and_run(
+            "class Box {\n"
+            "public:\n"
+            "    int value{};\n"
+            "    Box(int x = 7) : value{x} { return; }\n"
+            "    virtual ~Box() { return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Box b{};\n"
+            "    return b.value - 7;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "default_argument_trailing_rule_is_rejected";
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "int bad(int x = 1, int y) { return x + y; }\n"
+                "int main() { return bad(1, 2); }\n",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::ParseError& e) {
+            threw = std::string(e.what()).find("every later parameter must also have one") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected trailing-only default-argument diagnostic");
+    }
+}
+
 void run_random_tests() {
     {
         std::string case_name = "scpp_rand_uniform_int_distribution_rejects_empty_range";
@@ -5818,6 +5909,7 @@ int main() {
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
     run_static_member_function_tests();
+    run_default_argument_tests();
     run_random_tests();
     run_expected_tests();
     run_io_tests();

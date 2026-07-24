@@ -38,6 +38,18 @@ namespace {
            name == "uint64_t" || name == "size_t" || name == "ptrdiff_t";
 }
 
+[[nodiscard]] bool function_accepts_argument_count(const Function& fn, std::size_t arg_count, std::size_t param_offset) {
+    if (fn.params.size() < param_offset) return false;
+    std::size_t fixed_param_count = fn.params.size() - param_offset;
+    std::size_t min_required = fixed_param_count;
+    while (min_required > 0 && fn.params[param_offset + min_required - 1].default_expr != nullptr) {
+        min_required--;
+    }
+    if (arg_count < min_required) return false;
+    if (!fn.has_varargs && arg_count > fixed_param_count) return false;
+    return fn.has_varargs || arg_count <= fixed_param_count;
+}
+
 [[nodiscard]] bool literal_matches_scalar_parameter(const Expr& arg, const Type& target_type) {
     auto is_negative_literal = [&](ExprKind kind) {
         return arg.kind == ExprKind::Unary && arg.unary_op == UnaryOp::Neg && arg.lhs != nullptr && arg.lhs->kind == kind;
@@ -116,11 +128,23 @@ namespace {
             clone->explicit_template_args.push_back(std::move(cloned_arg));
         }
         clone->type = expr.type;
+        clone->lambda_blanket_mode = expr.lambda_blanket_mode;
+        for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
+        clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
+        clone->lambda_is_mutable = expr.lambda_is_mutable;
         clone->has_paren_init = expr.has_paren_init;
         clone->destroy_through_pointer = expr.destroy_through_pointer;
         clone->through_arrow = expr.through_arrow;
         clone->implicit_arrow_deref = expr.implicit_arrow_deref;
         clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
+        for (const LambdaCapture& capture : expr.lambda_captures) {
+            LambdaCapture cloned_capture;
+            cloned_capture.name = capture.name;
+            cloned_capture.by_reference = capture.by_reference;
+            if (capture.init) cloned_capture.init = clone_expr(*capture.init);
+            clone->lambda_captures.push_back(std::move(cloned_capture));
+        }
+        if (expr.lambda_body) clone->lambda_body = deep_clone_stmt(*expr.lambda_body);
         return clone;
     }
 
@@ -645,12 +669,11 @@ namespace {
                 }
                 if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) return nullptr;
             }
-            std::size_t fixed_param_count = candidates[0]->params.size() - param_offset;
-            if ((!candidates[0]->has_varargs && fixed_param_count != args.size()) ||
-                (candidates[0]->has_varargs && args.size() < fixed_param_count)) {
+            if (!function_accepts_argument_count(*candidates[0], args.size(), param_offset)) {
                 return nullptr;
             }
-            for (std::size_t i = 0; i < fixed_param_count; i++) {
+            std::size_t fixed_param_count = candidates[0]->params.size() - param_offset;
+            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
                 if (!argument_matches_parameter(*args[i], candidates[0]->params[i + param_offset].type)) {
                     return nullptr;
                 }
@@ -660,7 +683,7 @@ namespace {
 
         std::vector<const Function*> matches;
         for (const Function* fn : candidates) {
-            if (fn->params.size() != args.size() + param_offset) continue;
+            if (!function_accepts_argument_count(*fn, args.size(), param_offset)) continue;
             // The receiver (`this`): viable only if the candidate's own
             // `this` mutability doesn't demand more than the receiver
             // place can actually provide.
@@ -669,8 +692,9 @@ namespace {
                 !receiver_matches_method_qualifier(*receiver_expr, *fn)) {
                 continue;
             }
+            std::size_t fixed_param_count = fn->params.size() - param_offset;
             bool all_match = true;
-            for (std::size_t i = 0; all_match && i < args.size(); i++) {
+            for (std::size_t i = 0; all_match && i < args.size() && i < fixed_param_count; i++) {
                 all_match = argument_matches_parameter(*args[i], fn->params[i + param_offset].type);
             }
             if (all_match) matches.push_back(fn);
@@ -693,7 +717,8 @@ namespace {
                     score += 2;
                 }
             }
-            for (std::size_t i = 0; i < args.size(); i++) {
+            std::size_t fixed_param_count = fn->params.size() - param_offset;
+            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
                 const Type& param_type = fn->params[i + param_offset].type;
                 if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref && !is_read_only_place(*args[i])) {
                     score++;
@@ -723,7 +748,7 @@ namespace {
         std::vector<const Function*> matches;
         for (const Function& fn : program_->functions) {
             if (fn.name != class_name + "_new") continue;
-            if (fn.params.size() != args.size() + 1) continue;
+            if (!function_accepts_argument_count(fn, args.size(), 1)) continue;
             bool all_match = true;
             for (std::size_t i = 0; all_match && i < args.size(); i++) {
                 all_match = argument_matches_parameter(*args[i], fn.params[i + 1].type);
