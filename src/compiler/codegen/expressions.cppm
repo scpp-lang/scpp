@@ -652,8 +652,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                   std::size_t param_offset)
 {
         std::vector<llvm::LLVMValueRef> result;
-        result.reserve(args.size());
-        for (std::size_t i = 0; i < args.size(); i++) {
+        auto emit_arg = [&](const Expr& arg, std::size_t i) {
             bool param_is_reference = callee_def != nullptr && i + param_offset < callee_def->params.size() &&
                                        callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
             const Type* ref_param_type =
@@ -668,23 +667,23 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             // (real C++ itself forbids binding a *mutable* lvalue
             // reference to a temporary).
             bool param_is_const_reference_bound_to_rvalue =
-                param_is_reference && const_reference_binds_materialized_temporary(*args[i], *ref_param_type);
+                param_is_reference && const_reference_binds_materialized_temporary(arg, *ref_param_type);
             if (param_is_interface_reference) {
-                result.push_back(codegen_interface_value_for_target(*args[i], *ref_param_type));
+                result.push_back(codegen_interface_value_for_target(arg, *ref_param_type));
             } else if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
                 // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the move
                 // checker has already verified this argument produces a
                 // genuine rvalue (produces_rvalue_of_type), which may not
                 // itself be an addressable place (a literal, a fresh
                 // std::make_unique<T>(...)/call result, ...).
-                result.push_back(param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(*args[i])
+                result.push_back(param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(arg)
                                                            : codegen_materialize_const_reference_source(
-                                                                 *args[i], *ref_param_type->pointee));
+                                                                 arg, *ref_param_type->pointee));
             } else if (param_is_reference) {
                 // Bind the reference parameter to the argument's address
                 // rather than passing its value, exactly like a local
                 // reference's own VarDecl.
-                result.push_back(codegen_lvalue(*args[i]).ptr);
+                result.push_back(codegen_lvalue(arg).ptr);
             } else {
                 // ch06 §6: a bare literal argument adapts directly to
                 // its target parameter's own declared scalar type (see
@@ -695,14 +694,24 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (callee_def != nullptr && i + param_offset < callee_def->params.size()) {
                     const Type& param_type = callee_def->params[i + param_offset].type;
                     if (is_named_record_type(param_type)) {
-                        result.push_back(codegen_class_value_for_boundary(*args[i], param_type,
+                        result.push_back(codegen_class_value_for_boundary(arg, param_type,
                                                                          /*allow_implicit_converting_ctor=*/true));
                     } else {
-                        result.push_back(codegen_value_for_target(*args[i], param_type));
+                        result.push_back(codegen_value_for_target(arg, param_type));
                     }
                 } else {
-                    result.push_back(codegen_expr(*args[i]));
+                    result.push_back(codegen_expr(arg));
                 }
+            }
+        };
+        result.reserve(args.size());
+        for (std::size_t i = 0; i < args.size(); i++) emit_arg(*args[i], i);
+        if (callee_def != nullptr) {
+            for (std::size_t i = args.size(); i + param_offset < callee_def->params.size(); i++) {
+                const Param& param = callee_def->params[i + param_offset];
+                if (param.default_expr == nullptr) break;
+                ExprPtr default_arg = deep_clone_expr_with_loc(*param.default_expr, current_loc_);
+                emit_arg(*default_arg, i);
             }
         }
         return result;

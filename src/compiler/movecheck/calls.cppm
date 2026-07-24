@@ -106,6 +106,7 @@ void check_enum_conversion_compatibility(const Type& target_type, const Expr& so
     FunctionSignature sig;
     sig.param_types = type.function_params;
     sig.param_names.resize(sig.param_types.size());
+    sig.param_default_exprs.assign(sig.param_types.size(), nullptr);
     sig.param_require_thread_movable.assign(sig.param_types.size(), false);
     sig.param_require_thread_shareable.assign(sig.param_types.size(), false);
     sig.return_type = *type.function_return;
@@ -136,6 +137,22 @@ void check_enum_conversion_compatibility(const Type& target_type, const Expr& so
 // produces_rvalue_of_type so both resolve a method call's callee
 // identically.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+
+namespace {
+[[nodiscard]] bool signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
+                                                    std::size_t param_offset) {
+    if (sig.param_types.size() < param_offset) return false;
+    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
+    std::size_t min_required = fixed_param_count;
+    while (min_required > 0 && sig.param_default_exprs[param_offset + min_required - 1] != nullptr) {
+        min_required--;
+    }
+    if (arg_count < min_required) return false;
+    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
+    return sig.has_varargs || arg_count <= fixed_param_count;
+}
+}
+
 void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors);
@@ -524,7 +541,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures) {
     if (callee.direct_signature.has_value()) {
-        return callee.direct_signature->param_types.size() == call_expr.args.size() + callee.param_offset
+        return signature_accepts_argument_count(*callee.direct_signature, call_expr.args.size(), callee.param_offset)
                    ? &*callee.direct_signature
                    : nullptr;
     }
@@ -555,13 +572,14 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             }
             if (!receiver_matches_method_qualifier(*call_expr.lhs, only, body, signatures)) return nullptr;
         }
+        if (!signature_accepts_argument_count(only, call_expr.args.size(), callee.param_offset)) return nullptr;
         return &only;
     }
 
     std::vector<const FunctionSignature*> matches;
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (candidate.param_types.size() != call_expr.args.size() + callee.param_offset) continue;
+        if (!signature_accepts_argument_count(candidate, call_expr.args.size(), callee.param_offset)) continue;
         bool all_match = true;
         // The receiver (`this`), for a method call: viable only if the
         // candidate's own `this` mutability doesn't demand more than the
@@ -576,7 +594,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             !receiver_matches_method_qualifier(*call_expr.lhs, candidate, body, signatures)) {
             all_match = false;
         }
-        for (std::size_t i = 0; all_match && i < call_expr.args.size(); i++) {
+        std::size_t fixed_param_count = candidate.param_types.size() - callee.param_offset;
+        for (std::size_t i = 0; all_match && i < call_expr.args.size() && i < fixed_param_count; i++) {
             all_match = argument_matches_parameter(*call_expr.args[i], candidate.param_types[i + callee.param_offset],
                                                      body, signatures);
         }
@@ -606,7 +625,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 score += 2;
             }
         }
-        for (std::size_t i = 0; i < call_expr.args.size(); i++) {
+        std::size_t fixed_param_count = candidate.param_types.size() - callee.param_offset;
+        for (std::size_t i = 0; i < call_expr.args.size() && i < fixed_param_count; i++) {
             const Type& param_type = candidate.param_types[i + callee.param_offset];
             if (is_reference(param_type) && param_type.is_mutable_ref &&
                 !is_read_only_reachable(*call_expr.args[i], body, signatures)) {
@@ -641,14 +661,15 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     if (it == signatures.end()) return nullptr;
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (candidate.param_types.size() != call_expr.args.size() + 1) continue;
+        if (!signature_accepts_argument_count(candidate, call_expr.args.size(), 1)) continue;
         if (!is_reference(candidate.param_types[0]) || candidate.param_types[0].is_rvalue_ref ||
             !candidate.param_types[0].is_mutable_ref) {
             continue;
         }
         if (!receiver_matches_method_qualifier(*call_expr.lhs, candidate, body, signatures)) continue;
         bool all_match = true;
-        for (std::size_t i = 0; all_match && i < call_expr.args.size(); i++) {
+        std::size_t fixed_param_count = candidate.param_types.size() - 1;
+        for (std::size_t i = 0; all_match && i < call_expr.args.size() && i < fixed_param_count; i++) {
             all_match = argument_matches_parameter(*call_expr.args[i], candidate.param_types[i + 1], body, signatures);
         }
         if (all_match) return &candidate;

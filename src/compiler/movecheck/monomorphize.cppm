@@ -3109,11 +3109,12 @@ private:
                                              resolution.pack_bindings);
 
             std::size_t arg_cursor = 0;
-            for (std::size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
-                if (stable_tmpl.params[i].is_parameter_pack) {
+            std::size_t param_cursor = param_offset;
+            for (; param_cursor < stable_tmpl.params.size() && arg_cursor < expr.args.size(); param_cursor++) {
+                if (stable_tmpl.params[param_cursor].is_parameter_pack) {
                     std::optional<std::string> pack_type_name =
-                        referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
-                    const Type& pack_param_type = stable_tmpl.params[i].type;
+                        referenced_type_pack_param_name(stable_tmpl.params[param_cursor].type, stable_tmpl.template_params);
+                    const Type& pack_param_type = stable_tmpl.params[param_cursor].type;
                     const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
                                                                                          : pack_param_type;
                     bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
@@ -3150,7 +3151,7 @@ private:
                     }
                     continue;
                 }
-                const Type& param_type = stable_tmpl.params[i].type;
+                const Type& param_type = stable_tmpl.params[param_cursor].type;
                 const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
                 std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                 if (!arg_type.has_value()) return false;
@@ -3172,12 +3173,17 @@ private:
                     if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
                                                                       resolution.type_bindings,
                                                                       resolution.pack_bindings)) {
-                        resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                        resolution.deferred_obligations.push_back(
+                            DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
                     }
                 }
                 arg_cursor++;
             }
             if (arg_cursor != expr.args.size()) return false;
+            for (; param_cursor < stable_tmpl.params.size(); param_cursor++) {
+                if (stable_tmpl.params[param_cursor].is_parameter_pack) continue;
+                if (stable_tmpl.params[param_cursor].default_expr == nullptr) return false;
+            }
 
             populate_concrete_pack_param_types(stable_tmpl, resolution.pack_bindings, resolution.concrete_pack_param_types);
 
@@ -3244,12 +3250,17 @@ private:
                                                               : resolution.concrete_pack_param_types[i][0]);
                 continue;
             }
+            if (arg_cursor >= expr.args.size()) {
+                if (param.default_expr == nullptr) return false;
+                if (!param.generic_concept.empty()) return false;
+                resolution.concrete_param_types.push_back(param.type);
+                continue;
+            }
             if (param.generic_concept.empty()) {
                 resolution.concrete_param_types.push_back(param.type);
                 arg_cursor++;
                 continue;
             }
-            if (arg_cursor >= expr.args.size()) return false;
             std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
             if (!arg_type.has_value()) return false;
             Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
@@ -3268,6 +3279,10 @@ private:
             arg_cursor++;
         }
         if (arg_cursor != expr.args.size()) return false;
+        for (std::size_t i = expr.args.size() + param_offset; i < tmpl.params.size(); i++) {
+            if (tmpl.params[i].is_parameter_pack) continue;
+            if (tmpl.params[i].default_expr == nullptr) return false;
+        }
 
         for (std::size_t i = param_offset; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
@@ -3396,6 +3411,7 @@ private:
         }
 
         std::string clone_name = get_or_create_clone(tmpl, concrete_param_types, concrete_pack_param_types);
+        append_default_arguments_to_call(expr, tmpl, param_offset);
         if (expr.lhs == nullptr) {
             expr.name = std::move(clone_name);
         } else {
@@ -3428,6 +3444,28 @@ private:
         expr.explicit_template_args.clear();
     }
 
+    void append_default_arguments_to_call(Expr& expr, const Function& fn, std::size_t param_offset) {
+        for (std::size_t i = expr.args.size() + param_offset; i < fn.params.size(); i++) {
+            if (fn.params[i].is_parameter_pack || fn.params[i].default_expr == nullptr) break;
+            expr.args.push_back(deep_clone_expr_with_loc(*fn.params[i].default_expr, expr.loc));
+        }
+    }
+
+    void append_instantiated_default_arguments_to_call(
+        Expr& expr, const Function& tmpl, std::size_t param_offset,
+        const std::unordered_map<std::string, Type>& type_bindings,
+        const std::unordered_map<std::string, int>& value_bindings,
+        const std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
+        for (std::size_t i = expr.args.size() + param_offset; i < tmpl.params.size(); i++) {
+            if (tmpl.params[i].is_parameter_pack || tmpl.params[i].default_expr == nullptr) break;
+            ExprPtr default_arg = deep_clone_expr_with_loc(*tmpl.params[i].default_expr, expr.loc);
+            for (const auto& [name, type] : type_bindings) substitute_type_param_in_expr(*default_arg, name, type);
+            for (const auto& [name, value] : value_bindings) substitute_non_type_param_in_expr(*default_arg, name, value);
+            for (const auto& [name, pack] : pack_bindings) substitute_type_pack_in_expr(*default_arg, name, pack);
+            expr.args.push_back(std::move(default_arg));
+        }
+    }
+
     // ch05 §5.11: monomorphizes a call to a full-header-form generic
     // function template (Function::template_params non-empty, e.g.
     // `get`/`make`) -- binds each of the template's own parameters to a
@@ -3455,11 +3493,12 @@ private:
         seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
 
         std::size_t arg_cursor = 0;
-        for (std::size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
-            if (stable_tmpl.params[i].is_parameter_pack) {
+        std::size_t param_cursor = param_offset;
+        for (; param_cursor < stable_tmpl.params.size() && arg_cursor < expr.args.size(); param_cursor++) {
+            if (stable_tmpl.params[param_cursor].is_parameter_pack) {
                 std::optional<std::string> pack_type_name =
-                    referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
-                const Type& pack_param_type = stable_tmpl.params[i].type;
+                    referenced_type_pack_param_name(stable_tmpl.params[param_cursor].type, stable_tmpl.template_params);
+                const Type& pack_param_type = stable_tmpl.params[param_cursor].type;
                 const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
                                                                                      : pack_param_type;
                 bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
@@ -3506,7 +3545,7 @@ private:
                 }
                 continue;
             }
-            const Type& param_type = stable_tmpl.params[i].type;
+            const Type& param_type = stable_tmpl.params[param_cursor].type;
             const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
             std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
             if (arg_type.has_value()) {
@@ -3526,10 +3565,18 @@ private:
             if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                 if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params, type_bindings,
                                                                   pack_bindings)) {
-                    deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                    deferred_obligations.push_back(DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
                 }
             }
             arg_cursor++;
+        }
+        for (; param_cursor < stable_tmpl.params.size(); param_cursor++) {
+            if (stable_tmpl.params[param_cursor].is_parameter_pack) continue;
+            if (stable_tmpl.params[param_cursor].default_expr == nullptr) {
+                throw DataflowError("no overload of generic function '" + stable_tmpl.name +
+                                        "' matches this argument list",
+                                    expr.loc);
+            }
         }
 
         populate_concrete_pack_param_types(stable_tmpl, pack_bindings, concrete_pack_param_types);
@@ -3579,6 +3626,8 @@ private:
 
         std::string clone_name = instantiate_full_header_generic_clone(
             stable_tmpl, type_bindings, value_bindings, pack_bindings, concrete_pack_param_types, upcasts);
+        append_instantiated_default_arguments_to_call(expr, stable_tmpl, param_offset, type_bindings, value_bindings,
+                                                      pack_bindings);
         expr.name = member_name_prefix.empty() ? clone_name : clone_name.substr(member_name_prefix.size());
         expr.explicit_template_args.clear();
     }

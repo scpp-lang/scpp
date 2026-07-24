@@ -14,6 +14,7 @@ namespace scpp {
 struct FunctionSignature {
     std::vector<Type> param_types;
     std::vector<std::string> param_names;
+    std::vector<std::shared_ptr<Expr>> param_default_exprs;
     std::vector<bool> param_require_thread_movable;
     std::vector<bool> param_require_thread_shareable;
     std::vector<LifetimeAnnotation> param_lifetimes;
@@ -29,10 +30,26 @@ struct FunctionSignature {
     std::string owning_module;
     std::string member_owner_class;
     bool is_static = false;
+    bool has_varargs = false;
     AccessSpecifier access = AccessSpecifier::Public;
     SourceLocation loc;
     ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
 };
+
+namespace {
+[[nodiscard]] bool signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
+                                                    std::size_t param_offset) {
+    if (sig.param_types.size() < param_offset) return false;
+    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
+    std::size_t min_required = fixed_param_count;
+    while (min_required > 0 && sig.param_default_exprs[param_offset + min_required - 1] != nullptr) {
+        min_required--;
+    }
+    if (arg_count < min_required) return false;
+    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
+    return sig.has_varargs || arg_count <= fixed_param_count;
+}
+}
 
 using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
 
@@ -392,7 +409,7 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
     std::vector<const FunctionSignature*> matches;
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+        if (!signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
         bool all_match = true;
         for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
             all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
@@ -728,11 +745,13 @@ void validate_operator_arrow_signature(const Function& fn) {
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());
         sig.param_names.reserve(fn.params.size());
+        sig.param_default_exprs.reserve(fn.params.size());
         sig.param_require_thread_movable.reserve(fn.params.size());
         sig.param_require_thread_shareable.reserve(fn.params.size());
         for (const Param& param : fn.params) {
             sig.param_types.push_back(param.type);
             sig.param_names.push_back(param.name);
+            sig.param_default_exprs.push_back(param.default_expr);
             sig.param_require_thread_movable.push_back(param.require_thread_movable);
             sig.param_require_thread_shareable.push_back(param.require_thread_shareable);
             sig.param_lifetimes.push_back(param.lifetime);
@@ -749,6 +768,7 @@ void validate_operator_arrow_signature(const Function& fn) {
         sig.owning_module = fn.visibility_module.empty() ? fn.owning_module : fn.visibility_module;
         sig.member_owner_class = fn.member_owner_class;
         sig.is_static = fn.is_static;
+        sig.has_varargs = fn.has_varargs;
         sig.access = fn.access;
         sig.loc = fn.loc;
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;

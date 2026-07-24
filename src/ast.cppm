@@ -241,6 +241,7 @@ struct Param {
     Type type;
     std::string name;
     LifetimeAnnotation lifetime;
+    std::shared_ptr<Expr> default_expr;
     // ch05 §5.11: empty for an ordinary parameter (the overwhelmingly
     // common case). Non-empty names the concept this parameter is
     // constrained by, for the abbreviated generic-function form --
@@ -585,7 +586,8 @@ struct Stmt {
     std::uint64_t resolved_alignment = 0;
 
     // VarDecl, scalar/struct/class (any non-reference, non-pointer)
-    // only: true for `const T name = expr;`/`const ClassName name{args};`
+    // only: true for `const T name = expr;`/`const ClassName name{args    };
+
     // -- an immutable local, initialized exactly once at declaration and
     // rejected by movecheck (its own MirStatementKind::Assign case) on
     // any subsequent reassignment attempt. Distinct from `const T&`/
@@ -640,6 +642,119 @@ struct Stmt {
     // legal, anywhere. Meaningless for every other StmtKind.
     bool is_unsafe = false;
 };
+
+[[nodiscard]] inline Param deep_clone_param(const Param& param);
+[[nodiscard]] inline ExprPtr deep_clone_expr(const Expr& expr);
+[[nodiscard]] inline StmtPtr deep_clone_stmt(const Stmt& stmt);
+
+inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
+    expr.loc = loc;
+    if (expr.lhs) rewrite_expr_locs(*expr.lhs, loc);
+    if (expr.rhs) rewrite_expr_locs(*expr.rhs, loc);
+    if (expr.third) rewrite_expr_locs(*expr.third, loc);
+    for (ExprPtr& arg : expr.args) rewrite_expr_locs(*arg, loc);
+    for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+        if (!arg.is_type && arg.value) rewrite_expr_locs(*arg.value, loc);
+    }
+    for (LambdaCapture& capture : expr.lambda_captures) {
+        if (capture.init) rewrite_expr_locs(*capture.init, loc);
+    }
+    for (Param& param : expr.lambda_params) {
+        if (param.default_expr) rewrite_expr_locs(*param.default_expr, loc);
+    }
+    if (expr.lambda_body) {
+        auto rewrite_stmt_locs = [&](auto&& self, Stmt& stmt) -> void {
+            stmt.loc = loc;
+            if (stmt.init) rewrite_expr_locs(*stmt.init, loc);
+            for (ExprPtr& arg : stmt.ctor_args) rewrite_expr_locs(*arg, loc);
+            if (stmt.expr) rewrite_expr_locs(*stmt.expr, loc);
+            if (stmt.condition) rewrite_expr_locs(*stmt.condition, loc);
+            if (stmt.then_branch) self(self, *stmt.then_branch);
+            if (stmt.else_branch) self(self, *stmt.else_branch);
+            for (StmtPtr& child : stmt.statements) self(self, *child);
+        };
+        rewrite_stmt_locs(rewrite_stmt_locs, *expr.lambda_body);
+    }
+}
+
+[[nodiscard]] inline Param deep_clone_param(const Param& param) {
+    Param clone = param;
+    if (param.default_expr) clone.default_expr = std::shared_ptr<Expr>(deep_clone_expr(*param.default_expr).release());
+    return clone;
+}
+
+[[nodiscard]] inline ExprPtr deep_clone_expr(const Expr& expr) {
+    auto clone = std::make_unique<Expr>();
+    clone->kind = expr.kind;
+    clone->loc = expr.loc;
+    clone->int_value = expr.int_value;
+    clone->float_value = expr.float_value;
+    clone->bool_value = expr.bool_value;
+    clone->name = expr.name;
+    clone->explicit_global_qualification = expr.explicit_global_qualification;
+    clone->binary_op = expr.binary_op;
+    clone->unary_op = expr.unary_op;
+    clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
+    clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
+    clone->type = expr.type;
+    clone->has_paren_init = expr.has_paren_init;
+    clone->destroy_through_pointer = expr.destroy_through_pointer;
+    clone->through_arrow = expr.through_arrow;
+    clone->implicit_arrow_deref = expr.implicit_arrow_deref;
+    clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
+    if (expr.lhs) clone->lhs = deep_clone_expr(*expr.lhs);
+    if (expr.rhs) clone->rhs = deep_clone_expr(*expr.rhs);
+    if (expr.third) clone->third = deep_clone_expr(*expr.third);
+    for (const ExprPtr& arg : expr.args) clone->args.push_back(deep_clone_expr(*arg));
+    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
+        ExplicitTemplateArg cloned_arg = arg;
+        if (!arg.is_type && arg.value) cloned_arg.value = std::shared_ptr<Expr>(deep_clone_expr(*arg.value).release());
+        clone->explicit_template_args.push_back(std::move(cloned_arg));
+    }
+    for (const LambdaCapture& capture : expr.lambda_captures) {
+        LambdaCapture cloned_capture;
+        cloned_capture.name = capture.name;
+        cloned_capture.by_reference = capture.by_reference;
+        if (capture.init) cloned_capture.init = deep_clone_expr(*capture.init);
+        clone->lambda_captures.push_back(std::move(cloned_capture));
+    }
+    clone->lambda_blanket_mode = expr.lambda_blanket_mode;
+    for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
+    clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
+    clone->lambda_is_mutable = expr.lambda_is_mutable;
+    if (expr.lambda_body) clone->lambda_body = deep_clone_stmt(*expr.lambda_body);
+    return clone;
+}
+
+[[nodiscard]] inline StmtPtr deep_clone_stmt(const Stmt& stmt) {
+    auto clone = std::make_unique<Stmt>();
+    clone->kind = stmt.kind;
+    clone->loc = stmt.loc;
+    clone->type = stmt.type;
+    clone->var_name = stmt.var_name;
+    if (stmt.init) clone->init = deep_clone_expr(*stmt.init);
+    clone->alignment_specs = stmt.alignment_specs;
+    clone->resolved_alignment = stmt.resolved_alignment;
+    clone->is_const = stmt.is_const;
+    clone->is_constexpr = stmt.is_constexpr;
+    clone->is_static_local = stmt.is_static_local;
+    clone->has_ctor_args = stmt.has_ctor_args;
+    for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(deep_clone_expr(*arg));
+    if (stmt.expr) clone->expr = deep_clone_expr(*stmt.expr);
+    if (stmt.condition) clone->condition = deep_clone_expr(*stmt.condition);
+    clone->if_mode = stmt.if_mode;
+    if (stmt.then_branch) clone->then_branch = deep_clone_stmt(*stmt.then_branch);
+    if (stmt.else_branch) clone->else_branch = deep_clone_stmt(*stmt.else_branch);
+    for (const StmtPtr& child : stmt.statements) clone->statements.push_back(deep_clone_stmt(*child));
+    clone->is_unsafe = stmt.is_unsafe;
+    return clone;
+}
+
+[[nodiscard]] inline ExprPtr deep_clone_expr_with_loc(const Expr& expr, const SourceLocation& loc) {
+    ExprPtr clone = deep_clone_expr(expr);
+    rewrite_expr_locs(*clone, loc);
+    return clone;
+}
 
 struct GlobalVar {
     StmtPtr decl;
@@ -712,7 +827,7 @@ struct MemberInitializer {
         clone->lambda_captures.push_back(std::move(cloned));
     }
     clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-    clone->lambda_params = expr.lambda_params;
+    for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
     clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
     clone->lambda_is_mutable = expr.lambda_is_mutable;
     if (expr.lambda_body) clone->lambda_body = clone_initializer_stmt(*expr.lambda_body);

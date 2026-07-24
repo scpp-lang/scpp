@@ -472,7 +472,8 @@ private:
         clone->implicit_arrow_deref = expr.implicit_arrow_deref;
         clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
         clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-        clone->lambda_params = expr.lambda_params;
+        clone->lambda_params.clear();
+        for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
         clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
         clone->lambda_is_mutable = expr.lambda_is_mutable;
         if (expr.lhs) clone->lhs = clone_expr_tree(*expr.lhs);
@@ -878,6 +879,54 @@ private:
         return stmt;
     }
 
+    [[nodiscard]] bool is_integral_scalar_type_name(std::string_view name) {
+        return name == "char" || name == "int" || name == "long" || name == "unsigned int" ||
+               name == "unsigned long" || name == "int8_t" || name == "int16_t" || name == "int32_t" ||
+               name == "int64_t" || name == "uint8_t" || name == "uint16_t" || name == "uint32_t" ||
+               name == "uint64_t" || name == "size_t" || name == "ptrdiff_t";
+    }
+
+    [[nodiscard]] bool is_float_scalar_type_name(std::string_view name) {
+        return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
+    }
+
+    [[nodiscard]] ExprPtr make_value_initialized_expr(SourceLocation loc, const Type& type) {
+        if (type.kind == TypeKind::Reference && type.pointee != nullptr) {
+            return make_value_initialized_expr(loc, *type.pointee);
+        }
+        if (type.kind == TypeKind::Pointer) {
+            auto expr = std::make_unique<Expr>();
+            expr->kind = ExprKind::IntegerLiteral;
+            expr->loc = loc;
+            expr->int_value = 0;
+            return expr;
+        }
+        if (type.kind == TypeKind::Named) {
+            if (type.name == "bool") {
+                auto expr = std::make_unique<Expr>();
+                expr->kind = ExprKind::BoolLiteral;
+                expr->loc = loc;
+                expr->bool_value = false;
+                return expr;
+            }
+            if (is_integral_scalar_type_name(type.name)) {
+                auto expr = std::make_unique<Expr>();
+                expr->kind = ExprKind::IntegerLiteral;
+                expr->loc = loc;
+                expr->int_value = 0;
+                return expr;
+            }
+            if (is_float_scalar_type_name(type.name)) {
+                auto expr = std::make_unique<Expr>();
+                expr->kind = ExprKind::FloatLiteral;
+                expr->loc = loc;
+                expr->float_value = 0.0;
+                return expr;
+            }
+        }
+        return make_call_expr(loc, type_to_string(type), {});
+    }
+
     [[nodiscard]] StmtPtr make_continue_stmt(SourceLocation loc) {
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::Continue;
@@ -1200,7 +1249,8 @@ private:
             clone->lambda_captures.push_back(std::move(cloned_capture));
         }
         clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-        clone->lambda_params = expr.lambda_params;
+        clone->lambda_params.clear();
+        for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
         clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
         clone->lambda_is_mutable = expr.lambda_is_mutable;
         if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
@@ -1747,6 +1797,12 @@ private:
                     continue;
                 }
                 reconciled.push_back(std::move(candidate));
+                for (std::size_t p = 0; p < fn.params.size() && p < reconciled.back().params.size(); p++) {
+                    if (reconciled.back().params[p].default_expr == nullptr && fn.params[p].default_expr != nullptr) {
+                        reconciled.back().params[p].default_expr =
+                            std::shared_ptr<Expr>(clone_expr(*fn.params[p].default_expr).release());
+                    }
+                }
                 reconciled.back().is_exported = reconciled.back().is_exported || fn.is_exported;
                 consumed[j] = true;
                 merged = true;
@@ -2571,7 +2627,7 @@ private:
         clone.return_type = fn.return_type;
         clone.name = fn.name;
         clone.loc = fn.loc;
-        clone.params = fn.params;
+        for (const Param& param : fn.params) clone.params.push_back(deep_clone_param(param));
         clone.return_lifetime = fn.return_lifetime;
         if (keep_body && fn.body) clone.body = clone_stmt(*fn.body);
         clone.is_extern_c = fn.is_extern_c;
@@ -3625,6 +3681,7 @@ private:
     // shared helper.
     std::vector<Param> parse_param_list() {
         std::vector<Param> params;
+        bool saw_default_argument = false;
         expect(TokenKind::LParen, "'('");
         if (!check(TokenKind::RParen)) {
             do {
@@ -3663,11 +3720,32 @@ private:
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration");
+                if (match(TokenKind::Assign)) {
+                    if (param.is_parameter_pack) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument");
+                    }
+                    param.default_expr = std::shared_ptr<Expr>(parse_default_argument_expr(param.type).release());
+                    saw_default_argument = true;
+                } else if (saw_default_argument) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                     "once a parameter has a default argument, every later parameter must also "
+                                     "have one");
+                }
                 params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
         expect(TokenKind::RParen, "')'");
         return params;
+    }
+
+    [[nodiscard]] ExprPtr parse_default_argument_expr(const Type& param_type) {
+        if (!check(TokenKind::LBrace)) return parse_expr();
+        SourceLocation loc = current_loc();
+        std::vector<ExprPtr> args = parse_brace_initializer_args();
+        if (args.empty()) return make_value_initialized_expr(loc, param_type);
+        return make_call_expr(loc, type_to_string(param_type), std::move(args));
     }
 
     // Builds the implicit `this` parameter every class member function
@@ -5312,6 +5390,7 @@ private:
         fn.is_nodiscard = is_nodiscard;
         fn.nodiscard_reason = nodiscard_reason;
         bool saw_inline = false;
+        bool saw_default_argument = false;
         for (;;) {
             if (!saw_inline && match(TokenKind::KwInline)) {
                 saw_inline = true;
@@ -5378,6 +5457,19 @@ private:
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration");
+                if (match(TokenKind::Assign)) {
+                    if (param.is_parameter_pack) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument");
+                    }
+                    param.default_expr = std::shared_ptr<Expr>(parse_default_argument_expr(param.type).release());
+                    saw_default_argument = true;
+                } else if (saw_default_argument) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                     "once a parameter has a default argument, every later parameter must also "
+                                     "have one");
+                }
                 fn.params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }

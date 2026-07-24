@@ -663,6 +663,8 @@ void write_param(std::ostream& out, const Param& param) {
     write_type(out, param.type);
     write_string(out, param.name);
     write_string(out, param.lifetime.name);
+    write_u8(out, param.default_expr ? 1u : 0u);
+    if (param.default_expr) write_expr(out, *param.default_expr);
     write_string(out, param.generic_concept);
     write_u8(out, param.require_thread_movable ? 1u : 0u);
     write_u8(out, param.require_thread_shareable ? 1u : 0u);
@@ -674,6 +676,9 @@ void write_param(std::ostream& out, const Param& param) {
     param.type = read_type(in, context + " type");
     param.name = read_string(in, context + " name");
     param.lifetime.name = read_string(in, context + " lifetime");
+    if (read_u8(in, context + " default expr present") != 0u) {
+        param.default_expr = std::shared_ptr<Expr>(read_expr(in, context + " default expr").release());
+    }
     param.generic_concept = read_string(in, context + " generic concept");
     param.require_thread_movable = read_u8(in, context + " thread_movable") != 0u;
     param.require_thread_shareable = read_u8(in, context + " thread_shareable") != 0u;

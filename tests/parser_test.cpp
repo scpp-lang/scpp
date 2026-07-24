@@ -594,6 +594,40 @@ void test_inline_function_modifier_parses_with_existing_modifiers() {
            "inline_function_modifier_parses_with_existing_modifiers: constexpr should still parse");
 }
 
+void test_default_parameter_expression_parses() {
+    scpp::Program program = scpp::parse(
+        "int add(int lhs, int rhs = 1 + 2) { return lhs + rhs; }\n"
+        "int zero(int value = {}) { return value; }\n"
+        "class Box {\n"
+        "public:\n"
+        "    int value(int amount = 7) const { return amount; }\n"
+        "};\n");
+    const scpp::Function* add_fn = find_function_named(program, "add");
+    const scpp::Function* zero_fn = find_function_named(program, "zero");
+    const scpp::Function* value_fn = find_function_named(program, "Box_value");
+    expect(add_fn != nullptr && zero_fn != nullptr, "default_parameter_expression_parses: expected free functions");
+    expect(value_fn != nullptr, "default_parameter_expression_parses: expected Box_value");
+    if (add_fn == nullptr || zero_fn == nullptr || value_fn == nullptr) return;
+    expect(add_fn->params.size() == 2, "default_parameter_expression_parses: add should have 2 params");
+    expect(add_fn->params[1].default_expr != nullptr,
+           "default_parameter_expression_parses: rhs should have a default expression");
+    expect(zero_fn->params[0].default_expr != nullptr,
+           "default_parameter_expression_parses: empty-brace default should become an expression");
+    expect(value_fn->params.size() == 2, "default_parameter_expression_parses: Box_value should include this + amount");
+    expect(value_fn->params[1].default_expr != nullptr,
+           "default_parameter_expression_parses: method parameter should retain default expression");
+}
+
+void test_default_parameter_trailing_rule_is_enforced() {
+    bool threw = false;
+    try {
+        (void)scpp::parse("int bad(int x = 1, int y) { return x + y; }\n");
+    } catch (const scpp::ParseError& e) {
+        threw = std::string(e.what()).find("every later parameter must also have one") != std::string::npos;
+    }
+    expect(threw, "default_parameter_trailing_rule_is_enforced: expected trailing-only diagnostic");
+}
+
 void test_static_member_function_parses_without_this() {
     scpp::Program program = scpp::parse(
         "class Box {\n"
@@ -4284,6 +4318,8 @@ int main() {
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
     test_inline_function_modifier_parses_with_existing_modifiers();
+    test_default_parameter_expression_parses();
+    test_default_parameter_trailing_rule_is_enforced();
     test_static_member_function_parses_without_this();
     test_template_specialization_static_member_call_parses();
     test_struct_forward_declaration_parses_and_reconciles();
