@@ -627,6 +627,20 @@ namespace {
         return true;
     }
 
+    namespace {
+    [[nodiscard]] bool function_accepts_argument_count(const Function& fn, std::size_t arg_count, std::size_t param_offset) {
+        if (fn.params.size() < param_offset) return false;
+        std::size_t fixed_param_count = fn.params.size() - param_offset;
+        std::size_t min_required = fixed_param_count;
+        while (min_required > 0 && fn.params[param_offset + min_required - 1].has_empty_brace_default) {
+            min_required--;
+        }
+        if (arg_count < min_required) return false;
+        if (!fn.has_varargs && arg_count > fixed_param_count) return false;
+        return fn.has_varargs || arg_count <= fixed_param_count;
+    }
+    }
+
 
     const Function* Codegen::resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
                                               std::size_t param_offset, bool receiver_is_mutable ,
@@ -645,11 +659,10 @@ namespace {
                 }
                 if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) return nullptr;
             }
-            std::size_t fixed_param_count = candidates[0]->params.size() - param_offset;
-            if ((!candidates[0]->has_varargs && fixed_param_count != args.size()) ||
-                (candidates[0]->has_varargs && args.size() < fixed_param_count)) {
+            if (!function_accepts_argument_count(*candidates[0], args.size(), param_offset)) {
                 return nullptr;
             }
+            std::size_t fixed_param_count = std::min(args.size(), candidates[0]->params.size() - param_offset);
             for (std::size_t i = 0; i < fixed_param_count; i++) {
                 if (!argument_matches_parameter(*args[i], candidates[0]->params[i + param_offset].type)) {
                     return nullptr;
@@ -660,7 +673,7 @@ namespace {
 
         std::vector<const Function*> matches;
         for (const Function* fn : candidates) {
-            if (fn->params.size() != args.size() + param_offset) continue;
+            if (!function_accepts_argument_count(*fn, args.size(), param_offset)) continue;
             // The receiver (`this`): viable only if the candidate's own
             // `this` mutability doesn't demand more than the receiver
             // place can actually provide.
@@ -723,7 +736,7 @@ namespace {
         std::vector<const Function*> matches;
         for (const Function& fn : program_->functions) {
             if (fn.name != class_name + "_new") continue;
-            if (fn.params.size() != args.size() + 1) continue;
+            if (!function_accepts_argument_count(fn, args.size(), 1)) continue;
             bool all_match = true;
             for (std::size_t i = 0; all_match && i < args.size(); i++) {
                 all_match = argument_matches_parameter(*args[i], fn.params[i + 1].type);

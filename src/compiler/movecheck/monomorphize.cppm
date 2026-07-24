@@ -3109,11 +3109,12 @@ private:
                                              resolution.pack_bindings);
 
             std::size_t arg_cursor = 0;
-            for (std::size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
-                if (stable_tmpl.params[i].is_parameter_pack) {
+            std::size_t param_cursor = param_offset;
+            for (; param_cursor < stable_tmpl.params.size() && arg_cursor < expr.args.size(); param_cursor++) {
+                if (stable_tmpl.params[param_cursor].is_parameter_pack) {
                     std::optional<std::string> pack_type_name =
-                        referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
-                    const Type& pack_param_type = stable_tmpl.params[i].type;
+                        referenced_type_pack_param_name(stable_tmpl.params[param_cursor].type, stable_tmpl.template_params);
+                    const Type& pack_param_type = stable_tmpl.params[param_cursor].type;
                     const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
                                                                                          : pack_param_type;
                     bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
@@ -3150,7 +3151,7 @@ private:
                     }
                     continue;
                 }
-                const Type& param_type = stable_tmpl.params[i].type;
+                const Type& param_type = stable_tmpl.params[param_cursor].type;
                 const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
                 std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                 if (!arg_type.has_value()) return false;
@@ -3172,12 +3173,17 @@ private:
                     if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
                                                                       resolution.type_bindings,
                                                                       resolution.pack_bindings)) {
-                        resolution.deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                        resolution.deferred_obligations.push_back(
+                            DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
                     }
                 }
                 arg_cursor++;
             }
             if (arg_cursor != expr.args.size()) return false;
+            for (; param_cursor < stable_tmpl.params.size(); param_cursor++) {
+                if (stable_tmpl.params[param_cursor].is_parameter_pack) continue;
+                if (!stable_tmpl.params[param_cursor].has_empty_brace_default) return false;
+            }
 
             populate_concrete_pack_param_types(stable_tmpl, resolution.pack_bindings, resolution.concrete_pack_param_types);
 
@@ -3455,11 +3461,12 @@ private:
         seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
 
         std::size_t arg_cursor = 0;
-        for (std::size_t i = param_offset; i < stable_tmpl.params.size() && arg_cursor < expr.args.size(); i++) {
-            if (stable_tmpl.params[i].is_parameter_pack) {
+        std::size_t param_cursor = param_offset;
+        for (; param_cursor < stable_tmpl.params.size() && arg_cursor < expr.args.size(); param_cursor++) {
+            if (stable_tmpl.params[param_cursor].is_parameter_pack) {
                 std::optional<std::string> pack_type_name =
-                    referenced_type_pack_param_name(stable_tmpl.params[i].type, stable_tmpl.template_params);
-                const Type& pack_param_type = stable_tmpl.params[i].type;
+                    referenced_type_pack_param_name(stable_tmpl.params[param_cursor].type, stable_tmpl.template_params);
+                const Type& pack_param_type = stable_tmpl.params[param_cursor].type;
                 const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
                                                                                      : pack_param_type;
                 bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
@@ -3506,7 +3513,7 @@ private:
                 }
                 continue;
             }
-            const Type& param_type = stable_tmpl.params[i].type;
+            const Type& param_type = stable_tmpl.params[param_cursor].type;
             const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
             std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
             if (arg_type.has_value()) {
@@ -3526,10 +3533,18 @@ private:
             if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                 if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params, type_bindings,
                                                                   pack_bindings)) {
-                    deferred_obligations.push_back(DeferredTemplateObligation{i, arg_cursor, param_type});
+                    deferred_obligations.push_back(DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
                 }
             }
             arg_cursor++;
+        }
+        for (; param_cursor < stable_tmpl.params.size(); param_cursor++) {
+            if (stable_tmpl.params[param_cursor].is_parameter_pack) continue;
+            if (!stable_tmpl.params[param_cursor].has_empty_brace_default) {
+                throw DataflowError("no overload of generic function '" + stable_tmpl.name +
+                                        "' matches this argument list",
+                                    expr.loc);
+            }
         }
 
         populate_concrete_pack_param_types(stable_tmpl, pack_bindings, concrete_pack_param_types);

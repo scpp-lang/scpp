@@ -594,6 +594,28 @@ void test_inline_function_modifier_parses_with_existing_modifiers() {
            "inline_function_modifier_parses_with_existing_modifiers: constexpr should still parse");
 }
 
+void test_empty_brace_default_parameter_parses() {
+    scpp::Program program = scpp::parse(
+        "int add(int lhs, int rhs = {}) { return lhs + rhs; }\n"
+        "class Box {\n"
+        "public:\n"
+        "    int value(int amount = {}) const { return amount; }\n"
+        "};\n");
+    const scpp::Function* add_fn = find_function_named(program, "add");
+    const scpp::Function* value_fn = find_function_named(program, "Box_value");
+    expect(add_fn != nullptr, "empty_brace_default_parameter_parses: expected add");
+    expect(value_fn != nullptr, "empty_brace_default_parameter_parses: expected Box_value");
+    if (add_fn == nullptr || value_fn == nullptr) return;
+    expect(add_fn->params.size() == 2, "empty_brace_default_parameter_parses: add should have 2 params");
+    expect(!add_fn->params[0].has_empty_brace_default,
+           "empty_brace_default_parameter_parses: lhs should not have default");
+    expect(add_fn->params[1].has_empty_brace_default,
+           "empty_brace_default_parameter_parses: rhs should have '= {}' default");
+    expect(value_fn->params.size() == 2, "empty_brace_default_parameter_parses: Box_value should include this + amount");
+    expect(value_fn->params[1].has_empty_brace_default,
+           "empty_brace_default_parameter_parses: method parameter should retain '= {}' default");
+}
+
 void test_static_member_function_parses_without_this() {
     scpp::Program program = scpp::parse(
         "class Box {\n"
@@ -4284,6 +4306,7 @@ int main() {
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
     test_inline_function_modifier_parses_with_existing_modifiers();
+    test_empty_brace_default_parameter_parses();
     test_static_member_function_parses_without_this();
     test_template_specialization_static_member_call_parses();
     test_struct_forward_declaration_parses_and_reconciles();

@@ -14,6 +14,7 @@ namespace scpp {
 struct FunctionSignature {
     std::vector<Type> param_types;
     std::vector<std::string> param_names;
+    std::vector<bool> param_has_empty_brace_default;
     std::vector<bool> param_require_thread_movable;
     std::vector<bool> param_require_thread_shareable;
     std::vector<LifetimeAnnotation> param_lifetimes;
@@ -32,9 +33,25 @@ struct FunctionSignature {
     AccessSpecifier access = AccessSpecifier::Public;
     SourceLocation loc;
     ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
+    bool has_varargs = false;
 };
 
 using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
+
+namespace {
+[[nodiscard]] bool signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
+                                                    std::size_t param_offset) {
+    if (sig.param_types.size() < param_offset) return false;
+    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
+    std::size_t min_required = fixed_param_count;
+    while (min_required > 0 && sig.param_has_empty_brace_default[param_offset + min_required - 1]) {
+        min_required--;
+    }
+    if (arg_count < min_required) return false;
+    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
+    return sig.has_varargs || arg_count <= fixed_param_count;
+}
+}
 
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
 [[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
@@ -78,6 +95,11 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
 void validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def,
                                                                 const Body& body,
                                                                 const Signatures& signatures);
+void validate_empty_brace_default_parameter_type(const Type& type, const Body& body, const Signatures& signatures,
+                                                 const SourceLocation& loc, std::string_view context);
+void validate_omitted_default_arguments(const FunctionSignature& sig, std::size_t provided_arg_count,
+                                        std::size_t param_offset, const Body& body, const Signatures& signatures,
+                                        const SourceLocation& loc);
 [[nodiscard]] std::optional<std::size_t> resolve_elided_param_index(const Function& fn);
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param);
 void validate_lifetime_annotation_placement(const Function& fn);
@@ -392,7 +414,7 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
     std::vector<const FunctionSignature*> matches;
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (candidate.param_types.size() != ctor_args.size() + 1) continue;
+        if (!signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
         bool all_match = true;
         for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
             all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
@@ -428,6 +450,47 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
         }
     }
     return unique_best ? best : matches[0];
+}
+
+void validate_empty_brace_default_parameter_type(const Type& type, const Body& body, const Signatures& signatures,
+                                                 const SourceLocation& loc, std::string_view context) {
+    const Type* value_type = &type;
+    if (type.kind == TypeKind::Reference) {
+        if (type.is_mutable_ref || type.is_rvalue_ref || type.pointee == nullptr) {
+            throw DataflowError(std::string(context) + " cannot use '= {}' because references are not default-constructible",
+                                loc);
+        }
+        value_type = &*type.pointee;
+    }
+    if (value_type->kind != TypeKind::Named || body.program == nullptr) return;
+    const ClassDef* class_def = find_class_def(*body.program, value_type->name);
+    if (class_def == nullptr || class_def->is_concept_witness) return;
+    static const std::vector<ExprPtr> no_ctor_args;
+    if (!class_has_any_constructor(value_type->name, *body.program)) {
+        ensure_implicit_default_construction_is_valid(value_type->name, body.function_member_owner_class, body, signatures,
+                                                      loc,
+                                                      std::string(context) + " cannot use '= {}' because type '" +
+                                                          value_type->name + "' is not default-constructible");
+        return;
+    }
+    if (resolve_constructor_signature(value_type->name, no_ctor_args, body, signatures) == nullptr) {
+        throw DataflowError(std::string(context) + " cannot use '= {}' because type '" + value_type->name +
+                                "' has no default constructor",
+                            loc);
+    }
+}
+
+void validate_omitted_default_arguments(const FunctionSignature& sig, std::size_t provided_arg_count,
+                                        std::size_t param_offset, const Body& body, const Signatures& signatures,
+                                        const SourceLocation& loc) {
+    if (provided_arg_count + param_offset >= sig.param_types.size()) return;
+    for (std::size_t i = provided_arg_count + param_offset; i < sig.param_types.size(); i++) {
+        if (i >= sig.param_has_empty_brace_default.size() || !sig.param_has_empty_brace_default[i]) {
+            throw DataflowError("call is missing a required argument for parameter '" + sig.param_names[i] + "'", loc);
+        }
+        validate_empty_brace_default_parameter_type(sig.param_types[i], body, signatures, loc,
+                                                    "parameter '" + sig.param_names[i] + "'");
+    }
 }
 
 void ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
@@ -728,11 +791,13 @@ void validate_operator_arrow_signature(const Function& fn) {
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());
         sig.param_names.reserve(fn.params.size());
+        sig.param_has_empty_brace_default.reserve(fn.params.size());
         sig.param_require_thread_movable.reserve(fn.params.size());
         sig.param_require_thread_shareable.reserve(fn.params.size());
         for (const Param& param : fn.params) {
             sig.param_types.push_back(param.type);
             sig.param_names.push_back(param.name);
+            sig.param_has_empty_brace_default.push_back(param.has_empty_brace_default);
             sig.param_require_thread_movable.push_back(param.require_thread_movable);
             sig.param_require_thread_shareable.push_back(param.require_thread_shareable);
             sig.param_lifetimes.push_back(param.lifetime);
@@ -752,6 +817,7 @@ void validate_operator_arrow_signature(const Function& fn) {
         sig.access = fn.access;
         sig.loc = fn.loc;
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+        sig.has_varargs = fn.has_varargs;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             bool same_params = existing.param_types.size() == sig.param_types.size();
@@ -767,6 +833,21 @@ void validate_operator_arrow_signature(const Function& fn) {
             }
         }
         overloads.push_back(std::move(sig));
+    }
+    for (const Function& fn : program.functions) {
+        if (fn.is_generic_template) continue;
+        Body body;
+        body.program = &program;
+        body.function_owning_module = fn.owning_module;
+        body.function_visibility_module = fn.visibility_module.empty() ? fn.owning_module : fn.visibility_module;
+        body.function_member_owner_class = fn.member_owner_class;
+        body.function_source_path = fn.loc.source_path_text();
+        body.function_namespace_path = fn.namespace_path;
+        for (const Param& param : fn.params) {
+            if (!param.has_empty_brace_default) continue;
+            validate_empty_brace_default_parameter_type(param.type, body, signatures, fn.loc,
+                                                        "parameter '" + param.name + "'");
+        }
     }
     return signatures;
 }

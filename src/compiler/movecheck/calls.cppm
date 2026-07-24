@@ -87,6 +87,20 @@ void validate_alignof_operand(const Expr& expr, const Body& body, const SourceLo
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                            const Signatures& signatures);
 
+[[nodiscard]] static bool signature_accepts_argument_count(const FunctionSignature& candidate, std::size_t arg_count,
+                                                           std::size_t param_offset) {
+    if (candidate.param_types.size() < param_offset) return false;
+    std::size_t fixed_param_count = candidate.param_types.size() - param_offset;
+    std::size_t min_required = fixed_param_count;
+    while (min_required > 0 &&
+           candidate.param_has_empty_brace_default[param_offset + min_required - 1]) {
+        min_required--;
+    }
+    if (arg_count < min_required) return false;
+    if (!candidate.has_varargs && arg_count > fixed_param_count) return false;
+    return candidate.has_varargs || arg_count <= fixed_param_count;
+}
+
 void check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
                                          const Signatures& signatures, const SourceLocation& loc) {
     const Type& target_operand = binary_operand_type(target_type);
@@ -106,6 +120,7 @@ void check_enum_conversion_compatibility(const Type& target_type, const Expr& so
     FunctionSignature sig;
     sig.param_types = type.function_params;
     sig.param_names.resize(sig.param_types.size());
+    sig.param_has_empty_brace_default.assign(sig.param_types.size(), false);
     sig.param_require_thread_movable.assign(sig.param_types.size(), false);
     sig.param_require_thread_shareable.assign(sig.param_types.size(), false);
     sig.return_type = *type.function_return;
@@ -524,7 +539,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures) {
     if (callee.direct_signature.has_value()) {
-        return callee.direct_signature->param_types.size() == call_expr.args.size() + callee.param_offset
+        return signature_accepts_argument_count(*callee.direct_signature, call_expr.args.size(), callee.param_offset)
                    ? &*callee.direct_signature
                    : nullptr;
     }
@@ -555,13 +570,14 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             }
             if (!receiver_matches_method_qualifier(*call_expr.lhs, only, body, signatures)) return nullptr;
         }
+        if (!signature_accepts_argument_count(only, call_expr.args.size(), callee.param_offset)) return nullptr;
         return &only;
     }
 
     std::vector<const FunctionSignature*> matches;
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (candidate.param_types.size() != call_expr.args.size() + callee.param_offset) continue;
+        if (!signature_accepts_argument_count(candidate, call_expr.args.size(), callee.param_offset)) continue;
         bool all_match = true;
         // The receiver (`this`), for a method call: viable only if the
         // candidate's own `this` mutability doesn't demand more than the
@@ -641,7 +657,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     if (it == signatures.end()) return nullptr;
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (candidate.param_types.size() != call_expr.args.size() + 1) continue;
+        if (!signature_accepts_argument_count(candidate, call_expr.args.size(), 1)) continue;
         if (!is_reference(candidate.param_types[0]) || candidate.param_types[0].is_rvalue_ref ||
             !candidate.param_types[0].is_mutable_ref) {
             continue;

@@ -506,6 +506,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                              "caller can guarantee (ch01 §1.2/§1.3)",
             state.current_loc);
     }
+    if (report_errors && sig != nullptr) {
+        validate_omitted_default_arguments(*sig, expr.args.size(), callee.param_offset, body, signatures, state.current_loc);
+    }
     // Scratch borrow-map shared by every reference argument of *this*
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
@@ -726,6 +729,9 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                              "caller can guarantee (ch01 §1.2/§1.3)",
             state.current_loc);
+    }
+    if (report_errors && sig != nullptr) {
+        validate_omitted_default_arguments(*sig, ctor_args.size(), 1, body, signatures, state.current_loc);
     }
     BorrowMap in_call_borrows;
     bool constructed_state_can_carry_lifetimes =

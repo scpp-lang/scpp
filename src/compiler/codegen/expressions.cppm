@@ -647,12 +647,72 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         return bool_to_i1(codegen_contextual_bool_value(expr));
     }
 
+    void Codegen::initialize_empty_brace_default_storage(llvm::LLVMValueRef storage, const Type& type,
+                                                         std::optional<unsigned> alignment)
+{
+        zero_initialize_storage(storage, type, alignment);
+        if (type.kind != TypeKind::Named) return;
+        const ClassDef* class_def = find_class_def(type.name);
+        if (class_def == nullptr) return;
+        const Function* ctor_def = resolve_constructor_overload_exact(type.name, {});
+        if (ctor_def == nullptr) {
+            if (!class_has_any_constructor(type.name)) {
+                emit_default_initializers_for_class_storage(storage, *class_def,
+                                                           /*initialize_virtual_interface_bases=*/true);
+                return;
+            }
+            throw CodegenError("type '" + type.name + "' has no default constructor for '= {}'", current_loc_);
+        }
+        if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+            Expr ctor_expr;
+            ctor_expr.kind = ExprKind::Call;
+            ctor_expr.loc = current_loc_;
+            ctor_expr.name = type.name;
+            ctor_expr.has_paren_init = true;
+            ConstexprValue value = evaluate_immediate_expr(*program_, ctor_expr);
+            store_constexpr_value_into(storage, type, value);
+            return;
+        }
+        llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+        if (ctor == nullptr) {
+            throw CodegenError("type '" + type.name + "' has no default constructor for '= {}'", current_loc_);
+        }
+        emit_complete_object_interface_initializers(*class_def, ctor_def, storage);
+        build_call(ctor, {storage});
+    }
+
+    llvm::LLVMValueRef Codegen::codegen_empty_brace_default_argument(const Type& param_type)
+{
+        if (param_type.kind == TypeKind::Reference) {
+            if (param_type.is_mutable_ref || param_type.is_rvalue_ref || param_type.pointee == nullptr) {
+                throw CodegenError("references are not default-constructible for '= {}'", current_loc_);
+            }
+            const Type& pointee = *param_type.pointee;
+            std::optional<unsigned> align = alignment_for_type(pointee);
+            llvm::LLVMValueRef temp = create_entry_block_alloca(to_llvm_type(pointee), "defaultarg.ref", align);
+            initialize_empty_brace_default_storage(temp, pointee, align);
+            return temp;
+        }
+        if (param_type.kind == TypeKind::Named && find_class_def(param_type.name) != nullptr) {
+            const Function* ctor_def = resolve_constructor_overload_exact(param_type.name, {});
+            if (ctor_def == nullptr && class_has_any_constructor(param_type.name)) {
+                throw CodegenError("type '" + param_type.name + "' has no default constructor for '= {}'", current_loc_);
+            }
+            return codegen_constructed_class_value(param_type.name, {}, ctor_def);
+        }
+        return llvm::LLVMConstNull(to_llvm_type(param_type));
+    }
+
 
     std::vector<llvm::LLVMValueRef> Codegen::codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
                                                   std::size_t param_offset)
 {
         std::vector<llvm::LLVMValueRef> result;
-        result.reserve(args.size());
+        std::size_t total_args = args.size();
+        if (callee_def != nullptr && callee_def->params.size() >= param_offset) {
+            total_args = std::max(total_args, callee_def->params.size() - param_offset);
+        }
+        result.reserve(total_args);
         for (std::size_t i = 0; i < args.size(); i++) {
             bool param_is_reference = callee_def != nullptr && i + param_offset < callee_def->params.size() &&
                                        callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
@@ -703,6 +763,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 } else {
                     result.push_back(codegen_expr(*args[i]));
                 }
+            }
+        }
+        if (callee_def != nullptr) {
+            for (std::size_t i = args.size() + param_offset; i < callee_def->params.size(); i++) {
+                if (!callee_def->params[i].has_empty_brace_default) break;
+                result.push_back(codegen_empty_brace_default_argument(callee_def->params[i].type));
             }
         }
         return result;

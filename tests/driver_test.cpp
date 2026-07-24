@@ -5243,6 +5243,58 @@ int main() { return 0; }
     }
 }
 
+void run_default_argument_tests() {
+    {
+        std::string case_name = "empty_brace_default_argument_works_for_free_function";
+        RunResult result = compile_and_run(
+            "int add(int lhs, int rhs = {}) {\n"
+            "    return lhs + rhs;\n"
+            "}\n"
+            "int main() {\n"
+            "    return add(41) + add(1, 1) - 43;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "empty_brace_default_argument_works_for_generic_function";
+        RunResult result = compile_and_run(
+            "template<typename T>\n"
+            "T add_default(T value, int extra = {}) {\n"
+            "    return value + extra;\n"
+            "}\n"
+            "int main() {\n"
+            "    return add_default(41) - 41;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "empty_brace_default_argument_requires_default_constructible_type";
+        bool threw = false;
+        std::filesystem::path exe_path = std::filesystem::current_path() / case_name;
+        try {
+            scpp::compile_to_executable(
+                "class NoDefault {\n"
+                "public:\n"
+                "    NoDefault(int value) { return; }\n"
+                "};\n"
+                "int f(NoDefault value = {}) { return 0; }\n"
+                "int main() { return 0; }\n",
+                exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        } catch (const std::exception& e) {
+            std::string message = e.what();
+            threw = message.find("parameter 'value'") != std::string::npos &&
+                    (message.find("no default constructor") != std::string::npos ||
+                     message.find("not default-constructible") != std::string::npos);
+        }
+        std::filesystem::remove(exe_path);
+        expect(threw, case_name + ": expected non-default-constructible diagnostic");
+    }
+}
+
 void run_random_tests() {
     {
         std::string case_name = "scpp_rand_uniform_int_distribution_rejects_empty_range";
@@ -5818,6 +5870,7 @@ int main() {
     run_global_scope_resolution_tests();
     run_nodiscard_tests();
     run_static_member_function_tests();
+    run_default_argument_tests();
     run_random_tests();
     run_expected_tests();
     run_io_tests();

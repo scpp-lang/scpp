@@ -241,6 +241,7 @@ struct Param {
     Type type;
     std::string name;
     LifetimeAnnotation lifetime;
+    bool has_empty_brace_default = false;
     // ch05 §5.11: empty for an ordinary parameter (the overwhelmingly
     // common case). Non-empty names the concept this parameter is
     // constrained by, for the abbreviated generic-function form --

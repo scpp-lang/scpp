@@ -3625,6 +3625,7 @@ private:
     // shared helper.
     std::vector<Param> parse_param_list() {
         std::vector<Param> params;
+        bool saw_default_argument = false;
         expect(TokenKind::LParen, "'('");
         if (!check(TokenKind::RParen)) {
             do {
@@ -3663,6 +3664,24 @@ private:
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration");
+                if (match(TokenKind::Assign)) {
+                    if (!match(TokenKind::LBrace) || !match(TokenKind::RBrace)) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column,
+                                         "default function arguments only support the restricted form '= {}' in this version");
+                    }
+                    param.has_empty_brace_default = true;
+                } else if (saw_default_argument) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                     "once a parameter uses a default argument ('= {}'), every later parameter "
+                                     "must also provide one");
+                }
+                if (param.is_parameter_pack && param.has_empty_brace_default) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument");
+                }
+                saw_default_argument = saw_default_argument || param.has_empty_brace_default;
                 params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
@@ -5312,6 +5331,7 @@ private:
         fn.is_nodiscard = is_nodiscard;
         fn.nodiscard_reason = nodiscard_reason;
         bool saw_inline = false;
+        bool saw_default_argument = false;
         for (;;) {
             if (!saw_inline && match(TokenKind::KwInline)) {
                 saw_inline = true;
@@ -5378,6 +5398,24 @@ private:
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration");
+                if (match(TokenKind::Assign)) {
+                    if (!match(TokenKind::LBrace) || !match(TokenKind::RBrace)) {
+                        const Token& tok = peek();
+                        throw ParseError(tok.line, tok.column,
+                                         "default function arguments only support the restricted form '= {}' in this version");
+                    }
+                    param.has_empty_brace_default = true;
+                } else if (saw_default_argument) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                     "once a parameter uses a default argument ('= {}'), every later parameter "
+                                     "must also provide one");
+                }
+                if (param.is_parameter_pack && param.has_empty_brace_default) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument");
+                }
+                saw_default_argument = saw_default_argument || param.has_empty_brace_default;
                 fn.params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }

@@ -814,6 +814,11 @@ private:
 
     llvm::LLVMValueRef codegen_contextual_bool_i1(const Expr& expr);
 
+    void initialize_empty_brace_default_storage(llvm::LLVMValueRef storage, const Type& type,
+                                                std::optional<unsigned> alignment);
+
+    llvm::LLVMValueRef codegen_empty_brace_default_argument(const Type& param_type);
+
     std::vector<llvm::LLVMValueRef> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
                                                   std::size_t param_offset);
 
