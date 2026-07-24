@@ -28,7 +28,7 @@ void __thread_detach_and_delete(void* handle) {
     return;
 }
 
-export template<typename F>
+template<typename F>
 void __thread_run_callable(void* erased) {
     [[scpp::unsafe]] {
         F* typed = static_cast<F*>(erased);

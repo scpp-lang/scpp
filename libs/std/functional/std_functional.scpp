@@ -2,7 +2,7 @@ export module std:functional;
 
 namespace std {
 
-export template<typename F>
+template<typename F>
 void __move_only_function_destroy(void* erased) {
     [[scpp::unsafe]] {
         F* typed = static_cast<F*>(erased);
@@ -11,7 +11,7 @@ void __move_only_function_destroy(void* erased) {
     return;
 }
 
-export template<typename F>
+template<typename F>
 void* __function_copy(const void* erased) {
     [[scpp::unsafe]] {
         F* raw = static_cast<F*>(erased);
@@ -21,7 +21,7 @@ void* __function_copy(const void* erased) {
     }
 }
 
-export template<typename F, typename R, typename... Args>
+template<typename F, typename R, typename... Args>
 R __move_only_function_invoke(void* erased, Args... args) {
     [[scpp::unsafe]] {
         F* typed = static_cast<F*>(erased);
@@ -29,7 +29,7 @@ R __move_only_function_invoke(void* erased, Args... args) {
     }
 }
 
-export template<typename F, typename R, typename... Args>
+template<typename F, typename R, typename... Args>
 R __move_only_function_invoke_const(const void* erased, Args... args) {
     [[scpp::unsafe]] {
         F* raw = static_cast<F*>(erased);
@@ -38,7 +38,7 @@ R __move_only_function_invoke_const(const void* erased, Args... args) {
     }
 }
 
-export template<typename F, typename R, typename... Args>
+template<typename F, typename R, typename... Args>
 R __move_only_function_invoke_rvalue(void* erased, Args... args) {
     [[scpp::unsafe]] {
         F* typed = static_cast<F*>(erased);
@@ -47,7 +47,7 @@ R __move_only_function_invoke_rvalue(void* erased, Args... args) {
     }
 }
 
-export template<typename F, typename R, typename... Args>
+template<typename F, typename R, typename... Args>
 R __move_only_function_invoke_const_rvalue(const void* erased, Args... args) {
     [[scpp::unsafe]] {
         F* raw = static_cast<F*>(erased);

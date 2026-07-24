@@ -1502,12 +1502,20 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
 // feed a copy constructor / by-value class boundary without first moving.
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body,
                                                  const Signatures& signatures) {
+    auto same_named_record_type_ignoring_top_level_const = [](const Type& source_type, const Type& dest_type) {
+        return source_type.kind == TypeKind::Named && dest_type.kind == TypeKind::Named &&
+               source_type.name == dest_type.name;
+    };
     if (!is_lvalue_copy_source_shape(expr)) return false;
     std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
     if (!source_type.has_value()) return false;
-    if (types_equal(*source_type, target_type)) return true;
+    if (same_named_record_type_ignoring_top_level_const(*source_type, target_type) ||
+        types_equal(*source_type, target_type)) {
+        return true;
+    }
     return source_type->kind == TypeKind::Reference && !source_type->is_rvalue_ref && source_type->pointee &&
-           types_equal(*source_type->pointee, target_type);
+           (same_named_record_type_ignoring_top_level_const(*source_type->pointee, target_type) ||
+            types_equal(*source_type->pointee, target_type));
 }
 
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,

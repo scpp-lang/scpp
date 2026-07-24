@@ -1044,6 +1044,12 @@ struct Function {
     // declaration is mangled exactly the way its owning module's own
     // separate compilation will define it.
     std::string owning_module;
+    // Module whose full private/exported visibility should be used when
+    // checking/instantiating this function's body. Usually identical to
+    // owning_module; preserved separately for locally-instantiated clones
+    // of imported generics, which may need local symbol ownership while
+    // still seeing the defining module's hidden helpers.
+    std::string visibility_module;
 };
 
 struct StructField {

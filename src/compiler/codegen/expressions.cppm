@@ -330,12 +330,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         const Function* callee_def =
             resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get());
         if (callee_def == nullptr) {
-            throw CodegenError("call to unknown function '" + callee_name + "'",
+            throw CodegenError("call to unknown function '" + callee_name + "' (resolve)",
                 current_loc_);
         }
         llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee_def).c_str());
         if (callee == nullptr) {
-            throw CodegenError("call to unknown function '" + callee_name + "'",
+            throw CodegenError("call to unknown function '" + callee_name + "' (llvm)",
                 current_loc_);
         }
         std::vector<llvm::LLVMValueRef> args = codegen_call_args(expr.args, callee_def, param_offset);
@@ -410,11 +410,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
             return true;
         }
-        if (!is_bare_same_type_copy_source(*args[0], target.type) || !is_copy_constructible(target.type.name)) {
+        bool allow_hidden_helper_copy =
+            current_function_def_ != nullptr && current_function_def_->is_compile_time_dependency;
+        if (!is_bare_same_type_copy_source(*args[0], target.type) ||
+            (!allow_hidden_helper_copy && !is_copy_constructible(target.type.name))) {
             return false;
         }
         LValue src = codegen_lvalue(*args[0]);
-        if (!types_equal(src.type, target.type)) return false;
         codegen_copy_construct_class(target.ptr, src.ptr, target.type.name);
         return true;
     }
@@ -521,10 +523,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                   bool allow_implicit_converting_ctor)
 {
         llvm::LLVMTypeRef llvm_type = to_llvm_type(target_type);
-        if (is_bare_same_type_copy_source(expr, target_type) && is_copy_constructible(target_type.name)) {
-            auto src_it = locals_.find(expr.name);
+        bool allow_hidden_helper_copy =
+            current_function_def_ != nullptr && current_function_def_->is_compile_time_dependency;
+        if (is_bare_same_type_copy_source(expr, target_type) &&
+            (allow_hidden_helper_copy || is_copy_constructible(target_type.name))) {
             llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "classtransport");
-            codegen_copy_construct_class(temp, src_it->second.alloca, target_type.name);
+            codegen_copy_construct_class(temp, codegen_lvalue(expr).ptr, target_type.name);
             return llvm::LLVMBuildLoad2(builder_, llvm_type, temp, "classtransport.value");
         }
         if (expr.kind == ExprKind::Lambda) {
@@ -1271,13 +1275,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             ident.name = capture.name;
             const Expr& source = capture.init ? *capture.init : ident;
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name) &&
-                source.kind == ExprKind::Identifier) {
-                auto src_it = locals_.find(source.name);
-                if (src_it != locals_.end() && types_equal(src_it->second.type, field_type) &&
-                    is_copy_constructible(field_type.name)) {
-                    codegen_copy_construct_class(field_ptr, src_it->second.alloca, field_type.name);
-                    continue;
-                }
+                is_bare_same_type_copy_source(source, field_type) && is_copy_constructible(field_type.name)) {
+                codegen_copy_construct_class(field_ptr, codegen_lvalue(source).ptr, field_type.name);
+                continue;
             }
             llvm::LLVMValueRef value = codegen_value_for_target(source, field_type);
             check_store_type(value, to_llvm_type(field_type), "capture '" + capture.name + "'");
@@ -2086,28 +2086,26 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             // assignment kind (including move assignment, which reuses
             // that same generic path below) is.
             if (lv.type.kind == TypeKind::Named && structs_.contains(lv.type.name) &&
-                expr.rhs->kind == ExprKind::Identifier) {
-                auto src_it = locals_.find(expr.rhs->name);
-                if (src_it != locals_.end() && types_equal(src_it->second.type, lv.type)) {
-                    if (const Function* user_assign = find_user_declared_copy_assign_ast(lv.type.name)) {
-                        llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
-                        build_call(op, {lv.ptr, src_it->second.alloca});
-                    } else {
-                        codegen_memberwise_copy_assign(lv.ptr, src_it->second.alloca, lv.type.name);
-                    }
-                    if (expr.lhs->kind == ExprKind::Identifier) {
-                        // See the move-assignment path's identical
-                        // comment below for why this reset is needed
-                        // (covers reassigning a previously-moved-out
-                        // variable via a copy this time).
-                        auto target_it = locals_.find(expr.lhs->name);
-                        if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
-                            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0),
-                                                   target_it->second.moved_flag);
-                        }
-                    }
-                    return lv.ptr;
+                is_bare_same_type_copy_source(*expr.rhs, lv.type)) {
+                llvm::LLVMValueRef src_ptr = codegen_lvalue(*expr.rhs).ptr;
+                if (const Function* user_assign = find_user_declared_copy_assign_ast(lv.type.name)) {
+                    llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
+                    build_call(op, {lv.ptr, src_ptr});
+                } else {
+                    codegen_memberwise_copy_assign(lv.ptr, src_ptr, lv.type.name);
                 }
+                if (expr.lhs->kind == ExprKind::Identifier) {
+                    // See the move-assignment path's identical
+                    // comment below for why this reset is needed
+                    // (covers reassigning a previously-moved-out
+                    // variable via a copy this time).
+                    auto target_it = locals_.find(expr.lhs->name);
+                    if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
+                        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0),
+                                             target_it->second.moved_flag);
+                    }
+                }
+                return lv.ptr;
             }
             llvm::LLVMValueRef value = codegen_value_for_target(*expr.rhs, lv.type);
             // Refresh to `expr`'s own position -- see the VarDecl case's

@@ -3474,6 +3474,93 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name =
+            "cli_build_module_with_hidden_function_value_copy_helper_roundtrips";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_build_module_with_hidden_function_value_copy_helper_roundtrips";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    template<typename T>\n"
+                        "    void* hidden_copy(const void* erased) {\n"
+                        "        [[scpp::unsafe]] {\n"
+                        "            T* raw = static_cast<T*>(erased);\n"
+                        "            const T* typed = raw;\n"
+                        "            const T& source = *typed;\n"
+                        "            return static_cast<void*>(new T(source));\n"
+                        "        }\n"
+                        "    }\n"
+                        "    export template<typename T>\n"
+                        "    class Cloner {\n"
+                        "    public:\n"
+                        "        virtual ~Cloner() = default;\n"
+                        "        void* (*copy_)(const void*){};\n"
+                        "        Cloner() {\n"
+                        "            this->copy_ = helper::hidden_copy<T>;\n"
+                        "            return;\n"
+                        "        }\n"
+                        "        T* clone(const T& value) const {\n"
+                        "            [[scpp::unsafe]] {\n"
+                        "                void* erased_copy = this->copy_(static_cast<const void*>(&value));\n"
+                        "                return static_cast<T*>(erased_copy);\n"
+                        "            }\n"
+                        "        }\n"
+                        "    };\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                                                "import helper;\n"
+                                                "class Adder {\n"
+                                                "public:\n"
+                                                "    virtual ~Adder() { return; }\n"
+                                                "    Adder(int& value) : value{value} {\n"
+                                                "        return;\n"
+                                                "    }\n"
+                                                "    int call(int x) const {\n"
+                                                "        return x + this->value;\n"
+                                                "    }\n"
+                                                "private:\n"
+                                                "    int& value;\n"
+                                                "};\n"
+                                                "int main() {\n"
+                                                "    int value = 5;\n"
+                                                "    Adder base{value};\n"
+                                                "    helper::Cloner<Adder> cloner{};\n"
+                        "    Adder* copied = cloner.clone(base);\n"
+                        "    int result = 0;\n"
+                        "    [[scpp::unsafe]] {\n"
+                        "        result = copied->call(7);\n"
+                        "    }\n"
+                        "    return result - 12;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": hidden function-value copy helper should build from .scppm payload, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected hidden copy-helper payload-backed binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_compile_time_dependency_function_is_not_directly_callable";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_compile_time_dependency_function_is_not_directly_callable";

@@ -162,6 +162,8 @@ struct Body {
     // compile-time-dependency visibility without storing a raw pointer into
     // Program::functions (which may reallocate while new clones are appended).
     std::string function_owning_module;
+    std::string function_visibility_module;
+    std::string function_member_owner_class;
     std::string function_source_path;
     std::vector<std::string> function_namespace_path;
 };
@@ -179,6 +181,8 @@ public:
 
     Body build() {
         body_.function_owning_module = fn_.owning_module;
+        body_.function_visibility_module = fn_.visibility_module.empty() ? fn_.owning_module : fn_.visibility_module;
+        body_.function_member_owner_class = fn_.member_owner_class;
         body_.function_source_path = fn_.loc.source_path_text();
         body_.function_namespace_path = fn_.namespace_path;
         for (const Param& param : fn_.params) {

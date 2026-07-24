@@ -7,6 +7,54 @@ import :api;
 
 namespace scpp {
 
+namespace {
+
+[[nodiscard]] bool same_named_record_type_ignoring_top_level_const(const Type& source_type, const Type& target_type) {
+    if (source_type.kind != TypeKind::Named || target_type.kind != TypeKind::Named) return false;
+    return source_type.name == target_type.name;
+}
+
+[[nodiscard]] bool pointer_to_void_parameter_accepts_pointer_in_unsafe_context(const Type& source_type,
+                                                                               const Type& target_type,
+                                                                               int unsafe_depth)
+{
+    if (unsafe_depth <= 0 || source_type.kind != TypeKind::Pointer || target_type.kind != TypeKind::Pointer ||
+        source_type.pointee == nullptr || target_type.pointee == nullptr) {
+        return false;
+    }
+    if (target_type.pointee->kind != TypeKind::Named || target_type.pointee->name != "void") return false;
+    if (target_type.is_mutable_pointee && !source_type.is_mutable_pointee) return false;
+    return true;
+}
+
+[[nodiscard]] bool is_float_scalar_name(std::string_view name) {
+    return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
+}
+
+[[nodiscard]] bool is_integral_scalar_name(std::string_view name) {
+    return name == "char" || name == "int" || name == "long" || name == "unsigned int" ||
+           name == "unsigned long" || name == "int8_t" || name == "int16_t" || name == "int32_t" ||
+           name == "int64_t" || name == "uint8_t" || name == "uint16_t" || name == "uint32_t" ||
+           name == "uint64_t" || name == "size_t" || name == "ptrdiff_t";
+}
+
+[[nodiscard]] bool literal_matches_scalar_parameter(const Expr& arg, const Type& target_type) {
+    auto is_negative_literal = [&](ExprKind kind) {
+        return arg.kind == ExprKind::Unary && arg.unary_op == UnaryOp::Neg && arg.lhs != nullptr && arg.lhs->kind == kind;
+    };
+    if (target_type.kind != TypeKind::Named) return false;
+    if ((arg.kind == ExprKind::IntegerLiteral || is_negative_literal(ExprKind::IntegerLiteral)) &&
+        (is_float_scalar_name(target_type.name) ||
+         (is_integral_scalar_name(target_type.name) && target_type.name != "bool" &&
+          target_type.name != "char"))) {
+        return true;
+    }
+    return (arg.kind == ExprKind::FloatLiteral || is_negative_literal(ExprKind::FloatLiteral)) &&
+           is_float_scalar_name(target_type.name);
+}
+
+} // namespace
+
     const StructDef* Codegen::find_struct_def(const std::string& name) const {
         const StructDef* forward_decl = nullptr;
         for (const StructDef& def : program_->structs) {
@@ -395,9 +443,14 @@ namespace scpp {
         if (!is_lvalue_copy_source_shape(expr)) return false;
         std::optional<Type> expr_type = infer_type(expr);
         if (!expr_type.has_value()) return false;
-        if (types_equal(*expr_type, target_type)) return true;
+        if (same_named_record_type_ignoring_top_level_const(*expr_type, target_type) ||
+            types_equal(*expr_type, target_type)) {
+            return true;
+        }
         return expr_type->kind == TypeKind::Reference && !expr_type->is_rvalue_ref &&
-               expr_type->pointee != nullptr && types_equal(*expr_type->pointee, target_type);
+               expr_type->pointee != nullptr &&
+               (same_named_record_type_ignoring_top_level_const(*expr_type->pointee, target_type) ||
+                types_equal(*expr_type->pointee, target_type));
     }
 
 
@@ -429,6 +482,16 @@ namespace scpp {
 
     bool Codegen::argument_type_matches_parameter(const Type& arg_type, const Type& candidate_param_type)
 {
+        if (candidate_param_type.kind == TypeKind::Pointer && arg_type.kind == TypeKind::Array &&
+            candidate_param_type.pointee != nullptr && arg_type.element != nullptr) {
+            return (!candidate_param_type.is_mutable_pointee || !arg_type.element->is_const_qualified) &&
+                   types_equal(*arg_type.element, *candidate_param_type.pointee);
+        }
+        if (candidate_param_type.kind == TypeKind::Span && arg_type.kind == TypeKind::Array &&
+            candidate_param_type.pointee != nullptr && arg_type.element != nullptr) {
+            return (!candidate_param_type.is_mutable_ref || !arg_type.element->is_const_qualified) &&
+                   types_equal(*arg_type.element, *candidate_param_type.pointee);
+        }
         if (candidate_param_type.kind == TypeKind::Reference) {
             if (arg_type.kind == TypeKind::Reference) {
                 if (arg_type.pointee == nullptr || candidate_param_type.pointee == nullptr) return false;
@@ -448,6 +511,8 @@ namespace scpp {
 {
         auto argument_type_matches_or_converts = [&](const Type& arg_type, const Type& candidate_param_type) {
             return argument_type_matches_parameter(arg_type, candidate_param_type) ||
+                   pointer_to_void_parameter_accepts_pointer_in_unsafe_context(arg_type, candidate_param_type,
+                                                                               unsafe_depth_) ||
                    types_compatible_with_base_conversion(arg_type, candidate_param_type, current_enclosing_class_name());
         };
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
@@ -473,6 +538,7 @@ namespace scpp {
             std::optional<Type> arg_type = infer_type(arg);
             return arg_type.has_value() && argument_type_matches_or_converts(*arg_type, param_type);
         }
+        if (literal_matches_scalar_parameter(arg, param_type)) return true;
         std::optional<Type> arg_type = infer_type(arg);
         if (!arg_type.has_value()) return false;
         if (!argument_type_matches_or_converts(*arg_type, param_type)) {
@@ -578,6 +644,16 @@ namespace scpp {
                     return nullptr;
                 }
                 if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) return nullptr;
+            }
+            std::size_t fixed_param_count = candidates[0]->params.size() - param_offset;
+            if ((!candidates[0]->has_varargs && fixed_param_count != args.size()) ||
+                (candidates[0]->has_varargs && args.size() < fixed_param_count)) {
+                return nullptr;
+            }
+            for (std::size_t i = 0; i < fixed_param_count; i++) {
+                if (!argument_matches_parameter(*args[i], candidates[0]->params[i + param_offset].type)) {
+                    return nullptr;
+                }
             }
             return candidates[0];
         }
