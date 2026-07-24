@@ -41,6 +41,13 @@ private:
     void* handle{};
 
 public:
+    string() {
+        [[scpp::unsafe]] {
+            this->handle = scpp_string_new("");
+        }
+        return;
+    }
+
     string(const char* s) {
         [[scpp::unsafe]] {
             this->handle = scpp_string_new(s);

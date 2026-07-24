@@ -1,0 +1,10 @@
+import std;
+
+int size_of_empty() {
+    static const std::string empty;
+    return (int)empty.size();
+}
+
+int main() {
+    return size_of_empty();
+}

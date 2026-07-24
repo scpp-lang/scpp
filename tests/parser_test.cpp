@@ -231,6 +231,32 @@ void test_bare_local_var_decl_is_rejected() {
     expect(threw, "bare_local_var_decl_is_rejected: expected a ParseError");
 }
 
+void test_static_local_var_decl_parses_and_allows_no_initializer() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "int f() {\n"
+        "    static const std::string empty;\n"
+        "    return (int)empty.size();\n"
+        "}\n");
+    const scpp::Function* fn = find_function_named(program, "f");
+    expect(fn != nullptr, "static_local_var_decl_parses_and_allows_no_initializer: expected f");
+    if (fn == nullptr) return;
+    expect(fn->body->statements.size() == 2,
+           "static_local_var_decl_parses_and_allows_no_initializer: expected 2 statements");
+    if (fn->body->statements.size() != 2) return;
+    const scpp::Stmt& decl = *fn->body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl,
+           "static_local_var_decl_parses_and_allows_no_initializer: first statement should be VarDecl");
+    expect(decl.is_static_local,
+           "static_local_var_decl_parses_and_allows_no_initializer: local should be marked static");
+    expect(decl.is_const,
+           "static_local_var_decl_parses_and_allows_no_initializer: local should be marked const");
+    expect(is_named_type(decl.type, "std::string"),
+           "static_local_var_decl_parses_and_allows_no_initializer: type should be std::string");
+    expect(decl.init == nullptr && !decl.has_ctor_args,
+           "static_local_var_decl_parses_and_allows_no_initializer: no explicit initializer should be preserved");
+}
+
 void test_valid_local_initializer_forms_parse() {
     scpp::Program program = scpp::parse(
         "struct Pair { int first; int second; };\n"
@@ -4219,6 +4245,7 @@ int main() {
     test_class_var_decl_with_brace_init_parses_ctor_args();
     test_class_var_decl_with_paren_init_is_rejected();
     test_bare_local_var_decl_is_rejected();
+    test_static_local_var_decl_parses_and_allows_no_initializer();
     test_valid_local_initializer_forms_parse();
     test_class_default_member_initializers_parse();
     test_constructor_member_initializer_list_parses();

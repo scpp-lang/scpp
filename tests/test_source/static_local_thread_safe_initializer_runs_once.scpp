@@ -1,0 +1,23 @@
+import std;
+
+int init_hits = 0;
+int thread_a_value = 0;
+int thread_b_value = 0;
+
+int build() {
+    init_hits = init_hits + 1;
+    return 7;
+}
+
+int read_value() {
+    static int value = build();
+    return value;
+}
+
+int main() {
+    std::thread a{[]() { thread_a_value = read_value(); }};
+    std::thread b{[]() { thread_b_value = read_value(); }};
+    a.join();
+    b.join();
+    return init_hits + thread_a_value + thread_b_value - 15;
+}

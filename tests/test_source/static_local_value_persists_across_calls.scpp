@@ -1,0 +1,12 @@
+int next() {
+    static int counter = 0;
+    counter = counter + 1;
+    return counter;
+}
+
+int main() {
+    int a = next();
+    int b = next();
+    int c = next();
+    return a * 100 + b * 10 + c - 123;
+}

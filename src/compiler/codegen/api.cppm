@@ -135,6 +135,7 @@ private:
         llvm::LLVMValueRef alloca;
         Type type;
         bool is_const = false;
+        bool is_static_storage = false;
         // spec §6.4: non-null only for a class-typed local whose own
         // class has a destructor (see create_moved_flag_if_has_destructor)
         // -- an extra `i1` slot, initialized false at declaration, set
