@@ -3183,6 +3183,8 @@ private:
                                                   bool is_nodiscard = false,
                                                   const std::string& nodiscard_reason = {}) {
         SourceLocation loc = current_loc();
+        while (match(TokenKind::KwInline)) {
+        }
         if (match(TokenKind::KwExtern)) {
             if (!check(TokenKind::StringLiteral)) {
                 // Bare extern (ch11 §11.6): always a single bodyless
@@ -5309,7 +5311,30 @@ private:
         fn.is_unsafe = is_unsafe;
         fn.is_nodiscard = is_nodiscard;
         fn.nodiscard_reason = nodiscard_reason;
-        fn.eval_mode = parse_optional_function_eval_mode();
+        bool saw_inline = false;
+        for (;;) {
+            if (!saw_inline && match(TokenKind::KwInline)) {
+                saw_inline = true;
+                continue;
+            }
+            if (fn.eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConstexpr)) {
+                advance();
+                fn.eval_mode = FunctionEvalMode::Constexpr;
+                continue;
+            }
+            if (fn.eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConsteval)) {
+                advance();
+                fn.eval_mode = FunctionEvalMode::Consteval;
+                continue;
+            }
+            if ((check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval)) &&
+                fn.eval_mode != FunctionEvalMode::RuntimeOnly) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                 "a declaration may specify at most one of 'constexpr' or 'consteval'");
+            }
+            break;
+        }
         fn.return_type = parse_type();
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
 

@@ -579,6 +579,21 @@ void test_nodiscard_function_and_method_attributes_parse() {
            "nodiscard_function_and_method_attributes_parse: bare nodiscard should have empty reason");
 }
 
+void test_inline_function_modifier_parses_with_existing_modifiers() {
+    scpp::Program program = scpp::parse(
+        "export module sample;\n"
+        "export [[nodiscard(\"use it\")]] inline constexpr int answer() { return 42; }\n");
+    const scpp::Function* fn = find_function_named(program, "answer");
+    expect(fn != nullptr, "inline_function_modifier_parses_with_existing_modifiers: expected answer");
+    if (fn == nullptr) return;
+    expect(fn->is_exported, "inline_function_modifier_parses_with_existing_modifiers: function should be exported");
+    expect(fn->is_nodiscard, "inline_function_modifier_parses_with_existing_modifiers: function should be nodiscard");
+    expect(fn->nodiscard_reason == "use it",
+           "inline_function_modifier_parses_with_existing_modifiers: nodiscard reason should parse");
+    expect(fn->eval_mode == scpp::FunctionEvalMode::Constexpr,
+           "inline_function_modifier_parses_with_existing_modifiers: constexpr should still parse");
+}
+
 void test_static_member_function_parses_without_this() {
     scpp::Program program = scpp::parse(
         "class Box {\n"
@@ -4268,6 +4283,7 @@ int main() {
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();
     test_nodiscard_function_and_method_attributes_parse();
+    test_inline_function_modifier_parses_with_existing_modifiers();
     test_static_member_function_parses_without_this();
     test_template_specialization_static_member_call_parses();
     test_struct_forward_declaration_parses_and_reconciles();

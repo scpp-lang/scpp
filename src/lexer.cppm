@@ -78,6 +78,7 @@ enum class TokenKind {
     KwConst,
     KwConstexpr,
     KwConsteval,
+    KwInline,
     KwClass,   // ch04 §4.2: owns resources, participates in move/borrow
                // checking, private-by-default access control -- unlike
                // `struct` (trivial aggregate, always-public fields).
@@ -272,6 +273,7 @@ private:
         if (text == "const") return TokenKind::KwConst;
         if (text == "constexpr") return TokenKind::KwConstexpr;
         if (text == "consteval") return TokenKind::KwConsteval;
+        if (text == "inline") return TokenKind::KwInline;
         if (text == "class") return TokenKind::KwClass;
         if (text == "static") return TokenKind::KwStatic;
         if (text == "virtual") return TokenKind::KwVirtual;

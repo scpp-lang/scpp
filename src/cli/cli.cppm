@@ -48,6 +48,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwConst: return "KwConst";
         case scpp::TokenKind::KwConstexpr: return "KwConstexpr";
         case scpp::TokenKind::KwConsteval: return "KwConsteval";
+        case scpp::TokenKind::KwInline: return "KwInline";
         case scpp::TokenKind::KwNew: return "KwNew";
         case scpp::TokenKind::KwDelete: return "KwDelete";
         case scpp::TokenKind::KwClass: return "KwClass";
