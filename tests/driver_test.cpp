@@ -6091,6 +6091,56 @@ void run_defaulted_special_member_tests() {
     }
 }
 
+void run_equality_operator_tests() {
+    {
+        std::string case_name = "defaulted_equality_operators_compare_members";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "struct Point {\n"
+            "    int x = 0;\n"
+            "    int y = 0;\n"
+            "    Point(int x, int y) : x{x}, y{y} { return; }\n"
+            "    bool operator==(const Point&) const = default;\n"
+            "    bool operator!=(const Point&) const = default;\n"
+            "};\n"
+            "int main() {\n"
+            "    Point a{1, 2};\n"
+            "    Point b{1, 2};\n"
+            "    Point c{3, 4};\n"
+            "    if (a == b) { print_int(1); } else { print_int(0); }\n"
+            "    if (a != c) { print_int(1); } else { print_int(0); }\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "1\n1\n",
+               case_name + ": expected stdout '1\\n1\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "custom_equality_operator_body_is_used_by_equals_syntax";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "struct Offset {\n"
+            "    int value = 0;\n"
+            "    Offset(int value) : value{value} { return; }\n"
+            "    bool operator==(const Offset& other) const { return this.value + 1 == other.value; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Offset a{2};\n"
+            "    Offset b{3};\n"
+            "    Offset c{2};\n"
+            "    if (a == b) { print_int(1); } else { print_int(0); }\n"
+            "    if (a == c) { print_int(1); } else { print_int(0); }\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "1\n0\n",
+               case_name + ": expected stdout '1\\n0\\n', got '" + result.stdout_text + "'");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -6127,6 +6177,7 @@ int main() {
     run_inheritance_constructor_and_destructor_tests();
     run_default_constructor_selection_tests();
     run_defaulted_special_member_tests();
+    run_equality_operator_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

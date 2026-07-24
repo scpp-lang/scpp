@@ -1193,6 +1193,11 @@ struct Function {
            type.pointee->kind == TypeKind::Named && special_member_owner_name_matches(type.pointee->name, owner_name);
 }
 
+[[nodiscard]] inline bool is_member_receiver_self_param(const Type& type, std::string_view owner_name) {
+    return type.kind == TypeKind::Reference && !type.is_rvalue_ref && type.pointee &&
+           type.pointee->kind == TypeKind::Named && special_member_owner_name_matches(type.pointee->name, owner_name);
+}
+
 [[nodiscard]] inline bool is_constructor_function(const Function& fn) {
     return !fn.member_owner_class.empty() && fn.name.ends_with("_new") && !fn.params.empty() &&
            is_special_member_this_param(fn.params[0].type, fn.member_owner_class);
@@ -1233,6 +1238,43 @@ struct Function {
     return fn.is_defaulted &&
            (is_default_constructor_function(fn) || is_copy_constructor_function(fn) || is_move_constructor_function(fn) ||
             is_copy_assignment_function(fn) || is_move_assignment_function(fn));
+}
+
+[[nodiscard]] inline bool is_equality_operator_function(const Function& fn) {
+    return !fn.member_owner_class.empty() && fn.name.ends_with("_operator_equal") && fn.params.size() == 2 &&
+           is_member_receiver_self_param(fn.params[0].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_inequality_operator_function(const Function& fn) {
+    return !fn.member_owner_class.empty() && fn.name.ends_with("_operator_not_equal") && fn.params.size() == 2 &&
+           is_member_receiver_self_param(fn.params[0].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_equality_like_operator_function(const Function& fn) {
+    return is_equality_operator_function(fn) || is_inequality_operator_function(fn);
+}
+
+[[nodiscard]] inline bool is_defaulted_equality_operator_function(const Function& fn) {
+    return fn.is_defaulted && is_equality_like_operator_function(fn);
+}
+
+[[nodiscard]] inline std::string equality_operator_method_name(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::Eq: return "operator_equal";
+        case BinaryOp::Ne: return "operator_not_equal";
+        default: return "";
+    }
+}
+
+[[nodiscard]] inline ExprPtr make_overloaded_equality_call_expr(const Expr& lhs, const Expr& rhs, BinaryOp op,
+                                                                SourceLocation loc) {
+    ExprPtr call = std::make_unique<Expr>();
+    call->kind = ExprKind::Call;
+    call->loc = std::move(loc);
+    call->name = equality_operator_method_name(op);
+    call->lhs = deep_clone_expr_with_loc(lhs, call->loc);
+    call->args.push_back(deep_clone_expr_with_loc(rhs, call->loc));
+    return call;
 }
 
 struct StructField {
