@@ -928,6 +928,41 @@ void test_user_declared_move_assignment_operator_is_rejected() {
     expect(threw, "user_declared_move_assignment_operator_is_rejected: expected a ParseError");
 }
 
+void test_defaulted_move_special_members_parse_without_parameter_names() {
+    scpp::Program program = scpp::parse(
+        "class Foo {\n"
+        "public:\n"
+        "    Foo() = default;\n"
+        "    Foo(Foo&&) = default;\n"
+        "    Foo& operator=(Foo&&) = default;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* move_ctor = nullptr;
+    const scpp::Function* move_assign = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Foo_new" && fn.params.size() == 2 && fn.is_defaulted) move_ctor = &fn;
+        if (fn.name == "Foo_operator_assign" && fn.params.size() == 2 && fn.is_defaulted) move_assign = &fn;
+    }
+    expect(move_ctor != nullptr && move_ctor->is_defaulted && move_ctor->params.size() == 2,
+           "defaulted_move_special_members_parse_without_parameter_names: expected defaulted move constructor");
+    expect(move_assign != nullptr && move_assign->is_defaulted && move_assign->params.size() == 2,
+           "defaulted_move_special_members_parse_without_parameter_names: expected defaulted move assignment");
+}
+
+void test_defaulted_non_special_member_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("class Foo {\n"
+                    "public:\n"
+                    "    int value() = default;\n"
+                    "};\n"
+                    "int main() { return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "defaulted_non_special_member_is_rejected: expected a ParseError");
+}
+
 // ch06 §6: `static_cast<T>(expr)` parses to a Cast expression with `type`
 // set to the target type and the operand in `lhs`.
 void test_static_cast_parses() {
@@ -4390,6 +4425,8 @@ int main() {
     test_constructor_taking_other_type_rvalue_reference_parses();
     test_operator_assign_parses();
     test_user_declared_move_assignment_operator_is_rejected();
+    test_defaulted_move_special_members_parse_without_parameter_names();
+    test_defaulted_non_special_member_is_rejected();
     test_static_cast_parses();
     test_c_style_cast_parses();
     test_parenthesized_expression_is_not_misdetected_as_cast();

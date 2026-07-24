@@ -64,7 +64,6 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 [[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program);
 [[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program);
-[[nodiscard]] bool is_constructor_function(const Function& fn);
 [[nodiscard]] bool class_has_any_constructor(const std::string& class_name, const Program& program);
 [[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name);
 [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def);
@@ -110,15 +109,8 @@ void validate_lifetime_annotation_placement(const Function& fn);
 // real C++, is out of scope for this recognition).
 [[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
-        if (!fn.name.ends_with("_new") || fn.params.size() != 2) continue;
-        const Type& this_param = fn.params[0].type;
-        if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
-            this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
-            continue;
-        }
-        const Type& p = fn.params[1].type;
-        if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
-            p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+        if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
+        if (is_copy_constructor_function(fn) && fn.member_owner_class == class_name) {
             return true;
         }
     }
@@ -134,15 +126,8 @@ void validate_lifetime_annotation_placement(const Function& fn);
 // operator this recognizes).
 [[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
-        if (!fn.name.ends_with("_operator_assign") || fn.params.size() != 2) continue;
-        const Type& this_param = fn.params[0].type;
-        if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
-            this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
-            continue;
-        }
-        const Type& p = fn.params[1].type;
-        if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
-            p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
+        if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
+        if (is_copy_assignment_function(fn) && fn.member_owner_class == class_name) {
             return true;
         }
     }
@@ -204,16 +189,10 @@ void validate_lifetime_annotation_placement(const Function& fn);
     return true;
 }
 
-[[nodiscard]] bool is_constructor_function(const Function& fn) {
-    if (fn.member_owner_class.empty() || !fn.name.ends_with("_new") || fn.params.empty()) return false;
-    const Type& this_param = fn.params[0].type;
-    return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
-           this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
-}
-
 [[nodiscard]] bool class_has_any_constructor(const std::string& class_name, const Program& program) {
     return std::any_of(program.functions.begin(), program.functions.end(), [&](const Function& fn) {
-        return is_constructor_function(fn) && fn.member_owner_class == class_name;
+        return is_constructor_function(fn) && fn.member_owner_class == class_name &&
+               !is_defaulted_special_member_equivalent_to_implicit_omission(fn);
     });
 }
 
@@ -270,7 +249,10 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 }
 
 void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program) {
-    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration) return;
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration ||
+        is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
+        return;
+    }
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     std::unordered_set<std::string> direct_field_names;
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
@@ -484,7 +466,10 @@ void ensure_implicit_default_construction_is_valid(const std::string& class_name
 void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                               const Signatures& signatures) {
     const BaseSpecifier* base = def.direct_ordinary_base();
-    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || base == nullptr) return;
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || base == nullptr ||
+        is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
+        return;
+    }
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
     std::string context_message =
@@ -522,7 +507,10 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
 
 void validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                                                 const Signatures& signatures) {
-    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || body.program == nullptr) return;
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || body.program == nullptr ||
+        is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
+        return;
+    }
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*body.program, def);
     for (const ClassDef* interface_def : interface_bases) {
@@ -741,6 +729,7 @@ void validate_operator_arrow_signature(const Function& fn) {
 [[nodiscard]] Signatures build_signatures(const Program& program) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
+        if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
         validate_operator_arrow_signature(fn);
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());
