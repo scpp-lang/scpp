@@ -5433,6 +5433,7 @@ private:
             return stmt;
         }
         if (check(TokenKind::LBrace)) return parse_block();
+        if (check(TokenKind::KwStatic)) return parse_var_decl();
         if (looks_like_type_start()) return parse_var_decl();
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
@@ -5450,6 +5451,7 @@ private:
         stmt->kind = StmtKind::VarDecl;
         stmt->loc = loc;
         stmt->alignment_specs = std::move(leading_alignments);
+        if (!qualify_variable_name && match(TokenKind::KwStatic)) stmt->is_static_local = true;
         stmt->is_constexpr = match(TokenKind::KwConstexpr);
         if (match(TokenKind::KwAuto)) {
             // ch05 §5.12: `auto name = expr;` infers the local's type
@@ -5516,14 +5518,15 @@ private:
         // ever give it a value, unlike an ordinary mutable local, which
         // may be declared bare and assigned later. Matches real C++'s
         // own "default initialization of const variable" rejection.
-        if (require_explicit_initializer && stmt->type.kind != TypeKind::Array && !stmt->init && !stmt->has_ctor_args) {
+        if (require_explicit_initializer && !stmt->is_static_local && stmt->type.kind != TypeKind::Array && !stmt->init &&
+            !stmt->has_ctor_args) {
             throw ParseError(loc.line, loc.column,
                              "a non-array local variable declaration must include an explicit initializer "
                              "(write '" + stmt->type.name + " " + stmt->var_name +
                                  "{};', '" + stmt->type.name + " " + stmt->var_name +
                                  "{...};', or '" + stmt->type.name + " " + stmt->var_name + " = ...;')");
         }
-        if ((stmt->is_const || stmt->is_constexpr) && !stmt->init && !stmt->has_ctor_args) {
+        if (((stmt->is_const && !stmt->is_static_local) || stmt->is_constexpr) && !stmt->init && !stmt->has_ctor_args) {
             throw ParseError(loc.line, loc.column,
                               "a constant variable must be initialized ('" +
                                   std::string(stmt->is_constexpr ? "constexpr " : "const ") + stmt->type.name +

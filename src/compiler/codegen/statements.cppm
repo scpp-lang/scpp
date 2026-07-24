@@ -43,6 +43,235 @@ namespace scpp {
                         declared_alignment = explicit_align;
                     }
                 }
+                if (stmt.is_static_local) {
+                    if (current_function_def_ == nullptr) {
+                        throw CodegenError("internal error: function-local static outside a function body", current_loc_);
+                    }
+                    auto add_internal_global = [&](llvm::LLVMTypeRef llvm_type, const std::string& name,
+                                                   llvm::LLVMValueRef init) {
+                        llvm::LLVMValueRef global = llvm::LLVMAddGlobal(module_, llvm_type, name.c_str());
+                        llvm::LLVMSetLinkage(global, llvm::LLVMInternalLinkage);
+                        llvm::LLVMSetGlobalConstant(global, /*IsConstant=*/0);
+                        llvm::LLVMSetInitializer(global, init);
+                        return global;
+                    };
+                    auto get_or_declare_runtime_fn = [&](const std::string& name, llvm::LLVMTypeRef fn_type) {
+                        llvm::LLVMValueRef fn = llvm::LLVMGetNamedFunction(module_, name.c_str());
+                        if (fn == nullptr) fn = llvm::LLVMAddFunction(module_, name.c_str(), fn_type);
+                        return fn;
+                    };
+                    auto define_static_local_destructor_helper =
+                        [&](const std::string& helper_name, llvm::LLVMValueRef storage,
+                            llvm::LLVMValueRef moved_flag) -> llvm::LLVMValueRef {
+                        llvm::LLVMTypeRef fn_type =
+                            llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
+                        llvm::LLVMValueRef fn = llvm::LLVMGetNamedFunction(module_, helper_name.c_str());
+                        if (fn != nullptr) return fn;
+                        fn = llvm::LLVMAddFunction(module_, helper_name.c_str(), fn_type);
+                        llvm::LLVMSetLinkage(fn, llvm::LLVMInternalLinkage);
+                        llvm::LLVMBasicBlockRef saved_bb = llvm::LLVMGetInsertBlock(builder_);
+                        const Function* saved_function = current_function_def_;
+                        SourceLocation saved_loc = current_loc_;
+                        llvm::LLVMBasicBlockRef entry =
+                            llvm::LLVMAppendBasicBlockInContext(context_, fn, "entry");
+                        llvm::LLVMPositionBuilderAtEnd(builder_, entry);
+                        current_function_def_ = nullptr;
+                        current_loc_ = stmt.loc;
+                        codegen_call_destructor_chain_unless_moved(stmt.type.name, storage, moved_flag);
+                        llvm::LLVMBuildRetVoid(builder_);
+                        current_function_def_ = saved_function;
+                        current_loc_ = saved_loc;
+                        if (saved_bb != nullptr) llvm::LLVMPositionBuilderAtEnd(builder_, saved_bb);
+                        refresh_debug_location(stmt.loc);
+                        return fn;
+                    };
+
+                    std::string static_base = "__scpp_static_local." + overload_names_.at(current_function_def_) + "." +
+                                              stmt.var_name + "." + std::to_string(stmt.loc.line) + "." +
+                                              std::to_string(stmt.loc.column);
+                    llvm::LLVMTypeRef storage_type = stmt.type.kind == TypeKind::Reference
+                                                         ? llvm::LLVMPointerTypeInContext(context_, 0)
+                                                     : to_llvm_type(stmt.type);
+                    llvm::LLVMValueRef storage =
+                        add_internal_global(storage_type, static_base + ".storage", llvm::LLVMConstNull(storage_type));
+                    if (declared_alignment.has_value()) llvm::LLVMSetAlignment(storage, *declared_alignment);
+                    llvm::LLVMTypeRef guard_type = llvm::LLVMInt64TypeInContext(context_);
+                    llvm::LLVMValueRef guard = add_internal_global(
+                        guard_type, static_base + ".guard",
+                        llvm::LLVMConstInt(guard_type, 0, /*SignExtend=*/0));
+                    llvm::LLVMValueRef moved_flag = nullptr;
+                    if (stmt.type.kind == TypeKind::Named && class_has_destructor_in_chain(stmt.type.name)) {
+                        llvm::LLVMTypeRef moved_flag_type = llvm::LLVMInt1TypeInContext(context_);
+                        moved_flag = add_internal_global(
+                            moved_flag_type, static_base + ".moved",
+                            llvm::LLVMConstInt(moved_flag_type, 0, /*SignExtend=*/0));
+                    }
+
+                    llvm::LLVMTypeRef guard_ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
+                    llvm::LLVMTypeRef guard_acquire_params[] = {guard_ptr_type};
+                    llvm::LLVMValueRef guard_acquire = get_or_declare_runtime_fn(
+                        "__cxa_guard_acquire",
+                        llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), guard_acquire_params, 1,
+                                               /*IsVarArg=*/0));
+                    llvm::LLVMValueRef guard_release = get_or_declare_runtime_fn(
+                        "__cxa_guard_release",
+                        llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), guard_acquire_params, 1,
+                                               /*IsVarArg=*/0));
+                    llvm::LLVMValueRef atexit_fn = get_or_declare_runtime_fn(
+                        "atexit",
+                        [&] {
+                            llvm::LLVMTypeRef atexit_params[] = {guard_ptr_type};
+                            return llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), atexit_params,
+                                                          1, /*IsVarArg=*/0);
+                        }());
+
+                    llvm::LLVMValueRef acquired = build_call(guard_acquire, {guard});
+                    llvm::LLVMValueRef should_init = llvm::LLVMBuildICmp(
+                        builder_, llvm::LLVMIntNE, acquired,
+                        llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, /*SignExtend=*/0),
+                        "staticguard");
+                    llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+                    llvm::LLVMBasicBlockRef init_bb =
+                        llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "static.init");
+                    llvm::LLVMBasicBlockRef cont_bb =
+                        llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "static.cont");
+                    llvm::LLVMBuildCondBr(builder_, should_init, init_bb, cont_bb);
+
+                    llvm::LLVMPositionBuilderAtEnd(builder_, init_bb);
+                    refresh_debug_location(stmt.loc);
+                    if (stmt.type.kind == TypeKind::Reference) {
+                        if (!stmt.init) {
+                            throw CodegenError("reference '" + stmt.var_name +
+                                                   "' must be initialized (bound to a variable) at declaration",
+                                current_loc_);
+                        }
+                        validate_reference_pointee(*stmt.type.pointee);
+                        llvm::LLVMValueRef referent_addr =
+                            !stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)
+                                ? codegen_materialize_rvalue_reference_source(*stmt.init)
+                                : codegen_lvalue(*stmt.init).ptr;
+                        llvm::LLVMBuildStore(builder_, referent_addr, storage);
+                    } else if (stmt.type.kind == TypeKind::Span) {
+                        if (!stmt.init) {
+                            throw CodegenError("span '" + stmt.var_name +
+                                                   "' must be initialized (bound to an array) at declaration",
+                                current_loc_);
+                        }
+                        llvm::LLVMValueRef span_value = codegen_span_value_for_target(*stmt.init, stmt.type);
+                        llvm::LLVMBuildStore(builder_, span_value, storage);
+                    } else if (is_bare_void(stmt.type)) {
+                        throw CodegenError("variable '" + stmt.var_name +
+                                               "' cannot have type 'void' (only a return type or a pointer's "
+                                               "pointee -- 'void*' -- may be 'void')",
+                            current_loc_);
+                    } else if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
+                        codegen_construct_lambda(*stmt.init, storage);
+                    } else if (stmt.has_ctor_args) {
+                        zero_initialize_storage(storage, stmt.type, declared_alignment);
+                        if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
+                            initialize_storage_from_brace_args(LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args);
+                        } else if (try_initialize_class_storage_from_same_type_source(
+                                       LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args)) {
+                        } else {
+                            std::string ctor_name = stmt.type.name + "_new";
+                            const Function* ctor_def = resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
+                            if (ctor_def == nullptr) {
+                                const ClassDef* class_def = find_class_def(stmt.type.name);
+                                if (stmt.ctor_args.empty() && class_def == nullptr) {
+                                } else if (stmt.ctor_args.empty() && class_def != nullptr &&
+                                           !class_has_any_constructor(stmt.type.name)) {
+                                    emit_default_initializers_for_class_storage(
+                                        storage, *class_def, /*initialize_virtual_interface_bases=*/true);
+                                } else {
+                                    throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                        current_loc_);
+                                }
+                            } else if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+                                llvm::LLVMValueRef value =
+                                    codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
+                                create_store(value, storage, declared_alignment);
+                            } else {
+                                llvm::LLVMValueRef ctor =
+                                    llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+                                if (ctor == nullptr) {
+                                    throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                        current_loc_);
+                                }
+                                if (const ClassDef* class_def = find_class_def(stmt.type.name)) {
+                                    emit_complete_object_interface_initializers(*class_def, ctor_def, storage);
+                                }
+                                std::vector<llvm::LLVMValueRef> args =
+                                    codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                                args.insert(args.begin(), storage);
+                                build_call(ctor, args);
+                            }
+                        }
+                    } else if (stmt.init) {
+                        if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name) &&
+                            stmt.init->kind == ExprKind::Identifier) {
+                            LValue src = codegen_lvalue(*stmt.init);
+                            if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
+                                llvm::LLVMValueRef ctor =
+                                    llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+                                build_call(ctor, {storage, src.ptr});
+                            } else {
+                                codegen_memberwise_copy_construct(storage, src.ptr, stmt.type.name);
+                            }
+                        } else {
+                            llvm::LLVMValueRef init_value = codegen_value_for_target(*stmt.init, stmt.type);
+                            refresh_debug_location(stmt.loc);
+                            check_store_type(init_value, storage_type, "variable '" + stmt.var_name + "'");
+                            create_store(init_value, storage, declared_alignment);
+                        }
+                    } else if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name)) {
+                        zero_initialize_storage(storage, stmt.type, declared_alignment);
+                        const ClassDef* class_def = find_class_def(stmt.type.name);
+                        std::vector<ExprPtr> no_args;
+                        std::string ctor_name = stmt.type.name + "_new";
+                        const Function* ctor_def = resolve_overload_by_type(ctor_name, no_args, /*param_offset=*/1);
+                        if (ctor_def != nullptr) {
+                            llvm::LLVMValueRef ctor =
+                                llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+                            if (ctor == nullptr) {
+                                throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                    current_loc_);
+                            }
+                            if (const ClassDef* concrete_def = find_class_def(stmt.type.name)) {
+                                emit_complete_object_interface_initializers(*concrete_def, ctor_def, storage);
+                            }
+                            build_call(ctor, {storage});
+                        } else if (class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
+                            emit_default_initializers_for_class_storage(
+                                storage, *class_def, /*initialize_virtual_interface_bases=*/true);
+                        } else if (class_def != nullptr) {
+                            throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                current_loc_);
+                        }
+                    } else {
+                        zero_initialize_storage(storage, stmt.type, declared_alignment);
+                    }
+
+                    if (moved_flag != nullptr) {
+                        llvm::LLVMBuildStore(builder_,
+                                             llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0), moved_flag);
+                        llvm::LLVMValueRef dtor_helper = define_static_local_destructor_helper(
+                            static_base + ".dtor", storage, moved_flag);
+                        build_call(atexit_fn, {dtor_helper});
+                    }
+                    build_call(guard_release, {guard});
+                    llvm::LLVMBuildBr(builder_, cont_bb);
+
+                    llvm::LLVMPositionBuilderAtEnd(builder_, cont_bb);
+                    refresh_debug_location(stmt.loc);
+                    locals_[stmt.var_name] = LocalSlot{storage, stmt.type};
+                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                    locals_[stmt.var_name].is_static_storage = true;
+                    locals_[stmt.var_name].moved_flag = moved_flag;
+                    if (!scope_stack_.empty()) {
+                        scope_stack_.back().push_back(stmt.var_name);
+                    }
+                    return;
+                }
                 if (stmt.type.kind == TypeKind::Reference) {
                     // Real C++ references must be bound at declaration
                     // (there's no such thing as a later-bound or
@@ -476,6 +705,7 @@ namespace scpp {
             for (auto it = params.rbegin(); it != params.rend(); ++it) {
                 auto slot_it = locals_.find(it->name);
                 if (slot_it == locals_.end()) continue;
+                if (slot_it->second.is_static_storage) continue;
                 if (slot_it->second.type.kind == TypeKind::Named) {
                     if (class_has_destructor_in_chain(slot_it->second.type.name)) {
                         codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
@@ -501,6 +731,7 @@ namespace scpp {
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
+                if (slot_it->second.is_static_storage) continue;
                 if (slot_it->second.type.kind == TypeKind::Named) {
                     if (class_has_destructor_in_chain(slot_it->second.type.name)) {
                         codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
@@ -522,6 +753,7 @@ namespace scpp {
             for (auto it = names.rbegin(); it != names.rend(); ++it) {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
+                if (slot_it->second.is_static_storage) continue;
                 if (slot_it->second.type.kind == TypeKind::Named) {
                     if (class_has_destructor_in_chain(slot_it->second.type.name)) {
                         codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,

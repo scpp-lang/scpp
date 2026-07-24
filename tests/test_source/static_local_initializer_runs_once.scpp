@@ -1,0 +1,17 @@
+int hits = 0;
+
+int build() {
+    hits = hits + 1;
+    return 40 + hits;
+}
+
+int read_value() {
+    static int value = build();
+    return value;
+}
+
+int main() {
+    int a = read_value();
+    int b = read_value();
+    return hits + a + b - 83;
+}

@@ -598,6 +598,10 @@ struct Stmt {
     // `const`, but equally immutable once initialized. Phase A only records
     // the spelling; constant-evaluation semantics land later.
     bool is_constexpr = false;
+    // True only for a block-scope `static` variable declaration: same
+    // lexical scope as an ordinary local, but static storage duration and
+    // exactly-once initialization semantics at runtime.
+    bool is_static_local = false;
 
     // VarDecl, class-typed only (ch04 §4.2 / spec §6.1):
     // `ClassName name{args};`, direct-initialization via an explicit
@@ -726,6 +730,7 @@ struct MemberInitializer {
     clone->resolved_alignment = stmt.resolved_alignment;
     clone->is_const = stmt.is_const;
     clone->is_constexpr = stmt.is_constexpr;
+    clone->is_static_local = stmt.is_static_local;
     clone->has_ctor_args = stmt.has_ctor_args;
     for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_initializer_expr(*arg));
     if (stmt.expr) clone->expr = clone_initializer_expr(*stmt.expr);
