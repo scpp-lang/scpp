@@ -1172,6 +1172,69 @@ struct Function {
     std::string visibility_module;
 };
 
+[[nodiscard]] inline bool special_member_owner_name_matches(std::string_view spelled_name, std::string_view owner_name) {
+    if (spelled_name == owner_name) return true;
+    std::size_t scope = owner_name.rfind("::");
+    return scope != std::string_view::npos && spelled_name == owner_name.substr(scope + 2);
+}
+
+[[nodiscard]] inline bool is_special_member_this_param(const Type& type, std::string_view owner_name) {
+    return type.kind == TypeKind::Reference && type.is_mutable_ref && type.pointee &&
+           type.pointee->kind == TypeKind::Named && special_member_owner_name_matches(type.pointee->name, owner_name);
+}
+
+[[nodiscard]] inline bool is_special_member_const_lvalue_self_param(const Type& type, std::string_view owner_name) {
+    return type.kind == TypeKind::Reference && !type.is_rvalue_ref && !type.is_mutable_ref && type.pointee &&
+           type.pointee->kind == TypeKind::Named && special_member_owner_name_matches(type.pointee->name, owner_name);
+}
+
+[[nodiscard]] inline bool is_special_member_rvalue_self_param(const Type& type, std::string_view owner_name) {
+    return type.kind == TypeKind::Reference && type.is_rvalue_ref && type.pointee &&
+           type.pointee->kind == TypeKind::Named && special_member_owner_name_matches(type.pointee->name, owner_name);
+}
+
+[[nodiscard]] inline bool is_constructor_function(const Function& fn) {
+    return !fn.member_owner_class.empty() && fn.name.ends_with("_new") && !fn.params.empty() &&
+           is_special_member_this_param(fn.params[0].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_destructor_function(const Function& fn) {
+    return !fn.member_owner_class.empty() && fn.name.ends_with("_delete") && fn.params.size() == 1 &&
+           is_special_member_this_param(fn.params[0].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_default_constructor_function(const Function& fn) {
+    return is_constructor_function(fn) && fn.params.size() == 1;
+}
+
+[[nodiscard]] inline bool is_copy_constructor_function(const Function& fn) {
+    return is_constructor_function(fn) && fn.params.size() == 2 &&
+           is_special_member_const_lvalue_self_param(fn.params[1].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_move_constructor_function(const Function& fn) {
+    return is_constructor_function(fn) && fn.params.size() == 2 &&
+           is_special_member_rvalue_self_param(fn.params[1].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_copy_assignment_function(const Function& fn) {
+    return !fn.member_owner_class.empty() && fn.name.ends_with("_operator_assign") && fn.params.size() == 2 &&
+           is_special_member_this_param(fn.params[0].type, fn.member_owner_class) &&
+           is_special_member_const_lvalue_self_param(fn.params[1].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_move_assignment_function(const Function& fn) {
+    return !fn.member_owner_class.empty() && fn.name.ends_with("_operator_assign") && fn.params.size() == 2 &&
+           is_special_member_this_param(fn.params[0].type, fn.member_owner_class) &&
+           is_special_member_rvalue_self_param(fn.params[1].type, fn.member_owner_class);
+}
+
+[[nodiscard]] inline bool is_defaulted_special_member_equivalent_to_implicit_omission(const Function& fn) {
+    return fn.is_defaulted &&
+           (is_default_constructor_function(fn) || is_copy_constructor_function(fn) || is_move_constructor_function(fn) ||
+            is_copy_assignment_function(fn) || is_move_assignment_function(fn));
+}
+
 struct StructField {
     SourceLocation loc;
     Type type;

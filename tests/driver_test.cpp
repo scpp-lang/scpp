@@ -6045,6 +6045,52 @@ int main() {
     }
 }
 
+void run_defaulted_special_member_tests() {
+    {
+        std::string case_name = "defaulted_copy_special_members_compile";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
+        scpp::compile_to_executable(
+            "struct Box {\n"
+            "    int value = 0;\n"
+            "    Box(int v) : value{v} { return; }\n"
+            "    Box(const Box&) = default;\n"
+            "    Box& operator=(const Box&) = default;\n"
+            "};\n"
+            "int main() {\n"
+            "    Box a{9};\n"
+            "    return a.value - 9;\n"
+            "}\n",
+            exe_path.string());
+        std::filesystem::remove(exe_path);
+        expect(true, case_name + ": compile succeeded");
+    }
+
+    {
+        std::string case_name = "defaulted_move_special_members_compile";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
+        scpp::compile_to_executable(
+            "import std;\n"
+            "class Box {\n"
+            "private:\n"
+            "    std::unique_ptr<int> value;\n"
+            "public:\n"
+            "    virtual ~Box() = default;\n"
+            "    Box(std::unique_ptr<int> v) : value{std::move(v)} { return; }\n"
+            "    Box(Box&&) = default;\n"
+            "    Box& operator=(Box&&) = default;\n"
+            "};\n"
+            "int main() {\n"
+            "    Box b{std::make_unique<int>(3)};\n"
+            "    return 0;\n"
+            "}\n",
+            exe_path.string());
+        std::filesystem::remove(exe_path);
+        expect(true, case_name + ": compile succeeded");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -6080,6 +6126,7 @@ int main() {
     run_for_loop_tests();
     run_inheritance_constructor_and_destructor_tests();
     run_default_constructor_selection_tests();
+    run_defaulted_special_member_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

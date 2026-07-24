@@ -3700,7 +3700,13 @@ private:
     // two are simple and small enough that duplicating this one loop
     // body is lower-risk than threading varargs-specific logic through a
     // shared helper.
-    std::vector<Param> parse_param_list() {
+    static constexpr std::string_view kUnnamedDefaultedSpecialMemberParam = "__defaulted_special_member_param";
+
+    [[nodiscard]] bool has_unnamed_defaulted_special_member_param(const std::vector<Param>& params) const {
+        return params.size() == 1 && params[0].name == kUnnamedDefaultedSpecialMemberParam;
+    }
+
+    std::vector<Param> parse_param_list(bool allow_unnamed_single_parameter = false) {
         std::vector<Param> params;
         bool saw_default_argument = false;
         expect(TokenKind::LParen, "'('");
@@ -3716,7 +3722,13 @@ private:
                                       "parameter packs are only supported for the abbreviated generic form "
                                       "('Concept auto&... args') in this version (ch05 §5.11)");
                 }
-                Type param_type = parse_named_declarator(std::move(base_type), param.name, "parameter name");
+                Type param_type;
+                if (allow_unnamed_single_parameter && params.empty() && !param.is_parameter_pack && check(TokenKind::RParen)) {
+                    param.name = std::string(kUnnamedDefaultedSpecialMemberParam);
+                    param_type = std::move(base_type);
+                } else {
+                    param_type = parse_named_declarator(std::move(base_type), param.name, "parameter name");
+                }
                 if (param.is_parameter_pack && !check(TokenKind::RParen)) {
                     const Token& tok = peek();
                     throw ParseError(tok.line, tok.column,
@@ -3759,6 +3771,23 @@ private:
         }
         expect(TokenKind::RParen, "')'");
         return params;
+    }
+
+    void reject_unnamed_defaulted_special_member_param_if_needed(const std::vector<Param>& params,
+                                                                 const Function& fn,
+                                                                 const SourceLocation& loc) const {
+        if (has_unnamed_defaulted_special_member_param(params) && !fn.is_defaulted) {
+            throw ParseError(loc.line, loc.column,
+                             "an unnamed special-member parameter is only supported in a '= default' declaration");
+        }
+    }
+
+    void validate_defaulted_special_member(const Function& fn, const SourceLocation& loc) const {
+        if (!fn.is_defaulted) return;
+        if (is_destructor_function(fn) || is_defaulted_special_member_equivalent_to_implicit_omission(fn)) return;
+        throw ParseError(loc.line, loc.column,
+                         "only a destructor, default constructor, copy/move constructor, or copy/move assignment "
+                         "operator may be declared '= default' in this version");
     }
 
     [[nodiscard]] ExprPtr parse_default_argument_expr(const Type& param_type) {
@@ -5043,6 +5072,7 @@ private:
                 fn.name = synthesized_member_owner_name + "_delete";
                 fn.params.push_back(make_this_param(qualified_owner_name, /*is_const=*/false));
                 fn.body = parse_member_function_suffix(fn);
+                validate_defaulted_special_member(fn, member_loc);
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -5068,20 +5098,11 @@ private:
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_new";
-                fn.params = parse_param_list();
+                fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
                 parse_function_trailing_attributes(fn, "a constructor declarator");
                 reject_generic_params(fn.params, "a constructor");
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
-                if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
-                    fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
-                    fn.params[0].type.pointee->kind == TypeKind::Named &&
-                    fn.params[0].type.pointee->name == owner_name) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a move constructor cannot be user-declared for " + std::string(owner_keyword) +
-                                          " '" + owner_name + "' -- the compiler always provides one (spec "
-                                          "§6.4(1)/(2), ch04 §4.2)");
-                }
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, /*is_const=*/false));
                 fn.is_override = match(TokenKind::KwOverride);
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
@@ -5105,6 +5126,14 @@ private:
                     }
                 } else {
                     fn.body = parse_member_body_or_declaration();
+                }
+                reject_unnamed_defaulted_special_member_param_if_needed(fn.params, fn, member_loc);
+                validate_defaulted_special_member(fn, member_loc);
+                if (is_move_constructor_function(fn) && !fn.is_defaulted) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a move constructor cannot be user-declared for " + std::string(owner_keyword) +
+                                          " '" + owner_name + "' -- the compiler always provides one (spec "
+                                          "§6.4(1)/(2), ch04 §4.2)");
                 }
                 if (fn.body == nullptr && !fn.member_initializers.empty()) {
                     throw ParseError(member_loc.line, member_loc.column,
@@ -5210,19 +5239,9 @@ private:
                 fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
-                fn.params = parse_param_list();
+                fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
                 parse_function_trailing_attributes(fn, "a member function declarator");
                 reject_generic_params(fn.params, "an operator=");
-                if (fn.params.size() == 1 && fn.params[0].type.kind == TypeKind::Reference &&
-                    fn.params[0].type.is_rvalue_ref && fn.params[0].type.pointee &&
-                    fn.params[0].type.pointee->kind == TypeKind::Named &&
-                    fn.params[0].type.pointee->name == owner_name) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a move assignment operator cannot be user-declared for " +
-                                          std::string(owner_keyword) + " '" + owner_name +
-                                          "' -- the compiler always provides one (spec "
-                                          "§6.4(1)/(2), ch04 §4.2)");
-                }
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
@@ -5230,6 +5249,15 @@ private:
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_member_function_suffix(fn);
+                reject_unnamed_defaulted_special_member_param_if_needed(fn.params, fn, member_loc);
+                validate_defaulted_special_member(fn, member_loc);
+                if (is_move_assignment_function(fn) && !fn.is_defaulted) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                      "a move assignment operator cannot be user-declared for " +
+                                          std::string(owner_keyword) + " '" + owner_name +
+                                          "' -- the compiler always provides one (spec "
+                                          "§6.4(1)/(2), ch04 §4.2)");
+                }
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
@@ -5320,6 +5348,7 @@ private:
                 } else {
                     fn.body = parse_block();
                 }
+                validate_defaulted_special_member(fn, member_loc);
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
