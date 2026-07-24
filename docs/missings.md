@@ -38,6 +38,17 @@ rules, coroutine machinery, codegen, or preprocessor support.
   is rejected as a redefinition rather than accepted as that declaration's
   own definition, and leaving it undefined instead fails to link with an
   undefined-reference error as soon as it's called.
+- `inline` on a function declaration/definition is currently parser-only:
+  scpp accepts the keyword so ordinary C++ signatures such as
+  `[[nodiscard]] inline SourceLocation make_source_location(...)` parse, but
+  it has no semantic effect whatsoever. It does not provide C++'s real
+  "multiple definitions across translation units without an ODR violation"
+  relaxation, and it does not act as any codegen/optimization inlining hint
+  either: a function marked `inline` compiles and behaves identically to the
+  same function without `inline`. This is a deliberate simplification to
+  unblock self-hosting-preparation work on compiler-internal sources, and
+  full `inline` semantics can wait until a real multi-translation-unit need
+  appears.
 - Coroutine/async language support is still absent: no `co_await`, `co_yield`,
   `co_return`, or coroutine lowering/runtime integration yet.
 

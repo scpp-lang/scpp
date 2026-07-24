@@ -33,6 +33,15 @@
   打开的 namespace 块——都会被当作 redefinition 拒绝，而不会被当作该声
   明自己的定义来接受；如果干脆不提供函数体，一旦被调用就会在链接阶段报
   undefined-reference 错误。
+- 函数声明 / 定义上的 `inline` 目前只是 parser 级别的接受：scpp 接受这
+  个关键字，因此像 `[[nodiscard]] inline SourceLocation
+  make_source_location(...)` 这样的普通 C++ 签名现在可以通过解析，但它
+  完全没有任何语义效果。它既不会提供真正 C++ 里那种“同一个函数可以跨多个
+  translation unit 出现多个定义而不触发 ODR 违规”的放宽，也不会作为任
+  何 codegen / optimization 的内联提示：标了 `inline` 的函数，其编译结
+  果和运行行为都与不写 `inline` 完全相同。这是为了先打通编译器内部源码的
+  self-hosting 准备工作而做的刻意简化；等到将来真的出现多 translation
+  unit 的需求时，再补全完整的 `inline` 语义也不迟。
 - coroutine / async 语言支持仍然缺失：还没有 `co_await`、`co_yield`、
   `co_return`，也没有 coroutine lowering / runtime integration。
 
