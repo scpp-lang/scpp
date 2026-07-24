@@ -231,7 +231,7 @@ struct LifetimeAnnotation {
 };
 
 [[nodiscard]] inline Type named_type(std::string name) {
-    Type type;
+    Type type{};
     type.kind = TypeKind::Named;
     type.name = std::move(name);
     return type;
@@ -434,7 +434,7 @@ struct Expr {
     // IntegerLiteral, or CharLiteral's ordinal value (e.g. 'a' -> 97) --
     // sharing this field rather than adding a new one keeps Expr flat;
     // which literal kind `expr.kind` is tells the two apart.
-    long long int_value = 0;
+    std::int64_t int_value = 0;
 
     // FloatLiteral
     double float_value = 0.0;
