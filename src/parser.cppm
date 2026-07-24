@@ -66,6 +66,36 @@ using PartitionResolver = std::function<Program(const std::string&)>;
     return ++counter;
 }
 
+[[nodiscard]] std::string_view builtin_scalar_keyword_type_name(TokenKind kind) {
+    switch (kind) {
+        case TokenKind::KwInt: return "int";
+        case TokenKind::KwBool: return "bool";
+        case TokenKind::KwChar: return "char";
+        case TokenKind::KwLong: return "long";
+        case TokenKind::KwFloat: return "float";
+        case TokenKind::KwDouble: return "double";
+        case TokenKind::KwInt8T: return "int8_t";
+        case TokenKind::KwUInt8T: return "uint8_t";
+        case TokenKind::KwInt16T: return "int16_t";
+        case TokenKind::KwUInt16T: return "uint16_t";
+        case TokenKind::KwInt32T: return "int32_t";
+        case TokenKind::KwUInt32T: return "uint32_t";
+        case TokenKind::KwInt64T: return "int64_t";
+        case TokenKind::KwUInt64T: return "uint64_t";
+        case TokenKind::KwVoid: return "void";
+        default: return {};
+    }
+}
+
+[[nodiscard]] bool is_type_start_keyword(TokenKind kind) {
+    return kind == TokenKind::KwConst || kind == TokenKind::KwUnsigned ||
+           !builtin_scalar_keyword_type_name(kind).empty();
+}
+
+[[nodiscard]] bool is_cast_type_start_keyword(TokenKind kind) {
+    return kind == TokenKind::KwUnsigned || !builtin_scalar_keyword_type_name(kind).empty();
+}
+
 class Parser {
 public:
     explicit Parser(std::vector<Token> tokens, ModuleResolver resolver = {},
@@ -73,22 +103,11 @@ public:
         : tokens_(std::move(tokens)), resolver_(std::move(resolver)),
           partition_resolver_(std::move(partition_resolver)), parser_instance_id_(next_parser_instance_id()) {
         if (!source_path.empty()) source_path_ = std::make_shared<std::string>(std::move(source_path));
-        // ch06 §6: the numeric family's own non-keyword members -- real
-        // C++ <cstdint>/<cstddef>/<stdfloat> typedef names, not keywords
-        // at all (unlike int/bool/char/long/float/double/unsigned,
-        // recognized directly by parse_unqualified_type's own keyword
-        // chain instead) -- pre-registered here exactly like an
-        // already-declared struct/class name (struct_names_ is what
-        // looks_like_type_start/parse_unqualified_type's own Identifier
-        // fallback both already consult), so every one of these is
-        // recognized as a type name from the very first line of every
-        // program, unconditionally guaranteed on every target (ch06's
-        // own "no platform on which scpp would need to omit any of
-        // these" rationale) -- never registered in class_names_ (they're
-        // scalars, not classes: no access control, no method-call
-        // machinery, no by-value-parameter restriction).
-        for (const char* name : {"int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
-                                  "uint64_t", "size_t", "ptrdiff_t", "float32_t", "float64_t"}) {
+        // ch06 §6: the remaining scalar-family typedef spellings that are
+        // intentionally still NOT lexer keywords -- real C++
+        // <cstddef>/<stdfloat> names, recognized as pre-registered
+        // identifiers from the first line of every program.
+        for (const char* name : {"size_t", "ptrdiff_t", "float32_t", "float64_t"}) {
             struct_names_.insert(name);
         }
     }
@@ -297,12 +316,7 @@ private:
         const Token& tok = peek();
         if (tok.kind == TokenKind::KwAlignas) return true;
         if (tok.kind == TokenKind::KwConstexpr) return true;
-        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwConst ||
-            tok.kind == TokenKind::KwVoid || tok.kind == TokenKind::KwChar || tok.kind == TokenKind::KwLong ||
-            tok.kind == TokenKind::KwFloat || tok.kind == TokenKind::KwDouble ||
-            tok.kind == TokenKind::KwUnsigned) {
-            return true;
-        }
+        if (is_type_start_keyword(tok.kind)) return true;
         // ch05 §5.12: a bare `auto` at statement start unambiguously
         // means an auto-typed var-decl (`auto f = expr;`) -- the only
         // way to name a closure's own compiler-synthesized, otherwise
@@ -310,6 +324,7 @@ private:
         // auto` in parameter position, parse_param_type) is never the
         // very first token of a statement, so there's no ambiguity here.
         if (tok.kind == TokenKind::KwAuto) return true;
+        if (peek_std_qualified_fixed_width_type_name().has_value()) return true;
         if (check_std_qualified("span")) return true;
         if (tok.kind != TokenKind::Identifier) return false;
         // ch11: a bare identifier might be the *first segment* of a
@@ -332,11 +347,8 @@ private:
     [[nodiscard]] bool looks_like_type_start_at(std::size_t offset) const {
         const Token& tok = peek_at(offset);
         if (tok.kind == TokenKind::KwAlignas) return true;
-        if (tok.kind == TokenKind::KwInt || tok.kind == TokenKind::KwBool || tok.kind == TokenKind::KwChar ||
-            tok.kind == TokenKind::KwLong || tok.kind == TokenKind::KwFloat || tok.kind == TokenKind::KwDouble ||
-            tok.kind == TokenKind::KwUnsigned) {
-            return true;
-        }
+        if (is_cast_type_start_keyword(tok.kind)) return true;
+        if (peek_std_qualified_fixed_width_type_name(offset).has_value()) return true;
         if (tok.kind == TokenKind::Identifier && tok.text == "std" && peek_at(offset + 1).kind == TokenKind::ColonColon &&
             peek_at(offset + 2).kind == TokenKind::Identifier && peek_at(offset + 2).text == "span") {
             return true;
@@ -1057,8 +1069,7 @@ private:
     // flow through the general qualified-name path.
     [[nodiscard]] bool check_std_qualified(std::string_view member) const {
         return peek().kind == TokenKind::Identifier && peek().text == "std" &&
-               peek_at(1).kind == TokenKind::ColonColon && peek_at(2).kind == TokenKind::Identifier &&
-               peek_at(2).text == member;
+               peek_at(1).kind == TokenKind::ColonColon && peek_at(2).text == member;
     }
 
     [[nodiscard]] bool check_scpp_qualified(std::string_view member) const {
@@ -1071,6 +1082,19 @@ private:
         advance(); // std
         advance(); // ::
         advance(); // <member>
+    }
+
+    [[nodiscard]] std::optional<std::string_view> peek_std_qualified_fixed_width_type_name(std::size_t offset = 0) const {
+        if (peek_at(offset).kind != TokenKind::Identifier || peek_at(offset).text != "std" ||
+            peek_at(offset + 1).kind != TokenKind::ColonColon) {
+            return std::nullopt;
+        }
+        std::string_view name = builtin_scalar_keyword_type_name(peek_at(offset + 2).kind);
+        if (name == "int8_t" || name == "uint8_t" || name == "int16_t" || name == "uint16_t" ||
+            name == "int32_t" || name == "uint32_t" || name == "int64_t" || name == "uint64_t") {
+            return name;
+        }
+        return std::nullopt;
     }
 
     // Looks ahead (without consuming anything) at a possibly-qualified
@@ -1990,6 +2014,23 @@ private:
     // an outer pointer level), never a later/outer one, mirroring how
     // real C++ reads `const int**` as "pointer to (pointer to const int)".
     Type parse_unqualified_type(bool const_qualifies_first_pointer = false) {
+        if (std::optional<std::string_view> std_fixed_width = peek_std_qualified_fixed_width_type_name();
+            std_fixed_width.has_value()) {
+            Type type;
+            type.kind = TypeKind::Named;
+            type.name = std::string(*std_fixed_width);
+            consume_std_qualified();
+            bool first_star = true;
+            while (match(TokenKind::Star)) {
+                auto pointee = std::make_shared<Type>(type);
+                type = Type{};
+                type.kind = TypeKind::Pointer;
+                type.pointee = std::move(pointee);
+                type.is_mutable_pointee = !(first_star && const_qualifies_first_pointer);
+                first_star = false;
+            }
+            return type;
+        }
         if (check_std_qualified("span")) {
             consume_std_qualified();
             expect(TokenKind::Less, "'<'");
@@ -2010,14 +2051,9 @@ private:
         const Token& tok = peek();
         Type type;
         type.kind = TypeKind::Named;
-        if (tok.kind == TokenKind::KwInt) {
-            type.name = "int";
-            advance();
-        } else if (tok.kind == TokenKind::KwBool) {
-            type.name = "bool";
-            advance();
-        } else if (tok.kind == TokenKind::KwChar) {
-            type.name = "char";
+        if (std::string_view builtin_name = builtin_scalar_keyword_type_name(tok.kind); !builtin_name.empty() &&
+            tok.kind != TokenKind::KwLong) {
+            type.name = std::string(builtin_name);
             advance();
         } else if (tok.kind == TokenKind::KwLong) {
             // ch06 §6: `long` -- deliberately fixed as an alias for
@@ -2025,12 +2061,6 @@ private:
             // own platform-defined width), to design away the classic
             // LP64-vs-LLP64 cross-platform pitfall.
             type.name = "long";
-            advance();
-        } else if (tok.kind == TokenKind::KwFloat) {
-            type.name = "float";
-            advance();
-        } else if (tok.kind == TokenKind::KwDouble) {
-            type.name = "double";
             advance();
         } else if (tok.kind == TokenKind::KwUnsigned) {
             // ch06 §6: `unsigned` is only ever legal directly before
@@ -2048,15 +2078,6 @@ private:
                                   "'unsigned' must be immediately followed by 'int' or 'long' (ch06 §6) -- the "
                                   "bare 'unsigned' shorthand is not valid scpp");
             }
-        } else if (tok.kind == TokenKind::KwVoid) {
-            // Valid here structurally (like int/bool) so `void*` falls
-            // out of the trailing `*` loop below for free; a *bare*
-            // (non-pointer) `void` is rejected downstream, not by the
-            // parser -- see codegen's declare_function (parameters) and
-            // VarDecl codegen (locals). A `void` return type is always
-            // fine and needs no rejection anywhere.
-            type.name = "void";
-            advance();
         } else if (tok.kind == TokenKind::Identifier &&
                    generic_type_names_.contains(resolve_visible_type_name(peek_qualified_name()))) {
             // ch05 §5.14: `Name<Arg, Arg2, ...>` -- a generic class/

@@ -31,6 +31,14 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwFloat: return "KwFloat";
         case scpp::TokenKind::KwDouble: return "KwDouble";
         case scpp::TokenKind::KwUnsigned: return "KwUnsigned";
+        case scpp::TokenKind::KwInt8T: return "KwInt8T";
+        case scpp::TokenKind::KwUInt8T: return "KwUInt8T";
+        case scpp::TokenKind::KwInt16T: return "KwInt16T";
+        case scpp::TokenKind::KwUInt16T: return "KwUInt16T";
+        case scpp::TokenKind::KwInt32T: return "KwInt32T";
+        case scpp::TokenKind::KwUInt32T: return "KwUInt32T";
+        case scpp::TokenKind::KwInt64T: return "KwInt64T";
+        case scpp::TokenKind::KwUInt64T: return "KwUInt64T";
         case scpp::TokenKind::KwVoid: return "KwVoid";
         case scpp::TokenKind::KwReturn: return "KwReturn";
         case scpp::TokenKind::KwIf: return "KwIf";

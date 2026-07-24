@@ -95,6 +95,23 @@ void test_inline_is_a_keyword() {
     expect_kinds("inline", {scpp::TokenKind::KwInline, scpp::TokenKind::EndOfFile}, "inline_is_a_keyword");
 }
 
+void test_fixed_width_integer_keywords() {
+    expect_kinds(
+        "int64_t uint32_t std::int64_t std::uint32_t",
+        {
+            scpp::TokenKind::KwInt64T,
+            scpp::TokenKind::KwUInt32T,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::ColonColon,
+            scpp::TokenKind::KwInt64T,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::ColonColon,
+            scpp::TokenKind::KwUInt32T,
+            scpp::TokenKind::EndOfFile,
+        },
+        "fixed_width_integer_keywords");
+}
+
 void test_identifier_text() {
     std::vector<scpp::Token> tokens = scpp::tokenize("foo_bar1");
     expect(tokens.size() == 2, "identifier_text: expected 2 tokens");
@@ -386,6 +403,7 @@ int main() {
     test_safe_is_no_longer_a_keyword();
     test_static_is_a_keyword();
     test_inline_is_a_keyword();
+    test_fixed_width_integer_keywords();
     test_unsafe_is_not_a_keyword();
     test_identifier_text();
     test_integer_literal_text();
