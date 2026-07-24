@@ -85,7 +85,7 @@ struct Type {
     // consumer downstream of that pass (layout_of_type, codegen, ...)
     // may assume `array_size_expr == nullptr` and read this field
     // directly.
-    long long array_size = 0;
+    std::int64_t array_size = 0;
     // ch05 §9.4: the not-yet-evaluated array-bound constant-expression
     // exactly as parsed (e.g. `sizeof(T)`, `alignof(Header) * 2`, a bare
     // `constexpr` constant's name, or simply an integer literal) --
