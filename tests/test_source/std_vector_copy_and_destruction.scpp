@@ -1,0 +1,64 @@
+import std;
+
+class Tracker {
+private:
+    int* destroyed_{};
+    int* copied_{};
+    int value_{};
+
+public:
+    Tracker(int* destroyed, int* copied, int value) {
+        this->destroyed_ = destroyed;
+        this->copied_ = copied;
+        this->value_ = value;
+        return;
+    }
+
+    Tracker(const Tracker& other) {
+        this->destroyed_ = other.destroyed_;
+        this->copied_ = other.copied_;
+        this->value_ = other.value_;
+        [[scpp::unsafe]] {
+            *this->copied_ = *this->copied_ + 1;
+        }
+        return;
+    }
+
+    virtual ~Tracker() {
+        [[scpp::unsafe]] {
+            *this->destroyed_ = *this->destroyed_ + 1;
+        }
+        return;
+    }
+
+    int value() const {
+        return this->value_;
+    }
+
+    void set_value(int value) {
+        this->value_ = value;
+        return;
+    }
+};
+
+int main() {
+    int destroyed = 0;
+    int copied = 0;
+    Tracker seed{&destroyed, &copied, 7};
+    {
+        std::vector<Tracker> original{};
+        original.push_back(seed);
+        original.push_back(seed);
+        original.push_back(seed);
+        if (copied != 3) return 1;
+        std::vector<Tracker> clone = original;
+        if (copied != 6) return 2;
+        if (clone.size() != 3) return 3;
+        clone[1].set_value(99);
+        if (original[1].value() != 7) return 4;
+        if (clone[1].value() != 99) return 5;
+        if (destroyed != 0) return 6;
+    }
+    if (destroyed != 6) return 7;
+    return 0;
+}

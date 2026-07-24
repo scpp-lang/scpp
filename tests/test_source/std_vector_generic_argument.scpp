@@ -1,0 +1,18 @@
+import std;
+
+std::expected<std::vector<int>, int> load_values() {
+    std::vector<int> values{};
+    values.push_back(4);
+    values.push_back(5);
+    std::expected<std::vector<int>, int> result{std::move(values)};
+    return result;
+}
+
+int main() {
+    auto result = load_values();
+    if (!result.has_value()) return 1;
+    if (result.value().size() != 2) return 2;
+    if (result.value()[0] != 4) return 3;
+    if (result.value()[1] != 5) return 4;
+    return 0;
+}

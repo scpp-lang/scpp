@@ -1,0 +1,59 @@
+import std;
+
+class Holder {
+public:
+    std::vector<int> values{};
+
+    Holder() { return; }
+    virtual ~Holder() { return; }
+
+    void append(int value) {
+        this->values.push_back(value);
+        return;
+    }
+};
+
+int main() {
+    Holder holder{};
+    if (!holder.values.empty()) return 1;
+    if (holder.values.size() != 0) return 2;
+    if (holder.values.capacity() != 0) return 3;
+    if (holder.values.begin() != holder.values.end()) return 4;
+
+    int previous_capacity = holder.values.capacity();
+    int i = 0;
+    while (i < 20) {
+        holder.append(i * 3);
+        if (holder.values.size() != i + 1) return 5;
+        if (holder.values.capacity() < holder.values.size()) return 6;
+        if (holder.values.capacity() < previous_capacity) return 7;
+        previous_capacity = holder.values.capacity();
+        i = i + 1;
+    }
+
+    if (holder.values.empty()) return 8;
+    if (holder.values.begin() == holder.values.end()) return 9;
+    if (holder.values.capacity() <= 1) return 10;
+
+    int* raw = holder.values.data();
+
+    i = 0;
+    while (i < holder.values.size()) {
+        if (holder.values[i] != i * 3) return 11;
+        if (holder.values.at(i) != i * 3) return 12;
+        [[scpp::unsafe]] {
+            if (raw[i] != i * 3) return 13;
+        }
+        i = i + 1;
+    }
+
+    holder.values.pop_back();
+    if (holder.values.size() != 19) return 14;
+    if (holder.values[18] != 54) return 15;
+    holder.values.clear();
+    if (!holder.values.empty()) return 16;
+    if (holder.values.size() != 0) return 17;
+    if (holder.values.capacity() <= 0) return 18;
+    if (holder.values.begin() != holder.values.end()) return 19;
+    return 0;
+}
