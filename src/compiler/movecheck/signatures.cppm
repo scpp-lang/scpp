@@ -653,6 +653,30 @@ void validate_lifetime_annotation_placement(const Function& fn) {
            fn.params[0].name == "this";
 }
 
+void validate_equality_operator_signature(const Function& fn) {
+    bool named_equality_operator =
+        fn.name.ends_with("_operator_equal") || fn.name.ends_with("_operator_not_equal");
+    if (!named_equality_operator) return;
+    if (fn.is_static) {
+        throw DataflowError("equality operators of '" + fn.member_owner_class + "' shall not be static", fn.loc);
+    }
+    if (fn.params.size() != 2) {
+        throw DataflowError("equality operators of '" + fn.member_owner_class + "' shall have exactly one parameter", fn.loc);
+    }
+    if (fn.return_type.kind != TypeKind::Named || fn.return_type.name != "bool") {
+        throw DataflowError("equality operators of '" + fn.member_owner_class + "' shall return bool", fn.loc);
+    }
+    if (fn.is_defaulted) {
+        if (!is_special_member_const_lvalue_self_param(fn.params[1].type, fn.member_owner_class) ||
+            fn.receiver_ref_qualifier != ReceiverRefQualifier::None || fn.params[0].type.is_mutable_ref) {
+            throw DataflowError("a defaulted equality operator of '" + fn.member_owner_class +
+                                    "' shall have signature 'bool operator==(const " + fn.member_owner_class +
+                                    "&) const' (and likewise for operator!=)",
+                                fn.loc);
+        }
+    }
+}
+
 void validate_operator_arrow_signature(const Function& fn) {
     if (!is_operator_arrow_function(fn)) return;
     if (fn.params.size() != 1) {
@@ -730,6 +754,7 @@ void validate_operator_arrow_signature(const Function& fn) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
         if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
+        validate_equality_operator_signature(fn);
         validate_operator_arrow_signature(fn);
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());

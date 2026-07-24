@@ -3700,10 +3700,10 @@ private:
     // two are simple and small enough that duplicating this one loop
     // body is lower-risk than threading varargs-specific logic through a
     // shared helper.
-    static constexpr std::string_view kUnnamedDefaultedSpecialMemberParam = "__defaulted_special_member_param";
+    static constexpr std::string_view kUnnamedDefaultedSingleParam = "__defaulted_single_param";
 
-    [[nodiscard]] bool has_unnamed_defaulted_special_member_param(const std::vector<Param>& params) const {
-        return params.size() == 1 && params[0].name == kUnnamedDefaultedSpecialMemberParam;
+    [[nodiscard]] bool has_unnamed_defaulted_single_param(const std::vector<Param>& params) const {
+        return params.size() == 1 && params[0].name == kUnnamedDefaultedSingleParam;
     }
 
     std::vector<Param> parse_param_list(bool allow_unnamed_single_parameter = false) {
@@ -3724,7 +3724,7 @@ private:
                 }
                 Type param_type;
                 if (allow_unnamed_single_parameter && params.empty() && !param.is_parameter_pack && check(TokenKind::RParen)) {
-                    param.name = std::string(kUnnamedDefaultedSpecialMemberParam);
+                    param.name = std::string(kUnnamedDefaultedSingleParam);
                     param_type = std::move(base_type);
                 } else {
                     param_type = parse_named_declarator(std::move(base_type), param.name, "parameter name");
@@ -3773,21 +3773,22 @@ private:
         return params;
     }
 
-    void reject_unnamed_defaulted_special_member_param_if_needed(const std::vector<Param>& params,
-                                                                 const Function& fn,
-                                                                 const SourceLocation& loc) const {
-        if (has_unnamed_defaulted_special_member_param(params) && !fn.is_defaulted) {
+    void reject_unnamed_defaulted_single_param_if_needed(const std::vector<Param>& params,
+                                                         const Function& fn,
+                                                         const SourceLocation& loc) const {
+        if (has_unnamed_defaulted_single_param(params) && !fn.is_defaulted) {
             throw ParseError(loc.line, loc.column,
-                             "an unnamed special-member parameter is only supported in a '= default' declaration");
+                             "an unnamed parameter is only supported in a '= default' declaration here");
         }
     }
 
     void validate_defaulted_special_member(const Function& fn, const SourceLocation& loc) const {
         if (!fn.is_defaulted) return;
         if (is_destructor_function(fn) || is_defaulted_special_member_equivalent_to_implicit_omission(fn)) return;
+        if (is_defaulted_equality_operator_function(fn)) return;
         throw ParseError(loc.line, loc.column,
-                         "only a destructor, default constructor, copy/move constructor, or copy/move assignment "
-                         "operator may be declared '= default' in this version");
+                         "only a destructor, default constructor, copy/move constructor, copy/move assignment operator, "
+                         "or equality operator may be declared '= default' in this version");
     }
 
     [[nodiscard]] ExprPtr parse_default_argument_expr(const Type& param_type) {
@@ -5127,7 +5128,7 @@ private:
                 } else {
                     fn.body = parse_member_body_or_declaration();
                 }
-                reject_unnamed_defaulted_special_member_param_if_needed(fn.params, fn, member_loc);
+                reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc);
                 validate_defaulted_special_member(fn, member_loc);
                 if (is_move_constructor_function(fn) && !fn.is_defaulted) {
                     throw ParseError(member_loc.line, member_loc.column,
@@ -5218,6 +5219,47 @@ private:
                 continue;
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
+                (peek_at(1).kind == TokenKind::EqualEqual || peek_at(1).kind == TokenKind::NotEqual)) {
+                reject_alignment_specifiers(member_alignments, "a member function declaration");
+                advance(); // 'operator'
+                TokenKind operator_kind = advance().kind;
+                Function fn;
+                fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
+                fn.eval_mode = member_eval_mode;
+                fn.member_owner_class = qualified_owner_name;
+                fn.is_static = member_is_static;
+                fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
+                fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
+                parse_function_trailing_attributes(fn, "a member function declarator");
+                reject_generic_params(fn.params, operator_kind == TokenKind::EqualEqual ? "an operator==" : "an operator!=");
+                fn.template_params = member_template_params;
+                fn.is_generic_template = member_is_template;
+                bool is_const = match(TokenKind::KwConst);
+                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
+                if (member_is_static && (is_const || fn.receiver_ref_qualifier != ReceiverRefQualifier::None)) {
+                    throw ParseError(member_loc.line, member_loc.column,
+                                     "a static member function cannot be const-qualified or ref-qualified");
+                }
+                fn.return_type = std::move(member_type);
+                fn.name = synthesized_member_owner_name +
+                          std::string(operator_kind == TokenKind::EqualEqual ? "_operator_equal" : "_operator_not_equal");
+                if (!member_is_static) {
+                    fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
+                }
+                fn.is_override = match(TokenKind::KwOverride);
+                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
+                fn.body = parse_member_function_suffix(fn);
+                reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc);
+                validate_defaulted_special_member(fn, member_loc);
+                finish_member_fn(fn);
+                program.functions.push_back(std::move(fn));
+                continue;
+            }
+            if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Assign) {
                 reject_alignment_specifiers(member_alignments, "a member function declaration");
                 if (member_is_template) {
@@ -5249,7 +5291,7 @@ private:
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
                 fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
                 fn.body = parse_member_function_suffix(fn);
-                reject_unnamed_defaulted_special_member_param_if_needed(fn.params, fn, member_loc);
+                reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc);
                 validate_defaulted_special_member(fn, member_loc);
                 if (is_move_assignment_function(fn) && !fn.is_defaulted) {
                     throw ParseError(member_loc.line, member_loc.column,

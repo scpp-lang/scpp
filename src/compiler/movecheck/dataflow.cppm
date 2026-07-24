@@ -1225,6 +1225,43 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 }
                 return;
             }
+            if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
+                std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+                const Type* lhs_named =
+                    lhs_type.has_value() ? &(lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee
+                                                                                                         : *lhs_type)
+                                         : nullptr;
+                std::string overload_name =
+                    lhs_named != nullptr && lhs_named->kind == TypeKind::Named ? lhs_named->name + "_" + equality_operator_method_name(expr.binary_op)
+                                                                               : "";
+                if (!overload_name.empty() && signatures.contains(overload_name)) {
+                    ExprPtr overload_call =
+                        make_overloaded_equality_call_expr(*expr.lhs, *expr.rhs, expr.binary_op, expr.loc);
+                    check_call_arguments(*overload_call, state, body, signatures, report_errors);
+                    return;
+                }
+                std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+                const Type* rhs_named =
+                    rhs_type.has_value() ? &(rhs_type->kind == TypeKind::Reference && rhs_type->pointee ? *rhs_type->pointee
+                                                                                                         : *rhs_type)
+                                         : nullptr;
+                bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named &&
+                                     body.program != nullptr &&
+                                     (find_class_def(*body.program, lhs_named->name) != nullptr ||
+                                      find_struct_def(*body.program, lhs_named->name) != nullptr);
+                bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named &&
+                                     body.program != nullptr &&
+                                     (find_class_def(*body.program, rhs_named->name) != nullptr ||
+                                      find_struct_def(*body.program, rhs_named->name) != nullptr);
+                if (report_errors && (lhs_is_record || rhs_is_record)) {
+                    std::string receiver_name =
+                        lhs_named != nullptr && lhs_named->kind == TypeKind::Named ? lhs_named->name : "<non-record>";
+                    throw DataflowError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
+                                            "' requires a matching overloaded member operator on left operand type '" +
+                                            receiver_name + "'",
+                                        state.current_loc);
+                }
+            }
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
             apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
             if (report_errors) check_binary_expr_operand_types(expr, body, signatures, state.current_loc);

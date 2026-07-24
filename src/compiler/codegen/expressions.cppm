@@ -2226,6 +2226,37 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         bool rhs_is_literal = expr.rhs->kind == ExprKind::IntegerLiteral || expr.rhs->kind == ExprKind::FloatLiteral;
         std::optional<Type> lhs_type = infer_type(*expr.lhs);
         std::optional<Type> rhs_type = infer_type(*expr.rhs);
+        if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
+            const Type* lhs_named =
+                lhs_type.has_value() ? &(lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee
+                                                                                                     : *lhs_type)
+                                     : nullptr;
+            std::string operator_name = equality_operator_method_name(expr.binary_op);
+            if (lhs_named != nullptr && lhs_named->kind == TypeKind::Named) {
+                std::vector<ExprPtr> overload_args;
+                overload_args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
+                if (resolve_overload_by_type(lhs_named->name + "_" + operator_name, overload_args, /*param_offset=*/1,
+                                             !is_read_only_place(*expr.lhs), expr.lhs.get()) != nullptr) {
+                    ExprPtr overload_call =
+                        make_overloaded_equality_call_expr(*expr.lhs, *expr.rhs, expr.binary_op, expr.loc);
+                    return codegen_call(*overload_call).value;
+                }
+            }
+            const Type* rhs_named =
+                rhs_type.has_value() ? &(rhs_type->kind == TypeKind::Reference && rhs_type->pointee ? *rhs_type->pointee
+                                                                                                     : *rhs_type)
+                                     : nullptr;
+            bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named && structs_.contains(lhs_named->name);
+            bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named && structs_.contains(rhs_named->name);
+            if (lhs_is_record || rhs_is_record) {
+                std::string receiver_name =
+                    lhs_named != nullptr && lhs_named->kind == TypeKind::Named ? lhs_named->name : "<non-record>";
+                throw CodegenError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
+                                       "' requires a matching overloaded member operator on left operand type '" +
+                                       receiver_name + "'",
+                                   current_loc_);
+            }
+        }
         if ((expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) && lhs_type.has_value() && rhs_type.has_value() &&
             is_interface_pointer_type(binary_operand_type(*lhs_type)) && is_interface_pointer_type(binary_operand_type(*rhs_type))) {
             llvm::LLVMValueRef lhs_object = extract_interface_object_ptr(codegen_expr(*expr.lhs));

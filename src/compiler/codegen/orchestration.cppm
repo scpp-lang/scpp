@@ -289,6 +289,8 @@ namespace scpp {
         if (fn.name.ends_with("_operator_deref")) return "operator*";
         if (fn.name.ends_with("_operator_arrow")) return "operator->";
         if (fn.name.ends_with("_operator_assign")) return "operator=";
+        if (fn.name.ends_with("_operator_equal")) return "operator==";
+        if (fn.name.ends_with("_operator_not_equal")) return "operator!=";
         if (!fn.member_owner_class.empty() && fn.name.rfind(fn.member_owner_class + "_", 0) == 0) {
             return fn.name.substr(fn.member_owner_class.size() + 1);
         }

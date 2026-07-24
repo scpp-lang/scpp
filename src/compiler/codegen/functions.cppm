@@ -148,8 +148,10 @@ namespace scpp {
         if (!fn.is_defaulted) {
             throw CodegenError("internal error: asked to define a non-defaulted function without a body", current_loc_);
         }
-        if (!fn.name.ends_with("_delete") || fn.params.size() != 1) {
-            throw CodegenError("only defaulted destructors are code-generated in this version", fn.loc);
+        bool is_defaulted_destructor = fn.name.ends_with("_delete") && fn.params.size() == 1;
+        bool is_defaulted_equality = is_defaulted_equality_operator_function(fn);
+        if (!is_defaulted_destructor && !is_defaulted_equality) {
+            throw CodegenError("only defaulted destructors and equality operators are code-generated in this version", fn.loc);
         }
 
         llvm::LLVMValueRef llvm_fn = llvm::LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
@@ -193,28 +195,107 @@ namespace scpp {
 
         const Type& this_type = fn.params[0].type;
         if (this_type.kind != TypeKind::Reference || this_type.pointee == nullptr || this_type.pointee->kind != TypeKind::Named) {
-            throw CodegenError("defaulted destructor '" + fn.name + "' has an invalid this parameter", fn.loc);
+            throw CodegenError("defaulted function '" + fn.name + "' has an invalid this parameter", fn.loc);
         }
         const std::string& class_name = this_type.pointee->name;
         auto info_it = structs_.find(class_name);
         if (info_it == structs_.end()) {
-            throw CodegenError("defaulted destructor '" + fn.name + "' names unknown class '" + class_name + "'", fn.loc);
+            throw CodegenError("defaulted function '" + fn.name + "' names unknown class '" + class_name + "'", fn.loc);
         }
 
         llvm::LLVMTypeRef this_llvm_type = to_llvm_type(fn.params[0].type);
         llvm::LLVMValueRef this_ptr = llvm::LLVMBuildLoad2(builder_, this_llvm_type, locals_.at("this").alloca, "thisptr");
         const StructInfo& info = info_it->second;
-        for (std::size_t i = info.field_types.size(); i > 0; --i) {
-            const Type& field_type = info.field_types[i - 1];
-            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,
-                                                             info.physical_field_index(i - 1),
-                                                             info.field_names[i - 1].c_str());
-                codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
+
+        if (is_defaulted_destructor) {
+            for (std::size_t i = info.field_types.size(); i > 0; --i) {
+                const Type& field_type = info.field_types[i - 1];
+                if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+                    llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,
+                                                                 info.physical_field_index(i - 1),
+                                                                 info.field_names[i - 1].c_str());
+                    codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
+                }
             }
+            llvm::LLVMBuildRetVoid(builder_);
+            llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
+            current_debug_scope_ = nullptr;
+            current_subprogram_ = nullptr;
+            return;
         }
 
-        llvm::LLVMBuildRetVoid(builder_);
+        auto find_record_equality = [&](const std::string& record_name) -> const Function* {
+            for (const Function& candidate : program_->functions) {
+                if (candidate.name != record_name + "_operator_equal") continue;
+                if (!is_equality_operator_function(candidate)) continue;
+                if (candidate.return_type.kind != TypeKind::Named || candidate.return_type.name != "bool") continue;
+                if (!is_special_member_const_lvalue_self_param(candidate.params[1].type, record_name)) continue;
+                return &candidate;
+            }
+            return nullptr;
+        };
+
+        auto compare_field = [&](auto&& self, llvm::LLVMValueRef lhs_ptr, llvm::LLVMValueRef rhs_ptr, const Type& type,
+                                 std::string_view field_name) -> llvm::LLVMValueRef {
+            if (type.kind == TypeKind::Array && type.element != nullptr) {
+                llvm::LLVMTypeRef array_type = to_llvm_type(type);
+                llvm::LLVMTypeRef i32 = llvm::LLVMInt32TypeInContext(context_);
+                llvm::LLVMValueRef equal = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0);
+                for (std::size_t i = 0; i < static_cast<std::size_t>(type.array_size); ++i) {
+                    llvm::LLVMValueRef indices[] = {llvm::LLVMConstInt(i32, 0, 0), llvm::LLVMConstInt(i32, i, 0)};
+                    llvm::LLVMValueRef lhs_elem =
+                        llvm::LLVMBuildGEP2(builder_, array_type, lhs_ptr, indices, 2, "eq.elem.lhs");
+                    llvm::LLVMValueRef rhs_elem =
+                        llvm::LLVMBuildGEP2(builder_, array_type, rhs_ptr, indices, 2, "eq.elem.rhs");
+                    equal = llvm::LLVMBuildAnd(builder_, equal,
+                                               self(self, lhs_elem, rhs_elem, *type.element, field_name), "eq.elem.and");
+                }
+                return equal;
+            }
+            if (type.kind == TypeKind::Named && structs_.contains(type.name)) {
+                const Function* callee_def = find_record_equality(type.name);
+                if (callee_def == nullptr) {
+                    throw CodegenError("defaulted equality operator of '" + class_name +
+                                           "' requires an equality-comparable field '" + std::string(field_name) +
+                                           "' of type '" + type.name + "'",
+                                       fn.loc);
+                }
+                llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee_def).c_str());
+                if (callee == nullptr) {
+                    throw CodegenError("defaulted equality operator of '" + class_name +
+                                           "' could not find generated equality function for field type '" + type.name + "'",
+                                       fn.loc);
+                }
+                llvm::LLVMValueRef call = build_call(callee, {lhs_ptr, rhs_ptr});
+                return bool_to_i1(call);
+            }
+
+            llvm::LLVMTypeRef llvm_type = to_llvm_type(type);
+            llvm::LLVMValueRef lhs = create_load(llvm_type, lhs_ptr, std::nullopt, "eq.lhs");
+            llvm::LLVMValueRef rhs = create_load(llvm_type, rhs_ptr, std::nullopt, "eq.rhs");
+            if (type.kind == TypeKind::Named && is_float_scalar_type_name(type.name)) {
+                return llvm::LLVMBuildFCmp(builder_, llvm::LLVMRealOEQ, lhs, rhs, "eqtmp");
+            }
+            return llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, lhs, rhs, "eqtmp");
+        };
+
+        llvm::LLVMTypeRef other_llvm_type = to_llvm_type(fn.params[1].type);
+        llvm::LLVMValueRef other_ptr = llvm::LLVMBuildLoad2(builder_, other_llvm_type, locals_.at(fn.params[1].name).alloca, "otherptr");
+        llvm::LLVMValueRef equal = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0);
+        for (std::size_t i = 0; i < info.field_types.size(); ++i) {
+            llvm::LLVMValueRef lhs_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,
+                                                                     info.physical_field_index(i), info.field_names[i].c_str());
+            llvm::LLVMValueRef rhs_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, other_ptr,
+                                                                     info.physical_field_index(i), info.field_names[i].c_str());
+            equal = llvm::LLVMBuildAnd(builder_, equal,
+                                       compare_field(compare_field, lhs_field, rhs_field, info.field_types[i],
+                                                     info.field_names[i]),
+                                       "eq.and");
+        }
+        if (is_inequality_operator_function(fn)) {
+            equal = llvm::LLVMBuildNot(builder_, equal, "neqtmp");
+        }
+        llvm::LLVMBuildRet(builder_, i1_to_bool(equal));
         llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
         current_debug_scope_ = nullptr;
         current_subprogram_ = nullptr;

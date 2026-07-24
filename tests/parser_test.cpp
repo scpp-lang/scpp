@@ -963,6 +963,23 @@ void test_defaulted_non_special_member_is_rejected() {
     expect(threw, "defaulted_non_special_member_is_rejected: expected a ParseError");
 }
 
+void test_equality_operator_methods_parse() {
+    scpp::Program program = scpp::parse(
+        "struct Point {\n"
+        "    int x = 0;\n"
+        "    int y = 0;\n"
+        "    bool operator==(const Point&) const = default;\n"
+        "    bool operator!=(const Point& other) const { return this.x != other.x; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::Function* eq = find_function_named(program, "Point_operator_equal");
+    const scpp::Function* ne = find_function_named(program, "Point_operator_not_equal");
+    expect(eq != nullptr && eq->is_defaulted && eq->params.size() == 2,
+           "equality_operator_methods_parse: expected defaulted operator==");
+    expect(ne != nullptr && !ne->is_defaulted && ne->params.size() == 2,
+           "equality_operator_methods_parse: expected user-defined operator!=");
+}
+
 // ch06 §6: `static_cast<T>(expr)` parses to a Cast expression with `type`
 // set to the target type and the operand in `lhs`.
 void test_static_cast_parses() {
@@ -4427,6 +4444,7 @@ int main() {
     test_user_declared_move_assignment_operator_is_rejected();
     test_defaulted_move_special_members_parse_without_parameter_names();
     test_defaulted_non_special_member_is_rejected();
+    test_equality_operator_methods_parse();
     test_static_cast_parses();
     test_c_style_cast_parses();
     test_parenthesized_expression_is_not_misdetected_as_cast();
