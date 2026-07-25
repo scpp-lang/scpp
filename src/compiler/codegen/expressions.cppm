@@ -39,6 +39,29 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     return 0;
 }
 
+[[nodiscard]] bool is_string_named_type(const Type& type) {
+    return type.kind == TypeKind::Named && (type.name == "std::string" || type.name == "string");
+}
+
+[[nodiscard]] bool is_const_char_pointer_type(const Type& type) {
+    return type.kind == TypeKind::Pointer && type.pointee != nullptr && type.pointee->kind == TypeKind::Named &&
+           type.pointee->name == "char" && !type.is_mutable_pointee;
+}
+
+[[nodiscard]] bool is_compound_assignment(BinaryOp op) {
+    return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
+}
+
+[[nodiscard]] BinaryOp compound_base_operator(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::AddAssign: return BinaryOp::Add;
+        case BinaryOp::SubAssign: return BinaryOp::Sub;
+        case BinaryOp::MulAssign: return BinaryOp::Mul;
+        case BinaryOp::DivAssign: return BinaryOp::Div;
+        default: return op;
+    }
+}
+
 } // namespace
 
     [[nodiscard]] bool Codegen::is_enum_cast_store_builtin_name(const std::string& name)
@@ -2236,6 +2259,78 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto target_it = locals_.find(expr.lhs->name);
                 if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
                     llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0), target_it->second.moved_flag);
+                }
+            }
+            return value;
+        }
+        if (is_compound_assignment(expr.binary_op)) {
+            LValue lv = codegen_lvalue(*expr.lhs);
+            std::optional<Type> lhs_type = infer_type(*expr.lhs);
+            std::optional<Type> rhs_type = infer_type(*expr.rhs);
+            const Type& operand_type = lv.type.kind == TypeKind::Reference && lv.type.pointee ? *lv.type.pointee : lv.type;
+            if (expr.binary_op == BinaryOp::AddAssign && lhs_type.has_value() && rhs_type.has_value()) {
+                const Type& lhs_operand = binary_operand_type(*lhs_type);
+                const Type& rhs_operand = binary_operand_type(*rhs_type);
+                if (is_string_named_type(lhs_operand) &&
+                    (is_string_named_type(rhs_operand) || is_const_char_pointer_type(rhs_operand))) {
+                    std::vector<ExprPtr> append_args;
+                    append_args.push_back(clone_expr(*expr.rhs));
+                    const Function* callee =
+                        resolve_overload_by_type(lhs_operand.name + "_append", append_args, /*param_offset=*/1,
+                                                 !is_read_only_place(*expr.lhs), expr.lhs.get());
+                    if (callee == nullptr) {
+                        throw CodegenError("class '" + lhs_operand.name + "' has no append overload matching this '+='", current_loc_);
+                    }
+                    llvm::LLVMValueRef target = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee).c_str());
+                    if (target == nullptr) {
+                        throw CodegenError("call to unknown function '" + lhs_operand.name + "_append'", current_loc_);
+                    }
+                    std::vector<llvm::LLVMValueRef> args = codegen_call_args(append_args, callee, /*param_offset=*/1);
+                    args.insert(args.begin(), lv.ptr);
+                    build_call(target, args);
+                    return create_load(to_llvm_type(lv.type), lv.ptr, lv.alignment, "compoundassign.tmp");
+                }
+            }
+
+            llvm::LLVMValueRef lhs = create_load(to_llvm_type(lv.type), lv.ptr, lv.alignment, "compoundassign.lhs");
+            llvm::LLVMValueRef rhs = codegen_value_for_target(*expr.rhs, lv.type);
+            std::optional<Type> pointer_result_type =
+                lhs_type.has_value() && rhs_type.has_value()
+                    ? pointer_arithmetic_result_type(compound_base_operator(expr.binary_op), *lhs_type, *rhs_type)
+                    : std::nullopt;
+            if (pointer_result_type.has_value()) {
+                if (expr.binary_op != BinaryOp::AddAssign && expr.binary_op != BinaryOp::SubAssign) {
+                    throw CodegenError("pointer compound assignment only supports '+=' and '-='", current_loc_);
+                }
+                llvm::LLVMValueRef value = codegen_pointer_offset(lhs, rhs, operand_type, expr.binary_op == BinaryOp::SubAssign);
+                create_store(value, lv.ptr, lv.alignment);
+                return value;
+            }
+            bool is_float = operand_type.kind == TypeKind::Named && is_float_scalar_type_name(operand_type.name);
+            bool is_unsigned = operand_type.kind == TypeKind::Named && is_unsigned_scalar_type_name(operand_type.name);
+            bool is_checked = operand_type.kind == TypeKind::Named && is_checked_arithmetic_scalar_type_name(operand_type.name);
+            BinaryOp arithmetic_op = compound_base_operator(expr.binary_op);
+            llvm::LLVMValueRef value = nullptr;
+            switch (arithmetic_op) {
+                case BinaryOp::Add:
+                case BinaryOp::Sub:
+                case BinaryOp::Mul:
+                    value = is_float ? codegen_float_arith(arithmetic_op, lhs, rhs)
+                                     : codegen_checked_arith(arithmetic_op, lhs, rhs, is_unsigned, is_checked);
+                    break;
+                case BinaryOp::Div:
+                    value = is_float ? llvm::LLVMBuildFDiv(builder_, lhs, rhs, "fdivtmp")
+                                     : codegen_checked_div(lhs, rhs, is_unsigned, is_checked);
+                    break;
+                default:
+                    throw CodegenError("unhandled compound assignment operator", current_loc_);
+            }
+            create_store(value, lv.ptr, lv.alignment);
+            if (lv.type.kind == TypeKind::Named && expr.lhs->kind == ExprKind::Identifier) {
+                auto target_it = locals_.find(expr.lhs->name);
+                if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
+                    llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0),
+                                         target_it->second.moved_flag);
                 }
             }
             return value;

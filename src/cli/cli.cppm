@@ -101,6 +101,10 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Tilde: return "Tilde";
         case scpp::TokenKind::PlusPlus: return "PlusPlus";
         case scpp::TokenKind::MinusMinus: return "MinusMinus";
+        case scpp::TokenKind::PlusAssign: return "PlusAssign";
+        case scpp::TokenKind::MinusAssign: return "MinusAssign";
+        case scpp::TokenKind::StarAssign: return "StarAssign";
+        case scpp::TokenKind::SlashAssign: return "SlashAssign";
         case scpp::TokenKind::Plus: return "Plus";
         case scpp::TokenKind::Minus: return "Minus";
         case scpp::TokenKind::Star: return "Star";
@@ -398,6 +402,10 @@ std::string_view binary_op_name(scpp::BinaryOp op) {
         case scpp::BinaryOp::Sub: return "-";
         case scpp::BinaryOp::Mul: return "*";
         case scpp::BinaryOp::Div: return "/";
+        case scpp::BinaryOp::AddAssign: return "+=";
+        case scpp::BinaryOp::SubAssign: return "-=";
+        case scpp::BinaryOp::MulAssign: return "*=";
+        case scpp::BinaryOp::DivAssign: return "/=";
         case scpp::BinaryOp::Eq: return "==";
         case scpp::BinaryOp::Ne: return "!=";
         case scpp::BinaryOp::Lt: return "<";

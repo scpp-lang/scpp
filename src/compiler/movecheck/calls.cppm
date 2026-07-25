@@ -1146,6 +1146,10 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                     [[fallthrough]];
                 case BinaryOp::Mul:
                 case BinaryOp::Div:
+                case BinaryOp::AddAssign:
+                case BinaryOp::SubAssign:
+                case BinaryOp::MulAssign:
+                case BinaryOp::DivAssign:
                 case BinaryOp::Assign:
                     return infer_expr_type(*expr.lhs, body, signatures);
                 case BinaryOp::Eq:

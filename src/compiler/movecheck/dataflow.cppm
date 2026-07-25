@@ -86,6 +86,39 @@ void check_moves_impl(const Program& program);
     return global != nullptr && global->decl != nullptr && (global->decl->is_const || global->decl->is_constexpr);
 }
 
+[[nodiscard]] bool is_string_named_type(const Type& type) {
+    return type.kind == TypeKind::Named && (type.name == "std::string" || type.name == "string");
+}
+
+[[nodiscard]] bool is_const_char_pointer_type(const Type& type) {
+    return type.kind == TypeKind::Pointer && type.pointee != nullptr && type.pointee->kind == TypeKind::Named &&
+           type.pointee->name == "char" && !type.is_mutable_pointee;
+}
+
+[[nodiscard]] bool is_supported_compound_assignment(BinaryOp op) {
+    return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
+}
+
+[[nodiscard]] BinaryOp compound_base_operator(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::AddAssign: return BinaryOp::Add;
+        case BinaryOp::SubAssign: return BinaryOp::Sub;
+        case BinaryOp::MulAssign: return BinaryOp::Mul;
+        case BinaryOp::DivAssign: return BinaryOp::Div;
+        default: return op;
+    }
+}
+
+[[nodiscard]] std::string_view compound_operator_spelling(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::AddAssign: return "+=";
+        case BinaryOp::SubAssign: return "-=";
+        case BinaryOp::MulAssign: return "*=";
+        case BinaryOp::DivAssign: return "/=";
+        default: return "?=";
+    }
+}
+
 [[nodiscard]] bool is_increment_decrement_numeric_type(const Type& type) {
     return type.kind == TypeKind::Named && type.name != "bool" &&
            (is_integral_scalar_type_name(type.name) || type.name == "float" || type.name == "double" ||
@@ -160,6 +193,54 @@ void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, c
     bool pointer_operand_present = lhs_operand.kind == TypeKind::Pointer || rhs_operand.kind == TypeKind::Pointer;
     if (!pointer_operand_present) return true;
     return pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type).has_value();
+}
+
+void validate_compound_assignment_expr(const Expr& expr, DataflowState& state, const Body& body,
+                                       const Signatures& signatures, bool report_errors) {
+    apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+    apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
+    if (!report_errors) return;
+    std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+    std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+    if (!lhs_type.has_value() || !rhs_type.has_value()) return;
+    const Type& lhs_operand = binary_operand_type(*lhs_type);
+    const Type& rhs_operand = binary_operand_type(*rhs_type);
+    bool string_add_assign =
+        expr.binary_op == BinaryOp::AddAssign && is_string_named_type(lhs_operand) &&
+        (is_const_char_pointer_type(rhs_operand) || is_string_named_type(rhs_operand));
+    if (!string_add_assign) {
+        Expr arithmetic_check{};
+        arithmetic_check.binary_op = compound_base_operator(expr.binary_op);
+        arithmetic_check.lhs = deep_clone_expr(*expr.lhs);
+        arithmetic_check.rhs = deep_clone_expr(*expr.rhs);
+        check_binary_expr_operand_types(arithmetic_check, body, signatures, expr.loc);
+    }
+    if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
+        throw DataflowError("cannot assign to this place: it is reached through a read-only (const) reference",
+                            state.current_loc);
+    }
+    if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
+        validate_reborrow_lender_write(*lender, state, report_errors);
+    }
+    RootSet write_roots;
+    if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
+        write_roots = single_root(*root);
+    } else {
+        write_roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+    }
+    if (write_roots.empty()) {
+        throw DataflowError("left operand of '" + std::string(compound_operator_spelling(expr.binary_op)) +
+                                "' must be an assignable place",
+                            expr.loc);
+    }
+    for (const std::string& root : write_roots) {
+        auto borrow_it = state.borrows.find(root);
+        if (borrow_it != state.borrows.end() &&
+            (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+            throw DataflowError("cannot assign to this place: '" + root + "' is currently borrowed", state.current_loc);
+        }
+    }
+    if (expr.lhs->kind == ExprKind::Identifier) state.locals[expr.lhs->name] = LocalState::Initialized;
 }
 
 void check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
@@ -1282,6 +1363,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                         }
                     };
                 }
+                return;
+            }
+            if (is_supported_compound_assignment(expr.binary_op)) {
+                validate_compound_assignment_expr(expr, state, body, signatures, report_errors);
                 return;
             }
             if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {

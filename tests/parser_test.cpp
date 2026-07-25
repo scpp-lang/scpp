@@ -1392,6 +1392,42 @@ void test_increment_and_decrement_operators_parse() {
            "increment_and_decrement_operators_parse: expected postfix ++ in desugared increment clause");
 }
 
+void test_compound_assignment_operators_parse() {
+    scpp::Program program = scpp::parse(
+        "int main() {\n"
+        "    int x = 1;\n"
+        "    x += 2;\n"
+        "    x -= 3;\n"
+        "    x *= 4;\n"
+        "    x /= 5;\n"
+        "    int y = 1;\n"
+        "    x += y += 6;\n"
+        "    return x;\n"
+        "}\n");
+    const scpp::Function& main_fn = program.functions[0];
+    expect(main_fn.body->statements.size() == 8,
+           "compound_assignment_operators_parse: expected 8 top-level statements");
+    auto expect_compound_stmt = [&](std::size_t stmt_index, scpp::BinaryOp op, std::string_view label) {
+        if (stmt_index >= main_fn.body->statements.size()) return;
+        const scpp::Stmt& stmt = *main_fn.body->statements[stmt_index];
+        expect(stmt.kind == scpp::StmtKind::ExprStmt && stmt.expr != nullptr && stmt.expr->kind == scpp::ExprKind::Binary &&
+                   stmt.expr->binary_op == op,
+               std::string(label) + ": expected binary compound assignment");
+    };
+    expect_compound_stmt(1, scpp::BinaryOp::AddAssign, "compound_assignment_operators_parse +=");
+    expect_compound_stmt(2, scpp::BinaryOp::SubAssign, "compound_assignment_operators_parse -=");
+    expect_compound_stmt(3, scpp::BinaryOp::MulAssign, "compound_assignment_operators_parse *=");
+    expect_compound_stmt(4, scpp::BinaryOp::DivAssign, "compound_assignment_operators_parse /=");
+    const scpp::Stmt& chained = *main_fn.body->statements[6];
+    expect(chained.kind == scpp::StmtKind::ExprStmt && chained.expr != nullptr && chained.expr->kind == scpp::ExprKind::Binary &&
+               chained.expr->binary_op == scpp::BinaryOp::AddAssign,
+           "compound_assignment_operators_parse: outer chained expr should be +=");
+    if (chained.kind != scpp::StmtKind::ExprStmt || chained.expr == nullptr || chained.expr->kind != scpp::ExprKind::Binary) return;
+    expect(chained.expr->rhs != nullptr && chained.expr->rhs->kind == scpp::ExprKind::Binary &&
+               chained.expr->rhs->binary_op == scpp::BinaryOp::AddAssign,
+           "compound_assignment_operators_parse: rhs should parse as right-associative +=");
+}
+
 void test_arrow_parses_as_deferred_operator_arrow_access() {
     scpp::Program program = scpp::parse("int f() { return p->x; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
@@ -4896,6 +4932,7 @@ int main() {
     test_address_of_field_and_subscript();
     test_address_of_dereference_chain();
     test_increment_and_decrement_operators_parse();
+    test_compound_assignment_operators_parse();
     test_arrow_parses_as_deferred_operator_arrow_access();
     test_chained_arrow_and_dot();
     test_operator_arrow_member_decl_and_explicit_call_parse();

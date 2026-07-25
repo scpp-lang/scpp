@@ -1724,7 +1724,11 @@ private:
                 return std::nullopt;
             case ExprKind::Binary:
                 if (!expr.lhs || !expr.rhs) return std::nullopt;
-                if (expr.binary_op == BinaryOp::Assign) return infer_unevaluated_expr_type(*expr.lhs);
+                if (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
+                    expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
+                    expr.binary_op == BinaryOp::DivAssign) {
+                    return infer_unevaluated_expr_type(*expr.lhs);
+                }
                 if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne || expr.binary_op == BinaryOp::Lt ||
                     expr.binary_op == BinaryOp::Gt || expr.binary_op == BinaryOp::Le || expr.binary_op == BinaryOp::Ge ||
                     expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) {
@@ -1832,10 +1836,23 @@ private:
                 return evaluate_call_expr(expr);
             case ExprKind::Cast: return cast_value(expr.type, evaluate_expr(*expr.lhs), expr.loc);
             case ExprKind::Binary:
-                if (expr.binary_op == BinaryOp::Assign) {
+                if (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
+                    expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
+                    expr.binary_op == BinaryOp::DivAssign) {
                     LValue target = resolve_lvalue(*expr.lhs);
                     if (target.read_only) throw ConstexprError(expr.loc, "cannot assign through a const/constexpr binding");
                     std::shared_ptr<Cell> value = evaluate_expr(*expr.rhs);
+                    if (expr.binary_op != BinaryOp::Assign) {
+                        std::shared_ptr<Cell> lhs_value = clone_cell(target.cell);
+                        BinaryOp arithmetic_op = expr.binary_op == BinaryOp::AddAssign   ? BinaryOp::Add
+                                                 : expr.binary_op == BinaryOp::SubAssign ? BinaryOp::Sub
+                                                 : expr.binary_op == BinaryOp::MulAssign ? BinaryOp::Mul
+                                                                                         : BinaryOp::Div;
+                        Expr arithmetic_expr{};
+                        arithmetic_expr.binary_op = arithmetic_op;
+                        arithmetic_expr.loc = expr.loc;
+                        value = evaluate_binary_numeric(arithmetic_expr, lhs_value, value);
+                    }
                     copy_into(target.cell, value, expr.loc);
                     return clone_cell(target.cell);
                 }

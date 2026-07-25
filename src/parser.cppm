@@ -6518,13 +6518,22 @@ private:
 
     ExprPtr parse_expr() { return parse_assignment(); }
 
+    std::optional<BinaryOp> parse_assignment_operator() {
+        if (match(TokenKind::Assign)) return BinaryOp::Assign;
+        if (match(TokenKind::PlusAssign)) return BinaryOp::AddAssign;
+        if (match(TokenKind::MinusAssign)) return BinaryOp::SubAssign;
+        if (match(TokenKind::StarAssign)) return BinaryOp::MulAssign;
+        if (match(TokenKind::SlashAssign)) return BinaryOp::DivAssign;
+        return std::nullopt;
+    }
+
     ExprPtr parse_assignment() {
         ExprPtr lhs = parse_conditional();
-        if (match(TokenKind::Assign)) {
+        if (std::optional<BinaryOp> op = parse_assignment_operator(); op.has_value()) {
             ExprPtr rhs = parse_assignment();
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Binary;
-            node->binary_op = BinaryOp::Assign;
+            node->binary_op = *op;
             node->loc = lhs->loc;
             node->lhs = std::move(lhs);
             node->rhs = std::move(rhs);

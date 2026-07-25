@@ -108,6 +108,11 @@ public:
         return;
     }
 
+    void append(const string& s) {
+        this->append(s.c_str());
+        return;
+    }
+
     // True if this string's content equals `s` byte-for-byte.
     bool equals(const char* s) const {
         [[scpp::unsafe]] {

@@ -5910,6 +5910,51 @@ void run_increment_decrement_tests() {
     }
 }
 
+void run_compound_assignment_tests() {
+    {
+        std::string case_name = "numeric_compound_assignment_returns_updated_value";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(int main() {
+    int x = 6;
+    int a = (x += 4);
+    int b = (x -= 3);
+    int c = (x *= 2);
+    int d = (x /= 7);
+    if (a != 10) return 1;
+    if (b != 7) return 2;
+    if (c != 14) return 3;
+    if (d != 2) return 4;
+    return x - 2;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "std_string_plus_assign_appends_literals_and_strings";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::string candidate{"owner"};
+    candidate += "::";
+    std::string tail{"Type"};
+    candidate += tail;
+    if (candidate.size() != 11) return 1;
+    const char* text = candidate.c_str();
+    if (text[0] != 'o') return 2;
+    if (text[5] != ':') return 3;
+    if (text[6] != ':') return 4;
+    if (text[10] != 'e') return 5;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -6797,6 +6842,7 @@ int main() {
     run_string_view_tests();
     run_size_t_keyword_tests();
     run_increment_decrement_tests();
+    run_compound_assignment_tests();
     run_expected_tests();
     run_optional_tests();
     run_io_tests();
