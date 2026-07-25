@@ -278,6 +278,11 @@ namespace {
                 switch (expr.unary_op) {
                     case UnaryOp::Not: return named_type("bool");
                     case UnaryOp::Neg: return infer_type(*expr.lhs);
+                    case UnaryOp::PreInc:
+                    case UnaryOp::PreDec:
+                    case UnaryOp::PostInc:
+                    case UnaryOp::PostDec:
+                        return infer_type(*expr.lhs);
                     case UnaryOp::AddressOf: {
                         if (std::optional<Type> fn_ptr = resolve_function_designator_type(expr)) return fn_ptr;
                         std::optional<Type> operand = infer_type(*expr.lhs);
@@ -634,6 +639,9 @@ namespace {
             case ExprKind::Subscript:
                 return is_read_only_place(*expr.lhs);
             case ExprKind::Unary:
+                if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                    return is_read_only_place(*expr.lhs);
+                }
                 if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
                 {
                     auto it = locals_.find(expr.lhs->name);

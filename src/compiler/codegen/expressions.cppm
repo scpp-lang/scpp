@@ -1105,6 +1105,26 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
 
             case ExprKind::Unary: {
+                if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                    LValue lv = codegen_lvalue(expr);
+                    return load_value(lv);
+                }
+                if (expr.unary_op == UnaryOp::PostInc || expr.unary_op == UnaryOp::PostDec) {
+                    LValue lv = codegen_lvalue(*expr.lhs);
+                    llvm::LLVMValueRef old_value = load_value(lv);
+                    bool is_float = lv.type.kind == TypeKind::Named && is_float_scalar_type_name(lv.type.name);
+                    llvm::LLVMTypeRef llvm_type = to_llvm_type(lv.type);
+                    llvm::LLVMValueRef one = is_float ? llvm::LLVMConstReal(llvm_type, 1.0)
+                                                      : llvm::LLVMConstInt(llvm_type, 1, 0);
+                    llvm::LLVMValueRef new_value =
+                        expr.unary_op == UnaryOp::PostInc
+                            ? (is_float ? llvm::LLVMBuildFAdd(builder_, old_value, one, "postinc")
+                                        : llvm::LLVMBuildAdd(builder_, old_value, one, "postinc"))
+                            : (is_float ? llvm::LLVMBuildFSub(builder_, old_value, one, "postdec")
+                                        : llvm::LLVMBuildSub(builder_, old_value, one, "postdec"));
+                    create_store(new_value, lv.ptr, lv.alignment);
+                    return old_value;
+                }
                 if (expr.unary_op == UnaryOp::Deref) {
                     if (std::optional<Type> operand_type = infer_type(*expr.lhs);
                         operand_type.has_value() && is_interface_pointer_type(*operand_type)) {
@@ -1985,8 +2005,25 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
 
             case ExprKind::Unary: {
-                // Only `*p` (Deref) is addressable; Neg/Not produce a
-                // plain value with no backing storage.
+                if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                    LValue lv = codegen_lvalue(*expr.lhs);
+                    llvm::LLVMValueRef old_value = load_value(lv);
+                    bool is_float = lv.type.kind == TypeKind::Named && is_float_scalar_type_name(lv.type.name);
+                    llvm::LLVMTypeRef llvm_type = to_llvm_type(lv.type);
+                    llvm::LLVMValueRef one = is_float ? llvm::LLVMConstReal(llvm_type, 1.0)
+                                                      : llvm::LLVMConstInt(llvm_type, 1, 0);
+                    llvm::LLVMValueRef new_value =
+                        expr.unary_op == UnaryOp::PreInc
+                            ? (is_float ? llvm::LLVMBuildFAdd(builder_, old_value, one, "preinc")
+                                        : llvm::LLVMBuildAdd(builder_, old_value, one, "preinc"))
+                            : (is_float ? llvm::LLVMBuildFSub(builder_, old_value, one, "predec")
+                                        : llvm::LLVMBuildSub(builder_, old_value, one, "predec"));
+                    create_store(new_value, lv.ptr, lv.alignment);
+                    return lv;
+                }
+                // Only `*p` (Deref) and prefix ++/-- are addressable; the
+                // other unary forms produce a plain value with no backing
+                // storage.
                 if (expr.unary_op != UnaryOp::Deref) {
                     throw CodegenError("expression is not assignable",
                         current_loc_);

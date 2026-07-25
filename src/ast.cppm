@@ -387,6 +387,10 @@ enum class BinaryOp {
 enum class UnaryOp {
     Neg,
     Not,
+    PreInc,
+    PreDec,
+    PostInc,
+    PostDec,
     Deref, // `*p` -- either a raw pointer `T*` (only inside `unsafe { }`,
            // see ch01 §1.3/movecheck's validate_deref_operand) or a user
            // class type whose `operator*` method movecheck desugars this

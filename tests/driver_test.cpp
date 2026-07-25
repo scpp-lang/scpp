@@ -5839,6 +5839,77 @@ int main() {
     }
 }
 
+void run_increment_decrement_tests() {
+    {
+        std::string case_name = "prefix_and_postfix_increment_return_expected_values";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(int main() {
+    int x = 5;
+    int y = x++;
+    int a = 5;
+    int b = ++a;
+    if (y != 5) return 1;
+    if (x != 6) return 2;
+    if (b != 6) return 3;
+    if (a != 6) return 4;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "prefix_and_postfix_decrement_return_expected_values";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(int main() {
+    int x = 5;
+    int y = x--;
+    int a = 5;
+    int b = --a;
+    if (y != 5) return 1;
+    if (x != 4) return 2;
+    if (b != 4) return 3;
+    if (a != 4) return 4;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "classic_for_loop_accepts_postfix_increment_clause";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(int main() {
+    int total = 0;
+    for (int i = 0; i < 4; i++) {
+        total = total + i;
+    }
+    return total - 6;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "classic_for_loop_accepts_postfix_decrement_clause";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(int main() {
+    int total = 0;
+    for (int i = 3; i >= 0; i--) {
+        total = total + i;
+    }
+    return total - 6;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -6725,6 +6796,7 @@ int main() {
     run_vector_tests();
     run_string_view_tests();
     run_size_t_keyword_tests();
+    run_increment_decrement_tests();
     run_expected_tests();
     run_optional_tests();
     run_io_tests();

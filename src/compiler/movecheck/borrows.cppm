@@ -64,6 +64,9 @@ void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, 
             return direct_write_root(*expr.lhs, body);
         case ExprKind::Unary:
             if (is_explicit_star_this(expr)) return "this";
+            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                return direct_write_root(*expr.lhs, body);
+            }
             if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) {
                 return std::nullopt;
             }
@@ -592,6 +595,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             if (expr.unary_op == UnaryOp::AddressOf) {
                 return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
             }
+            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+            }
             if (expr.unary_op != UnaryOp::Deref) {
                 if (report_errors) {
                     throw DataflowError("a reference can currently only borrow a plain local variable, a "
@@ -802,6 +808,9 @@ void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& stat
 
         case ExprKind::Unary: {
             if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
+            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                return is_read_only_reachable(*expr.lhs, body, signatures);
+            }
             if (expr.unary_op != UnaryOp::Deref) return false;
             std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
             if (!operand_type.has_value()) return false;

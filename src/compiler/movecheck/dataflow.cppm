@@ -39,6 +39,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
                                  DataflowState& state, const Body& body, const Signatures& signatures,
                                  bool report_errors);
+void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
+                                       const Signatures& signatures, bool report_errors);
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type,
                                                  const Body& body, const Signatures& signatures);
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body,
@@ -82,6 +84,58 @@ void check_moves_impl(const Program& program);
 [[nodiscard]] bool is_visible_global_const(const std::string& name, bool explicit_global_qualification, const Body& body) {
     const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);
     return global != nullptr && global->decl != nullptr && (global->decl->is_const || global->decl->is_constexpr);
+}
+
+[[nodiscard]] bool is_increment_decrement_numeric_type(const Type& type) {
+    return type.kind == TypeKind::Named && type.name != "bool" &&
+           (is_integral_scalar_type_name(type.name) || type.name == "float" || type.name == "double" ||
+            type.name == "float32_t" || type.name == "float64_t");
+}
+
+void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
+                                       const Signatures& signatures, bool report_errors) {
+    apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+    if (!report_errors) return;
+    std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
+    if (!operand_type.has_value()) return;
+    const Type& effective = operand_type->kind == TypeKind::Reference && operand_type->pointee != nullptr
+                                ? *operand_type->pointee
+                                : *operand_type;
+    if (!is_increment_decrement_numeric_type(effective)) {
+        throw DataflowError("operand of '" +
+                                std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
+                                "' must be a builtin numeric lvalue",
+                            expr.loc);
+    }
+    RootSet write_roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+    if (write_roots.empty()) {
+        throw DataflowError("operand of '" +
+                                std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
+                                "' must be an assignable place",
+                            expr.loc);
+    }
+    if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
+        throw DataflowError("cannot apply '" +
+                                std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
+                                "' to this place: it is reached through a read-only (const) reference",
+                            expr.loc);
+    }
+    if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
+        validate_reborrow_lender_write(*lender, state, report_errors);
+    }
+    for (const std::string& root : write_roots) {
+        auto borrow_it = state.borrows.find(root);
+        if (borrow_it != state.borrows.end() &&
+            (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+            throw DataflowError("cannot apply '" +
+                                    std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
+                                    "' to this place: '" + root + "' is currently borrowed",
+                                expr.loc);
+        }
+    }
+    if (expr.lhs->kind == ExprKind::Identifier) {
+        state.locals[expr.lhs->name] = LocalState::Initialized;
+    }
 }
 
 [[nodiscard]] bool binary_expr_has_compatible_types(const Expr& expr, const Body& body, const Signatures& signatures) {
@@ -996,6 +1050,11 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             if (expr.unary_op == UnaryOp::AddressOf) {
                 apply_address_of(expr, state, body, signatures, report_errors);
+                return;
+            }
+            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec ||
+                expr.unary_op == UnaryOp::PostInc || expr.unary_op == UnaryOp::PostDec) {
+                validate_increment_decrement_expr(expr, state, body, signatures, report_errors);
                 return;
             }
             apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
