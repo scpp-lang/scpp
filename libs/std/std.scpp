@@ -5,6 +5,8 @@
 // simply re-exports for consumers of `import std;`.
 export module std;
 
+export import :string;
+export import :string_view;
 export import :cstdlib;
 export import :expected;
 export import :functional;

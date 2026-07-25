@@ -1720,6 +1720,27 @@ void test_span_type_declaration() {
     expect(decl.var_name == "s", "span_type_declaration: variable name should be 's'");
 }
 
+void test_std_string_view_type_and_calls_parse() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "bool same(std::string_view view, const std::string& text) {\n"
+        "    return view == std::string_view{text};\n"
+        "}\n"
+        "int main() {\n"
+        "    std::string text{\"owner::Type\"};\n"
+        "    std::string_view view{text};\n"
+        "    size_t pos = view.rfind(\"::\");\n"
+        "    return same(view.substr(pos + 2), text) ? 0 : 1;\n"
+        "}\n");
+    const scpp::Function* same = find_function_named(program, "same");
+    expect(same != nullptr, "std_string_view_type_and_calls_parse: expected same()");
+    if (same != nullptr) {
+        expect(same->params.size() == 2, "std_string_view_type_and_calls_parse: expected 2 params");
+        expect(is_named_type(same->params[0].type, "std::string_view"),
+               "std_string_view_type_and_calls_parse: first param should be std::string_view");
+    }
+}
+
 void test_span_of_const_element_type() {
     scpp::Program program = scpp::parse("int f() { int arr[3]; std::span<const int> s = arr; return 0; }");
     const scpp::Function& fn = program.functions[0];
@@ -4661,6 +4682,7 @@ int main() {
     test_unique_ptr_type_declaration();
     test_unique_ptr_of_struct_type();
     test_span_type_declaration();
+    test_std_string_view_type_and_calls_parse();
     test_span_of_const_element_type();
     test_move_expression();
     test_move_as_function_argument();

@@ -5593,6 +5593,85 @@ int main() {
     }
 }
 
+void run_string_view_tests() {
+    {
+        std::string case_name = "std_string_view_constructs_from_string_and_literal";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::string text{"owner::Type"};
+    std::string_view from_string{text};
+    std::string_view from_literal{"owner::Type"};
+    const char* empty{};
+    if (from_string.empty()) return 1;
+    if (from_string.size() != 11) return 2;
+    if (from_string.length() != 11) return 3;
+    if (from_string.data() == empty) return 4;
+    return from_string == from_literal ? 0 : 5;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_string_view_rfind_and_substr_match_ast_usage";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::string text{"owner::Type"};
+    std::string_view view{text};
+    size_t scope = view.rfind("::");
+    if (scope >= view.size()) return 1;
+    std::string_view tail = view.substr(scope + 2);
+    return tail == "Type" ? 0 : 2;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_string_view_at_is_bounds_checked";
+        cases_run++;
+        RunResult ok = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::string_view view{"abc"};
+    return view.at(1) == 'b' ? 0 : 1;
+}
+)SCPP",
+            case_name + "_ok");
+        expect(ok.exit_code == 0, case_name + ": expected in-bounds access to succeed, got " + std::to_string(ok.exit_code));
+        RunResult bad = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::string_view view{"abc"};
+    return view.at(9) == 'z' ? 0 : 1;
+}
+)SCPP",
+            case_name + "_oob");
+        expect(bad.exit_code != 0,
+               case_name + ": expected out-of-bounds access to abort, got " + std::to_string(bad.exit_code));
+    }
+
+    {
+        std::string case_name = "std_string_view_is_thread_movable_and_shareable";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int main() {
+    return scpp::is_thread_movable(std::string_view) && scpp::is_thread_shareable(std::string_view) ? 0 : 1;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -6253,6 +6332,7 @@ int main() {
     run_default_argument_tests();
     run_random_tests();
     run_vector_tests();
+    run_string_view_tests();
     run_expected_tests();
     run_io_tests();
     run_enum_tests();

@@ -1,0 +1,146 @@
+export module std:string_view;
+
+import :cstdlib;
+import :string;
+
+namespace std {
+
+[[nodiscard]] size_t __string_view_not_found() {
+    return static_cast<size_t>(-1);
+}
+
+[[nodiscard]] size_t __string_view_strlen(const char* s) {
+    const char* empty{};
+    if (s == empty) return 0;
+    size_t len = 0;
+    while (s[len] != '\0') len = len + 1;
+    return len;
+}
+
+export class [[scpp::thread_movable, scpp::thread_shareable]] string_view {
+private:
+    const char* data_{};
+    size_t size_{};
+
+    void __check_index(size_t index) const {
+        if (index >= this->size_) std::abort();
+        return;
+    }
+
+public:
+    virtual ~string_view() { return; }
+
+    string_view() { return; }
+
+    string_view(const char* s) {
+        this->data_ = s;
+        this->size_ = std::__string_view_strlen(s);
+        return;
+    }
+
+    string_view(const std::string& s) {
+        this->data_ = s.c_str();
+        this->size_ = static_cast<size_t>(s.size());
+        return;
+    }
+
+    string_view(const char* data, size_t count) {
+        this->data_ = data;
+        this->size_ = count;
+        return;
+    }
+
+    size_t size() const {
+        return this->size_;
+    }
+
+    size_t length() const {
+        return this->size();
+    }
+
+    bool empty() const {
+        return this->size_ == 0;
+    }
+
+    const char* data() const {
+        return this->data_;
+    }
+
+    const char& at(size_t index) const {
+        this->__check_index(index);
+        [[scpp::unsafe]] {
+            return this->data_[index];
+        }
+    }
+
+    bool operator==(const std::string_view& other) const {
+        if (this->size_ != other.size_) return false;
+        size_t i = 0;
+        while (i < this->size_) {
+            if (this->at(i) != other.at(i)) return false;
+            i = i + 1;
+        }
+        return true;
+    }
+
+    bool operator!=(const std::string_view& other) const {
+        return !(*this == other);
+    }
+
+    size_t rfind(const std::string_view& needle) const {
+        if (needle.size_ == 0) return this->size_;
+        if (needle.size_ > this->size_) return std::__string_view_not_found();
+        size_t i = this->size_ - needle.size_ + 1;
+        while (i > 0) {
+            i = i - 1;
+            size_t j = 0;
+            bool matches = true;
+            while (j < needle.size_) {
+                if (this->at(i + j) != needle.at(j)) {
+                    matches = false;
+                    break;
+                }
+                j = j + 1;
+            }
+            if (matches) return i;
+        }
+        return std::__string_view_not_found();
+    }
+
+    size_t rfind(const char* needle) const {
+        std::string_view needle_view{needle};
+        return this->rfind(needle_view);
+    }
+
+    std::string_view substr(size_t pos) const {
+        if (pos > this->size_) std::abort();
+        if (pos == this->size_) {
+            std::string_view empty{};
+            return empty;
+        }
+        const char* start{};
+        [[scpp::unsafe]] {
+            start = this->data_ + pos;
+        }
+        std::string_view view{start, this->size_ - pos};
+        return view;
+    }
+
+    std::string_view substr(size_t pos, size_t count) const {
+        if (pos > this->size_) std::abort();
+        size_t available = this->size_ - pos;
+        size_t actual = count < available ? count : available;
+        if (actual == 0) {
+            std::string_view empty{};
+            return empty;
+        }
+        const char* start{};
+        [[scpp::unsafe]] {
+            start = this->data_ + pos;
+        }
+        std::string_view view{start, actual};
+        return view;
+    }
+};
+
+} // namespace std
