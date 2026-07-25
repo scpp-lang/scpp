@@ -983,6 +983,100 @@ void test_operator_assign_parses() {
            "operator_assign_parses: return type should be a Reference ('Widget&')");
 }
 
+void test_out_of_line_constructor_definition_parses_and_merges() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "private:\n"
+        "    int value_{};\n"
+        "public:\n"
+        "    virtual ~Box() = default;\n"
+        "    Box(int value);\n"
+        "    int value() const;\n"
+        "};\n"
+        "inline Box::Box(int value) : value_{value} { return; }\n"
+        "int Box::value() const { return this->value_; }\n"
+        "int main() { Box box{7}; return box.value() - 7; }\n");
+    const scpp::Function* ctor = nullptr;
+    const scpp::Function* value = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Box_new") ctor = &fn;
+        if (fn.name == "Box_value") value = &fn;
+    }
+    expect(ctor != nullptr, "out_of_line_constructor_definition_parses_and_merges: expected Box_new");
+    expect(value != nullptr, "out_of_line_constructor_definition_parses_and_merges: expected Box_value");
+    if (ctor != nullptr) {
+        expect(ctor->body != nullptr, "out_of_line_constructor_definition_parses_and_merges: ctor should have a body");
+        expect(ctor->member_initializers.size() == 1,
+               "out_of_line_constructor_definition_parses_and_merges: ctor should keep member initializer list");
+    }
+    if (value != nullptr) {
+        expect(value->body != nullptr, "out_of_line_constructor_definition_parses_and_merges: method should have a body");
+        expect(value->params.size() == 1 && value->params[0].type.kind == scpp::TypeKind::Reference &&
+                   !value->params[0].type.is_mutable_ref,
+               "out_of_line_constructor_definition_parses_and_merges: const method should synthesize const this");
+    }
+}
+
+void test_out_of_line_destructor_definition_parses_and_merges() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "public:\n"
+        "    virtual ~Box();\n"
+        "};\n"
+        "Box::~Box() { return; }\n"
+        "int main() { Box box{}; return 0; }\n");
+    const scpp::Function* dtor = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Box_delete") dtor = &fn;
+    }
+    expect(dtor != nullptr, "out_of_line_destructor_definition_parses_and_merges: expected Box_delete");
+    if (dtor != nullptr) {
+        expect(dtor->body != nullptr, "out_of_line_destructor_definition_parses_and_merges: destructor should have a body");
+    }
+}
+
+void test_out_of_line_operator_assign_definition_parses_and_merges() {
+    scpp::Program program = scpp::parse(
+        "class Widget {\n"
+        "public:\n"
+        "    virtual ~Widget() = default;\n"
+        "    Widget(int v) { this.v = v; return; }\n"
+        "    Widget& operator=(const Widget& other);\n"
+        "    int v{};\n"
+        "};\n"
+        "Widget& Widget::operator=(const Widget& other) { this.v = other.v; return this; }\n"
+        "int main() { Widget w{1}; return w.v - 1; }\n");
+    const scpp::Function* op_assign = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Widget_operator_assign") op_assign = &fn;
+    }
+    expect(op_assign != nullptr, "out_of_line_operator_assign_definition_parses_and_merges: expected operator=");
+    if (op_assign != nullptr) {
+        expect(op_assign->body != nullptr,
+               "out_of_line_operator_assign_definition_parses_and_merges: operator= should have a body");
+        expect(op_assign->params.size() == 2,
+               "out_of_line_operator_assign_definition_parses_and_merges: operator= should keep this + other params");
+    }
+}
+
+void test_out_of_line_member_definition_signature_mismatch_is_rejected() {
+    bool threw = false;
+    try {
+        (void)scpp::parse(
+            "class Box {\n"
+            "public:\n"
+            "    virtual ~Box() = default;\n"
+            "    int value() const;\n"
+            "};\n"
+            "bool Box::value() const { return true; }\n");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(std::string(e.what()).find("does not match its earlier declaration exactly") != std::string::npos,
+               "out_of_line_member_definition_signature_mismatch_is_rejected: expected mismatch diagnostic");
+    }
+    expect(threw, "out_of_line_member_definition_signature_mismatch_is_rejected: expected a ParseError");
+}
+
 // spec §6.4(1)/ch08 Q14: same unconditional rejection as
 // test_user_declared_move_constructor_is_rejected, for
 // `operator=(ClassName&&)` instead of the constructor -- a real,
@@ -4522,6 +4616,10 @@ int main() {
     test_user_declared_move_constructor_is_rejected();
     test_constructor_taking_other_type_rvalue_reference_parses();
     test_operator_assign_parses();
+    test_out_of_line_constructor_definition_parses_and_merges();
+    test_out_of_line_destructor_definition_parses_and_merges();
+    test_out_of_line_operator_assign_definition_parses_and_merges();
+    test_out_of_line_member_definition_signature_mismatch_is_rejected();
     test_user_declared_move_assignment_operator_is_rejected();
     test_defaulted_move_special_members_parse_without_parameter_names();
     test_defaulted_non_special_member_is_rejected();

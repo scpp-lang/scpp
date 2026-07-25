@@ -1750,6 +1750,11 @@ private:
                !fn.is_module_extern && (fn.params.empty() || fn.params[0].name != "this");
     }
 
+    [[nodiscard]] bool is_bodyless_member_forward_decl(const Function& fn) const {
+        return fn.expects_out_of_line_definition && fn.body == nullptr && !fn.member_owner_class.empty() && !fn.is_pure &&
+               !fn.is_defaulted;
+    }
+
     [[nodiscard]] static bool is_bodyless_extern_c_declaration(const Function& fn) {
         return fn.is_extern_c && fn.body == nullptr;
     }
@@ -1759,6 +1764,355 @@ private:
                a.member_owner_class == b.member_owner_class && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
                a.is_static == b.is_static && a.access == b.access &&
                same_template_param_shape(a.template_params, b.template_params);
+    }
+
+    struct ParsedOutOfLineMemberOwner {
+        std::string spelled_name;
+        std::string resolved_name;
+        std::string unqualified_name;
+    };
+
+    enum class OutOfLineMemberKind {
+        Constructor,
+        Destructor,
+        Method,
+        OperatorDeref,
+        OperatorArrow,
+        OperatorEqual,
+        OperatorNotEqual,
+        OperatorAssign,
+    };
+
+    struct ParsedOutOfLineMemberDefinition {
+        Function fn;
+        ParsedOutOfLineMemberOwner owner;
+        OutOfLineMemberKind kind = OutOfLineMemberKind::Method;
+        std::string member_name;
+        bool is_const_method = false;
+    };
+
+    [[nodiscard]] std::string out_of_line_member_suffix(OutOfLineMemberKind kind, std::string_view member_name) const {
+        switch (kind) {
+            case OutOfLineMemberKind::Constructor: return "_new";
+            case OutOfLineMemberKind::Destructor: return "_delete";
+            case OutOfLineMemberKind::Method: return "_" + std::string(member_name);
+            case OutOfLineMemberKind::OperatorDeref: return "_operator_deref";
+            case OutOfLineMemberKind::OperatorArrow: return "_operator_arrow";
+            case OutOfLineMemberKind::OperatorEqual: return "_operator_equal";
+            case OutOfLineMemberKind::OperatorNotEqual: return "_operator_not_equal";
+            case OutOfLineMemberKind::OperatorAssign: return "_operator_assign";
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::string out_of_line_member_display_name(const ParsedOutOfLineMemberDefinition& parsed) const {
+        switch (parsed.kind) {
+            case OutOfLineMemberKind::Constructor:
+                return parsed.owner.spelled_name + "::" + parsed.owner.unqualified_name;
+            case OutOfLineMemberKind::Destructor:
+                return parsed.owner.spelled_name + "::~" + parsed.owner.unqualified_name;
+            case OutOfLineMemberKind::Method:
+                return parsed.owner.spelled_name + "::" + parsed.member_name;
+            case OutOfLineMemberKind::OperatorDeref: return parsed.owner.spelled_name + "::operator*";
+            case OutOfLineMemberKind::OperatorArrow: return parsed.owner.spelled_name + "::operator->";
+            case OutOfLineMemberKind::OperatorEqual: return parsed.owner.spelled_name + "::operator==";
+            case OutOfLineMemberKind::OperatorNotEqual: return parsed.owner.spelled_name + "::operator!=";
+            case OutOfLineMemberKind::OperatorAssign: return parsed.owner.spelled_name + "::operator=";
+        }
+        return parsed.owner.spelled_name;
+    }
+
+    [[nodiscard]] std::optional<ParsedOutOfLineMemberOwner>
+    parse_out_of_line_member_owner() {
+        bool explicit_global = check(TokenKind::ColonColon);
+        std::size_t offset = explicit_global ? 1 : 0;
+        if (peek_at(offset).kind != TokenKind::Identifier) return std::nullopt;
+
+        std::vector<std::string> segments;
+        segments.push_back(std::string(peek_at(offset).text));
+        std::size_t look = offset + 1;
+        while (peek_at(look).kind == TokenKind::ColonColon && peek_at(look + 1).kind == TokenKind::Identifier) {
+            segments.push_back(std::string(peek_at(look + 1).text));
+            look += 2;
+        }
+
+        for (std::size_t prefix_len = segments.size(); prefix_len > 0; prefix_len--) {
+            std::string spelled_name;
+            for (std::size_t i = 0; i < prefix_len; i++) {
+                if (i != 0) spelled_name += "::";
+                spelled_name += segments[i];
+            }
+            std::string resolved_name = explicit_global ? spelled_name : resolve_visible_type_name(spelled_name);
+            if (resolved_name.empty()) continue;
+            std::size_t next_offset = offset + (2 * prefix_len - 1);
+            if (peek_at(next_offset).kind != TokenKind::ColonColon) continue;
+            TokenKind member_start = peek_at(next_offset + 1).kind;
+            if (member_start != TokenKind::Identifier && member_start != TokenKind::Tilde) continue;
+
+            if (explicit_global) advance();
+            expect(TokenKind::Identifier, "record name");
+            for (std::size_t i = 1; i < prefix_len; i++) {
+                expect(TokenKind::ColonColon, "'::'");
+                expect(TokenKind::Identifier, "identifier after '::'");
+            }
+            ParsedOutOfLineMemberOwner owner;
+            owner.spelled_name = std::move(spelled_name);
+            owner.resolved_name = std::move(resolved_name);
+            owner.unqualified_name = segments[prefix_len - 1];
+            return owner;
+        }
+        return std::nullopt;
+    }
+
+    Function build_comparable_out_of_line_member_function(const Function& declared,
+                                                          const ParsedOutOfLineMemberDefinition& parsed) {
+        Function comparable;
+        comparable.loc = parsed.fn.loc;
+        comparable.return_type = parsed.fn.return_type;
+        comparable.has_varargs = parsed.fn.has_varargs;
+        comparable.eval_mode = parsed.fn.eval_mode;
+        comparable.receiver_ref_qualifier = parsed.fn.receiver_ref_qualifier;
+        comparable.return_lifetime = parsed.fn.return_lifetime;
+        comparable.is_defaulted = parsed.fn.is_defaulted;
+        comparable.params = parsed.fn.params;
+        comparable.name = declared.name;
+        comparable.member_owner_class = declared.member_owner_class;
+        comparable.is_extern_c = declared.is_extern_c;
+        comparable.is_module_extern = declared.is_module_extern;
+        if (!comparable.is_unsafe) comparable.is_unsafe = declared.is_unsafe;
+        if (!comparable.is_nodiscard) {
+            comparable.is_nodiscard = declared.is_nodiscard;
+            comparable.nodiscard_reason = declared.nodiscard_reason;
+        }
+        if (comparable.eval_mode == FunctionEvalMode::RuntimeOnly) comparable.eval_mode = declared.eval_mode;
+        comparable.is_static = declared.is_static;
+        comparable.access = declared.access;
+        comparable.is_virtual = declared.is_virtual;
+        comparable.is_override = declared.is_override;
+        comparable.template_params = declared.template_params;
+        comparable.is_generic_template = declared.is_generic_template;
+        if (comparable.method_requires_concept.empty()) comparable.method_requires_concept = declared.method_requires_concept;
+        if (!comparable.return_lifetime.present()) comparable.return_lifetime = declared.return_lifetime;
+        comparable.namespace_path = declared.namespace_path;
+        comparable.is_exported = declared.is_exported;
+        comparable.generic_method_owner_id = declared.generic_method_owner_id;
+
+        std::vector<Param> user_params = std::move(comparable.params);
+        comparable.params.clear();
+        std::size_t declared_user_offset = 0;
+        if (parsed.kind == OutOfLineMemberKind::Constructor || parsed.kind == OutOfLineMemberKind::Destructor ||
+            !declared.is_static) {
+            comparable.params.push_back(make_this_param(declared.member_owner_class, parsed.is_const_method));
+            declared_user_offset = 1;
+        }
+        for (std::size_t i = 0; i < user_params.size(); i++) {
+            Param user = std::move(user_params[i]);
+            if (declared_user_offset + i < declared.params.size()) {
+                const Param& declared_param = declared.params[declared_user_offset + i];
+                if (user.generic_concept.empty()) user.generic_concept = declared_param.generic_concept;
+                if (!user.lifetime.present()) user.lifetime = declared_param.lifetime;
+                if (!user.require_thread_movable) user.require_thread_movable = declared_param.require_thread_movable;
+                if (!user.require_thread_shareable) user.require_thread_shareable = declared_param.require_thread_shareable;
+            }
+            comparable.params.push_back(std::move(user));
+        }
+        return comparable;
+    }
+
+    void merge_out_of_line_member_definition_into(Function& declared, ParsedOutOfLineMemberDefinition parsed) {
+        declared.loc = parsed.fn.loc;
+        declared.body = std::move(parsed.fn.body);
+        declared.member_initializers = std::move(parsed.fn.member_initializers);
+        if (parsed.fn.is_defaulted) declared.is_defaulted = true;
+        declared.expects_out_of_line_definition = false;
+    }
+
+    bool parse_out_of_line_member_definition(Program& program, SourceLocation loc, bool is_unsafe = false,
+                                             bool is_nodiscard = false, const std::string& nodiscard_reason = {}) {
+        std::size_t saved_pos = pos_;
+
+        auto try_finish = [&](ParsedOutOfLineMemberDefinition parsed) {
+            std::string expected_suffix = out_of_line_member_suffix(parsed.kind, parsed.member_name);
+            Function* exact_match = nullptr;
+            bool saw_mismatch = false;
+            for (Function& candidate : program.functions) {
+                if (!is_bodyless_member_forward_decl(candidate) || candidate.member_owner_class != parsed.owner.resolved_name) {
+                    continue;
+                }
+                if (!candidate.name.ends_with(expected_suffix)) continue;
+                Function comparable = build_comparable_out_of_line_member_function(candidate, parsed);
+                validate_defaulted_special_member(comparable, parsed.fn.loc);
+                if (same_function_signature(candidate, comparable)) {
+                    exact_match = &candidate;
+                    break;
+                }
+                if (same_function_declarator(candidate, comparable)) saw_mismatch = true;
+            }
+            if (exact_match == nullptr) {
+                if (saw_mismatch) {
+                    throw ParseError(parsed.fn.loc.line, parsed.fn.loc.column,
+                                     "out-of-line definition of member '" + out_of_line_member_display_name(parsed) +
+                                         "' does not match its earlier declaration exactly");
+                }
+                throw ParseError(parsed.fn.loc.line, parsed.fn.loc.column,
+                                 "out-of-line definition of member '" + out_of_line_member_display_name(parsed) +
+                                     "' requires an earlier class/struct member declaration");
+            }
+            merge_out_of_line_member_definition_into(*exact_match, std::move(parsed));
+            return true;
+        };
+
+        auto parse_body_or_default = [&](Function& fn, const char* entity) {
+            if (match(TokenKind::Assign)) {
+                if (!match(TokenKind::KwDefault)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, std::string("expected 'default' after '=' in ") + entity);
+                }
+                fn.is_defaulted = true;
+                expect(TokenKind::Semicolon, "';'");
+                fn.body = nullptr;
+                return;
+            }
+            if (match(TokenKind::Semicolon)) {
+                fn.body = nullptr;
+                return;
+            }
+            fn.body = parse_block();
+        };
+
+        auto parse_eval_mode = [&](Function& fn) {
+            if (fn.eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConstexpr)) {
+                advance();
+                fn.eval_mode = FunctionEvalMode::Constexpr;
+                return true;
+            }
+            if (fn.eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConsteval)) {
+                advance();
+                fn.eval_mode = FunctionEvalMode::Consteval;
+                return true;
+            }
+            if ((check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval)) &&
+                fn.eval_mode != FunctionEvalMode::RuntimeOnly) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                 "a declaration may specify at most one of 'constexpr' or 'consteval'");
+            }
+            return false;
+        };
+
+        Function prefix;
+        prefix.loc = loc;
+        prefix.is_unsafe = is_unsafe;
+        prefix.is_nodiscard = is_nodiscard;
+        prefix.nodiscard_reason = nodiscard_reason;
+        while (parse_eval_mode(prefix)) {
+        }
+
+        std::size_t after_prefix = pos_;
+        if (std::optional<ParsedOutOfLineMemberOwner> owner = parse_out_of_line_member_owner(); owner.has_value()) {
+            expect(TokenKind::ColonColon, "'::'");
+            if (match(TokenKind::Tilde)) {
+                const Token& name_tok = expect(TokenKind::Identifier, "destructor name");
+                if (std::string(name_tok.text) != owner->unqualified_name) {
+                    throw ParseError(name_tok.line, name_tok.column,
+                                     "destructor name '~" + std::string(name_tok.text) +
+                                         "' must match the declaring class/struct name '" + owner->unqualified_name + "'");
+                }
+                ParsedOutOfLineMemberDefinition parsed;
+                parsed.fn.loc = prefix.loc;
+                parsed.fn.is_unsafe = prefix.is_unsafe;
+                parsed.fn.is_nodiscard = prefix.is_nodiscard;
+                parsed.fn.nodiscard_reason = prefix.nodiscard_reason;
+                parsed.fn.eval_mode = prefix.eval_mode;
+                parsed.owner = *owner;
+                parsed.kind = OutOfLineMemberKind::Destructor;
+                parsed.fn.return_type.kind = TypeKind::Named;
+                parsed.fn.return_type.name = "void";
+                expect(TokenKind::LParen, "'('");
+                expect(TokenKind::RParen, "')'");
+                parse_body_or_default(parsed.fn, "an out-of-line destructor definition");
+                return try_finish(std::move(parsed));
+            }
+            if (check(TokenKind::Identifier) && std::string(peek().text) == owner->unqualified_name &&
+                peek_at(1).kind == TokenKind::LParen) {
+                advance();
+                ParsedOutOfLineMemberDefinition parsed;
+                parsed.fn.loc = prefix.loc;
+                parsed.fn.is_unsafe = prefix.is_unsafe;
+                parsed.fn.is_nodiscard = prefix.is_nodiscard;
+                parsed.fn.nodiscard_reason = prefix.nodiscard_reason;
+                parsed.fn.eval_mode = prefix.eval_mode;
+                parsed.owner = *owner;
+                parsed.kind = OutOfLineMemberKind::Constructor;
+                parsed.fn.return_type.kind = TypeKind::Named;
+                parsed.fn.return_type.name = "void";
+                parsed.fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
+                parse_function_trailing_attributes(parsed.fn, "a constructor declarator");
+                if (!check(TokenKind::Semicolon) && !check(TokenKind::Assign)) {
+                    parsed.fn.member_initializers = parse_constructor_member_initializer_list();
+                }
+                parse_body_or_default(parsed.fn, "an out-of-line constructor definition");
+                return try_finish(std::move(parsed));
+            }
+            pos_ = saved_pos;
+            return false;
+        }
+
+        pos_ = after_prefix;
+        Type return_type;
+        try {
+            return_type = parse_type();
+        } catch (const ParseError&) {
+            pos_ = saved_pos;
+            return false;
+        }
+        std::optional<ParsedOutOfLineMemberOwner> owner = parse_out_of_line_member_owner();
+        if (!owner.has_value()) {
+            pos_ = saved_pos;
+            return false;
+        }
+        expect(TokenKind::ColonColon, "'::'");
+
+        ParsedOutOfLineMemberDefinition parsed;
+        parsed.fn.loc = prefix.loc;
+        parsed.fn.is_unsafe = prefix.is_unsafe;
+        parsed.fn.is_nodiscard = prefix.is_nodiscard;
+        parsed.fn.nodiscard_reason = prefix.nodiscard_reason;
+        parsed.fn.eval_mode = prefix.eval_mode;
+        parsed.owner = *owner;
+        parsed.fn.return_type = std::move(return_type);
+
+        if (check(TokenKind::Identifier) && std::string(peek().text) == "operator") {
+            advance();
+            if (match(TokenKind::Star)) {
+                parsed.kind = OutOfLineMemberKind::OperatorDeref;
+            } else if (match(TokenKind::Arrow)) {
+                parsed.kind = OutOfLineMemberKind::OperatorArrow;
+            } else if (match(TokenKind::EqualEqual)) {
+                parsed.kind = OutOfLineMemberKind::OperatorEqual;
+            } else if (match(TokenKind::NotEqual)) {
+                parsed.kind = OutOfLineMemberKind::OperatorNotEqual;
+            } else if (match(TokenKind::Assign)) {
+                parsed.kind = OutOfLineMemberKind::OperatorAssign;
+            } else {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                 "unsupported out-of-line member operator definition in this version");
+            }
+        } else {
+            parsed.kind = OutOfLineMemberKind::Method;
+            parsed.member_name = std::string(expect(TokenKind::Identifier, "method name").text);
+        }
+
+        bool allow_unnamed_single_parameter =
+            parsed.kind == OutOfLineMemberKind::OperatorEqual || parsed.kind == OutOfLineMemberKind::OperatorNotEqual ||
+            parsed.kind == OutOfLineMemberKind::OperatorAssign;
+        parsed.fn.params = parse_param_list(allow_unnamed_single_parameter);
+        parse_function_trailing_attributes(parsed.fn, "a member function declarator");
+        parsed.is_const_method = match(TokenKind::KwConst);
+        parsed.fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
+        parse_body_or_default(parsed.fn, "an out-of-line member definition");
+        return try_finish(std::move(parsed));
     }
 
     // Multiple identical bodyless `extern "C"` declarations all describe
@@ -1853,6 +2207,35 @@ private:
             reconciled.push_back(std::move(program.functions[i]));
         }
         program.functions = std::move(reconciled);
+    }
+
+    void ensure_member_forward_declarations_are_defined(const Program& program) {
+        for (const Function& fn : program.functions) {
+            if (!is_bodyless_member_forward_decl(fn)) continue;
+            std::string display_name = fn.member_owner_class + "::" + fn.name.substr(fn.name.rfind('_') + 1);
+            if (fn.name.ends_with("_new")) {
+                std::size_t pos = fn.member_owner_class.rfind("::");
+                std::string unqualified = pos == std::string::npos ? fn.member_owner_class : fn.member_owner_class.substr(pos + 2);
+                display_name = fn.member_owner_class + "::" + unqualified;
+            } else if (fn.name.ends_with("_delete")) {
+                std::size_t pos = fn.member_owner_class.rfind("::");
+                std::string unqualified = pos == std::string::npos ? fn.member_owner_class : fn.member_owner_class.substr(pos + 2);
+                display_name = fn.member_owner_class + "::~" + unqualified;
+            } else if (fn.name.ends_with("_operator_assign")) {
+                display_name = fn.member_owner_class + "::operator=";
+            } else if (fn.name.ends_with("_operator_equal")) {
+                display_name = fn.member_owner_class + "::operator==";
+            } else if (fn.name.ends_with("_operator_not_equal")) {
+                display_name = fn.member_owner_class + "::operator!=";
+            } else if (fn.name.ends_with("_operator_deref")) {
+                display_name = fn.member_owner_class + "::operator*";
+            } else if (fn.name.ends_with("_operator_arrow")) {
+                display_name = fn.member_owner_class + "::operator->";
+            }
+            throw ParseError(fn.loc.line, fn.loc.column,
+                             "member declaration '" + display_name +
+                                 "' must be followed by a matching out-of-line definition in the same translation unit");
+        }
     }
 
     [[nodiscard]] static bool is_shadowed_local(
@@ -2671,6 +3054,7 @@ private:
         clone.is_override = fn.is_override;
         clone.is_pure = fn.is_pure;
         clone.is_defaulted = fn.is_defaulted;
+        clone.expects_out_of_line_definition = false;
         clone.eval_mode = fn.eval_mode;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
@@ -3302,6 +3686,9 @@ private:
                                nodiscard_reason);
             fn.loc = loc;
             program.functions.push_back(std::move(fn));
+            return;
+        }
+        if (parse_out_of_line_member_definition(program, loc, is_unsafe, is_nodiscard, nodiscard_reason)) {
             return;
         }
         Function fn =
@@ -4921,6 +5308,8 @@ private:
             fn.namespace_path = namespace_stack_;
             fn.is_exported = is_exported;
             if (!generic_method_owner_id.empty()) fn.generic_method_owner_id = generic_method_owner_id;
+            fn.expects_out_of_line_definition =
+                fn.body == nullptr && fn.owning_module.empty() && !fn.is_pure && !fn.is_defaulted;
         };
         auto enter_member_template_context = [&](const std::vector<GenericTypeParam>& member_template_params) {
             for (const GenericTypeParam& p : member_template_params) {

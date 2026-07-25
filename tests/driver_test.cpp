@@ -5718,6 +5718,56 @@ int main() {
     }
 }
 
+void run_out_of_line_member_definition_tests() {
+    {
+        std::string case_name = "out_of_line_constructor_method_and_destructor_compile_and_run";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(class Box {
+private:
+    int value_{};
+public:
+    virtual ~Box();
+    Box(int value);
+    int value() const;
+};
+inline Box::Box(int value) : value_{value} { return; }
+int Box::value() const { return this->value_; }
+Box::~Box() { return; }
+int main() {
+    Box box{7};
+    return box.value() - 7;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "out_of_line_operator_assign_compile_and_run";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(class Widget {
+public:
+    virtual ~Widget() = default;
+    Widget(int v) { this.v = v; return; }
+    Widget& operator=(const Widget& other);
+    int value() const { return this.v; }
+private:
+    int v{};
+};
+Widget& Widget::operator=(const Widget& other) { this.v = other.v; return this; }
+int main() {
+    Widget lhs{1};
+    Widget rhs{9};
+    lhs = rhs;
+    return lhs.value() - 9;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_for_loop_tests() {
     {
         std::string case_name = "classic_for_init_decl_is_out_of_scope_after_loop";
@@ -6215,6 +6265,7 @@ int main() {
     run_consteval_tests();
     run_cli_extension_tests();
     run_brace_init_only_var_decl_tests();
+    run_out_of_line_member_definition_tests();
     run_for_loop_tests();
     run_inheritance_constructor_and_destructor_tests();
     run_default_constructor_selection_tests();
