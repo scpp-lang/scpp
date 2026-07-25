@@ -47,12 +47,15 @@ enum class TokenKind {
     // `unsigned` is only ever legal directly before `int`/`long` (ch06:
     // the bare one-word shorthand isn't valid scpp) -- parse_
     // unqualified_type enforces this, not the lexer. The fixed-width
-    // integer names are promoted to true keywords too, even though real
-    // C++ exposes them as typedef names.
+    // integer names plus the ubiquitous `<cstddef>` scalar aliases
+    // `size_t`/`ptrdiff_t` are promoted to true keywords too, even though
+    // real C++ exposes them as typedef names.
     KwLong,
     KwFloat,
     KwDouble,
     KwUnsigned,
+    KwSizeT,
+    KwPtrdiffT,
     KwInt8T,
     KwUInt8T,
     KwInt16T,
@@ -259,6 +262,8 @@ private:
         if (text == "float") return TokenKind::KwFloat;
         if (text == "double") return TokenKind::KwDouble;
         if (text == "unsigned") return TokenKind::KwUnsigned;
+        if (text == "size_t") return TokenKind::KwSizeT;
+        if (text == "ptrdiff_t") return TokenKind::KwPtrdiffT;
         if (text == "int8_t") return TokenKind::KwInt8T;
         if (text == "uint8_t") return TokenKind::KwUInt8T;
         if (text == "int16_t") return TokenKind::KwInt16T;
