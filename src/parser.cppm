@@ -283,6 +283,7 @@ private:
     std::size_t parser_instance_id_ = 0;
     std::size_t synthesized_for_temp_counter_ = 0;
     int loop_depth_ = 0;
+    int switch_depth_ = 0;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -433,6 +434,7 @@ private:
         ExprPtr thread_movable_if_movable_expr;
         ExprPtr thread_movable_if_shareable_expr;
         bool has_nodiscard = false;
+        bool has_fallthrough = false;
         std::string nodiscard_reason;
         LifetimeAnnotation lifetime;
         [[nodiscard]] bool has(const std::string& token) const { return scpp_tokens.contains(token); }
@@ -659,6 +661,7 @@ private:
                         }
                     }
                     if (ns.empty() && token == "nodiscard") result.has_nodiscard = true;
+                    if (ns.empty() && token == "fallthrough") result.has_fallthrough = true;
                     if (ns == "scpp") result.scpp_tokens.insert(token);
                 } while (match(TokenKind::Comma));
             }
@@ -955,6 +958,13 @@ private:
         return stmt;
     }
 
+    [[nodiscard]] StmtPtr make_fallthrough_stmt(SourceLocation loc) {
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::Fallthrough;
+        stmt->loc = loc;
+        return stmt;
+    }
+
     [[nodiscard]] std::string fresh_for_temp_name(std::string_view stem) {
         return "$for_" + std::string(stem) + "_" + std::to_string(synthesized_for_temp_counter_++);
     }
@@ -980,6 +990,13 @@ private:
                     stmt->else_branch = rewrite_loop_continue_with_epilogue(std::move(stmt->else_branch), epilogue);
                 }
                 return stmt;
+            case StmtKind::Switch:
+                for (SwitchCase& switch_case : stmt->switch_cases) {
+                    for (StmtPtr& child : switch_case.statements) {
+                        child = rewrite_loop_continue_with_epilogue(std::move(child), epilogue);
+                    }
+                }
+                return stmt;
             case StmtKind::Block:
                 for (StmtPtr& child : stmt->statements) {
                     child = rewrite_loop_continue_with_epilogue(std::move(child), epilogue);
@@ -990,6 +1007,7 @@ private:
             case StmtKind::VarDecl:
             case StmtKind::Return:
             case StmtKind::Break:
+            case StmtKind::Fallthrough:
             case StmtKind::ExprStmt:
                 return stmt;
         }
@@ -1627,8 +1645,18 @@ private:
                 if (stmt.condition) collect_hidden_function_designators_in_expr(*stmt.condition, out);
                 if (stmt.then_branch) collect_hidden_function_designators_in_stmt(*stmt.then_branch, out);
                 return;
+            case StmtKind::Switch:
+                if (stmt.condition) collect_hidden_function_designators_in_expr(*stmt.condition, out);
+                for (const SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) collect_hidden_function_designators_in_expr(*switch_case.value, out);
+                    for (const StmtPtr& child : switch_case.statements) {
+                        if (child) collect_hidden_function_designators_in_stmt(*child, out);
+                    }
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
         }
     }
@@ -2306,8 +2334,26 @@ private:
                                                               scopes);
                 scopes.pop_back();
                 return;
+            case StmtKind::Switch: {
+                qualify_same_namespace_function_calls_in_expr(*stmt.condition, namespace_prefix, known_function_names,
+                                                              scopes);
+                scopes.push_back({});
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) {
+                        qualify_same_namespace_function_calls_in_expr(*switch_case.value, namespace_prefix,
+                                                                      known_function_names, scopes);
+                    }
+                    for (StmtPtr& child : switch_case.statements) {
+                        qualify_same_namespace_function_calls_in_stmt(*child, namespace_prefix, known_function_names,
+                                                                      scopes);
+                    }
+                }
+                scopes.pop_back();
+                return;
+            }
             case StmtKind::Break:
-            case StmtKind::Continue: return;
+            case StmtKind::Continue:
+            case StmtKind::Fallthrough: return;
             case StmtKind::Block:
                 scopes.push_back({});
                 for (StmtPtr& child : stmt.statements) {
@@ -6014,6 +6060,71 @@ private:
         return block;
     }
 
+    void reject_nested_fallthrough(const Stmt& stmt) {
+        switch (stmt.kind) {
+            case StmtKind::Fallthrough:
+                throw ParseError(stmt.loc.line, stmt.loc.column,
+                                 "'[[fallthrough]];' is only valid as the final top-level statement of a switch case");
+            case StmtKind::If:
+                if (stmt.then_branch) reject_nested_fallthrough(*stmt.then_branch);
+                if (stmt.else_branch) reject_nested_fallthrough(*stmt.else_branch);
+                return;
+            case StmtKind::While:
+                if (stmt.then_branch) reject_nested_fallthrough(*stmt.then_branch);
+                return;
+            case StmtKind::Switch:
+                return;
+            case StmtKind::Block:
+                for (const StmtPtr& child : stmt.statements) reject_nested_fallthrough(*child);
+                return;
+            case StmtKind::VarDecl:
+            case StmtKind::Return:
+            case StmtKind::Break:
+            case StmtKind::Continue:
+            case StmtKind::ExprStmt:
+                return;
+        }
+    }
+
+    [[nodiscard]] bool is_explicit_switch_case_terminator(const Stmt& stmt) {
+        return stmt.kind == StmtKind::Break || stmt.kind == StmtKind::Return || stmt.kind == StmtKind::Continue ||
+               stmt.kind == StmtKind::Fallthrough;
+    }
+
+    void validate_switch_fallthrough(const Stmt& stmt) {
+        for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
+            const SwitchCase& switch_case = stmt.switch_cases[i];
+            for (std::size_t j = 0; j < switch_case.statements.size(); j++) {
+                const Stmt& child = *switch_case.statements[j];
+                if (child.kind == StmtKind::Fallthrough) {
+                    if (j + 1 != switch_case.statements.size()) {
+                        throw ParseError(child.loc.line, child.loc.column,
+                                         "'[[fallthrough]];' must be the last statement in its switch case");
+                    }
+                    if (i + 1 == stmt.switch_cases.size()) {
+                        throw ParseError(child.loc.line, child.loc.column,
+                                         "'[[fallthrough]];' requires a following case or default label");
+                    }
+                } else {
+                    reject_nested_fallthrough(child);
+                }
+            }
+            if (switch_case.statements.empty()) {
+                if (i + 1 == stmt.switch_cases.size()) {
+                    throw ParseError(switch_case.loc.line, switch_case.loc.column,
+                                     "an empty switch case must be immediately followed by another case or default label");
+                }
+                continue;
+            }
+            const Stmt& tail = *switch_case.statements.back();
+            if (!is_explicit_switch_case_terminator(tail)) {
+                throw ParseError(tail.loc.line, tail.loc.column,
+                                 "a non-empty switch case must end with 'break;', 'return ...;', 'continue;', or "
+                                 "'[[fallthrough]];'");
+            }
+        }
+    }
+
     StmtPtr parse_statement() {
         // ch00 §2/ch01 §1.3: `[[scpp::unsafe]] { ... }` -- attribute-
         // driven now, not a keyword. Parses (and discards) any leading
@@ -6031,6 +6142,19 @@ private:
             const Token& attr_start_tok = peek();
             ParsedAttributes attrs = parse_attribute_specifier_seq();
             reject_packed_attribute(attrs, attr_start_tok, "a statement");
+            if (attrs.has_fallthrough) {
+                if (!check(TokenKind::Semicolon)) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column,
+                                     "'[[fallthrough]]' only applies to a standalone ';' statement");
+                }
+                if (switch_depth_ == 0) {
+                    throw ParseError(attr_start_tok.line, attr_start_tok.column,
+                                     "'[[fallthrough]];' is only valid inside a switch statement");
+                }
+                expect(TokenKind::Semicolon, "';'");
+                return make_fallthrough_stmt(make_source_location(attr_start_tok.line, attr_start_tok.column, source_path_));
+            }
             StmtPtr stmt = parse_statement();
             if (attrs.has("unsafe") && stmt->kind == StmtKind::Block) stmt->is_unsafe = true;
             return stmt;
@@ -6041,6 +6165,7 @@ private:
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
         if (check(TokenKind::KwWhile)) return parse_while();
+        if (check(TokenKind::KwSwitch)) return parse_switch();
         if (check(TokenKind::KwFor)) return parse_for();
         if (check(TokenKind::KwBreak)) return parse_break();
         if (check(TokenKind::KwContinue)) return parse_continue();
@@ -6259,6 +6384,47 @@ private:
         return stmt;
     }
 
+    StmtPtr parse_switch() {
+        SourceLocation loc = current_loc();
+        expect(TokenKind::KwSwitch, "'switch'");
+        expect(TokenKind::LParen, "'('");
+        auto stmt = std::make_unique<Stmt>();
+        stmt->kind = StmtKind::Switch;
+        stmt->loc = loc;
+        stmt->condition = parse_expr();
+        expect(TokenKind::RParen, "')'");
+        expect(TokenKind::LBrace, "'{'");
+        switch_depth_++;
+        bool saw_default = false;
+        while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
+            SwitchCase switch_case{};
+            switch_case.loc = current_loc();
+            if (match(TokenKind::KwCase)) {
+                switch_case.value = parse_expr();
+                expect(TokenKind::Colon, "':'");
+            } else if (match(TokenKind::KwDefault)) {
+                if (saw_default) {
+                    const Token& tok = peek();
+                    throw ParseError(tok.line, tok.column, "a switch statement may contain at most one 'default' label");
+                }
+                saw_default = true;
+                expect(TokenKind::Colon, "':'");
+            } else {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column, "expected 'case' or 'default' inside switch body");
+            }
+            while (!check(TokenKind::RBrace) && !check(TokenKind::KwCase) && !check(TokenKind::KwDefault) &&
+                   !check(TokenKind::EndOfFile)) {
+                switch_case.statements.push_back(parse_statement());
+            }
+            stmt->switch_cases.push_back(std::move(switch_case));
+        }
+        switch_depth_--;
+        expect(TokenKind::RBrace, "'}'");
+        validate_switch_fallthrough(*stmt);
+        return stmt;
+    }
+
     StmtPtr parse_for() {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwFor, "'for'");
@@ -6311,9 +6477,9 @@ private:
     StmtPtr parse_break() {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwBreak, "'break'");
-        if (loop_depth_ == 0) {
+        if (loop_depth_ == 0 && switch_depth_ == 0) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column, "'break' is only valid inside a loop");
+            throw ParseError(tok.line, tok.column, "'break' is only valid inside a loop or switch");
         }
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::Break;

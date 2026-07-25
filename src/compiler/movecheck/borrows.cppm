@@ -209,6 +209,12 @@ std::vector<std::size_t> successors(const Terminator& term) {
     switch (term.kind) {
         case TerminatorKind::Goto: return {term.target};
         case TerminatorKind::Branch: return {term.true_target, term.false_target};
+        case TerminatorKind::Switch: {
+            std::vector<std::size_t> out;
+            out.reserve(term.switch_targets.size());
+            for (const SwitchTarget& target : term.switch_targets) out.push_back(target.block);
+            return out;
+        }
         case TerminatorKind::Return:
         case TerminatorKind::Unreachable:
         case TerminatorKind::None:
@@ -371,6 +377,7 @@ LiveSet reference_uses(const Terminator& term, const Body& body) {
     LiveSet uses;
     switch (term.kind) {
         case TerminatorKind::Branch:
+        case TerminatorKind::Switch:
             collect_reference_uses(term.condition, body, uses);
             return uses;
         case TerminatorKind::Return:

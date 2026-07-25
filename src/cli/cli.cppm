@@ -46,6 +46,8 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwIf: return "KwIf";
         case scpp::TokenKind::KwElse: return "KwElse";
         case scpp::TokenKind::KwWhile: return "KwWhile";
+        case scpp::TokenKind::KwSwitch: return "KwSwitch";
+        case scpp::TokenKind::KwCase: return "KwCase";
         case scpp::TokenKind::KwBreak: return "KwBreak";
         case scpp::TokenKind::KwContinue: return "KwContinue";
         case scpp::TokenKind::KwFor: return "KwFor";
@@ -603,11 +605,24 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
             print_expr(*stmt.condition, depth + 1);
             print_stmt(*stmt.then_branch, depth + 1);
             break;
+        case scpp::StmtKind::Switch:
+            std::cout << "Switch\n";
+            print_expr(*stmt.condition, depth + 1);
+            for (const auto& switch_case : stmt.switch_cases) {
+                print_indent(depth + 1);
+                std::cout << (switch_case.value ? "Case\n" : "Default\n");
+                if (switch_case.value) print_expr(*switch_case.value, depth + 2);
+                for (const auto& s : switch_case.statements) print_stmt(*s, depth + 2);
+            }
+            break;
         case scpp::StmtKind::Break:
             std::cout << "Break\n";
             break;
         case scpp::StmtKind::Continue:
             std::cout << "Continue\n";
+            break;
+        case scpp::StmtKind::Fallthrough:
+            std::cout << "Fallthrough\n";
             break;
         case scpp::StmtKind::ExprStmt:
             std::cout << "ExprStmt\n";

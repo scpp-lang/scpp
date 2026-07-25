@@ -72,6 +72,8 @@ enum class TokenKind {
     KwIf,
     KwElse,
     KwWhile,
+    KwSwitch,
+    KwCase,
     KwBreak,
     KwContinue,
     KwFor,
@@ -277,6 +279,8 @@ private:
         if (text == "if") return TokenKind::KwIf;
         if (text == "else") return TokenKind::KwElse;
         if (text == "while") return TokenKind::KwWhile;
+        if (text == "switch") return TokenKind::KwSwitch;
+        if (text == "case") return TokenKind::KwCase;
         if (text == "break") return TokenKind::KwBreak;
         if (text == "continue") return TokenKind::KwContinue;
         if (text == "for") return TokenKind::KwFor;

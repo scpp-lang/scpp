@@ -252,6 +252,20 @@ void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::st
     if (stmt.else_branch) {
         collect_stmt_edges(*stmt.else_branch, known_function_names, bound_names, function_names, type_names);
     }
+    if (stmt.kind == scpp::StmtKind::Switch) {
+        std::unordered_set<std::string> switch_bound_names = bound_names;
+        for (const auto& switch_case : stmt.switch_cases) {
+            if (switch_case.value) {
+                collect_expr_edges(*switch_case.value, known_function_names, switch_bound_names, function_names, type_names);
+            }
+            for (const auto& nested : switch_case.statements) {
+                collect_stmt_edges(*nested, known_function_names, switch_bound_names, function_names, type_names);
+                if (nested->kind == scpp::StmtKind::VarDecl && !nested->var_name.empty()) {
+                    switch_bound_names.insert(nested->var_name);
+                }
+            }
+        }
+    }
     std::unordered_set<std::string> block_bound_names = bound_names;
     if (stmt.kind == scpp::StmtKind::VarDecl && !stmt.var_name.empty()) block_bound_names.insert(stmt.var_name);
     for (const auto& nested : stmt.statements) {
@@ -820,6 +834,14 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     if (stmt.then_branch) write_stmt(out, *stmt.then_branch);
     write_u8(out, stmt.else_branch ? 1u : 0u);
     if (stmt.else_branch) write_stmt(out, *stmt.else_branch);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.switch_cases.size()));
+    for (const SwitchCase& switch_case : stmt.switch_cases) {
+        write_source_location(out, switch_case.loc);
+        write_u8(out, switch_case.value ? 1u : 0u);
+        if (switch_case.value) write_expr(out, *switch_case.value);
+        write_u32_le(out, static_cast<std::uint32_t>(switch_case.statements.size()));
+        for (const auto& nested : switch_case.statements) write_stmt(out, *nested);
+    }
     write_u32_le(out, static_cast<std::uint32_t>(stmt.statements.size()));
     for (const auto& nested : stmt.statements) write_stmt(out, *nested);
     write_u8(out, stmt.is_unsafe ? 1u : 0u);
@@ -849,6 +871,21 @@ StmtPtr read_stmt(std::istream& in, const std::string& context) {
     stmt->if_mode = read_enum<IfMode>(in, context + " if mode");
     if (read_u8(in, context + " then present") != 0u) stmt->then_branch = read_stmt(in, context + " then");
     if (read_u8(in, context + " else present") != 0u) stmt->else_branch = read_stmt(in, context + " else");
+    std::uint32_t switch_case_count = read_u32_le(in, context + " switch case count");
+    stmt->switch_cases.reserve(switch_case_count);
+    for (std::uint32_t i = 0; i < switch_case_count; i++) {
+        SwitchCase switch_case{};
+        switch_case.loc = read_source_location(in, context + " switch case loc");
+        if (read_u8(in, context + " switch case value present") != 0u) {
+            switch_case.value = read_expr(in, context + " switch case value");
+        }
+        std::uint32_t switch_stmt_count = read_u32_le(in, context + " switch case stmt count");
+        switch_case.statements.reserve(switch_stmt_count);
+        for (std::uint32_t j = 0; j < switch_stmt_count; j++) {
+            switch_case.statements.push_back(read_stmt(in, context + " switch case stmt"));
+        }
+        stmt->switch_cases.push_back(std::move(switch_case));
+    }
     std::uint32_t nested_count = read_u32_le(in, context + " nested count");
     stmt->statements.reserve(nested_count);
     for (std::uint32_t i = 0; i < nested_count; i++) stmt->statements.push_back(read_stmt(in, context + " nested"));

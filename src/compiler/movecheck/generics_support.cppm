@@ -78,6 +78,13 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     if (stmt.condition) clone->condition = clone_expr(*stmt.condition);
     if (stmt.then_branch) clone->then_branch = clone_stmt(*stmt.then_branch);
     if (stmt.else_branch) clone->else_branch = clone_stmt(*stmt.else_branch);
+    for (const SwitchCase& switch_case : stmt.switch_cases) {
+        SwitchCase cloned_case{};
+        cloned_case.loc = switch_case.loc;
+        if (switch_case.value) cloned_case.value = clone_expr(*switch_case.value);
+        for (const StmtPtr& s : switch_case.statements) cloned_case.statements.push_back(clone_stmt(*s));
+        clone->switch_cases.push_back(std::move(cloned_case));
+    }
     clone->is_constexpr = stmt.is_constexpr;
     clone->if_mode = stmt.if_mode;
     clone->statements.reserve(stmt.statements.size());

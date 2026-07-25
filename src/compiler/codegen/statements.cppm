@@ -654,30 +654,109 @@ namespace scpp {
                 // previous iteration's allocation.
                 llvm::LLVMPositionBuilderAtEnd(builder_, body_block);
                 push_scope();
-                loop_stack_.push_back(LoopFrame{cond_block, end_block, scope_stack_.size()});
+                control_flow_stack_.push_back(ControlFlowFrame{cond_block, end_block, scope_stack_.size()});
                 codegen_stmt(*stmt.then_branch, current_function);
                 pop_scope();
-                loop_stack_.pop_back();
+                control_flow_stack_.pop_back();
                 if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
                     llvm::LLVMBuildBr(builder_, cond_block);
                 }
 
                 llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
+                if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(end_block)) == nullptr) {
+                    llvm::LLVMBuildUnreachable(builder_);
+                }
+                return;
+            }
+
+            case StmtKind::Switch: {
+                llvm::LLVMValueRef condition = codegen_expr(*stmt.condition);
+                llvm::LLVMBasicBlockRef end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.end");
+                std::vector<llvm::LLVMBasicBlockRef> case_blocks;
+                case_blocks.reserve(stmt.switch_cases.size());
+                for ([[maybe_unused]] const SwitchCase& switch_case : stmt.switch_cases) {
+                    case_blocks.push_back(llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.case"));
+                }
+                llvm::LLVMBasicBlockRef default_block = end_block;
+                bool has_default = false;
+                std::vector<std::pair<llvm::LLVMValueRef, llvm::LLVMBasicBlockRef>> value_cases;
+                for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
+                    if (stmt.switch_cases[i].value) {
+                        value_cases.push_back({codegen_expr(*stmt.switch_cases[i].value), case_blocks[i]});
+                    } else {
+                        has_default = true;
+                        default_block = case_blocks[i];
+                    }
+                }
+                bool end_block_reachable = !has_default;
+
+                llvm::LLVMBasicBlockRef current_test_block = llvm::LLVMGetInsertBlock(builder_);
+                for (std::size_t i = 0; i < value_cases.size(); i++) {
+                    llvm::LLVMBasicBlockRef false_block =
+                        (i + 1 == value_cases.size()) ? default_block
+                                                      : llvm::LLVMAppendBasicBlockInContext(context_, current_function,
+                                                                                            "switch.test");
+                    llvm::LLVMPositionBuilderAtEnd(builder_, current_test_block);
+                    llvm::LLVMValueRef matches =
+                        llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, condition, value_cases[i].first, "switch.match");
+                    llvm::LLVMBuildCondBr(builder_, matches, value_cases[i].second, false_block);
+                    current_test_block = false_block;
+                }
+                if (value_cases.empty()) {
+                    llvm::LLVMBuildBr(builder_, default_block);
+                } else if (current_test_block == default_block &&
+                           llvm::LLVMGetBasicBlockTerminator(default_block) == nullptr &&
+                           default_block == end_block) {
+                    llvm::LLVMPositionBuilderAtEnd(builder_, default_block);
+                }
+
+                for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
+                    llvm::LLVMPositionBuilderAtEnd(builder_, case_blocks[i]);
+                    push_scope();
+                    control_flow_stack_.push_back(ControlFlowFrame{std::nullopt, end_block, scope_stack_.size()});
+                    for (const StmtPtr& child : stmt.switch_cases[i].statements) {
+                        if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) break;
+                        codegen_stmt(*child, current_function);
+                    }
+                    bool falls_into_next_case =
+                        stmt.switch_cases[i].statements.empty() ||
+                        (!stmt.switch_cases[i].statements.empty() &&
+                         stmt.switch_cases[i].statements.back()->kind == StmtKind::Fallthrough);
+                    bool ends_with_break = !stmt.switch_cases[i].statements.empty() &&
+                                           stmt.switch_cases[i].statements.back()->kind == StmtKind::Break;
+                    pop_scope();
+                    control_flow_stack_.pop_back();
+                    if (ends_with_break) end_block_reachable = true;
+                    if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
+                        llvm::LLVMBasicBlockRef target =
+                            (falls_into_next_case && i + 1 < case_blocks.size()) ? case_blocks[i + 1] : end_block;
+                        if (target == end_block) end_block_reachable = true;
+                        llvm::LLVMBuildBr(builder_, target);
+                    }
+                }
+
+                llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
+                if (!end_block_reachable) llvm::LLVMBuildUnreachable(builder_);
                 return;
             }
 
             case StmtKind::Break:
-                if (!loop_stack_.empty()) {
-                    emit_scope_cleanup_to_depth(loop_stack_.back().scope_depth);
-                    llvm::LLVMBuildBr(builder_, loop_stack_.back().end_block);
+                if (!control_flow_stack_.empty()) {
+                    emit_scope_cleanup_to_depth(control_flow_stack_.back().scope_depth);
+                    llvm::LLVMBuildBr(builder_, control_flow_stack_.back().end_block);
                 }
                 return;
 
             case StmtKind::Continue:
-                if (!loop_stack_.empty()) {
-                    emit_scope_cleanup_to_depth(loop_stack_.back().scope_depth);
-                    llvm::LLVMBuildBr(builder_, loop_stack_.back().cond_block);
+                for (auto it = control_flow_stack_.rbegin(); it != control_flow_stack_.rend(); ++it) {
+                    if (!it->continue_block.has_value()) continue;
+                    emit_scope_cleanup_to_depth(it->scope_depth);
+                    llvm::LLVMBuildBr(builder_, *it->continue_block);
+                    return;
                 }
+                return;
+
+            case StmtKind::Fallthrough:
                 return;
         }
     }

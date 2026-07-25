@@ -223,12 +223,12 @@ private:
     // of any pushed scope; they live for the whole function and are only
     // freed at Return, same as before.
     std::vector<std::vector<std::string>> scope_stack_;
-    struct LoopFrame {
-        llvm::LLVMBasicBlockRef cond_block;
+    struct ControlFlowFrame {
+        std::optional<llvm::LLVMBasicBlockRef> continue_block;
         llvm::LLVMBasicBlockRef end_block;
         std::size_t scope_depth;
     };
-    std::vector<LoopFrame> loop_stack_;
+    std::vector<ControlFlowFrame> control_flow_stack_;
     std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_type_cache_;
     std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_file_cache_;
     llvm::LLVMTypeRef interface_representation_llvm_type_ = nullptr;

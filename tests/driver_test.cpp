@@ -5036,6 +5036,149 @@ void run_enum_tests() {
     }
 }
 
+void run_switch_tests() {
+    {
+        std::string case_name = "switch_non_empty_case_requires_explicit_terminator";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
+        std::filesystem::remove(exe_path);
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                "int main() {\n"
+                "    int value = 0;\n"
+                "    switch (1) {\n"
+                "        case 1:\n"
+                "            value = 1;\n"
+                "        case 2:\n"
+                "            value = 2;\n"
+                "        default:\n"
+                "            return value;\n"
+                "    }\n"
+                "}\n",
+                exe_path.string(), std_link_inputs(),
+                prebuilt_module_import_paths());
+        } catch (const scpp::ParseError& e) {
+            threw = true;
+            expect(std::string(e.what()).find("must end with 'break;'") != std::string::npos,
+                   case_name + ": expected explicit-terminator diagnostic");
+        }
+        std::filesystem::remove(exe_path);
+        expect(threw, case_name + ": expected compile-time rejection");
+    }
+
+    {
+        std::string case_name = "switch_fallthrough_attribute_allows_continuation";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int value = 0;\n"
+            "    switch (1) {\n"
+            "        case 1:\n"
+            "            value = 1;\n"
+            "            [[fallthrough]];\n"
+            "        case 2:\n"
+            "            value = value + 2;\n"
+            "            break;\n"
+            "        default:\n"
+            "            value = value + 4;\n"
+            "            break;\n"
+            "    }\n"
+            "    return value - 3;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "switch_on_enum_type_executes_matching_case";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "enum class Color { red = 1, green = 2, blue = 3 };\n"
+            "int main() {\n"
+            "    Color color = Color::green;\n"
+            "    switch (color) {\n"
+            "        case Color::red:\n"
+            "            return 1;\n"
+            "        case Color::green:\n"
+            "            return 0;\n"
+            "        default:\n"
+            "            return 2;\n"
+            "    }\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "switch_grouped_case_labels_share_following_body";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "int main() {\n"
+            "    int value = 0;\n"
+            "    switch (2) {\n"
+            "        case 1:\n"
+            "        case 2:\n"
+            "            value = 7;\n"
+            "            break;\n"
+            "        default:\n"
+            "            return 1;\n"
+            "    }\n"
+            "    return value - 7;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "switch_duplicate_case_values_are_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(
+                "int main() {\n"
+                "    switch (1) {\n"
+                "        case 1:\n"
+                "            return 1;\n"
+                "        case 1:\n"
+                "            return 0;\n"
+                "    }\n"
+                "}\n");
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+        } catch (const scpp::DataflowError& e) {
+            threw = true;
+            expect(std::string(e.what()).find("duplicate switch case value") != std::string::npos,
+                   case_name + ": expected duplicate-case diagnostic");
+        }
+        expect(threw, case_name + ": expected a DataflowError");
+    }
+
+    {
+        std::string case_name = "switch_on_non_integral_type_is_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::Program program = scpp::parse(
+                "struct Box { int value; };\n"
+                "int main() {\n"
+                "    Box box{1};\n"
+                "    switch (box) {\n"
+                "        default:\n"
+                "            return 0;\n"
+                "    }\n"
+                "}\n");
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+        } catch (const scpp::DataflowError& e) {
+            threw = true;
+            expect(std::string(e.what()).find("integral or enum") != std::string::npos,
+                   case_name + ": expected integral-or-enum diagnostic");
+        }
+        expect(threw, case_name + ": expected a DataflowError");
+    }
+}
+
 void run_global_scope_resolution_tests() {
     {
         std::string case_name = "global_scope_resolution_bypasses_namespace_shadowing";
@@ -6361,6 +6504,7 @@ int main() {
     run_expected_tests();
     run_io_tests();
     run_enum_tests();
+    run_switch_tests();
     test_compile_time_payload_plan_collects_exported_roots_and_helpers();
     run_sizeof_tests();
     run_storage_tests();
