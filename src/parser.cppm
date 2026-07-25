@@ -116,6 +116,7 @@ public:
 
     Program parse_program() {
         Program program;
+        current_program_ = &program;
         parse_module_declaration(program);
         parse_import_declarations(program);
         parse_top_level_items(program);
@@ -157,6 +158,7 @@ public:
             auto_concept.name = "$auto";
             program.concepts.push_back(std::move(auto_concept));
         }
+        current_program_ = nullptr;
         return program;
     }
 
@@ -176,6 +178,7 @@ private:
     ModuleResolver resolver_;
     PartitionResolver partition_resolver_;
     std::shared_ptr<const std::string> source_path_;
+    Program* current_program_ = nullptr;
     // ch11 §11.4: the namespace path currently being parsed into, e.g.
     // inside `namespace std { ... }` this is {"std"}; empty at file
     // scope (today's default -- every existing, non-namespaced file is
@@ -215,6 +218,8 @@ private:
     // while parsing later type uses, so downstream phases see the aliased
     // underlying Type directly rather than a distinct "alias type" node.
     std::unordered_map<std::string, Type> type_aliases_;
+    std::vector<std::unordered_map<std::string, std::string>> local_type_name_scopes_;
+    std::size_t next_local_type_id_ = 0;
     // ch05 §5.11: true once parse_param_type has seen at least one bare
     // (unconstrained) `auto` parameter anywhere in the program --
     // consulted by parse_program at the very end to decide whether to
@@ -1362,6 +1367,30 @@ private:
         return joined;
     }
 
+    [[nodiscard]] std::optional<std::string> resolve_visible_local_type_name(const std::string& spelled_name) const {
+        if (spelled_name.empty() || spelled_name.contains("::")) return std::nullopt;
+        for (auto it = local_type_name_scopes_.rbegin(); it != local_type_name_scopes_.rend(); ++it) {
+            auto local_it = it->find(spelled_name);
+            if (local_it != it->end()) return local_it->second;
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::string fresh_local_type_name(const std::string& bare_name) {
+        return "$local_type_" + std::to_string(++next_local_type_id_) + "::" + bare_name;
+    }
+
+    void register_local_type_name(const std::string& bare_name, const std::string& qualified_name, const SourceLocation& loc) {
+        if (local_type_name_scopes_.empty()) {
+            throw ParseError(loc.line, loc.column, "internal parser error: missing block scope for local type definition");
+        }
+        auto [_, inserted] = local_type_name_scopes_.back().emplace(bare_name, qualified_name);
+        if (!inserted) {
+            throw ParseError(loc.line, loc.column,
+                             "redeclaration of local type '" + bare_name + "' in the same block scope");
+        }
+    }
+
     [[nodiscard]] std::optional<Type> resolve_visible_type_alias(const std::string& spelled_name) const {
         if (spelled_name.empty()) return std::nullopt;
         auto lookup = [&](const std::string& candidate) -> std::optional<Type> {
@@ -1401,6 +1430,9 @@ private:
 
     [[nodiscard]] std::string resolve_visible_type_name(const std::string& spelled_name) const {
         if (spelled_name.empty()) return {};
+        if (std::optional<std::string> local = resolve_visible_local_type_name(spelled_name); local.has_value()) {
+            return *local;
+        }
         auto alias_underlying_name = [&](const Type& type) -> std::string {
             if (type.kind != TypeKind::Named || !type.template_args.empty() || !type.non_type_args.empty() ||
                 type.is_pack_expansion) {
@@ -3928,7 +3960,9 @@ private:
     // duration of this one struct's body, removed again immediately
     // afterward.
     StructDef parse_struct_def(Program& program, std::vector<GenericTypeParam> template_params = {},
-                               std::vector<AlignmentSpecifier> leading_alignments = {}) {
+                               std::vector<AlignmentSpecifier> leading_alignments = {},
+                               std::optional<std::string> forced_qualified_name = std::nullopt,
+                               bool is_local_definition = false) {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwStruct, "'struct'");
         StructDef def;
@@ -3964,9 +3998,12 @@ private:
             throw ParseError(tok.line, tok.column,
                              "'alignas' must appear before a struct name, not after it (spec §9.3)");
         }
-        def.name = qualify_name(bare_name);
+        def.name = forced_qualified_name.has_value() ? *forced_qualified_name
+                                                     : (is_local_definition ? fresh_local_type_name(bare_name)
+                                                                            : qualify_name(bare_name));
         def.namespace_path = namespace_stack_;
         register_record_tag_kind(def.name, RecordTagKind::Struct, loc);
+        if (is_local_definition || forced_qualified_name.has_value()) register_local_type_name(bare_name, def.name, loc);
         // Register the (fully-qualified) name before parsing the body so
         // a field can refer to the enclosing struct via a pointer (e.g.
         // `Node* next;`).
@@ -5202,7 +5239,9 @@ private:
     // handling (movecheck.cppm) for both the once-at-definition abstract
     // check and each concrete instantiation's own clone.
     void parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {},
-                         std::vector<AlignmentSpecifier> leading_alignments = {}) {
+                         std::vector<AlignmentSpecifier> leading_alignments = {},
+                         std::optional<std::string> forced_qualified_name = std::nullopt,
+                         bool is_local_definition = false) {
         SourceLocation loc = current_loc();
         expect(TokenKind::KwClass, "'class'");
         bool is_generic = !template_params.empty();
@@ -5241,6 +5280,9 @@ private:
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
         register_record_tag_kind(qualified_class_name, RecordTagKind::Class, loc);
+        if (is_local_definition || forced_qualified_name.has_value()) {
+            register_local_type_name(class_name, qualified_class_name, loc);
+        }
         if (is_generic) {
             bool saw_type = false;
             bool saw_non_type = false;
@@ -6050,6 +6092,7 @@ private:
     StmtPtr parse_block() {
         SourceLocation loc = current_loc();
         expect(TokenKind::LBrace, "'{'");
+        local_type_name_scopes_.push_back({});
         auto block = std::make_unique<Stmt>();
         block->kind = StmtKind::Block;
         block->loc = loc;
@@ -6057,7 +6100,21 @@ private:
             block->statements.push_back(parse_statement());
         }
         expect(TokenKind::RBrace, "'}'");
+        local_type_name_scopes_.pop_back();
         return block;
+    }
+
+    StmtPtr parse_local_type_definition_statement() {
+        SourceLocation loc = current_loc();
+        if (current_program_ == nullptr) {
+            throw ParseError(loc.line, loc.column, "internal parser error: local type definition without active program");
+        }
+        if (check(TokenKind::KwStruct)) {
+            current_program_->structs.push_back(parse_struct_def(*current_program_, {}, {}, std::nullopt, true));
+        } else {
+            parse_class_def(*current_program_, /*is_exported=*/false, {}, {}, std::nullopt, true);
+        }
+        return make_block_stmt(loc);
     }
 
     void reject_nested_fallthrough(const Stmt& stmt) {
@@ -6160,6 +6217,7 @@ private:
             return stmt;
         }
         if (check(TokenKind::LBrace)) return parse_block();
+        if (check(TokenKind::KwStruct) || check(TokenKind::KwClass)) return parse_local_type_definition_statement();
         if (check(TokenKind::KwStatic)) return parse_var_decl();
         if (looks_like_type_start()) return parse_var_decl();
         if (check(TokenKind::KwReturn)) return parse_return();
