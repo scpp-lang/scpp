@@ -99,6 +99,8 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::Colon: return "Colon";
         case scpp::TokenKind::Arrow: return "Arrow";
         case scpp::TokenKind::Tilde: return "Tilde";
+        case scpp::TokenKind::PlusPlus: return "PlusPlus";
+        case scpp::TokenKind::MinusMinus: return "MinusMinus";
         case scpp::TokenKind::Plus: return "Plus";
         case scpp::TokenKind::Minus: return "Minus";
         case scpp::TokenKind::Star: return "Star";
@@ -413,6 +415,10 @@ std::string_view unary_op_name(scpp::UnaryOp op) {
     switch (op) {
         case scpp::UnaryOp::Neg: return "-";
         case scpp::UnaryOp::Not: return "!";
+        case scpp::UnaryOp::PreInc: return "++";
+        case scpp::UnaryOp::PreDec: return "--";
+        case scpp::UnaryOp::PostInc: return "++ (post)";
+        case scpp::UnaryOp::PostDec: return "-- (post)";
         case scpp::UnaryOp::Deref: return "*";
         case scpp::UnaryOp::AddressOf: return "&";
     }

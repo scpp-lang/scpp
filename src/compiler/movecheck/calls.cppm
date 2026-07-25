@@ -869,6 +869,9 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Subscript:
             return assignment_target_is_read_only(*expr.lhs, body, signatures);
         case ExprKind::Unary: {
+            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                return assignment_target_is_read_only(*expr.lhs, body, signatures);
+            }
             if (expr.unary_op != UnaryOp::Deref) return false;
             if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
             std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
@@ -1060,6 +1063,11 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             switch (expr.unary_op) {
                 case UnaryOp::Not: return named_type("bool");
                 case UnaryOp::Neg: return infer_expr_type(*expr.lhs, body, signatures);
+                case UnaryOp::PreInc:
+                case UnaryOp::PreDec:
+                case UnaryOp::PostInc:
+                case UnaryOp::PostDec:
+                    return infer_expr_type(*expr.lhs, body, signatures);
                 case UnaryOp::AddressOf: {
                     if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name) &&
                         find_visible_global_for_expr(*expr.lhs, body) == nullptr) {

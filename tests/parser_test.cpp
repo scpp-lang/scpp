@@ -1344,6 +1344,54 @@ void test_address_of_dereference_chain() {
            "address_of_dereference_chain: innermost operand should be identifier 'p'");
 }
 
+void test_increment_and_decrement_operators_parse() {
+    scpp::Program program = scpp::parse(
+        "int main() {\n"
+        "    int x = 5;\n"
+        "    int a = ++x;\n"
+        "    int b = x++;\n"
+        "    int c = --x;\n"
+        "    int d = x--;\n"
+        "    for (int i = 0; i < 3; i++) { }\n"
+        "    return a + b + c + d;\n"
+        "}\n");
+    const scpp::Function& main_fn = program.functions[0];
+    expect(main_fn.body->statements.size() == 7,
+           "increment_and_decrement_operators_parse: expected 7 top-level statements");
+    auto expect_unary_init = [&](std::size_t stmt_index, scpp::UnaryOp op, std::string_view label) {
+        if (stmt_index >= main_fn.body->statements.size()) return;
+        const scpp::Stmt& stmt = *main_fn.body->statements[stmt_index];
+        expect(stmt.kind == scpp::StmtKind::VarDecl && stmt.init != nullptr,
+               std::string(label) + ": expected initialized VarDecl");
+        if (stmt.kind != scpp::StmtKind::VarDecl || stmt.init == nullptr) return;
+        expect(stmt.init->kind == scpp::ExprKind::Unary && stmt.init->unary_op == op,
+               std::string(label) + ": expected unary increment/decrement initializer");
+        expect(stmt.init->lhs != nullptr && stmt.init->lhs->kind == scpp::ExprKind::Identifier && stmt.init->lhs->name == "x",
+               std::string(label) + ": expected operand identifier 'x'");
+    };
+    expect_unary_init(1, scpp::UnaryOp::PreInc, "increment_and_decrement_operators_parse pre-inc");
+    expect_unary_init(2, scpp::UnaryOp::PostInc, "increment_and_decrement_operators_parse post-inc");
+    expect_unary_init(3, scpp::UnaryOp::PreDec, "increment_and_decrement_operators_parse pre-dec");
+    expect_unary_init(4, scpp::UnaryOp::PostDec, "increment_and_decrement_operators_parse post-dec");
+    const scpp::Stmt& loop_block = *main_fn.body->statements[5];
+    expect(loop_block.kind == scpp::StmtKind::Block,
+           "increment_and_decrement_operators_parse: for-loop should desugar to a block");
+    if (loop_block.kind != scpp::StmtKind::Block || loop_block.statements.size() != 2) return;
+    const scpp::Stmt& while_stmt = *loop_block.statements[1];
+    expect(while_stmt.kind == scpp::StmtKind::While && while_stmt.then_branch != nullptr &&
+               while_stmt.then_branch->kind == scpp::StmtKind::Block,
+           "increment_and_decrement_operators_parse: expected while body block");
+    if (while_stmt.kind != scpp::StmtKind::While || while_stmt.then_branch == nullptr ||
+        while_stmt.then_branch->statements.size() != 2) {
+        return;
+    }
+    const scpp::Stmt& increment_stmt = *while_stmt.then_branch->statements[1];
+    expect(increment_stmt.kind == scpp::StmtKind::ExprStmt && increment_stmt.expr != nullptr &&
+               increment_stmt.expr->kind == scpp::ExprKind::Unary &&
+               increment_stmt.expr->unary_op == scpp::UnaryOp::PostInc,
+           "increment_and_decrement_operators_parse: expected postfix ++ in desugared increment clause");
+}
+
 void test_arrow_parses_as_deferred_operator_arrow_access() {
     scpp::Program program = scpp::parse("int f() { return p->x; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
@@ -4847,6 +4895,7 @@ int main() {
     test_address_of_plain_variable();
     test_address_of_field_and_subscript();
     test_address_of_dereference_chain();
+    test_increment_and_decrement_operators_parse();
     test_arrow_parses_as_deferred_operator_arrow_access();
     test_chained_arrow_and_dot();
     test_operator_arrow_member_decl_and_explicit_call_parse();

@@ -165,6 +165,8 @@ enum class TokenKind {
            // ch04 §4.2), in this version.
 
     // operators
+    PlusPlus,
+    MinusMinus,
     Plus,
     Minus,
     Star,
@@ -416,8 +418,11 @@ private:
                     return make_token(TokenKind::Ellipsis, start, start_line, start_col);
                 }
                 return make_token(TokenKind::Dot, start, start_line, start_col);
-            case '+': return make_token(TokenKind::Plus, start, start_line, start_col);
+            case '+':
+                if (peek() == '+') { advance(); return make_token(TokenKind::PlusPlus, start, start_line, start_col); }
+                return make_token(TokenKind::Plus, start, start_line, start_col);
             case '-':
+                if (peek() == '-') { advance(); return make_token(TokenKind::MinusMinus, start, start_line, start_col); }
                 if (peek() == '>') { advance(); return make_token(TokenKind::Arrow, start, start_line, start_col); }
                 return make_token(TokenKind::Minus, start, start_line, start_col);
             case '*': return make_token(TokenKind::Star, start, start_line, start_col);

@@ -6714,6 +6714,22 @@ private:
             node->lhs = parse_unary();
             return node;
         }
+        if (match(TokenKind::PlusPlus)) {
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Unary;
+            node->loc = loc;
+            node->unary_op = UnaryOp::PreInc;
+            node->lhs = parse_unary();
+            return node;
+        }
+        if (match(TokenKind::MinusMinus)) {
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Unary;
+            node->loc = loc;
+            node->unary_op = UnaryOp::PreDec;
+            node->lhs = parse_unary();
+            return node;
+        }
         if (match(TokenKind::Bang)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Unary;
@@ -6845,6 +6861,20 @@ private:
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::PackExpansion;
                 node->loc = expr->loc;
+                node->lhs = std::move(expr);
+                expr = std::move(node);
+            } else if (match(TokenKind::PlusPlus)) {
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Unary;
+                node->loc = expr->loc;
+                node->unary_op = UnaryOp::PostInc;
+                node->lhs = std::move(expr);
+                expr = std::move(node);
+            } else if (match(TokenKind::MinusMinus)) {
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Unary;
+                node->loc = expr->loc;
+                node->unary_op = UnaryOp::PostDec;
                 node->lhs = std::move(expr);
                 expr = std::move(node);
             } else if (check(TokenKind::LParen)) {

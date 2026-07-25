@@ -1702,6 +1702,11 @@ private:
                 switch (expr.unary_op) {
                     case UnaryOp::Neg: return infer_unevaluated_expr_type(*expr.lhs);
                     case UnaryOp::Not: return named_type("bool");
+                    case UnaryOp::PreInc:
+                    case UnaryOp::PreDec:
+                    case UnaryOp::PostInc:
+                    case UnaryOp::PostDec:
+                        return infer_unevaluated_expr_type(*expr.lhs);
                     case UnaryOp::Deref: {
                         std::optional<Type> operand = infer_unevaluated_expr_type(*expr.lhs);
                         if (!operand.has_value()) return std::nullopt;
@@ -1855,6 +1860,11 @@ private:
                         return make_checked_int_cell(-value, expr.loc);
                     }
                     case UnaryOp::Not: return make_bool_cell(!as_bool(evaluate_expr(*expr.lhs), expr.loc));
+                    case UnaryOp::PreInc:
+                    case UnaryOp::PreDec:
+                    case UnaryOp::PostInc:
+                    case UnaryOp::PostDec:
+                        break;
                     case UnaryOp::Deref: return clone_cell(resolve_lvalue(expr).cell);
                     case UnaryOp::AddressOf: {
                         LValue target = resolve_lvalue(*expr.lhs);
