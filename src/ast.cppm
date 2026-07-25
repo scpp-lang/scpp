@@ -1180,7 +1180,7 @@ struct Function {
 [[nodiscard]] inline bool special_member_owner_name_matches(std::string_view spelled_name, std::string_view owner_name) {
     if (spelled_name == owner_name) return true;
     std::size_t scope = owner_name.rfind("::");
-    return scope != std::string_view::npos && spelled_name == owner_name.substr(scope + 2);
+    return scope < owner_name.size() && spelled_name == owner_name.substr(scope + 2);
 }
 
 [[nodiscard]] inline bool is_special_member_this_param(const Type& type, std::string_view owner_name) {
@@ -1704,7 +1704,7 @@ struct Program {
                                                           const std::string& name, bool explicit_global_qualification = false) {
     if (program == nullptr) return nullptr;
     auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
-        return global.decl != nullptr && global.decl->var_name == candidate;
+        return global.decl != nullptr && std::string_view{global.decl->var_name} == candidate;
     };
     if (explicit_global_qualification) {
         for (const GlobalVar& global : program->globals) {
@@ -1754,7 +1754,7 @@ struct TypeLayoutInfo {
 
         [[nodiscard]] const EnumDef* find_enum(std::string_view name) const {
             for (const EnumDef& def : program.enums) {
-                if (def.name == name) return &def;
+                if (std::string_view{def.name} == name) return &def;
             }
             return nullptr;
         }
@@ -1762,7 +1762,7 @@ struct TypeLayoutInfo {
         [[nodiscard]] const StructDef* find_struct(std::string_view name) const {
             const StructDef* forward_decl = nullptr;
             for (const StructDef& def : program.structs) {
-                if (def.name != name) continue;
+                if (std::string_view{def.name} != name) continue;
                 if (!def.is_forward_declaration) return &def;
                 if (forward_decl == nullptr) forward_decl = &def;
             }
@@ -1772,7 +1772,7 @@ struct TypeLayoutInfo {
         [[nodiscard]] const ClassDef* find_class(std::string_view name) const {
             const ClassDef* forward_decl = nullptr;
             for (const ClassDef& def : program.classes) {
-                if (def.name != name) continue;
+                if (std::string_view{def.name} != name) continue;
                 if (!def.is_forward_declaration) return &def;
                 if (forward_decl == nullptr) forward_decl = &def;
             }
