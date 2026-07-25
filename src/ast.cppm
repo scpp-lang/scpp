@@ -1118,6 +1118,11 @@ struct Function {
     // Special-member functions only: whether the declaration is defaulted
     // (`= default`).
     bool is_defaulted = false;
+    // Member declarations only: parsed in the current translation unit as
+    // a declaration-without-body that expects a later out-of-line
+    // definition. Cleared again on imported/cloned declarations and once a
+    // matching definition is merged in.
+    bool expects_out_of_line_definition = false;
 
     // ch05 §5.14: non-empty only for a synthesized *forwarding stub* --
     // a derived class inheriting a base method it doesn't itself
