@@ -313,6 +313,63 @@ void test_fixed_width_integer_keywords_and_std_qualification_parse() {
            "fixed_width_integer_keywords_and_std_qualification_parse: local y should canonicalize to uint32_t");
 }
 
+void test_size_t_and_ptrdiff_t_keywords_and_std_qualification_parse() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Box {};\n"
+        "struct Pair {\n"
+        "    std::size_t count;\n"
+        "    ptrdiff_t delta;\n"
+        "};\n"
+        "size_t add(std::size_t count, std::ptrdiff_t delta) {\n"
+        "    Box<std::size_t> a{};\n"
+        "    Box<ptrdiff_t> b{};\n"
+        "    size_t x = count;\n"
+        "    ptrdiff_t y = delta;\n"
+        "    return x + (size_t)y;\n"
+        "}\n");
+    const scpp::StructDef* pair = find_struct_named(program, "Pair");
+    expect(pair != nullptr, "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: expected Pair");
+    if (pair == nullptr) return;
+    expect(pair->fields.size() == 2,
+           "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: expected 2 Pair fields");
+    if (pair->fields.size() == 2) {
+        expect(is_named_type(pair->fields[0].type, "size_t"),
+               "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: count should canonicalize to size_t");
+        expect(is_named_type(pair->fields[1].type, "ptrdiff_t"),
+               "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: delta should canonicalize to ptrdiff_t");
+    }
+    const scpp::Function* add = find_function_named(program, "add");
+    expect(add != nullptr, "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: expected add");
+    if (add == nullptr) return;
+    expect(is_named_type(add->return_type, "size_t"),
+           "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: return type should canonicalize to size_t");
+    expect(add->params.size() == 2, "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: expected 2 params");
+    if (add->params.size() == 2) {
+        expect(is_named_type(add->params[0].type, "size_t"),
+               "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: param count should canonicalize to size_t");
+        expect(is_named_type(add->params[1].type, "ptrdiff_t"),
+               "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: param delta should canonicalize to ptrdiff_t");
+    }
+    expect(add->body != nullptr && add->body->statements.size() == 5,
+           "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: expected 5 statements");
+    if (add->body == nullptr || add->body->statements.size() != 5) return;
+    const scpp::Stmt& a_decl = *add->body->statements[0];
+    const scpp::Stmt& b_decl = *add->body->statements[1];
+    const scpp::Stmt& x_decl = *add->body->statements[2];
+    const scpp::Stmt& y_decl = *add->body->statements[3];
+    expect(a_decl.kind == scpp::StmtKind::VarDecl && a_decl.type.template_args.size() == 1 &&
+               a_decl.type.name == "Box" && is_named_type(a_decl.type.template_args[0], "size_t"),
+           "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: Box<std::size_t> should canonicalize to Box<size_t>");
+    expect(b_decl.kind == scpp::StmtKind::VarDecl && b_decl.type.template_args.size() == 1 &&
+               b_decl.type.name == "Box" && is_named_type(b_decl.type.template_args[0], "ptrdiff_t"),
+           "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: Box<ptrdiff_t> should stay Box<ptrdiff_t>");
+    expect(x_decl.kind == scpp::StmtKind::VarDecl && is_named_type(x_decl.type, "size_t"),
+           "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: local x should canonicalize to size_t");
+    expect(y_decl.kind == scpp::StmtKind::VarDecl && is_named_type(y_decl.type, "ptrdiff_t"),
+           "size_t_and_ptrdiff_t_keywords_and_std_qualification_parse: local y should canonicalize to ptrdiff_t");
+}
+
 void test_valid_local_initializer_forms_parse() {
     scpp::Program program = scpp::parse(
         "struct Pair { int first; int second; };\n"
@@ -4598,6 +4655,7 @@ int main() {
     test_bare_local_var_decl_is_rejected();
     test_static_local_var_decl_parses_and_allows_no_initializer();
     test_fixed_width_integer_keywords_and_std_qualification_parse();
+    test_size_t_and_ptrdiff_t_keywords_and_std_qualification_parse();
     test_valid_local_initializer_forms_parse();
     test_class_default_member_initializers_parse();
     test_constructor_member_initializer_list_parses();

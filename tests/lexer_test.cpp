@@ -95,12 +95,20 @@ void test_inline_is_a_keyword() {
     expect_kinds("inline", {scpp::TokenKind::KwInline, scpp::TokenKind::EndOfFile}, "inline_is_a_keyword");
 }
 
-void test_fixed_width_integer_keywords() {
+void test_builtin_scalar_alias_keywords() {
     expect_kinds(
-        "int64_t uint32_t std::int64_t std::uint32_t",
+        "size_t ptrdiff_t int64_t uint32_t std::size_t std::ptrdiff_t std::int64_t std::uint32_t",
         {
+            scpp::TokenKind::KwSizeT,
+            scpp::TokenKind::KwPtrdiffT,
             scpp::TokenKind::KwInt64T,
             scpp::TokenKind::KwUInt32T,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::ColonColon,
+            scpp::TokenKind::KwSizeT,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::ColonColon,
+            scpp::TokenKind::KwPtrdiffT,
             scpp::TokenKind::Identifier,
             scpp::TokenKind::ColonColon,
             scpp::TokenKind::KwInt64T,
@@ -109,7 +117,7 @@ void test_fixed_width_integer_keywords() {
             scpp::TokenKind::KwUInt32T,
             scpp::TokenKind::EndOfFile,
         },
-        "fixed_width_integer_keywords");
+        "builtin_scalar_alias_keywords");
 }
 
 void test_identifier_text() {
@@ -403,7 +411,7 @@ int main() {
     test_safe_is_no_longer_a_keyword();
     test_static_is_a_keyword();
     test_inline_is_a_keyword();
-    test_fixed_width_integer_keywords();
+    test_builtin_scalar_alias_keywords();
     test_unsafe_is_not_a_keyword();
     test_identifier_text();
     test_integer_literal_text();

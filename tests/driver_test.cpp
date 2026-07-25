@@ -5672,6 +5672,30 @@ int main() {
     }
 }
 
+void run_size_t_keyword_tests() {
+    {
+        std::string case_name = "size_t_and_ptrdiff_t_keywords_compile_and_run";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+size_t grow(std::size_t count) {
+    size_t one = 1;
+    return count + one;
+}
+ptrdiff_t distance(std::ptrdiff_t lhs, ptrdiff_t rhs) {
+    return lhs - rhs;
+}
+int main() {
+    size_t count = grow(6);
+    ptrdiff_t delta = distance(9, 4);
+    return (int)(count + (size_t)delta - 12);
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -6333,6 +6357,7 @@ int main() {
     run_random_tests();
     run_vector_tests();
     run_string_view_tests();
+    run_size_t_keyword_tests();
     run_expected_tests();
     run_io_tests();
     run_enum_tests();

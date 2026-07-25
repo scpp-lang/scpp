@@ -74,6 +74,8 @@ using PartitionResolver = std::function<Program(const std::string&)>;
         case TokenKind::KwLong: return "long";
         case TokenKind::KwFloat: return "float";
         case TokenKind::KwDouble: return "double";
+        case TokenKind::KwSizeT: return "size_t";
+        case TokenKind::KwPtrdiffT: return "ptrdiff_t";
         case TokenKind::KwInt8T: return "int8_t";
         case TokenKind::KwUInt8T: return "uint8_t";
         case TokenKind::KwInt16T: return "int16_t";
@@ -324,7 +326,7 @@ private:
         // auto` in parameter position, parse_param_type) is never the
         // very first token of a statement, so there's no ambiguity here.
         if (tok.kind == TokenKind::KwAuto) return true;
-        if (peek_std_qualified_fixed_width_type_name().has_value()) return true;
+        if (peek_std_qualified_builtin_scalar_type_name().has_value()) return true;
         if (check_std_qualified("span")) return true;
         if (tok.kind != TokenKind::Identifier) return false;
         // ch11: a bare identifier might be the *first segment* of a
@@ -348,7 +350,7 @@ private:
         const Token& tok = peek_at(offset);
         if (tok.kind == TokenKind::KwAlignas) return true;
         if (is_cast_type_start_keyword(tok.kind)) return true;
-        if (peek_std_qualified_fixed_width_type_name(offset).has_value()) return true;
+        if (peek_std_qualified_builtin_scalar_type_name(offset).has_value()) return true;
         if (tok.kind == TokenKind::Identifier && tok.text == "std" && peek_at(offset + 1).kind == TokenKind::ColonColon &&
             peek_at(offset + 2).kind == TokenKind::Identifier && peek_at(offset + 2).text == "span") {
             return true;
@@ -1064,9 +1066,11 @@ private:
     }
 
     // Checks (without consuming) for the 3-token sequence `std :: <member>`.
-    // Only the still-builtin spellings (`std::move`, plus the parser-only
-    // `std::span` type form) use this helper; ordinary library names now
-    // flow through the general qualified-name path.
+    // Only the still-builtin spellings (`std::move`, parser-only
+    // `std::span`, and the lexer-keyword scalar aliases routed through
+    // peek_std_qualified_builtin_scalar_type_name below) use this helper;
+    // ordinary library names now flow through the general qualified-name
+    // path.
     [[nodiscard]] bool check_std_qualified(std::string_view member) const {
         return peek().kind == TokenKind::Identifier && peek().text == "std" &&
                peek_at(1).kind == TokenKind::ColonColon && peek_at(2).text == member;
@@ -1084,14 +1088,15 @@ private:
         advance(); // <member>
     }
 
-    [[nodiscard]] std::optional<std::string_view> peek_std_qualified_fixed_width_type_name(std::size_t offset = 0) const {
+    [[nodiscard]] std::optional<std::string_view> peek_std_qualified_builtin_scalar_type_name(std::size_t offset = 0) const {
         if (peek_at(offset).kind != TokenKind::Identifier || peek_at(offset).text != "std" ||
             peek_at(offset + 1).kind != TokenKind::ColonColon) {
             return std::nullopt;
         }
         std::string_view name = builtin_scalar_keyword_type_name(peek_at(offset + 2).kind);
-        if (name == "int8_t" || name == "uint8_t" || name == "int16_t" || name == "uint16_t" ||
-            name == "int32_t" || name == "uint32_t" || name == "int64_t" || name == "uint64_t") {
+        if (name == "size_t" || name == "ptrdiff_t" || name == "int8_t" || name == "uint8_t" ||
+            name == "int16_t" || name == "uint16_t" || name == "int32_t" || name == "uint32_t" ||
+            name == "int64_t" || name == "uint64_t") {
             return name;
         }
         return std::nullopt;
@@ -2397,11 +2402,11 @@ private:
     // an outer pointer level), never a later/outer one, mirroring how
     // real C++ reads `const int**` as "pointer to (pointer to const int)".
     Type parse_unqualified_type(bool const_qualifies_first_pointer = false) {
-        if (std::optional<std::string_view> std_fixed_width = peek_std_qualified_fixed_width_type_name();
-            std_fixed_width.has_value()) {
+        if (std::optional<std::string_view> std_builtin_scalar = peek_std_qualified_builtin_scalar_type_name();
+            std_builtin_scalar.has_value()) {
             Type type;
             type.kind = TypeKind::Named;
-            type.name = std::string(*std_fixed_width);
+            type.name = std::string(*std_builtin_scalar);
             consume_std_qualified();
             bool first_star = true;
             while (match(TokenKind::Star)) {
