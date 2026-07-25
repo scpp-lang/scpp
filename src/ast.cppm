@@ -820,7 +820,7 @@ struct MemberInitializer {
     clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
     clone->lambda_captures.clear();
     for (const LambdaCapture& capture : expr.lambda_captures) {
-        LambdaCapture cloned;
+        LambdaCapture cloned{};
         cloned.name = capture.name;
         cloned.by_reference = capture.by_reference;
         if (capture.init) cloned.init = clone_initializer_expr(*capture.init);
@@ -859,7 +859,7 @@ struct MemberInitializer {
 }
 
 [[nodiscard]] inline GlobalVar clone_global_var(const GlobalVar& global) {
-    GlobalVar clone;
+    GlobalVar clone{};
     if (global.decl) clone.decl = clone_initializer_stmt(*global.decl);
     clone.namespace_path = global.namespace_path;
     clone.is_exported = global.is_exported;
@@ -1708,7 +1708,7 @@ struct Program {
         return nullptr;
     }
     for (std::size_t depth = namespace_path.size(); depth > 0; depth--) {
-        std::string candidate;
+        std::string candidate{};
         for (std::size_t i = 0; i < depth; i++) {
             if (!candidate.empty()) candidate += "::";
             candidate += namespace_path[i];
