@@ -344,8 +344,11 @@ void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unorder
 // body is deliberately not recursed into: it has its own independent
 // capture list, checked when *it* is itself resolved.
 void reject_write_to_nonmutable_by_value_capture(const Expr& expr, const std::unordered_set<std::string>& by_value_names) {
-    if (expr.kind == ExprKind::Binary && expr.binary_op == BinaryOp::Assign && expr.lhs->kind == ExprKind::Identifier &&
-        by_value_names.contains(expr.lhs->name)) {
+    if (expr.kind == ExprKind::Binary &&
+        (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
+         expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
+         expr.binary_op == BinaryOp::DivAssign) &&
+        expr.lhs->kind == ExprKind::Identifier && by_value_names.contains(expr.lhs->name)) {
         throw DataflowError("cannot assign to by-value-captured '" + expr.lhs->name +
                                  "' inside a non-'mutable' lambda (ch05 §5.12 -- a closure's own call operator "
                                  "is 'const' by default; add 'mutable' to opt out)",

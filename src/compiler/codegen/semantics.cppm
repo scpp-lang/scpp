@@ -351,6 +351,10 @@ namespace {
                         [[fallthrough]];
                     case BinaryOp::Mul:
                     case BinaryOp::Div:
+                    case BinaryOp::AddAssign:
+                    case BinaryOp::SubAssign:
+                    case BinaryOp::MulAssign:
+                    case BinaryOp::DivAssign:
                     case BinaryOp::Assign:
                         return infer_type(*expr.lhs);
                     case BinaryOp::Eq:

@@ -167,6 +167,10 @@ enum class TokenKind {
     // operators
     PlusPlus,
     MinusMinus,
+    PlusAssign,
+    MinusAssign,
+    StarAssign,
+    SlashAssign,
     Plus,
     Minus,
     Star,
@@ -420,13 +424,19 @@ private:
                 return make_token(TokenKind::Dot, start, start_line, start_col);
             case '+':
                 if (peek() == '+') { advance(); return make_token(TokenKind::PlusPlus, start, start_line, start_col); }
+                if (peek() == '=') { advance(); return make_token(TokenKind::PlusAssign, start, start_line, start_col); }
                 return make_token(TokenKind::Plus, start, start_line, start_col);
             case '-':
                 if (peek() == '-') { advance(); return make_token(TokenKind::MinusMinus, start, start_line, start_col); }
+                if (peek() == '=') { advance(); return make_token(TokenKind::MinusAssign, start, start_line, start_col); }
                 if (peek() == '>') { advance(); return make_token(TokenKind::Arrow, start, start_line, start_col); }
                 return make_token(TokenKind::Minus, start, start_line, start_col);
-            case '*': return make_token(TokenKind::Star, start, start_line, start_col);
-            case '/': return make_token(TokenKind::Slash, start, start_line, start_col);
+            case '*':
+                if (peek() == '=') { advance(); return make_token(TokenKind::StarAssign, start, start_line, start_col); }
+                return make_token(TokenKind::Star, start, start_line, start_col);
+            case '/':
+                if (peek() == '=') { advance(); return make_token(TokenKind::SlashAssign, start, start_line, start_col); }
+                return make_token(TokenKind::Slash, start, start_line, start_col);
             case '!':
                 if (peek() == '=') { advance(); return make_token(TokenKind::NotEqual, start, start_line, start_col); }
                 return make_token(TokenKind::Bang, start, start_line, start_col);
