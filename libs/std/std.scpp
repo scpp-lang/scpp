@@ -13,6 +13,7 @@ export import :optional;
 export import :functional;
 export import :memory;
 export import :vector;
+export import :unordered_set;
 export import :thread;
 export import :print;
 export import :random;

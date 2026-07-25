@@ -18,6 +18,7 @@ input = [
     "print/scpp_print_wrapper.cpp",
     "random/scpp_random_wrapper.cpp",
     "vector/scpp_vector_wrapper.cpp",
+    "unordered_set/scpp_unordered_set_wrapper.cpp",
 ]
 output = [
     "scpp_string_wrapper.o",
@@ -27,6 +28,7 @@ output = [
     "scpp_print_wrapper.o",
     "scpp_random_wrapper.o",
     "scpp_vector_wrapper.o",
+    "scpp_unordered_set_wrapper.o",
 ]
 command = """\
 ${CXX:-c++} -std=c++26 -O2 -c \
@@ -36,5 +38,6 @@ memory/scpp_shared_ptr_wrapper.cpp \
 thread/scpp_thread_wrapper.cpp \
 print/scpp_print_wrapper.cpp \
 random/scpp_random_wrapper.cpp \
-vector/scpp_vector_wrapper.cpp
+vector/scpp_vector_wrapper.cpp \
+unordered_set/scpp_unordered_set_wrapper.cpp
 """
