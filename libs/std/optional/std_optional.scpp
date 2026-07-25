@@ -1,0 +1,135 @@
+export module std:optional;
+
+import :cstdlib;
+
+namespace std {
+
+export template<typename T>
+class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shareable(T))]] optional {
+private:
+    bool has_value_{};
+    alignas(T) char storage_[sizeof(T)]{};
+
+    void __construct_value(const T& value) {
+        [[scpp::unsafe]] {
+            new ((T*)&this->storage_) T(value);
+        }
+        this->has_value_ = true;
+        return;
+    }
+
+    void __construct_value(T&& value) {
+        [[scpp::unsafe]] {
+            new ((T*)&this->storage_) T(std::move(value));
+        }
+        this->has_value_ = true;
+        return;
+    }
+
+    void __copy_from(const std::optional<T>& other) {
+        if (!other.has_value()) {
+            this->has_value_ = false;
+            return;
+        }
+        [[scpp::unsafe]] {
+            new ((T*)&this->storage_) T(*other);
+        }
+        this->has_value_ = true;
+        return;
+    }
+
+public:
+    optional() { return; }
+
+    optional(const T& value) {
+        this->__construct_value(value);
+        return;
+    }
+
+    optional(T&& value) {
+        this->__construct_value(std::move(value));
+        return;
+    }
+
+    optional(const std::optional<T>& other) {
+        this->__copy_from(other);
+        return;
+    }
+
+    void operator=(const T& value) {
+        this->reset();
+        this->__construct_value(value);
+        return;
+    }
+
+    void operator=(T&& value) {
+        this->reset();
+        this->__construct_value(std::move(value));
+        return;
+    }
+
+    void operator=(const std::optional<T>& other) {
+        this->reset();
+        this->__copy_from(other);
+        return;
+    }
+
+    virtual ~optional() {
+        this->reset();
+        return;
+    }
+
+    bool has_value() const {
+        return this->has_value_;
+    }
+
+    T& value() {
+        if (!this->has_value_) std::abort();
+        [[scpp::unsafe]] {
+            return ((T*)&this->storage_)[0];
+        }
+    }
+
+    const T& value() const {
+        if (!this->has_value_) std::abort();
+        [[scpp::unsafe]] {
+            return ((T*)&this->storage_)[0];
+        }
+    }
+
+    T& operator*() {
+        [[scpp::unsafe]] {
+            return ((T*)&this->storage_)[0];
+        }
+    }
+
+    const T& operator*() const {
+        [[scpp::unsafe]] {
+            return ((T*)&this->storage_)[0];
+        }
+    }
+
+    T* operator->() [[scpp::lifetime(self)]] {
+        [[scpp::unsafe]] {
+            return (T*)&this->storage_;
+        }
+    }
+
+    const T* operator->() const [[scpp::lifetime(self)]] {
+        [[scpp::unsafe]] {
+            return (T*)&this->storage_;
+        }
+    }
+
+    void reset() {
+        if (!this->has_value_) return;
+        [[scpp::unsafe]] {
+            ((T*)&this->storage_)->~T();
+        }
+        this->has_value_ = false;
+        return;
+    }
+
+};
+
+} // namespace std
