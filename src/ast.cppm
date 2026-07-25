@@ -712,7 +712,7 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
         clone->explicit_template_args.push_back(std::move(cloned_arg));
     }
     for (const LambdaCapture& capture : expr.lambda_captures) {
-        LambdaCapture cloned_capture;
+        LambdaCapture cloned_capture{};
         cloned_capture.name = capture.name;
         cloned_capture.by_reference = capture.by_reference;
         if (capture.init) cloned_capture.init = deep_clone_expr(*capture.init);
