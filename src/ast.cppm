@@ -1622,7 +1622,7 @@ struct ConceptDef {
 
 struct EnumVariant {
     std::string name;
-    long long value = 0;
+    std::int64_t value = 0;
 };
 
 struct EnumDef {
