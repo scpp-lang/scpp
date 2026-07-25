@@ -5872,8 +5872,13 @@ private:
 
         if (is_range_for_decl_start()) {
             std::size_t saved_pos = pos_;
+            StmtPtr loop_var;
             try {
-                StmtPtr loop_var = parse_for_range_decl();
+                loop_var = parse_for_range_decl();
+            } catch (const ParseError&) {
+                pos_ = saved_pos;
+            }
+            if (loop_var) {
                 if (match(TokenKind::Colon)) {
                     ExprPtr range_expr = parse_expr();
                     expect(TokenKind::RParen, "')'");
@@ -5882,9 +5887,8 @@ private:
                     loop_depth_--;
                     return desugar_range_for(loc, std::move(loop_var), std::move(range_expr), std::move(body));
                 }
-            } catch (const ParseError&) {
+                pos_ = saved_pos;
             }
-            pos_ = saved_pos;
         }
 
         StmtPtr init_stmt;

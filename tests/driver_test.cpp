@@ -5737,6 +5737,48 @@ void run_for_loop_tests() {
         expect(threw, case_name + ": expected loop-init declaration to be out of scope after the loop");
     }
     {
+        std::string case_name = "range_for_named_const_reference_compiles";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(struct Box {
+    int value = 0;
+};
+int main() {
+    Box boxes[2];
+    boxes[0].value = 1;
+    boxes[1].value = 2;
+    int total = 0;
+    for (const Box& box : boxes) {
+        total = total + box.value;
+    }
+    return total - 3;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "range_for_named_reference_compiles";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(struct Box {
+    int value = 0;
+};
+int main() {
+    Box boxes[2];
+    boxes[0].value = 1;
+    boxes[1].value = 2;
+    int total = 0;
+    for (Box& box : boxes) {
+        total = total + box.value;
+    }
+    return total - 3;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
         std::string case_name = "range_for_const_reference_rejects_mutation";
         bool threw = false;
         try {

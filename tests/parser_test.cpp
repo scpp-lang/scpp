@@ -529,6 +529,85 @@ void test_range_for_loop_desugars_over_span() {
            "range_for_loop_desugars_over_span: loop variable should be const reference");
 }
 
+void test_range_for_loop_named_element_forms_desugar() {
+    scpp::Program program = scpp::parse(
+        "struct Box { int value = 0; };\n"
+        "int main() {\n"
+        "    Box boxes[2];\n"
+        "    for (Box by_value : boxes) { return by_value.value; }\n"
+        "    for (const Box& by_const_ref : boxes) { return by_const_ref.value; }\n"
+        "    for (Box& by_ref : boxes) { return by_ref.value; }\n"
+        "    return 0;\n"
+        "}");
+    const scpp::Function& fn = program.functions[0];
+    expect(fn.body->statements.size() == 5,
+           "range_for_loop_named_element_forms_desugar: expected decl + 3 loops + return");
+    if (fn.body->statements.size() != 5) return;
+
+    const scpp::Stmt& by_value_loop = *fn.body->statements[1];
+    const scpp::Stmt& by_const_ref_loop = *fn.body->statements[2];
+    const scpp::Stmt& by_ref_loop = *fn.body->statements[3];
+    expect(by_value_loop.kind == scpp::StmtKind::Block && by_value_loop.statements.size() == 3,
+           "range_for_loop_named_element_forms_desugar: by-value loop should desugar to hidden decls plus while");
+    expect(by_const_ref_loop.kind == scpp::StmtKind::Block && by_const_ref_loop.statements.size() == 3,
+           "range_for_loop_named_element_forms_desugar: const-ref loop should desugar to hidden decls plus while");
+    expect(by_ref_loop.kind == scpp::StmtKind::Block && by_ref_loop.statements.size() == 3,
+           "range_for_loop_named_element_forms_desugar: ref loop should desugar to hidden decls plus while");
+    if (by_value_loop.kind != scpp::StmtKind::Block || by_const_ref_loop.kind != scpp::StmtKind::Block ||
+        by_ref_loop.kind != scpp::StmtKind::Block || by_value_loop.statements.size() != 3 ||
+        by_const_ref_loop.statements.size() != 3 || by_ref_loop.statements.size() != 3 ||
+        by_value_loop.statements[2]->then_branch == nullptr || by_const_ref_loop.statements[2]->then_branch == nullptr ||
+        by_ref_loop.statements[2]->then_branch == nullptr || by_value_loop.statements[2]->then_branch->statements.empty() ||
+        by_const_ref_loop.statements[2]->then_branch->statements.empty() ||
+        by_ref_loop.statements[2]->then_branch->statements.empty()) {
+        return;
+    }
+    const scpp::Stmt& by_value_var = *by_value_loop.statements[2]->then_branch->statements[0];
+    const scpp::Stmt& by_const_ref_var = *by_const_ref_loop.statements[2]->then_branch->statements[0];
+    const scpp::Stmt& by_ref_var = *by_ref_loop.statements[2]->then_branch->statements[0];
+
+    expect(by_value_var.kind == scpp::StmtKind::VarDecl && by_value_var.var_name == "by_value" &&
+               by_value_var.type.kind == scpp::TypeKind::Named && by_value_var.type.name == "Box",
+           "range_for_loop_named_element_forms_desugar: by-value loop variable should keep the named element type");
+    expect(by_const_ref_var.kind == scpp::StmtKind::VarDecl && by_const_ref_var.var_name == "by_const_ref" &&
+               by_const_ref_var.type.kind == scpp::TypeKind::Reference && !by_const_ref_var.type.is_mutable_ref &&
+               by_const_ref_var.type.pointee != nullptr && by_const_ref_var.type.pointee->kind == scpp::TypeKind::Named &&
+               by_const_ref_var.type.pointee->name == "Box",
+           "range_for_loop_named_element_forms_desugar: const-ref loop variable should keep const reference type");
+    expect(by_ref_var.kind == scpp::StmtKind::VarDecl && by_ref_var.var_name == "by_ref" &&
+               by_ref_var.type.kind == scpp::TypeKind::Reference && by_ref_var.type.is_mutable_ref &&
+               by_ref_var.type.pointee != nullptr && by_ref_var.type.pointee->kind == scpp::TypeKind::Named &&
+               by_ref_var.type.pointee->name == "Box",
+           "range_for_loop_named_element_forms_desugar: ref loop variable should keep mutable reference type");
+}
+
+void test_range_for_body_parse_errors_are_not_misattributed_to_loop_var() {
+    bool threw = false;
+    try {
+        (void)parse_with_std_imports(
+            "import std;\n"
+            "struct Capture { int value = 0; };\n"
+            "struct Holder { std::vector<Capture> captures{}; };\n"
+            "int sum(const Holder& holder) {\n"
+            "    for (const Capture& capture : holder.captures) {\n"
+            "        Capture scratch;\n"
+            "        return capture.value + scratch.value;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n");
+    } catch (const scpp::ParseError& e) {
+        threw = true;
+        expect(e.loc.line == 6,
+               "range_for_body_parse_errors_are_not_misattributed_to_loop_var: expected body diagnostic on line 6");
+        expect(std::string(e.what()).find("scratch{};") != std::string::npos,
+               "range_for_body_parse_errors_are_not_misattributed_to_loop_var: diagnostic should name the body local");
+        expect(std::string(e.what()).find("capture{};") == std::string::npos,
+               "range_for_body_parse_errors_are_not_misattributed_to_loop_var: diagnostic should not be blamed on loop "
+               "variable");
+    }
+    expect(threw, "range_for_body_parse_errors_are_not_misattributed_to_loop_var: expected a ParseError");
+}
+
 void test_unsafe_block_sets_is_unsafe_flag() {
     // `[[scpp::unsafe]] { }` (ch01 §1.3) is an ordinary Block statement
     // with is_unsafe set -- see parse_statement's attribute handling.
@@ -4413,6 +4492,8 @@ int main() {
     test_classic_for_loop_with_expression_init_desugars();
     test_range_for_loop_desugars_over_array();
     test_range_for_loop_desugars_over_span();
+    test_range_for_loop_named_element_forms_desugar();
+    test_range_for_body_parse_errors_are_not_misattributed_to_loop_var();
     test_break_and_continue_parse_inside_loop();
     test_break_outside_loop_is_rejected();
     test_continue_outside_loop_is_rejected();
