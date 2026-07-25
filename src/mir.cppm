@@ -103,10 +103,15 @@ struct MirStatement {
     const std::vector<ExprPtr>* ctor_args = nullptr;
 };
 
+struct SwitchTarget {
+    std::size_t block = 0;
+};
+
 enum class TerminatorKind {
     None, // not yet assigned (builder bug if this survives into a finished Body)
     Goto,
     Branch,
+    Switch,
     Return,
     Unreachable, // e.g. after two branches that both already returned
 };
@@ -116,7 +121,8 @@ struct Terminator {
     std::size_t target = 0;                  // Goto
     std::size_t true_target = 0;             // Branch (condition is true)
     std::size_t false_target = 0;            // Branch (condition is false)
-    const Expr* condition = nullptr;    // Branch
+    const Expr* condition = nullptr;         // Branch / Switch
+    std::vector<SwitchTarget> switch_targets; // Switch
     const Expr* return_value = nullptr; // Return (nullable)
     SourceLocation loc;                 // the originating Stmt's position, see MirStatement::loc
 };
@@ -204,12 +210,12 @@ private:
     // (see build()), so they're never captured here: they live for the
     // whole function, same as in codegen.
     std::vector<std::vector<std::string>> scope_stack_;
-    struct LoopFrame {
-        std::size_t cond_block;
+    struct ControlFlowFrame {
+        std::optional<std::size_t> continue_block;
         std::size_t end_block;
         std::size_t scope_depth;
     };
-    std::vector<LoopFrame> loop_stack_;
+    std::vector<ControlFlowFrame> control_flow_stack_;
 
     void declare_local(const std::string& name, const Type& type) {
         if (!body_.local_types.contains(name)) {
@@ -327,8 +333,11 @@ private:
             }
 
             case StmtKind::Return: {
-                current().terminator = Terminator{TerminatorKind::Return, 0, 0, 0, nullptr,
-                                                   stmt.expr ? stmt.expr.get() : nullptr, stmt.loc};
+                Terminator term;
+                term.kind = TerminatorKind::Return;
+                term.return_value = stmt.expr ? stmt.expr.get() : nullptr;
+                term.loc = stmt.loc;
+                current().terminator = std::move(term);
                 return;
             }
 
@@ -358,16 +367,24 @@ private:
                 std::size_t else_block = new_block();
                 std::size_t merge_block = new_block();
 
-                body_.blocks[branch_block].terminator = Terminator{
-                    TerminatorKind::Branch, 0, then_block, else_block, stmt.condition.get(), nullptr, stmt.loc};
+                Terminator term;
+                term.kind = TerminatorKind::Branch;
+                term.true_target = then_block;
+                term.false_target = else_block;
+                term.condition = stmt.condition.get();
+                term.loc = stmt.loc;
+                body_.blocks[branch_block].terminator = std::move(term);
 
                 current_block_ = then_block;
                 push_scope();
                 lower_stmt(*stmt.then_branch);
                 pop_scope();
                 if (!current_has_terminator()) {
-                    current().terminator =
-                        Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr, stmt.loc};
+                    Terminator term;
+                    term.kind = TerminatorKind::Goto;
+                    term.target = merge_block;
+                    term.loc = stmt.loc;
+                    current().terminator = std::move(term);
                 }
 
                 current_block_ = else_block;
@@ -375,8 +392,11 @@ private:
                 if (stmt.else_branch) lower_stmt(*stmt.else_branch);
                 pop_scope();
                 if (!current_has_terminator()) {
-                    current().terminator =
-                        Terminator{TerminatorKind::Goto, merge_block, 0, 0, nullptr, nullptr, stmt.loc};
+                    Terminator term;
+                    term.kind = TerminatorKind::Goto;
+                    term.target = merge_block;
+                    term.loc = stmt.loc;
+                    current().terminator = std::move(term);
                 }
 
                 current_block_ = merge_block;
@@ -389,19 +409,82 @@ private:
                 std::size_t body_block = new_block();
                 std::size_t end_block = new_block();
 
-                body_.blocks[preheader].terminator =
-                    Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr, stmt.loc};
-                body_.blocks[cond_block].terminator = Terminator{
-                    TerminatorKind::Branch, 0, body_block, end_block, stmt.condition.get(), nullptr, stmt.loc};
+                Terminator to_cond;
+                to_cond.kind = TerminatorKind::Goto;
+                to_cond.target = cond_block;
+                to_cond.loc = stmt.loc;
+                body_.blocks[preheader].terminator = std::move(to_cond);
+                Terminator branch;
+                branch.kind = TerminatorKind::Branch;
+                branch.true_target = body_block;
+                branch.false_target = end_block;
+                branch.condition = stmt.condition.get();
+                branch.loc = stmt.loc;
+                body_.blocks[cond_block].terminator = std::move(branch);
 
                 current_block_ = body_block;
                 push_scope();
-                loop_stack_.push_back(LoopFrame{cond_block, end_block, scope_stack_.size()});
+                control_flow_stack_.push_back(ControlFlowFrame{cond_block, end_block, scope_stack_.size()});
                 lower_stmt(*stmt.then_branch);
                 pop_scope();
-                loop_stack_.pop_back();
+                control_flow_stack_.pop_back();
                 if (!current_has_terminator()) {
-                    current().terminator = Terminator{TerminatorKind::Goto, cond_block, 0, 0, nullptr, nullptr, stmt.loc};
+                    Terminator back_edge;
+                    back_edge.kind = TerminatorKind::Goto;
+                    back_edge.target = cond_block;
+                    back_edge.loc = stmt.loc;
+                    current().terminator = std::move(back_edge);
+                }
+
+                current_block_ = end_block;
+                return;
+            }
+
+            case StmtKind::Switch: {
+                std::size_t dispatch_block = current_block_;
+                std::size_t end_block = new_block();
+                std::vector<std::size_t> case_blocks;
+                case_blocks.reserve(stmt.switch_cases.size());
+                for ([[maybe_unused]] const SwitchCase& switch_case : stmt.switch_cases) {
+                    case_blocks.push_back(new_block());
+                }
+
+                Terminator dispatch;
+                dispatch.kind = TerminatorKind::Switch;
+                dispatch.condition = stmt.condition.get();
+                dispatch.loc = stmt.loc;
+                for (std::size_t block : case_blocks) dispatch.switch_targets.push_back(SwitchTarget{block});
+                bool has_default = false;
+                for (const SwitchCase& switch_case : stmt.switch_cases) {
+                    if (!switch_case.value) {
+                        has_default = true;
+                        break;
+                    }
+                }
+                if (!has_default) dispatch.switch_targets.push_back(SwitchTarget{end_block});
+                body_.blocks[dispatch_block].terminator = std::move(dispatch);
+
+                for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
+                    current_block_ = case_blocks[i];
+                    push_scope();
+                    control_flow_stack_.push_back(ControlFlowFrame{std::nullopt, end_block, scope_stack_.size()});
+                    const SwitchCase& switch_case = stmt.switch_cases[i];
+                    for (const StmtPtr& child : switch_case.statements) {
+                        if (current_has_terminator()) break;
+                        lower_stmt(*child);
+                    }
+                    control_flow_stack_.pop_back();
+                    bool falls_into_next_case =
+                        switch_case.statements.empty() ||
+                        (!switch_case.statements.empty() && switch_case.statements.back()->kind == StmtKind::Fallthrough);
+                    pop_scope();
+                    if (!current_has_terminator()) {
+                        Terminator term;
+                        term.kind = TerminatorKind::Goto;
+                        term.target = falls_into_next_case && i + 1 < case_blocks.size() ? case_blocks[i + 1] : end_block;
+                        term.loc = stmt.loc;
+                        current().terminator = std::move(term);
+                    }
                 }
 
                 current_block_ = end_block;
@@ -409,18 +492,31 @@ private:
             }
 
             case StmtKind::Break: {
-                if (loop_stack_.empty()) return;
-                emit_scope_exits_to_depth(loop_stack_.back().scope_depth);
-                current().terminator =
-                    Terminator{TerminatorKind::Goto, loop_stack_.back().end_block, 0, 0, nullptr, nullptr, stmt.loc};
+                if (control_flow_stack_.empty()) return;
+                emit_scope_exits_to_depth(control_flow_stack_.back().scope_depth);
+                Terminator term;
+                term.kind = TerminatorKind::Goto;
+                term.target = control_flow_stack_.back().end_block;
+                term.loc = stmt.loc;
+                current().terminator = std::move(term);
                 return;
             }
 
             case StmtKind::Continue: {
-                if (loop_stack_.empty()) return;
-                emit_scope_exits_to_depth(loop_stack_.back().scope_depth);
-                current().terminator =
-                    Terminator{TerminatorKind::Goto, loop_stack_.back().cond_block, 0, 0, nullptr, nullptr, stmt.loc};
+                for (auto it = control_flow_stack_.rbegin(); it != control_flow_stack_.rend(); ++it) {
+                    if (!it->continue_block.has_value()) continue;
+                    emit_scope_exits_to_depth(it->scope_depth);
+                    Terminator term;
+                    term.kind = TerminatorKind::Goto;
+                    term.target = *it->continue_block;
+                    term.loc = stmt.loc;
+                    current().terminator = std::move(term);
+                    return;
+                }
+                return;
+            }
+
+            case StmtKind::Fallthrough: {
                 return;
             }
         }

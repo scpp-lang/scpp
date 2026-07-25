@@ -339,6 +339,48 @@ void test_explicit_base_initializer_satisfies_nondefault_base_ctor() {
               (error.has_value() ? std::string(", got '") + *error + "'" : ""));
 }
 
+void test_switch_with_default_allows_branch_local_moves_without_post_switch_use() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "void consume(std::unique_ptr<int> p) { return; }\n"
+        "int main() {\n"
+        "    std::unique_ptr<int> p = std::make_unique<int>(7);\n"
+        "    int selector = 2;\n"
+        "    switch (selector) {\n"
+        "        case 1:\n"
+        "            consume(std::move(p));\n"
+        "            break;\n"
+        "        default:\n"
+        "            return 0;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(!error.has_value(),
+           "switch_with_default_allows_branch_local_moves_without_post_switch_use: expected movecheck to accept" +
+               (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
+void test_switch_with_default_rejects_post_switch_use_of_maybe_moved_value() {
+    cases_run++;
+    expect(throws_move_error(
+               "import std;\n"
+               "void consume(std::unique_ptr<int> p) { return; }\n"
+               "int main() {\n"
+               "    std::unique_ptr<int> p = std::make_unique<int>(7);\n"
+               "    int selector = 2;\n"
+               "    switch (selector) {\n"
+               "        case 1:\n"
+               "            consume(std::move(p));\n"
+               "            break;\n"
+               "        default:\n"
+               "            break;\n"
+               "    }\n"
+               "    return *p;\n"
+               "}\n"),
+           "switch_with_default_rejects_post_switch_use_of_maybe_moved_value: expected movecheck rejection");
+}
+
 } // namespace
 
 int main() {
@@ -354,6 +396,8 @@ int main() {
     test_std_string_const_reference_mutation_reports_clear_diagnostic();
     test_derived_constructor_requires_explicit_base_initializer_without_default_base_ctor();
     test_explicit_base_initializer_satisfies_nondefault_base_ctor();
+    test_switch_with_default_allows_branch_local_moves_without_post_switch_use();
+    test_switch_with_default_rejects_post_switch_use_of_maybe_moved_value();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

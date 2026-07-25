@@ -652,8 +652,16 @@ private:
                 substitute_type_param_in_expr(*stmt.condition, param_name, replacement);
                 substitute_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
                 return;
+            case StmtKind::Switch:
+                substitute_type_param_in_expr(*stmt.condition, param_name, replacement);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) substitute_type_param_in_expr(*switch_case.value, param_name, replacement);
+                    for (StmtPtr& s : switch_case.statements) substitute_type_param_in_stmt(*s, param_name, replacement);
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_type_param_in_stmt(*s, param_name, replacement);
@@ -690,8 +698,16 @@ private:
                 substitute_type_pack_in_stmt(*stmt.then_branch, pack_name, pack_elems);
                 if (stmt.else_branch) substitute_type_pack_in_stmt(*stmt.else_branch, pack_name, pack_elems);
                 return;
+            case StmtKind::Switch:
+                substitute_type_pack_in_expr(*stmt.condition, pack_name, pack_elems);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) substitute_type_pack_in_expr(*switch_case.value, pack_name, pack_elems);
+                    for (StmtPtr& s : switch_case.statements) substitute_type_pack_in_stmt(*s, pack_name, pack_elems);
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_type_pack_in_stmt(*s, pack_name, pack_elems);
@@ -748,8 +764,16 @@ private:
                 substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
                 substitute_non_type_param_in_stmt(*stmt.then_branch, param_name, replacement);
                 return;
+            case StmtKind::Switch:
+                substitute_non_type_param_in_expr(*stmt.condition, param_name, replacement);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) substitute_non_type_param_in_expr(*switch_case.value, param_name, replacement);
+                    for (StmtPtr& s : switch_case.statements) substitute_non_type_param_in_stmt(*s, param_name, replacement);
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_non_type_param_in_stmt(*s, param_name, replacement);
@@ -1609,8 +1633,16 @@ private:
                 resolve_generic_types_in_expr(*stmt.condition);
                 resolve_generic_types_in_stmt(*stmt.then_branch);
                 return;
+            case StmtKind::Switch:
+                resolve_generic_types_in_expr(*stmt.condition);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) resolve_generic_types_in_expr(*switch_case.value);
+                    for (StmtPtr& s : switch_case.statements) resolve_generic_types_in_stmt(*s);
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) resolve_generic_types_in_stmt(*s);
@@ -3725,8 +3757,20 @@ private:
                 walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
                 walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization);
                 return;
+            case StmtKind::Switch:
+                walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) {
+                        walk_expr(*switch_case.value, body, enclosing_this_type, allow_generic_monomorphization);
+                    }
+                    for (StmtPtr& s : switch_case.statements) {
+                        walk_stmt(*s, body, enclosing_this_type, allow_generic_monomorphization);
+                    }
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) {
@@ -4350,8 +4394,18 @@ private:
             case StmtKind::While:
                 return expr_mentions_identifier(*stmt.condition, name) ||
                        stmt_mentions_identifier(*stmt.then_branch, name);
+            case StmtKind::Switch:
+                if (expr_mentions_identifier(*stmt.condition, name)) return true;
+                for (const SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value && expr_mentions_identifier(*switch_case.value, name)) return true;
+                    for (const StmtPtr& child : switch_case.statements) {
+                        if (stmt_mentions_identifier(*child, name)) return true;
+                    }
+                }
+                return false;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return false;
             case StmtKind::Block:
                 for (const StmtPtr& child : stmt.statements) {
@@ -4395,8 +4449,16 @@ private:
                 substitute_identifier_in_expr(*stmt.condition, from, to);
                 substitute_identifier_in_stmt(*stmt.then_branch, from, to);
                 return;
+            case StmtKind::Switch:
+                substitute_identifier_in_expr(*stmt.condition, from, to);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) substitute_identifier_in_expr(*switch_case.value, from, to);
+                    for (StmtPtr& s : switch_case.statements) substitute_identifier_in_stmt(*s, from, to);
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) substitute_identifier_in_stmt(*s, from, to);
@@ -4568,8 +4630,17 @@ private:
                     case StmtKind::While:
                         expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_names);
                         break;
+                    case StmtKind::Switch:
+                        expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_names);
+                        for (SwitchCase& switch_case : s->switch_cases) {
+                            if (switch_case.value) {
+                                expand_explicit_template_arg_packs_in_expr(*switch_case.value, pack_name, concrete_names);
+                            }
+                        }
+                        break;
                     case StmtKind::Break:
                     case StmtKind::Continue:
+                    case StmtKind::Fallthrough:
                         break;
                     case StmtKind::Block:
                         break;
@@ -4634,8 +4705,20 @@ private:
                 expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
                 expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_names);
                 return;
+            case StmtKind::Switch:
+                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) {
+                        expand_explicit_template_arg_packs_in_expr(*switch_case.value, pack_name, concrete_names);
+                    }
+                    for (StmtPtr& s : switch_case.statements) {
+                        expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_names);
+                    }
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_names);
@@ -4678,8 +4761,16 @@ private:
                 expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names);
                 expand_pack_folds_in_stmt(*stmt.then_branch, pack_name, concrete_names);
                 return;
+            case StmtKind::Switch:
+                expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) expand_pack_folds_in_expr(*switch_case.value, pack_name, concrete_names);
+                    for (StmtPtr& s : switch_case.statements) expand_pack_folds_in_stmt(*s, pack_name, concrete_names);
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) expand_pack_folds_in_stmt(*s, pack_name, concrete_names);
@@ -4715,8 +4806,20 @@ private:
                 expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
                 expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names);
                 return;
+            case StmtKind::Switch:
+                expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) {
+                        expand_pack_expansions_in_expr(*switch_case.value, pack_name, concrete_names);
+                    }
+                    for (StmtPtr& s : switch_case.statements) {
+                        expand_pack_expansions_in_stmt(*s, pack_name, concrete_names);
+                    }
+                }
+                return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) expand_pack_expansions_in_stmt(*s, pack_name, concrete_names);

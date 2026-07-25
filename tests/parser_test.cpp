@@ -4584,6 +4584,132 @@ void test_continue_outside_loop_is_rejected() {
     expect(threw, "continue_outside_loop_is_rejected: expected a ParseError");
 }
 
+void test_switch_statement_parses_with_cases_default_and_fallthrough() {
+    scpp::Program program = scpp::parse(
+        "enum class Color { red = 1, green = 2 };\n"
+        "int main() {\n"
+        "    Color color = Color::red;\n"
+        "    switch (color) {\n"
+        "        case Color::red:\n"
+        "            return 1;\n"
+        "        case Color::green:\n"
+        "            [[fallthrough]];\n"
+        "        default:\n"
+        "            return 0;\n"
+        "    }\n"
+        "}\n");
+    const scpp::Function& main_fn = program.functions[0];
+    expect(main_fn.body->statements.size() == 2,
+           "switch_statement_parses_with_cases_default_and_fallthrough: expected decl + switch");
+    if (main_fn.body->statements.size() != 2) return;
+    const scpp::Stmt& switch_stmt = *main_fn.body->statements[1];
+    expect(switch_stmt.kind == scpp::StmtKind::Switch,
+           "switch_statement_parses_with_cases_default_and_fallthrough: expected Switch");
+    expect(switch_stmt.switch_cases.size() == 3,
+           "switch_statement_parses_with_cases_default_and_fallthrough: expected 3 switch cases");
+    if (switch_stmt.switch_cases.size() != 3) return;
+    expect(switch_stmt.switch_cases[0].value != nullptr &&
+               switch_stmt.switch_cases[0].value->kind == scpp::ExprKind::Identifier &&
+               switch_stmt.switch_cases[0].value->name == "Color::red",
+           "switch_statement_parses_with_cases_default_and_fallthrough: first case should be Color::red");
+    expect(switch_stmt.switch_cases[1].statements.size() == 1 &&
+               switch_stmt.switch_cases[1].statements[0]->kind == scpp::StmtKind::Fallthrough,
+           "switch_statement_parses_with_cases_default_and_fallthrough: second case should end with Fallthrough");
+    expect(switch_stmt.switch_cases[2].value == nullptr,
+           "switch_statement_parses_with_cases_default_and_fallthrough: final case should be default");
+}
+
+void test_break_parses_inside_switch() {
+    scpp::Program program = scpp::parse(
+        "int main() {\n"
+        "    switch (1) {\n"
+        "        case 1:\n"
+        "            break;\n"
+        "        default:\n"
+        "            return 0;\n"
+        "    }\n"
+        "    return 1;\n"
+        "}\n");
+    const scpp::Stmt& switch_stmt = *program.functions[0].body->statements[0];
+    expect(switch_stmt.kind == scpp::StmtKind::Switch, "break_parses_inside_switch: expected Switch");
+    expect(switch_stmt.switch_cases.size() == 2, "break_parses_inside_switch: expected 2 cases");
+    if (switch_stmt.switch_cases.size() != 2) return;
+    expect(switch_stmt.switch_cases[0].statements.size() == 1 &&
+               switch_stmt.switch_cases[0].statements[0]->kind == scpp::StmtKind::Break,
+           "break_parses_inside_switch: first case should contain Break");
+}
+
+void test_fallthrough_outside_switch_is_rejected() {
+    bool threw = false;
+    try {
+        scpp::parse("int main() { [[fallthrough]]; return 0; }\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "fallthrough_outside_switch_is_rejected: expected a ParseError");
+}
+
+void test_fallthrough_must_be_last_in_case() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "int main() {\n"
+            "    switch (1) {\n"
+            "        case 1:\n"
+            "            [[fallthrough]];\n"
+            "            return 1;\n"
+            "        default:\n"
+            "            return 0;\n"
+            "    }\n"
+            "}\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "fallthrough_must_be_last_in_case: expected a ParseError");
+}
+
+void test_switch_case_requires_explicit_terminator() {
+    bool threw = false;
+    try {
+        scpp::parse(
+            "int main() {\n"
+            "    switch (1) {\n"
+            "        case 1:\n"
+            "            int x = 1;\n"
+            "        default:\n"
+            "            return 0;\n"
+            "    }\n"
+            "}\n");
+    } catch (const scpp::ParseError&) {
+        threw = true;
+    }
+    expect(threw, "switch_case_requires_explicit_terminator: expected a ParseError");
+}
+
+void test_grouped_switch_case_labels_parse_as_empty_cases() {
+    scpp::Program program = scpp::parse(
+        "int main() {\n"
+        "    switch (2) {\n"
+        "        case 1:\n"
+        "        case 2:\n"
+        "            return 0;\n"
+        "        default:\n"
+        "            return 1;\n"
+        "    }\n"
+        "}\n");
+    const scpp::Stmt& switch_stmt = *program.functions[0].body->statements[0];
+    expect(switch_stmt.kind == scpp::StmtKind::Switch,
+           "grouped_switch_case_labels_parse_as_empty_cases: expected Switch");
+    expect(switch_stmt.switch_cases.size() == 3,
+           "grouped_switch_case_labels_parse_as_empty_cases: expected 3 switch cases");
+    if (switch_stmt.switch_cases.size() != 3) return;
+    expect(switch_stmt.switch_cases[0].statements.empty(),
+           "grouped_switch_case_labels_parse_as_empty_cases: first grouped case should be empty");
+    expect(switch_stmt.switch_cases[1].statements.size() == 1 &&
+               switch_stmt.switch_cases[1].statements[0]->kind == scpp::StmtKind::Return,
+           "grouped_switch_case_labels_parse_as_empty_cases: second grouped case should own the shared body");
+}
+
 void test_conditional_expression_parses() {
     scpp::Program program = scpp::parse("int main() { return true ? 1 : 2; }\n");
     const scpp::Function& main_fn = program.functions[0];
@@ -4670,6 +4796,12 @@ int main() {
     test_break_and_continue_parse_inside_loop();
     test_break_outside_loop_is_rejected();
     test_continue_outside_loop_is_rejected();
+    test_switch_statement_parses_with_cases_default_and_fallthrough();
+    test_break_parses_inside_switch();
+    test_fallthrough_outside_switch_is_rejected();
+    test_fallthrough_must_be_last_in_case();
+    test_switch_case_requires_explicit_terminator();
+    test_grouped_switch_case_labels_parse_as_empty_cases();
     test_unsafe_block_sets_is_unsafe_flag();
     test_ordinary_block_is_not_unsafe();
     test_nested_unsafe_blocks_parse();

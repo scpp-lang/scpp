@@ -544,11 +544,19 @@ private:
                 walk_expr(*stmt.condition, body);
                 walk_stmt(*stmt.then_branch, body);
                 return;
+            case StmtKind::Switch:
+                walk_expr(*stmt.condition, body);
+                for (const SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) walk_expr(*switch_case.value, body);
+                    for (const StmtPtr& nested : switch_case.statements) walk_stmt(*nested, body);
+                }
+                return;
             case StmtKind::Block:
                 for (const StmtPtr& nested : stmt.statements) walk_stmt(*nested, body);
                 return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
         }
     }

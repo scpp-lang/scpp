@@ -1965,6 +1965,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
     state.current_loc = term.loc;
     switch (term.kind) {
         case TerminatorKind::Branch:
+        case TerminatorKind::Switch:
             apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
             return;
         case TerminatorKind::Return: {
@@ -2035,6 +2036,106 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
     }
 }
 
+struct SwitchCaseKey {
+    long long value = 0;
+};
+
+[[nodiscard]] std::optional<long long> integer_case_label_value(const Expr& expr) {
+    if (expr.kind == ExprKind::IntegerLiteral) return expr.int_value;
+    if (expr.kind == ExprKind::BoolLiteral) return expr.bool_value ? 1LL : 0LL;
+    if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs &&
+        expr.lhs->kind == ExprKind::IntegerLiteral) {
+        return -expr.lhs->int_value;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] SwitchCaseKey normalize_switch_case_label(const Expr& expr, const Type& condition_type, const Body& body,
+                                                        const Signatures& signatures) {
+    const Type& operand_type = binary_operand_type(condition_type);
+    if (is_enum_type(operand_type, body.program)) {
+        const EnumDef* owning_enum = nullptr;
+        const EnumVariant* variant = expr.kind == ExprKind::Identifier ? find_enum_variant(body.program, expr.name, &owning_enum)
+                                                                       : nullptr;
+        if (variant == nullptr || owning_enum == nullptr || owning_enum->name != operand_type.name) {
+            throw DataflowError("switch on enum type '" + operand_type.name +
+                                    "' requires each 'case' label to name an enumerator of that same enum",
+                                expr.loc);
+        }
+        return SwitchCaseKey{variant->value};
+    }
+    if (!(operand_type.kind == TypeKind::Named &&
+          (operand_type.name == "bool" || is_integral_scalar_type_name(operand_type.name)))) {
+        throw DataflowError("switch requires an integral or enum condition expression", expr.loc);
+    }
+    if (std::optional<long long> literal = integer_case_label_value(expr)) {
+        return SwitchCaseKey{*literal};
+    }
+    std::optional<Type> label_type = infer_expr_type(expr, body, signatures);
+    if (label_type.has_value() && binary_operand_type(*label_type).kind == TypeKind::Named &&
+        binary_operand_type(*label_type).name == operand_type.name && expr.kind == ExprKind::Identifier) {
+        throw DataflowError("switch case labels must be integer literals in this version", expr.loc);
+    }
+    throw DataflowError("switch case labels must be integer literals (or enum enumerators for enum switches) in this version",
+                        expr.loc);
+}
+
+void validate_switch_stmt_tree(const Stmt& stmt, const Body& body, const Signatures& signatures) {
+    switch (stmt.kind) {
+        case StmtKind::VarDecl:
+        case StmtKind::Return:
+        case StmtKind::Break:
+        case StmtKind::Continue:
+        case StmtKind::Fallthrough:
+        case StmtKind::ExprStmt:
+            return;
+        case StmtKind::If:
+            if (stmt.then_branch) validate_switch_stmt_tree(*stmt.then_branch, body, signatures);
+            if (stmt.else_branch) validate_switch_stmt_tree(*stmt.else_branch, body, signatures);
+            return;
+        case StmtKind::While:
+            if (stmt.then_branch) validate_switch_stmt_tree(*stmt.then_branch, body, signatures);
+            return;
+        case StmtKind::Block:
+            for (const StmtPtr& nested : stmt.statements) validate_switch_stmt_tree(*nested, body, signatures);
+            return;
+        case StmtKind::Switch: {
+            std::optional<Type> condition_type = infer_expr_type(*stmt.condition, body, signatures);
+            if (condition_type.has_value()) {
+                const Type& operand_type = binary_operand_type(*condition_type);
+                bool condition_ok =
+                    is_enum_type(operand_type, body.program) ||
+                    (operand_type.kind == TypeKind::Named &&
+                     (operand_type.name == "bool" || is_integral_scalar_type_name(operand_type.name)));
+                if (!condition_ok) {
+                    throw DataflowError("switch requires an integral or enum condition expression", stmt.condition->loc);
+                }
+                std::unordered_map<long long, SourceLocation> seen_labels;
+                for (const SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) {
+                        SwitchCaseKey key =
+                            normalize_switch_case_label(*switch_case.value, operand_type, body, signatures);
+                        if (seen_labels.contains(key.value)) {
+                            throw DataflowError("duplicate switch case value", switch_case.value->loc);
+                        }
+                        seen_labels[key.value] = switch_case.value->loc;
+                    }
+                    for (const StmtPtr& nested : switch_case.statements) {
+                        validate_switch_stmt_tree(*nested, body, signatures);
+                    }
+                }
+            } else {
+                for (const SwitchCase& switch_case : stmt.switch_cases) {
+                    for (const StmtPtr& nested : switch_case.statements) {
+                        validate_switch_stmt_tree(*nested, body, signatures);
+                    }
+                }
+            }
+            return;
+        }
+    }
+}
+
 // Runs the worklist algorithm (see spec ch07/M3) to a fixed point over
 // `body`'s CFG, computing a stable per-block entry ("IN") state for the
 // definite-initialization/move/borrow lattice above, then makes one more
@@ -2050,6 +2151,7 @@ void check_function(const Function& fn, const Program& program, const Signatures
                      [[maybe_unused]] const std::unordered_set<std::string>& witness_class_names) {
     Body body = build_mir(fn);
     body.program = &program;
+    if (fn.body) validate_switch_stmt_tree(*fn.body, body, signatures);
 
     std::size_t n = body.blocks.size();
 

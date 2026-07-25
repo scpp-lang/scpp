@@ -162,6 +162,11 @@ void collect_locally_declared_names(const Stmt& stmt, std::unordered_set<std::st
         case StmtKind::While:
             collect_locally_declared_names(*stmt.then_branch, out);
             return;
+        case StmtKind::Switch:
+            for (const SwitchCase& switch_case : stmt.switch_cases) {
+                for (const StmtPtr& s : switch_case.statements) collect_locally_declared_names(*s, out);
+            }
+            return;
         case StmtKind::Block:
             for (const StmtPtr& s : stmt.statements) collect_locally_declared_names(*s, out);
             return;
@@ -226,8 +231,16 @@ void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::st
             collect_free_identifiers(*stmt.condition, excluded, out);
             collect_free_identifiers(*stmt.then_branch, excluded, out);
             return;
+        case StmtKind::Switch:
+            collect_free_identifiers(*stmt.condition, excluded, out);
+            for (const SwitchCase& switch_case : stmt.switch_cases) {
+                if (switch_case.value) collect_free_identifiers(*switch_case.value, excluded, out);
+                for (const StmtPtr& s : switch_case.statements) collect_free_identifiers(*s, excluded, out);
+            }
+            return;
         case StmtKind::Break:
         case StmtKind::Continue:
+        case StmtKind::Fallthrough:
             return;
         case StmtKind::Block:
             for (const StmtPtr& s : stmt.statements) collect_free_identifiers(*s, excluded, out);
@@ -297,8 +310,16 @@ void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unorder
             rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
             rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names);
             return;
+        case StmtKind::Switch:
+            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
+            for (SwitchCase& switch_case : stmt.switch_cases) {
+                if (switch_case.value) rewrite_captured_identifiers_as_field_access(*switch_case.value, captured_names);
+                for (StmtPtr& s : switch_case.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names);
+            }
+            return;
         case StmtKind::Break:
         case StmtKind::Continue:
+        case StmtKind::Fallthrough:
             return;
         case StmtKind::Block:
             for (StmtPtr& s : stmt.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names);
@@ -355,8 +376,18 @@ void reject_write_to_nonmutable_by_value_capture(const Stmt& stmt, const std::un
             reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
             reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names);
             return;
+        case StmtKind::Switch:
+            reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
+            for (const SwitchCase& switch_case : stmt.switch_cases) {
+                if (switch_case.value) reject_write_to_nonmutable_by_value_capture(*switch_case.value, by_value_names);
+                for (const StmtPtr& s : switch_case.statements) {
+                    reject_write_to_nonmutable_by_value_capture(*s, by_value_names);
+                }
+            }
+            return;
         case StmtKind::Break:
         case StmtKind::Continue:
+        case StmtKind::Fallthrough:
             return;
         case StmtKind::Block:
             for (const StmtPtr& s : stmt.statements) reject_write_to_nonmutable_by_value_capture(*s, by_value_names);

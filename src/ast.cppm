@@ -8,6 +8,7 @@ export namespace scpp {
 
 struct Expr;
 struct Stmt;
+struct SwitchCase;
 using ExprPtr = std::unique_ptr<Expr>;
 using StmtPtr = std::unique_ptr<Stmt>;
 
@@ -553,8 +554,10 @@ enum class StmtKind {
     Return,
     If,
     While,
+    Switch,
     Break,
     Continue,
+    Fallthrough,
     ExprStmt,
     Block,
 };
@@ -569,6 +572,12 @@ enum class IfMode {
     Runtime,
     ConstevalTrue,
     ConstevalFalse,
+};
+
+struct SwitchCase {
+    SourceLocation loc;
+    ExprPtr value; // null => default
+    std::vector<StmtPtr> statements;
 };
 
 struct Stmt {
@@ -620,11 +629,12 @@ struct Stmt {
     // Return / ExprStmt (value/expr)
     ExprPtr expr;
 
-    // If / While
+    // If / While / Switch
     ExprPtr condition;
     IfMode if_mode = IfMode::Runtime;
     StmtPtr then_branch;
     StmtPtr else_branch; // optional, If only
+    std::vector<SwitchCase> switch_cases;
 
     // Block
     std::vector<StmtPtr> statements;
@@ -671,6 +681,11 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
             if (stmt.condition) rewrite_expr_locs(*stmt.condition, loc);
             if (stmt.then_branch) self(self, *stmt.then_branch);
             if (stmt.else_branch) self(self, *stmt.else_branch);
+            for (SwitchCase& switch_case : stmt.switch_cases) {
+                switch_case.loc = loc;
+                if (switch_case.value) rewrite_expr_locs(*switch_case.value, loc);
+                for (StmtPtr& child : switch_case.statements) self(self, *child);
+            }
             for (StmtPtr& child : stmt.statements) self(self, *child);
         };
         rewrite_stmt_locs(rewrite_stmt_locs, *expr.lambda_body);
@@ -745,6 +760,13 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
     clone->if_mode = stmt.if_mode;
     if (stmt.then_branch) clone->then_branch = deep_clone_stmt(*stmt.then_branch);
     if (stmt.else_branch) clone->else_branch = deep_clone_stmt(*stmt.else_branch);
+    for (const SwitchCase& switch_case : stmt.switch_cases) {
+        SwitchCase cloned_case{};
+        cloned_case.loc = switch_case.loc;
+        if (switch_case.value) cloned_case.value = deep_clone_expr(*switch_case.value);
+        for (const StmtPtr& child : switch_case.statements) cloned_case.statements.push_back(deep_clone_stmt(*child));
+        clone->switch_cases.push_back(std::move(cloned_case));
+    }
     for (const StmtPtr& child : stmt.statements) clone->statements.push_back(deep_clone_stmt(*child));
     clone->is_unsafe = stmt.is_unsafe;
     return clone;

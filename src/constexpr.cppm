@@ -557,9 +557,22 @@ private:
                     frames_.pop_back();
                 }
                 return;
+            case StmtKind::Switch:
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    frames_.push_back({});
+                    try {
+                        for (StmtPtr& nested : switch_case.statements) validate_constexpr_stmt_tree(*nested);
+                    } catch (...) {
+                        frames_.pop_back();
+                        throw;
+                    }
+                    frames_.pop_back();
+                }
+                return;
             case StmtKind::Return:
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
             case StmtKind::ExprStmt:
                 return;
         }
@@ -763,6 +776,20 @@ private:
         if (is_named_type(cell->type, "bool")) return std::get<bool>(cell->data);
         if (is_integer_like(cell->type)) return as_integer(cell, loc) != 0;
         throw ConstexprError(loc, "expected a boolean constexpr value");
+    }
+
+    [[nodiscard]] bool is_enum_like(const Type& type) {
+        if (type.kind != TypeKind::Named) return false;
+        for (const EnumDef& def : program_.enums) {
+            if (def.name == type.name) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] long long switch_match_key(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+        if (is_integer_like(cell->type)) return as_integer(cell, loc);
+        if (is_enum_like(cell->type)) return std::get<long long>(cell->data);
+        throw ConstexprError(loc, "switch requires an integral or enum constexpr value");
     }
 
     [[nodiscard]] std::pair<long long, long long> integer_bounds_for_type(const Type& type) const {
@@ -1967,8 +1994,42 @@ private:
                 }
                 return;
             }
+            case StmtKind::Switch: {
+                std::shared_ptr<Cell> condition_value = evaluate_expr(*stmt.condition);
+                long long condition_key = switch_match_key(condition_value, stmt.loc);
+                frames_.push_back({});
+                try {
+                    bool matched = false;
+                    for (const SwitchCase& switch_case : stmt.switch_cases) {
+                        bool case_matches = false;
+                        if (matched) {
+                            case_matches = true;
+                        } else if (!switch_case.value) {
+                            case_matches = true;
+                        } else {
+                            case_matches = switch_match_key(evaluate_expr(*switch_case.value), switch_case.loc) == condition_key;
+                        }
+                        if (!case_matches) continue;
+                        matched = true;
+                        try {
+                            for (const StmtPtr& nested : switch_case.statements) execute_stmt(*nested, return_type);
+                        } catch (const BreakSignal&) {
+                            break;
+                        }
+                        bool ends_with_fallthrough =
+                            !switch_case.statements.empty() && switch_case.statements.back()->kind == StmtKind::Fallthrough;
+                        if (!ends_with_fallthrough) break;
+                    }
+                } catch (...) {
+                    frames_.pop_back();
+                    throw;
+                }
+                frames_.pop_back();
+                return;
+            }
             case StmtKind::Break: throw BreakSignal{};
             case StmtKind::Continue: throw ContinueSignal{};
+            case StmtKind::Fallthrough: return;
             case StmtKind::Block:
                 if (stmt.is_unsafe) throw ConstexprError(stmt.loc, "unsafe blocks are not allowed in constant evaluation");
                 frames_.push_back({});
@@ -2434,6 +2495,20 @@ private:
                     engine_.pop_local_array_bound_scope();
                 }
                 return;
+            case StmtKind::Switch:
+                if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) resolve_array_bounds_in_expr(*switch_case.value);
+                    engine_.push_local_array_bound_scope();
+                    try {
+                        for (StmtPtr& nested : switch_case.statements) resolve_array_bounds_in_stmt(*nested);
+                    } catch (...) {
+                        engine_.pop_local_array_bound_scope();
+                        throw;
+                    }
+                    engine_.pop_local_array_bound_scope();
+                }
+                return;
             case StmtKind::Block:
                 engine_.push_local_array_bound_scope();
                 try {
@@ -2446,6 +2521,7 @@ private:
                 return;
             case StmtKind::Break:
             case StmtKind::Continue:
+            case StmtKind::Fallthrough:
                 return;
         }
     }
