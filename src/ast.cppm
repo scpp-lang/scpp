@@ -868,25 +868,25 @@ struct MemberInitializer {
 }
 
 inline AlignmentSpecifier::AlignmentSpecifier(const AlignmentSpecifier& other)
-    : loc(other.loc), operand_is_type(other.operand_is_type), type(other.type) {
+    : loc{other.loc}, operand_is_type{other.operand_is_type}, type{other.type} {
     if (other.expr) expr = clone_initializer_expr(*other.expr);
 }
 
 inline AlignmentSpecifier& AlignmentSpecifier::operator=(const AlignmentSpecifier& other) {
     if (this == &other) return *this;
-    AlignmentSpecifier clone(other);
+    AlignmentSpecifier clone{other};
     *this = std::move(clone);
     return *this;
 }
 
-inline Initializer::Initializer(const Initializer& other) : has_brace_args(other.has_brace_args) {
+inline Initializer::Initializer(const Initializer& other) : has_brace_args{other.has_brace_args} {
     if (other.expr) expr = clone_initializer_expr(*other.expr);
     for (const ExprPtr& arg : other.brace_args) brace_args.push_back(clone_initializer_expr(*arg));
 }
 
 inline Initializer& Initializer::operator=(const Initializer& other) {
     if (this == &other) return *this;
-    Initializer clone(other);
+    Initializer clone{other};
     *this = std::move(clone);
     return *this;
 }
