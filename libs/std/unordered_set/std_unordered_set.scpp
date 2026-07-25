@@ -1,0 +1,144 @@
+export module std:unordered_set;
+
+import :memory;
+import :string;
+
+extern "C" {
+    void* scpp_unordered_set_string_new();
+    void* scpp_unordered_set_string_copy(const void* handle);
+    void scpp_unordered_set_string_delete(void* handle);
+    int scpp_unordered_set_string_insert(void* handle, const char* value);
+    int scpp_unordered_set_string_contains(const void* handle, const char* value);
+    int scpp_unordered_set_string_erase(void* handle, const char* value);
+    int scpp_unordered_set_string_size(const void* handle);
+    int scpp_unordered_set_string_empty(const void* handle);
+    void scpp_unordered_set_string_clear(void* handle);
+}
+
+namespace std {
+
+export template<typename T>
+class unordered_set {
+public:
+    consteval unordered_set() {
+        int zero = 0;
+        int boom = 1 / zero;
+        return;
+    }
+};
+
+class __unordered_set_string_box {
+public:
+    void* handle{};
+
+    __unordered_set_string_box() {
+        [[scpp::unsafe]] {
+            this->handle = scpp_unordered_set_string_new();
+        }
+        return;
+    }
+
+    __unordered_set_string_box(void* handle) {
+        this->handle = handle;
+        return;
+    }
+
+    virtual ~__unordered_set_string_box() {
+        [[scpp::unsafe]] {
+            scpp_unordered_set_string_delete(this->handle);
+        }
+        return;
+    }
+};
+
+export template<>
+class unordered_set<std::string> {
+private:
+    std::unique_ptr<std::__unordered_set_string_box> box_{};
+
+public:
+    unordered_set() {
+        std::__unordered_set_string_box* raw{};
+        [[scpp::unsafe]] {
+            raw = new std::__unordered_set_string_box();
+        }
+        std::unique_ptr<std::__unordered_set_string_box> box{raw};
+        this->box_ = std::move(box);
+        return;
+    }
+
+    unordered_set(const std::unordered_set<std::string>& other) {
+        void* copied{};
+        [[scpp::unsafe]] {
+            copied = scpp_unordered_set_string_copy(other.box_->handle);
+        }
+        std::__unordered_set_string_box* raw{};
+        [[scpp::unsafe]] {
+            raw = new std::__unordered_set_string_box(copied);
+        }
+        std::unique_ptr<std::__unordered_set_string_box> box{raw};
+        this->box_ = std::move(box);
+        return;
+    }
+
+    void operator=(const std::unordered_set<std::string>& other) {
+        void* copied{};
+        [[scpp::unsafe]] {
+            copied = scpp_unordered_set_string_copy(other.box_->handle);
+        }
+        std::__unordered_set_string_box* raw{};
+        [[scpp::unsafe]] {
+            raw = new std::__unordered_set_string_box(copied);
+        }
+        std::unique_ptr<std::__unordered_set_string_box> box{raw};
+        this->box_ = std::move(box);
+        return;
+    }
+
+    virtual ~unordered_set() { return; }
+
+    bool insert(const std::string& value) {
+        [[scpp::unsafe]] {
+            return scpp_unordered_set_string_insert(this->box_->handle, value.c_str()) != 0;
+        }
+    }
+
+    bool insert(std::string&& value) {
+        [[scpp::unsafe]] {
+            return scpp_unordered_set_string_insert(this->box_->handle, value.c_str()) != 0;
+        }
+    }
+
+    bool contains(const std::string& value) const {
+        [[scpp::unsafe]] {
+            return scpp_unordered_set_string_contains(this->box_->handle, value.c_str()) != 0;
+        }
+    }
+
+    bool erase(const std::string& value) {
+        [[scpp::unsafe]] {
+            return scpp_unordered_set_string_erase(this->box_->handle, value.c_str()) != 0;
+        }
+    }
+
+    int size() const {
+        [[scpp::unsafe]] {
+            return scpp_unordered_set_string_size(this->box_->handle);
+        }
+    }
+
+    bool empty() const {
+        [[scpp::unsafe]] {
+            return scpp_unordered_set_string_empty(this->box_->handle) != 0;
+        }
+    }
+
+    void clear() {
+        [[scpp::unsafe]] {
+            scpp_unordered_set_string_clear(this->box_->handle);
+        }
+        return;
+    }
+};
+
+} // namespace std

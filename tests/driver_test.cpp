@@ -6020,6 +6020,82 @@ void run_local_type_definition_tests() {
     }
 }
 
+void run_unordered_set_tests() {
+    {
+        std::string case_name = "unordered_set_string_insert_contains_erase_tracks_size";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::unordered_set<std::string> visiting{};
+    std::string node{"Node"};
+    std::string other{"Other"};
+    if (!visiting.empty()) return 1;
+    if (visiting.size() != 0) return 2;
+    if (!visiting.insert(node)) return 3;
+    if (!visiting.contains(node)) return 4;
+    if (visiting.contains(other)) return 5;
+    if (visiting.size() != 1) return 6;
+    if (visiting.insert(std::string{"Node"})) return 7;
+    if (visiting.size() != 1) return 8;
+    if (!visiting.erase(node)) return 9;
+    if (visiting.erase(node)) return 10;
+    if (visiting.contains(node)) return 11;
+    return visiting.empty() ? 0 : 12;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "unordered_set_copy_move_and_clear_preserve_string_membership";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::unordered_set<std::string> original{};
+    original.insert(std::string{"alpha"});
+    original.insert(std::string{"beta"});
+    std::unordered_set<std::string> copied{original};
+    if (!copied.contains(std::string{"alpha"})) return 1;
+    if (!copied.contains(std::string{"beta"})) return 2;
+    if (copied.size() != 2) return 3;
+    std::unordered_set<std::string> moved{std::move(original)};
+    if (!moved.contains(std::string{"alpha"})) return 4;
+    if (!moved.contains(std::string{"beta"})) return 5;
+    if (moved.size() != 2) return 6;
+    copied.clear();
+    if (!copied.empty()) return 7;
+    if (copied.size() != 0) return 8;
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "unordered_set_string_usage_matches_ast_layoutcomputer_pattern";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int visit(std::unordered_set<std::string>& visiting, const std::string& current) {
+    if (visiting.contains(current)) return 1;
+    visiting.insert(current);
+    if (!visiting.contains(current)) return 2;
+    visiting.erase(current);
+    return visiting.contains(current) ? 3 : 0;
+}
+int main() {
+    std::unordered_set<std::string> visiting{};
+    std::string current{"TypeName"};
+    return visit(visiting, current);
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -6909,6 +6985,7 @@ int main() {
     run_increment_decrement_tests();
     run_compound_assignment_tests();
     run_local_type_definition_tests();
+    run_unordered_set_tests();
     run_expected_tests();
     run_optional_tests();
     run_io_tests();
