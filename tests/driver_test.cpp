@@ -5900,6 +5900,230 @@ int main() {
     }
 }
 
+void run_optional_tests() {
+    {
+        std::string case_name = "std_optional_empty_and_value_construction_work_without_T_default_ctor";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+class NoDefault {
+private:
+    int value_{};
+public:
+    virtual ~NoDefault() = default;
+    NoDefault(int value) : value_{value} { return; }
+    NoDefault(const NoDefault& other) : value_{other.value_} { return; }
+    int value() const { return this->value_; }
+};
+int main() {
+    std::optional<NoDefault> empty{};
+    if (empty.has_value()) return 1;
+    std::optional<NoDefault> full{NoDefault{7}};
+    if (!full.has_value()) return 2;
+    return full->value() - 7;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_optional_empty_reset_and_value_access_work";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::optional<int> empty{};
+    std::optional<int> value{7};
+    if (empty.has_value()) return 1;
+    if (value.value() != 7) return 2;
+    value.reset();
+    if (value.has_value()) return 3;
+    std::optional<int> replacement{9};
+    value = replacement;
+    return value.value() - 9;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_optional_bad_access_aborts_via_std_abort";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::optional<int> empty{};
+    return empty.value();
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code != 0,
+               case_name + ": expected non-zero exit code, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_optional_copy_move_and_arrow_access_work";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+class Tracker {
+private:
+    int value_{};
+    int* copies_{};
+public:
+    virtual ~Tracker() = default;
+    Tracker(int value, int* copies) : value_{value}, copies_{copies} { return; }
+    Tracker(const Tracker& other) : value_{other.value_}, copies_{other.copies_} {
+        [[scpp::unsafe]] {
+            *this->copies_ = *this->copies_ + 1;
+        }
+        return;
+    }
+    int value() const { return this->value_; }
+    void set_value(int value) {
+        this->value_ = value;
+        return;
+    }
+};
+int main() {
+    int copies = 0;
+    std::optional<Tracker> original{Tracker{7, &copies}};
+    copies = 0;
+    std::optional<Tracker> clone = original;
+    if (copies != 1) return 1;
+    original->set_value(11);
+    if (clone->value() != 7) return 2;
+    std::optional<Tracker> moved = std::move(original);
+    if (copies != 1) return 3;
+    if (!moved.has_value()) return 4;
+    return moved->value() - 11;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_optional_reset_and_destructor_destroy_contained_value";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+class Tracker {
+private:
+    int* destroyed_{};
+public:
+    virtual ~Tracker() {
+        [[scpp::unsafe]] {
+            *this->destroyed_ = *this->destroyed_ + 1;
+        }
+        return;
+    }
+    Tracker(int* destroyed) : destroyed_{destroyed} { return; }
+    Tracker(const Tracker& other) : destroyed_{other.destroyed_} { return; }
+};
+int main() {
+    int destroyed = 0;
+    {
+        Tracker seed{&destroyed};
+        {
+            std::optional<Tracker> maybe{seed};
+            maybe.reset();
+            if (destroyed != 1) return 1;
+            std::optional<Tracker> again{seed};
+        }
+        if (destroyed != 2) return 2;
+    }
+    return destroyed - 3;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_optional_thread_traits_follow_contained_type";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+class RawPtrBox {
+public:
+    virtual ~RawPtrBox() = default;
+    RawPtrBox() { return; }
+    RawPtrBox(const RawPtrBox& other) : ptr_{other.ptr_} { return; }
+private:
+    int* ptr_{};
+};
+int main() {
+    if (!scpp::is_thread_movable(std::optional<int>)) return 1;
+    if (!scpp::is_thread_shareable(std::optional<int>)) return 2;
+    if (scpp::is_thread_movable(std::optional<RawPtrBox>)) return 3;
+    return scpp::is_thread_shareable(std::optional<RawPtrBox>) ? 4 : 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "cli_build_module_roundtrips_std_optional_without_exporting_helpers";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "import std;\n"
+                        "namespace helper {\n"
+                        "    export std::optional<int> maybe_box(bool flag) {\n"
+                        "        if (flag) {\n"
+                        "            std::optional<int> boxed{42};\n"
+                        "            return boxed;\n"
+                        "        }\n"
+                        "        std::optional<int> empty{};\n"
+                        "        return empty;\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        expect(std::filesystem::exists(interface_path), case_name + ": expected .scppm output");
+        expect(std::filesystem::exists(archive_path), case_name + ": expected .scppa output");
+        expect(read_file(interface_path).find("__optional") == std::string::npos,
+               case_name + ": expected no exported __optional helpers in interface source");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import std;\n"
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    auto boxed = helper::maybe_box(true);\n"
+                        "    if (!boxed.has_value()) return 1;\n"
+                        "    if (boxed.value() != 42) return 2;\n"
+                        "    auto empty = helper::maybe_box(false);\n"
+                        "    return empty.has_value() ? 3 : 0;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build from .scppm should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected optional consumer binary to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+}
+
 void run_io_tests() {
     {
         std::string case_name = "scpp_io_getline_reads_one_line_without_newline";
@@ -6502,6 +6726,7 @@ int main() {
     run_string_view_tests();
     run_size_t_keyword_tests();
     run_expected_tests();
+    run_optional_tests();
     run_io_tests();
     run_enum_tests();
     run_switch_tests();
