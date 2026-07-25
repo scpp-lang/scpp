@@ -5955,6 +5955,71 @@ int main() {
     }
 }
 
+void run_local_type_definition_tests() {
+    {
+        std::string case_name = "local_struct_definition_with_method_compiles_and_runs";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(int main() {
+    struct Point {
+        int x;
+        int y;
+        int sum() const { return this->x + this->y; }
+    };
+    Point p{};
+    p.x = 2;
+    p.y = 3;
+    return p.sum() - 5;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "local_class_definition_with_constructor_compiles_and_runs";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(int main() {
+    class Counter {
+    public:
+        int value;
+        Counter(int initial) : value{initial} {}
+        virtual ~Counter() { return; }
+        int bump() {
+            this->value += 1;
+            return this->value;
+        }
+    };
+    Counter counter{6};
+    if (counter.bump() != 7) return 1;
+    return counter.value - 7;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "local_type_name_is_not_visible_outside_its_function";
+        cases_run++;
+        try {
+            scpp::parse(
+                "int make() {\n"
+                "    struct Local { int value; };\n"
+                "    Local ok{};\n"
+                "    return ok.value;\n"
+                "}\n"
+                "int use() {\n"
+                "    Local bad{};\n"
+                "    return bad.value;\n"
+                "}\n");
+            expect(false, case_name + ": expected parse failure for out-of-scope local type name");
+        } catch (const scpp::ParseError& e) {
+            expect(e.loc.line == 7, case_name + ": expected out-of-scope use to fail on line 7, got " +
+                                            std::to_string(e.loc.line));
+        }
+    }
+}
+
 void run_expected_tests() {
     {
         std::string case_name = "std_abort_aborts_process";
@@ -6843,6 +6908,7 @@ int main() {
     run_size_t_keyword_tests();
     run_increment_decrement_tests();
     run_compound_assignment_tests();
+    run_local_type_definition_tests();
     run_expected_tests();
     run_optional_tests();
     run_io_tests();

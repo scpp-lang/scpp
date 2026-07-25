@@ -1428,6 +1428,37 @@ void test_compound_assignment_operators_parse() {
            "compound_assignment_operators_parse: rhs should parse as right-associative +=");
 }
 
+void test_local_type_definitions_parse() {
+    scpp::Program program = scpp::parse(
+        "int main() {\n"
+        "    struct Point {\n"
+        "        int x;\n"
+        "        int y;\n"
+        "        int sum() const { return this->x + this->y; }\n"
+        "    };\n"
+        "    Point p{};\n"
+        "    p.x = 2;\n"
+        "    p.y = 3;\n"
+        "    return p.sum();\n"
+        "}\n");
+    expect(program.structs.size() == 1, "local_type_definitions_parse: expected one local struct definition");
+    expect(program.functions.size() == 2, "local_type_definitions_parse: expected main plus one local method");
+    if (program.structs.empty() || program.functions.size() < 2) return;
+    const scpp::StructDef& point = program.structs[0];
+    expect(point.name != "Point" && point.name.ends_with("::Point"),
+           "local_type_definitions_parse: local struct should use an internal qualified name");
+    expect(point.fields.size() == 2, "local_type_definitions_parse: expected two fields");
+    const scpp::Function& main_fn = program.functions.back();
+    expect(main_fn.body != nullptr && main_fn.body->statements.size() == 5,
+           "local_type_definitions_parse: expected local-type placeholder plus four executable statements");
+    if (!main_fn.body || main_fn.body->statements.size() < 2) return;
+    expect(main_fn.body->statements[0]->kind == scpp::StmtKind::Block && main_fn.body->statements[0]->statements.empty(),
+           "local_type_definitions_parse: local type definition should lower to an empty placeholder block statement");
+    const scpp::Stmt& decl = *main_fn.body->statements[1];
+    expect(decl.kind == scpp::StmtKind::VarDecl && decl.type.kind == scpp::TypeKind::Named && decl.type.name == point.name,
+           "local_type_definitions_parse: later local variable should resolve to the local struct type");
+}
+
 void test_arrow_parses_as_deferred_operator_arrow_access() {
     scpp::Program program = scpp::parse("int f() { return p->x; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
@@ -4933,6 +4964,7 @@ int main() {
     test_address_of_dereference_chain();
     test_increment_and_decrement_operators_parse();
     test_compound_assignment_operators_parse();
+    test_local_type_definitions_parse();
     test_arrow_parses_as_deferred_operator_arrow_access();
     test_chained_arrow_and_dot();
     test_operator_arrow_member_decl_and_explicit_call_parse();
