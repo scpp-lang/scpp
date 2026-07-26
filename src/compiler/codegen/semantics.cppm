@@ -694,7 +694,7 @@ namespace {
 {
         std::vector<const Function*> candidates;
         for (const Function& fn : program_->functions) {
-            if (fn.name == callee_name && !is_defaulted_special_member_equivalent_to_implicit_omission(fn)) {
+            if (fn.name == callee_name) {
                 candidates.push_back(&fn);
             }
         }

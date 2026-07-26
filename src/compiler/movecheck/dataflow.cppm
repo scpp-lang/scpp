@@ -60,7 +60,12 @@ void check_moves_impl(const Program& program);
 
 [[nodiscard]] const GlobalVar* find_visible_global_for_name(const std::string& name, bool explicit_global_qualification,
                                                             const Body& body) {
-    return find_visible_global(body.program, body.function_namespace_path, name, explicit_global_qualification);
+    if (body.program == nullptr) {
+        return find_visible_global(OptionalProgramRef{}, body.function_namespace_path, name, explicit_global_qualification);
+    }
+    std::reference_wrapper<const Program> program_ref{*body.program};
+    return find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, name,
+                               explicit_global_qualification);
 }
 
 [[nodiscard]] bool function_signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,

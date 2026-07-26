@@ -7502,32 +7502,116 @@ int main() {
     }
 }
 
-void run_defaulted_special_member_tests() {
+void run_reference_wrapper_tests() {
     {
-        std::string case_name = "defaulted_copy_special_members_compile";
+        std::string case_name = "reference_wrapper_optional_rebinds";
         cases_run++;
-        std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
-        scpp::compile_to_executable(
-            "struct Box {\n"
-            "    int value = 0;\n"
-            "    Box(int v) : value{v} { return; }\n"
-            "    Box(const Box&) = default;\n"
-            "    Box& operator=(const Box&) = default;\n"
-            "};\n"
-            "int main() {\n"
-            "    Box a{9};\n"
-            "    return a.value - 9;\n"
-            "}\n",
-            exe_path.string());
-        std::filesystem::remove(exe_path);
-        expect(true, case_name + ": compile succeeded");
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    int first = 4;
+    int second = 9;
+    std::reference_wrapper<int> current{first};
+    std::optional<std::reference_wrapper<int>> maybe{current};
+    if (!maybe.has_value()) return 1;
+    maybe->get() = 6;
+    std::reference_wrapper<int> rebound{second};
+    current = rebound;
+    current.get() = 12;
+    print_int(first);
+    print_int(second);
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "6\n12\n",
+               case_name + ": expected stdout '6\\n12\\n', got '" + result.stdout_text + "'");
     }
 
     {
-        std::string case_name = "defaulted_move_special_members_compile";
+        std::string case_name = "reference_wrapper_const_target_reads";
         cases_run++;
-        std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
-        scpp::compile_to_executable(
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    int value = 7;
+    std::reference_wrapper<const int> current{value};
+    std::optional<std::reference_wrapper<const int>> maybe{current};
+    if (!maybe.has_value()) return 1;
+    print_int(maybe->get());
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "7\n",
+               case_name + ": expected stdout '7\\n', got '" + result.stdout_text + "'");
+    }
+}
+
+void run_defaulted_special_member_tests() {
+    {
+        std::string case_name = "defaulted_copy_special_members_runtime";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "class Simple {\n"
+            "public:\n"
+            "    int value{};\n"
+            "    virtual ~Simple() {}\n"
+            "    Simple() = default;\n"
+            "    Simple(const Simple&) = default;\n"
+            "};\n"
+            "int main() {\n"
+            "    Simple a{};\n"
+            "    a.value = 7;\n"
+            "    Simple b{a};\n"
+            "    print_int(b.value);\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "7\n",
+               case_name + ": expected stdout '7\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "generic_defaulted_copy_special_members_runtime";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "template<typename T>\n"
+            "class Wrapper {\n"
+            "public:\n"
+            "    Wrapper(T& ref) : ptr_{&ref} {}\n"
+            "    Wrapper(const Wrapper&) = default;\n"
+            "    Wrapper& operator=(const Wrapper&) = default;\n"
+            "    T& get() { [[scpp::unsafe]] { return *this->ptr_; } }\n"
+            "    virtual ~Wrapper() {}\n"
+            "private:\n"
+            "    T* ptr_{};\n"
+            "};\n"
+            "int main() {\n"
+            "    int first = 5;\n"
+            "    int second = 9;\n"
+            "    Wrapper<int> a{first};\n"
+            "    Wrapper<int> b{a};\n"
+            "    Wrapper<int> c{second};\n"
+            "    c = a;\n"
+            "    c.get() = 11;\n"
+            "    print_int(b.get());\n"
+            "    print_int(second);\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "11\n9\n",
+               case_name + ": expected stdout '11\\n9\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "defaulted_move_special_members_runtime";
+        cases_run++;
+        RunResult result = compile_and_run(
             "import std;\n"
             "class Box {\n"
             "private:\n"
@@ -7537,14 +7621,20 @@ void run_defaulted_special_member_tests() {
             "    Box(std::unique_ptr<int> v) : value{std::move(v)} { return; }\n"
             "    Box(Box&&) = default;\n"
             "    Box& operator=(Box&&) = default;\n"
+            "    int read() const { return *this->value; }\n"
             "};\n"
             "int main() {\n"
-            "    Box b{std::make_unique<int>(3)};\n"
+            "    Box first{std::make_unique<int>(3)};\n"
+            "    Box second{std::move(first)};\n"
+            "    Box third{std::make_unique<int>(8)};\n"
+            "    third = std::move(second);\n"
+            "    print_int(third.read());\n"
             "    return 0;\n"
             "}\n",
-            exe_path.string());
-        std::filesystem::remove(exe_path);
-        expect(true, case_name + ": compile succeeded");
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "3\n",
+               case_name + ": expected stdout '3\\n', got '" + result.stdout_text + "'");
     }
 }
 
@@ -7629,6 +7719,7 @@ int main() {
     run_unordered_set_tests();
     run_expected_tests();
     run_optional_tests();
+    run_reference_wrapper_tests();
     run_smart_pointer_nullptr_tests();
     run_subscripted_deref_tests();
     run_io_tests();

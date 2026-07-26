@@ -65,6 +65,32 @@ class move_only_function;
 export template<typename Sig>
 class function;
 
+export template<typename T>
+class reference_wrapper {
+private:
+    T* ptr_{};
+
+public:
+    reference_wrapper(T& value) : ptr_{&value} { return; }
+    reference_wrapper(const reference_wrapper&) = default;
+    reference_wrapper& operator=(const reference_wrapper&) = default;
+
+    // Intentionally omits an implicit `operator T&()` until conversion operators are supported.
+    T& get() {
+        [[scpp::unsafe]] {
+            return *this->ptr_;
+        }
+    }
+
+    const T& get() const {
+        [[scpp::unsafe]] {
+            return *this->ptr_;
+        }
+    }
+
+    virtual ~reference_wrapper() { return; }
+};
+
 export template<typename R, typename... Args>
 class move_only_function<R(Args...)> {
 private:

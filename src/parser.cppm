@@ -262,6 +262,12 @@ private:
     // above already handles the separate recursive-inheritance variadic
     // family.
     std::unordered_map<std::string, std::vector<GenericTypeParam>> ordinary_generic_type_template_params_;
+    struct InjectedGenericTypeName {
+        std::string spelled_name;
+        std::string qualified_name;
+        std::vector<GenericTypeParam> template_params;
+    };
+    std::vector<InjectedGenericTypeName> injected_generic_type_name_stack_;
     enum class RecordTagKind { Struct, Class, Union };
     std::unordered_map<std::string, RecordTagKind> record_tag_kinds_;
     // ch05 §5.11: every full-header-form generic function's own declared
@@ -1480,6 +1486,13 @@ private:
         return !resolve_visible_type_name(spelled_name).empty() || resolve_visible_type_alias(spelled_name).has_value();
     }
 
+    [[nodiscard]] const InjectedGenericTypeName* find_injected_generic_type_name(const std::string& spelled_name) const {
+        for (auto it = injected_generic_type_name_stack_.rbegin(); it != injected_generic_type_name_stack_.rend(); ++it) {
+            if (it->spelled_name == spelled_name) return &*it;
+        }
+        return nullptr;
+    }
+
     [[nodiscard]] std::optional<std::string>
     resolve_static_member_owner_name(const std::string& spelled_owner, bool explicit_global_qualification) const {
         std::string resolved_owner =
@@ -2557,6 +2570,23 @@ private:
                                   "'unsigned' must be immediately followed by 'int' or 'long' (ch06 §6) -- the "
                                   "bare 'unsigned' shorthand is not valid scpp");
             }
+        } else if (tok.kind == TokenKind::Identifier &&
+                   peek_at(1).kind != TokenKind::Less &&
+                   find_injected_generic_type_name(std::string(tok.text)) != nullptr) {
+            const InjectedGenericTypeName& injected = *find_injected_generic_type_name(std::string(tok.text));
+            type.name = injected.qualified_name;
+            for (const GenericTypeParam& param : injected.template_params) {
+                if (param.is_non_type) {
+                    type.non_type_args.push_back(std::shared_ptr<Expr>(make_identifier_expr(current_loc(), param.name).release()));
+                    continue;
+                }
+                Type arg;
+                arg.kind = TypeKind::Named;
+                arg.name = param.name;
+                arg.is_pack_expansion = param.is_pack;
+                type.template_args.push_back(std::move(arg));
+            }
+            advance();
         } else if (tok.kind == TokenKind::Identifier &&
                    generic_type_names_.contains(resolve_visible_type_name(peek_qualified_name()))) {
             // ch05 §5.14: `Name<Arg, Arg2, ...>` -- a generic class/
@@ -5453,6 +5483,10 @@ private:
         };
         std::vector<GenericTypeParam> saved_class_template_params = current_class_template_params_;
         current_class_template_params_ = template_params;
+        if (!template_params.empty()) {
+            injected_generic_type_name_stack_.push_back(
+                InjectedGenericTypeName{owner_name, qualified_owner_name, template_params});
+        }
 
         expect(TokenKind::LBrace, "'{'");
         AccessSpecifier current_access = default_access;
@@ -5939,6 +5973,7 @@ private:
         }
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
+        if (!template_params.empty()) injected_generic_type_name_stack_.pop_back();
         current_class_template_params_ = std::move(saved_class_template_params);
     }
 

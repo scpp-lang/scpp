@@ -13,7 +13,13 @@ import :signatures;
 namespace scpp {
 
 [[nodiscard]] const GlobalVar* find_visible_global_for_expr(const Expr& expr, const Body& body) {
-    return find_visible_global(body.program, body.function_namespace_path, expr.name, expr.explicit_global_qualification);
+    if (body.program == nullptr) {
+        return find_visible_global(OptionalProgramRef{}, body.function_namespace_path, expr.name,
+                                   expr.explicit_global_qualification);
+    }
+    std::reference_wrapper<const Program> program_ref{*body.program};
+    return find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, expr.name,
+                               expr.explicit_global_qualification);
 }
 
 struct CalleeSignature {
@@ -777,8 +783,17 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     const Expr* source = &expr;
     if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
     if (source->kind != ExprKind::Identifier || body.local_types.contains(source->name)) return std::nullopt;
-    if (find_visible_global(body.program, body.function_namespace_path, source->name, source->explicit_global_qualification) !=
-        nullptr) {
+    const GlobalVar* visible_global = nullptr;
+    if (body.program != nullptr) {
+        std::reference_wrapper<const Program> program_ref{*body.program};
+        visible_global = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, source->name,
+                                             source->explicit_global_qualification);
+    } else {
+        visible_global =
+            find_visible_global(OptionalProgramRef{}, body.function_namespace_path, source->name,
+                                source->explicit_global_qualification);
+    }
+    if (visible_global != nullptr) {
         return std::nullopt;
     }
     const auto* candidates = lookup_name(source->name);
