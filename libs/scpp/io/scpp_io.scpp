@@ -4,7 +4,7 @@
 // that intentionally do not live in `std::`.
 export module scpp:io;
 
-import std;
+export import std;
 
 extern "C" {
     void* scpp_io_getline(int* status);

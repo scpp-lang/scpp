@@ -1,5 +1,7 @@
 export module std:functional;
 
+import :string;
+
 namespace std {
 
 template<typename F>
@@ -553,6 +555,77 @@ public:
     R call(Args... args) const && {
         return this->invoke_(this->object_, args...);
     }
+};
+
+export template<typename T>
+class hash;
+
+export template<typename T>
+class equal_to;
+
+uint64_t __hash_mix_uint64(uint64_t value) {
+    uint64_t mixed = value;
+    [[scpp::unsafe]] {
+        mixed = mixed * static_cast<uint64_t>(1099511628211);
+        mixed = mixed + static_cast<uint64_t>(1469598103934665603) * 10 + 7;
+    }
+    return mixed;
+}
+
+uint64_t __hash_string_bytes(const std::string& value) {
+    uint64_t mixed = static_cast<uint64_t>(1469598103934665603) * 10 + 7;
+    uint64_t prime = static_cast<uint64_t>(1099511628211);
+    const char* bytes = value.c_str();
+    int index = 0;
+    while (bytes[index] != '\0') {
+        uint64_t byte = static_cast<uint64_t>(static_cast<std::uint8_t>(bytes[index]));
+        [[scpp::unsafe]] {
+            mixed = mixed + byte + 1;
+            mixed = mixed * prime;
+        }
+        index = index + 1;
+    }
+    return mixed;
+}
+
+export template<>
+class hash<int> {
+public:
+    uint64_t call(int value) const {
+        return std::__hash_mix_uint64(static_cast<uint64_t>(value));
+    }
+
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<int> {
+public:
+    bool call(int lhs, int rhs) const {
+        return lhs == rhs;
+    }
+
+    virtual ~equal_to() = default;
+};
+
+export template<>
+class hash<std::string> {
+public:
+    uint64_t call(const std::string& value) const {
+        return std::__hash_string_bytes(value);
+    }
+
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<std::string> {
+public:
+    bool call(const std::string& lhs, const std::string& rhs) const {
+        return lhs.equals(rhs.c_str());
+    }
+
+    virtual ~equal_to() = default;
 };
 
 } // namespace std

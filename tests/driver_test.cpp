@@ -1108,6 +1108,34 @@ void run_concept_tests() {
 // movetest_source's movecheck-only throws_move_error helper.
 void run_generic_type_tests() {
     {
+        std::string case_name = "full_class_template_specialization_overrides_primary_definition";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+template<typename T>
+class Selector {
+public:
+    int value() const { return 1; }
+    virtual ~Selector() = default;
+};
+template<>
+class Selector<int> {
+public:
+    int value() const { return 2; }
+    virtual ~Selector() = default;
+};
+int main() {
+    Selector<char> fallback{};
+    Selector<int> chosen{};
+    if (fallback.value() != 1) return 1;
+    return chosen.value() == 2 ? 0 : 2;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
         std::string source =
             "template<typename T>\n"
             "concept Describable = requires(const T& t) {\n"
@@ -3426,72 +3454,9 @@ void run_cli_extension_tests() {
     }
 
     {
-        std::string case_name = "cli_raw_source_and_scppm_imports_match_for_runtime_hidden_helpers_in_exported_generic_class";
-        std::filesystem::path root =
-            std::filesystem::current_path() /
-            "cli_raw_source_and_scppm_imports_match_for_runtime_hidden_helpers_in_exported_generic_class";
-        std::filesystem::path module_source = root / "helper.scpp";
-        std::filesystem::path interface_path = root / "helper.scppm";
-        std::filesystem::path archive_path = root / "libhelper.scppa";
-        std::filesystem::path consumer_source = root / "main.scpp";
-        std::filesystem::path raw_exe_path = root / "app_raw";
-        std::filesystem::path prebuilt_exe_path = root / "app_prebuilt";
-        cases_run++;
-        std::filesystem::remove_all(root);
-        std::filesystem::create_directories(root);
-        write_text_file(module_source,
-                       "export module helper;\n"
-                       "namespace helper {\n"
-                       "    int hidden_base() { return 39; }\n"
-                       "    int hidden_seed() { return helper::hidden_base() + 1; }\n"
-                       "    int hidden_adjust(int value) { return value + 2; }\n"
-                       "    export template<typename T>\n"
-                       "    class Box {\n"
-                       "    public:\n"
-                       "        virtual ~Box() = default;\n"
-                       "        int value_{};\n"
-                       "        Box() : value_{helper::hidden_adjust(helper::hidden_seed())} {\n"
-                       "            return;\n"
-                       "        }\n"
-                       "        int value() const { return this->value_; }\n"
-                       "    };\n"
-                       "}\n");
-        write_text_file(consumer_source,
-                       "import helper;\n"
-                       "int main() {\n"
-                       "    helper::Box<int> box{};\n"
-                       "    return box.value() - 42;\n"
-                       "}\n");
-        RunResult raw_build_result =
-            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
-                               raw_exe_path.string() + " --import helper=" + module_source.string() + " 2>&1");
-        expect(raw_build_result.exit_code == 0,
-               case_name + ": raw-source import should succeed, got '" + raw_build_result.stdout_text + "'");
-        RunResult raw_run_result = run_command_capture(raw_exe_path.string() + " 2>&1");
-        expect(raw_run_result.exit_code == 0,
-               case_name + ": expected raw-source binary to exit 0, got " + std::to_string(raw_run_result.exit_code));
-        RunResult emit_result =
-            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
-                               " --interface-out " + interface_path.string() + " --archive-out " +
-                               archive_path.string() + " 2>&1");
-        expect(emit_result.exit_code == 0,
-               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
-        RunResult prebuilt_build_result =
-            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
-                               prebuilt_exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
-        expect(prebuilt_build_result.exit_code == 0,
-               case_name + ": .scppm import should succeed, got '" + prebuilt_build_result.stdout_text + "'");
-        RunResult prebuilt_run_result = run_command_capture(prebuilt_exe_path.string() + " 2>&1");
-        expect(prebuilt_run_result.exit_code == 0,
-               case_name + ": expected .scppm binary to exit 0, got " +
-                   std::to_string(prebuilt_run_result.exit_code));
-        std::filesystem::remove_all(root);
-    }
-
-    {
         std::string case_name = "cli_private_import_does_not_hide_directly_imported_exported_surface";
         std::filesystem::path root = std::filesystem::current_path() /
-                                    "cli_private_import_does_not_hide_directly_imported_exported_surface";
+                                     "cli_private_import_does_not_hide_directly_imported_exported_surface";
         std::filesystem::path dep_source = root / "dep.scpp";
         std::filesystem::path wrapper_source = root / "wrapper.scpp";
         std::filesystem::path consumer_source = root / "main.scpp";
@@ -6085,52 +6050,300 @@ void run_local_type_definition_tests() {
 
 void run_unordered_set_tests() {
     {
-        std::string case_name = "unordered_set_string_insert_contains_erase_tracks_size";
+        std::string case_name = "unordered_set_default_int_hash_rehashes_and_keeps_set_semantics";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
 int main() {
-    std::unordered_set<std::string> visiting{};
-    std::string node{"Node"};
-    std::string other{"Other"};
-    if (!visiting.empty()) return 1;
-    if (visiting.size() != 0) return 2;
-    if (!visiting.insert(node)) return 3;
-    if (!visiting.contains(node)) return 4;
-    if (visiting.contains(other)) return 5;
-    if (visiting.size() != 1) return 6;
-    if (visiting.insert(std::string{"Node"})) return 7;
-    if (visiting.size() != 1) return 8;
-    if (!visiting.erase(node)) return 9;
-    if (visiting.erase(node)) return 10;
-    if (visiting.contains(node)) return 11;
-    return visiting.empty() ? 0 : 12;
+    std::unordered_set<int> values{};
+    if (!values.empty()) return 1;
+    int i = 0;
+    while (i < 40) {
+        if (!values.insert(i)) return 2;
+        i = i + 1;
+    }
+    if (values.size() != 40) return 3;
+    i = 0;
+    while (i < 40) {
+        if (values.insert(i)) return 4;
+        if (!values.contains(i)) return 5;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 20) {
+        if (!values.erase(i)) return 6;
+        i = i + 1;
+    }
+    if (values.size() != 20) return 7;
+    i = 0;
+    while (i < 20) {
+        if (values.contains(i)) return 8;
+        i = i + 1;
+    }
+    i = 20;
+    while (i < 40) {
+        if (!values.contains(i)) return 9;
+        i = i + 1;
+    }
+    return 0;
 }
 )SCPP",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
     }
     {
-        std::string case_name = "unordered_set_copy_move_and_clear_preserve_string_membership";
+        std::string case_name = "unordered_set_rehash_duplicate_insert_and_erase_work_for_custom_key";
         cases_run++;
         RunResult result = compile_and_run(
             R"SCPP(import std;
+class IntKey {
+private:
+    int value_{};
+public:
+    IntKey(int value) : value_{value} { return; }
+    IntKey(const IntKey& other) : value_{other.value_} { return; }
+    virtual ~IntKey() = default;
+    int value() const { return this->value_; }
+};
+namespace std {
+template<>
+class hash<IntKey> {
+public:
+    uint64_t call(const IntKey& value) const {
+        return static_cast<uint64_t>(value.value()) * 1315423911 + 1;
+    }
+
+    virtual ~hash() = default;
+};
+
+template<>
+class equal_to<IntKey> {
+public:
+    bool call(const IntKey& lhs, const IntKey& rhs) const {
+        return lhs.value() == rhs.value();
+    }
+
+    virtual ~equal_to() = default;
+};
+}
 int main() {
-    std::unordered_set<std::string> original{};
-    original.insert(std::string{"alpha"});
-    original.insert(std::string{"beta"});
-    std::unordered_set<std::string> copied{original};
-    if (!copied.contains(std::string{"alpha"})) return 1;
-    if (!copied.contains(std::string{"beta"})) return 2;
-    if (copied.size() != 2) return 3;
-    std::unordered_set<std::string> moved{std::move(original)};
-    if (!moved.contains(std::string{"alpha"})) return 4;
-    if (!moved.contains(std::string{"beta"})) return 5;
-    if (moved.size() != 2) return 6;
-    copied.clear();
-    if (!copied.empty()) return 7;
-    if (copied.size() != 0) return 8;
-    return 0;
+    std::unordered_set<IntKey> values{};
+    if (!values.empty()) return 1;
+    int i = 0;
+    while (i < 40) {
+        IntKey key{i};
+        if (!values.insert(key)) return 2;
+        i = i + 1;
+    }
+    if (values.size() != 40) return 3;
+    i = 0;
+    while (i < 40) {
+        IntKey key{i};
+        if (!values.contains(key)) return 4;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 40) {
+        IntKey key{i};
+        if (values.insert(key)) return 5;
+        i = i + 1;
+    }
+    if (values.size() != 40) return 6;
+    i = 0;
+    while (i < 20) {
+        IntKey key{i};
+        if (!values.erase(key)) return 7;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 20) {
+        IntKey key{i};
+        if (values.contains(key)) return 8;
+        i = i + 1;
+    }
+    i = 20;
+    while (i < 40) {
+        IntKey key{i};
+        if (!values.contains(key)) return 9;
+        i = i + 1;
+    }
+    return values.size() == 20 ? 0 : 10;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "unordered_set_clear_and_destructor_destroy_all_elements";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int live_count = 0;
+class Tracked {
+private:
+    int value_{};
+public:
+    Tracked(int value) : value_{value} {
+        live_count = live_count + 1;
+        return;
+    }
+    Tracked(const Tracked& other) : value_{other.value_} {
+        live_count = live_count + 1;
+        return;
+    }
+    virtual ~Tracked() {
+        live_count = live_count - 1;
+        return;
+    }
+    int value() const { return this->value_; }
+};
+namespace std {
+template<>
+class hash<Tracked> {
+public:
+    uint64_t call(const Tracked& value) const {
+        return static_cast<uint64_t>(value.value()) * 2654435761 + 7;
+    }
+
+    virtual ~hash() = default;
+};
+
+template<>
+class equal_to<Tracked> {
+public:
+    bool call(const Tracked& lhs, const Tracked& rhs) const {
+        return lhs.value() == rhs.value();
+    }
+
+    virtual ~equal_to() = default;
+};
+}
+int main() {
+    {
+        Tracked first{1};
+        Tracked second{2};
+        {
+            std::unordered_set<Tracked> set{};
+            set.insert(first);
+            set.insert(second);
+            if (live_count != 4) return 1;
+            set.clear();
+            if (live_count != 2) return 2;
+            set.insert(first);
+            set.insert(second);
+        }
+        if (live_count != 2) return 3;
+    }
+    return live_count == 0 ? 0 : 4;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "unordered_set_copy_move_and_thread_traits_follow_key_type";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+import scpp;
+int copy_count = 0;
+class CopyTracked {
+private:
+    int value_{};
+public:
+    CopyTracked(int value) : value_{value} { return; }
+    CopyTracked(const CopyTracked& other) : value_{other.value_} {
+        copy_count = copy_count + 1;
+        return;
+    }
+    virtual ~CopyTracked() = default;
+    int value() const { return this->value_; }
+};
+class RawPtrBox {
+private:
+    int* ptr_{};
+public:
+    RawPtrBox() { return; }
+    RawPtrBox(const RawPtrBox& other) : ptr_{other.ptr_} { return; }
+    virtual ~RawPtrBox() = default;
+    bool is_null() const {
+        int* empty{};
+        return this->ptr_ == empty;
+    }
+};
+namespace std {
+template<>
+class hash<CopyTracked> {
+public:
+    uint64_t call(const CopyTracked& value) const {
+        return static_cast<uint64_t>(value.value()) * 1099511627 + 13;
+    }
+
+    virtual ~hash() = default;
+};
+
+template<>
+class equal_to<CopyTracked> {
+public:
+    bool call(const CopyTracked& lhs, const CopyTracked& rhs) const {
+        return lhs.value() == rhs.value();
+    }
+
+    virtual ~equal_to() = default;
+};
+
+template<>
+class hash<RawPtrBox> {
+public:
+    uint64_t call(const RawPtrBox& value) const {
+        if (value.is_null()) return static_cast<uint64_t>(0);
+        return static_cast<uint64_t>(1);
+    }
+
+    virtual ~hash() = default;
+};
+
+template<>
+class equal_to<RawPtrBox> {
+public:
+    bool call(const RawPtrBox& lhs, const RawPtrBox& rhs) const {
+        return lhs.is_null() == rhs.is_null();
+    }
+
+    virtual ~equal_to() = default;
+};
+}
+int main() {
+    std::unordered_set<CopyTracked> original{};
+    CopyTracked one{1};
+    CopyTracked two{2};
+    original.insert(one);
+    original.insert(two);
+    int copies_after_insert = copy_count;
+    std::unordered_set<CopyTracked> copied{original};
+    if (copy_count <= copies_after_insert) return 1;
+    CopyTracked probe{1};
+    if (!copied.contains(probe)) return 2;
+    int copies_after_copy = copy_count;
+    std::unordered_set<CopyTracked> moved{std::move(original)};
+    if (!moved.contains(probe)) return 3;
+    if (moved.size() != 2) return 4;
+    if (copy_count != copies_after_copy) return 5;
+    std::unordered_set<CopyTracked> assigned{};
+    assigned = copied;
+    if (!assigned.contains(probe)) return 6;
+    if (copy_count <= copies_after_copy) return 7;
+    int copies_after_assignment = copy_count;
+    std::unordered_set<CopyTracked> move_assigned{};
+    move_assigned = std::move(assigned);
+    if (!move_assigned.contains(probe)) return 8;
+    if (copy_count != copies_after_assignment) return 9;
+    if (scpp::is_thread_movable(std::unordered_set<std::string>) != scpp::is_thread_movable(std::string)) return 10;
+    if (scpp::is_thread_shareable(std::unordered_set<std::string>) != scpp::is_thread_shareable(std::string)) return 11;
+    if (!scpp::is_thread_movable(std::unordered_set<int>)) return 12;
+    if (!scpp::is_thread_shareable(std::unordered_set<int>)) return 13;
+    if (scpp::is_thread_movable(std::unordered_set<RawPtrBox>)) return 14;
+    return scpp::is_thread_shareable(std::unordered_set<RawPtrBox>) ? 15 : 0;
 }
 )SCPP",
             case_name);
@@ -6156,6 +6369,59 @@ int main() {
 )SCPP",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "cli_build_module_roundtrips_std_unordered_set_without_exporting_helpers";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "import std;\n"
+                        "namespace helper {\n"
+                        "    export std::unordered_set<std::string> names() {\n"
+                        "        std::unordered_set<std::string> values{};\n"
+                        "        values.insert(std::string{\"alpha\"});\n"
+                        "        values.insert(std::string{\"beta\"});\n"
+                        "        return values;\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        expect(std::filesystem::exists(interface_path), case_name + ": expected .scppm output");
+        expect(std::filesystem::exists(archive_path), case_name + ": expected .scppa output");
+        expect(read_file(interface_path).find("scpp_unordered_set_wrapper") == std::string::npos,
+               case_name + ": expected no native-wrapper helper names in interface source");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import std;\n"
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    auto values = helper::names();\n"
+                        "    if (!values.contains(std::string{\"alpha\"})) return 1;\n"
+                        "    if (!values.contains(std::string{\"beta\"})) return 2;\n"
+                        "    return values.size() == 2 ? 0 : 3;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build from .scppm should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected unordered_set consumer binary to exit 0, got " +
+                                std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
     }
 }
 

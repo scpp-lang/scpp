@@ -1,142 +1,417 @@
 export module std:unordered_set;
 
+import :cstdlib;
 import :memory;
-import :string;
+import :functional;
 
 extern "C" {
-    void* scpp_unordered_set_string_new();
-    void* scpp_unordered_set_string_copy(const void* handle);
-    void scpp_unordered_set_string_delete(void* handle);
-    int scpp_unordered_set_string_insert(void* handle, const char* value);
-    int scpp_unordered_set_string_contains(const void* handle, const char* value);
-    int scpp_unordered_set_string_erase(void* handle, const char* value);
-    int scpp_unordered_set_string_size(const void* handle);
-    int scpp_unordered_set_string_empty(const void* handle);
-    void scpp_unordered_set_string_clear(void* handle);
+    void* scpp_vector_allocate(uint64_t bytes, uint64_t align);
+    void scpp_vector_deallocate(void* ptr, uint64_t align);
 }
 
 namespace std {
 
+void* unordered_set_allocate_bytes(uint64_t bytes, uint64_t align) {
+    [[scpp::unsafe]] {
+        return scpp_vector_allocate(bytes, align);
+    }
+}
+
+void unordered_set_deallocate_bytes(void* ptr, uint64_t align) {
+    [[scpp::unsafe]] {
+        scpp_vector_deallocate(ptr, align);
+    }
+    return;
+}
+
 export template<typename T>
-class unordered_set {
-public:
-    consteval unordered_set() {
-        int zero = 0;
-        int boom = 1 / zero;
-        return;
-    }
-};
-
-class __unordered_set_string_box {
-public:
-    void* handle{};
-
-    __unordered_set_string_box() {
-        [[scpp::unsafe]] {
-            this->handle = scpp_unordered_set_string_new();
-        }
-        return;
-    }
-
-    __unordered_set_string_box(void* handle) {
-        this->handle = handle;
-        return;
-    }
-
-    virtual ~__unordered_set_string_box() {
-        [[scpp::unsafe]] {
-            scpp_unordered_set_string_delete(this->handle);
-        }
-        return;
-    }
-};
-
-export template<>
-class unordered_set<std::string> {
+class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shareable(T))]] unordered_set {
 private:
-    std::unique_ptr<std::__unordered_set_string_box> box_{};
+    T* slots_{};
+    int* states_{};
+    int slot_count_{8};
+    int size_{};
+    int tombstones_{};
+    uint64_t slot_size_{sizeof(T)};
+    uint64_t slot_align_{alignof(T)};
+    uint64_t state_size_{sizeof(int)};
+    uint64_t state_align_{alignof(int)};
+
+    uint64_t __hash(const T& value) const {
+        std::hash<T> hasher{};
+        return hasher(value);
+    }
+
+    bool __equals(const T& lhs, const T& rhs) const {
+        std::equal_to<T> equals{};
+        return equals(lhs, rhs);
+    }
+
+    int __bucket_index_for_hash(uint64_t hash, int slot_count) const {
+        if (slot_count <= 0) return 0;
+        uint64_t count = static_cast<uint64_t>(slot_count);
+        uint64_t quotient = hash / count;
+        uint64_t remainder = hash - quotient * count;
+        return static_cast<int>(remainder);
+    }
+
+    int __probe_next(int index) const {
+        return index + 1 == this->slot_count_ ? 0 : index + 1;
+    }
+
+    T* __allocate_slots(int count) {
+        T* empty{};
+        if (count <= 0) return empty;
+        [[scpp::unsafe]] {
+            return static_cast<T*>(std::unordered_set_allocate_bytes(static_cast<uint64_t>(count) * this->slot_size_,
+                                                                    this->slot_align_));
+        }
+    }
+
+    int* __allocate_states(int count) {
+        int* empty{};
+        if (count <= 0) return empty;
+        [[scpp::unsafe]] {
+            return static_cast<int*>(std::unordered_set_allocate_bytes(static_cast<uint64_t>(count) * this->state_size_,
+                                                                       this->state_align_));
+        }
+    }
+
+    void __zero_states(int* states, int count) {
+        int index = 0;
+        while (index < count) {
+            [[scpp::unsafe]] {
+                states[index] = 0;
+            }
+            index = index + 1;
+        }
+        return;
+    }
+
+    void __destroy_slot(int index) {
+        [[scpp::unsafe]] {
+            T* slot = &this->slots_[index];
+            slot->~T();
+        }
+        return;
+    }
+
+    void __destroy_live_slots() {
+        int* empty_states{};
+        if (this->states_ == empty_states) return;
+        int index = 0;
+        while (index < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 1) this->__destroy_slot(index);
+            index = index + 1;
+        }
+        return;
+    }
+
+    void __destroy_storage() {
+        this->__destroy_live_slots();
+        T* empty_slots{};
+        int* empty_states{};
+        if (this->slots_ != empty_slots) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(this->slots_);
+                std::unordered_set_deallocate_bytes(erased, this->slot_align_);
+            }
+        }
+        if (this->states_ != empty_states) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(this->states_);
+                std::unordered_set_deallocate_bytes(erased, this->state_align_);
+            }
+        }
+        this->slots_ = empty_slots;
+        this->states_ = empty_states;
+        this->size_ = 0;
+        this->tombstones_ = 0;
+        return;
+    }
+
+    void __initialize_storage(int count) {
+        if (count < 8) count = 8;
+        this->__destroy_storage();
+        [[scpp::unsafe]] {
+            this->slots_ = this->__allocate_slots(count);
+            this->states_ = this->__allocate_states(count);
+        }
+        this->__zero_states(this->states_, count);
+        this->slot_count_ = count;
+        this->size_ = 0;
+        this->tombstones_ = 0;
+        return;
+    }
+
+    void __construct_slot(int index, const T& value) {
+        [[scpp::unsafe]] {
+            new (&this->slots_[index]) T(value);
+            this->states_[index] = 1;
+        }
+        this->size_ = this->size_ + 1;
+        return;
+    }
+
+    void __construct_slot(int index, T&& value) {
+        [[scpp::unsafe]] {
+            new (&this->slots_[index]) T(std::move(value));
+            this->states_[index] = 1;
+        }
+        this->size_ = this->size_ + 1;
+        return;
+    }
+
+    void __rehash(int new_slot_count) {
+        if (new_slot_count < 8) new_slot_count = 8;
+        T* old_slots = this->slots_;
+        int* old_states = this->states_;
+        int old_slot_count = this->slot_count_;
+
+        [[scpp::unsafe]] {
+            this->slots_ = this->__allocate_slots(new_slot_count);
+            this->states_ = this->__allocate_states(new_slot_count);
+        }
+        this->__zero_states(this->states_, new_slot_count);
+        this->slot_count_ = new_slot_count;
+        this->size_ = 0;
+        this->tombstones_ = 0;
+
+        int index = 0;
+        while (index < old_slot_count) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = old_states[index];
+            }
+            if (state == 1) {
+                T copied_value{old_slots[index]};
+                this->__insert_copy(copied_value);
+                [[scpp::unsafe]] {
+                    T* slot = &old_slots[index];
+                    slot->~T();
+                }
+            }
+            index = index + 1;
+        }
+
+        T* empty_slots{};
+        int* empty_states{};
+        if (old_slots != empty_slots) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(old_slots);
+                std::unordered_set_deallocate_bytes(erased, this->slot_align_);
+            }
+        }
+        if (old_states != empty_states) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(old_states);
+                std::unordered_set_deallocate_bytes(erased, this->state_align_);
+            }
+        }
+        return;
+    }
+
+    void __ensure_capacity_for_one_more() {
+        if ((this->size_ + this->tombstones_ + 1) * 4 <= this->slot_count_ * 3) return;
+        this->__rehash(this->slot_count_ * 2);
+        return;
+    }
 
 public:
     unordered_set() {
-        std::__unordered_set_string_box* raw{};
-        [[scpp::unsafe]] {
-            raw = new std::__unordered_set_string_box();
-        }
-        std::unique_ptr<std::__unordered_set_string_box> box{raw};
-        this->box_ = std::move(box);
+        this->__initialize_storage(8);
         return;
     }
 
-    unordered_set(const std::unordered_set<std::string>& other) {
-        void* copied{};
-        [[scpp::unsafe]] {
-            copied = scpp_unordered_set_string_copy(other.box_->handle);
-        }
-        std::__unordered_set_string_box* raw{};
-        [[scpp::unsafe]] {
-            raw = new std::__unordered_set_string_box(copied);
-        }
-        std::unique_ptr<std::__unordered_set_string_box> box{raw};
-        this->box_ = std::move(box);
+    unordered_set(const std::unordered_set<T>& other) {
+        this->__initialize_storage(8);
+        other.__append_all_to(*this);
         return;
     }
 
-    void operator=(const std::unordered_set<std::string>& other) {
-        void* copied{};
-        [[scpp::unsafe]] {
-            copied = scpp_unordered_set_string_copy(other.box_->handle);
-        }
-        std::__unordered_set_string_box* raw{};
-        [[scpp::unsafe]] {
-            raw = new std::__unordered_set_string_box(copied);
-        }
-        std::unique_ptr<std::__unordered_set_string_box> box{raw};
-        this->box_ = std::move(box);
+    void operator=(const std::unordered_set<T>& other) {
+        this->__initialize_storage(8);
+        other.__append_all_to(*this);
         return;
     }
 
-    virtual ~unordered_set() { return; }
-
-    bool insert(const std::string& value) {
-        [[scpp::unsafe]] {
-            return scpp_unordered_set_string_insert(this->box_->handle, value.c_str()) != 0;
-        }
+    virtual ~unordered_set() {
+        this->__destroy_storage();
+        return;
     }
 
-    bool insert(std::string&& value) {
-        [[scpp::unsafe]] {
-            return scpp_unordered_set_string_insert(this->box_->handle, value.c_str()) != 0;
+    bool __insert_copy(const T& value) {
+        this->__ensure_capacity_for_one_more();
+        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        int first_tombstone = -1;
+        int probes = 0;
+        while (probes < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 0) {
+                int target = first_tombstone >= 0 ? first_tombstone : index;
+                this->__construct_slot(target, value);
+                if (first_tombstone >= 0) this->tombstones_ = this->tombstones_ - 1;
+                return true;
+            }
+            if (state == 2) {
+                if (first_tombstone < 0) first_tombstone = index;
+            } else {
+                bool matches = false;
+                [[scpp::unsafe]] {
+                    matches = this->__equals(this->slots_[index], value);
+                }
+                if (matches) return false;
+            }
+            index = this->__probe_next(index);
+            probes = probes + 1;
         }
+        this->__rehash(this->slot_count_ * 2);
+        return this->__insert_copy(value);
     }
 
-    bool contains(const std::string& value) const {
-        [[scpp::unsafe]] {
-            return scpp_unordered_set_string_contains(this->box_->handle, value.c_str()) != 0;
+    bool __insert_move(T&& value) {
+        this->__ensure_capacity_for_one_more();
+        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        int first_tombstone = -1;
+        int probes = 0;
+        while (probes < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 0) {
+                int target = first_tombstone >= 0 ? first_tombstone : index;
+                this->__construct_slot(target, std::move(value));
+                if (first_tombstone >= 0) this->tombstones_ = this->tombstones_ - 1;
+                return true;
+            }
+            if (state == 2) {
+                if (first_tombstone < 0) first_tombstone = index;
+            } else {
+                bool matches = false;
+                [[scpp::unsafe]] {
+                    matches = this->__equals(this->slots_[index], value);
+                }
+                if (matches) return false;
+            }
+            index = this->__probe_next(index);
+            probes = probes + 1;
         }
+        this->__rehash(this->slot_count_ * 2);
+        return this->__insert_move(std::move(value));
     }
 
-    bool erase(const std::string& value) {
-        [[scpp::unsafe]] {
-            return scpp_unordered_set_string_erase(this->box_->handle, value.c_str()) != 0;
+    void __append_all_to(std::unordered_set<T>& target) const {
+        int index = 0;
+        while (index < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 1) {
+                T copied_value{this->slots_[index]};
+                target.__insert_copy(copied_value);
+            }
+            index = index + 1;
         }
+        return;
+    }
+
+    bool insert(const T& value) {
+        return this->__insert_copy(value);
+    }
+
+    bool insert(T&& value) {
+        return this->__insert_move(std::move(value));
+    }
+
+    bool contains(const T& value) const {
+        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        int probes = 0;
+        while (probes < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 0) return false;
+            if (state == 1) {
+                bool matches = false;
+                [[scpp::unsafe]] {
+                    matches = this->__equals(this->slots_[index], value);
+                }
+                if (matches) return true;
+            }
+            index = this->__probe_next(index);
+            probes = probes + 1;
+        }
+        return false;
+    }
+
+    bool erase(const T& value) {
+        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        int probes = 0;
+        while (probes < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 0) return false;
+            if (state == 1) {
+                bool matches = false;
+                [[scpp::unsafe]] {
+                    matches = this->__equals(this->slots_[index], value);
+                }
+                if (matches) {
+                    this->__destroy_slot(index);
+                    [[scpp::unsafe]] {
+                        this->states_[index] = 2;
+                    }
+                    this->size_ = this->size_ - 1;
+                    this->tombstones_ = this->tombstones_ + 1;
+                    if (this->size_ == 0) {
+                        this->clear();
+                    } else if (this->tombstones_ > this->size_) {
+                        this->__rehash(this->slot_count_);
+                    }
+                    return true;
+                }
+            }
+            index = this->__probe_next(index);
+            probes = probes + 1;
+        }
+        return false;
     }
 
     int size() const {
-        [[scpp::unsafe]] {
-            return scpp_unordered_set_string_size(this->box_->handle);
-        }
+        return this->size_;
     }
 
     bool empty() const {
-        [[scpp::unsafe]] {
-            return scpp_unordered_set_string_empty(this->box_->handle) != 0;
-        }
+        return this->size_ == 0;
     }
 
     void clear() {
-        [[scpp::unsafe]] {
-            scpp_unordered_set_string_clear(this->box_->handle);
+        int index = 0;
+        while (index < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 1) this->__destroy_slot(index);
+            [[scpp::unsafe]] {
+                this->states_[index] = 0;
+            }
+            index = index + 1;
         }
+        this->size_ = 0;
+        this->tombstones_ = 0;
         return;
     }
 };
