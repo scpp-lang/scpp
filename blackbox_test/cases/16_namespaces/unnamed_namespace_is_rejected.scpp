@@ -1,0 +1,8 @@
+// spec §10.5(1): unnamed namespaces are ill-formed in SCPP26.
+namespace {
+    int hidden{};
+}
+
+int main() {
+    return hidden;
+}

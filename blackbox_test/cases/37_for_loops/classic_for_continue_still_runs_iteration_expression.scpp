@@ -1,0 +1,13 @@
+// spec §8.2(1.3): the iteration expression runs after each completed
+// iteration, including one that ends by `continue`.
+int main() {
+    int i{};
+    int hits{};
+    for (i = 0; i < 5; i = i + 1) {
+        if (i < 3) {
+            continue;
+        }
+        hits = hits + 1;
+    }
+    return i + hits - 7;
+}

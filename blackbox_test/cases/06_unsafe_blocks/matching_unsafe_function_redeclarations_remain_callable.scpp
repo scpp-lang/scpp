@@ -1,0 +1,14 @@
+// spec §5.1(2)-(3): when every declaration of a function consistently carries
+// `[[scpp::unsafe]]`, the function remains callable from an unsafe context and
+// its whole body is an unsafe context.
+[[scpp::unsafe]] int read(int* p);
+[[scpp::unsafe]] int read(int* p) {
+    return *p;
+}
+
+int main() {
+    int value{7};
+    [[scpp::unsafe]] {
+        return read(&value) - 7;
+    }
+}

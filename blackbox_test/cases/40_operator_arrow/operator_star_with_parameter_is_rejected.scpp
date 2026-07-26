@@ -1,0 +1,19 @@
+// spec §7.1(2.1): a declaration of `operator*` is ill-formed unless it has
+// no parameters.
+struct Box {
+    int value;
+};
+
+struct Broken {
+    Box box;
+
+    Broken() : box{1} {}
+    Box& operator*(int extra) {
+        return box;
+    }
+};
+
+int main() {
+    Broken b{};
+    return (*b).value;
+}

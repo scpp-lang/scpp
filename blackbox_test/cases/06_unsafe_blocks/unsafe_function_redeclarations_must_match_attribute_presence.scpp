@@ -1,0 +1,14 @@
+// spec §5.1(2): if one declaration of a function is marked
+// `[[scpp::unsafe]]`, every declaration of that same function must carry the
+// attribute. Mixing safe and unsafe declarations is ill-formed.
+[[scpp::unsafe]] int read(int* p);
+int read(int* p) {
+    return 0;
+}
+
+int main() {
+    int value{};
+    [[scpp::unsafe]] {
+        return read(&value);
+    }
+}
