@@ -1,0 +1,22 @@
+// spec §7.1(1)-(3): a class `operator*` with no parameters and an lvalue
+// reference result is used to evaluate `*E`.
+struct Box {
+    int value;
+};
+
+struct PtrLike {
+    Box box;
+
+    PtrLike(int value) : box{value} {}
+    Box& operator*() {
+        return box;
+    }
+    const Box& operator*() const {
+        return box;
+    }
+};
+
+int main() {
+    PtrLike p{7};
+    return (*p).value - 7;
+}

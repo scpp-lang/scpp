@@ -1,0 +1,19 @@
+// spec §10.6(1): argument-dependent lookup is never performed for function
+// calls, so an unqualified call outside `ns` cannot find `ns::process`.
+namespace ns {
+    struct Tag {
+        int v;
+    };
+
+    int process(Tag t) {
+        return t.v;
+    }
+}
+
+int use(ns::Tag t) {
+    return process(t);
+}
+
+int main() {
+    return use(ns::Tag{7}) - 7;
+}

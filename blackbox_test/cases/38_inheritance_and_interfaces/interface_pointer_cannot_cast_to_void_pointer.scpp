@@ -1,0 +1,15 @@
+// spec §11.2(12): no implicit or explicit conversion is provided from a
+// pointer-to-interface to a one-word scalar such as `void*`.
+class [[scpp::interface]] IValue {
+public:
+    virtual int get() const = 0;
+    virtual ~IValue() = default;
+};
+
+void* leak(IValue* p) {
+    return static_cast<void*>(p);
+}
+
+int main() {
+    return 0;
+}

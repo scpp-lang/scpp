@@ -1,0 +1,7 @@
+// spec §8.2(4): a variable declared in a classic `for` init-statement leaves
+// scope when the `for` statement exits.
+int main() {
+    for (int i = 0; i < 1; i = i + 1) {
+    }
+    return i;
+}

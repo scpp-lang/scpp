@@ -1,0 +1,38 @@
+// spec §8.2(3)-(5): arrays inherit their element type's thread properties;
+// references are never thread-movable, and only `const T&` to a shareable `T`
+// is thread-shareable.
+using ConstIntRef = const int&;
+using MutIntRef = int&;
+
+struct ScalarArrayBox {
+    int values[2];
+};
+
+struct PointerArrayBox {
+    int* values[2];
+};
+
+int main() {
+    if (!scpp::is_thread_shareable(ConstIntRef)) {
+        return 1;
+    }
+    if (scpp::is_thread_shareable(MutIntRef)) {
+        return 2;
+    }
+    if (scpp::is_thread_movable(ConstIntRef)) {
+        return 3;
+    }
+    if (!scpp::is_thread_movable(ScalarArrayBox)) {
+        return 4;
+    }
+    if (!scpp::is_thread_shareable(ScalarArrayBox)) {
+        return 5;
+    }
+    if (scpp::is_thread_movable(PointerArrayBox)) {
+        return 6;
+    }
+    if (scpp::is_thread_shareable(PointerArrayBox)) {
+        return 7;
+    }
+    return 0;
+}

@@ -1,0 +1,11 @@
+// spec §8.1(4), §8.2(5): a parameter annotated
+// `[[scpp::thread_shareable]]` may bind a `const T&` argument when `T` itself
+// is thread-shareable.
+int publish(const int& value [[scpp::thread_shareable]]) {
+    return value;
+}
+
+int main() {
+    int x{7};
+    return publish(x) - 7;
+}

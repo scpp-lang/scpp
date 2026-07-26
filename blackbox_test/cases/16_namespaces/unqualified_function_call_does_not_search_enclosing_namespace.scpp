@@ -1,0 +1,31 @@
+// spec §10.6(2): an unqualified function call inside `outer::inner` searches
+// `inner` and the global namespace, but not the enclosing namespace `outer`.
+int global_helper() {
+    return 100;
+}
+
+namespace outer {
+    int outer_helper() {
+        return 10;
+    }
+
+    namespace inner {
+        struct Widget {
+            int v;
+        };
+
+        int use_it() {
+            Widget w{};
+            w.v = 1;
+            return global_helper();
+        }
+
+        int bad() {
+            return outer_helper();
+        }
+    }
+}
+
+int main() {
+    return outer::inner::use_it() - 100;
+}
