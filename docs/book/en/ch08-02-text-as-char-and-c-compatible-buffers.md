@@ -195,4 +195,4 @@ contiguous buffer without transferring ownership of it.
 
 ---
 
-[← Previous: Fixed-Size Arrays](ch08-01-fixed-size-arrays.md) · [Table of Contents](README.md)
+[← Previous: Fixed-Size Arrays](ch08-01-fixed-size-arrays.md) · [Table of Contents](README.md) · [Next: Borrowed Views with `std::span` →](ch08-03-borrowed-views-with-std-span.md)
