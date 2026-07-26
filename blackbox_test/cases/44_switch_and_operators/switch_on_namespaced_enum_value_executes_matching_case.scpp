@@ -1,0 +1,17 @@
+// PR #336 plus PR #356: `switch` accepts enum-class scrutinees and fully
+// qualified enumerators inside namespaces.
+namespace color {
+    enum class Shade { red = 1, green = 2 };
+}
+
+int main() {
+    color::Shade shade = color::Shade::green;
+    switch (shade) {
+        case color::Shade::red:
+            return 1;
+        case color::Shade::green:
+            return 0;
+        default:
+            return 2;
+    }
+}

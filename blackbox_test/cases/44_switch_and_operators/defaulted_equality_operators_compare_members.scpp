@@ -1,0 +1,22 @@
+// PR #327: defaulted member `operator==`/`operator!=` should compare the
+// class's direct data members.
+struct Point {
+    int x = 0;
+    int y = 0;
+
+    Point(int x, int y) : x{x}, y{y} {
+        return;
+    }
+
+    bool operator==(const Point&) const = default;
+    bool operator!=(const Point&) const = default;
+};
+
+int main() {
+    Point a{1, 2};
+    Point b{1, 2};
+    Point c{3, 4};
+    if (!(a == b)) return 1;
+    if (!(a != c)) return 2;
+    return 0;
+}

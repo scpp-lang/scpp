@@ -1,0 +1,18 @@
+import std;
+// PRs #314 and #348: smart pointers compare against `nullptr` in both empty
+// and non-empty states.
+int main() {
+    std::shared_ptr<int> empty_shared{};
+    std::shared_ptr<int> full_shared = std::make_shared<int>(7);
+    if (!(empty_shared == nullptr)) return 1;
+    if (empty_shared != nullptr) return 2;
+    if (full_shared == nullptr) return 3;
+    if (!(full_shared != nullptr)) return 4;
+
+    std::unique_ptr<int> empty_unique{};
+    std::unique_ptr<int> full_unique = std::make_unique<int>(9);
+    if (!(empty_unique == nullptr)) return 5;
+    if (empty_unique != nullptr) return 6;
+    if (full_unique == nullptr) return 7;
+    return full_unique != nullptr ? 0 : 8;
+}

@@ -1,0 +1,15 @@
+// PRs #318 and #322: function-local `static` storage persists across calls,
+// and a default argument expression is re-evaluated at each call site.
+int next_value() {
+    static int counter = 40;
+    counter = counter + 1;
+    return counter;
+}
+
+int take(int value = next_value()) {
+    return value;
+}
+
+int main() {
+    return take() + take() - 83;
+}

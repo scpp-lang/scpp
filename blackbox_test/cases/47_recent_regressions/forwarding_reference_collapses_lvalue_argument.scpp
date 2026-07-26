@@ -1,0 +1,12 @@
+// PR #354: a forwarding-reference parameter (`auto&&`) must accept an lvalue
+// argument via reference collapsing.
+int forward_one(auto&& x) {
+    x += 1;
+    return x;
+}
+
+int main() {
+    int value = 4;
+    int result = forward_one(value);
+    return result + value - 10;
+}

@@ -1,0 +1,57 @@
+import std;
+// PR #344: `std::unordered_set<T>` should honor `std::hash<T>` and
+// `std::equal_to<T>` specializations for user-defined keys.
+class IntKey {
+private:
+    int value_{};
+public:
+    IntKey(int value) : value_{value} {
+        return;
+    }
+
+    IntKey(const IntKey& other) : value_{other.value_} {
+        return;
+    }
+
+    virtual ~IntKey() = default;
+
+    int value() const {
+        return this->value_;
+    }
+};
+
+namespace std {
+template<>
+class hash<IntKey> {
+public:
+    uint64_t call(const IntKey& value) const {
+        return static_cast<uint64_t>(value.value()) * 1315423911 + 1;
+    }
+
+    virtual ~hash() = default;
+};
+
+template<>
+class equal_to<IntKey> {
+public:
+    bool call(const IntKey& lhs, const IntKey& rhs) const {
+        return lhs.value() == rhs.value();
+    }
+
+    virtual ~equal_to() = default;
+};
+}
+
+int main() {
+    std::unordered_set<IntKey> values{};
+    IntKey one{1};
+    IntKey two{2};
+    IntKey again{1};
+    if (!values.insert(one)) return 1;
+    if (!values.insert(two)) return 2;
+    if (values.insert(again)) return 3;
+    if (!values.contains(one)) return 4;
+    if (!values.erase(two)) return 5;
+    if (values.contains(two)) return 6;
+    return values.size() == static_cast<size_t>(1) ? 0 : 7;
+}

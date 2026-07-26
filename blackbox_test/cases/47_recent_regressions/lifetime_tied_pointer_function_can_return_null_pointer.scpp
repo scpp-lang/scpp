@@ -1,0 +1,20 @@
+// PR #359: a lifetime-tied raw-pointer-returning function may still return a
+// null pointer value when it has no borrowed result to hand back.
+int* maybe_value(int& value [[scpp::lifetime(a)]], bool hit) [[scpp::lifetime(a)]] {
+    if (hit) {
+        return &value;
+    }
+    int* none{};
+    return none;
+}
+
+int main() {
+    int value = 7;
+    int* miss = maybe_value(value, false);
+    int* empty{};
+    if (miss != empty) return 1;
+    int* hit = maybe_value(value, true);
+    [[scpp::unsafe]] {
+        return *hit - 7;
+    }
+}

@@ -1,0 +1,16 @@
+import std;
+// PRs #334, #349, and #352: string/string_view support literal comparison in
+// both operand orders and expose `size_t` size/length APIs.
+int main() {
+    std::string name{"owner::Type"};
+    std::string_view view{name};
+    size_t scope = view.rfind("::");
+    if (name.size() != static_cast<size_t>(11)) return 1;
+    if (view.length() != static_cast<size_t>(11)) return 2;
+    if (!(name == "owner::Type")) return 3;
+    if (!("owner::Type" == name)) return 4;
+    if (!(view == "owner::Type")) return 5;
+    if (!("owner::Type" == view)) return 6;
+    std::string_view tail = view.substr(scope + static_cast<size_t>(2));
+    return tail == "Type" ? 0 : 7;
+}

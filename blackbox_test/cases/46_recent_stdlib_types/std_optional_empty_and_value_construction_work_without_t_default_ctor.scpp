@@ -1,0 +1,29 @@
+import std;
+// PR #337: `std::optional<T>` can be empty even when `T` itself has no
+// default constructor.
+class NoDefault {
+private:
+    int value_{};
+public:
+    virtual ~NoDefault() = default;
+
+    NoDefault(int value) : value_{value} {
+        return;
+    }
+
+    NoDefault(const NoDefault& other) : value_{other.value_} {
+        return;
+    }
+
+    int value() const {
+        return this->value_;
+    }
+};
+
+int main() {
+    std::optional<NoDefault> empty{};
+    if (empty.has_value()) return 1;
+    std::optional<NoDefault> full{NoDefault{7}};
+    if (!full.has_value()) return 2;
+    return full->value() - 7;
+}

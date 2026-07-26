@@ -1,0 +1,10 @@
+// PR #353: a by-reference lambda capture of a const reference stays const.
+int main() {
+    int value = 4;
+    const int& ref = value;
+    auto f = [&ref]() {
+        ref = 5;
+        return 0;
+    };
+    return f();
+}

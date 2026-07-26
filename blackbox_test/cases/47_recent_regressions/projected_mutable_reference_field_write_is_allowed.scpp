@@ -1,0 +1,14 @@
+// PR #347: writing through a field projection of a live mutable reference is
+// allowed when no nested reborrow remains live.
+struct Pair {
+    int x;
+    int y;
+};
+
+int main() {
+    Pair pair{};
+    Pair& ref = pair;
+    ref.x = 4;
+    ref.y = 3;
+    return pair.x + pair.y - 7;
+}

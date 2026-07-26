@@ -1,0 +1,7 @@
+import std;
+// PR #325: `std::vector::at` is bounds-checked and aborts on overflow.
+int main() {
+    std::vector<int> values{};
+    values.push_back(3);
+    return values.at(static_cast<size_t>(1));
+}

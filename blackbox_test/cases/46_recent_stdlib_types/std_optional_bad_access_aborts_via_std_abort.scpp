@@ -1,0 +1,6 @@
+import std;
+// PR #337: `value()` on an empty optional aborts instead of reading garbage.
+int main() {
+    std::optional<int> empty{};
+    return empty.value();
+}

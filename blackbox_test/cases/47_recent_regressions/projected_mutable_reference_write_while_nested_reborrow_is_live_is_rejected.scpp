@@ -1,0 +1,14 @@
+// PR #347 kept the safety rule that a parent mutable reference cannot write
+// through a projection while a nested reborrow from that same projection lives.
+struct Pair {
+    int x;
+    int y;
+};
+
+int main() {
+    Pair pair{};
+    Pair& ref = pair;
+    int& cell = ref.x;
+    ref.x = 4;
+    return cell;
+}

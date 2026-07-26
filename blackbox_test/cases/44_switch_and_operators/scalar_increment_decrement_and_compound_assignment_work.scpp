@@ -1,0 +1,12 @@
+// PRs #339 and #340: prefix/postfix ++/-- and compound assignment operators
+// behave like their C++ scalar counterparts.
+int main() {
+    int value = 3;
+    int post = value++;
+    int pre = ++value;
+    value -= 1;
+    value *= 2;
+    value /= 2;
+    value += 1;
+    return post + pre + value - 13;
+}

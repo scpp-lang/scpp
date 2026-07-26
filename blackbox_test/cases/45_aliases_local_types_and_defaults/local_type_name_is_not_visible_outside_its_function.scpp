@@ -1,0 +1,17 @@
+// PR #341: a function-local type's name is scoped to that function only.
+int make() {
+    struct Local {
+        int value;
+    };
+    Local ok{};
+    return ok.value;
+}
+
+int use() {
+    Local bad{};
+    return bad.value;
+}
+
+int main() {
+    return make() + use();
+}
