@@ -99,6 +99,16 @@ void check_moves_impl(const Program& program);
     return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
 }
 
+[[nodiscard]] bool return_roots_are_proven_to_outlive_call(const RootSet& returned_roots, std::string_view expected_root) {
+    if (returned_roots.empty()) return false;
+    for (const std::string& root : returned_roots) {
+        if (root == expected_root) continue;
+        if (is_program_lifetime_root(root)) continue;
+        return false;
+    }
+    return true;
+}
+
 [[nodiscard]] BinaryOp compound_base_operator(BinaryOp op) {
     switch (op) {
         case BinaryOp::AddAssign: return BinaryOp::Add;
@@ -2146,7 +2156,8 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                     std::vector<std::size_t> source_indices = resolve_returned_lifetime_param_indices(fn);
                     if (!source_indices.empty()) {
                         RootSet expected = single_root(fn.params[source_indices.front()].name);
-                        if (returned_roots != expected) {
+                        if (!return_roots_are_proven_to_outlive_call(returned_roots,
+                                                                     fn.params[source_indices.front()].name)) {
                             throw DataflowError(
                                 "function '" + fn.name + "' returns a reference derived from " +
                                     format_roots(returned_roots) + ", not from its sole reference parameter '" +

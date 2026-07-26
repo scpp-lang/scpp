@@ -691,6 +691,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         case ExprKind::Identifier: {
             auto local_it = state.local_lifetime_sources.find(expr.name);
             if (local_it != state.local_lifetime_sources.end()) return local_it->second;
+            if (body.local_types.contains(expr.name)) {
+                if (body.static_lifetime_locals.contains(expr.name)) return program_lifetime_root();
+                return single_root(expr.name);
+            }
+            if (find_visible_global(body.program, body.function_namespace_path, expr.name,
+                                    expr.explicit_global_qualification) != nullptr) {
+                return program_lifetime_root();
+            }
             return single_root(expr.name);
         }
         case ExprKind::Member:

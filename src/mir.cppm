@@ -146,6 +146,10 @@ struct Body {
     std::vector<BasicBlock> blocks;
     std::unordered_map<std::string, Type> local_types;
     std::vector<std::string> locals_in_order;
+    // Block-scope `static` locals: their names still participate in
+    // ordinary name lookup and borrow tracking like other locals, but
+    // their storage duration is program-long rather than stack-scoped.
+    std::unordered_set<std::string> static_lifetime_locals;
     // The owning program this MIR came from, so later movecheck passes can
     // answer whole-program questions (e.g. whether a Named type is really a
     // class, and whether that class is copy-constructible) while walking just
@@ -295,6 +299,7 @@ private:
             case StmtKind::VarDecl: {
                 declare_local(stmt.var_name, stmt.type);
                 if (stmt.is_const || stmt.is_constexpr) body_.const_locals.insert(stmt.var_name);
+                if (stmt.is_static_local) body_.static_lifetime_locals.insert(stmt.var_name);
                 if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
                     for (const LambdaCapture& capture : stmt.init->lambda_captures) {
                         if (capture.by_reference) {

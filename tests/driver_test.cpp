@@ -5562,6 +5562,53 @@ void run_default_argument_tests() {
     }
 }
 
+void run_static_local_lifetime_tests() {
+    {
+        std::string case_name = "returning_reference_to_static_local_is_accepted";
+        RunResult result = compile_and_run(
+            "class Holder {\n"
+            "public:\n"
+            "    const int& stable_value() const {\n"
+            "        static int value = 42;\n"
+            "        return value;\n"
+            "    }\n"
+            "    virtual ~Holder() = default;\n"
+            "};\n"
+            "int main() {\n"
+            "    Holder holder{};\n"
+            "    return holder.stable_value() - 42;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "returning_reference_to_non_static_local_is_still_rejected";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(class Holder {
+public:
+    const int& dangling_value() const {
+        int value = 42;
+        return value;
+    }
+    virtual ~Holder() = default;
+};
+int main() {
+    Holder holder{};
+    return holder.dangling_value();
+}
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("returns a reference derived from 'value'") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected ordinary local reference return to remain rejected");
+    }
+}
+
 void run_random_tests() {
     {
         std::string case_name = "scpp_rand_uniform_int_distribution_rejects_empty_range";
@@ -7307,6 +7354,7 @@ int main() {
     run_nodiscard_tests();
     run_static_member_function_tests();
     run_default_argument_tests();
+    run_static_local_lifetime_tests();
     run_random_tests();
     run_vector_tests();
     run_string_view_tests();
