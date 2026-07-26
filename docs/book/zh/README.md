@@ -39,7 +39,7 @@
 - 数组、缓冲区与视图
   - [定长数组](ch08-01-fixed-size-arrays.md)
   - [把文本当作 `char` 与 C 兼容缓冲区处理](ch08-02-text-as-char-and-c-compatible-buffers.md)
-  - 用 `std::span` 借用视图
+  - [用 `std::span` 借用视图](ch08-03-borrowed-views-with-std-span.md)
 
 - 错误处理
   - 不可恢复错误与编译器插入的检查

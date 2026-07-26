@@ -39,7 +39,7 @@
 - Arrays, Buffers, and Views
   - [Fixed-Size Arrays](ch08-01-fixed-size-arrays.md)
   - [Text as `char` and C-Compatible Buffers](ch08-02-text-as-char-and-c-compatible-buffers.md)
-  - Borrowed Views with `std::span`
+  - [Borrowed Views with `std::span`](ch08-03-borrowed-views-with-std-span.md)
 
 - Error Handling
   - Unrecoverable Errors and Compiler-Inserted Checks

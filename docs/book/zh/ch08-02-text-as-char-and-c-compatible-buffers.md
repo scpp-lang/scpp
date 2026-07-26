@@ -185,4 +185,4 @@ string_literal_mutable_pointer_fail.scpp:2:18: error: cannot initialize or assig
 
 ---
 
-[← 上一章：定长数组](ch08-01-fixed-size-arrays.md) · [目录](README.md)
+[← 上一章：定长数组](ch08-01-fixed-size-arrays.md) · [目录](README.md) · [下一章：用 `std::span` 借用视图 →](ch08-03-borrowed-views-with-std-span.md)
