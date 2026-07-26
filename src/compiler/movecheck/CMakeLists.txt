@@ -18,4 +18,4 @@ target_sources(scpp_movecheck
     PRIVATE
             movecheck.cpp)
 target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir)
-target_compile_features(scpp_movecheck PRIVATE cxx_std_23)
+target_compile_features(scpp_movecheck PRIVATE cxx_std_26)

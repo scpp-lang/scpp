@@ -17,6 +17,6 @@ output = [
     "native_value.o",
 ]
 command = """\
-${CXX:-c++} -std=c++23 -O2 -c \
+${CXX:-c++} -std=c++26 -O2 -c \
 src/native_value.cpp
 """

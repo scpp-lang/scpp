@@ -69,7 +69,7 @@ published only in English and Simplified Chinese today.
 
 ## Building
 
-Requires Clang with C++23 modules support, CMake 3.28+, Ninja, an LLVM
+Requires Clang with C++26 modules support, CMake 3.28+, Ninja, an LLVM
 development package, SQLite development headers/libs, and a `g++` install (for
 its `libstdc++` development files -- see below). On Debian/Ubuntu:
 
