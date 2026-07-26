@@ -381,6 +381,40 @@ void test_switch_with_default_rejects_post_switch_use_of_maybe_moved_value() {
            "switch_with_default_rejects_post_switch_use_of_maybe_moved_value: expected movecheck rejection");
 }
 
+void test_lambda_by_reference_capture_preserves_const_reference_readonlyness() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "int read_const(const int& value) {\n"
+        "    auto reader = [&]() -> int { return value; };\n"
+        "    return reader();\n"
+        "}\n"
+        "int main() {\n"
+        "    int seed = 7;\n"
+        "    return read_const(seed) - 7;\n"
+        "}\n");
+    expect(!error.has_value(),
+           "lambda_by_reference_capture_preserves_const_reference_readonlyness: expected movecheck to accept" +
+              (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
+void test_lambda_by_reference_capture_still_rejects_mutation_through_const_reference() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "int mutate_const(const int& value) {\n"
+        "    auto writer = [&]() -> int {\n"
+        "        value = 1;\n"
+        "        return 0;\n"
+        "    };\n"
+        "    return writer();\n"
+        "}\n");
+    expect(error.has_value() &&
+              error->find("cannot assign to this place: it is reached through a read-only (const) reference") !=
+                  std::string::npos,
+           "lambda_by_reference_capture_still_rejects_mutation_through_const_reference: expected const-reference "
+           "mutation diagnostic, got '" +
+              (error.has_value() ? *error : std::string("<no error>")) + "'");
+}
+
 } // namespace
 
 int main() {
@@ -398,6 +432,8 @@ int main() {
     test_explicit_base_initializer_satisfies_nondefault_base_ctor();
     test_switch_with_default_allows_branch_local_moves_without_post_switch_use();
     test_switch_with_default_rejects_post_switch_use_of_maybe_moved_value();
+    test_lambda_by_reference_capture_preserves_const_reference_readonlyness();
+    test_lambda_by_reference_capture_still_rejects_mutation_through_const_reference();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

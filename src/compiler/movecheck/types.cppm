@@ -19,6 +19,7 @@ namespace scpp {
 [[nodiscard]] bool is_reborrowable_local_type(const Type& type);
 [[nodiscard]] bool local_is_suspended_for_reborrow(std::string_view name, const DataflowState& state);
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr);
+[[nodiscard]] Type by_reference_capture_type(std::string_view local_name, const Type& local_type, const Body& body);
 
 [[nodiscard]] bool is_scalar_type_name(const std::string& name);
 [[nodiscard]] bool is_integral_scalar_type_name(const std::string& name);
@@ -72,6 +73,14 @@ namespace scpp {
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr) {
     return expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr &&
            expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this";
+}
+[[nodiscard]] Type by_reference_capture_type(std::string_view local_name, const Type& local_type, const Body& body) {
+    if (is_reference(local_type)) return local_type;
+    Type capture_type;
+    capture_type.kind = TypeKind::Reference;
+    capture_type.pointee = std::make_shared<Type>(local_type);
+    capture_type.is_mutable_ref = !body.const_locals.contains(std::string(local_name));
+    return capture_type;
 }
 
 // ch06 §6: the complete scalar/numeric family a `static_cast<T>(expr)`/

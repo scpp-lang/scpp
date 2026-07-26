@@ -901,8 +901,51 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             return false;
         }
         case ExprKind::Member:
-        case ExprKind::Subscript:
+        case ExprKind::Subscript: {
+            // Most projections inherit writeability from their base (a
+            // field of a const object, an element of a const/span<const>
+            // view, ...), but some expressions themselves *are* a
+            // read-only reference-like view even when the base object is
+            // otherwise mutable -- most notably lambda capture fields that
+            // preserve an outer `const T&`. Check the projection's own
+            // declared view type first so `this.capture = ...` is rejected
+            // when the field denotes a shared borrow/span, then fall back
+            // to the base-place const-reachability rule for ordinary value
+            // fields.
+            if (expr.kind == ExprKind::Member && body.program != nullptr) {
+                std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
+                const Type* base_named = base.has_value() ? &*base : nullptr;
+                if (base_named != nullptr && base_named->kind == TypeKind::Reference && base_named->pointee != nullptr) {
+                    base_named = base_named->pointee.get();
+                }
+                if (base_named != nullptr && base_named->kind == TypeKind::Named) {
+                    if (const ClassDef* def = find_class_def(*body.program, base_named->name)) {
+                        for (const ClassField& field : def->fields) {
+                            if (field.name == expr.name) {
+                                if ((is_reference(field.type) || is_span(field.type)) && !field.type.is_mutable_ref) return true;
+                                break;
+                            }
+                        }
+                    }
+                    if (const StructDef* def = find_struct_def(*body.program, base_named->name)) {
+                        for (const StructField& field : def->fields) {
+                            if (field.name == expr.name) {
+                                if ((is_reference(field.type) || is_span(field.type)) && !field.type.is_mutable_ref) return true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else if (expr.kind == ExprKind::Subscript) {
+                std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
+                const Type* effective = base.has_value() ? &*base : nullptr;
+                if (effective != nullptr && effective->kind == TypeKind::Reference && effective->pointee != nullptr) {
+                    effective = effective->pointee.get();
+                }
+                if (effective != nullptr && effective->kind == TypeKind::Span && !effective->is_mutable_ref) return true;
+            }
             return assignment_target_is_read_only(*expr.lhs, body, signatures);
+        }
         case ExprKind::Unary: {
             if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                 return assignment_target_is_read_only(*expr.lhs, body, signatures);
