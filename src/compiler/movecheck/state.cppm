@@ -24,6 +24,8 @@ using BorrowMap = std::unordered_map<std::string, BorrowState>;
 
 struct RefTarget {
     RootSet roots;
+    // Non-empty only when this reference was tracked by suspending a
+    // mutable-reborrow lender rather than by incrementing root borrows.
     std::string lender;
 
     [[nodiscard]] bool is_reborrow() const { return !lender.empty(); }

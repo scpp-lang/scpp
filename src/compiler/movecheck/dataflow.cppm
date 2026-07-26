@@ -1610,7 +1610,8 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     std::optional<std::string> lender = resolve_reborrow_lender(*stmt.expr, body, signatures);
     bool lender_is_mutable =
         lender.has_value() && is_reborrowable_local_type(body.local_types.at(*lender)) && body.local_types.at(*lender).is_mutable_ref;
-    if (lender.has_value() && lender_is_mutable) {
+    bool uses_lender_suspension = lender.has_value() && lender_is_mutable;
+    if (uses_lender_suspension) {
         validate_reborrow_lender(*lender, is_mutable, state, body, report_errors);
     }
 
@@ -1628,7 +1629,7 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
             state.current_loc);
     }
 
-    if (!(lender.has_value() && lender_is_mutable)) {
+    if (!uses_lender_suspension) {
         for (const std::string& root : roots) {
             BorrowState& borrow = state.borrows[root];
             if (report_errors) {
@@ -1650,7 +1651,7 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     } else {
         state.suspended_reborrows[*lender]++;
     }
-    state.ref_targets[stmt.local] = RefTarget{roots, lender.value_or("")};
+    state.ref_targets[stmt.local] = RefTarget{roots, uses_lender_suspension ? *lender : ""};
     state.local_lifetime_sources[stmt.local] = roots;
     state.locals[stmt.local] = LocalState::Initialized;
 }
