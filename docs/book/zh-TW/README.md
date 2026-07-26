@@ -38,7 +38,7 @@
 
 - 陣列、緩衝區與視圖
   - [固定大小陣列](ch08-01-fixed-size-arrays.md)
-  - 把文字當成 `char` 與 C 相容緩衝區處理
+  - [把文字當成 `char` 與 C 相容緩衝區處理](ch08-02-text-as-char-and-c-compatible-buffers.md)
   - 用 `std::span` 借用視圖
 
 - 錯誤處理
