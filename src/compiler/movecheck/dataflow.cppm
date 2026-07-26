@@ -2493,6 +2493,7 @@ void check_moves_impl(const Program& program) {
         // registered in `signatures` above (so call sites into it are
         // still checked normally), but there's nothing here to check.
         if (!fn.body) continue;
+        if (fn.skip_imported_body_verification) continue;
         // ch05 §5.11: a full-header-form generic function's own
         // template (e.g. `get`/`make`, Function::template_params
         // non-empty) is never checked directly here -- its own body may

@@ -1048,6 +1048,11 @@ struct Function {
     // without pretending they were part of the module's ordinary exported
     // surface.
     bool is_compile_time_dependency = false;
+    // True for an imported hidden helper body that must stay available so
+    // downstream codegen/generic instantiation can inline or clone it, but
+    // whose defining module has already movechecked it once. Importers skip
+    // re-running movecheck on such runtime-only helper bodies.
+    bool skip_imported_body_verification = false;
     // Records whether this declaration was spelled `constexpr` or
     // `consteval`. RuntimeOnly is the ordinary pre-existing case.
     FunctionEvalMode eval_mode = FunctionEvalMode::RuntimeOnly;
