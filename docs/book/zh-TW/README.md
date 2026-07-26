@@ -42,7 +42,7 @@
   - [用 `std::span` 借用視圖](ch08-03-borrowed-views-with-std-span.md)
 
 - 錯誤處理
-  - 不可恢復錯誤與編譯器插入的檢查
+  - [不可恢復錯誤與編譯器插入的檢查](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
   - 目前可用的可恢復錯誤寫法
   - 為 `std::expected` 做準備
 

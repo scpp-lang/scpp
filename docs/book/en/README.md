@@ -42,7 +42,7 @@
   - [Borrowed Views with `std::span`](ch08-03-borrowed-views-with-std-span.md)
 
 - Error Handling
-  - Unrecoverable Errors and Compiler-Inserted Checks
+  - [Unrecoverable Errors and Compiler-Inserted Checks](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
   - Recoverable Errors Today
   - Preparing for `std::expected`
 
