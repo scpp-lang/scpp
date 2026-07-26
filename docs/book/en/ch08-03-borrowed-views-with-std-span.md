@@ -187,4 +187,4 @@ C-compatible character buffers, and borrowed views over both.
 
 ---
 
-[← Previous: Text as `char` and C-Compatible Buffers](ch08-02-text-as-char-and-c-compatible-buffers.md) · [Table of Contents](README.md)
+[← Previous: Text as `char` and C-Compatible Buffers](ch08-02-text-as-char-and-c-compatible-buffers.md) · [Table of Contents](README.md) · [Next: Unrecoverable Errors and Compiler-Inserted Checks →](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)

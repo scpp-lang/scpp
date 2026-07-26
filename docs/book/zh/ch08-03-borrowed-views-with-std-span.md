@@ -174,4 +174,4 @@ span_return_local_fail.scpp:3:5: error: function 'bad' returns a lifetime-tracke
 
 ---
 
-[← 上一章：把文本当作 `char` 与 C 兼容缓冲区处理](ch08-02-text-as-char-and-c-compatible-buffers.md) · [目录](README.md)
+[← 上一章：把文本当作 `char` 与 C 兼容缓冲区处理](ch08-02-text-as-char-and-c-compatible-buffers.md) · [目录](README.md) · [下一章：不可恢复错误与编译器插入的检查 →](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
