@@ -5957,6 +5957,29 @@ int main() {
     }
 
     {
+        std::string case_name = "std_string_and_string_view_compare_against_literals_in_both_orders";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::string name{"any"};
+    if (!(name == "any")) return 1;
+    if ("any" != name) return 2;
+    if ("other" == name) return 3;
+    if (!(name != "other")) return 4;
+
+    std::string_view view{name};
+    if (!(view == "any")) return 5;
+    if ("any" != view) return 6;
+    if ("other" == view) return 7;
+    return view != "other" ? 0 : 8;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
         std::string case_name = "std_string_view_is_thread_movable_and_shareable";
         cases_run++;
         RunResult result = compile_and_run(

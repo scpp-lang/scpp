@@ -2367,29 +2367,39 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 lhs_type.has_value() ? &(lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee
                                                                                                      : *lhs_type)
                                      : nullptr;
-            std::string operator_name = equality_operator_method_name(expr.binary_op);
-            if (lhs_named != nullptr && lhs_named->kind == TypeKind::Named) {
-                std::vector<ExprPtr> overload_args;
-                overload_args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
-                if (resolve_overload_by_type(lhs_named->name + "_" + operator_name, overload_args, /*param_offset=*/1,
-                                             !is_read_only_place(*expr.lhs), expr.lhs.get()) != nullptr) {
-                    ExprPtr overload_call =
-                        make_overloaded_equality_call_expr(*expr.lhs, *expr.rhs, expr.binary_op, expr.loc);
-                    return codegen_call(*overload_call).value;
-                }
-            }
             const Type* rhs_named =
                 rhs_type.has_value() ? &(rhs_type->kind == TypeKind::Reference && rhs_type->pointee ? *rhs_type->pointee
                                                                                                      : *rhs_type)
                                      : nullptr;
-            bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named && structs_.contains(lhs_named->name);
-            bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named && structs_.contains(rhs_named->name);
+            std::string operator_name = equality_operator_method_name(expr.binary_op);
+            auto resolve_equality_receiver =
+                [&](const Expr& receiver_expr, const Expr& arg_expr,
+                    const Type* receiver_named) -> std::optional<llvm::LLVMValueRef> {
+                if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return std::nullopt;
+                std::vector<ExprPtr> overload_args;
+                overload_args.push_back(deep_clone_expr_with_loc(arg_expr, expr.loc));
+                if (resolve_overload_by_type(receiver_named->name + "_" + operator_name, overload_args, /*param_offset=*/1,
+                                             !is_read_only_place(receiver_expr), &receiver_expr) != nullptr) {
+                    ExprPtr overload_call =
+                        make_overloaded_equality_call_expr(receiver_expr, arg_expr, expr.binary_op, expr.loc);
+                    return codegen_call(*overload_call).value;
+                }
+                return std::nullopt;
+            };
+            if (std::optional<llvm::LLVMValueRef> value = resolve_equality_receiver(*expr.lhs, *expr.rhs, lhs_named)) {
+                return *value;
+            }
+            if (std::optional<llvm::LLVMValueRef> value = resolve_equality_receiver(*expr.rhs, *expr.lhs, rhs_named)) {
+                return *value;
+            }
+            bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named && is_named_record_type(*lhs_named);
+            bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named && is_named_record_type(*rhs_named);
             if (lhs_is_record || rhs_is_record) {
-                std::string receiver_name =
-                    lhs_named != nullptr && lhs_named->kind == TypeKind::Named ? lhs_named->name : "<non-record>";
+                std::string receiver_name = lhs_is_record ? lhs_named->name : rhs_named->name;
+                std::string receiver_side = lhs_is_record ? "left" : "right";
                 throw CodegenError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
-                                       "' requires a matching overloaded member operator on left operand type '" +
-                                       receiver_name + "'",
+                                       "' requires a matching overloaded member operator on " + receiver_side +
+                                       " operand type '" + receiver_name + "'",
                                    current_loc_);
             }
         }

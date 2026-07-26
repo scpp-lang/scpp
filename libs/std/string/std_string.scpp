@@ -119,6 +119,14 @@ public:
             return scpp_string_equals(this->handle, s) != 0;
         }
     }
+
+    bool operator==(const char* other) const {
+        return this->equals(other);
+    }
+
+    bool operator!=(const char* other) const {
+        return !this->equals(other);
+    }
 };
 
 } // namespace std

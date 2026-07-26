@@ -1381,24 +1381,29 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             }
             if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
                 std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+                std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
                 const Type* lhs_named =
                     lhs_type.has_value() ? &(lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee
                                                                                                          : *lhs_type)
                                          : nullptr;
-                std::string overload_name =
-                    lhs_named != nullptr && lhs_named->kind == TypeKind::Named ? lhs_named->name + "_" + equality_operator_method_name(expr.binary_op)
-                                                                               : "";
-                if (!overload_name.empty() && signatures.contains(overload_name)) {
-                    ExprPtr overload_call =
-                        make_overloaded_equality_call_expr(*expr.lhs, *expr.rhs, expr.binary_op, expr.loc);
-                    check_call_arguments(*overload_call, state, body, signatures, report_errors);
-                    return;
-                }
-                std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
                 const Type* rhs_named =
                     rhs_type.has_value() ? &(rhs_type->kind == TypeKind::Reference && rhs_type->pointee ? *rhs_type->pointee
                                                                                                          : *rhs_type)
                                          : nullptr;
+                auto maybe_check_equality_overload = [&](const Expr& receiver_expr, const Expr& arg_expr,
+                                                         const Type* receiver_named) {
+                    if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return false;
+                    std::string overload_name = receiver_named->name + "_" + equality_operator_method_name(expr.binary_op);
+                    if (!signatures.contains(overload_name)) return false;
+                    ExprPtr overload_call =
+                        make_overloaded_equality_call_expr(receiver_expr, arg_expr, expr.binary_op, expr.loc);
+                    check_call_arguments(*overload_call, state, body, signatures, report_errors);
+                    return true;
+                };
+                if (maybe_check_equality_overload(*expr.lhs, *expr.rhs, lhs_named) ||
+                    maybe_check_equality_overload(*expr.rhs, *expr.lhs, rhs_named)) {
+                    return;
+                }
                 bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named &&
                                      body.program != nullptr &&
                                      (find_class_def(*body.program, lhs_named->name) != nullptr ||
@@ -1408,11 +1413,11 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                      (find_class_def(*body.program, rhs_named->name) != nullptr ||
                                       find_struct_def(*body.program, rhs_named->name) != nullptr);
                 if (report_errors && (lhs_is_record || rhs_is_record)) {
-                    std::string receiver_name =
-                        lhs_named != nullptr && lhs_named->kind == TypeKind::Named ? lhs_named->name : "<non-record>";
+                    std::string receiver_name = lhs_is_record ? lhs_named->name : rhs_named->name;
+                    std::string receiver_side = lhs_is_record ? "left" : "right";
                     throw DataflowError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
-                                            "' requires a matching overloaded member operator on left operand type '" +
-                                            receiver_name + "'",
+                                            "' requires a matching overloaded member operator on " + receiver_side +
+                                            " operand type '" + receiver_name + "'",
                                         state.current_loc);
                 }
             }
