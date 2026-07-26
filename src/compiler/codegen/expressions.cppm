@@ -891,6 +891,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (is_interface_representation_type(target_type)) {
             return codegen_interface_value_for_target(expr, target_type);
         }
+        if (target_type.kind == TypeKind::Pointer && expr.kind == ExprKind::Identifier && expr.name == "nullptr" &&
+            !expr.explicit_global_qualification) {
+            return llvm::LLVMConstNull(to_llvm_type(target_type));
+        }
         // `-100`/`-1.5` (a negated literal, ExprKind::Unary/Neg over a
         // bare literal) is just as untyped as the bare literal itself --
         // real C++ itself treats a unary-minus-literal as a single

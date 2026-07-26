@@ -96,6 +96,14 @@ public:
         this->owns_ = false;
         return raw;
     }
+
+    bool operator==(T* other) const {
+        return this->ptr_ == other;
+    }
+
+    bool operator!=(T* other) const {
+        return this->ptr_ != other;
+    }
 };
 
 template<typename T>
@@ -294,6 +302,14 @@ public:
         this->ptr_ = ptr;
         this->handle_.reset(std::__shared_ptr_detail_erase<T>(ptr), std::__shared_ptr_detail_destroy<T>);
         return;
+    }
+
+    bool operator==(T* other) const {
+        return this->ptr_ == other;
+    }
+
+    bool operator!=(T* other) const {
+        return this->ptr_ != other;
     }
 };
 
