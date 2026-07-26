@@ -1,0 +1,20 @@
+// PR #327: user-defined equality operators must run their custom body.
+struct Offset {
+    int value = 0;
+
+    Offset(int value) : value{value} {
+        return;
+    }
+
+    bool operator==(const Offset& other) const {
+        return this->value + 1 == other.value;
+    }
+};
+
+int main() {
+    Offset a{2};
+    Offset b{3};
+    Offset c{2};
+    if (!(a == b)) return 1;
+    return a == c ? 2 : 0;
+}

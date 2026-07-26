@@ -1,0 +1,13 @@
+// PR #312: `export namespace ns { ... }` should export the block's direct
+// members without repeating `export` on each declaration.
+export module exportnsblock;
+
+export namespace inner {
+    int increment(int x) {
+        return x + 1;
+    }
+
+    int helper(int x) {
+        return increment(x);
+    }
+}

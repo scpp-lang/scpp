@@ -1,0 +1,13 @@
+import std;
+// PRs #325 and #352: `std::vector<T>` exposes `size_t`-typed size/capacity
+// APIs and accepts `size_t` indices for element access.
+int main() {
+    std::vector<int> values{};
+    values.push_back(3);
+    values.push_back(4);
+    size_t before = values.capacity();
+    values.pop_back();
+    if (values.size() != static_cast<size_t>(1)) return 1;
+    if (before < values.size()) return 2;
+    return values.at(static_cast<size_t>(0)) - 3;
+}

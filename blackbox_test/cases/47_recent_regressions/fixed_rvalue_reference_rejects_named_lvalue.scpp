@@ -1,0 +1,10 @@
+// PR #354 preserved the ordinary `T&&` rule: a named lvalue still needs an
+// explicit move and cannot bind directly to a fixed rvalue-reference parameter.
+int take_rvalue(int&& value) {
+    return value;
+}
+
+int main() {
+    int value = 4;
+    return take_rvalue(value);
+}

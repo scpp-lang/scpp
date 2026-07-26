@@ -1,0 +1,27 @@
+// PR #332 plus PR #320: out-of-line member definitions, including an
+// `inline` constructor definition, should merge with the class declaration.
+class Box {
+private:
+    int value_{};
+public:
+    virtual ~Box();
+    Box(int value);
+    int value() const;
+};
+
+inline Box::Box(int value) : value_{value} {
+    return;
+}
+
+int Box::value() const {
+    return this->value_;
+}
+
+Box::~Box() {
+    return;
+}
+
+int main() {
+    Box box{7};
+    return box.value() - 7;
+}

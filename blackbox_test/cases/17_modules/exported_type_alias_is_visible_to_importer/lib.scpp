@@ -1,0 +1,10 @@
+// PR #304: an exported `using` alias is part of the imported module surface.
+export module wordlib;
+
+namespace wordlib {
+    export using Word = int;
+
+    export Word plus_one(Word value) {
+        return value + 1;
+    }
+}

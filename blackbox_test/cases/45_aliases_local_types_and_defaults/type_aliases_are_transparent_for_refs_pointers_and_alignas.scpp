@@ -1,0 +1,21 @@
+// PR #304: ordinary `using Alias = Type;` aliases are transparent in ref,
+// pointer, and `alignas(...)` positions.
+using Word = int;
+using WordRef = Word&;
+using WordPtr = Word*;
+
+Word add(WordRef lhs, Word rhs) {
+    return lhs + rhs;
+}
+
+int main() {
+    alignas(Word) Word x = 20;
+    Word y = 21;
+    WordPtr ptr = &y;
+    Word sum = add(x, y);
+    Word pointed = 0;
+    [[scpp::unsafe]] {
+        pointed = *ptr;
+    }
+    return sizeof(Word) == sizeof(int) && pointed == 21 ? sum - 41 : 1;
+}

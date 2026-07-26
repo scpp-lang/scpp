@@ -1,0 +1,30 @@
+// PR #341: function-local `struct` and `class` definitions are usable inside
+// their defining function body.
+int main() {
+    struct Pair {
+        int x;
+        int y;
+    };
+
+    class Counter {
+    public:
+        int value{};
+
+        Counter(int start) {
+            this->value = start;
+            return;
+        }
+
+        virtual ~Counter() = default;
+
+        int get() const {
+            return this->value;
+        }
+    };
+
+    Pair pair{};
+    pair.x = 3;
+    pair.y = 4;
+    Counter counter{5};
+    return pair.x + pair.y + counter.get() - 12;
+}

@@ -1,0 +1,5 @@
+import exportnsblock;
+
+int main() {
+    return inner::helper(41) - 42;
+}

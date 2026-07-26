@@ -1,0 +1,6 @@
+import wordlib;
+
+int main() {
+    wordlib::Word value = 41;
+    return wordlib::plus_one(value) - 42;
+}

@@ -1,0 +1,16 @@
+// PR #336: a non-empty `case` may continue only via `[[fallthrough]];`.
+int main() {
+    int value = 0;
+    switch (1) {
+        case 1:
+            value = 1;
+            [[fallthrough]];
+        case 2:
+            value = value + 2;
+            break;
+        default:
+            value = value + 4;
+            break;
+    }
+    return value - 3;
+}
