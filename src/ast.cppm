@@ -1320,9 +1320,9 @@ struct Function {
 
 [[nodiscard]] inline std::string equality_operator_method_name(BinaryOp op) {
     switch (op) {
-        case BinaryOp::Eq: return "operator_equal";
-        case BinaryOp::Ne: return "operator_not_equal";
-        default: return "";
+        case BinaryOp::Eq: return std::string{"operator_equal"};
+        case BinaryOp::Ne: return std::string{"operator_not_equal"};
+        default: return std::string{};
     }
 }
 
