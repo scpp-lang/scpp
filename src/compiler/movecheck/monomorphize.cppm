@@ -158,6 +158,7 @@ public:
             // walk, over an *already-monomorphized* caller's own body)
             // by monomorphize_generic_function_call.
             if (!program_.functions[i].template_params.empty()) continue;
+            rewrite_implicit_member_field_access(program_.functions[i]);
             // build_mir's own Body holds raw (const Expr*) pointers into
             // this Function's *own* Stmt/Expr tree (see mir.cppm's
             // Terminator) -- safe to keep using after program_.functions
@@ -406,10 +407,38 @@ private:
         if (fn_index >= program_.functions.size()) return;
         Function& fn = program_.functions[fn_index];
         if (fn.body == nullptr || !fn.template_params.empty()) return;
+        rewrite_implicit_member_field_access(fn);
         signatures_ = build_signatures(program_);
         Body body = build_mir(fn);
         body.program = &program_;
         walk_stmt(*fn.body, body, this_type_of(fn), /*allow_generic_monomorphization=*/!fn.is_generic_template);
+    }
+
+    void rewrite_implicit_member_field_access(Function& fn) {
+        if (fn.body == nullptr || fn.member_owner_class.empty()) return;
+
+        std::unordered_set<std::string> member_field_names;
+        for (const ClassDef& def : program_.classes) {
+            if (def.name != fn.member_owner_class) continue;
+            for (const ClassField& field : def.fields) member_field_names.insert(field.name);
+            break;
+        }
+        if (member_field_names.empty()) {
+            for (const StructDef& def : program_.structs) {
+                if (def.name != fn.member_owner_class) continue;
+                for (const StructField& field : def.fields) member_field_names.insert(field.name);
+                break;
+            }
+        }
+        if (member_field_names.empty()) return;
+
+        std::unordered_set<std::string> excluded_names;
+        for (const Param& param : fn.params) excluded_names.insert(param.name);
+        collect_locally_declared_names(*fn.body, excluded_names);
+        for (const std::string& excluded : excluded_names) member_field_names.erase(excluded);
+        if (member_field_names.empty()) return;
+
+        rewrite_captured_identifiers_as_field_access(*fn.body, member_field_names);
     }
 
     // ch04 §4.2/ch05 §5.9: the enclosing function's own `this` parameter

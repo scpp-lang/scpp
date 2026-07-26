@@ -5609,6 +5609,87 @@ int main() {
     }
 }
 
+void run_implicit_member_field_access_tests() {
+    {
+        std::string case_name = "member_shared_ptr_deref_without_explicit_this_can_return_reference";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "import std;\n"
+            "class Holder {\n"
+            "public:\n"
+            "    std::shared_ptr<const std::string> text{};\n"
+            "    Holder() {\n"
+            "        this->text = std::make_shared<const std::string>(\"ok\");\n"
+            "        return;\n"
+            "    }\n"
+            "    const std::string& text_ref() const {\n"
+            "        return text.operator*();\n"
+            "    }\n"
+            "    virtual ~Holder() = default;\n"
+            "};\n"
+            "int main() {\n"
+            "    Holder holder{};\n"
+            "    return holder.text_ref().length() - 2;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "member_optional_deref_without_explicit_this_compiles";
+        cases_run++;
+        std::filesystem::path exe_path = std::filesystem::current_path() / case_name;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(import std;
+class Holder {
+public:
+    std::optional<std::string> text{};
+    const std::string& text_ref() const {
+        return text.operator*();
+    }
+    virtual ~Holder() = default;
+};
+int main() {
+    return 0;
+}
+)SCPP",
+                exe_path.string());
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        }
+        expect(!threw, case_name + ": expected optional member deref to compile without explicit this");
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "local_optional_deref_still_cannot_escape";
+        cases_run++;
+        bool threw = false;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(import std;
+class Holder {
+public:
+    const std::string& broken() const {
+        std::optional<std::string> text{};
+        return text.operator*();
+    }
+    virtual ~Holder() = default;
+};
+int main() {
+    return 0;
+}
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("returns a reference derived from 'text'") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected local optional deref escape to remain rejected");
+    }
+}
+
 void run_random_tests() {
     {
         std::string case_name = "scpp_rand_uniform_int_distribution_rejects_empty_range";
@@ -7355,6 +7436,7 @@ int main() {
     run_static_member_function_tests();
     run_default_argument_tests();
     run_static_local_lifetime_tests();
+    run_implicit_member_field_access_tests();
     run_random_tests();
     run_vector_tests();
     run_string_view_tests();

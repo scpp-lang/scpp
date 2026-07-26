@@ -251,12 +251,8 @@ void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::st
 // ch05 §5.12: rewrites every bare Identifier reference to a captured
 // name inside `expr` into an explicit `this.name` Member access.
 // Necessary because a lambda's body, as originally written, refers to
-// what were then ordinary enclosing-scope locals by their bare names --
-// but scpp requires *explicit* `this.field` for a class's own fields
-// (there is no implicit-field-lookup fallback the way real C++ allows
-// a bare `field` inside a method body, verified empirically: this
-// codebase's own movecheck rejects a bare field reference with "use of
-// undeclared variable"). Once the lambda's body becomes the synthesized
+// what were then ordinary enclosing-scope locals by their bare names.
+// Once the lambda's body becomes the synthesized
 // closure class's own "call" method, each captured name is a *field*,
 // not a local, so every such reference must be rewritten this way. The
 // lambda's own parameters and any of its own locally-declared variables

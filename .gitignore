@@ -1,6 +1,7 @@
 # Build output
 /build/
 build*/
+.scpp/
 docs/spec/dist/
 docs/site/dist/
 
