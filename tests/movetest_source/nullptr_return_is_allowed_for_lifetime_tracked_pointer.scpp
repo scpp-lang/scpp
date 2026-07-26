@@ -1,0 +1,7 @@
+const int* none() {
+    return nullptr;
+}
+
+int main() {
+    return none() == nullptr ? 0 : 1;
+}

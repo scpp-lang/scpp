@@ -111,6 +111,7 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
                                                                 const Body& body,
                                                                 const Signatures& signatures);
 [[nodiscard]] std::optional<std::size_t> resolve_elided_param_index(const Function& fn);
+[[nodiscard]] std::vector<std::size_t> infer_pointer_return_source_param_indices(const Function& fn);
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param);
 void validate_lifetime_annotation_placement(const Function& fn);
 [[nodiscard]] std::vector<std::size_t> resolve_returned_lifetime_param_indices(const Function& fn);
@@ -651,6 +652,20 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
     return found;
 }
 
+[[nodiscard]] std::vector<std::size_t> infer_pointer_return_source_param_indices(const Function& fn) {
+    if (fn.return_lifetime.present() || fn.return_type.kind != TypeKind::Pointer) return {};
+    if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) return {0};
+
+    std::vector<std::size_t> indices;
+    for (std::size_t i = 0; i < fn.params.size(); i++) {
+        if ((is_reference(fn.params[i].type) && !fn.params[i].type.is_rvalue_ref) ||
+            fn.params[i].type.kind == TypeKind::Pointer) {
+            indices.push_back(i);
+        }
+    }
+    return indices;
+}
+
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param) {
     if (!is_lifetime_eligible_type(param.type)) return false;
     return !(is_reference(param.type) && param.type.is_rvalue_ref);
@@ -746,7 +761,11 @@ void validate_operator_arrow_signature(const Function& fn) {
         }
         return indices;
     }
-    if (!is_reference(fn.return_type)) return {};
+    if (!is_reference(fn.return_type) && fn.return_type.kind != TypeKind::Pointer) return {};
+    if (fn.return_type.kind == TypeKind::Pointer) {
+        std::vector<std::size_t> indices = infer_pointer_return_source_param_indices(fn);
+        return indices.size() == 1 ? indices : std::vector<std::size_t>{};
+    }
     std::optional<std::size_t> elided = resolve_elided_param_index(fn);
     if (!elided.has_value()) return {};
     const Param& param = fn.params[*elided];

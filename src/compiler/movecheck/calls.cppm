@@ -1188,12 +1188,18 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                     if (!operand) return std::nullopt;
                     Type result;
                     result.kind = TypeKind::Pointer;
-                    result.pointee = std::make_shared<Type>(std::move(*operand));
-                    // `&expr` always yields a mutable T* (ch05 §5.7) --
-                    // whether the place itself is read-only-reachable is
-                    // a separate check (is_read_only_reachable), not part
-                    // of `&expr`'s own static type.
-                    result.is_mutable_pointee = true;
+                    if (operand->kind == TypeKind::Reference && operand->pointee != nullptr) {
+                        result.pointee = std::make_shared<Type>(*operand->pointee);
+                        result.is_mutable_pointee = operand->is_mutable_ref;
+                    } else {
+                        result.pointee = std::make_shared<Type>(std::move(*operand));
+                        // `&expr` of a non-reference place yields a mutable
+                        // T* (ch05 §5.7) -- whether the place itself is
+                        // read-only-reachable is a separate check
+                        // (is_read_only_reachable), not part of `&expr`'s own
+                        // static type.
+                        result.is_mutable_pointee = true;
+                    }
                     return result;
                 }
                 case UnaryOp::Deref: {

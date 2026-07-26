@@ -97,6 +97,10 @@ void check_moves_impl(const Program& program);
            type.pointee->name == "char" && !type.is_mutable_pointee;
 }
 
+[[nodiscard]] bool is_nullptr_literal_expr(const Expr& expr) {
+    return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
+}
+
 [[nodiscard]] bool is_supported_compound_assignment(BinaryOp op) {
     return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
 }
@@ -109,6 +113,23 @@ void check_moves_impl(const Program& program);
         return false;
     }
     return true;
+}
+
+[[nodiscard]] bool roots_are_program_lifetime_only(const RootSet& roots) {
+    if (roots.empty()) return false;
+    for (const std::string& root : roots) {
+        if (!is_program_lifetime_root(root)) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool expr_is_definitely_null_pointer(const Expr& expr, const DataflowState& state, const Body& body) {
+    if (is_nullptr_literal_expr(expr)) return true;
+    if (expr.kind != ExprKind::Identifier || expr.explicit_global_qualification) return false;
+    auto type_it = body.local_types.find(expr.name);
+    if (type_it == body.local_types.end() || type_it->second.kind != TypeKind::Pointer) return false;
+    auto source_it = state.local_lifetime_sources.find(expr.name);
+    return source_it != state.local_lifetime_sources.end() && source_it->second.empty();
 }
 
 [[nodiscard]] BinaryOp compound_base_operator(BinaryOp op) {
@@ -1821,7 +1842,11 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // comment above): a bare declaration always zero-initializes,
             // so it's always Initialized from this point on.
             state.locals[stmt.local] = LocalState::Initialized;
-            if (is_lifetime_eligible_type(stmt.type)) state.local_lifetime_sources.erase(stmt.local);
+            if (stmt.type.kind == TypeKind::Pointer) {
+                state.local_lifetime_sources[stmt.local] = {};
+            } else if (is_lifetime_eligible_type(stmt.type)) {
+                state.local_lifetime_sources.erase(stmt.local);
+            }
             return;
 
         case MirStatementKind::BindReference:
@@ -2186,6 +2211,14 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
         case TerminatorKind::Return: {
             if (term.return_value == nullptr) return;
             if (is_lifetime_eligible_type(fn.return_type)) {
+                bool null_pointer_return =
+                    fn.return_type.kind == TypeKind::Pointer &&
+                    expr_is_definitely_null_pointer(*term.return_value, state, body);
+                if (null_pointer_return) {
+                    apply_expr(*term.return_value, /*is_move_target_context=*/false, state, body, signatures,
+                               /*report_errors=*/true);
+                    return;
+                }
                 std::optional<Type> returned_type = infer_expr_type(*term.return_value, body, signatures);
                 bool return_type_compatible = false;
                 if (returned_type.has_value()) {
@@ -2213,20 +2246,42 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                                                 fn.return_lifetime.name + "'",
                                             state.current_loc);
                     }
-                } else if (is_reference(fn.return_type)) {
+                } else if (fn.return_type.kind == TypeKind::Pointer && returned_roots.empty()) {
+                    return;
+                } else if (is_reference(fn.return_type) || fn.return_type.kind == TypeKind::Pointer) {
+                    if (fn.return_type.kind == TypeKind::Pointer && roots_are_program_lifetime_only(returned_roots)) {
+                        return;
+                    }
                     std::vector<std::size_t> source_indices = resolve_returned_lifetime_param_indices(fn);
-                    if (!source_indices.empty()) {
-                        RootSet expected = single_root(fn.params[source_indices.front()].name);
-                        if (!return_roots_are_proven_to_outlive_call(returned_roots,
-                                                                     fn.params[source_indices.front()].name)) {
+                    if (fn.return_type.kind == TypeKind::Pointer && source_indices.empty()) {
+                        std::vector<std::size_t> inferred_pointer_sources = infer_pointer_return_source_param_indices(fn);
+                        if (inferred_pointer_sources.empty()) {
                             throw DataflowError(
-                                "function '" + fn.name + "' returns a reference derived from " +
-                                    format_roots(returned_roots) + ", not from its sole reference parameter '" +
-                                    fn.params[source_indices.front()].name +
-                                    "'; scpp v0.1 can only prove a returned reference doesn't dangle when it "
-                                    "borrows (directly or transitively) from that parameter (spec ch05.3)",
+                                "function '" + fn.name +
+                                    "' returns a raw pointer but has no reference/pointer parameter to infer its "
+                                    "lifetime from (spec ch05.3) -- add an explicit lifetime annotation, return "
+                                    "nullptr, or refactor to return by value/std::unique_ptr instead",
                                 state.current_loc);
                         }
+                        throw DataflowError(
+                            "function '" + fn.name +
+                                "' returns a raw pointer but has more than one reference/pointer parameter; scpp "
+                                "v0.1 can only infer a returned pointer's lifetime when there is exactly one "
+                                "eligible source parameter (spec ch05.3) -- add an explicit lifetime annotation "
+                                "or refactor the signature",
+                            state.current_loc);
+                    }
+                    if (!source_indices.empty() &&
+                        !return_roots_are_proven_to_outlive_call(returned_roots, fn.params[source_indices.front()].name)) {
+                        throw DataflowError(
+                            "function '" + fn.name + "' returns " +
+                                std::string(is_reference(fn.return_type) ? "a reference" : "a raw pointer") +
+                                " derived from " + format_roots(returned_roots) +
+                                ", not from its sole reference/pointer parameter '" +
+                                fn.params[source_indices.front()].name +
+                                "'; scpp v0.1 can only prove the returned value doesn't dangle when it "
+                                "borrows (directly or transitively) from that parameter (spec ch05.3)",
+                            state.current_loc);
                     }
                 }
                 return;
