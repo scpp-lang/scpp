@@ -1,0 +1,8 @@
+const int* borrow(const int& value) {
+    const int& ref = value;
+    return &ref;
+}
+
+int main() {
+    return 0;
+}

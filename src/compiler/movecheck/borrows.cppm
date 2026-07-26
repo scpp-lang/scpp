@@ -689,6 +689,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                                     const Signatures& signatures, bool report_errors) {
     switch (expr.kind) {
         case ExprKind::Identifier: {
+            if (expr.name == "nullptr" && !expr.explicit_global_qualification) return {};
             auto local_it = state.local_lifetime_sources.find(expr.name);
             if (local_it != state.local_lifetime_sources.end()) return local_it->second;
             if (body.local_types.contains(expr.name)) {

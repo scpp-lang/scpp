@@ -1,0 +1,8 @@
+const int* bad() {
+    char value = 'a';
+    return &value;
+}
+
+int main() {
+    return 0;
+}

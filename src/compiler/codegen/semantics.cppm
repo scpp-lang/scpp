@@ -293,8 +293,13 @@ namespace {
                         if (!operand) return std::nullopt;
                         Type result;
                         result.kind = TypeKind::Pointer;
-                        result.pointee = std::make_shared<Type>(std::move(*operand));
-                        result.is_mutable_pointee = true; // &expr always yields a mutable T* (ch05 §5.7)
+                        if (operand->kind == TypeKind::Reference && operand->pointee) {
+                            result.pointee = std::make_shared<Type>(*operand->pointee);
+                            result.is_mutable_pointee = operand->is_mutable_ref;
+                        } else {
+                            result.pointee = std::make_shared<Type>(std::move(*operand));
+                            result.is_mutable_pointee = true; // &expr always yields a mutable T* (ch05 §5.7)
+                        }
                         return result;
                     }
                     case UnaryOp::Deref: {
