@@ -1912,7 +1912,15 @@ std::string strip_concrete_function_bodies(const Program& program, const std::st
         std::size_t end = find_matching_brace(source, begin);
         ranges.push_back(BodyRange{begin, end + 1, ";"});
     }
-    std::sort(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) { return a.begin > b.begin; });
+    std::sort(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) {
+        if (a.begin != b.begin) return a.begin > b.begin;
+        if (a.end != b.end) return a.end > b.end;
+        return a.replacement > b.replacement;
+    });
+    ranges.erase(std::unique(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) {
+                     return a.begin == b.begin && a.end == b.end && a.replacement == b.replacement;
+                 }),
+                 ranges.end());
     for (const BodyRange& range : ranges) {
         source.replace(range.begin, range.end - range.begin, range.replacement);
     }

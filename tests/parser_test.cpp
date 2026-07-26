@@ -863,6 +863,31 @@ void test_template_specialization_static_member_call_parses() {
            "template_specialization_static_member_call_parses: expected specialized static make function");
 }
 
+void test_full_class_template_specialization_parses_as_concrete_specialization() {
+    scpp::Program program = scpp::parse(
+        "template<typename T>\n"
+        "class Box;\n"
+        "template<>\n"
+        "class Box<int> {\n"
+        "public:\n"
+        "    int value() const { return 2; }\n"
+        "};\n"
+        "int main() { Box<int> box{}; return box.value(); }\n");
+    const scpp::ClassDef* specialization = nullptr;
+    for (const scpp::ClassDef& c : program.classes) {
+        if (c.name == "Box" && c.is_partial_specialization && c.template_params.empty()) {
+            specialization = &c;
+            break;
+        }
+    }
+    expect(specialization != nullptr,
+           "full_class_template_specialization_parses_as_concrete_specialization: expected explicit specialization");
+    expect(specialization->specialization_template_args.size() == 1 &&
+               specialization->specialization_template_args[0].kind == scpp::TypeKind::Named &&
+               specialization->specialization_template_args[0].name == "int",
+           "full_class_template_specialization_parses_as_concrete_specialization: expected concrete int argument");
+}
+
 void test_struct_forward_declaration_parses_and_reconciles() {
     scpp::Program program = scpp::parse(
         "struct Node;\n"
@@ -4932,6 +4957,7 @@ int main() {
     test_default_parameter_trailing_rule_is_enforced();
     test_static_member_function_parses_without_this();
     test_template_specialization_static_member_call_parses();
+    test_full_class_template_specialization_parses_as_concrete_specialization();
     test_struct_forward_declaration_parses_and_reconciles();
     test_class_forward_declaration_parses_and_reconciles();
     test_record_forward_declaration_tag_mismatch_is_rejected();

@@ -3182,9 +3182,10 @@ private:
                                 bool is_reexport) {
         std::unordered_set<std::string> hidden_function_designators = imported_hidden_function_designators(imported);
         for (const EnumDef& def : imported.enums) {
+            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
+            if (!def.is_exported && effective_owner != imported_name) continue;
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
             if (def.is_exported) struct_names_.insert(def.name);
-            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
             auto existing = std::find_if(program.enums.begin(), program.enums.end(), [&](const EnumDef& current) {
                 return current.owning_module == effective_owner && same_enum_identity(current, def);
             });
@@ -3199,6 +3200,8 @@ private:
             program.enums.push_back(std::move(clone));
         }
         for (const StructDef& def : imported.structs) {
+            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
+            if (!def.is_exported && effective_owner != imported_name) continue;
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
             if (def.is_exported) {
                 struct_names_.insert(def.name);
@@ -3208,7 +3211,6 @@ private:
                 generic_type_names_.insert(def.name);
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
             }
-            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
             auto existing = std::find_if(program.structs.begin(), program.structs.end(), [&](const StructDef& current) {
                 return current.owning_module == effective_owner && same_struct_identity(current, def);
             });
@@ -3223,6 +3225,8 @@ private:
             program.structs.push_back(std::move(clone));
         }
         for (const ClassDef& def : imported.classes) {
+            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
+            if (!def.is_exported && effective_owner != imported_name) continue;
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
             if (def.is_exported) {
                 struct_names_.insert(def.name);
@@ -3237,7 +3241,6 @@ private:
                     ordinary_generic_type_template_params_[def.name] = def.template_params;
                 }
             }
-            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
             auto existing = std::find_if(program.classes.begin(), program.classes.end(), [&](const ClassDef& current) {
                 return current.owning_module == effective_owner && same_class_identity(current, def);
             });
@@ -3270,12 +3273,13 @@ private:
             program.type_aliases.push_back(std::move(clone));
         }
         for (const Function& fn : imported.functions) {
+            std::string effective_owner = fn.owning_module.empty() ? imported_name : fn.owning_module;
+            if (!fn.is_exported && effective_owner != imported_name) continue;
             bool keep_body = imported_function_body_must_stay_available(imported, fn);
             bool needs_hidden_compile_time_visibility =
                 !fn.is_exported && hidden_function_designators.contains(fn.name);
             if (!fn.is_exported && !fn.is_compile_time_dependency && !needs_hidden_compile_time_visibility) continue;
             if (fn.is_exported && !fn.template_params.empty()) generic_function_template_params_[fn.name] = fn.template_params;
-            std::string effective_owner = fn.owning_module.empty() ? imported_name : fn.owning_module;
             auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {
                 return current.owning_module == effective_owner && current.loc.source_path_text() == fn.loc.source_path_text() &&
                        current.loc.line == fn.loc.line && current.loc.column == fn.loc.column &&

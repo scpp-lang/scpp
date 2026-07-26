@@ -5,7 +5,7 @@
 // destination enum's declared enumerators.
 export module scpp:enum_cast;
 
-import std;
+export import std;
 
 namespace scpp {
 
