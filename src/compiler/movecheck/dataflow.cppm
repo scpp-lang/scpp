@@ -750,14 +750,16 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 is_named_record_type_for_call_binding(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
+            bool freely_copyable_value_source =
+                class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
             const FunctionSignature* converting_ctor =
                 class_value_param ? find_single_argument_converting_constructor_signature(sig->param_types[param_index], arg, body,
                                                                                          signatures)
                                   : nullptr;
-            if (report_errors && class_value_param && !copyable_lvalue_source &&
+            if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
-                                     "' by value requires either a copyable bare local of that exact type or "
+                                     "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc);
             }
@@ -790,7 +792,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 }
                 return;
             }
-            apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
+            apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
+                       body, signatures, report_errors);
 
             // `&expr` (ch05 §5.7) passed directly as a call argument --
             // the primary motivating use case (an `extern "C"` out
@@ -950,14 +953,17 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 is_named_record_type_for_call_binding(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
-            if (report_errors && class_value_param && !copyable_lvalue_source &&
+            bool freely_copyable_value_source =
+                class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
+            if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
-                                     "' by value requires either a copyable bare local of that exact type or "
+                                     "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc);
             }
-            apply_expr(arg, /*is_move_target_context=*/!copyable_lvalue_source, state, body, signatures, report_errors);
+            apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
+                       body, signatures, report_errors);
         }
         if (report_errors && sig != nullptr) {
             enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "constructor", class_name, body,
@@ -1199,8 +1205,13 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             if (expr.type.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(expr.type.name)) {
                 bool move_shape = expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move &&
                                   produces_rvalue_of_type(*expr.args[0], expr.type, body, signatures);
+                bool freely_copyable_copy_shape =
+                    expr.args.size() == 1 &&
+                    is_freely_copyable_class_value_source(*expr.args[0], expr.type, body, signatures);
                 if (move_shape) {
                     apply_expr(*expr.args[0], /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                } else if (freely_copyable_copy_shape) {
+                    apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors);
                 } else if (expr.args.size() == 1 &&
                            body.program != nullptr && !has_user_declared_copy_ctor(expr.type.name, *body.program) &&
                            is_copyable_class_lvalue_boundary_source(*expr.args[0], expr.type, body, signatures)) {
@@ -1793,6 +1804,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/true, state, body, signatures,
                                report_errors);
                 } else if (stmt.ctor_args->size() == 1 &&
+                           is_freely_copyable_class_value_source(*(*stmt.ctor_args)[0], stmt.type, body, signatures)) {
+                    apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
+                               report_errors);
+                } else if (stmt.ctor_args->size() == 1 &&
                            body.program != nullptr && !has_user_declared_copy_ctor(stmt.type.name, *body.program) &&
                            is_copyable_class_lvalue_boundary_source(*(*stmt.ctor_args)[0], stmt.type, body, signatures)) {
                     apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
@@ -1958,11 +1973,15 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // (spec §6.5's own note) -- no MovedOut transition for
                 // it, so apply_expr is called with is_move_target_context
                 // irrelevant here (there is no std::move to license).
-                if (is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures) &&
+                bool freely_copyable_assign_source =
+                    is_freely_copyable_class_value_source(*stmt.expr, type_it->second, body, signatures);
+                if ((is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures) ||
+                     freely_copyable_assign_source) &&
                     state.locals.contains(stmt.local)) {
                     if (report_errors) {
-                        if (state.classes_with_copy_assign == nullptr ||
-                            !state.classes_with_copy_assign->contains(type_it->second.name)) {
+                        if (!freely_copyable_assign_source &&
+                            (state.classes_with_copy_assign == nullptr ||
+                             !state.classes_with_copy_assign->contains(type_it->second.name))) {
                             throw DataflowError("class '" + type_it->second.name +
                                                  "' is not copy-assignable (spec §6.5(3)) -- '" + stmt.local +
                                                  "' cannot be reassigned this way",
@@ -2026,18 +2045,22 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     // *any* expression shape at all (a real gap, closed
                     // as part of implementing this feature).
                     if (report_errors) {
-                        if (!is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures)) {
+                        bool freely_copyable_init_source =
+                            is_freely_copyable_class_value_source(*stmt.expr, type_it->second, body, signatures);
+                        if (!is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures) &&
+                            !freely_copyable_init_source) {
                             throw DataflowError(
                                 "class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                     "' can only be initialized via constructor-call syntax ('" +
                                     type_it->second.name + " " + stmt.local +
                                     "(args);'), std::move of the same type, or (if the class is copy-"
-                                    "constructible, spec §6.5) a plain copy of another '" + type_it->second.name +
-                                    "' variable",
+                                    "constructible, spec §6.5) an implicitly copyable source of another '" +
+                                    type_it->second.name + "' value",
                                 state.current_loc);
                         }
-                        if (state.classes_with_copy_ctor == nullptr ||
-                            !state.classes_with_copy_ctor->contains(type_it->second.name)) {
+                        if (!freely_copyable_init_source &&
+                            (state.classes_with_copy_ctor == nullptr ||
+                             !state.classes_with_copy_ctor->contains(type_it->second.name))) {
                             throw DataflowError("class '" + type_it->second.name +
                                                  "' is not copy-constructible (spec §6.5(2)) -- '" + stmt.local +
                                                  "' cannot be initialized this way",
@@ -2211,12 +2234,16 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             bool return_is_class_value = is_named_class_type(fn.return_type, body);
             bool implicit_move_source =
                 return_is_class_value && is_implicit_move_return_source(*term.return_value, fn.return_type, body);
-            bool move_target_context = return_is_class_value || term.return_value->kind == ExprKind::Move;
+            bool freely_copyable_return_source =
+                return_is_class_value &&
+                is_freely_copyable_class_value_source(*term.return_value, fn.return_type, body, signatures);
+            bool move_target_context =
+                (return_is_class_value && !freely_copyable_return_source) || term.return_value->kind == ExprKind::Move;
             apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true);
-            if (return_is_class_value && !implicit_move_source &&
+            if (return_is_class_value && !implicit_move_source && !freely_copyable_return_source &&
                 !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures)) {
                 throw DataflowError("returning class '" + fn.return_type.name +
-                                     "' by value requires either a bare same-type local/parameter or "
+                                     "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc);
             }
