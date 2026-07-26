@@ -28,10 +28,15 @@ struct SourceLocation {
     std::shared_ptr<const std::string> source_path;
 
     [[nodiscard]] bool is_known() const { return line > 0; }
-    [[nodiscard]] bool has_source_path() const { return source_path != nullptr && !source_path->empty(); }
+    [[nodiscard]] bool has_source_path() const {
+        if (source_path == nullptr) return false;
+        return !source_path.operator*().empty();
+    }
+
     [[nodiscard]] const std::string& source_path_text() const {
         static const std::string empty;
-        return source_path ? *source_path : empty;
+        if (source_path == nullptr) return empty;
+        return source_path.operator*();
     }
 
 };
@@ -667,34 +672,38 @@ struct Stmt {
 
 inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
     expr.loc = loc;
-    if (expr.lhs) rewrite_expr_locs(*expr.lhs, loc);
-    if (expr.rhs) rewrite_expr_locs(*expr.rhs, loc);
-    if (expr.third) rewrite_expr_locs(*expr.third, loc);
-    for (ExprPtr& arg : expr.args) rewrite_expr_locs(*arg, loc);
-    for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+    if (expr.lhs.get() != nullptr) rewrite_expr_locs(*expr.lhs, loc);
+    if (expr.rhs.get() != nullptr) rewrite_expr_locs(*expr.rhs, loc);
+    if (expr.third.get() != nullptr) rewrite_expr_locs(*expr.third, loc);
+    for (std::size_t i = 0; i < expr.args.size(); i++) rewrite_expr_locs(*expr.args[i], loc);
+    for (std::size_t i = 0; i < expr.explicit_template_args.size(); i++) {
+        ExplicitTemplateArg& arg = expr.explicit_template_args[i];
         if (!arg.is_type && arg.value) rewrite_expr_locs(*arg.value, loc);
     }
-    for (LambdaCapture& capture : expr.lambda_captures) {
-        if (capture.init) rewrite_expr_locs(*capture.init, loc);
+    for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
+        LambdaCapture& capture = expr.lambda_captures[i];
+        if (capture.init.get() != nullptr) rewrite_expr_locs(*capture.init, loc);
     }
-    for (Param& param : expr.lambda_params) {
-        if (param.default_expr) rewrite_expr_locs(*param.default_expr, loc);
+    for (std::size_t i = 0; i < expr.lambda_params.size(); i++) {
+        Param& param = expr.lambda_params[i];
+        if (param.default_expr.get() != nullptr) rewrite_expr_locs(*param.default_expr, loc);
     }
-    if (expr.lambda_body) {
+    if (expr.lambda_body.get() != nullptr) {
         auto rewrite_stmt_locs = [&](auto&& self, Stmt& stmt) -> void {
             stmt.loc = loc;
-            if (stmt.init) rewrite_expr_locs(*stmt.init, loc);
-            for (ExprPtr& arg : stmt.ctor_args) rewrite_expr_locs(*arg, loc);
-            if (stmt.expr) rewrite_expr_locs(*stmt.expr, loc);
-            if (stmt.condition) rewrite_expr_locs(*stmt.condition, loc);
-            if (stmt.then_branch) self(self, *stmt.then_branch);
-            if (stmt.else_branch) self(self, *stmt.else_branch);
-            for (SwitchCase& switch_case : stmt.switch_cases) {
+            if (stmt.init.get() != nullptr) rewrite_expr_locs(*stmt.init, loc);
+            for (std::size_t i = 0; i < stmt.ctor_args.size(); i++) rewrite_expr_locs(*stmt.ctor_args[i], loc);
+            if (stmt.expr.get() != nullptr) rewrite_expr_locs(*stmt.expr, loc);
+            if (stmt.condition.get() != nullptr) rewrite_expr_locs(*stmt.condition, loc);
+            if (stmt.then_branch.get() != nullptr) self(self, *stmt.then_branch);
+            if (stmt.else_branch.get() != nullptr) self(self, *stmt.else_branch);
+            for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
+                SwitchCase& switch_case = stmt.switch_cases[i];
                 switch_case.loc = loc;
-                if (switch_case.value) rewrite_expr_locs(*switch_case.value, loc);
-                for (StmtPtr& child : switch_case.statements) self(self, *child);
+                if (switch_case.value.get() != nullptr) rewrite_expr_locs(*switch_case.value, loc);
+                for (std::size_t j = 0; j < switch_case.statements.size(); j++) self(self, *switch_case.statements[j]);
             }
-            for (StmtPtr& child : stmt.statements) self(self, *child);
+            for (std::size_t i = 0; i < stmt.statements.size(); i++) self(self, *stmt.statements[i]);
         };
         rewrite_stmt_locs(rewrite_stmt_locs, *expr.lambda_body);
     }
@@ -702,7 +711,10 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
 
 [[nodiscard]] inline Param deep_clone_param(const Param& param) {
     Param clone = param;
-    if (param.default_expr) clone.default_expr = std::shared_ptr<Expr>(deep_clone_expr(*param.default_expr).release());
+    if (param.default_expr.get() != nullptr) {
+        std::shared_ptr<Expr> cloned_default{deep_clone_expr(*param.default_expr).release()};
+        clone.default_expr = std::move(cloned_default);
+    }
     return clone;
 }
 
@@ -725,27 +737,32 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
     clone->through_arrow = expr.through_arrow;
     clone->implicit_arrow_deref = expr.implicit_arrow_deref;
     clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
-    if (expr.lhs) clone->lhs = deep_clone_expr(*expr.lhs);
-    if (expr.rhs) clone->rhs = deep_clone_expr(*expr.rhs);
-    if (expr.third) clone->third = deep_clone_expr(*expr.third);
-    for (const ExprPtr& arg : expr.args) clone->args.push_back(deep_clone_expr(*arg));
-    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
+    if (expr.lhs.get() != nullptr) clone->lhs = deep_clone_expr(*expr.lhs);
+    if (expr.rhs.get() != nullptr) clone->rhs = deep_clone_expr(*expr.rhs);
+    if (expr.third.get() != nullptr) clone->third = deep_clone_expr(*expr.third);
+    for (std::size_t i = 0; i < expr.args.size(); i++) clone->args.push_back(deep_clone_expr(*expr.args[i]));
+    for (std::size_t i = 0; i < expr.explicit_template_args.size(); i++) {
+        const ExplicitTemplateArg& arg = expr.explicit_template_args[i];
         ExplicitTemplateArg cloned_arg = arg;
-        if (!arg.is_type && arg.value) cloned_arg.value = std::shared_ptr<Expr>(deep_clone_expr(*arg.value).release());
+        if (!arg.is_type && arg.value) {
+            std::shared_ptr<Expr> cloned_value{deep_clone_expr(*arg.value).release()};
+            cloned_arg.value = std::move(cloned_value);
+        }
         clone->explicit_template_args.push_back(std::move(cloned_arg));
     }
-    for (const LambdaCapture& capture : expr.lambda_captures) {
+    for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
+        const LambdaCapture& capture = expr.lambda_captures[i];
         LambdaCapture cloned_capture{};
         cloned_capture.name = capture.name;
         cloned_capture.by_reference = capture.by_reference;
-        if (capture.init) cloned_capture.init = deep_clone_expr(*capture.init);
+        if (capture.init.get() != nullptr) cloned_capture.init = deep_clone_expr(*capture.init);
         clone->lambda_captures.push_back(std::move(cloned_capture));
     }
     clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-    for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
+    for (std::size_t i = 0; i < expr.lambda_params.size(); i++) clone->lambda_params.push_back(deep_clone_param(expr.lambda_params[i]));
     clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
     clone->lambda_is_mutable = expr.lambda_is_mutable;
-    if (expr.lambda_body) clone->lambda_body = deep_clone_stmt(*expr.lambda_body);
+    if (expr.lambda_body.get() != nullptr) clone->lambda_body = deep_clone_stmt(*expr.lambda_body);
     return clone;
 }
 
@@ -755,27 +772,30 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
     clone->loc = stmt.loc;
     clone->type = stmt.type;
     clone->var_name = stmt.var_name;
-    if (stmt.init) clone->init = deep_clone_expr(*stmt.init);
+    if (stmt.init.get() != nullptr) clone->init = deep_clone_expr(*stmt.init);
     clone->alignment_specs = stmt.alignment_specs;
     clone->resolved_alignment = stmt.resolved_alignment;
     clone->is_const = stmt.is_const;
     clone->is_constexpr = stmt.is_constexpr;
     clone->is_static_local = stmt.is_static_local;
     clone->has_ctor_args = stmt.has_ctor_args;
-    for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(deep_clone_expr(*arg));
-    if (stmt.expr) clone->expr = deep_clone_expr(*stmt.expr);
-    if (stmt.condition) clone->condition = deep_clone_expr(*stmt.condition);
+    for (std::size_t i = 0; i < stmt.ctor_args.size(); i++) clone->ctor_args.push_back(deep_clone_expr(*stmt.ctor_args[i]));
+    if (stmt.expr.get() != nullptr) clone->expr = deep_clone_expr(*stmt.expr);
+    if (stmt.condition.get() != nullptr) clone->condition = deep_clone_expr(*stmt.condition);
     clone->if_mode = stmt.if_mode;
-    if (stmt.then_branch) clone->then_branch = deep_clone_stmt(*stmt.then_branch);
-    if (stmt.else_branch) clone->else_branch = deep_clone_stmt(*stmt.else_branch);
-    for (const SwitchCase& switch_case : stmt.switch_cases) {
+    if (stmt.then_branch.get() != nullptr) clone->then_branch = deep_clone_stmt(*stmt.then_branch);
+    if (stmt.else_branch.get() != nullptr) clone->else_branch = deep_clone_stmt(*stmt.else_branch);
+    for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
+        const SwitchCase& switch_case = stmt.switch_cases[i];
         SwitchCase cloned_case{};
         cloned_case.loc = switch_case.loc;
-        if (switch_case.value) cloned_case.value = deep_clone_expr(*switch_case.value);
-        for (const StmtPtr& child : switch_case.statements) cloned_case.statements.push_back(deep_clone_stmt(*child));
+        if (switch_case.value.get() != nullptr) cloned_case.value = deep_clone_expr(*switch_case.value);
+        for (std::size_t j = 0; j < switch_case.statements.size(); j++) {
+            cloned_case.statements.push_back(deep_clone_stmt(*switch_case.statements[j]));
+        }
         clone->switch_cases.push_back(std::move(cloned_case));
     }
-    for (const StmtPtr& child : stmt.statements) clone->statements.push_back(deep_clone_stmt(*child));
+    for (std::size_t i = 0; i < stmt.statements.size(); i++) clone->statements.push_back(deep_clone_stmt(*stmt.statements[i]));
     clone->is_unsafe = stmt.is_unsafe;
     return clone;
 }
@@ -831,15 +851,19 @@ struct MemberInitializer {
     clone->name = expr.name;
     clone->explicit_global_qualification = expr.explicit_global_qualification;
     clone->binary_op = expr.binary_op;
-    if (expr.lhs) clone->lhs = clone_initializer_expr(*expr.lhs);
-    if (expr.rhs) clone->rhs = clone_initializer_expr(*expr.rhs);
-    if (expr.third) clone->third = clone_initializer_expr(*expr.third);
+    if (expr.lhs.get() != nullptr) clone->lhs = clone_initializer_expr(*expr.lhs);
+    if (expr.rhs.get() != nullptr) clone->rhs = clone_initializer_expr(*expr.rhs);
+    if (expr.third.get() != nullptr) clone->third = clone_initializer_expr(*expr.third);
     clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
     clone->unary_op = expr.unary_op;
-    for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_initializer_expr(*arg));
+    for (std::size_t i = 0; i < expr.args.size(); i++) clone->args.push_back(clone_initializer_expr(*expr.args[i]));
     clone->explicit_template_args = expr.explicit_template_args;
-    for (ExplicitTemplateArg& arg : clone->explicit_template_args) {
-        if (arg.value) arg.value = std::shared_ptr<Expr>(clone_initializer_expr(*arg.value).release());
+    for (std::size_t i = 0; i < clone->explicit_template_args.size(); i++) {
+        ExplicitTemplateArg& arg = clone->explicit_template_args[i];
+        if (arg.value.get() != nullptr) {
+            std::shared_ptr<Expr> cloned_value{clone_initializer_expr(*arg.value).release()};
+            arg.value = std::move(cloned_value);
+        }
     }
     clone->type = expr.type;
     clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
@@ -849,18 +873,19 @@ struct MemberInitializer {
     clone->implicit_arrow_deref = expr.implicit_arrow_deref;
     clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
     clone->lambda_captures.clear();
-    for (const LambdaCapture& capture : expr.lambda_captures) {
+    for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
+        const LambdaCapture& capture = expr.lambda_captures[i];
         LambdaCapture cloned{};
         cloned.name = capture.name;
         cloned.by_reference = capture.by_reference;
-        if (capture.init) cloned.init = clone_initializer_expr(*capture.init);
+        if (capture.init.get() != nullptr) cloned.init = clone_initializer_expr(*capture.init);
         clone->lambda_captures.push_back(std::move(cloned));
     }
     clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-    for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
+    for (std::size_t i = 0; i < expr.lambda_params.size(); i++) clone->lambda_params.push_back(deep_clone_param(expr.lambda_params[i]));
     clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
     clone->lambda_is_mutable = expr.lambda_is_mutable;
-    if (expr.lambda_body) clone->lambda_body = clone_initializer_stmt(*expr.lambda_body);
+    if (expr.lambda_body.get() != nullptr) clone->lambda_body = clone_initializer_stmt(*expr.lambda_body);
     return clone;
 }
 
@@ -870,27 +895,27 @@ struct MemberInitializer {
     clone->loc = stmt.loc;
     clone->type = stmt.type;
     clone->var_name = stmt.var_name;
-    if (stmt.init) clone->init = clone_initializer_expr(*stmt.init);
+    if (stmt.init.get() != nullptr) clone->init = clone_initializer_expr(*stmt.init);
     clone->alignment_specs = stmt.alignment_specs;
     clone->resolved_alignment = stmt.resolved_alignment;
     clone->is_const = stmt.is_const;
     clone->is_constexpr = stmt.is_constexpr;
     clone->is_static_local = stmt.is_static_local;
     clone->has_ctor_args = stmt.has_ctor_args;
-    for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_initializer_expr(*arg));
-    if (stmt.expr) clone->expr = clone_initializer_expr(*stmt.expr);
-    if (stmt.condition) clone->condition = clone_initializer_expr(*stmt.condition);
+    for (std::size_t i = 0; i < stmt.ctor_args.size(); i++) clone->ctor_args.push_back(clone_initializer_expr(*stmt.ctor_args[i]));
+    if (stmt.expr.get() != nullptr) clone->expr = clone_initializer_expr(*stmt.expr);
+    if (stmt.condition.get() != nullptr) clone->condition = clone_initializer_expr(*stmt.condition);
     clone->if_mode = stmt.if_mode;
-    if (stmt.then_branch) clone->then_branch = clone_initializer_stmt(*stmt.then_branch);
-    if (stmt.else_branch) clone->else_branch = clone_initializer_stmt(*stmt.else_branch);
-    for (const StmtPtr& nested : stmt.statements) clone->statements.push_back(clone_initializer_stmt(*nested));
+    if (stmt.then_branch.get() != nullptr) clone->then_branch = clone_initializer_stmt(*stmt.then_branch);
+    if (stmt.else_branch.get() != nullptr) clone->else_branch = clone_initializer_stmt(*stmt.else_branch);
+    for (std::size_t i = 0; i < stmt.statements.size(); i++) clone->statements.push_back(clone_initializer_stmt(*stmt.statements[i]));
     clone->is_unsafe = stmt.is_unsafe;
     return clone;
 }
 
 [[nodiscard]] inline GlobalVar clone_global_var(const GlobalVar& global) {
     GlobalVar clone{};
-    if (global.decl) clone.decl = clone_initializer_stmt(*global.decl);
+    if (global.decl.get() != nullptr) clone.decl = clone_initializer_stmt(*global.decl);
     clone.namespace_path = global.namespace_path;
     clone.is_exported = global.is_exported;
     clone.owning_module = global.owning_module;
@@ -899,23 +924,21 @@ struct MemberInitializer {
 
 inline AlignmentSpecifier::AlignmentSpecifier(const AlignmentSpecifier& other)
     : loc{other.loc}, operand_is_type{other.operand_is_type}, type{other.type} {
-    if (other.expr) expr = clone_initializer_expr(*other.expr);
+    if (other.expr.get() != nullptr) expr = clone_initializer_expr(*other.expr);
 }
 
 inline AlignmentSpecifier& AlignmentSpecifier::operator=(const AlignmentSpecifier& other) {
-    if (this == &other) return *this;
     AlignmentSpecifier clone{other};
     *this = std::move(clone);
     return *this;
 }
 
 inline Initializer::Initializer(const Initializer& other) : has_brace_args{other.has_brace_args} {
-    if (other.expr) expr = clone_initializer_expr(*other.expr);
-    for (const ExprPtr& arg : other.brace_args) brace_args.push_back(clone_initializer_expr(*arg));
+    if (other.expr.get() != nullptr) expr = clone_initializer_expr(*other.expr);
+    for (std::size_t i = 0; i < other.brace_args.size(); i++) brace_args.push_back(clone_initializer_expr(*other.brace_args[i]));
 }
 
 inline Initializer& Initializer::operator=(const Initializer& other) {
-    if (this == &other) return *this;
     Initializer clone{other};
     *this = std::move(clone);
     return *this;
@@ -1546,14 +1569,16 @@ struct ClassDef {
     std::string nodiscard_reason;
 
     [[nodiscard]] const BaseSpecifier* direct_ordinary_base() const {
-        for (const BaseSpecifier& base : base_specifiers) {
+        for (std::size_t i = 0; i < base_specifiers.size(); i++) {
+            const BaseSpecifier& base = base_specifiers[i];
             if (base.kind != BaseClassKind::Interface) return &base;
         }
         return nullptr;
     }
 
     [[nodiscard]] BaseSpecifier* direct_ordinary_base() {
-        for (BaseSpecifier& base : base_specifiers) {
+        for (std::size_t i = 0; i < base_specifiers.size(); i++) {
+            BaseSpecifier& base = base_specifiers[i];
             if (base.kind != BaseClassKind::Interface) return &base;
         }
         return nullptr;
@@ -1739,10 +1764,11 @@ struct Program {
                                                           const std::string& name, bool explicit_global_qualification = false) {
     if (program == nullptr) return nullptr;
     auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
-        return global.decl != nullptr && std::string_view{global.decl->var_name} == candidate;
+        return global.decl.get() != nullptr && std::string_view{global.decl->var_name} == candidate;
     };
     if (explicit_global_qualification) {
-        for (const GlobalVar& global : program->globals) {
+        for (std::size_t i = 0; i < program->globals.size(); i++) {
+            const GlobalVar& global = program->globals[i];
             if (matches_name(global, name)) return &global;
         }
         return nullptr;
@@ -1755,11 +1781,13 @@ struct Program {
         }
         candidate += "::";
         candidate += name;
-        for (const GlobalVar& global : program->globals) {
+        for (std::size_t i = 0; i < program->globals.size(); i++) {
+            const GlobalVar& global = program->globals[i];
             if (matches_name(global, candidate)) return &global;
         }
     }
-    for (const GlobalVar& global : program->globals) {
+    for (std::size_t i = 0; i < program->globals.size(); i++) {
+        const GlobalVar& global = program->globals[i];
         if (matches_name(global, name)) return &global;
     }
     return nullptr;
@@ -1780,7 +1808,7 @@ struct TypeLayoutInfo {
     struct LayoutComputer {
         const Program& program;
         TargetLayoutInfo target;
-        std::unordered_set<std::string> visiting_named_types;
+        std::unordered_set<std::string> visiting_named_types{};
 
         [[nodiscard]] static std::uint64_t align_up(std::uint64_t value, std::uint64_t align) {
             if (align <= 1) return value;
@@ -1788,7 +1816,8 @@ struct TypeLayoutInfo {
         }
 
         [[nodiscard]] const EnumDef* find_enum(std::string_view name) const {
-            for (const EnumDef& def : program.enums) {
+            for (std::size_t i = 0; i < program.enums.size(); i++) {
+                const EnumDef& def = program.enums[i];
                 if (std::string_view{def.name} == name) return &def;
             }
             return nullptr;
@@ -1796,7 +1825,8 @@ struct TypeLayoutInfo {
 
         [[nodiscard]] const StructDef* find_struct(std::string_view name) const {
             const StructDef* forward_decl = nullptr;
-            for (const StructDef& def : program.structs) {
+            for (std::size_t i = 0; i < program.structs.size(); i++) {
+                const StructDef& def = program.structs[i];
                 if (std::string_view{def.name} != name) continue;
                 if (!def.is_forward_declaration) return &def;
                 if (forward_decl == nullptr) forward_decl = &def;
@@ -1806,7 +1836,8 @@ struct TypeLayoutInfo {
 
         [[nodiscard]] const ClassDef* find_class(std::string_view name) const {
             const ClassDef* forward_decl = nullptr;
-            for (const ClassDef& def : program.classes) {
+            for (std::size_t i = 0; i < program.classes.size(); i++) {
+                const ClassDef& def = program.classes[i];
                 if (std::string_view{def.name} != name) continue;
                 if (!def.is_forward_declaration) return &def;
                 if (forward_decl == nullptr) forward_decl = &def;
@@ -1826,150 +1857,145 @@ struct TypeLayoutInfo {
                 return TypeLayoutInfo{8, 8};
             }
             if (name == "size_t" || name == "ptrdiff_t") {
-                std::uint64_t align = std::max<std::uint64_t>(target.pointer_align_bytes, 1);
+                std::uint64_t align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
                 return TypeLayoutInfo{target.pointer_size_bytes, align};
             }
             return std::nullopt;
         }
 
-        [[nodiscard]] std::optional<TypeLayoutInfo> operator()(const Type& current) {
-            switch (current.kind) {
-                case TypeKind::Pointer:
-                case TypeKind::Reference:
-                case TypeKind::FunctionPointer: {
-                    std::uint64_t align = std::max<std::uint64_t>(target.pointer_align_bytes, 1);
-                    if ((current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference) && current.pointee &&
-                        current.pointee->kind == TypeKind::Named) {
-                        if (const ClassDef* referent = find_class(current.pointee->name);
-                            referent != nullptr && referent->is_interface) {
-                            return TypeLayoutInfo{target.pointer_size_bytes * 2, align};
-                        }
+        [[nodiscard]] std::optional<TypeLayoutInfo> compute(const Type& current) {
+            if (current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference ||
+                current.kind == TypeKind::FunctionPointer) {
+                std::uint64_t align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
+                if ((current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference) && current.pointee &&
+                    current.pointee->kind == TypeKind::Named) {
+                    const ClassDef* referent = find_class(current.pointee->name);
+                    if (referent != nullptr && referent->is_interface) {
+                        return TypeLayoutInfo{target.pointer_size_bytes * 2, align};
                     }
-                    return TypeLayoutInfo{target.pointer_size_bytes, align};
                 }
-                case TypeKind::Function:
-                    return std::nullopt;
-                case TypeKind::Span: {
-                    std::uint64_t pointer_align = std::max<std::uint64_t>(target.pointer_align_bytes, 1);
-                    std::uint64_t count_align = 8;
-                    std::uint64_t size = align_up(target.pointer_size_bytes, count_align) + 8;
-                    return TypeLayoutInfo{align_up(size, std::max(pointer_align, count_align)),
-                                          std::max(pointer_align, count_align)};
-                }
-                case TypeKind::Array: {
-                    if (!current.element || current.array_size < 0) return std::nullopt;
-                    std::optional<TypeLayoutInfo> element = (*this)(*current.element);
-                    if (!element.has_value()) return std::nullopt;
-                    return TypeLayoutInfo{element->size_bytes * static_cast<std::uint64_t>(current.array_size),
-                                          element->abi_align_bytes};
-                }
-                case TypeKind::Named: {
-                    if (current.name == "void") return std::nullopt;
-                    if (std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name)) return scalar;
-                    if (const EnumDef* def = find_enum(current.name)) return (*this)(def->underlying_type);
-                    if (visiting_named_types.contains(current.name)) return std::nullopt;
-                    visiting_named_types.insert(current.name);
-                    auto clear_visit = [&]() { visiting_named_types.erase(current.name); };
-                    if (const StructDef* def = find_struct(current.name)) {
-                        if (def->is_forward_declaration) {
-                            clear_visit();
-                            return std::nullopt;
-                        }
-                        if (!def->is_union) {
-                            std::uint64_t offset = 0;
-                            std::uint64_t overall_align = 1;
-                            for (const StructField& field : def->fields) {
-                                std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
-                                if (!field_layout.has_value()) {
-                                    clear_visit();
-                                    return std::optional<TypeLayoutInfo>{};
-                                }
-                                std::uint64_t field_align =
-                                    def->is_packed ? std::uint64_t{1}
-                                                   : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
-                                offset = align_up(offset, field_align);
-                                offset += field_layout->size_bytes;
-                                overall_align = std::max(overall_align, field_align);
-                            }
-                            overall_align = def->is_packed ? 1 : std::max(overall_align, def->resolved_alignment);
-                            clear_visit();
-                            return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
-                        }
-                        if (def->fields.empty()) {
-                            clear_visit();
-                            return std::nullopt;
-                        }
-                        std::uint64_t max_size = 0;
-                        std::uint64_t overall_align = 1;
-                        for (const StructField& field : def->fields) {
-                            std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
-                            if (!field_layout.has_value()) {
-                                clear_visit();
-                                return std::optional<TypeLayoutInfo>{};
-                            }
-                            max_size = std::max(max_size, field_layout->size_bytes);
-                            overall_align = std::max(
-                                overall_align,
-                                def->is_packed ? std::uint64_t{1}
-                                               : std::max(field_layout->abi_align_bytes, field.resolved_alignment));
-                        }
-                        overall_align = def->is_packed ? 1 : std::max(overall_align, def->resolved_alignment);
+                return TypeLayoutInfo{target.pointer_size_bytes, align};
+            }
+            if (current.kind == TypeKind::Function) return std::nullopt;
+            if (current.kind == TypeKind::Span) {
+                std::uint64_t pointer_align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
+                std::uint64_t count_align = 8;
+                std::uint64_t size = align_up(target.pointer_size_bytes, count_align) + 8;
+                return TypeLayoutInfo{align_up(size, std::max(pointer_align, count_align)),
+                                      std::max(pointer_align, count_align)};
+            }
+            if (current.kind == TypeKind::Array) {
+                if (!current.element || current.array_size < 0) return std::nullopt;
+                std::optional<TypeLayoutInfo> element = this->compute(*current.element);
+                if (!element.has_value()) return std::nullopt;
+                return TypeLayoutInfo{element->size_bytes * static_cast<std::uint64_t>(current.array_size),
+                                      element->abi_align_bytes};
+            }
+            if (current.kind == TypeKind::Named) {
+                if (current.name == "void") return std::nullopt;
+                std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name);
+                if (scalar.has_value()) return scalar;
+                const EnumDef* enum_def = find_enum(current.name);
+                if (enum_def != nullptr) return this->compute(enum_def->underlying_type);
+                if (visiting_named_types.contains(current.name)) return std::nullopt;
+                visiting_named_types.insert(current.name);
+                auto clear_visit = [&]() { visiting_named_types.erase(current.name); };
+                const StructDef* struct_def = find_struct(current.name);
+                if (struct_def != nullptr) {
+                    if (struct_def->is_forward_declaration) {
                         clear_visit();
-                        return TypeLayoutInfo{align_up(max_size, overall_align), overall_align};
+                        return std::nullopt;
                     }
-                    if (const ClassDef* def = find_class(current.name)) {
-                        if (def->is_forward_declaration) {
-                            clear_visit();
-                            return std::nullopt;
-                        }
+                    if (!struct_def->is_union) {
                         std::uint64_t offset = 0;
                         std::uint64_t overall_align = 1;
-                        if (const BaseSpecifier* base = def->direct_ordinary_base()) {
-                            std::optional<TypeLayoutInfo> base_layout = (*this)(base->base_type);
-                            if (!base_layout.has_value()) {
-                                clear_visit();
-                                return std::optional<TypeLayoutInfo>{};
-                            }
-                            offset = base_layout->size_bytes;
-                            overall_align = std::max(overall_align, base_layout->abi_align_bytes);
-                        }
-                        // Mirrors Codegen::declare_class's `has_ordinary_vtable &&
-                        // llvm_field_types.empty()` check: every non-interface class
-                        // gets an implicit leading vtable pointer *unless* an ordinary
-                        // base already contributed one (offset > 0 here means the base
-                        // already supplied at least a vtable pointer and/or fields).
-                        // Omitting this made sizeof()/alignof() disagree with the real,
-                        // ABI object size for any class with a vtable (i.e. virtually
-                        // every class, since a virtual destructor is mandatory --
-                        // ch11 §11.5(1)), silently under-reporting size by one pointer.
-                        if (!def->is_interface && offset == 0) {
-                            offset = target.pointer_size_bytes;
-                            overall_align = std::max(overall_align, target.pointer_align_bytes);
-                        }
-                        for (const ClassField& field : def->fields) {
-                            std::optional<TypeLayoutInfo> field_layout = (*this)(field.type);
+                        for (std::size_t i = 0; i < struct_def->fields.size(); i++) {
+                            const StructField& field = struct_def->fields[i];
+                            std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                             if (!field_layout.has_value()) {
                                 clear_visit();
-                                return std::optional<TypeLayoutInfo>{};
+                                return std::nullopt;
                             }
-                            std::uint64_t field_align = std::max(field_layout->abi_align_bytes, field.resolved_alignment);
+                            std::uint64_t field_align =
+                                struct_def->is_packed ? 1 : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
                             offset = align_up(offset, field_align);
                             offset += field_layout->size_bytes;
                             overall_align = std::max(overall_align, field_align);
                         }
-                        overall_align = std::max(overall_align, def->resolved_alignment);
+                        overall_align =
+                            struct_def->is_packed ? 1 : std::max(overall_align, struct_def->resolved_alignment);
                         clear_visit();
                         return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
                     }
+                    if (struct_def->fields.empty()) {
+                        clear_visit();
+                        return std::nullopt;
+                    }
+                    std::uint64_t max_size = 0;
+                    std::uint64_t overall_align = 1;
+                    for (std::size_t i = 0; i < struct_def->fields.size(); i++) {
+                        const StructField& field = struct_def->fields[i];
+                        std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
+                        if (!field_layout.has_value()) {
+                            clear_visit();
+                            return std::nullopt;
+                        }
+                        max_size = std::max(max_size, field_layout->size_bytes);
+                        std::uint64_t field_align =
+                            struct_def->is_packed ? 1 : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
+                        overall_align = std::max(overall_align, field_align);
+                    }
+                    overall_align = struct_def->is_packed ? 1 : std::max(overall_align, struct_def->resolved_alignment);
                     clear_visit();
-                    return std::nullopt;
+                    return TypeLayoutInfo{align_up(max_size, overall_align), overall_align};
                 }
+                const ClassDef* class_def = find_class(current.name);
+                if (class_def != nullptr) {
+                    if (class_def->is_forward_declaration) {
+                        clear_visit();
+                        return std::nullopt;
+                    }
+                    std::uint64_t offset = 0;
+                    std::uint64_t overall_align = 1;
+                    const BaseSpecifier* base = class_def->direct_ordinary_base();
+                    if (base != nullptr) {
+                        std::optional<TypeLayoutInfo> base_layout = this->compute(base->base_type);
+                        if (!base_layout.has_value()) {
+                            clear_visit();
+                            return std::nullopt;
+                        }
+                        offset = base_layout->size_bytes;
+                        overall_align = std::max(overall_align, base_layout->abi_align_bytes);
+                    }
+                    if (!class_def->is_interface && offset == 0) {
+                        offset = target.pointer_size_bytes;
+                        overall_align = std::max(overall_align, target.pointer_align_bytes);
+                    }
+                    for (std::size_t i = 0; i < class_def->fields.size(); i++) {
+                        const ClassField& field = class_def->fields[i];
+                        std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
+                        if (!field_layout.has_value()) {
+                            clear_visit();
+                            return std::nullopt;
+                        }
+                        std::uint64_t field_align = std::max(field_layout->abi_align_bytes, field.resolved_alignment);
+                        offset = align_up(offset, field_align);
+                        offset += field_layout->size_bytes;
+                        overall_align = std::max(overall_align, field_align);
+                    }
+                    overall_align = std::max(overall_align, class_def->resolved_alignment);
+                    clear_visit();
+                    return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
+                }
+                clear_visit();
+                return std::nullopt;
             }
             return std::nullopt;
         }
     };
 
-    return LayoutComputer{program, target, {}}(type);
+    LayoutComputer layout{program, target};
+    return layout.compute(type);
 }
 
 } // namespace scpp
