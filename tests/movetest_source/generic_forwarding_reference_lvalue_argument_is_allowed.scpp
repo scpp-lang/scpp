@@ -1,0 +1,12 @@
+// ch05 §5.11: a deduced `T&&` parameter is a forwarding reference, so an
+// lvalue argument binds by reference after collapsing instead of being
+// rejected like a fixed move-only `U&&` parameter.
+template<typename T>
+int invoke_twice(T&& fn, int x) {
+    return fn(x) + fn(x + 1);
+}
+
+int main() {
+    auto add_one = [](int value) -> int { return value + 1; };
+    return invoke_twice(add_one, 3) - 9;
+}

@@ -1,0 +1,14 @@
+class Box {
+public:
+    virtual ~Box() { return; }
+public:
+    int value;
+};
+
+int main() {
+    Box box{};
+    Box& ref = box;
+    int& value_ref = ref.value;
+    ref.value = 1;
+    return value_ref;
+}
