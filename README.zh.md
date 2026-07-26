@@ -55,7 +55,7 @@ int legacy(int* p) {
 
 ## 构建
 
-需要支持 C++23 modules 的 Clang、CMake 3.28+、Ninja、LLVM 开发包、
+需要支持 C++26 modules 的 Clang、CMake 3.28+、Ninja、LLVM 开发包、
 SQLite 开发头文件/库，以及一个 `g++` 安装（用于其 `libstdc++` 开发文件，
 详见下文）。
 在 Debian/Ubuntu 上：

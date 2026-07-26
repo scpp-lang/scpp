@@ -26,7 +26,7 @@ output = [
     "nativea_value.o",
 ]
 command = """\
-${CXX:-c++} -std=c++23 -O2 -c \
+${CXX:-c++} -std=c++26 -O2 -c \
 src/nativea_value.cpp -o nativea_value.o
 """
 
@@ -38,6 +38,6 @@ output = [
     "nativeb_value.o",
 ]
 command = """\
-${CXX:-c++} -std=c++23 -O2 -c \
+${CXX:-c++} -std=c++26 -O2 -c \
 src/nativeb_value.cpp -o nativeb_value.o
 """
