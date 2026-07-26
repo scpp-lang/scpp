@@ -174,13 +174,11 @@ namespace scpp {
             return !fn.member_owner_class.empty() && generic_type_template_names.contains(fn.member_owner_class);
         };
         for (const Function& fn : program.functions) {
-            if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
             if (is_never_compiled(fn)) continue;
             declare_function(fn);
         }
         if (!program.globals.empty()) define_global_initializers(program);
         for (const Function& fn : program.functions) {
-            if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
             if (is_never_compiled(fn)) continue;
             if (fn.body != nullptr) {
                 define_function(fn);
@@ -232,8 +230,10 @@ namespace scpp {
                                                                       bool explicit_global_qualification) const
 {
         if (program_ == nullptr) return nullptr;
+        std::reference_wrapper<const Program> program_ref{*program_};
         const GlobalVar* global =
-            find_visible_global(program_, current_lookup_namespace_path(), name, explicit_global_qualification);
+            find_visible_global(OptionalProgramRef{program_ref}, current_lookup_namespace_path(), name,
+                                explicit_global_qualification);
         if (global == nullptr || global->decl == nullptr) return nullptr;
         auto it = globals_.find(global->decl->var_name);
         return it == globals_.end() ? nullptr : &it->second;

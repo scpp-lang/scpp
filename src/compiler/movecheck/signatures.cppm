@@ -126,7 +126,6 @@ void validate_lifetime_annotation_placement(const Function& fn);
 // real C++, is out of scope for this recognition).
 [[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
-        if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
         if (is_copy_constructor_function(fn) && fn.member_owner_class == class_name) {
             return true;
         }
@@ -143,7 +142,6 @@ void validate_lifetime_annotation_placement(const Function& fn);
 // operator this recognizes).
 [[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
-        if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
         if (is_copy_assignment_function(fn) && fn.member_owner_class == class_name) {
             return true;
         }
@@ -154,11 +152,8 @@ void validate_lifetime_annotation_placement(const Function& fn);
 [[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
         if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
-        const Type& this_param = fn.params[0].type;
-        if (this_param.kind == TypeKind::Reference && this_param.is_mutable_ref && this_param.pointee &&
-            this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == class_name) {
-            return true;
-        }
+        if (fn.member_owner_class != class_name) continue;
+        if (is_special_member_this_param(fn.params[0].type, class_name)) return true;
     }
     return false;
 }
@@ -217,8 +212,7 @@ void validate_lifetime_annotation_placement(const Function& fn);
 
 [[nodiscard]] bool class_has_any_constructor(const std::string& class_name, const Program& program) {
     return std::any_of(program.functions.begin(), program.functions.end(), [&](const Function& fn) {
-        return is_constructor_function(fn) && fn.member_owner_class == class_name &&
-               !is_defaulted_special_member_equivalent_to_implicit_omission(fn);
+        return is_constructor_function(fn) && fn.member_owner_class == class_name;
     });
 }
 
@@ -797,7 +791,6 @@ void validate_operator_arrow_signature(const Function& fn) {
 [[nodiscard]] Signatures build_signatures(const Program& program) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
-        if (is_defaulted_special_member_equivalent_to_implicit_omission(fn)) continue;
         validate_equality_operator_signature(fn);
         validate_operator_arrow_signature(fn);
         FunctionSignature sig;

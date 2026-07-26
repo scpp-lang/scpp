@@ -53,11 +53,9 @@ namespace scpp {
 {
         for (const Function& fn : program_->functions) {
             if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
+            if (fn.member_owner_class != class_name) continue;
             const Type& this_param = fn.params[0].type;
-            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
-                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
-                continue;
-            }
+            if (!is_special_member_this_param(this_param, class_name)) continue;
             return llvm::LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
         }
         return nullptr;
@@ -68,11 +66,9 @@ namespace scpp {
 {
         for (const Function& fn : program_->functions) {
             if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
+            if (fn.member_owner_class != class_name) continue;
             const Type& this_param = fn.params[0].type;
-            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
-                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
-                continue;
-            }
+            if (!is_special_member_this_param(this_param, class_name)) continue;
             return &fn;
         }
         return nullptr;
@@ -104,16 +100,11 @@ namespace scpp {
 {
         for (const Function& fn : program_->functions) {
             if (!fn.name.ends_with("_new") || fn.params.size() != 2) continue;
+            if (fn.member_owner_class != class_name) continue;
             const Type& this_param = fn.params[0].type;
-            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
-                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
-                continue;
-            }
+            if (!is_special_member_this_param(this_param, class_name)) continue;
             const Type& p = fn.params[1].type;
-            if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
-                p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
-                return &fn;
-            }
+            if (is_special_member_const_lvalue_self_param(p, class_name)) return &fn;
         }
         return nullptr;
     }
@@ -123,16 +114,11 @@ namespace scpp {
 {
         for (const Function& fn : program_->functions) {
             if (!fn.name.ends_with("_operator_assign") || fn.params.size() != 2) continue;
+            if (fn.member_owner_class != class_name) continue;
             const Type& this_param = fn.params[0].type;
-            if (this_param.kind != TypeKind::Reference || !this_param.is_mutable_ref || !this_param.pointee ||
-                this_param.pointee->kind != TypeKind::Named || this_param.pointee->name != class_name) {
-                continue;
-            }
+            if (!is_special_member_this_param(this_param, class_name)) continue;
             const Type& p = fn.params[1].type;
-            if (p.kind == TypeKind::Reference && !p.is_rvalue_ref && !p.is_mutable_ref && p.pointee &&
-                p.pointee->kind == TypeKind::Named && p.pointee->name == class_name) {
-                return &fn;
-            }
+            if (is_special_member_const_lvalue_self_param(p, class_name)) return &fn;
         }
         return nullptr;
     }

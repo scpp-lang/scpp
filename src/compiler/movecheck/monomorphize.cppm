@@ -157,7 +157,10 @@ public:
             // call site is instead resolved directly below (this same
             // walk, over an *already-monomorphized* caller's own body)
             // by monomorphize_generic_function_call.
-            if (!program_.functions[i].template_params.empty()) continue;
+            if (!program_.functions[i].template_params.empty() ||
+                !program_.functions[i].generic_method_owner_id.empty()) {
+                continue;
+            }
             rewrite_implicit_member_field_access(program_.functions[i]);
             // build_mir's own Body holds raw (const Expr*) pointers into
             // this Function's *own* Stmt/Expr tree (see mir.cppm's

@@ -696,8 +696,17 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 if (body.static_lifetime_locals.contains(expr.name)) return program_lifetime_root();
                 return single_root(expr.name);
             }
-            if (find_visible_global(body.program, body.function_namespace_path, expr.name,
-                                    expr.explicit_global_qualification) != nullptr) {
+            const GlobalVar* visible_global = nullptr;
+            if (body.program != nullptr) {
+                std::reference_wrapper<const Program> program_ref{*body.program};
+                visible_global = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path,
+                                                     expr.name, expr.explicit_global_qualification);
+            } else {
+                visible_global =
+                    find_visible_global(OptionalProgramRef{}, body.function_namespace_path, expr.name,
+                                        expr.explicit_global_qualification);
+            }
+            if (visible_global != nullptr) {
                 return program_lifetime_root();
             }
             return single_root(expr.name);

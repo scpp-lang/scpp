@@ -148,10 +148,20 @@ namespace scpp {
         if (!fn.is_defaulted) {
             throw CodegenError("internal error: asked to define a non-defaulted function without a body", current_loc_);
         }
+        bool is_defaulted_default_constructor = is_default_constructor_function(fn);
+        bool is_defaulted_copy_constructor = is_copy_constructor_function(fn);
+        bool is_defaulted_move_constructor = is_move_constructor_function(fn);
+        bool is_defaulted_copy_assignment = is_copy_assignment_function(fn);
+        bool is_defaulted_move_assignment = is_move_assignment_function(fn);
         bool is_defaulted_destructor = fn.name.ends_with("_delete") && fn.params.size() == 1;
         bool is_defaulted_equality = is_defaulted_equality_operator_function(fn);
-        if (!is_defaulted_destructor && !is_defaulted_equality) {
-            throw CodegenError("only defaulted destructors and equality operators are code-generated in this version", fn.loc);
+        if (!is_defaulted_default_constructor && !is_defaulted_copy_constructor && !is_defaulted_move_constructor &&
+            !is_defaulted_copy_assignment && !is_defaulted_move_assignment && !is_defaulted_destructor &&
+            !is_defaulted_equality) {
+            throw CodegenError(
+                "defaulted function '" + fn.name +
+                    "' is not a supported destructor, constructor, assignment operator, or equality operator",
+                fn.loc);
         }
 
         llvm::LLVMValueRef llvm_fn = llvm::LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
@@ -206,6 +216,49 @@ namespace scpp {
         llvm::LLVMTypeRef this_llvm_type = to_llvm_type(fn.params[0].type);
         llvm::LLVMValueRef this_ptr = llvm::LLVMBuildLoad2(builder_, this_llvm_type, locals_.at("this").alloca, "thisptr");
         const StructInfo& info = info_it->second;
+
+        if (is_defaulted_default_constructor) {
+            if (const ClassDef* class_def = find_class_def(class_name)) {
+                emit_default_initializers_for_class_storage(this_ptr, *class_def, /*initialize_virtual_interface_bases=*/true);
+            }
+            llvm::LLVMBuildRetVoid(builder_);
+            llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
+            current_debug_scope_ = nullptr;
+            current_subprogram_ = nullptr;
+            return;
+        }
+
+        if (is_defaulted_copy_constructor || is_defaulted_move_constructor || is_defaulted_copy_assignment ||
+            is_defaulted_move_assignment) {
+            const Param& other_param = fn.params[1];
+            llvm::LLVMTypeRef other_llvm_type = to_llvm_type(other_param.type);
+            llvm::LLVMValueRef other_ptr =
+                llvm::LLVMBuildLoad2(builder_, other_llvm_type, locals_.at(other_param.name).alloca, "otherptr");
+            if (is_defaulted_copy_constructor) {
+                codegen_memberwise_copy_construct(this_ptr, other_ptr, class_name);
+                llvm::LLVMBuildRetVoid(builder_);
+            } else if (is_defaulted_move_constructor) {
+                llvm::LLVMTypeRef object_llvm_type = to_llvm_type(*this_type.pointee);
+                llvm::LLVMValueRef moved_value = create_load(object_llvm_type, other_ptr, std::nullopt, "movetmp");
+                create_store(moved_value, this_ptr, std::nullopt);
+                zero_initialize_storage(other_ptr, *this_type.pointee, std::nullopt);
+                llvm::LLVMBuildRetVoid(builder_);
+            } else if (is_defaulted_copy_assignment) {
+                codegen_memberwise_copy_assign(this_ptr, other_ptr, class_name);
+                llvm::LLVMBuildRet(builder_, this_ptr);
+            } else {
+                codegen_destroy_old_class_state_for_move_assign(this_ptr, class_name);
+                llvm::LLVMTypeRef object_llvm_type = to_llvm_type(*this_type.pointee);
+                llvm::LLVMValueRef moved_value = create_load(object_llvm_type, other_ptr, std::nullopt, "movetmp");
+                create_store(moved_value, this_ptr, std::nullopt);
+                zero_initialize_storage(other_ptr, *this_type.pointee, std::nullopt);
+                llvm::LLVMBuildRet(builder_, this_ptr);
+            }
+            llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
+            current_debug_scope_ = nullptr;
+            current_subprogram_ = nullptr;
+            return;
+        }
 
         if (is_defaulted_destructor) {
             for (std::size_t i = info.field_types.size(); i > 0; --i) {

@@ -1233,9 +1233,18 @@ struct Function {
 };
 
 [[nodiscard]] inline bool special_member_owner_name_matches(std::string_view spelled_name, std::string_view owner_name) {
+    auto unqualified_name = [](std::string_view name) {
+        std::size_t scope = name.rfind("::");
+        return scope == std::string_view::npos ? name : name.substr(scope + 2);
+    };
+    auto generic_base_name = [&](std::string_view name) {
+        std::string_view tail = unqualified_name(name);
+        std::size_t dot = tail.find('.');
+        return dot == std::string_view::npos ? tail : tail.substr(0, dot);
+    };
     if (spelled_name == owner_name) return true;
-    std::size_t scope = owner_name.rfind("::");
-    return scope < owner_name.size() && spelled_name == owner_name.substr(scope + 2);
+    if (unqualified_name(spelled_name) == unqualified_name(owner_name)) return true;
+    return generic_base_name(spelled_name) == generic_base_name(owner_name);
 }
 
 [[nodiscard]] inline bool is_special_member_this_param(const Type& type, std::string_view owner_name) {
@@ -1757,15 +1766,18 @@ struct Program {
     std::vector<ImportDecl> imports;
 };
 
-[[nodiscard]] inline const GlobalVar* find_visible_global(const Program* program, const std::vector<std::string>& namespace_path,
-                                                          const std::string& name, bool explicit_global_qualification = false) {
-    if (program == nullptr) return nullptr;
+using OptionalProgramRef = std::optional<std::reference_wrapper<const Program>>;
+
+[[nodiscard]] inline const GlobalVar*
+find_visible_global(OptionalProgramRef program, const std::vector<std::string>& namespace_path,
+                    const std::string& name, bool explicit_global_qualification = false) {
+    if (!program.has_value()) return nullptr;
     auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
         return global.decl.get() != nullptr && std::string_view{global.decl->var_name} == candidate;
     };
     if (explicit_global_qualification) {
-        for (std::size_t i = 0; i < program->globals.size(); i++) {
-            const GlobalVar& global = program->globals[i];
+        for (std::size_t i = 0; i < program->get().globals.size(); i++) {
+            const GlobalVar& global = program->get().globals[i];
             if (matches_name(global, name)) return &global;
         }
         return nullptr;
@@ -1778,13 +1790,13 @@ struct Program {
         }
         candidate += "::";
         candidate += name;
-        for (std::size_t i = 0; i < program->globals.size(); i++) {
-            const GlobalVar& global = program->globals[i];
+        for (std::size_t i = 0; i < program->get().globals.size(); i++) {
+            const GlobalVar& global = program->get().globals[i];
             if (matches_name(global, candidate)) return &global;
         }
     }
-    for (std::size_t i = 0; i < program->globals.size(); i++) {
-        const GlobalVar& global = program->globals[i];
+    for (std::size_t i = 0; i < program->get().globals.size(); i++) {
+        const GlobalVar& global = program->get().globals[i];
         if (matches_name(global, name)) return &global;
     }
     return nullptr;
