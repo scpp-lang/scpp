@@ -1,0 +1,22 @@
+namespace calc {
+
+enum class Color { red = 1, green = 2, blue = 3 };
+
+int pick(Color color) {
+    Color chosen = Color::green;
+    if (chosen != Color::green) return 4;
+    switch (color) {
+        case Color::red:
+            return 1;
+        case Color::green:
+            return 0;
+        default:
+            return 2;
+    }
+}
+
+} // namespace calc
+
+int main() {
+    return calc::pick(calc::Color::green);
+}

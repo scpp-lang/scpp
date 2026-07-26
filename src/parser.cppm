@@ -1488,6 +1488,19 @@ private:
         return resolved_owner;
     }
 
+    [[nodiscard]] std::optional<std::string>
+    resolve_value_qualified_type_owner_name(const std::string& spelled_name, bool explicit_global_qualification) const {
+        std::size_t last_separator = spelled_name.rfind("::");
+        if (last_separator == std::string::npos) return std::nullopt;
+        std::string owner_name = spelled_name.substr(0, last_separator);
+        std::string member_name = spelled_name.substr(last_separator + 2);
+        if (owner_name.empty() || member_name.empty()) return std::nullopt;
+        std::string resolved_owner =
+            explicit_global_qualification ? owner_name : resolve_visible_type_name(owner_name);
+        if (resolved_owner.empty() || resolved_owner == owner_name) return std::nullopt;
+        return resolved_owner + "::" + member_name;
+    }
+
     [[nodiscard]] bool types_equal(const Type& a, const Type& b) const {
         if (a.kind != b.kind) return false;
         if (a.name != b.name || a.is_mutable_ref != b.is_mutable_ref ||
@@ -7233,6 +7246,10 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
             node->loc = loc;
+            if (std::optional<std::string> qualified_name =
+                    resolve_value_qualified_type_owner_name(name, /*explicit_global_qualification=*/true)) {
+                name = std::move(*qualified_name);
+            }
             node->name = std::move(name);
             node->explicit_global_qualification = true;
             node->explicit_template_args = std::move(explicit_template_args);
@@ -7432,6 +7449,10 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
             node->loc = loc;
+            if (std::optional<std::string> qualified_name =
+                    resolve_value_qualified_type_owner_name(name, /*explicit_global_qualification=*/false)) {
+                name = std::move(*qualified_name);
+            }
             node->name = name;
             node->explicit_template_args = std::move(explicit_template_args);
             return node;
