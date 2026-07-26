@@ -22,6 +22,10 @@ struct CalleeSignature {
     std::optional<FunctionSignature> direct_signature;
 };
 
+[[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
+    return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
+}
+
 [[nodiscard]] FunctionSignature function_pointer_signature(const Type& type);
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
         void check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
@@ -404,6 +408,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
                                                 const Signatures& signatures) {
+    if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
         // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the mirror image of
         // the ordinary-reference case just below: needs a genuine
@@ -451,6 +456,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] bool constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type,
                                                                    const Body& body, const Signatures& signatures) {
+    if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
         return produces_rvalue_of_type(arg, *param_type.pointee, body, signatures);
     }

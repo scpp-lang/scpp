@@ -65,6 +65,10 @@ namespace {
            is_float_scalar_name(target_type.name);
 }
 
+[[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
+    return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
+}
+
 } // namespace
 
     const StructDef* Codegen::find_struct_def(const std::string& name) const {
@@ -555,6 +559,7 @@ namespace {
 
     bool Codegen::argument_matches_parameter(const Expr& arg, const Type& param_type)
 {
+        if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
         auto argument_type_matches_or_converts = [&](const Type& arg_type, const Type& candidate_param_type) {
             return argument_type_matches_parameter(arg_type, candidate_param_type) ||
                    pointer_to_void_parameter_accepts_pointer_in_unsafe_context(arg_type, candidate_param_type,
@@ -604,6 +609,7 @@ namespace {
 
     bool Codegen::constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type)
 {
+        if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
         if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
             return produces_rvalue_of_type(arg, *param_type.pointee);
         }

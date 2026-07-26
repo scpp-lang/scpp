@@ -6838,6 +6838,33 @@ int main() {
     }
 }
 
+void run_smart_pointer_nullptr_tests() {
+    {
+        std::string case_name = "std_shared_and_unique_ptr_compare_against_nullptr";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    std::shared_ptr<int> empty_shared{};
+    std::shared_ptr<int> full_shared = std::make_shared<int>(7);
+    if (!(empty_shared == nullptr)) return 1;
+    if (empty_shared != nullptr) return 2;
+    if (full_shared == nullptr) return 3;
+    if (!(full_shared != nullptr)) return 4;
+
+    std::unique_ptr<int> empty_unique{};
+    std::unique_ptr<int> full_unique = std::make_unique<int>(9);
+    if (!(empty_unique == nullptr)) return 5;
+    if (empty_unique != nullptr) return 6;
+    if (full_unique == nullptr) return 7;
+    return full_unique != nullptr ? 0 : 8;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_io_tests() {
     {
         std::string case_name = "scpp_io_getline_reads_one_line_without_newline";
@@ -7447,6 +7474,7 @@ int main() {
     run_unordered_set_tests();
     run_expected_tests();
     run_optional_tests();
+    run_smart_pointer_nullptr_tests();
     run_io_tests();
     run_enum_tests();
     run_switch_tests();
