@@ -35,6 +35,7 @@ using RefTargetMap = std::unordered_map<std::string, RefTarget>;
 using ReborrowSuspensionMap = std::unordered_map<std::string, int>;
 using LocalLifetimeSourceMap = std::unordered_map<std::string, RootSet>;
 using ParameterLifetimeMap = std::unordered_map<std::string, LifetimeAnnotation>;
+inline constexpr std::string_view kProgramLifetimeRoot = "<program-lifetime>";
 
 struct ClosureCaptureBorrow {
     std::string root;
@@ -86,6 +87,8 @@ RootSet canonicalize_roots(RootSet roots);
 RootSet union_roots(RootSet lhs, const RootSet& rhs);
 [[nodiscard]] std::string format_roots(const RootSet& roots);
 [[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name);
+[[nodiscard]] RootSet program_lifetime_root();
+[[nodiscard]] bool is_program_lifetime_root(std::string_view root);
 
 bool DataflowState::operator==(const DataflowState& other) const {
     return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
@@ -246,6 +249,10 @@ RootSet canonicalize_roots(RootSet roots) {
 }
 
 [[nodiscard]] RootSet single_root(std::string root) { return RootSet{std::move(root)}; }
+
+[[nodiscard]] RootSet program_lifetime_root() { return single_root(std::string(kProgramLifetimeRoot)); }
+
+[[nodiscard]] bool is_program_lifetime_root(std::string_view root) { return root == kProgramLifetimeRoot; }
 
 RootSet union_roots(RootSet lhs, const RootSet& rhs) {
     lhs.insert(lhs.end(), rhs.begin(), rhs.end());
