@@ -5609,6 +5609,35 @@ int main() {
     }
 }
 
+void run_loop_reborrow_release_tests() {
+    {
+        std::string case_name = "shared_reborrow_inside_loop_releases_each_iteration";
+        cases_run++;
+        RunResult result = compile_and_run(
+            "struct Item {\n"
+            "    int value;\n"
+            "};\n"
+            "struct Holder {\n"
+            "    Item item;\n"
+            "};\n"
+            "int sum(const Holder& holder, int count) {\n"
+            "    int total = 0;\n"
+            "    for (int i = 0; i < count; i++) {\n"
+            "        const Item& current = holder.item;\n"
+            "        total += current.value;\n"
+            "    }\n"
+            "    return total;\n"
+            "}\n"
+            "int main() {\n"
+            "    Holder holder{};\n"
+            "    holder.item.value = 3;\n"
+            "    return sum(holder, 2) == 6 ? 0 : 1;\n"
+            "}\n",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_implicit_member_field_access_tests() {
     {
         std::string case_name = "member_shared_ptr_deref_without_explicit_this_can_return_reference";
@@ -7486,6 +7515,7 @@ int main() {
     run_static_member_function_tests();
     run_default_argument_tests();
     run_static_local_lifetime_tests();
+    run_loop_reborrow_release_tests();
     run_implicit_member_field_access_tests();
     run_random_tests();
     run_vector_tests();
