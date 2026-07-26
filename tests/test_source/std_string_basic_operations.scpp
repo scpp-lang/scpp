@@ -17,7 +17,7 @@ int main() {
     greeting.append("scpp");
     greeting.append("!");
     print_string(greeting);
-    print_int(greeting.length());
+    print_int(static_cast<int>(greeting.length()));
     print_bool(greeting.equals("Hello, scpp!"));
     print_bool(greeting.equals("something else"));
     return 0;

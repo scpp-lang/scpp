@@ -7,7 +7,7 @@ std::string make_word() {
 
 int main() {
     std::string word{make_word()};
-    print_int(word.length());
+    print_int(static_cast<int>(word.length()));
     print_bool(word.equals("hi"));
     return 0;
 }

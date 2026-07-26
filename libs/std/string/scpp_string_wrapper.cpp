@@ -8,6 +8,7 @@
 // this fits into the overall String demo.
 #include "scpp_string_wrapper.h"
 
+#include <cstddef>
 #include <string>
 
 namespace {
@@ -25,7 +26,7 @@ void* scpp_string_copy(const void* handle) { return new std::string(*as_string(h
 
 void scpp_string_delete(void* handle) { delete as_string(handle); }
 
-int scpp_string_length(void* handle) { return static_cast<int>(as_string(handle)->size()); }
+std::size_t scpp_string_length(void* handle) { return as_string(handle)->size(); }
 
 const char* scpp_string_c_str(void* handle) { return as_string(handle)->c_str(); }
 

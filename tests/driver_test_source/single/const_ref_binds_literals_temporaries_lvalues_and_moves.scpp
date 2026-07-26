@@ -18,7 +18,7 @@ int take_box(const Box& x) {
 }
 
 int take_string_length(const std::string& text) {
-    return text.length();
+    return (int)text.length();
 }
 
 int main() {

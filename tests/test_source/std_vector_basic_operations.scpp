@@ -20,10 +20,10 @@ int main() {
     if (holder.values.capacity() != 0) return 3;
     if (holder.values.begin() != holder.values.end()) return 4;
 
-    int previous_capacity = holder.values.capacity();
-    int i = 0;
+    std::size_t previous_capacity = holder.values.capacity();
+    std::size_t i = 0;
     while (i < 20) {
-        holder.append(i * 3);
+        holder.append(static_cast<int>(i) * 3);
         if (holder.values.size() != i + 1) return 5;
         if (holder.values.capacity() < holder.values.size()) return 6;
         if (holder.values.capacity() < previous_capacity) return 7;
@@ -39,10 +39,10 @@ int main() {
 
     i = 0;
     while (i < holder.values.size()) {
-        if (holder.values[i] != i * 3) return 11;
-        if (holder.values.at(i) != i * 3) return 12;
+        if (holder.values[i] != static_cast<int>(i) * 3) return 11;
+        if (holder.values.at(i) != static_cast<int>(i) * 3) return 12;
         [[scpp::unsafe]] {
-            if (raw[i] != i * 3) return 13;
+            if (raw[i] != static_cast<int>(i) * 3) return 13;
         }
         i = i + 1;
     }

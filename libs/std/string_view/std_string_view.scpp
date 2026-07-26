@@ -40,7 +40,7 @@ public:
 
     string_view(const std::string& s) {
         this->data_ = s.c_str();
-        this->size_ = static_cast<size_t>(s.size());
+        this->size_ = s.size();
         return;
     }
 

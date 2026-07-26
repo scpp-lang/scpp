@@ -16,6 +16,8 @@
 #ifndef SCPP_STRING_WRAPPER_H
 #define SCPP_STRING_WRAPPER_H
 
+#include <cstddef>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,7 +40,7 @@ void* scpp_string_copy(const void* handle);
 void scpp_string_delete(void* handle);
 
 // Returns the string's length in bytes (std::string::size()).
-int scpp_string_length(void* handle);
+std::size_t scpp_string_length(void* handle);
 
 // Returns a pointer to the string's internal nul-terminated buffer
 // (std::string::c_str()). Valid only until the next mutating call

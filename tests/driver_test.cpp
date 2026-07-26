@@ -3165,7 +3165,7 @@ void run_cli_extension_tests() {
                         "import helper;\n"
                         "int main() {\n"
                         "    helper::ConstStringPtr value = helper::make_text();\n"
-                        "    return value->length() - 2;\n"
+                        "    return value->length() == 2 ? 0 : 1;\n"
                         "}\n");
         RunResult build_result =
             run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
@@ -3211,7 +3211,7 @@ void run_cli_extension_tests() {
                         "import helper;\n"
                         "int main() {\n"
                         "    helper::ConstStringPtr value = helper::make_text();\n"
-                        "    return value->length() - 2;\n"
+                        "    return value->length() == 2 ? 0 : 1;\n"
                         "}\n");
         RunResult build_result =
             run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
@@ -4125,7 +4125,7 @@ void run_cli_extension_tests() {
                         "import std;\n"
                         "int main() {\n"
                         "    std::string s{\"relocated\"};\n"
-                        "    return s.length();\n"
+                        "    return s.length() == 9 ? 9 : 0;\n"
                         "}\n");
         RunResult build_result =
             run_command_capture(relocated_scpp.string() + " " + source_path.string() + " -o " + exe_path.string() + " 2>&1");
@@ -5658,7 +5658,7 @@ void run_implicit_member_field_access_tests() {
             "};\n"
             "int main() {\n"
             "    Holder holder{};\n"
-            "    return holder.text_ref().length() - 2;\n"
+            "    return holder.text_ref().length() == 2 ? 0 : 1;\n"
             "}\n",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
@@ -5850,7 +5850,7 @@ int main() {
 int main() {
     std::vector<int> values{};
     values.push_back(1);
-    return values.at(-1);
+    return values.at((std::size_t)-1);
 }
 )SCPP",
             case_name);
@@ -5884,7 +5884,7 @@ int main() {
                         "}\n"
                         "export int sum(const std::vector<int>& values) {\n"
                         "    int total = 0;\n"
-                        "    int i = 0;\n"
+                        "    std::size_t i = 0;\n"
                         "    while (i < values.size()) {\n"
                         "        total = total + values[i];\n"
                         "        i = i + 1;\n"
