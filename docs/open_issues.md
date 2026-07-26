@@ -63,5 +63,50 @@ dynamic-initialization-order dependencies at compile time, instead of either
 blanket-banning all file-scope globals or silently inheriting C++'s full
 unsafe/unspecified behavior.
 
+## Whether `const T&` should continue to permit implicit materialization through converting constructors
+
+Under [§6.2(11)](spec/en/02-ownership-and-move.md) and
+[§6.6](spec/en/02-ownership-and-move.md), a `const T&` binding may currently
+materialize a temporary `T` not only from an argument that is already a value
+of type `T` under §6.2(11.1), but also from an expression that implicitly
+selects a single-argument constructor of `T` under §6.2(11.2). For example, a
+call that appears to pass a string literal or `const char*` through by
+reference may in fact construct a fresh temporary `std::string` and bind the
+reference to that temporary:
+
+```cpp
+void read_text(const std::string&);
+
+read_text("hi");                // currently OK: §6.2(11.2), §6.6
+read_text(std::string{"hi"});   // explicit spelling of the same construction
+```
+
+This is convenient and familiar from C++, but it is also easy to misread. A
+reader skimming the call site gets no visual cue that a conversion and class-
+type construction are happening at all. Code that looks like it is merely
+passing a pointer-like or view-like value by reference may instead be creating
+an owning object of a different, potentially expensive, type behind the scenes.
+
+The open design question is whether scpp should eventually forbid all such
+implicit class-type conversions and require the conversion to be written
+explicitly at the call site instead. In that direction, §6.2(11.2) would be
+removed and only §6.2(11.1) would remain; then every reference or value
+binding of class type would require the argument to already be of the exact
+type, whether as an existing object or as a fresh value under
+[§6.6](spec/en/02-ownership-and-move.md) and
+[§6.7](spec/en/02-ownership-and-move.md).
+
+This surfaced during the self-hosting bootstrap effort to compile scpp's own
+`src/ast.cppm` with scpp itself. In that work, `return "operator_equal";` from
+a function returning `std::string` is correctly rejected today under
+[§6.7](spec/en/02-ownership-and-move.md), because by-value return uses the
+existing fresh-value rules and does not perform the constructor-based
+materialization that [§6.2(11)](spec/en/02-ownership-and-move.md) currently
+permits for `const T&` binding. That leaves an asymmetry between reference-
+binding and by-value contexts that is still unresolved: later work may either
+extend such implicit materialization symmetrically to by-value cases as well,
+or remove it from reference-binding in favor of full consistency and
+explicitness.
+
 The previously-open question about unchecked integer-to-enum casts was resolved
 by the specification in [docs/spec/en/09-enumeration-conversions.md](spec/en/09-enumeration-conversions.md).

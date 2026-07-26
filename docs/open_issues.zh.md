@@ -53,6 +53,44 @@ PR [#250](https://github.com/scpp-lang/scpp/pull/250) 引入；截至本文写�
 测并诊断这类跨文件动态初始化顺序依赖；这将不同于“直接一刀切禁止所有 file-scope
 全局变量”，也不同于“原样继承 C++ 全部不安全 / 未指定行为并保持静默”。
 
+## `const T&` 是否应继续允许通过 converting constructor 隐式物化临时对象
+
+按照 [§6.2(11)](spec/zh/02-ownership-and-move.md) 与
+[§6.6](spec/zh/02-ownership-and-move.md) 的当前规则，一个 `const T&`
+绑定不仅可以接收已经是 `T` 类型值的实参（§6.2(11.1)），还可以接收这样一种表达式：
+它会在 §6.2(11.2) 下隐式选中 `T` 的单参数构造函数，从而先物化出一个临时 `T`。
+也就是说，某个看起来只是把字符串字面量或 `const char*`“按引用传过去”的调用，
+实际上可能会先悄悄构造出一个全新的临时 `std::string`，然后再把引用绑到这个临时
+对象上：
+
+```cpp
+void read_text(const std::string&);
+
+read_text("hi");                // 当前合法：§6.2(11.2), §6.6
+read_text(std::string{"hi"});   // 把同样的构造显式写出来
+```
+
+这当然方便，而且也很符合 C++ 读者的直觉；但它同样很容易被误读。快速扫一眼调用点
+时，读者完全看不出这里其实发生了一次转换和 class 类型构造。表面上像是在按引用传
+一个 pointer-like / view-like 值，实际上却可能在背后创建了一个不同类型、并且可
+能带所有权或开销不小的对象。
+
+因此，一个仍未定案的设计问题是：scpp 将来是否应当禁止这类 class 类型隐式转换，
+要求用户在调用点把转换明确写出来。在这个方向上，§6.2(11.2) 会被删掉，只保留
+§6.2(11.1)；这样一来，任何 class 类型的引用绑定或值绑定，都要求实参事先就是那
+个精确类型——要么是现成对象，要么是按照 [§6.6](spec/zh/02-ownership-and-move.md)
+与 [§6.7](spec/zh/02-ownership-and-move.md) 现有“新鲜值”机制显式构造出来的值。
+
+这个问题是在 self-hosting bootstrap 过程中浮现出来的：当时需要用 scpp 自己去编译
+scpp 的 `src/ast.cppm`。在那项工作里，如果某个返回类型是 `std::string` 的函数写
+出 `return "operator_equal";`，那么它今天会在
+[§6.7](spec/zh/02-ownership-and-move.md) 下被正确拒绝；原因是按值返回只接受现有
+的新鲜值规则，并不会像 [§6.2(11)](spec/zh/02-ownership-and-move.md) 那样，为
+`const T&` 绑定额外执行这类基于构造函数的隐式物化。于是现在就留下了一个尚未解决
+的不对称：reference-binding 与 by-value context 的行为不同。后续工作要么可以把
+这种隐式物化对称地扩展到按值场景，要么也可以把它从 reference-binding 中移除，以
+换取彻底的一致性与显式性。
+
 此前关于“是否允许未检查的整数到枚举 cast”的开放问题，现已由
 [docs/spec/zh/09-enumeration-conversions.md](spec/zh/09-enumeration-conversions.md)
 中的规范定案。
