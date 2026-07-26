@@ -1522,6 +1522,10 @@ void mark_reachable_hidden_compile_time_dependencies(Program& program) {
             reachable_function_indices.contains(i)) {
             program.functions[i].is_compile_time_dependency = true;
         }
+        if (program.functions[i].body && program.functions[i].is_compile_time_dependency &&
+            program.functions[i].eval_mode == FunctionEvalMode::RuntimeOnly) {
+            program.functions[i].skip_imported_body_verification = true;
+        }
     }
 }
 
@@ -1569,6 +1573,9 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     }
     for (Function& fn : payload.functions) {
         if (!fn.is_exported) fn.is_compile_time_dependency = true;
+        if (fn.body && fn.is_compile_time_dependency && fn.eval_mode == FunctionEvalMode::RuntimeOnly) {
+            fn.skip_imported_body_verification = true;
+        }
         auto existing = std::find_if(imported.functions.begin(), imported.functions.end(),
                                      [&](const Function& current) { return same_function_identity_for_payload_merge(current, fn); });
         if (existing != imported.functions.end()) {

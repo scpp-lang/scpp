@@ -3123,6 +3123,7 @@ private:
         clone.is_nodiscard = fn.is_nodiscard;
         clone.nodiscard_reason = fn.nodiscard_reason;
         clone.is_compile_time_dependency = fn.is_compile_time_dependency;
+        clone.skip_imported_body_verification = fn.skip_imported_body_verification;
         clone.has_varargs = fn.has_varargs;
         clone.method_requires_concept = fn.method_requires_concept;
         clone.is_generic_template = fn.is_generic_template;
@@ -3284,10 +3285,18 @@ private:
                 existing->is_exported = existing->is_exported || (is_reexport && fn.is_exported);
                 existing->is_compile_time_dependency =
                     existing->is_compile_time_dependency || fn.is_compile_time_dependency || needs_hidden_compile_time_visibility;
+                if (!existing->body && keep_body && fn.body) existing->body = clone_stmt(*fn.body);
+                if (existing->body && existing->is_compile_time_dependency &&
+                    existing->eval_mode == FunctionEvalMode::RuntimeOnly) {
+                    existing->skip_imported_body_verification = true;
+                }
                 continue;
             }
             Function clone = clone_function_declaration(fn, imported_name, is_reexport, keep_body);
             clone.is_compile_time_dependency = clone.is_compile_time_dependency || needs_hidden_compile_time_visibility;
+            if (clone.body && clone.is_compile_time_dependency && clone.eval_mode == FunctionEvalMode::RuntimeOnly) {
+                clone.skip_imported_body_verification = true;
+            }
             program.functions.push_back(std::move(clone));
         }
         for (const GlobalVar& global : imported.globals) {

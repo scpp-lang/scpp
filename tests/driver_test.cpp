@@ -3426,9 +3426,72 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_raw_source_and_scppm_imports_match_for_runtime_hidden_helpers_in_exported_generic_class";
+        std::filesystem::path root =
+            std::filesystem::current_path() /
+            "cli_raw_source_and_scppm_imports_match_for_runtime_hidden_helpers_in_exported_generic_class";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path raw_exe_path = root / "app_raw";
+        std::filesystem::path prebuilt_exe_path = root / "app_prebuilt";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                       "export module helper;\n"
+                       "namespace helper {\n"
+                       "    int hidden_base() { return 39; }\n"
+                       "    int hidden_seed() { return helper::hidden_base() + 1; }\n"
+                       "    int hidden_adjust(int value) { return value + 2; }\n"
+                       "    export template<typename T>\n"
+                       "    class Box {\n"
+                       "    public:\n"
+                       "        virtual ~Box() = default;\n"
+                       "        int value_{};\n"
+                       "        Box() : value_{helper::hidden_adjust(helper::hidden_seed())} {\n"
+                       "            return;\n"
+                       "        }\n"
+                       "        int value() const { return this->value_; }\n"
+                       "    };\n"
+                       "}\n");
+        write_text_file(consumer_source,
+                       "import helper;\n"
+                       "int main() {\n"
+                       "    helper::Box<int> box{};\n"
+                       "    return box.value() - 42;\n"
+                       "}\n");
+        RunResult raw_build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                               raw_exe_path.string() + " --import helper=" + module_source.string() + " 2>&1");
+        expect(raw_build_result.exit_code == 0,
+               case_name + ": raw-source import should succeed, got '" + raw_build_result.stdout_text + "'");
+        RunResult raw_run_result = run_command_capture(raw_exe_path.string() + " 2>&1");
+        expect(raw_run_result.exit_code == 0,
+               case_name + ": expected raw-source binary to exit 0, got " + std::to_string(raw_run_result.exit_code));
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                               " --interface-out " + interface_path.string() + " --archive-out " +
+                               archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        RunResult prebuilt_build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                               prebuilt_exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(prebuilt_build_result.exit_code == 0,
+               case_name + ": .scppm import should succeed, got '" + prebuilt_build_result.stdout_text + "'");
+        RunResult prebuilt_run_result = run_command_capture(prebuilt_exe_path.string() + " 2>&1");
+        expect(prebuilt_run_result.exit_code == 0,
+               case_name + ": expected .scppm binary to exit 0, got " +
+                   std::to_string(prebuilt_run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_private_import_does_not_hide_directly_imported_exported_surface";
         std::filesystem::path root = std::filesystem::current_path() /
-                                     "cli_private_import_does_not_hide_directly_imported_exported_surface";
+                                    "cli_private_import_does_not_hide_directly_imported_exported_surface";
         std::filesystem::path dep_source = root / "dep.scpp";
         std::filesystem::path wrapper_source = root / "wrapper.scpp";
         std::filesystem::path consumer_source = root / "main.scpp";
