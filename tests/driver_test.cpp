@@ -6917,6 +6917,108 @@ int main() {
     }
 }
 
+void run_subscripted_deref_tests() {
+    {
+        std::string case_name = "forward_declared_member_vector_optional_element_can_be_dereferenced_through_subscript";
+        cases_run++;
+        bool threw = false;
+        std::string unexpected;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(import std;
+class Box;
+class Box {
+public:
+    std::vector<std::optional<int>> values;
+    virtual ~Box() = default;
+};
+const int& first(const Box& box) {
+    return *box.values[0];
+}
+int main() { return 0; }
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const std::exception& e) {
+            threw = true;
+            unexpected = e.what();
+        }
+        expect(!threw, case_name + ": expected forward-declared owner subscripted deref to compile, got '" + unexpected + "'");
+    }
+
+    {
+        std::string case_name = "returning_ref_through_local_forward_declared_member_vector_optional_element_is_still_rejected";
+        cases_run++;
+        bool threw = false;
+        std::string unexpected;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(import std;
+class Box;
+class Box {
+public:
+    std::vector<std::optional<int>> values;
+    virtual ~Box() = default;
+};
+const int& bad(const Box& seed) {
+    Box box{};
+    std::optional<int> seven{7};
+    box.values.push_back(seven);
+    if (!seed.values.empty()) {
+        return *box.values[0];
+    }
+    return *seed.values[0];
+}
+int main() {
+    return 0;
+}
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("returns a reference derived from 'box'") != std::string::npos;
+        } catch (const std::exception& e) {
+            unexpected = e.what();
+        }
+        expect(threw, case_name + ": expected local vector element deref escape to remain rejected, got '" + unexpected + "'");
+    }
+
+    {
+        std::string case_name = "assigning_forward_declared_owner_while_subscripted_optional_ref_is_live_is_still_rejected";
+        cases_run++;
+        bool threw = false;
+        std::string unexpected;
+        try {
+            scpp::compile_to_executable(
+                R"SCPP(import std;
+class Box;
+class Box {
+public:
+    std::vector<std::optional<int>> values;
+    virtual ~Box() = default;
+};
+int main() {
+    std::optional<int> seven{7};
+    Box box{};
+    box.values.push_back(seven);
+    const int& current = *box.values[0];
+    std::vector<std::optional<int>> other{};
+    std::optional<int> nine{9};
+    other.push_back(nine);
+    box.values = other;
+    return current;
+}
+)SCPP",
+                (std::filesystem::current_path() / case_name).string());
+        } catch (const scpp::DataflowError& e) {
+            threw = std::string(e.what()).find("cannot assign to this place: 'box' is currently borrowed") !=
+                    std::string::npos;
+        } catch (const std::exception& e) {
+            unexpected = e.what();
+        }
+        expect(threw, case_name + ": expected container reassignment while element-derived ref is live to remain rejected, got '" +
+                          unexpected + "'");
+    }
+}
+
 void run_io_tests() {
     {
         std::string case_name = "scpp_io_getline_reads_one_line_without_newline";
@@ -7528,6 +7630,7 @@ int main() {
     run_expected_tests();
     run_optional_tests();
     run_smart_pointer_nullptr_tests();
+    run_subscripted_deref_tests();
     run_io_tests();
     run_enum_tests();
     run_switch_tests();

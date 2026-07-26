@@ -29,6 +29,7 @@ namespace scpp {
 [[nodiscard]] const Type* enum_underlying_type(const Type& type, const Program* program);
 
 [[nodiscard]] const ClassDef* find_class_def(const Program& program, const std::string& class_name);
+[[nodiscard]] const StructDef* find_struct_def(const Program& program, const std::string& struct_name);
 [[nodiscard]] bool type_contains_lifetime_carrying_state(const Type& type, const Program& program,
                                                          std::unordered_set<std::string> visiting = {});
 [[nodiscard]] std::string named_type_name(const Type& type);
@@ -131,6 +132,16 @@ namespace scpp {
     const ClassDef* forward_decl = nullptr;
     for (const ClassDef& def : program.classes) {
         if (def.name != class_name) continue;
+        if (!def.is_forward_declaration) return &def;
+        if (forward_decl == nullptr) forward_decl = &def;
+    }
+    return forward_decl;
+}
+
+[[nodiscard]] const StructDef* find_struct_def(const Program& program, const std::string& struct_name) {
+    const StructDef* forward_decl = nullptr;
+    for (const StructDef& def : program.structs) {
+        if (def.name != struct_name) continue;
         if (!def.is_forward_declaration) return &def;
         if (forward_decl == nullptr) forward_decl = &def;
     }

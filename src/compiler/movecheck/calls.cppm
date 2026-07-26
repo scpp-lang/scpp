@@ -118,6 +118,35 @@ void check_enum_conversion_compatibility(const Type& target_type, const Expr& so
     return sig;
 }
 
+[[nodiscard]] bool is_vector_like_named_type(const Type& type) {
+    return type.kind == TypeKind::Named &&
+           (type.name == "std::vector" || type.name == "vector" || type.name.starts_with("std::vector.") ||
+            type.name.starts_with("vector."));
+}
+
+[[nodiscard]] std::optional<Type> infer_vector_element_type(const Type& type, const Body& body) {
+    if (!is_vector_like_named_type(type)) return std::nullopt;
+    if (type.template_args.size() == 1) return type.template_args[0];
+    if (body.program == nullptr) return std::nullopt;
+    if (const ClassDef* def = find_class_def(*body.program, type.name)) {
+        for (const ClassField& field : def->fields) {
+            if (field.name == "data_" && field.type.kind == TypeKind::Pointer && field.type.pointee) {
+                return *field.type.pointee;
+            }
+        }
+        return std::nullopt;
+    }
+    if (const StructDef* def = find_struct_def(*body.program, type.name)) {
+        for (const StructField& field : def->fields) {
+            if (field.name == "data_" && field.type.kind == TypeKind::Pointer && field.type.pointee) {
+                return *field.type.pointee;
+            }
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 // Resolves a Call expression's signature-lookup key, accounting for a
 // method call's receiver (ch04 §4.2/ch05 §5.9): `obj.name(...)`/
 // `this->name(...)` stores its receiver in `call_expr.lhs` and only the
@@ -1213,25 +1242,23 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             if (!base) return std::nullopt;
             const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
             if (base_named.kind != TypeKind::Named || body.program == nullptr) return std::nullopt;
-            for (const ClassDef& def : body.program->classes) {
-                if (def.name != base_named.name) continue;
-                for (const ClassField& field : def.fields) {
+            if (const ClassDef* def = find_class_def(*body.program, base_named.name)) {
+                for (const ClassField& field : def->fields) {
                     if (field.name == expr.name) {
                         return field.type.kind == TypeKind::Reference ? std::optional<Type>(*field.type.pointee)
                                                                       : std::optional<Type>(field.type);
                     }
                 }
-                return std::nullopt;
+                return {};
             }
-            for (const StructDef& def : body.program->structs) {
-                if (def.name != base_named.name) continue;
-                for (const StructField& field : def.fields) {
+            if (const StructDef* def = find_struct_def(*body.program, base_named.name)) {
+                for (const StructField& field : def->fields) {
                     if (field.name == expr.name) {
                         return field.type.kind == TypeKind::Reference ? std::optional<Type>(*field.type.pointee)
                                                                       : std::optional<Type>(field.type);
                     }
                 }
-                return std::nullopt;
+                return {};
             }
             return std::nullopt;
         }
@@ -1243,6 +1270,9 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             if (effective.kind == TypeKind::Array) return *effective.element;
             if (effective.kind == TypeKind::Span) return *effective.pointee;
             if (effective.kind == TypeKind::Pointer) return *effective.pointee;
+            if (std::optional<Type> element = infer_vector_element_type(effective, body); element.has_value()) {
+                return *element;
+            }
             return std::nullopt;
         }
     }
