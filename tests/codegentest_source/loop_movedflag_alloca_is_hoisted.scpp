@@ -4,7 +4,8 @@ int main() {
     int i = 0;
     while (i < 3) {
         std::string local{"hi"};
-        i = i + local.length();
+        if (local.length() != 2) return 99;
+        i = i + 2;
     }
     return i;
 }

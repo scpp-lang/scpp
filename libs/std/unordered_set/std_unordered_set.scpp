@@ -29,9 +29,9 @@ class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shar
 private:
     T* slots_{};
     int* states_{};
-    int slot_count_{8};
-    int size_{};
-    int tombstones_{};
+    size_t slot_count_{8};
+    size_t size_{};
+    size_t tombstones_{};
     uint64_t slot_size_{sizeof(T)};
     uint64_t slot_align_{alignof(T)};
     uint64_t state_size_{sizeof(int)};
@@ -47,19 +47,19 @@ private:
         return equals(lhs, rhs);
     }
 
-    int __bucket_index_for_hash(uint64_t hash, int slot_count) const {
+    size_t __bucket_index_for_hash(uint64_t hash, size_t slot_count) const {
         if (slot_count <= 0) return 0;
         uint64_t count = static_cast<uint64_t>(slot_count);
         uint64_t quotient = hash / count;
         uint64_t remainder = hash - quotient * count;
-        return static_cast<int>(remainder);
+        return static_cast<size_t>(remainder);
     }
 
-    int __probe_next(int index) const {
-        return index + 1 == this->slot_count_ ? 0 : index + 1;
+    size_t __probe_next(size_t index) const {
+        return index + 1 == this->slot_count_ ? static_cast<size_t>(0) : index + 1;
     }
 
-    T* __allocate_slots(int count) {
+    T* __allocate_slots(size_t count) {
         T* empty{};
         if (count <= 0) return empty;
         [[scpp::unsafe]] {
@@ -68,7 +68,7 @@ private:
         }
     }
 
-    int* __allocate_states(int count) {
+    int* __allocate_states(size_t count) {
         int* empty{};
         if (count <= 0) return empty;
         [[scpp::unsafe]] {
@@ -77,8 +77,8 @@ private:
         }
     }
 
-    void __zero_states(int* states, int count) {
-        int index = 0;
+    void __zero_states(int* states, size_t count) {
+        size_t index = 0;
         while (index < count) {
             [[scpp::unsafe]] {
                 states[index] = 0;
@@ -88,7 +88,7 @@ private:
         return;
     }
 
-    void __destroy_slot(int index) {
+    void __destroy_slot(size_t index) {
         [[scpp::unsafe]] {
             T* slot = &this->slots_[index];
             slot->~T();
@@ -99,7 +99,7 @@ private:
     void __destroy_live_slots() {
         int* empty_states{};
         if (this->states_ == empty_states) return;
-        int index = 0;
+        size_t index = 0;
         while (index < this->slot_count_) {
             int state = 0;
             [[scpp::unsafe]] {
@@ -134,7 +134,7 @@ private:
         return;
     }
 
-    void __initialize_storage(int count) {
+    void __initialize_storage(size_t count) {
         if (count < 8) count = 8;
         this->__destroy_storage();
         [[scpp::unsafe]] {
@@ -148,7 +148,7 @@ private:
         return;
     }
 
-    void __construct_slot(int index, const T& value) {
+    void __construct_slot(size_t index, const T& value) {
         [[scpp::unsafe]] {
             new (&this->slots_[index]) T(value);
             this->states_[index] = 1;
@@ -157,7 +157,7 @@ private:
         return;
     }
 
-    void __construct_slot(int index, T&& value) {
+    void __construct_slot(size_t index, T&& value) {
         [[scpp::unsafe]] {
             new (&this->slots_[index]) T(std::move(value));
             this->states_[index] = 1;
@@ -166,11 +166,11 @@ private:
         return;
     }
 
-    void __rehash(int new_slot_count) {
+    void __rehash(size_t new_slot_count) {
         if (new_slot_count < 8) new_slot_count = 8;
         T* old_slots = this->slots_;
         int* old_states = this->states_;
-        int old_slot_count = this->slot_count_;
+        size_t old_slot_count = this->slot_count_;
 
         [[scpp::unsafe]] {
             this->slots_ = this->__allocate_slots(new_slot_count);
@@ -181,7 +181,7 @@ private:
         this->size_ = 0;
         this->tombstones_ = 0;
 
-        int index = 0;
+        size_t index = 0;
         while (index < old_slot_count) {
             int state = 0;
             [[scpp::unsafe]] {
@@ -246,22 +246,26 @@ public:
 
     bool __insert_copy(const T& value) {
         this->__ensure_capacity_for_one_more();
-        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
-        int first_tombstone = -1;
-        int probes = 0;
+        size_t index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        size_t first_tombstone = 0;
+        bool has_first_tombstone = false;
+        size_t probes = 0;
         while (probes < this->slot_count_) {
             int state = 0;
             [[scpp::unsafe]] {
                 state = this->states_[index];
             }
             if (state == 0) {
-                int target = first_tombstone >= 0 ? first_tombstone : index;
+                size_t target = has_first_tombstone ? first_tombstone : index;
                 this->__construct_slot(target, value);
-                if (first_tombstone >= 0) this->tombstones_ = this->tombstones_ - 1;
+                if (has_first_tombstone) this->tombstones_ = this->tombstones_ - 1;
                 return true;
             }
             if (state == 2) {
-                if (first_tombstone < 0) first_tombstone = index;
+                if (!has_first_tombstone) {
+                    has_first_tombstone = true;
+                    first_tombstone = index;
+                }
             } else {
                 bool matches = false;
                 [[scpp::unsafe]] {
@@ -278,22 +282,26 @@ public:
 
     bool __insert_move(T&& value) {
         this->__ensure_capacity_for_one_more();
-        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
-        int first_tombstone = -1;
-        int probes = 0;
+        size_t index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        size_t first_tombstone = 0;
+        bool has_first_tombstone = false;
+        size_t probes = 0;
         while (probes < this->slot_count_) {
             int state = 0;
             [[scpp::unsafe]] {
                 state = this->states_[index];
             }
             if (state == 0) {
-                int target = first_tombstone >= 0 ? first_tombstone : index;
+                size_t target = has_first_tombstone ? first_tombstone : index;
                 this->__construct_slot(target, std::move(value));
-                if (first_tombstone >= 0) this->tombstones_ = this->tombstones_ - 1;
+                if (has_first_tombstone) this->tombstones_ = this->tombstones_ - 1;
                 return true;
             }
             if (state == 2) {
-                if (first_tombstone < 0) first_tombstone = index;
+                if (!has_first_tombstone) {
+                    has_first_tombstone = true;
+                    first_tombstone = index;
+                }
             } else {
                 bool matches = false;
                 [[scpp::unsafe]] {
@@ -309,7 +317,7 @@ public:
     }
 
     void __append_all_to(std::unordered_set<T>& target) const {
-        int index = 0;
+        size_t index = 0;
         while (index < this->slot_count_) {
             int state = 0;
             [[scpp::unsafe]] {
@@ -333,8 +341,8 @@ public:
     }
 
     bool contains(const T& value) const {
-        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
-        int probes = 0;
+        size_t index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        size_t probes = 0;
         while (probes < this->slot_count_) {
             int state = 0;
             [[scpp::unsafe]] {
@@ -355,8 +363,8 @@ public:
     }
 
     bool erase(const T& value) {
-        int index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
-        int probes = 0;
+        size_t index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
+        size_t probes = 0;
         while (probes < this->slot_count_) {
             int state = 0;
             [[scpp::unsafe]] {
@@ -389,7 +397,7 @@ public:
         return false;
     }
 
-    int size() const {
+    size_t size() const {
         return this->size_;
     }
 
@@ -398,7 +406,7 @@ public:
     }
 
     void clear() {
-        int index = 0;
+        size_t index = 0;
         while (index < this->slot_count_) {
             int state = 0;
             [[scpp::unsafe]] {

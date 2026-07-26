@@ -23,7 +23,7 @@ extern "C" {
     void* scpp_string_new(const char* s);
     void* scpp_string_copy(const void* handle);
     void scpp_string_delete(void* handle);
-    int scpp_string_length(void* handle);
+    size_t scpp_string_length(void* handle);
     const char* scpp_string_c_str(void* handle);
     void scpp_string_append(void* handle, const char* s);
     int scpp_string_equals(void* handle, const char* s);
@@ -79,13 +79,13 @@ public:
     }
 
     // Number of bytes currently stored (std::string::size()/length()).
-    int length() const {
+    size_t length() const {
         [[scpp::unsafe]] {
             return scpp_string_length(this->handle);
         }
     }
 
-    int size() const {
+    size_t size() const {
         return this->length();
     }
 

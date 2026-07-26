@@ -7,5 +7,5 @@ std::string make_word() {
 
 int main() {
     std::string word{make_word()};
-    return word.length();
+    return word.length() == 2 ? 2 : 0;
 }
