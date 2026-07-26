@@ -132,14 +132,21 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
         reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture");
         RootSet roots =
             resolve_borrow_source_root(capture_ident, state, body, signatures, report_errors);
-        Type ref_type;
-        ref_type.kind = TypeKind::Reference;
-        ref_type.is_mutable_ref = true; // matches resolve_lambda's own field choice
+        auto type_it = body.local_types.find(capture.name);
+        if (type_it == body.local_types.end()) {
+            if (report_errors) {
+                throw DataflowError("lambda captures '" + capture.name +
+                                       "', which is not a local variable or parameter in this scope (ch05 §5.12)",
+                    state.current_loc);
+            }
+            continue;
+        }
+        Type ref_type = by_reference_capture_type(capture.name, type_it->second, body);
         apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
                                   report_errors);
         if (out_closure_capture_borrows != nullptr) {
             for (const std::string& root : roots) {
-                out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, true});
+                out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, ref_type.is_mutable_ref});
             }
         }
     }

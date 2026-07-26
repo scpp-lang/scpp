@@ -4162,19 +4162,7 @@ private:
                 captured_type = it->second;
             }
             if (capture.by_reference) {
-                Type ref;
-                ref.kind = TypeKind::Reference;
-                ref.pointee = std::make_shared<Type>(std::move(captured_type));
-                // v1 simplification: every by-reference capture is a
-                // mutable reference field, regardless of how the body
-                // itself uses it -- ch05 §5.12 doesn't ask for a
-                // separate const-vs-mutable capture distinction, and
-                // real C++ itself doesn't track per-capture constness
-                // this way either (a lambda's own constness -- the
-                // `mutable` keyword -- is about by-*value* captures, see
-                // `this_param.type.is_mutable_ref` below).
-                ref.is_mutable_ref = true;
-                field_types.push_back(std::move(ref));
+                field_types.push_back(by_reference_capture_type(capture.name, captured_type, enclosing_body));
             } else {
                 if (capture.name != "this") by_value_names.insert(capture.name);
                 field_types.push_back(std::move(captured_type));
