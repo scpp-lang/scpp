@@ -93,6 +93,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program);
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
+[[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program& program);
 
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
@@ -159,6 +160,15 @@ void validate_lifetime_annotation_placement(const Function& fn);
         }
     }
     return false;
+}
+// Certain stdlib "view" wrappers intentionally behave like scalar pairs at
+// by-value boundaries even though they are spelled as classes with
+// user-declared special members in the library source. Treat those named
+// wrappers as freely copyable without relaxing ordinary class copy rules.
+[[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program&) {
+    if (type.kind != TypeKind::Named) return false;
+    std::string base_name = unqualified_template_base_name(type.name);
+    return type.name == "std::string_view" || type.name == "std::format_string<>" || base_name == "format_string";
 }
 
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);

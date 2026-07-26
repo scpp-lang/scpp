@@ -57,8 +57,8 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 //    permitting std::move(p) for a move-only type).
 //  - a by-value capture of a class type uses the same copy/move boundary
 //    rules as any other class value construction site in the language:
-//    a bare same-type lvalue copies only if the class is
-//    copy-constructible, otherwise the source must be an rvalue (e.g.
+//    an implicitly copyable same-type source copies when the class
+//    supports it; otherwise the source must be an rvalue (e.g.
 //    `std::move(p)` in an init-capture).
 //  - a by-reference capture is checked exactly like a reference-typed
 //    call argument (apply_reference_argument): the closure's own field
@@ -71,11 +71,14 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
                                              const std::string& capture_display) {
         if (is_named_class_type(source_type, body)) {
             bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body, signatures);
+            bool is_freely_copyable_source =
+                is_freely_copyable_class_value_source(source, source_type, body, signatures);
             bool is_rvalue_source = produces_rvalue_of_type(source, source_type, body, signatures);
             if (report_errors) {
-                if (is_copy_source) {
-                    if (state.classes_with_copy_ctor == nullptr ||
-                        !state.classes_with_copy_ctor->contains(source_type.name)) {
+                if (is_copy_source || is_freely_copyable_source) {
+                    if (!is_freely_copyable_source &&
+                        (state.classes_with_copy_ctor == nullptr ||
+                         !state.classes_with_copy_ctor->contains(source_type.name))) {
                         throw DataflowError(
                             "capture '" + capture_display + "' of class '" + source_type.name +
                                "' requires std::move or another rvalue source because the class is not "
@@ -85,7 +88,8 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
                 } else if (!is_rvalue_source) {
                     throw DataflowError(
                         "capture '" + capture_display + "' of class '" + source_type.name +
-                            "' must use a plain same-typed variable (if copy-constructible) or an rvalue such as "
+                            "' must use an implicitly copyable same-typed source (if copy-constructible) or an "
+                            "rvalue such as "
                             "std::move(...) (spec §6.5/§5.12)",
                         state.current_loc);
                 }

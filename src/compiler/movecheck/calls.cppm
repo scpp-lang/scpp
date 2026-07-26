@@ -48,6 +48,8 @@ struct NodiscardInfo {
 [[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type,
                                                             const Body& body,
                                                             const Signatures& signatures);
+[[nodiscard]] bool is_freely_copyable_class_value_source(const Expr& expr, const Type& target_type, const Body& body,
+                                                         const Signatures& signatures);
 [[nodiscard]] bool is_implicit_move_return_source(const Expr& expr, const Type& target_type, const Body& body);
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
             const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures);
@@ -385,6 +387,19 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
            is_copy_constructible(target_type.name, *body.program);
 }
 
+[[nodiscard]] bool is_freely_copyable_class_value_source(const Expr& expr, const Type& target_type, const Body& body,
+                                                         const Signatures& signatures) {
+    if (body.program == nullptr || !is_named_record_type_for_call_binding(target_type, body) ||
+        !is_freely_copyable_value_type(target_type, *body.program)) {
+        return false;
+    }
+    std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
+    if (!source_type.has_value()) return false;
+    if (types_equal(*source_type, target_type)) return true;
+    return source_type->kind == TypeKind::Reference && source_type->pointee != nullptr &&
+           !source_type->is_rvalue_ref && types_equal(*source_type->pointee, target_type);
+}
+
 [[nodiscard]] bool is_implicit_move_return_source(const Expr& expr, const Type& target_type, const Body& body) {
     if (expr.kind != ExprKind::Identifier || expr.explicit_global_qualification) return false;
     auto it = body.local_types.find(expr.name);
@@ -478,6 +493,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     }
     if (is_named_record_type_for_call_binding(param_type, body)) {
         return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
+               is_freely_copyable_class_value_source(arg, param_type, body, signatures) ||
                produces_rvalue_of_type(arg, param_type, body, signatures);
     }
     return true;
@@ -507,6 +523,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, param_type, body)) return false;
     if (is_named_record_type_for_call_binding(param_type, body)) {
         return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
+               is_freely_copyable_class_value_source(arg, param_type, body, signatures) ||
                produces_rvalue_of_type(arg, param_type, body, signatures);
     }
     return true;

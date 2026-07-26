@@ -1,0 +1,12 @@
+import std;
+
+void takes(std::format_string<> fmt) {
+    return;
+}
+
+int main() {
+    std::format_string<> fmt{"ok"};
+    std::format_string<> copy = fmt;
+    takes(copy);
+    return 0;
+}

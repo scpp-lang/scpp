@@ -1,0 +1,24 @@
+import std;
+
+std::string_view copy_back(std::string_view view) {
+    std::string_view local = view;
+    return local;
+}
+
+bool takes_tail(std::string_view view) {
+    return view.size() == 2 && view.at(0) == 'b' && view.at(1) == 'c';
+}
+
+int main() {
+    std::string_view base{"abc"};
+    std::string_view copy = base;
+    size_t pos = 1;
+    std::string_view assigned{"z"};
+    assigned = base.substr(pos);
+    std::string_view returned = copy_back(base.substr(pos));
+    if (copy.size() != 3 || copy.at(0) != 'a' || copy.at(1) != 'b' || copy.at(2) != 'c') return 1;
+    if (assigned.size() != 2 || assigned.at(0) != 'b' || assigned.at(1) != 'c') return 2;
+    if (!takes_tail(base.substr(pos))) return 3;
+    if (returned.size() != 2 || returned.at(0) != 'b' || returned.at(1) != 'c') return 4;
+    return 0;
+}

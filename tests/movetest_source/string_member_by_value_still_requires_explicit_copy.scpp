@@ -1,0 +1,17 @@
+import std;
+
+class Holder {
+public:
+    std::string value;
+};
+
+void takes(std::string value) {
+    return;
+}
+
+int main() {
+    Holder holder{};
+    holder.value = std::string{"abc"};
+    takes(holder.value);
+    return 0;
+}
