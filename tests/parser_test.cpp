@@ -4758,6 +4758,41 @@ void test_switch_statement_parses_with_cases_default_and_fallthrough() {
            "switch_statement_parses_with_cases_default_and_fallthrough: final case should be default");
 }
 
+void test_namespaced_enum_case_label_resolves_to_qualified_enumerator() {
+    scpp::Program program = scpp::parse(
+        "namespace calc {\n"
+        "enum class Color { red = 1, green = 2 };\n"
+        "int pick(Color color) {\n"
+        "    switch (color) {\n"
+        "        case Color::red:\n"
+        "            return 1;\n"
+        "        case Color::green:\n"
+        "            return 0;\n"
+        "        default:\n"
+        "            return 2;\n"
+        "    }\n"
+        "}\n"
+        "}\n");
+    const scpp::Function& pick_fn = program.functions[0];
+    expect(pick_fn.body->statements.size() == 1,
+           "namespaced_enum_case_label_resolves_to_qualified_enumerator: expected a single switch statement");
+    if (pick_fn.body->statements.size() != 1) return;
+    const scpp::Stmt& switch_stmt = *pick_fn.body->statements[0];
+    expect(switch_stmt.kind == scpp::StmtKind::Switch,
+           "namespaced_enum_case_label_resolves_to_qualified_enumerator: expected Switch");
+    expect(switch_stmt.switch_cases.size() == 3,
+           "namespaced_enum_case_label_resolves_to_qualified_enumerator: expected 3 switch cases");
+    if (switch_stmt.switch_cases.size() < 2) return;
+    expect(switch_stmt.switch_cases[0].value != nullptr &&
+               switch_stmt.switch_cases[0].value->kind == scpp::ExprKind::Identifier &&
+               switch_stmt.switch_cases[0].value->name == "calc::Color::red",
+           "namespaced_enum_case_label_resolves_to_qualified_enumerator: first case should resolve to calc::Color::red");
+    expect(switch_stmt.switch_cases[1].value != nullptr &&
+               switch_stmt.switch_cases[1].value->kind == scpp::ExprKind::Identifier &&
+               switch_stmt.switch_cases[1].value->name == "calc::Color::green",
+           "namespaced_enum_case_label_resolves_to_qualified_enumerator: second case should resolve to calc::Color::green");
+}
+
 void test_break_parses_inside_switch() {
     scpp::Program program = scpp::parse(
         "int main() {\n"
@@ -4936,6 +4971,7 @@ int main() {
     test_break_outside_loop_is_rejected();
     test_continue_outside_loop_is_rejected();
     test_switch_statement_parses_with_cases_default_and_fallthrough();
+    test_namespaced_enum_case_label_resolves_to_qualified_enumerator();
     test_break_parses_inside_switch();
     test_fallthrough_outside_switch_is_rejected();
     test_fallthrough_must_be_last_in_case();
