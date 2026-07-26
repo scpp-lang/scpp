@@ -3216,10 +3216,9 @@ void test_generic_parameter_const_auto_ref_parses() {
            "generic_parameter_const_auto_ref_parses: pointee should name the witness class 'Shape'");
 }
 
-// ch05 §5.11: `ConceptName auto&&` (a move-in generic parameter,
-// e.g. for passing a closure) parses with is_rvalue_ref set, mirroring
-// an ordinary `T&&` parameter exactly, just with a concept's witness
-// class standing in for a concrete type.
+// ch05 §5.11: `ConceptName auto&&` parses with the raw `&&` spelling
+// preserved in Type::is_rvalue_ref; later call resolution may collapse it
+// like a forwarding reference when deduction binds it to an lvalue.
 void test_generic_parameter_auto_rvalue_ref_parses() {
     scpp::Program program = scpp::parse(
         "template<typename T>\n"

@@ -637,6 +637,13 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         if (all_match) matches.push_back(&candidate);
     }
 
+    bool have_non_generic_match = std::any_of(matches.begin(), matches.end(),
+                                              [](const FunctionSignature* sig) { return !sig->is_generic_template; });
+    if (have_non_generic_match) {
+        matches.erase(std::remove_if(matches.begin(), matches.end(),
+                                     [](const FunctionSignature* sig) { return sig->is_generic_template; }),
+                      matches.end());
+    }
     if (matches.size() <= 1) return matches.empty() ? nullptr : matches[0];
 
     // Tie-break: prefer whichever match has the most mutable-reference

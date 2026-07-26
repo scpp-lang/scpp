@@ -457,8 +457,22 @@ private:
     // type) and a witness class (check_generic_type_methods_once), the
     // same way a generic function's own Concept-constrained parameter
     // is substituted at its own call site.
+    [[nodiscard]] static Type collapse_substituted_reference(Type type) {
+        if (type.kind != TypeKind::Reference || !type.pointee || type.pointee->kind != TypeKind::Reference ||
+            !type.pointee->pointee) {
+            return type;
+        }
+        Type inner = *type.pointee;
+        Type collapsed;
+        collapsed.kind = TypeKind::Reference;
+        collapsed.is_mutable_ref = inner.is_mutable_ref;
+        collapsed.is_rvalue_ref = type.is_rvalue_ref && inner.is_rvalue_ref;
+        collapsed.pointee = std::make_shared<Type>(*inner.pointee);
+        return collapsed;
+    }
+
     [[nodiscard]] Type substitute_type_param(const Type& type, const std::string& param_name,
-                                                     const Type& replacement) {
+                                             const Type& replacement) {
         if (type.kind == TypeKind::Named && type.name == param_name) return replacement;
         Type result = type;
         for (Type& arg : result.template_args) {
@@ -492,7 +506,7 @@ private:
             substitute_type_param_in_expr(*cloned, param_name, replacement);
             result.array_size_expr = std::shared_ptr<Expr>(std::move(cloned));
         }
-        return result;
+        return collapse_substituted_reference(std::move(result));
     }
 
     [[nodiscard]] Type substitute_type_pack(const Type& type, std::string_view pack_name,
@@ -2611,6 +2625,47 @@ private:
         return true;
     }
 
+    [[nodiscard]] bool is_forwarding_reference_parameter(const Param& param,
+                                                         const std::vector<GenericTypeParam>& template_params) const {
+        if (param.type.kind != TypeKind::Reference || !param.type.is_rvalue_ref || !param.type.pointee) return false;
+        if (!param.generic_concept.empty()) return true;
+        if (param.type.pointee->kind != TypeKind::Named || !param.type.pointee->template_args.empty() ||
+            !param.type.pointee->non_type_args.empty()) {
+            return false;
+        }
+        for (const GenericTypeParam& tp : template_params) {
+            if (!tp.is_non_type && !tp.is_pack && tp.name == param.type.pointee->name) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] Type forwarding_reference_deduced_type(const Expr& arg, const Type& arg_type, Body& body) const {
+        Type named = arg_type.kind == TypeKind::Reference ? *arg_type.pointee : arg_type;
+        if (produces_rvalue_of_type(arg, named, body, signatures_)) return named;
+        if (arg_type.kind == TypeKind::Reference && !arg_type.is_rvalue_ref) return arg_type;
+        Type deduced;
+        deduced.kind = TypeKind::Reference;
+        deduced.is_mutable_ref = !is_read_only_reachable(arg, body, signatures_);
+        deduced.is_rvalue_ref = false;
+        deduced.pointee = std::make_shared<Type>(std::move(named));
+        return deduced;
+    }
+
+    [[nodiscard]] Type abbreviated_generic_concrete_param_type(const Param& param, const Expr& arg,
+                                                               const Type& arg_type, Body& body) const {
+        Type named = arg_type.kind == TypeKind::Reference ? *arg_type.pointee : arg_type;
+        Type substituted = param.type;
+        if (is_forwarding_reference_parameter(param, {})) {
+            return forwarding_reference_deduced_type(arg, arg_type, body);
+        }
+        if (substituted.kind == TypeKind::Reference) {
+            substituted.pointee = std::make_shared<Type>(std::move(named));
+        } else {
+            substituted = std::move(named);
+        }
+        return substituted;
+    }
+
     bool deduce_template_bindings_from_type_pattern(
         const Type& pattern, const Type& concrete, const std::vector<GenericTypeParam>& template_params,
         std::unordered_map<std::string, Type>& type_bindings, std::unordered_map<std::string, int>& value_bindings,
@@ -2851,7 +2906,9 @@ private:
                     const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
                     std::optional<Type> arg_type = infer_expr_type(*args[arg_cursor], body, signatures_);
                     if (arg_type.has_value()) {
-                        Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                        Type concrete = is_forwarding_reference_parameter(tmpl.params[i], tmpl.template_params)
+                                            ? forwarding_reference_deduced_type(*args[arg_cursor], *arg_type, body)
+                                            : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                         if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                             Expr fake_call;
                             fake_call.loc = loc;
@@ -2977,6 +3034,8 @@ private:
                                                       const std::unordered_map<std::string, int>& value_bindings,
                                                       const std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
                                                       const std::vector<std::vector<Type>>& concrete_pack_param_types,
+                                                      const std::vector<Type>& concrete_param_types = {},
+                                                      const std::vector<bool>& use_concrete_param_types = {},
                                                       const std::vector<std::pair<std::size_t, Type>>& upcasts = {}) {
         std::string cache_key = tmpl.name;
         for (const GenericTypeParam& tp : tmpl.template_params) {
@@ -2991,6 +3050,11 @@ private:
                                         : ("." + mangle_type_for_clone_name(type_bindings.at(tp.name)));
         }
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
+            if (i < concrete_param_types.size() && i < use_concrete_param_types.size() && use_concrete_param_types[i] &&
+                !tmpl.params[i].is_parameter_pack) {
+                cache_key += "." + mangle_type_for_clone_name(concrete_param_types[i]);
+                continue;
+            }
             if (!tmpl.params[i].is_parameter_pack) continue;
             for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
         }
@@ -3048,7 +3112,11 @@ private:
                 break;
             }
             if (!upcasted) {
-                p.type = apply_template_bindings_to_type(p.type, type_bindings, pack_bindings, tmpl.loc);
+                if (i < concrete_param_types.size() && i < use_concrete_param_types.size() && use_concrete_param_types[i]) {
+                    p.type = concrete_param_types[i];
+                } else {
+                    p.type = apply_template_bindings_to_type(p.type, type_bindings, pack_bindings, tmpl.loc);
+                }
             }
             clone.params.push_back(std::move(p));
         }
@@ -3185,7 +3253,9 @@ private:
                     for (; arg_cursor < expr.args.size(); arg_cursor++) {
                         std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                         if (!arg_type.has_value()) return false;
-                        Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                        Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor], stable_tmpl.template_params)
+                                            ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
+                                            : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                         if (pack_type_name.has_value() && !direct_pack) {
                             std::unordered_map<std::string, Type> arg_type_bindings;
                             std::unordered_map<std::string, int> arg_value_bindings;
@@ -3216,7 +3286,10 @@ private:
                 const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
                 std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                 if (!arg_type.has_value()) return false;
-                Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor],
+                                                                  stable_tmpl.template_params)
+                                    ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
+                                    : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                 if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                     if (argument_type_can_participate_in_variadic_base_deduction(*expr_copy, arg_cursor, underlying.name,
                                                                                  body)) {
@@ -3226,9 +3299,11 @@ private:
                                                     resolution.pack_bindings, resolution.upcasts);
                     }
                 } else {
-                    deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
-                                                               resolution.type_bindings, resolution.value_bindings,
-                                                               resolution.pack_bindings);
+                    if (!deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
+                                                                    resolution.type_bindings, resolution.value_bindings,
+                                                                    resolution.pack_bindings)) {
+                        return false;
+                    }
                 }
                 if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                     if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
@@ -3258,6 +3333,12 @@ private:
             for (const DeferredTemplateObligation& obligation : resolution.deferred_obligations) {
                 Type concrete_pattern = apply_template_bindings_to_type(
                     obligation.parameter_type_pattern, resolution.type_bindings, resolution.pack_bindings, expr.loc);
+                if (is_forwarding_reference_parameter(stable_tmpl.params[obligation.param_index],
+                                                      stable_tmpl.template_params)) {
+                    std::optional<Type> arg_type = infer_expr_type(*expr.args[obligation.arg_index], body, signatures_);
+                    if (!arg_type.has_value()) return false;
+                    concrete_pattern = forwarding_reference_deduced_type(*expr.args[obligation.arg_index], *arg_type, body);
+                }
                 if (type_depends_on_template_params(concrete_pattern, stable_tmpl.template_params)) return false;
                 if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
                     return false;
@@ -3298,13 +3379,8 @@ private:
                         if (concept_it == concepts_by_name_.end()) return false;
                         if (!type_satisfies_concept(named, *concept_it->second, program_)) return false;
                     }
-                    Type substituted = param.type;
-                    if (substituted.kind == TypeKind::Reference) {
-                        substituted.pointee = std::make_shared<Type>(named);
-                    } else {
-                        substituted = named;
-                    }
-                    resolution.concrete_pack_param_types[i].push_back(std::move(substituted));
+                    resolution.concrete_pack_param_types[i].push_back(
+                        abbreviated_generic_concrete_param_type(param, *expr.args[arg_cursor], *arg_type, body));
                 }
                 resolution.concrete_param_types.push_back(resolution.concrete_pack_param_types[i].empty()
                                                               ? param.type
@@ -3330,13 +3406,8 @@ private:
                 if (concept_it == concepts_by_name_.end()) return false;
                 if (!type_satisfies_concept(named, *concept_it->second, program_)) return false;
             }
-            Type substituted = param.type;
-            if (substituted.kind == TypeKind::Reference) {
-                substituted.pointee = std::make_shared<Type>(named);
-            } else {
-                substituted = named;
-            }
-            resolution.concrete_param_types.push_back(std::move(substituted));
+            resolution.concrete_param_types.push_back(
+                abbreviated_generic_concrete_param_type(param, *expr.args[arg_cursor], *arg_type, body));
             arg_cursor++;
         }
         if (arg_cursor != expr.args.size()) return false;
@@ -3394,13 +3465,8 @@ private:
                                 expr.loc);
                         }
                     }
-                    Type substituted = param.type;
-                    if (substituted.kind == TypeKind::Reference) {
-                        substituted.pointee = std::make_shared<Type>(named);
-                    } else {
-                        substituted = named;
-                    }
-                    concrete_pack_param_types[i].push_back(std::move(substituted));
+                    concrete_pack_param_types[i].push_back(
+                        abbreviated_generic_concrete_param_type(param, *expr.args[arg_cursor], *arg_type, body));
                 }
                 concrete_param_types.push_back(concrete_pack_param_types[i].empty() ? param.type
                                                                                     : concrete_pack_param_types[i][0]);
@@ -3426,13 +3492,8 @@ private:
                         expr.loc);
                 }
             }
-            Type substituted = param.type;
-            if (substituted.kind == TypeKind::Reference) {
-                substituted.pointee = std::make_shared<Type>(named);
-            } else {
-                substituted = named;
-            }
-            concrete_param_types.push_back(std::move(substituted));
+            concrete_param_types.push_back(
+                abbreviated_generic_concrete_param_type(param, *expr.args[arg_cursor], *arg_type, body));
             arg_cursor++;
         }
 
@@ -3549,6 +3610,8 @@ private:
         std::unordered_map<std::string, std::vector<Type>> pack_bindings;
         std::vector<std::pair<std::size_t, Type>> upcasts;
         std::vector<DeferredTemplateObligation> deferred_obligations;
+        std::vector<Type> concrete_param_types(stable_tmpl.params.size());
+        std::vector<bool> have_concrete_param_types(stable_tmpl.params.size(), false);
         std::vector<std::vector<Type>> concrete_pack_param_types(stable_tmpl.params.size());
 
         seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
@@ -3569,7 +3632,10 @@ private:
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) continue;
-                    Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor],
+                                                                      stable_tmpl.template_params)
+                                        ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
+                                        : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                     if (pack_type_name.has_value() && !direct_pack) {
                         std::unordered_map<std::string, Type> arg_type_bindings;
                         std::unordered_map<std::string, int> arg_value_bindings;
@@ -3604,13 +3670,20 @@ private:
                                                 stable_tmpl.name + "' disagree across arguments",
                             expr.loc);
                 }
+                if (!deduced_pack_types.empty()) {
+                    concrete_param_types[param_cursor] = deduced_pack_types[0];
+                    have_concrete_param_types[param_cursor] = true;
+                }
                 continue;
             }
             const Type& param_type = stable_tmpl.params[param_cursor].type;
             const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
             std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
             if (arg_type.has_value()) {
-                Type concrete = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor],
+                                                                  stable_tmpl.template_params)
+                                    ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
+                                    : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                 if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                     // Case A: a base-class-deduction pattern (e.g.
                     // "TupleImpl<I, Head, Tail...>& t").
@@ -3619,8 +3692,16 @@ private:
                                                     pack_bindings, upcasts);
                     }
                 } else {
-                    deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
-                                                               type_bindings, value_bindings, pack_bindings);
+                    if (!deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
+                                                                    type_bindings, value_bindings, pack_bindings)) {
+                        throw DataflowError("no overload of generic function '" + stable_tmpl.name +
+                                                "' matches this argument list",
+                                            expr.loc);
+                    }
+                }
+                if (is_forwarding_reference_parameter(stable_tmpl.params[param_cursor], stable_tmpl.template_params)) {
+                    concrete_param_types[param_cursor] = concrete;
+                    have_concrete_param_types[param_cursor] = true;
                 }
             }
             if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
@@ -3628,6 +3709,9 @@ private:
                                                                   pack_bindings)) {
                     deferred_obligations.push_back(DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
                 }
+            } else {
+                concrete_param_types[param_cursor] = param_type;
+                have_concrete_param_types[param_cursor] = true;
             }
             arg_cursor++;
         }
@@ -3662,6 +3746,13 @@ private:
         for (const DeferredTemplateObligation& obligation : deferred_obligations) {
             Type concrete_pattern =
                 apply_template_bindings_to_type(obligation.parameter_type_pattern, type_bindings, pack_bindings, expr.loc);
+            if (is_forwarding_reference_parameter(stable_tmpl.params[obligation.param_index], stable_tmpl.template_params)) {
+                std::optional<Type> arg_type = infer_expr_type(*expr.args[obligation.arg_index], body, signatures_);
+                if (!arg_type.has_value()) {
+                    throw DataflowError("cannot resolve the type of this forwarding-reference argument", expr.loc);
+                }
+                concrete_pattern = forwarding_reference_deduced_type(*expr.args[obligation.arg_index], *arg_type, body);
+            }
             if (type_depends_on_template_params(concrete_pattern, stable_tmpl.template_params)) {
                 throw DataflowError("cannot deduce every template argument needed by parameter '" +
                                         stable_tmpl.params[obligation.param_index].name + "' of generic function '" +
@@ -3675,6 +3766,8 @@ private:
                                         "' is incompatible after substituting deduced template arguments",
                     expr.args[obligation.arg_index]->loc);
             }
+            concrete_param_types[obligation.param_index] = concrete_pattern;
+            have_concrete_param_types[obligation.param_index] = true;
         }
 
         // ch05 §5.15: once every template parameter is bound to a
@@ -3686,7 +3779,8 @@ private:
         check_thread_safety_constraints(expr, stable_tmpl, type_bindings, pack_bindings);
 
         std::string clone_name = instantiate_full_header_generic_clone(
-            stable_tmpl, type_bindings, value_bindings, pack_bindings, concrete_pack_param_types, upcasts);
+            stable_tmpl, type_bindings, value_bindings, pack_bindings, concrete_pack_param_types, concrete_param_types,
+            have_concrete_param_types, upcasts);
         append_instantiated_default_arguments_to_call(expr, stable_tmpl, param_offset, type_bindings, value_bindings,
                                                       pack_bindings);
         expr.name = member_name_prefix.empty() ? clone_name : clone_name.substr(member_name_prefix.size());
@@ -4033,6 +4127,11 @@ private:
             }
         }
         if (visible_template_candidates.empty()) return;
+        if (ordinary_overload_exists) {
+            CalleeSignature ordinary_callee{generic_template_name, param_offset, std::nullopt};
+            const FunctionSignature* ordinary = resolve_overload(expr, ordinary_callee, body, signatures_);
+            if (ordinary != nullptr && !ordinary->is_generic_template) return;
+        }
         if (visible_template_candidates.size() == 1 && !ordinary_overload_exists) {
             const Function& tmpl = program_.functions[visible_template_candidates[0]];
             if (!tmpl.template_params.empty()) {

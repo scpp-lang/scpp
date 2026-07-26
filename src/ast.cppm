@@ -127,17 +127,13 @@ struct Type {
     // true.
     bool is_mutable_ref = true;
 
-    // Reference only: true for `T&&` (ch03's "passed by move" parameter
-    // form -- ownership transfer, exactly like a std::unique_ptr move,
-    // just for any type). This is genuinely just a named rvalue
-    // reference: unlike real C++'s `auto&&`/forwarding-reference
-    // template parameters, scpp's `auto` never triggers reference
-    // collapsing, so `T&&` always means "take ownership via move," never
-    // "bind to either an lvalue or rvalue depending on the argument" --
-    // confirmed against the language-definition doc, ch05 §5.11's
-    // `Concept auto&&` generic form reuses this exact same flag (see
-    // Param::generic_concept). false for `T&`/`const T&`, where
-    // is_mutable_ref (above) then distinguishes those two as before.
+    // Reference only: true for an rvalue-reference spelling (`T&&` or a
+    // generic `auto&&`/deduced-`T&&` parameter before deduction). A
+    // non-deduced `T&&` remains the ordinary "passed by move" form; a
+    // deduced forwarding reference may later collapse to `T&` when the
+    // argument is an lvalue, but the parsed spelling still records `&&`
+    // here. false for `T&`/`const T&`, where is_mutable_ref (above) then
+    // distinguishes those two as before.
     bool is_rvalue_ref = false;
 
     // Pointer only: true for `T*`, false for `const T*` -- mirrors
@@ -253,10 +249,11 @@ struct Param {
     // constrained by, for the abbreviated generic-function form --
     // `ConceptName auto name` (by value), `ConceptName auto& name`/
     // `const ConceptName auto& name` (mutable/shared borrow), or
-    // `ConceptName auto&& name` (move-in) -- mirroring the ordinary
-    // `T`/`T&`/`const T&`/`T&&` forms exactly, just with `auto`
-    // interposed and a concept name standing in for a concrete type
-    // (see parse_generic_param_type). `type` itself is still fully
+    // `ConceptName auto&& name` (a forwarding-reference spelling that
+    // collapses at call resolution) -- mirroring the ordinary `T`/`T&`/
+    // `const T&`/`T&&` forms exactly, just with `auto` interposed and a
+    // concept name standing in for a concrete type (see
+    // parse_generic_param_type). `type` itself is still fully
     // populated the same shape an ordinary parameter's would be, except
     // its innermost Named type names a synthesized *witness class*
     // (see ClassDef::is_concept_witness) rather than a real type -- the

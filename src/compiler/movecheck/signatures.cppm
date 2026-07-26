@@ -13,6 +13,7 @@ namespace scpp {
 
 struct FunctionSignature {
     std::vector<Type> param_types;
+    std::vector<bool> param_is_forwarding_reference;
     std::vector<std::string> param_names;
     std::vector<std::shared_ptr<Expr>> param_default_exprs;
     std::vector<bool> param_require_thread_movable;
@@ -34,9 +35,23 @@ struct FunctionSignature {
     AccessSpecifier access = AccessSpecifier::Public;
     SourceLocation loc;
     ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
+    bool is_generic_template = false;
 };
 
 namespace {
+[[nodiscard]] bool is_forwarding_reference_param(const Function& fn, const Param& param) {
+    if (param.type.kind != TypeKind::Reference || !param.type.is_rvalue_ref || !param.type.pointee) return false;
+    if (!param.generic_concept.empty()) return true;
+    if (param.type.pointee->kind != TypeKind::Named || !param.type.pointee->template_args.empty() ||
+        !param.type.pointee->non_type_args.empty()) {
+        return false;
+    }
+    for (const GenericTypeParam& tp : fn.template_params) {
+        if (!tp.is_non_type && !tp.is_pack && tp.name == param.type.pointee->name) return true;
+    }
+    return false;
+}
+
 [[nodiscard]] bool signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
                                                     std::size_t param_offset) {
     if (sig.param_types.size() < param_offset) return false;
@@ -758,12 +773,14 @@ void validate_operator_arrow_signature(const Function& fn) {
         validate_operator_arrow_signature(fn);
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());
+        sig.param_is_forwarding_reference.reserve(fn.params.size());
         sig.param_names.reserve(fn.params.size());
         sig.param_default_exprs.reserve(fn.params.size());
         sig.param_require_thread_movable.reserve(fn.params.size());
         sig.param_require_thread_shareable.reserve(fn.params.size());
         for (const Param& param : fn.params) {
             sig.param_types.push_back(param.type);
+            sig.param_is_forwarding_reference.push_back(is_forwarding_reference_param(fn, param));
             sig.param_names.push_back(param.name);
             sig.param_default_exprs.push_back(param.default_expr);
             sig.param_require_thread_movable.push_back(param.require_thread_movable);
@@ -786,6 +803,7 @@ void validate_operator_arrow_signature(const Function& fn) {
         sig.access = fn.access;
         sig.loc = fn.loc;
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+        sig.is_generic_template = fn.is_generic_template;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             bool same_params = existing.param_types.size() == sig.param_types.size();

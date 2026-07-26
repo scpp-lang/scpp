@@ -1,0 +1,10 @@
+// The classic recursive-generic-lambda `auto&& self` pattern passes the
+// named closure object as an lvalue and therefore relies on forwarding-
+// reference collapsing, not plain move-only `T&&` semantics.
+int main() {
+    auto fact = [&](auto&& self, int n) -> int {
+        if (n <= 1) return 1;
+        return n * self(self, n - 1);
+    };
+    return fact(fact, 4) - 24;
+}

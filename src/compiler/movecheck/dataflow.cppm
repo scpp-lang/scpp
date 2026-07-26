@@ -41,6 +41,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                                  bool report_errors);
 void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
                                        const Signatures& signatures, bool report_errors);
+[[nodiscard]] bool write_is_licensed_by_mutable_reborrow_lender(const Expr& target, const DataflowState& state,
+                                                                const Body& body, const Signatures& signatures);
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type,
                                                  const Body& body, const Signatures& signatures);
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body,
@@ -166,14 +168,16 @@ void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, c
     if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
         validate_reborrow_lender_write(*lender, state, report_errors);
     }
-    for (const std::string& root : write_roots) {
-        auto borrow_it = state.borrows.find(root);
-        if (borrow_it != state.borrows.end() &&
-            (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-            throw DataflowError("cannot apply '" +
-                                    std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
-                                    "' to this place: '" + root + "' is currently borrowed",
-                                expr.loc);
+    if (!write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures)) {
+        for (const std::string& root : write_roots) {
+            auto borrow_it = state.borrows.find(root);
+            if (borrow_it != state.borrows.end() &&
+                (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                throw DataflowError("cannot apply '" +
+                                        std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
+                                        "' to this place: '" + root + "' is currently borrowed",
+                                    expr.loc);
+            }
         }
     }
     if (expr.lhs->kind == ExprKind::Identifier) {
@@ -205,6 +209,17 @@ void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, c
     return pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type).has_value();
 }
 
+[[nodiscard]] bool write_is_licensed_by_mutable_reborrow_lender(const Expr& target, const DataflowState& state,
+                                                                const Body& body, const Signatures& signatures) {
+    std::optional<std::string> lender = resolve_reborrow_lender(target, body, signatures);
+    if (!lender.has_value()) return false;
+    auto type_it = body.local_types.find(*lender);
+    if (type_it == body.local_types.end() || !is_reborrowable_local_type(type_it->second) || !type_it->second.is_mutable_ref) {
+        return false;
+    }
+    return lookup(state.locals, *lender) == LocalState::Initialized;
+}
+
 void validate_compound_assignment_expr(const Expr& expr, DataflowState& state, const Body& body,
                                        const Signatures& signatures, bool report_errors) {
     apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
@@ -232,6 +247,7 @@ void validate_compound_assignment_expr(const Expr& expr, DataflowState& state, c
     if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
         validate_reborrow_lender_write(*lender, state, report_errors);
     }
+    bool write_through_mutable_reborrow = write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
     RootSet write_roots;
     if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
         write_roots = single_root(*root);
@@ -243,11 +259,13 @@ void validate_compound_assignment_expr(const Expr& expr, DataflowState& state, c
                                 "' must be an assignable place",
                             expr.loc);
     }
-    for (const std::string& root : write_roots) {
-        auto borrow_it = state.borrows.find(root);
-        if (borrow_it != state.borrows.end() &&
-            (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-            throw DataflowError("cannot assign to this place: '" + root + "' is currently borrowed", state.current_loc);
+    if (!write_through_mutable_reborrow) {
+        for (const std::string& root : write_roots) {
+            auto borrow_it = state.borrows.find(root);
+            if (borrow_it != state.borrows.end() &&
+                (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                throw DataflowError("cannot assign to this place: '" + root + "' is currently borrowed", state.current_loc);
+            }
         }
     }
     if (expr.lhs->kind == ExprKind::Identifier) state.locals[expr.lhs->name] = LocalState::Initialized;
@@ -669,19 +687,30 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     // `state`, since none of these transient borrows outlive the call.
     BorrowMap in_call_borrows;
     auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) {
-        bool param_is_reference =
-            sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
-        bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
+        Type effective_param_type;
+        bool have_effective_param_type = false;
+        if (sig != nullptr && param_index < sig->param_types.size()) {
+            effective_param_type = sig->param_types[param_index];
+            if (param_index < sig->param_is_forwarding_reference.size() && sig->param_is_forwarding_reference[param_index] &&
+                is_reference(effective_param_type) && effective_param_type.pointee != nullptr &&
+                !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
+                effective_param_type.is_rvalue_ref = false;
+                effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
+            }
+            have_effective_param_type = true;
+        }
+        bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
+        bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
         if (param_is_rvalue_reference) {
-            // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- an ownership-
-            // transfer argument, not a borrow: needs a genuine rvalue
-            // (see produces_rvalue_of_type), never apply_reference_
-            // argument's place-borrow bookkeeping. Still walked via
-            // apply_expr (exactly like a by-value/unique_ptr argument
-            // below) for its own side effects -- e.g. std::move(x)
-            // marking x moved-out in `state`.
-            if (report_errors &&
-                !produces_rvalue_of_type(arg, *sig->param_types[param_index].pointee, body, signatures)) {
+            // ch03/ch05 §5.11: once a parameter is still a genuine
+            // rvalue-reference *after* any forwarding-reference collapse,
+            // it is an ownership-transfer argument, not a borrow: needs a
+            // genuine rvalue (see produces_rvalue_of_type), never
+            // apply_reference_argument's place-borrow bookkeeping. Still
+            // walked via apply_expr (exactly like a by-value/unique_ptr
+            // argument below) for its own side effects -- e.g.
+            // std::move(x) marking x moved-out in `state`.
+            if (report_errors && !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
                 throw DataflowError(
                     "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
                     "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
@@ -690,8 +719,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             }
             apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
         } else if (param_is_reference) {
-            apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
-                                      report_errors);
+            apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures, report_errors);
         } else {
             if (report_errors && sig != nullptr && param_index < sig->param_types.size() &&
                 sig->param_types[param_index].kind == TypeKind::Pointer) {
@@ -1356,19 +1384,23 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                             lender.has_value()) {
                             validate_reborrow_lender_write(*lender, state, report_errors);
                         }
+                        bool write_through_mutable_reborrow =
+                            write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
                         RootSet write_roots;
                         if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
                             write_roots = single_root(*root);
                         } else {
                             write_roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
                         }
-                        for (const std::string& root : write_roots) {
-                            auto borrow_it = state.borrows.find(root);
-                            if (borrow_it != state.borrows.end() &&
-                                (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                                throw DataflowError("cannot assign to this place: '" + root +
-                                                        "' is currently borrowed",
-                                                    state.current_loc);
+                        if (!write_through_mutable_reborrow) {
+                            for (const std::string& root : write_roots) {
+                                auto borrow_it = state.borrows.find(root);
+                                if (borrow_it != state.borrows.end() &&
+                                    (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                                    throw DataflowError("cannot assign to this place: '" + root +
+                                                            "' is currently borrowed",
+                                                        state.current_loc);
+                                }
                             }
                         }
                     };
