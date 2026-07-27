@@ -64,12 +64,26 @@ enum class TypeKind {
                // view over a fixed-size array (see ch03/ch06; M6).
 };
 
+struct LifetimeAnnotation {
+    // Empty when no `[[scpp::lifetime(...)]]` is present on this
+    // declaration. Otherwise the raw identifier spelled in source --
+    // either the reserved word `any` or a user-written, declaration-
+    // local group name.
+    std::string name;
+
+    [[nodiscard]] bool present() const { return !name.empty(); }
+    [[nodiscard]] bool is_any() const { return name == "any"; }
+
+    bool operator==(const LifetimeAnnotation&) const = default;
+};
+
 // A type reference. `pointee`/`element` use shared_ptr (not unique_ptr) so
 // Type stays copyable: Param/StructField/Stmt store Type by value, and
 // copying a pointer/array type is just a cheap refcount bump, not a deep
 // clone.
 struct Type {
     TypeKind kind = TypeKind::Named;
+    LifetimeAnnotation lifetime;
 
     // Named
     std::string name;
@@ -152,6 +166,14 @@ struct Type {
     // Distinct from Stmt::is_const, which marks an immutable local
     // variable declaration rather than a type-level qualifier.
     bool is_const_qualified = false;
+    // True only when this spelled type is one of the special by-value
+    // wrappers whose carried referent may serve as a lifetime source for
+    // pointer-return inference/validation: `std::reference_wrapper<T>`
+    // itself, or an allowed wrapper that contains exactly one such value
+    // (today `std::optional<std::reference_wrapper<T>>`). This does not
+    // make the wrapper object borrow-tracked in general; it is consulted
+    // only by the cross-function lifetime machinery.
+    bool is_reference_wrapper_lifetime_source = false;
 
     // ch05 §5.14: non-empty only for a *not-yet-resolved* generic-type
     // instantiation, e.g. `Vec<int>` parsed as `Type{Named, "Vec"}` with
@@ -217,19 +239,6 @@ struct AlignmentSpecifier {
     AlignmentSpecifier& operator=(const AlignmentSpecifier& other);
     AlignmentSpecifier(AlignmentSpecifier&&) = default;
     AlignmentSpecifier& operator=(AlignmentSpecifier&&) = default;
-};
-
-struct LifetimeAnnotation {
-    // Empty when no `[[scpp::lifetime(...)]]` is present on this
-    // declaration. Otherwise the raw identifier spelled in source --
-    // either the reserved word `any` or a user-written, declaration-
-    // local group name.
-    std::string name;
-
-    [[nodiscard]] bool present() const { return !name.empty(); }
-    [[nodiscard]] bool is_any() const { return name == "any"; }
-
-    bool operator==(const LifetimeAnnotation&) const = default;
 };
 
 [[nodiscard]] inline Type named_type(std::string name) {
@@ -1769,8 +1778,9 @@ struct Program {
 using OptionalProgramRef = std::optional<std::reference_wrapper<const Program>>;
 
 [[nodiscard]] inline const GlobalVar*
-find_visible_global(OptionalProgramRef program, const std::vector<std::string>& namespace_path,
-                    const std::string& name, bool explicit_global_qualification = false) {
+find_visible_global(std::optional<std::reference_wrapper<const Program [[scpp::lifetime(program)]]>> program,
+                    const std::vector<std::string>& namespace_path,
+                    const std::string& name, bool explicit_global_qualification = false) [[scpp::lifetime(program)]] {
     if (!program.has_value()) return nullptr;
     auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
         return global.decl.get() != nullptr && std::string_view{global.decl->var_name} == candidate;

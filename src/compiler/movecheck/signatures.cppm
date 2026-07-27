@@ -652,8 +652,8 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
 
     std::vector<std::size_t> indices;
     for (std::size_t i = 0; i < fn.params.size(); i++) {
-        if ((is_reference(fn.params[i].type) && !fn.params[i].type.is_rvalue_ref) ||
-            fn.params[i].type.kind == TypeKind::Pointer) {
+        if (is_pointer_return_lifetime_source_type(fn.params[i].type) &&
+            !(is_reference(fn.params[i].type) && fn.params[i].type.is_rvalue_ref)) {
             indices.push_back(i);
         }
     }
@@ -661,23 +661,24 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
 }
 
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param) {
-    if (!is_lifetime_eligible_type(param.type)) return false;
+    if (!is_pointer_return_lifetime_source_type(param.type)) return false;
     return !(is_reference(param.type) && param.type.is_rvalue_ref);
 }
 
 void validate_lifetime_annotation_placement(const Function& fn) {
     for (const Param& param : fn.params) {
         if (!param.lifetime.present()) continue;
-        if (!is_lifetime_eligible_type(param.type)) {
+        if (!is_pointer_return_lifetime_source_type(param.type)) {
             throw DataflowError("parameter '" + param.name +
-                                    "' bears '[[scpp::lifetime(name)]]' but is not a reference, pointer, or span",
+                                    "' bears '[[scpp::lifetime(name)]]' but does not denote a reference, pointer, "
+                                    "span, or std::reference_wrapper-carried reference",
                                 fn.loc);
         }
     }
-    if (fn.return_lifetime.present() && !is_lifetime_eligible_type(fn.return_type)) {
+    if (fn.return_lifetime.present() && !is_pointer_return_lifetime_source_type(fn.return_type)) {
         throw DataflowError("function '" + fn.name +
                                 "' bears '[[scpp::lifetime(name)]]' on its declarator, but its return type is not "
-                                "a reference, pointer, or span",
+                                "a reference, pointer, span, or std::reference_wrapper-carried reference",
                             fn.loc);
     }
 }

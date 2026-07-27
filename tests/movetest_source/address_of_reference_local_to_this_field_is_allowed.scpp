@@ -1,0 +1,23 @@
+class Box {
+private:
+    int value{};
+public:
+    Box(int start) {
+        this->value = start;
+        return;
+    }
+    virtual ~Box() {
+        return;
+    }
+    const int* ptr() const {
+        const int& ref = this->value;
+        const int* p = &ref;
+        return p;
+    }
+};
+
+int f() {
+    Box box{5};
+    const int* p = box.ptr();
+    return p == nullptr;
+}

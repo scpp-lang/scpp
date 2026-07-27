@@ -606,6 +606,7 @@ void write_type(std::ostream& out, const Type& type) {
     write_u8(out, type.is_rvalue_ref ? 1u : 0u);
     write_u8(out, type.is_mutable_pointee ? 1u : 0u);
     write_u8(out, type.is_const_qualified ? 1u : 0u);
+    write_u8(out, type.is_reference_wrapper_lifetime_source ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(type.template_args.size()));
     for (const Type& arg : type.template_args) write_type(out, arg);
     write_u32_le(out, static_cast<std::uint32_t>(type.non_type_args.size()));
@@ -639,6 +640,7 @@ void write_type(std::ostream& out, const Type& type) {
     type.is_rvalue_ref = read_u8(in, context + " rvalue ref") != 0u;
     type.is_mutable_pointee = read_u8(in, context + " mutable pointee") != 0u;
     type.is_const_qualified = read_u8(in, context + " const qualified") != 0u;
+    type.is_reference_wrapper_lifetime_source = read_u8(in, context + " ref_wrapper lifetime source") != 0u;
     std::uint32_t template_arg_count = read_u32_le(in, context + " template arg count");
     type.template_args.reserve(template_arg_count);
     for (std::uint32_t i = 0; i < template_arg_count; i++) type.template_args.push_back(read_type(in, context + " template arg"));

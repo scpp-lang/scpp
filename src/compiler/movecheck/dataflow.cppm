@@ -2244,6 +2244,9 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 }
                 RootSet returned_roots =
                     resolve_lifetime_source_roots(*term.return_value, state, body, signatures, /*report_errors=*/true);
+                if (fn.return_type.kind == TypeKind::Pointer && returned_roots.empty()) {
+                    return;
+                }
                 if (fn.return_lifetime.present()) {
                     if (!roots_satisfy_named_lifetime_group(returned_roots, fn, fn.return_lifetime.name)) {
                         throw DataflowError("function '" + fn.name + "' returns a value derived from " +
@@ -2251,8 +2254,6 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                                                 fn.return_lifetime.name + "'",
                                             state.current_loc);
                     }
-                } else if (fn.return_type.kind == TypeKind::Pointer && returned_roots.empty()) {
-                    return;
                 } else if (is_reference(fn.return_type) || fn.return_type.kind == TypeKind::Pointer) {
                     if (fn.return_type.kind == TypeKind::Pointer && roots_are_program_lifetime_only(returned_roots)) {
                         return;
@@ -2263,14 +2264,15 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                         if (inferred_pointer_sources.empty()) {
                             throw DataflowError(
                                 "function '" + fn.name +
-                                    "' returns a raw pointer but has no reference/pointer parameter to infer its "
-                                    "lifetime from (spec ch05.3) -- add an explicit lifetime annotation, return "
+                                    "' returns a raw pointer but has no eligible source parameter to infer its "
+                                    "lifetime from (reference, pointer, span, or std::reference_wrapper-carried "
+                                    "reference; spec ch05.3) -- add an explicit lifetime annotation, return "
                                     "nullptr, or refactor to return by value/std::unique_ptr instead",
                                 state.current_loc);
                         }
                         throw DataflowError(
                             "function '" + fn.name +
-                                "' returns a raw pointer but has more than one reference/pointer parameter; scpp "
+                                "' returns a raw pointer but has more than one eligible source parameter; scpp "
                                 "v0.1 can only infer a returned pointer's lifetime when there is exactly one "
                                 "eligible source parameter (spec ch05.3) -- add an explicit lifetime annotation "
                                 "or refactor the signature",
@@ -2282,7 +2284,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                             "function '" + fn.name + "' returns " +
                                 std::string(is_reference(fn.return_type) ? "a reference" : "a raw pointer") +
                                 " derived from " + format_roots(returned_roots) +
-                                ", not from its sole reference/pointer parameter '" +
+                                ", not from its sole eligible source parameter '" +
                                 fn.params[source_indices.front()].name +
                                 "'; scpp v0.1 can only prove the returned value doesn't dangle when it "
                                 "borrows (directly or transitively) from that parameter (spec ch05.3)",
@@ -2485,7 +2487,7 @@ void check_function(const Function& fn, const Program& program, const Signatures
     for (const Param& param : fn.params) {
         entry_state.locals[param.name] = LocalState::Initialized;
         if (param.lifetime.present()) entry_state.parameter_lifetimes[param.name] = param.lifetime;
-        if (is_lifetime_eligible_type(param.type)) {
+        if (is_pointer_return_lifetime_source_type(param.type)) {
             entry_state.local_lifetime_sources[param.name] = single_root(param.name);
         }
     }

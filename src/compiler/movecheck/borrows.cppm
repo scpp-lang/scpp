@@ -866,11 +866,13 @@ void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& stat
 // produced `T*` is never move/borrow-tracked (ch05.2 is unchanged by
 // this addition), so there's nothing left to later release, and an
 // ordinary `T&`/`const T&` borrow of the same place immediately
-// afterward is unaffected. Checked only at this instant, conservatively
-// (the resulting pointer's eventual use -- read or write -- can't be
-// known here): the root must have no existing borrow at all, shared or
+// afterward is unaffected. For a plain place, check conservatively at
+// this instant: the root must have no existing borrow at all, shared or
 // mutable -- the same exclusivity a *new* `T&` binding would require,
-// rejected the same way taking a second one would be.
+// rejected the same way taking a second one would be. But if the
+// operand's static type is already `T&`/`const T&`, `&expr` merely
+// derives a raw pointer from that existing borrow rather than creating a
+// second borrow of the root, so no extra exclusivity check applies here.
 void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                        bool report_errors) {
     if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name) &&
@@ -879,6 +881,10 @@ void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, 
     }
     RootSet roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
     if (!report_errors || roots.empty()) return;
+    if (std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
+        operand_type.has_value() && operand_type->kind == TypeKind::Reference) {
+        return;
+    }
     for (const std::string& root : roots) {
         auto borrow_it = state.borrows.find(root);
         if (borrow_it != state.borrows.end() &&

@@ -1528,6 +1528,20 @@ void test_operator_arrow_member_decl_and_explicit_call_parse() {
            "operator_arrow_member_decl_and_explicit_call_parse: explicit .operator->() must not use arrow protocol");
 }
 
+void test_nested_reference_wrapper_lifetime_parameter_parse() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "int* lookup(std::optional<std::reference_wrapper<const int [[scpp::lifetime(source)]]>> source) "
+        "[[scpp::lifetime(source)]] { return nullptr; }\n");
+    const scpp::Function* fn = find_function_named(program, "lookup");
+    expect(fn != nullptr, "nested_reference_wrapper_lifetime_parameter_parse: expected function 'lookup'");
+    expect(fn != nullptr && fn->params.size() == 1 && fn->params[0].lifetime.present() &&
+               fn->params[0].lifetime.name == "source",
+           "nested_reference_wrapper_lifetime_parameter_parse: expected nested parameter lifetime to hoist");
+    expect(fn != nullptr && fn->return_lifetime.present() && fn->return_lifetime.name == "source",
+           "nested_reference_wrapper_lifetime_parameter_parse: expected return lifetime to parse");
+}
+
 void test_multiplication_is_not_confused_with_dereference() {
     // `a * b` (binary multiply) must stay distinct from a leading `*b`
     // (unary deref) -- see parse_unary's comment.
@@ -5135,6 +5149,7 @@ int main() {
     test_concept_requirement_unknown_argument_is_rejected();
     test_export_concept_outside_module_is_rejected();
     test_concept_inside_namespace_is_qualified();
+    test_nested_reference_wrapper_lifetime_parameter_parse();
     test_generic_parameter_const_auto_ref_parses();
     test_generic_parameter_auto_rvalue_ref_parses();
     test_generic_parameter_mutable_auto_ref_parses();
