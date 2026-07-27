@@ -47,6 +47,7 @@
   - [Recoverable Errors with `std::expected<T, E>`](ch09-03-using-std-expected.md)
   - [Propagating `std::expected<T, E>` Through Multi-Step APIs](ch09-04-propagating-expected-results.md)
   - [Using `std::expected<T, E>` at I/O Boundaries](ch09-05-using-expected-at-io-boundaries.md)
+  - [Choosing Between Fail-Fast Checks, `std::optional<T>`, and `std::expected<T, E>`](ch09-06-choosing-between-fail-fast-optional-and-expected.md)
 
 - Generic Code, Concepts, and Lifetimes
   - Generic Data Types
