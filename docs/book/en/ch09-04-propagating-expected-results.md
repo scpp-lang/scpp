@@ -314,4 +314,4 @@ a lower layer's error detail it wants to expose.
 
 ---
 
-[← Previous: Recoverable Errors with `std::expected<T, E>`](ch09-03-using-std-expected.md) · [Table of Contents](README.md)
+[← Previous: Recoverable Errors with `std::expected<T, E>`](ch09-03-using-std-expected.md) · [Table of Contents](README.md) · [Next: Using `std::expected<T, E>` at I/O Boundaries →](ch09-05-using-expected-at-io-boundaries.md)
