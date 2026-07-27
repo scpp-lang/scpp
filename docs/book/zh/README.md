@@ -45,6 +45,7 @@
   - [不可恢复错误与编译器插入的检查](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
   - [今天可用的可恢复错误写法](ch09-02-recoverable-errors-today.md)
   - [用 `std::expected<T, E>` 表达可恢复错误](ch09-03-using-std-expected.md)
+  - [在多步 API 里传播 `std::expected<T, E>`](ch09-04-propagating-expected-results.md)
 
 - 泛型代码、concept 与生命周期
   - 泛型数据类型
