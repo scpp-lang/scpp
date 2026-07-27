@@ -52,7 +52,7 @@
 - 泛型程式碼、concept 與生命週期
   - [泛型函式與 class](ch10-01-generic-functions-and-classes.md)
   - [用 concept 描述共享需求](ch10-02-defining-shared-requirements-with-concepts.md)
-  - 用生命週期驗證參照
+  - [用生命週期驗證參照](ch10-03-validating-references-with-lifetimes.md)
 
 - 撰寫自動化測試
   - 編譯並執行式測試

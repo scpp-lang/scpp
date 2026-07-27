@@ -217,4 +217,4 @@ int main() {
 
 ---
 
-[← 上一章：泛型函式與 class](ch10-01-generic-functions-and-classes.md) · [目錄](README.md)
+[← 上一章：泛型函式與 class](ch10-01-generic-functions-and-classes.md) · [目錄](README.md) · [下一章：用生命週期驗證參照 →](ch10-03-validating-references-with-lifetimes.md)
