@@ -150,25 +150,36 @@ int (*                  sp)(int, int);   // 指向一个不是 unsafe-qualified
 情形里，两个类型中的一个都对"被指向的东西能被怎样使用"多做了一个承诺，
 而另一个没有，这个承诺被当成类型自身的一部分来跟踪。——注释结束】
 
-(3) 一个由一元 `&` 运算符施加在指代某个函数的 *id-expression* 上构成的
-表达式（[expr.unary.op]），或者一个指代某个函数、并被转换成指向函数的
-指针类型的纯右值的 *id-expression*（[conv.func]），其类型：
+(3) SCPP26 不执行函数到指针的标准转换（[conv.func]）。一个指代某个函数的
+*id-expression* 不会被隐式转换成指向函数的指针类型的纯右值。
 
-  (3.1) 是 unsafe-qualified 的指向函数的指针类型，如果这个函数是一个被
+【注：这只影响"把函数名当成值来用"的场景。一个 *postfix-expression*
+本身就指代该函数的函数调用表达式，例如 `compare(a, b)`，仍然受
+[expr.call] 约束，不需要写 `&`。——注释结束】
+
+(4) 如果初始化、赋值、实参传递、返回，或者任何别的语境，需要一个指向函数的
+指针类型的纯右值，那么除非操作数本来就已经具有指向函数的指针类型，或者它是
+一个由一元 `&` 运算符施加在指代该函数的 *id-expression* 上构成的表达式
+（[expr.unary.op]），否则程序非良构。
+
+(5) 一个由一元 `&` 运算符施加在指代某个函数的 *id-expression* 上构成的
+表达式（[expr.unary.op]），其类型：
+
+  (5.1) 是 unsafe-qualified 的指向函数的指针类型，如果这个函数是一个被
   含有 attribute-token `unsafe` 的 *attribute-specifier-seq* 附着
   （[§5.1](01-unsafe.md#51-attribute属性dclattrscppunsafe) (1.2)）的函数，
   或者是一个声明为 C 语言链接、且没有 *function-body* 的函数
   （[dcl.link]、[dcl.fct.def.general]）；
 
-  (3.2) 否则，是一个不是 unsafe-qualified 的指向函数的指针类型。
+  (5.2) 否则，是一个不是 unsafe-qualified 的指向函数的指针类型。
 
-【注：(3.1) 的第二种情形，就是一个没有函数体的 `extern "C"` 声明；调用它
+【注：(5.1) 的第二种情形，就是一个没有函数体的 `extern "C"` 声明；调用它
 本来就已经是一个 gated operation（
 [§5.1](01-unsafe.md#51-attribute属性dclattrscppunsafe) (5.6)）——理由是
 一样的：取它的地址不能造出一个调用者不进 unsafe context 就能调用的指向
 函数的指针类型。——注释结束】
 
-(4) 一个不是 unsafe-qualified 的、指向函数的指针类型的纯右值，可以被转换
+(6) 一个不是 unsafe-qualified 的、指向函数的指针类型的纯右值，可以被转换
 成与它别的方面都相同、但是 unsafe-qualified 的指向函数的指针类型的纯右值。
 反过来没有这种隐式转换。
 
@@ -177,7 +188,7 @@ int (*                  sp)(int, int);   // 指向一个不是 unsafe-qualified
 指针，反过来不行——转换只被允许指向"对拿着这个指针的代码承诺更少"的那个
 类型，永远不允许指向"比造出它的那个类型承诺更多"的类型。——注释结束】
 
-(5) 一个函数调用（[expr.call]），如果它的 *postfix-expression* 是一个
+(7) 一个函数调用（[expr.call]），如果它的 *postfix-expression* 是一个
 unsafe-qualified 的、指向函数的指针类型的纯右值，就是一个 gated
 operation（[§3.4](00-front-matter.md#3-术语和定义terms-and-definitions)）。
 
@@ -188,18 +199,27 @@ operation（[§3.4](00-front-matter.md#3-术语和定义terms-and-definitions)�
 函数本身。本条款补上这个缺口。——注释结束】
 
 ```cpp
+void use_plain(int (*fp)(int, int));
+void use_unsafe(int (* [[scpp::unsafe]] fp)(int*, int));
+
 [[scpp::unsafe]] int get_unchecked(int* base, int index) { return base[index]; }
 int add(int a, int b) { return a + b; }
 
-int (* [[scpp::unsafe]] up)(int*, int) = get_unchecked;   // OK：(3.1)
-int (*                  sp)(int, int)  = add;             // OK：(3.2)
+use_plain(add);           // 不合法：(3)，没有函数到指针的转换
+use_plain(&add);          // OK：(4)、(5.2)
+use_unsafe(get_unchecked);   // 不合法：(3)
+use_unsafe(&get_unchecked);  // OK：(4)、(5.1)
 
-int (* [[scpp::unsafe]] up2)(int, int) = add;   // OK：(4)，一次放宽方向
-                                                  // 的转换
-int (*                  sp2)(int*, int) = get_unchecked;  // 不合法：(4)
-                                          // 不允许这个方向的转换
+int (* [[scpp::unsafe]] up)(int*, int) = &get_unchecked;  // OK：(5.1)
+int (*                  sp)(int, int)  = &add;            // OK：(5.2)
+int (*                  sp2)(int, int) = sp;              // OK：本来就已经是指针
 
-int r1 = up(base, 0);                       // 不合法：(5)，safe context
+int (* [[scpp::unsafe]] up2)(int, int) = &add;   // OK：先按 (5.2) 取地址，
+                                                  // 再按 (6) 转换
+int (*                  sp3)(int*, int) = &get_unchecked;  // 不合法：(6)
+                                           // 不允许这个方向的转换
+
+int r1 = up(base, 0);                       // 不合法：(7)，safe context
 int r2{};
 [[scpp::unsafe]] { r2 = up(base, 0); }      // OK：unsafe context
 int r3 = sp(1, 2);                          // OK：sp 不是 unsafe-qualified

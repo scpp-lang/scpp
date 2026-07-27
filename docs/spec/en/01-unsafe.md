@@ -163,27 +163,41 @@ types. In each case, one of the two types promises something about how the
 pointee may be used that the other does not, and that promise is tracked as
 part of the type itself. — end note]
 
-(3) An expression consisting of the unary `&` operator applied to an
-*id-expression* that designates a function ([expr.unary.op]), or an
-*id-expression* designating a function converted to a prvalue of
-pointer-to-function type ([conv.func]), has:
+(3) The function-to-pointer standard conversion ([conv.func]) is not
+performed in SCPP26. An *id-expression* designating a function is not
+implicitly converted to a prvalue of pointer-to-function type.
 
-  (3.1) unsafe-qualified pointer-to-function type, if that function is one
+[Note: this affects only using a function's name as a value. A call
+expression whose *postfix-expression* denotes the function itself, such
+as `compare(a, b)`, remains governed by [expr.call] and does not require
+`&`. — end note]
+
+(4) If initialization, assignment, argument passing, return, or any
+other context requires a prvalue of pointer-to-function type, the
+program is ill-formed unless the operand already has
+pointer-to-function type or is an expression consisting of the unary `&`
+operator applied to an *id-expression* that designates the function
+([expr.unary.op]).
+
+(5) An expression consisting of the unary `&` operator applied to an
+*id-expression* that designates a function ([expr.unary.op]) has:
+
+  (5.1) unsafe-qualified pointer-to-function type, if that function is one
   to which an *attribute-specifier-seq* containing the attribute-token
   `unsafe` appertains
   ([§5.1](01-unsafe.md#51-attributes-dclattrscppunsafe) (1.2)), or a
   function declared with C language linkage and no *function-body*
   ([dcl.link], [dcl.fct.def.general]);
 
-  (3.2) pointer-to-function type that is not unsafe-qualified, otherwise.
+  (5.2) pointer-to-function type that is not unsafe-qualified, otherwise.
 
-[Note: (3.1)'s second case is an `extern "C"` declaration with no body;
+[Note: (5.1)'s second case is an `extern "C"` declaration with no body;
 calling it is already a gated operation
 ([§5.1](01-unsafe.md#51-attributes-dclattrscppunsafe) (5.6)) for the same
 reason: taking its address must not produce a pointer-to-function type a
 caller could invoke without ever entering an unsafe context. — end note]
 
-(4) A prvalue of pointer-to-function type that is not unsafe-qualified can
+(6) A prvalue of pointer-to-function type that is not unsafe-qualified can
 be converted to a prvalue of the otherwise-identical unsafe-qualified
 pointer-to-function type. There is no implicit conversion in the other
 direction.
@@ -194,7 +208,7 @@ function, and not the reverse: conversion is permitted only towards the
 type that promises less to the code holding the resulting pointer, never
 towards the type that promises more than what produced it. — end note]
 
-(5) A function call ([expr.call]) whose *postfix-expression* is a prvalue
+(7) A function call ([expr.call]) whose *postfix-expression* is a prvalue
 of unsafe-qualified pointer-to-function type is a gated operation
 ([§3.4](00-front-matter.md#3-terms-and-definitions)).
 
@@ -206,18 +220,26 @@ function, whose *postfix-expression* denotes a pointer value rather than
 the function itself. This paragraph closes that gap. — end note]
 
 ```cpp
+void use_plain(int (*fp)(int, int));
+void use_unsafe(int (* [[scpp::unsafe]] fp)(int*, int));
+
 [[scpp::unsafe]] int get_unchecked(int* base, int index) { return base[index]; }
 int add(int a, int b) { return a + b; }
 
-int (* [[scpp::unsafe]] up)(int*, int) = get_unchecked;   // OK: (3.1)
-int (*                  sp)(int, int)  = add;             // OK: (3.2)
+use_plain(add);           // ill-formed: (3), no function-to-pointer conversion
+use_plain(&add);          // OK: (4), (5.2)
+use_unsafe(get_unchecked);   // ill-formed: (3)
+use_unsafe(&get_unchecked);  // OK: (4), (5.1)
 
-int (* [[scpp::unsafe]] up2)(int, int) = add;   // OK: (4), a widening
-                                                  // conversion
-int (*                  sp2)(int*, int) = get_unchecked;  // ill-formed: (4)
-                                    // permits no conversion in this direction
+int (* [[scpp::unsafe]] up)(int*, int) = &get_unchecked;  // OK: (5.1)
+int (*                  sp)(int, int)  = &add;            // OK: (5.2)
+int (*                  sp2)(int, int) = sp;              // OK: already a pointer
 
-int r1 = up(base, 0);                       // ill-formed: (5), a safe context
+int (* [[scpp::unsafe]] up2)(int, int) = &add;   // OK: (5.2), then (6)
+int (*                  sp3)(int*, int) = &get_unchecked;  // ill-formed: (6)
+                                     // permits no conversion in this direction
+
+int r1 = up(base, 0);                       // ill-formed: (7), a safe context
 int r2{};
 [[scpp::unsafe]] { r2 = up(base, 0); }      // OK: an unsafe context
 int r3 = sp(1, 2);                          // OK: sp is not unsafe-qualified
