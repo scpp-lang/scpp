@@ -155,4 +155,4 @@ both.
 
 ---
 
-[← Previous: Choosing Between Fail-Fast Checks, `std::optional<T>`, and `std::expected<T, E>`](ch09-06-choosing-between-fail-fast-optional-and-expected.md) · [Table of Contents](README.md)
+[← Previous: Choosing Between Fail-Fast Checks, `std::optional<T>`, and `std::expected<T, E>`](ch09-06-choosing-between-fail-fast-optional-and-expected.md) · [Table of Contents](README.md) · [Next: Defining Shared Requirements with Concepts →](ch10-02-defining-shared-requirements-with-concepts.md)

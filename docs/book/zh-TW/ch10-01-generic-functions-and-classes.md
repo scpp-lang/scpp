@@ -147,4 +147,4 @@ int main() {
 
 ---
 
-[← 上一章：如何在 fail-fast、`std::optional<T>` 與 `std::expected<T, E>` 之間做選擇](ch09-06-choosing-between-fail-fast-optional-and-expected.md) · [目錄](README.md)
+[← 上一章：如何在 fail-fast、`std::optional<T>` 與 `std::expected<T, E>` 之間做選擇](ch09-06-choosing-between-fail-fast-optional-and-expected.md) · [目錄](README.md) · [下一章：用 concept 描述共享需求 →](ch10-02-defining-shared-requirements-with-concepts.md)

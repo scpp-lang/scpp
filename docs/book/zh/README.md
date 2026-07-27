@@ -51,7 +51,7 @@
 
 - 泛型代码、concept 与生命周期
   - [泛型函数与 class](ch10-01-generic-functions-and-classes.md)
-  - 用 concept 描述共享要求
+  - [用 concept 描述共享要求](ch10-02-defining-shared-requirements-with-concepts.md)
   - 用生命周期验证引用
 
 - 编写自动化测试

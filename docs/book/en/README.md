@@ -51,7 +51,7 @@
 
 - Generic Code, Concepts, and Lifetimes
   - [Generic Functions and Classes](ch10-01-generic-functions-and-classes.md)
-  - Defining Shared Requirements with Concepts
+  - [Defining Shared Requirements with Concepts](ch10-02-defining-shared-requirements-with-concepts.md)
   - Validating References with Lifetimes
 
 - Writing Automated Tests
