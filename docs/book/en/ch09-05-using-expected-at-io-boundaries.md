@@ -356,4 +356,4 @@ moves through the rest of the program as ordinary checked control flow.
 
 ---
 
-[← Previous: Propagating `std::expected<T, E>` Through Multi-Step APIs](ch09-04-propagating-expected-results.md) · [Table of Contents](README.md)
+[← Previous: Propagating `std::expected<T, E>` Through Multi-Step APIs](ch09-04-propagating-expected-results.md) · [Table of Contents](README.md) · [Next: Choosing Between Fail-Fast Checks, `std::optional<T>`, and `std::expected<T, E>` →](ch09-06-choosing-between-fail-fast-optional-and-expected.md)
