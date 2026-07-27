@@ -87,8 +87,8 @@ fallback。这里要跟真实 C++ 完全对齐：class 类型上的 `->` 必须�
 使用的是 `operator->`，并受 (2) 约束；`operator->` 的存在不会改变 `*E1`
 的含义，后者仍然受 §7.1 约束。
 
-(5) 就本小节而言，一次被选中的 `operator->` 调用，如果它的声明符带有
-`[[scpp::lifetime(name)]]`，并且那个注解按
+(5) 就本小节而言，一次被选中的 `operator->` 调用，如果它的声明返回类型里有
+一个可用出现处带有 `[[scpp::lifetime(name)]]`，并且那个注解按
 [§6.2](02-ownership-and-move.md#cross-function-lifetime-groups-dclattrscpplifetime)
 (23) 把结果绑定到了该次调用的隐式对象参数上，那么这一步调用就叫做
 **receiver-tied**。
@@ -100,9 +100,11 @@ fallback。这里要跟真实 C++ 完全对齐：class 类型上的 `->` 必须�
 (21) 对裸指针解引用施加的普通 `[[scpp::unsafe]]` 要求。
 
 由于 [§6.2](02-ownership-and-move.md#cross-function-lifetime-groups-dclattrscpplifetime)
-只允许在“返回引用 / 指针 / span”的位置上使用 `[[scpp::lifetime(name)]]`，
-所以一个返回 class prvalue 的 `operator->` 虽然可以参加 (2) 的链式协议，
-但那一步并不是 receiver-tied。
+只允许把 `[[scpp::lifetime(name)]]` 写在那些“表示一个被返回出来的引用 / 指针 /
+span”的可用出现处上，所以一个 `operator->` step 只有在它的声明返回类型里
+确实含有这样的出现处时，才是 receiver-tied。一个返回 class prvalue、并且
+不含这种出现处的 `operator->`，虽然可以参加 (2) 的链式协议，但那一步并不是
+receiver-tied。
 
 (7) `E1->E2` 的安全情形，复用了 §7.1 里的 class `operator*` 再加上
 [§6.2](02-ownership-and-move.md#62-所有权move-状态与-reborrowbasiclife)

@@ -90,8 +90,9 @@ support `->`, including `std::unique_ptr`, therefore need an explicit
 §7.1.
 
 (5) For the purposes of this subclause, a selected `operator->` invocation is
-**receiver-tied** if its declarator bears `[[scpp::lifetime(name)]]` and that
-annotation ties the result to the implicit object parameter under
+**receiver-tied** if its declared return type contains an eligible occurrence
+bearing `[[scpp::lifetime(name)]]` and that annotation ties the result to the
+implicit object parameter under
 [§6.2](02-ownership-and-move.md#cross-function-lifetime-groups-dclattrscpplifetime)
 (23).
 
@@ -103,9 +104,11 @@ dereference under [§5.1](01-unsafe.md#51-the-scppunsafe-attribute) or
 (21).
 
 Because [§6.2](02-ownership-and-move.md#cross-function-lifetime-groups-dclattrscpplifetime)
-permits `[[scpp::lifetime(name)]]` only on reference, pointer, and span return
-positions, an `operator->` that returns a class prvalue may participate in the
-chaining protocol of (2), but that step is not receiver-tied.
+permits `[[scpp::lifetime(name)]]` only on eligible occurrences denoting a
+returned reference, pointer, or span, an `operator->` step is receiver-tied
+only to the extent that its declared return type contains such an occurrence.
+An `operator->` that returns a class prvalue with no such occurrence may
+participate in the chaining protocol of (2), but that step is not receiver-tied.
 
 (7) The safe case for `E1->E2` reuses the same receiver-rooted borrow
 discipline that already governs a class `operator*` under §7.1 together with
