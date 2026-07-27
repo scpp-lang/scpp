@@ -1,0 +1,6 @@
+// spec §9.3(9): SCPP26 supports only `alignof(type-id)`, not the GNU-style
+// `alignof(expression)` form.
+int main() {
+    int x{};
+    return alignof(x);
+}

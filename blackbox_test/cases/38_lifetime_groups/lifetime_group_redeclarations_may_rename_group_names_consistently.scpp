@@ -1,0 +1,20 @@
+// spec §6.2(26): two declarations of the same function may rename user-
+// written lifetime-group names consistently; only the grouping relation must
+// match.
+const int& pick(
+    const int& x [[scpp::lifetime(left)]],
+    const int& y [[scpp::lifetime(right)]]
+) [[scpp::lifetime(left)]];
+
+const int& pick(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(b)]]
+) [[scpp::lifetime(a)]] {
+    return x;
+}
+
+int main() {
+    int a{1};
+    int b{2};
+    return pick(a, b) - 1;
+}

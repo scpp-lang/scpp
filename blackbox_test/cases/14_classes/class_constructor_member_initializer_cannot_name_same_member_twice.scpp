@@ -1,0 +1,19 @@
+// spec §6.1(4): a member shall not be named more than once in the same
+// constructor member-initializer-list.
+class Box {
+public:
+    virtual ~Box() { return; }
+
+private:
+    int value;
+
+public:
+    Box() : value{1}, value{2} {
+        return;
+    }
+};
+
+int main() {
+    Box b{};
+    return 0;
+}

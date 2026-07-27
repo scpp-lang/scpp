@@ -1,0 +1,18 @@
+// spec §7.2(2.1): a declaration of `operator->` is ill-formed unless it has
+// no parameters.
+struct Node {
+    int value{};
+};
+
+struct Bad {
+    Node* ptr{};
+
+    Node* operator->(int extra) {
+        return ptr;
+    }
+};
+
+int main() {
+    Bad b{};
+    return b->value;
+}

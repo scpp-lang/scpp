@@ -1,0 +1,21 @@
+// spec §6.1(5): a constructor for a class with a reference member is ill-
+// formed unless that member is initialized by an in-class default or by the
+// constructor's member-initializer-list.
+class Box {
+public:
+    virtual ~Box() { return; }
+
+private:
+    int& ref;
+
+public:
+    Box() {
+        return;
+    }
+};
+
+int main() {
+    int x{1};
+    Box b{};
+    return x;
+}

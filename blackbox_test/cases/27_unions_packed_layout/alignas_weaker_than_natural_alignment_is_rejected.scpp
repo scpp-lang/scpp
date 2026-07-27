@@ -1,0 +1,10 @@
+// spec §9.3(5): `alignas` may not request an alignment less strict than the
+// declared entity's natural alignment.
+struct alignas(1) Big {
+    int64_t value{};
+};
+
+int main() {
+    Big b{};
+    return (int)b.value;
+}
