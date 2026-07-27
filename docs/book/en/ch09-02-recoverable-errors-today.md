@@ -176,4 +176,4 @@ for result types that can carry both a value and an error explanation.
 
 ---
 
-[← Previous: Unrecoverable Errors and Compiler-Inserted Checks](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md) · [Table of Contents](README.md)
+[← Previous: Unrecoverable Errors and Compiler-Inserted Checks](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md) · [Table of Contents](README.md) · [Next: Recoverable Errors with `std::expected<T, E>` →](ch09-03-using-std-expected.md)

@@ -44,7 +44,7 @@
 - 錯誤處理
   - [不可恢復錯誤與編譯器插入的檢查](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
   - [目前可用的可恢復錯誤寫法](ch09-02-recoverable-errors-today.md)
-  - 為 `std::expected` 做準備
+  - [用 `std::expected<T, E>` 表達可恢復錯誤](ch09-03-using-std-expected.md)
 
 - 泛型程式碼、concept 與生命週期
   - 泛型資料型別
