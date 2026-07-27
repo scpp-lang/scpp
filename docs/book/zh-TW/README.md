@@ -54,10 +54,10 @@
   - [用 concept 描述共享需求](ch10-02-defining-shared-requirements-with-concepts.md)
   - [用生命週期驗證參照](ch10-03-validating-references-with-lifetimes.md)
 
-- 撰寫自動化測試
-  - 編譯並執行式測試
-  - 控制測試命令
-  - 測試組織方式
+- 閉包與可呼叫程式碼
+  - [閉包與捕獲](ch11-01-closures-and-captures.md)
+  - 泛型 lambda
+  - 選擇可呼叫表示形式
 
 - 一個 I/O 專案：打造命令列程式
   - 接收命令列參數

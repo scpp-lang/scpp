@@ -178,9 +178,9 @@ So far, the practical rules are:
 
 That completes Chapter 10's opening toolkit: generic definitions, concept-based
 operation requirements, and lifetime annotations for references. The next
-chapter can build on that foundation to show how the project validates behavior
-automatically.
+chapter builds on that foundation with closures, where local callback objects
+meet captures, concepts, and lifetimes in ordinary user code.
 
 ---
 
-[← Previous: Defining Shared Requirements with Concepts](ch10-02-defining-shared-requirements-with-concepts.md) · [Table of Contents](README.md)
+[← Previous: Defining Shared Requirements with Concepts](ch10-02-defining-shared-requirements-with-concepts.md) · [Table of Contents](README.md) · [Next: Closures and Captures →](ch11-01-closures-and-captures.md)

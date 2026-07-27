@@ -54,10 +54,10 @@
   - [Defining Shared Requirements with Concepts](ch10-02-defining-shared-requirements-with-concepts.md)
   - [Validating References with Lifetimes](ch10-03-validating-references-with-lifetimes.md)
 
-- Writing Automated Tests
-  - Compile-and-Run Tests
-  - Controlling Test Commands
-  - Test Organization
+- Closures and Callable Code
+  - [Closures and Captures](ch11-01-closures-and-captures.md)
+  - Generic Lambdas
+  - Choosing a Callable Representation
 
 - An I/O Project: Building a Command-Line Program
   - Accepting Command-Line Arguments
