@@ -1,0 +1,5 @@
+// spec §9.3(4): `alignas(0)` has no effect.
+int main() {
+    alignas(0) int x{};
+    return x;
+}

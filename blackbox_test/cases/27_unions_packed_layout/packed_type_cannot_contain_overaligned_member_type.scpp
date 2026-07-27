@@ -1,0 +1,15 @@
+// spec §9.3(11.2): a packed struct may not contain a class-type member whose
+// alignment was strengthened by `alignas`.
+struct alignas(8) Block8 {
+    int x{};
+};
+
+struct [[scpp::packed]] Packet {
+    char tag{};
+    Block8 payload{};
+};
+
+int main() {
+    Packet p{};
+    return p.payload.x;
+}

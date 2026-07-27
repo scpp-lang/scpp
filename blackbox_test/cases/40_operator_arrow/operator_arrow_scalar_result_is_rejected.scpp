@@ -1,0 +1,13 @@
+// spec §7.2(2.2) and §7.3(2.4): a selected `operator->` result must be a
+// pointer, class type, or reference to class type. A scalar result cannot
+// support `E1->E2`.
+struct Bad {
+    int operator->() {
+        return 0;
+    }
+};
+
+int main() {
+    Bad b{};
+    return b->value;
+}

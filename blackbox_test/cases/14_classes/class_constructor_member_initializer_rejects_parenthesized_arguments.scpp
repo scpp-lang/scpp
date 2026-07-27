@@ -1,0 +1,19 @@
+// spec §6.1(3): a constructor member-initializer must supply a braced-init-
+// list; a parenthesized expression-list is ill-formed.
+class Box {
+public:
+    virtual ~Box() { return; }
+
+private:
+    int value;
+
+public:
+    Box(int x) : value(x) {
+        return;
+    }
+};
+
+int main() {
+    Box b{7};
+    return 0;
+}

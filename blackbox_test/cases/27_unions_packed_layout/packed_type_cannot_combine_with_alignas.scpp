@@ -1,0 +1,10 @@
+// spec §9.3(11.1): `[[scpp::packed]]` and `alignas` cannot appertain to the
+// same struct or union declaration.
+struct [[scpp::packed]] alignas(8) Packet {
+    int x{};
+};
+
+int main() {
+    Packet p{};
+    return p.x;
+}
