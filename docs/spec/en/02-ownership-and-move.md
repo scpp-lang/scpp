@@ -240,17 +240,34 @@ state. — end note]
 ### Cross-function lifetime groups [dcl.attr.scpp.lifetime]
 
 (13) The attribute-token `scpp::lifetime` may appear in an
-*attribute-specifier-seq* ([dcl.attr.grammar]) appertaining to:
+*attribute-specifier-seq* ([dcl.attr.grammar]) appertaining to an
+**eligible occurrence** within:
 
   (13.1) a parameter declaration, including a `requires(...)`
-  expression's probe parameter declaration, whose type is a reference
-  type, pointer type, `std::span<T>`, or `std::span<const T>`; or
+  expression's probe parameter declaration; or
 
-  (13.2) the declarator of a function or member function whose return
-  type is a reference type, pointer type, `std::span<T>`, or
-  `std::span<const T>`.
+  (13.2) the declared return type of a function or member function.
 
-If it appears elsewhere, the program is ill-formed.
+For this subclause, an eligible occurrence is:
+
+  (13.3) a reference type, pointer type, `std::span<T>`, or
+  `std::span<const T>`; or
+
+  (13.4) the wrapped type-id `T` in `std::reference_wrapper<T>`, which,
+  for this subclause only, denotes the reference carried by that
+  specialization.
+
+A `[[scpp::lifetime(name)]]` attribute appertains to the nearest
+eligible occurrence that syntactically precedes it within the same
+declaration. If no such eligible occurrence exists, the program is
+ill-formed.
+
+[Note: This includes the already-supported case where the nearest
+eligible occurrence is the parameter's whole declared type or the
+function's whole declared return type. It also includes a nested
+occurrence written inside a larger type such as
+`std::optional<std::reference_wrapper<const int [[scpp::lifetime(a)]]>>`.
+— end note]
 
 (14) `[[scpp::lifetime(name)]]` takes exactly one argument. That
 argument shall be an identifier.
@@ -263,44 +280,45 @@ the same spelling denote one named lifetime group; user-written
 occurrences with different spellings denote different named lifetime
 groups.
 
-(16) The identifier `any` is reserved. Each parameter tagged
-`[[scpp::lifetime(any)]]` denotes a fresh compiler-synthesized
-lifetime group distinct from:
+(16) The identifier `any` is reserved. Each eligible parameter
+occurrence tagged `[[scpp::lifetime(any)]]` denotes a fresh
+compiler-synthesized lifetime group distinct from:
 
   (16.1) every user-written group; and
 
-  (16.2) every other `any` occurrence, including another such
-  parameter in the same declaration.
+  (16.2) every other `any` occurrence, including another such eligible
+  occurrence in the same declaration.
 
 An `any` group does not introduce a name that may later be referred
-to by a return annotation or by another parameter.
+to by a return annotation or by another occurrence.
 
-(17) If a parameter declaration bears `[[scpp::lifetime(name)]]` with a
-user-written group name `name`, that parameter is a member of group
-`name`. A parameter with no `scpp::lifetime` attribute belongs to no
+(17) If an eligible occurrence within a parameter declaration bears
+`[[scpp::lifetime(name)]]` with a user-written group name `name`, that
+occurrence is a member of group `name`. An eligible occurrence within a
+parameter declaration with no `scpp::lifetime` attribute belongs to no
 named lifetime group.
 
-(18) If the declarator of such a function or member function bears
-`[[scpp::lifetime(name)]]`, the returned reference, pointer, or
-span value is tied to group `name`.
+(18) If an eligible occurrence within the declared return type of such a
+function or member function bears `[[scpp::lifetime(name)]]`, the
+returned reference, pointer, or span denoted by that occurrence is tied
+to group `name`.
 The program is ill-formed if:
 
-  (18.1) the return type is not an eligible type under (13.2);
+  (18.1) `name` is `any`; or
 
-  (18.2) `name` is `any`; or
+  (18.2) neither:
 
-  (18.3) neither:
+    (18.2.1) some explicit parameter occurrence of that declaration is a
+    member of group `name`; nor
 
-    (18.3.1) some explicit parameter of that declaration is a member of
-    group `name`; nor
-
-    (18.3.2) the declaration is a non-static member function named
+    (18.2.2) the declaration is a non-static member function named
     `operator->` using the special implicit-object rule of (23).
 
-(19) A value tied to group `name` shall be derived only from:
+(19) A returned reference, pointer, or span tied to group `name` shall
+be derived only from:
 
-  (19.1) one or more explicit parameters that are members of group
-  `name`;
+  (19.1) one or more explicit parameter occurrences that are members of
+  group `name`;
 
   (19.2) for a non-static member function named `operator->` governed by
   (23), that call's implicit object parameter; or
@@ -311,20 +329,20 @@ The program is ill-formed if:
 It is ill-formed to return a value tied to group `name` if the returned
 value is instead derived from:
 
-  (19.4) an explicit parameter in a different named group;
+  (19.4) an explicit parameter occurrence in a different named group;
 
-  (19.5) an `any`-tagged parameter; or
+  (19.5) an `any`-tagged explicit parameter occurrence; or
 
   (19.6) a local object, temporary object, or other state whose
   lifetime is not proved to outlive the call.
 
-(20) If several parameters belong to the same named group, the function
-may return or forward a value derived from any of them wherever that
-group is required. At a call site, a result tied to that group is
-treated as no longer-lived than the shortest-lived actual argument
-supplied to any parameter in that group. Parameters in different named
-groups are lifetime-independent unless some other rule of this document
-relates them.
+(20) If several explicit parameter occurrences belong to the same named
+group, the function may return or forward a value derived from any of
+them wherever that group is required. At a call site, a result tied to
+that group is treated as no longer-lived than the shortest-lived actual
+argument component corresponding to any occurrence in that group.
+Occurrences in different named groups are lifetime-independent unless
+some other rule of this document relates them.
 
 (21) Lifetime-group identity constrains lifetime only. It does not relax
 aliasing, mutability, thread-safety, or `[[scpp::unsafe]]`
@@ -336,55 +354,56 @@ requirements. In particular, annotating a raw pointer with
 equivalent. A call from one such declaration to another does not
 compare lifetime-group names textually across declarations; the checker
 instead uses the callee's own grouping relation to determine which
-actual arguments may influence that callee's eligible return value under
-(18)-(20). Whether a value derived from such a group may instead be
-embedded into object state is governed separately by (24). The same
-declaration-local, alpha-equivalent comparison is used when a
-`requires(...)` expression tests a callable with probe parameters
-bearing `[[scpp::lifetime(name)]]`. Such an annotation constrains
-concept satisfaction; it is not merely syntactic sugar for an otherwise
-ordinary test call. For such a satisfaction check:
+actual arguments may influence that callee's eligible returned
+occurrence under (18)-(20). Whether a value derived from such a group
+may instead be embedded into object state is governed separately by
+(24). The same declaration-local, alpha-equivalent comparison is used
+when a `requires(...)` expression tests a callable with probe
+parameters bearing `[[scpp::lifetime(name)]]`. Such an annotation
+constrains concept satisfaction; it is not merely syntactic sugar for
+an otherwise ordinary test call. For such a satisfaction check:
 
-  (22.1) a probe parameter tagged with a user-written group name
-  requires the corresponding parameter of the selected callable
+  (22.1) a probe parameter occurrence tagged with a user-written group
+  name requires the corresponding occurrence of the selected callable
   declaration to be a member of some non-`any` group, and probe
-  parameters in the same user-written group require corresponding
-  parameters in that declaration to be members of one and the same
+  occurrences in the same user-written group require corresponding
+  occurrences in that declaration to be members of one and the same
   group;
 
-  (22.2) probe parameters in different user-written groups require
-  corresponding parameters in that declaration to belong to different
+  (22.2) probe occurrences in different user-written groups require
+  corresponding occurrences in that declaration to belong to different
   groups;
 
-  (22.3) a probe parameter tagged
-  `[[scpp::lifetime(any)]]` requires the corresponding parameter of
-  the selected callable declaration to be tagged
+  (22.3) a probe parameter occurrence tagged
+  `[[scpp::lifetime(any)]]` requires the corresponding occurrence of the
+  selected callable declaration to be tagged
   `[[scpp::lifetime(any)]]`; and
 
-  (22.4) a probe parameter with no `scpp::lifetime` attribute imposes
-  no lifetime-group constraint beyond the ordinary well-formedness and
-  type requirements of the probe.
+  (22.4) an eligible occurrence within a probe parameter with no
+  `scpp::lifetime` attribute imposes no lifetime-group constraint
+  beyond the ordinary well-formedness and type requirements of the
+  probe.
 
-(23) A non-static member function may use named lifetime groups on its
-explicit parameters under the same rules as a free function. For the
-purposes of this subclause, a call to a non-static member function
-supplies an implicit object parameter of reference type: `C&` for a
-non-`const` member function and `const C&` for a `const` member
-function; any borrow or reborrow through that implicit object parameter
-is governed by 6.2(7)-(12). The implicit object parameter cannot bear
-`[[scpp::lifetime(name)]]` on its own declaration. Except as provided
-next for `operator->`, it does not by itself introduce a user-written
-group name. Consequently, a member function with an explicit
-`[[scpp::lifetime(name)]]` return annotation is ill-formed unless one of
-its explicit parameters is a member of group `name`; a value derived
-solely from `this` cannot satisfy that requirement. A non-static member
-function named `operator->` may, however, use
-`[[scpp::lifetime(name)]]` on its declarator to tie its returned value
-directly to that call's implicit object parameter instead of to an
-explicit parameter. In that special case, `name` remains a declaration-
-local user-written group name, but for that one declaration it denotes
-the implicit object parameter for the purposes of (18.3.2) and
-(19.2)-(19.3).
+(23) A non-static member function may use named lifetime groups on
+eligible occurrences within its explicit parameter declarations under
+the same rules as a free function. For the purposes of this subclause,
+a call to a non-static member function supplies an implicit object
+parameter of reference type: `C&` for a non-`const` member function and
+`const C&` for a `const` member function; any borrow or reborrow
+through that implicit object parameter is governed by 6.2(7)-(12). The
+implicit object parameter cannot bear `[[scpp::lifetime(name)]]` on its
+own declaration. Except as provided next for `operator->`, it does not
+by itself introduce a user-written group name. Consequently, a member
+function with an explicit `[[scpp::lifetime(name)]]` return annotation
+is ill-formed unless one of its explicit parameter occurrences is a
+member of group `name`; a value derived solely from `this` cannot
+satisfy that requirement. A non-static member function named
+`operator->` may, however, use `[[scpp::lifetime(name)]]` within its
+declared return type to tie its returned value directly to that call's
+implicit object parameter instead of to an explicit parameter. In that
+special case, `name` remains a declaration-local user-written group
+name, but for that one declaration it denotes the implicit object
+parameter for the purposes of (18.2.2) and (19.2)-(19.3).
 
 (24) Constructing an object, closure, or other stored state from a
 reference, pointer, or span derived from a named lifetime group does not
@@ -449,7 +468,22 @@ const int& keep_head(
     scratch = 0;
     return head;
 }
+
+void inner_form(
+    std::optional<std::reference_wrapper<const int [[scpp::lifetime(a)]]>> w
+);
+
+void outer_form(
+    std::optional<std::reference_wrapper<const int>>& w [[scpp::lifetime(a)]]
+);
 ```
+
+[Note: In `inner_form`, `a` names only the lifetime of the referent
+carried by `std::reference_wrapper`; the parameter object `w` is still
+passed by value, and its own ordinary local-object lifetime is
+unrelated to group `a`. In `outer_form`, by contrast, `a` names only
+the outer reference parameter itself; the inner
+`std::reference_wrapper` referent remains unannotated. — end note]
 
 The following declarations are ill-formed:
 
@@ -489,6 +523,10 @@ Holder bad_store(const int& x [[scpp::lifetime(any)]]) {
     return Holder{x};
 }
 // ill-formed: a value derived from `any` is stored in returned state
+
+void bad_nested_value(std::optional<int [[scpp::lifetime(a)]]> w);
+// ill-formed: plain `int` is not an eligible occurrence, so the
+// attribute appertains to no eligible occurrence under (13)
 ```
 
 ## 6.3 Destruction [class.dtor]
