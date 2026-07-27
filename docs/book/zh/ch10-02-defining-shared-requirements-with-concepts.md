@@ -217,4 +217,4 @@ int main() {
 
 ---
 
-[← 上一章：泛型函数与 class](ch10-01-generic-functions-and-classes.md) · [目录](README.md)
+[← 上一章：泛型函数与 class](ch10-01-generic-functions-and-classes.md) · [目录](README.md) · [下一章：用生命周期验证引用 →](ch10-03-validating-references-with-lifetimes.md)

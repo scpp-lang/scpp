@@ -225,4 +225,4 @@ references safely too.
 
 ---
 
-[← Previous: Generic Functions and Classes](ch10-01-generic-functions-and-classes.md) · [Table of Contents](README.md)
+[← Previous: Generic Functions and Classes](ch10-01-generic-functions-and-classes.md) · [Table of Contents](README.md) · [Next: Validating References with Lifetimes →](ch10-03-validating-references-with-lifetimes.md)
