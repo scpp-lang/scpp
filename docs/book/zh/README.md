@@ -50,7 +50,7 @@
   - [如何在 fail-fast、`std::optional<T>` 与 `std::expected<T, E>` 之间做选择](ch09-06-choosing-between-fail-fast-optional-and-expected.md)
 
 - 泛型代码、concept 与生命周期
-  - 泛型数据类型
+  - [泛型函数与 class](ch10-01-generic-functions-and-classes.md)
   - 用 concept 描述共享要求
   - 用生命周期验证引用
 

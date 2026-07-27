@@ -185,4 +185,4 @@ signatures that tell callers which kind of situation they are dealing with.
 
 ---
 
-[← Previous: Using `std::expected<T, E>` at I/O Boundaries](ch09-05-using-expected-at-io-boundaries.md) · [Table of Contents](README.md)
+[← Previous: Using `std::expected<T, E>` at I/O Boundaries](ch09-05-using-expected-at-io-boundaries.md) · [Table of Contents](README.md) · [Next: Generic Functions and Classes →](ch10-01-generic-functions-and-classes.md)
