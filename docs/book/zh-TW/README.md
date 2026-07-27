@@ -46,6 +46,7 @@
   - [目前可用的可恢復錯誤寫法](ch09-02-recoverable-errors-today.md)
   - [用 `std::expected<T, E>` 表達可恢復錯誤](ch09-03-using-std-expected.md)
   - [在多步 API 裡傳遞 `std::expected<T, E>`](ch09-04-propagating-expected-results.md)
+  - [在 I/O 邊界上使用 `std::expected<T, E>`](ch09-05-using-expected-at-io-boundaries.md)
 
 - 泛型程式碼、concept 與生命週期
   - 泛型資料型別

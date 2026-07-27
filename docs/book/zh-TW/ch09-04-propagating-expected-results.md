@@ -303,4 +303,4 @@ bad range
 
 ---
 
-[← 上一章：用 `std::expected<T, E>` 表達可恢復錯誤](ch09-03-using-std-expected.md) · [目錄](README.md)
+[← 上一章：用 `std::expected<T, E>` 表達可恢復錯誤](ch09-03-using-std-expected.md) · [目錄](README.md) · [下一章：在 I/O 邊界上使用 `std::expected<T, E>` →](ch09-05-using-expected-at-io-boundaries.md)
