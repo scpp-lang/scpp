@@ -2016,6 +2016,63 @@ void test_brace_init_return_expression() {
            "brace_init_return_expression: expected one string literal constructor argument");
 }
 
+void test_generic_type_brace_init_return_expression_parses() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "std::optional<int> make_value() {\n"
+        "    return std::optional<int>{7};\n"
+        "}\n");
+    const scpp::Function& fn = *find_function_named(program, "make_value");
+    const scpp::Stmt& ret = *fn.body->statements[0];
+    expect(ret.kind == scpp::StmtKind::Return && ret.expr != nullptr,
+           "generic_type_brace_init_return_expression_parses: expected Return with expression");
+    expect(ret.expr->kind == scpp::ExprKind::Call && ret.expr->name == "std::optional",
+           "generic_type_brace_init_return_expression_parses: expected a Call to std::optional");
+    expect(ret.expr->explicit_template_args.size() == 1 && ret.expr->explicit_template_args[0].is_type &&
+               is_named_type(ret.expr->explicit_template_args[0].type, "int"),
+           "generic_type_brace_init_return_expression_parses: expected explicit_template_args == [int]");
+    expect(ret.expr->args.size() == 1 && ret.expr->args[0]->kind == scpp::ExprKind::IntegerLiteral &&
+               ret.expr->args[0]->int_value == 7,
+           "generic_type_brace_init_return_expression_parses: expected integer constructor argument");
+}
+
+void test_generic_type_declaration_brace_init_still_parses_as_ctor_args() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "int main() {\n"
+        "    std::optional<int> value{7};\n"
+        "    return value.has_value() ? 0 : 1;\n"
+        "}\n");
+    const scpp::Function& fn = *find_function_named(program, "main");
+    const scpp::Stmt& decl = *fn.body->statements[0];
+    expect(decl.kind == scpp::StmtKind::VarDecl,
+           "generic_type_declaration_brace_init_still_parses_as_ctor_args: first statement should be VarDecl");
+    expect(is_named_type(decl.type, "std::optional") && decl.type.template_args.size() == 1 &&
+               is_named_type(decl.type.template_args[0], "int"),
+           "generic_type_declaration_brace_init_still_parses_as_ctor_args: decl type should stay std::optional<int>");
+    expect(decl.has_ctor_args && decl.ctor_args.size() == 1,
+           "generic_type_declaration_brace_init_still_parses_as_ctor_args: expected one ctor arg");
+    expect(decl.init == nullptr,
+           "generic_type_declaration_brace_init_still_parses_as_ctor_args: brace init should not become an expression initializer");
+}
+
+void test_generic_type_ctad_brace_init_return_expression_parses() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "std::optional<int> make_value() {\n"
+        "    return std::optional{7};\n"
+        "}\n");
+    const scpp::Function& fn = *find_function_named(program, "make_value");
+    const scpp::Stmt& ret = *fn.body->statements[0];
+    expect(ret.expr != nullptr && ret.expr->kind == scpp::ExprKind::Call && ret.expr->name == "std::optional",
+           "generic_type_ctad_brace_init_return_expression_parses: expected a Call to std::optional");
+    expect(ret.expr->explicit_template_args.empty(),
+           "generic_type_ctad_brace_init_return_expression_parses: CTAD form should have no explicit_template_args");
+    expect(ret.expr->args.size() == 1 && ret.expr->args[0]->kind == scpp::ExprKind::IntegerLiteral &&
+               ret.expr->args[0]->int_value == 7,
+           "generic_type_ctad_brace_init_return_expression_parses: expected integer constructor argument");
+}
+
 void test_make_unique_zero_args() {
     scpp::Program program =
         parse_with_std_imports("import std;\nint f() { std::unique_ptr<int> a = std::make_unique<int>(); return 0; }");
@@ -5150,6 +5207,9 @@ int main() {
     test_export_concept_outside_module_is_rejected();
     test_concept_inside_namespace_is_qualified();
     test_nested_reference_wrapper_lifetime_parameter_parse();
+    test_generic_type_brace_init_return_expression_parses();
+    test_generic_type_declaration_brace_init_still_parses_as_ctor_args();
+    test_generic_type_ctad_brace_init_return_expression_parses();
     test_generic_parameter_const_auto_ref_parses();
     test_generic_parameter_auto_rvalue_ref_parses();
     test_generic_parameter_mutable_auto_ref_parses();

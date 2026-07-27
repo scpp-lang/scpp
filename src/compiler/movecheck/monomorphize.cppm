@@ -2654,6 +2654,19 @@ private:
         return deduced;
     }
 
+    void normalize_ctad_constructor_param_type(Type& type, const std::vector<GenericTypeParam>& template_params) const {
+        if (type.kind == TypeKind::Reference && type.is_rvalue_ref && type.pointee &&
+            type.pointee->kind == TypeKind::Named && type.pointee->template_args.empty() &&
+            type.pointee->non_type_args.empty()) {
+            for (const GenericTypeParam& tp : template_params) {
+                if (!tp.is_non_type && !tp.is_pack && tp.name == type.pointee->name) {
+                    type = *type.pointee;
+                    return;
+                }
+            }
+        }
+    }
+
     [[nodiscard]] Type abbreviated_generic_concrete_param_type(const Param& param, const Expr& arg,
                                                                const Type& arg_type, Body& body) const {
         Type named = arg_type.kind == TypeKind::Reference ? *arg_type.pointee : arg_type;
@@ -3439,6 +3452,207 @@ private:
         return true;
     }
 
+    [[nodiscard]] ExprPtr make_integer_literal_expr(SourceLocation loc, long long value) const {
+        auto node = std::make_unique<Expr>();
+        node->kind = ExprKind::IntegerLiteral;
+        node->loc = loc;
+        node->int_value = value;
+        return node;
+    }
+
+    [[nodiscard]] std::optional<std::vector<GenericTypeParam>>
+    primary_generic_type_template_params(const std::string& template_name) const {
+        for (const ClassDef& def : program_.classes) {
+            if (def.name == template_name && !def.template_params.empty() && !def.is_partial_specialization &&
+                !def.is_variadic_specialization) {
+                return def.template_params;
+            }
+        }
+        for (const StructDef& def : program_.structs) {
+            if (def.name == template_name && !def.template_params.empty()) {
+                return def.template_params;
+            }
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] Type apply_explicit_generic_type_arguments(const std::string& template_name,
+                                                             const std::vector<GenericTypeParam>& template_params,
+                                                             const Expr& expr) {
+        std::unordered_map<std::string, Type> type_bindings;
+        std::unordered_map<std::string, int> value_bindings;
+        std::unordered_map<std::string, std::vector<Type>> pack_bindings;
+        std::size_t explicit_index = 0;
+        for (std::size_t p = 0; p < template_params.size(); p++) {
+            const GenericTypeParam& tp = template_params[p];
+            if (tp.is_pack) {
+                std::vector<Type> pack;
+                while (explicit_index < expr.explicit_template_args.size()) {
+                    const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
+                    if (!arg.is_type) {
+                        throw DataflowError("template parameter pack '" + tp.name + "' of generic type '" +
+                                                template_name + "' only accepts type arguments in this version",
+                                            expr.loc);
+                    }
+                    pack.push_back(arg.type);
+                }
+                if (!pack.empty()) pack_bindings[tp.name] = std::move(pack);
+                continue;
+            }
+            if (explicit_index >= expr.explicit_template_args.size()) {
+                throw DataflowError("not enough explicit template arguments for generic type '" + template_name + "'",
+                                    expr.loc);
+            }
+            const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
+            if (tp.is_non_type) {
+                if (arg.is_type || !arg.value) {
+                    throw DataflowError("template parameter '" + tp.name + "' of generic type '" + template_name +
+                                            "' is a non-type parameter, but a type argument was given",
+                                        expr.loc);
+                }
+                value_bindings[tp.name] = evaluate_non_type_arg(*arg.value, value_bindings);
+            } else {
+                if (!arg.is_type) {
+                    throw DataflowError("template parameter '" + tp.name + "' of generic type '" + template_name +
+                                            "' is a type parameter, but a non-type argument was given",
+                                        expr.loc);
+                }
+                type_bindings[tp.name] = arg.type;
+            }
+        }
+        if (explicit_index != expr.explicit_template_args.size()) {
+            throw DataflowError("too many explicit template arguments for generic type '" + template_name + "'",
+                                expr.loc);
+        }
+        Type type;
+        type.kind = TypeKind::Named;
+        type.name = template_name;
+        for (const GenericTypeParam& tp : template_params) {
+            if (tp.is_pack) {
+                auto pack_it = pack_bindings.find(tp.name);
+                if (pack_it == pack_bindings.end()) continue;
+                for (const Type& bound : pack_it->second) type.template_args.push_back(bound);
+                continue;
+            }
+            if (tp.is_non_type) {
+                auto value_it = value_bindings.find(tp.name);
+                if (value_it == value_bindings.end()) {
+                    throw DataflowError("cannot form generic type '" + template_name +
+                                            "': missing explicit argument for non-type parameter '" + tp.name + "'",
+                                        expr.loc);
+                }
+                type.non_type_args.push_back(
+                    std::shared_ptr<Expr>(make_integer_literal_expr(expr.loc, value_it->second).release()));
+                continue;
+            }
+            auto type_it = type_bindings.find(tp.name);
+            if (type_it == type_bindings.end()) {
+                throw DataflowError("cannot form generic type '" + template_name +
+                                        "': missing explicit argument for type parameter '" + tp.name + "'",
+                                    expr.loc);
+            }
+            type.template_args.push_back(type_it->second);
+        }
+        return resolve_generic_type(std::move(type), expr.loc);
+    }
+
+    [[nodiscard]] Type build_deduced_generic_type(const std::string& template_name,
+                                                  const std::vector<GenericTypeParam>& template_params,
+                                                  const FullHeaderGenericCallResolution& resolution,
+                                                  SourceLocation loc) {
+        Type type;
+        type.kind = TypeKind::Named;
+        type.name = template_name;
+        for (const GenericTypeParam& tp : template_params) {
+            if (tp.is_pack) {
+                auto pack_it = resolution.pack_bindings.find(tp.name);
+                if (pack_it == resolution.pack_bindings.end()) continue;
+                for (const Type& bound : pack_it->second) type.template_args.push_back(bound);
+                continue;
+            }
+            if (tp.is_non_type) {
+                auto value_it = resolution.value_bindings.find(tp.name);
+                if (value_it == resolution.value_bindings.end()) {
+                    throw DataflowError("cannot deduce template parameter '" + tp.name + "' of generic type '" +
+                                            template_name + "' from this constructor call",
+                                        loc);
+                }
+                type.non_type_args.push_back(
+                    std::shared_ptr<Expr>(make_integer_literal_expr(loc, value_it->second).release()));
+                continue;
+            }
+            auto type_it = resolution.type_bindings.find(tp.name);
+            if (type_it == resolution.type_bindings.end()) {
+                throw DataflowError("cannot deduce template parameter '" + tp.name + "' of generic type '" +
+                                        template_name + "' from this constructor call",
+                                    loc);
+            }
+            type.template_args.push_back(type_it->second);
+        }
+        return resolve_generic_type(std::move(type), loc);
+    }
+
+    [[nodiscard]] bool maybe_resolve_generic_type_constructor_call(Expr& expr, Body& body) {
+        if (expr.kind != ExprKind::Call || expr.lhs != nullptr || !generic_type_template_names_.contains(expr.name)) {
+            return false;
+        }
+        if (!expr.explicit_template_args.empty()) {
+            std::optional<std::vector<GenericTypeParam>> template_params = primary_generic_type_template_params(expr.name);
+            if (!template_params.has_value()) {
+                throw DataflowError("internal error: missing primary template metadata for generic type '" + expr.name +
+                                        "'",
+                                    expr.loc);
+            }
+            Type concrete = apply_explicit_generic_type_arguments(expr.name, *template_params, expr);
+            expr.name = concrete.name;
+            expr.explicit_template_args.clear();
+            expr.explicit_global_qualification = false;
+            return true;
+        }
+
+        std::optional<std::vector<GenericTypeParam>> template_params = primary_generic_type_template_params(expr.name);
+        if (!template_params.has_value()) {
+            throw DataflowError("internal error: missing primary template metadata for generic type '" + expr.name + "'",
+                                expr.loc);
+        }
+
+        std::optional<Type> resolved_type;
+        for (const Function& tmpl : program_.functions) {
+            if (tmpl.name != expr.name + "_new" || !compile_time_dependency_visible(tmpl, body)) {
+                continue;
+            }
+            Function deduction_tmpl = clone_function(tmpl);
+            if (!deduction_tmpl.template_params.empty()) continue;
+            deduction_tmpl.template_params = *template_params;
+            deduction_tmpl.is_generic_template = true;
+            for (std::size_t i = 1; i < deduction_tmpl.params.size(); i++) {
+                normalize_ctad_constructor_param_type(deduction_tmpl.params[i].type, *template_params);
+            }
+            FullHeaderGenericCallResolution resolution;
+            if (!try_resolve_full_header_generic_function_call(expr, deduction_tmpl, body, /*param_offset=*/1, resolution)) {
+                continue;
+            }
+            Type candidate = build_deduced_generic_type(expr.name, *template_params, resolution, expr.loc);
+            if (!resolved_type.has_value()) {
+                resolved_type = std::move(candidate);
+                continue;
+            }
+            if (!types_equal(*resolved_type, candidate)) {
+                throw DataflowError("class template argument deduction for generic type '" + expr.name +
+                                        "' is ambiguous for this constructor call",
+                                    expr.loc);
+            }
+        }
+        if (!resolved_type.has_value()) {
+            throw DataflowError("cannot deduce template arguments for generic type '" + expr.name +
+                                    "' from this constructor call",
+                                expr.loc);
+        }
+        expr.name = resolved_type->name;
+        expr.explicit_global_qualification = false;
+        return true;
+    }
+
     void monomorphize_abbreviated_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
                                                         const std::string& cloned_method_suffix_prefix = "") {
         std::vector<Type> concrete_param_types;
@@ -4007,6 +4221,9 @@ private:
         for (ExprPtr& arg : expr.args) walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
         if (expr.kind == ExprKind::New && expr.type.kind == TypeKind::Named) {
             maybe_instantiate_generic_constructor_overloads(expr.type.name, expr.args, body, expr.loc);
+        }
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
+            (void)maybe_resolve_generic_type_constructor_call(expr, body);
         }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
             std::optional<Type> direct_call_type = infer_expr_type(expr, body, signatures_);
