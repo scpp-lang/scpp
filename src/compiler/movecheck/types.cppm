@@ -13,6 +13,7 @@ namespace scpp {
 [[nodiscard]] bool is_span(const Type& type);
 [[nodiscard]] bool is_pointer(const Type& type);
 [[nodiscard]] bool is_lifetime_eligible_type(const Type& type);
+[[nodiscard]] bool is_pointer_return_lifetime_source_type(const Type& type);
 [[nodiscard]] bool is_function_pointer(const Type& type);
 [[nodiscard]] bool is_for_range_size_builtin(const Expr& expr);
 [[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name);
@@ -59,6 +60,15 @@ namespace scpp {
 [[nodiscard]] bool is_pointer(const Type& type) { return type.kind == TypeKind::Pointer; }
 [[nodiscard]] bool is_lifetime_eligible_type(const Type& type) {
     return is_reference(type) || is_pointer(type) || is_span(type);
+}
+namespace {
+[[nodiscard]] bool unwrap_reference_wrapper_lifetime_source(const Type& type) {
+    return type.is_reference_wrapper_lifetime_source;
+}
+}
+
+[[nodiscard]] bool is_pointer_return_lifetime_source_type(const Type& type) {
+    return is_lifetime_eligible_type(type) || unwrap_reference_wrapper_lifetime_source(type);
 }
 [[nodiscard]] bool is_function_pointer(const Type& type) { return type.kind == TypeKind::FunctionPointer; }
 [[nodiscard]] bool is_for_range_size_builtin(const Expr& expr) {

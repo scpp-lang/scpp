@@ -7548,6 +7548,89 @@ int main() {
         expect(result.stdout_text == "7\n",
                case_name + ": expected stdout '7\\n', got '" + result.stdout_text + "'");
     }
+
+    {
+        std::string case_name = "reference_wrapper_optional_lifetime_annotation_supports_pointer_return";
+        cases_run++;
+        std::filesystem::path exe_path =
+            std::filesystem::current_path() / "reference_wrapper_optional_lifetime_annotation_supports_pointer_return_exe";
+        scpp::compile_to_executable(
+            R"SCPP(import std;
+int* find_visible(std::optional<std::reference_wrapper<const int [[scpp::lifetime(source)]]>> source)
+    [[scpp::lifetime(source)]] {
+    return &source->get();
+}
+int main() {
+    int value = 41;
+    std::reference_wrapper<const int> wrapped{value};
+    std::optional<std::reference_wrapper<const int>> source{wrapped};
+    const int* ptr = find_visible(source);
+    [[scpp::unsafe]] {
+        print_int(*ptr);
+    }
+    return 0;
+}
+)SCPP",
+            exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "top_level_lifetime_annotation_still_supports_pointer_return";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(const int* addr(const int& value [[scpp::lifetime(source)]]) [[scpp::lifetime(source)]] {
+    return &value;
+}
+int main() {
+    int value = 19;
+    const int* ptr = addr(value);
+    [[scpp::unsafe]] {
+        return *ptr == 19 ? 0 : 2;
+    }
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "nested_lifetime_annotation_rejects_non_eligible_template_argument";
+        bool threw = false;
+        try {
+            (void)compile_and_run(
+                R"SCPP(import std;
+int* bad(std::optional<int [[scpp::lifetime(source)]]> source) [[scpp::lifetime(source)]] {
+    return 0;
+}
+int main() { return 0; }
+)SCPP",
+                case_name);
+        } catch (const std::exception& ex) {
+            threw = std::string(ex.what()).find("does not denote a reference, pointer, span, or std::reference_wrapper-carried reference") !=
+                    std::string::npos;
+        }
+        expect(threw, case_name + ": expected non-eligible nested lifetime annotation to be rejected");
+    }
+
+    {
+        std::string case_name = "reference_wrapper_optional_counts_as_eligible_pointer_source_for_ambiguity";
+        bool threw = false;
+        try {
+            (void)compile_and_run(
+                R"SCPP(import std;
+const int* ambiguous(std::optional<std::reference_wrapper<const int>> source, const int& other) {
+    if (!source.has_value()) return &other;
+    return &source->get();
+}
+int main() { return 0; }
+)SCPP",
+                case_name);
+        } catch (const std::exception& ex) {
+            threw = std::string(ex.what()).find("more than one eligible source parameter") != std::string::npos;
+        }
+        expect(threw, case_name + ": expected optional<reference_wrapper<T>> to participate in pointer-source ambiguity");
+    }
 }
 
 void run_defaulted_special_member_tests() {

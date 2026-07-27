@@ -179,6 +179,7 @@ private:
     PartitionResolver partition_resolver_;
     std::shared_ptr<const std::string> source_path_;
     Program* current_program_ = nullptr;
+    bool allow_type_lifetime_attributes_ = false;
     // ch11 §11.4: the namespace path currently being parsed into, e.g.
     // inside `namespace std { ... }` this is {"std"}; empty at file
     // scope (today's default -- every existing, non-namespaced file is
@@ -622,6 +623,49 @@ private:
                              std::string(where) + " may bear at most one '[[scpp::lifetime(name)]]' attribute");
         }
         dst = src;
+    }
+
+    void collect_type_lifetime_annotations(const Type& type, std::vector<const LifetimeAnnotation*>& out) const {
+        if (type.lifetime.present()) out.push_back(&type.lifetime);
+        if (type.pointee) collect_type_lifetime_annotations(*type.pointee, out);
+        if (type.element) collect_type_lifetime_annotations(*type.element, out);
+        if (type.function_return) collect_type_lifetime_annotations(*type.function_return, out);
+        for (const Type& param : type.function_params) collect_type_lifetime_annotations(param, out);
+        for (const Type& arg : type.template_args) collect_type_lifetime_annotations(arg, out);
+    }
+
+    void clear_type_lifetime_annotations(Type& type) {
+        type.lifetime = {};
+        if (type.pointee) clear_type_lifetime_annotations(*type.pointee);
+        if (type.element) clear_type_lifetime_annotations(*type.element);
+        if (type.function_return) clear_type_lifetime_annotations(*type.function_return);
+        for (Type& param : type.function_params) clear_type_lifetime_annotations(param);
+        for (Type& arg : type.template_args) clear_type_lifetime_annotations(arg);
+    }
+
+    void hoist_type_lifetime_annotation(Type& type, LifetimeAnnotation& dst, const Token& tok, const char* where) {
+        std::vector<const LifetimeAnnotation*> annotations;
+        collect_type_lifetime_annotations(type, annotations);
+        if (annotations.size() > 1) {
+            throw ParseError(tok.line, tok.column,
+                             std::string(where) + " may bear at most one '[[scpp::lifetime(name)]]' attribute");
+        }
+        if (!annotations.empty()) merge_lifetime_attribute(dst, *annotations.front(), tok, where);
+        clear_type_lifetime_annotations(type);
+    }
+
+    template<typename Fn>
+    auto with_type_lifetime_attributes_enabled(Fn&& fn) {
+        bool saved = allow_type_lifetime_attributes_;
+        allow_type_lifetime_attributes_ = true;
+        try {
+            decltype(auto) result = fn();
+            allow_type_lifetime_attributes_ = saved;
+            return result;
+        } catch (...) {
+            allow_type_lifetime_attributes_ = saved;
+            throw;
+        }
     }
 
     [[nodiscard]] ParsedAttributes parse_attribute_specifier_seq() {
@@ -1239,6 +1283,17 @@ private:
                    type_to_string(*type.pointee) + ">";
         }
         return "<unknown-type>";
+    }
+
+    void maybe_mark_reference_wrapper_lifetime_source(Type& type) const {
+        if (type.kind != TypeKind::Named || type.template_args.size() != 1 || !type.non_type_args.empty()) return;
+        if (type.name == "std::reference_wrapper") {
+            type.is_reference_wrapper_lifetime_source = true;
+            return;
+        }
+        if (type.name == "std::optional" && type.template_args[0].is_reference_wrapper_lifetime_source) {
+            type.is_reference_wrapper_lifetime_source = true;
+        }
     }
 
     [[nodiscard]] std::optional<std::string>
@@ -2152,7 +2207,7 @@ private:
         pos_ = after_prefix;
         Type return_type;
         try {
-            return_type = parse_type();
+            return_type = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
         } catch (const ParseError&) {
             pos_ = saved_pos;
             return false;
@@ -2672,6 +2727,7 @@ private:
                                           " template argument(s) in this order (ch05 §5.14)");
                 }
             }
+           maybe_mark_reference_wrapper_lifetime_source(type);
         } else if (tok.kind == TokenKind::Identifier) {
             std::string spelled_name = peek_qualified_name();
             if (std::optional<Type> alias = resolve_visible_type_alias(spelled_name); alias.has_value()) {
@@ -2973,6 +3029,15 @@ private:
     Type parse_template_type_argument() {
         Type type = parse_type(/*allow_rvalue_ref=*/false, /*out_bare_const=*/nullptr,
                                /*allow_const_qualified_value_type=*/true);
+        const Token& attr_start_tok = peek();
+        ParsedAttributes attrs = parse_attribute_specifier_seq();
+        if (attrs.lifetime.present() && !allow_type_lifetime_attributes_) {
+            throw ParseError(attr_start_tok.line, attr_start_tok.column,
+                             "'[[scpp::lifetime(name)]]' cannot appertain to a type-id here -- only to an eligible "
+                             "parameter declaration or function declarator");
+        }
+        merge_lifetime_attribute(type.lifetime, attrs.lifetime, attr_start_tok,
+                                 "a type-id within a parameter or return type");
         if (check(TokenKind::LParen)) {
             type = parse_function_type_suffix(std::move(type));
         }
@@ -4244,7 +4309,9 @@ private:
         if (!check(TokenKind::RParen)) {
             do {
                 Param param;
-                Type base_type = parse_param_type(param.generic_concept);
+                Type base_type = with_type_lifetime_attributes_enabled([&] {
+                    return parse_param_type(param.generic_concept);
+                });
                 param.is_parameter_pack = match(TokenKind::Ellipsis);
                 if (param.is_parameter_pack && param.generic_concept.empty() &&
                     !referenced_pack_type_param_name(base_type).has_value()) {
@@ -4284,6 +4351,7 @@ private:
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration");
+                hoist_type_lifetime_annotation(param.type, param.lifetime, param_attr_start_tok, "a parameter declaration");
                 if (match(TokenKind::Assign)) {
                     if (param.is_parameter_pack) {
                         const Token& tok = peek();
@@ -4365,6 +4433,7 @@ private:
         ParsedAttributes attrs = parse_attribute_specifier_seq();
         reject_packed_attribute(attrs, attr_start_tok, what);
         merge_lifetime_attribute(fn.return_lifetime, attrs.lifetime, attr_start_tok, what);
+        hoist_type_lifetime_annotation(fn.return_type, fn.return_lifetime, attr_start_tok, what);
     }
 
     StmtPtr parse_member_function_suffix(Function& fn) {
@@ -4803,7 +4872,7 @@ private:
                         std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
                     found_placeholder = true;
                 } else {
-                    Type helper_type = parse_type();
+                    Type helper_type = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
                     std::string helper_name =
                         std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
                     // ch05 §5.13/spec §6.2(13.1): a probe parameter
@@ -4818,6 +4887,8 @@ private:
                     LifetimeAnnotation helper_lifetime;
                     merge_lifetime_attribute(helper_lifetime, helper_attrs.lifetime, helper_attr_start_tok,
                                               "a requires-expression parameter declaration");
+                    hoist_type_lifetime_annotation(helper_type, helper_lifetime, helper_attr_start_tok,
+                                                  "a requires-expression parameter declaration");
                     helper_param_types[helper_name] = std::move(helper_type);
                     helper_param_lifetimes[helper_name] = std::move(helper_lifetime);
                 }
@@ -6049,7 +6120,7 @@ private:
             }
             break;
         }
-        fn.return_type = parse_type();
+        fn.return_type = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
         fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
 
         expect(TokenKind::LParen, "'('");
@@ -6064,7 +6135,9 @@ private:
                     break;
                 }
                 Param param;
-                Type base_type = parse_param_type(param.generic_concept);
+                Type base_type = with_type_lifetime_attributes_enabled([&] {
+                    return parse_param_type(param.generic_concept);
+                });
                 param.is_parameter_pack = match(TokenKind::Ellipsis);
                 if (param.is_parameter_pack && param.generic_concept.empty() &&
                     !referenced_pack_type_param_name(base_type).has_value()) {
@@ -6092,6 +6165,7 @@ private:
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
                 merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration");
+                hoist_type_lifetime_annotation(param.type, param.lifetime, param_attr_start_tok, "a parameter declaration");
                 if (match(TokenKind::Assign)) {
                     if (param.is_parameter_pack) {
                         const Token& tok = peek();
@@ -6113,6 +6187,7 @@ private:
         ParsedAttributes fn_attrs = parse_attribute_specifier_seq();
         reject_packed_attribute(fn_attrs, fn_attr_start_tok, "a function declarator");
         merge_lifetime_attribute(fn.return_lifetime, fn_attrs.lifetime, fn_attr_start_tok, "a function declarator");
+        hoist_type_lifetime_annotation(fn.return_type, fn.return_lifetime, fn_attr_start_tok, "a function declarator");
 
         // ch05 §5.11: a function with at least one concept-constrained
         // parameter is a *generic template* -- checked once, abstractly,
