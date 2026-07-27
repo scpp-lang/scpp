@@ -180,4 +180,4 @@ multi-step APIs and result propagation patterns.
 
 ---
 
-[← Previous: Recoverable Errors Today](ch09-02-recoverable-errors-today.md) · [Table of Contents](README.md)
+[← Previous: Recoverable Errors Today](ch09-02-recoverable-errors-today.md) · [Table of Contents](README.md) · [Next: Propagating `std::expected<T, E>` Through Multi-Step APIs →](ch09-04-propagating-expected-results.md)
