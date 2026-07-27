@@ -54,10 +54,10 @@
   - [用 concept 描述共享要求](ch10-02-defining-shared-requirements-with-concepts.md)
   - [用生命周期验证引用](ch10-03-validating-references-with-lifetimes.md)
 
-- 编写自动化测试
-  - 编译并运行式测试
-  - 控制测试命令
-  - 测试组织方式
+- 闭包与可调用代码
+  - [闭包与捕获](ch11-01-closures-and-captures.md)
+  - 泛型 lambda
+  - 选择可调用表示形式
 
 - 一个 I/O 项目：构建命令行程序
   - 接收命令行参数

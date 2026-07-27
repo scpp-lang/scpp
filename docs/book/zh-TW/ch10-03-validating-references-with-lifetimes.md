@@ -166,8 +166,9 @@ int main() {
 - 對於會把 callee 內部新鮮借用交給 callback 的 API，使用 `[[scpp::lifetime(any)]]`。
 
 這樣一來，第 10 章開頭需要的工具就齊了：泛型定義、concept 描述的操作要求，以及用於
-參照的生命週期標註。下一章就可以在這套基礎上繼續講，看看這個專案如何自動驗證行為。
+參照的生命週期標註。下一章會在這套基礎上繼續講閉包：看看區域 callback 物件怎樣把捕
+獲、concept 與生命週期放進普通使用者程式碼裡。
 
 ---
 
-[← 上一章：用 concept 描述共享需求](ch10-02-defining-shared-requirements-with-concepts.md) · [目錄](README.md)
+[← 上一章：用 concept 描述共享需求](ch10-02-defining-shared-requirements-with-concepts.md) · [目錄](README.md) · [下一章：閉包與捕獲 →](ch11-01-closures-and-captures.md)
