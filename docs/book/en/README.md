@@ -55,7 +55,7 @@
   - [Validating References with Lifetimes](ch10-03-validating-references-with-lifetimes.md)
 
 - Writing Automated Tests
-  - Compile-and-Run Tests
+  - [Compile-and-Run Tests](ch11-01-compile-and-run-tests.md)
   - Controlling Test Commands
   - Test Organization
 

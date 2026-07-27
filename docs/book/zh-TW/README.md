@@ -55,7 +55,7 @@
   - [用生命週期驗證參照](ch10-03-validating-references-with-lifetimes.md)
 
 - 撰寫自動化測試
-  - 編譯並執行式測試
+  - [編譯並執行式測試](ch11-01-compile-and-run-tests.md)
   - 控制測試命令
   - 測試組織方式
 

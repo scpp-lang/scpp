@@ -170,4 +170,4 @@ int main() {
 
 ---
 
-[← 上一章：用 concept 描述共享需求](ch10-02-defining-shared-requirements-with-concepts.md) · [目錄](README.md)
+[← 上一章：用 concept 描述共享需求](ch10-02-defining-shared-requirements-with-concepts.md) · [目錄](README.md) · [下一章：編譯並執行式測試 →](ch11-01-compile-and-run-tests.md)

@@ -55,7 +55,7 @@
   - [用生命周期验证引用](ch10-03-validating-references-with-lifetimes.md)
 
 - 编写自动化测试
-  - 编译并运行式测试
+  - [编译并运行式测试](ch11-01-compile-and-run-tests.md)
   - 控制测试命令
   - 测试组织方式
 
