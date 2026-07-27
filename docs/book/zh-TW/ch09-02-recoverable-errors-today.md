@@ -168,4 +168,4 @@ int main() {
 
 ---
 
-[← 上一章：不可恢復錯誤與編譯器插入的檢查](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md) · [目錄](README.md)
+[← 上一章：不可恢復錯誤與編譯器插入的檢查](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md) · [目錄](README.md) · [下一章：用 `std::expected<T, E>` 表達可恢復錯誤 →](ch09-03-using-std-expected.md)

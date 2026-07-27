@@ -44,7 +44,7 @@
 - Error Handling
   - [Unrecoverable Errors and Compiler-Inserted Checks](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
   - [Recoverable Errors Today](ch09-02-recoverable-errors-today.md)
-  - Preparing for `std::expected`
+  - [Recoverable Errors with `std::expected<T, E>`](ch09-03-using-std-expected.md)
 
 - Generic Code, Concepts, and Lifetimes
   - Generic Data Types
