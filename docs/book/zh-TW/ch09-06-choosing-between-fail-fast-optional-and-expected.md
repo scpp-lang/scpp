@@ -180,4 +180,4 @@ trailing text
 
 ---
 
-[← 上一章：在 I/O 邊界上使用 `std::expected<T, E>`](ch09-05-using-expected-at-io-boundaries.md) · [目錄](README.md)
+[← 上一章：在 I/O 邊界上使用 `std::expected<T, E>`](ch09-05-using-expected-at-io-boundaries.md) · [目錄](README.md) · [下一章：泛型函式與 class →](ch10-01-generic-functions-and-classes.md)

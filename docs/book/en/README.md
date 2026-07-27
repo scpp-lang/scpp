@@ -50,7 +50,7 @@
   - [Choosing Between Fail-Fast Checks, `std::optional<T>`, and `std::expected<T, E>`](ch09-06-choosing-between-fail-fast-optional-and-expected.md)
 
 - Generic Code, Concepts, and Lifetimes
-  - Generic Data Types
+  - [Generic Functions and Classes](ch10-01-generic-functions-and-classes.md)
   - Defining Shared Requirements with Concepts
   - Validating References with Lifetimes
 
