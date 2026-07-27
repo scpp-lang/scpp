@@ -1817,9 +1817,19 @@ struct TargetLayoutInfo {
     std::uint64_t pointer_align_bytes = alignof(void*);
 };
 
-struct TypeLayoutInfo {
+class TypeLayoutInfo {
+public:
     std::uint64_t size_bytes = 0;
     std::uint64_t abi_align_bytes = 1;
+
+    virtual ~TypeLayoutInfo() = default;
+    TypeLayoutInfo() = default;
+    TypeLayoutInfo(std::uint64_t size_bytes, std::uint64_t abi_align_bytes)
+        : size_bytes{size_bytes}, abi_align_bytes{abi_align_bytes} {
+        return;
+    }
+    TypeLayoutInfo(const TypeLayoutInfo&) = default;
+    TypeLayoutInfo(TypeLayoutInfo&&) = default;
 };
 
 [[nodiscard]] inline std::optional<TypeLayoutInfo> layout_of_type(const Program& program, const Type& type,
@@ -1865,19 +1875,23 @@ struct TypeLayoutInfo {
         }
 
         [[nodiscard]] std::optional<TypeLayoutInfo> named_scalar_layout(std::string_view name) const {
-            if (name == "bool" || name == "char" || name == "int8_t" || name == "uint8_t") return TypeLayoutInfo{1, 1};
-            if (name == "int16_t" || name == "uint16_t") return TypeLayoutInfo{2, 2};
+            if (name == "bool" || name == "char" || name == "int8_t" || name == "uint8_t") {
+                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{1, 1}};
+            }
+            if (name == "int16_t" || name == "uint16_t") {
+                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{2, 2}};
+            }
             if (name == "int" || name == "unsigned int" || name == "int32_t" || name == "uint32_t" ||
                 name == "float" || name == "float32_t") {
-                return TypeLayoutInfo{4, 4};
+                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{4, 4}};
             }
             if (name == "long" || name == "unsigned long" || name == "int64_t" || name == "uint64_t" ||
                 name == "double" || name == "float64_t") {
-                return TypeLayoutInfo{8, 8};
+                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{8, 8}};
             }
             if (name == "size_t" || name == "ptrdiff_t") {
                 std::uint64_t align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
-                return TypeLayoutInfo{target.pointer_size_bytes, align};
+                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes, align}};
             }
             return std::nullopt;
         }
@@ -1890,25 +1904,25 @@ struct TypeLayoutInfo {
                     current.pointee->kind == TypeKind::Named) {
                     const ClassDef* referent = find_class(current.pointee->name);
                     if (referent != nullptr && referent->is_interface) {
-                        return TypeLayoutInfo{target.pointer_size_bytes * 2, align};
+                        return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes * 2, align}};
                     }
                 }
-                return TypeLayoutInfo{target.pointer_size_bytes, align};
+                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes, align}};
             }
             if (current.kind == TypeKind::Function) return std::nullopt;
             if (current.kind == TypeKind::Span) {
                 std::uint64_t pointer_align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
                 std::uint64_t count_align = 8;
                 std::uint64_t size = align_up(target.pointer_size_bytes, count_align) + 8;
-                return TypeLayoutInfo{align_up(size, std::max(pointer_align, count_align)),
-                                      std::max(pointer_align, count_align)};
+                return std::optional<TypeLayoutInfo>{
+                    TypeLayoutInfo{align_up(size, std::max(pointer_align, count_align)), std::max(pointer_align, count_align)}};
             }
             if (current.kind == TypeKind::Array) {
                 if (!current.element || current.array_size < 0) return std::nullopt;
                 std::optional<TypeLayoutInfo> element = this->compute(*current.element);
                 if (!element.has_value()) return std::nullopt;
-                return TypeLayoutInfo{element->size_bytes * static_cast<std::uint64_t>(current.array_size),
-                                      element->abi_align_bytes};
+                return std::optional<TypeLayoutInfo>{
+                    TypeLayoutInfo{element->size_bytes * static_cast<std::uint64_t>(current.array_size), element->abi_align_bytes}};
             }
             if (current.kind == TypeKind::Named) {
                 if (current.name == "void") return std::nullopt;
@@ -1944,7 +1958,7 @@ struct TypeLayoutInfo {
                         overall_align =
                             struct_def->is_packed ? 1 : std::max(overall_align, struct_def->resolved_alignment);
                         clear_visit();
-                        return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
+                        return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(offset, overall_align), overall_align}};
                     }
                     if (struct_def->fields.empty()) {
                         clear_visit();
@@ -1966,7 +1980,7 @@ struct TypeLayoutInfo {
                     }
                     overall_align = struct_def->is_packed ? 1 : std::max(overall_align, struct_def->resolved_alignment);
                     clear_visit();
-                    return TypeLayoutInfo{align_up(max_size, overall_align), overall_align};
+                    return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(max_size, overall_align), overall_align}};
                 }
                 const ClassDef* class_def = find_class(current.name);
                 if (class_def != nullptr) {
@@ -2004,7 +2018,7 @@ struct TypeLayoutInfo {
                     }
                     overall_align = std::max(overall_align, class_def->resolved_alignment);
                     clear_visit();
-                    return TypeLayoutInfo{align_up(offset, overall_align), overall_align};
+                    return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(offset, overall_align), overall_align}};
                 }
                 clear_visit();
                 return std::nullopt;
