@@ -4470,6 +4470,64 @@ private:
         return args;
     }
 
+    std::vector<ExplicitTemplateArg> parse_explicit_template_args(const std::vector<GenericTypeParam>& template_params) {
+        expect(TokenKind::Less, "'<'");
+        std::vector<ExplicitTemplateArg> explicit_template_args;
+        std::size_t arg_index = 0;
+        if (!check(TokenKind::Greater)) {
+            do {
+                ExplicitTemplateArg arg;
+                bool is_non_type =
+                    arg_index < template_params.size() && template_params[arg_index].is_non_type;
+                if (is_non_type) {
+                    arg.is_type = false;
+                    arg.value = std::shared_ptr<Expr>(parse_additive().release());
+                } else if (arg_index < template_params.size() && template_params[arg_index].is_pack &&
+                           check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
+                    arg.is_type = true;
+                    arg.type.kind = TypeKind::Named;
+                    arg.type.name = std::string(advance().text);
+                    advance(); // '...'
+                    arg.type.is_pack_expansion = true;
+                } else {
+                    arg.is_type = true;
+                    arg.type = parse_template_type_argument();
+                }
+                explicit_template_args.push_back(std::move(arg));
+                arg_index++;
+            } while (match(TokenKind::Comma));
+        }
+        expect(TokenKind::Greater, "'>'");
+        return explicit_template_args;
+    }
+
+    std::optional<std::vector<ExplicitTemplateArg>>
+    try_parse_explicit_generic_type_constructor_template_args(const std::string& spelled_name,
+                                                              bool explicit_global_qualification) {
+        std::string resolved_name =
+            explicit_global_qualification ? spelled_name : resolve_visible_type_name(spelled_name);
+        if (resolved_name.empty() || !generic_type_names_.contains(resolved_name) || !check(TokenKind::Less)) {
+            return std::nullopt;
+        }
+        const std::vector<GenericTypeParam>* template_params = nullptr;
+        if (auto it = ordinary_generic_type_template_params_.find(resolved_name);
+            it != ordinary_generic_type_template_params_.end()) {
+            template_params = &it->second;
+        } else if (auto it = variadic_primary_template_params_.find(resolved_name);
+                   it != variadic_primary_template_params_.end()) {
+            template_params = &it->second;
+        }
+        if (template_params == nullptr) return std::nullopt;
+
+        std::size_t saved_pos = pos_;
+        std::vector<ExplicitTemplateArg> args = parse_explicit_template_args(*template_params);
+        if (!check(TokenKind::LParen) && !check(TokenKind::LBrace)) {
+            pos_ = saved_pos;
+            return std::nullopt;
+        }
+        return args;
+    }
+
     std::optional<Initializer> parse_optional_default_initializer(const std::string& thing_name) {
         if (match(TokenKind::Assign)) {
             Initializer init;
@@ -7325,33 +7383,11 @@ private:
             auto generic_fn_it = generic_function_template_params_.find(name);
             std::vector<ExplicitTemplateArg> explicit_template_args;
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
-                advance(); // '<'
-                const std::vector<GenericTypeParam>& fn_template_params = generic_fn_it->second;
-                std::size_t arg_index = 0;
-                if (!check(TokenKind::Greater)) {
-                    do {
-                        ExplicitTemplateArg arg;
-                        bool is_non_type =
-                            arg_index < fn_template_params.size() && fn_template_params[arg_index].is_non_type;
-                        if (is_non_type) {
-                            arg.is_type = false;
-                            arg.value = std::shared_ptr<Expr>(parse_additive().release());
-                        } else if (arg_index < fn_template_params.size() && fn_template_params[arg_index].is_pack &&
-                                   check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
-                            arg.is_type = true;
-                            arg.type.kind = TypeKind::Named;
-                            arg.type.name = std::string(advance().text);
-                            advance(); // '...'
-                            arg.type.is_pack_expansion = true;
-                        } else {
-                            arg.is_type = true;
-                            arg.type = parse_template_type_argument();
-                        }
-                        explicit_template_args.push_back(std::move(arg));
-                        arg_index++;
-                    } while (match(TokenKind::Comma));
-                }
-                expect(TokenKind::Greater, "'>'");
+                explicit_template_args = parse_explicit_template_args(generic_fn_it->second);
+            } else if (std::optional<std::vector<ExplicitTemplateArg>> type_template_args =
+                           try_parse_explicit_generic_type_constructor_template_args(
+                               name, /*explicit_global_qualification=*/true)) {
+                explicit_template_args = std::move(*type_template_args);
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
@@ -7528,33 +7564,11 @@ private:
             auto generic_fn_it = generic_function_template_params_.find(name);
             std::vector<ExplicitTemplateArg> explicit_template_args;
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
-                advance(); // '<'
-                const std::vector<GenericTypeParam>& fn_template_params = generic_fn_it->second;
-                std::size_t arg_index = 0;
-                if (!check(TokenKind::Greater)) {
-                    do {
-                        ExplicitTemplateArg arg;
-                        bool is_non_type =
-                            arg_index < fn_template_params.size() && fn_template_params[arg_index].is_non_type;
-                        if (is_non_type) {
-                            arg.is_type = false;
-                            arg.value = std::shared_ptr<Expr>(parse_additive().release());
-                        } else if (arg_index < fn_template_params.size() && fn_template_params[arg_index].is_pack &&
-                                   check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
-                            arg.is_type = true;
-                            arg.type.kind = TypeKind::Named;
-                            arg.type.name = std::string(advance().text);
-                            advance(); // '...'
-                            arg.type.is_pack_expansion = true;
-                        } else {
-                            arg.is_type = true;
-                            arg.type = parse_template_type_argument();
-                        }
-                        explicit_template_args.push_back(std::move(arg));
-                        arg_index++;
-                    } while (match(TokenKind::Comma));
-                }
-                expect(TokenKind::Greater, "'>'");
+                explicit_template_args = parse_explicit_template_args(generic_fn_it->second);
+            } else if (std::optional<std::vector<ExplicitTemplateArg>> type_template_args =
+                           try_parse_explicit_generic_type_constructor_template_args(
+                               name, /*explicit_global_qualification=*/false)) {
+                explicit_template_args = std::move(*type_template_args);
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;

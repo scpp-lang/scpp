@@ -7083,6 +7083,88 @@ int main() {
     }
 }
 
+void run_generic_type_construction_expression_tests() {
+    {
+        std::string case_name = "explicit_generic_type_construction_expressions_work_in_return_argument_and_assignment";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+std::optional<int> make_value(int x) {
+    int value = x + 1;
+    return std::optional<int>{value};
+}
+int read_value(const std::optional<int>& value) {
+    return *value;
+}
+std::optional<int> assign_value(int x) {
+    std::optional<int> result{};
+    int value = x + 2;
+    result = std::optional<int>(value);
+    return result;
+}
+int main() {
+    int direct = 3;
+    if (read_value(std::optional<int>{direct}) != 3) {
+        return 1;
+    }
+    std::optional<int> made = make_value(3);
+    if (!made.has_value() || *made != 4) {
+        return 2;
+    }
+    std::optional<int> assigned = assign_value(4);
+    if (!assigned.has_value() || *assigned != 6) {
+        return 3;
+    }
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+    {
+        std::string case_name = "ctad_constructs_generic_temporaries_in_multiple_expression_positions";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+std::optional<int> make_value(int x) {
+    int value = x + 1;
+    return std::optional{value};
+}
+int read_value(const std::optional<int>& value) {
+    return *value;
+}
+int read_shared(std::shared_ptr<int> value) {
+    return *value;
+}
+int main() {
+    std::optional<int> assigned{};
+    int assigned_value = 4;
+    assigned = std::optional{assigned_value};
+    if (!assigned.has_value() || *assigned != 4) {
+        return 1;
+    }
+    int direct = 2;
+    if (read_value(std::optional{direct}) != 2) {
+        return 2;
+    }
+    std::optional<int> made = make_value(6);
+    if (!made.has_value() || *made != 7) {
+        return 3;
+    }
+    [[scpp::unsafe]] {
+        int* raw = new int(7);
+        if (read_shared(std::shared_ptr{raw}) != 7) {
+            return 4;
+        }
+    }
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_out_of_line_member_definition_tests() {
     {
         std::string case_name = "out_of_line_constructor_method_and_destructor_compile_and_run";
@@ -7817,6 +7899,7 @@ int main() {
     run_consteval_tests();
     run_cli_extension_tests();
     run_brace_init_only_var_decl_tests();
+    run_generic_type_construction_expression_tests();
     run_out_of_line_member_definition_tests();
     run_for_loop_tests();
     run_inheritance_constructor_and_destructor_tests();
