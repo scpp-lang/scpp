@@ -43,7 +43,7 @@
 
 - 错误处理
   - [不可恢复错误与编译器插入的检查](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
-  - 今天可用的可恢复错误写法
+  - [今天可用的可恢复错误写法](ch09-02-recoverable-errors-today.md)
   - 为 `std::expected` 做准备
 
 - 泛型代码、concept 与生命周期
