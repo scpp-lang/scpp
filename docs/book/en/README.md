@@ -43,7 +43,7 @@
 
 - Error Handling
   - [Unrecoverable Errors and Compiler-Inserted Checks](ch09-01-unrecoverable-errors-and-compiler-inserted-checks.md)
-  - Recoverable Errors Today
+  - [Recoverable Errors Today](ch09-02-recoverable-errors-today.md)
   - Preparing for `std::expected`
 
 - Generic Code, Concepts, and Lifetimes
