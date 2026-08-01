@@ -309,6 +309,10 @@ void collect_function_reachable_edges(const scpp::Function& fn, const std::unord
 void collect_class_reachable_edges(const scpp::ClassDef& def, const std::unordered_set<std::string>& known_function_names,
                                    std::unordered_set<std::string>& function_names,
                                    std::unordered_set<std::string>& type_names) {
+    if (!def.name.empty()) {
+        function_names.insert(def.name + "_new");
+        function_names.insert(def.name + "_delete");
+    }
     std::unordered_set<std::string> empty_bound_names;
     for (const scpp::ClassField& field : def.fields) {
         collect_type_edges(field.type, known_function_names, empty_bound_names, function_names, type_names);
