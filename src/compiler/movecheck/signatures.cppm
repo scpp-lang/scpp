@@ -836,7 +836,9 @@ void validate_operator_arrow_signature(const Function& fn) {
             }
             indices.push_back(i);
         }
-        if (indices.empty() && is_operator_arrow_function(fn) && !fn.params.empty() && fn.params[0].name == "this") {
+        if (indices.empty() && !fn.member_owner_class.empty() && !fn.is_static && !fn.params.empty() &&
+            fn.params[0].name == "this" && is_reference(fn.params[0].type) &&
+            (fn.return_lifetime.name == "this" || fn.return_lifetime.name == "this" || is_operator_arrow_function(fn))) {
             indices.push_back(0);
         }
         if (indices.empty()) {

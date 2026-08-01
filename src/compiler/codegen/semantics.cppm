@@ -617,9 +617,41 @@ namespace {
         if (candidate_param_type.kind == TypeKind::Reference) {
             if (arg_type.kind == TypeKind::Reference) {
                 if (arg_type.pointee == nullptr || candidate_param_type.pointee == nullptr) return false;
-                if (candidate_param_type.is_rvalue_ref != arg_type.is_rvalue_ref) return false;
-                return types_equal(*arg_type.pointee, *candidate_param_type.pointee) &&
-                       (!candidate_param_type.is_mutable_ref || arg_type.is_mutable_ref);
+                // A *mutable* lvalue reference parameter (`T&`) cannot
+                // bind to an rvalue argument -- but a *const* lvalue
+                // reference (`const T&`) can bind to either an lvalue or
+                // an rvalue (this is ordinary, legal C++-like reference-
+                // binding; e.g. passing `std::move(x)` to a `const T&`
+                // parameter is valid). `candidate_param_type.is_rvalue_ref`
+                // is already guaranteed false here -- callers special-
+                // case genuine `T&&` parameters separately before ever
+                // reaching this comparison -- so only the mutable-ref
+                // case needs this rejection.
+                if (arg_type.is_rvalue_ref && candidate_param_type.is_mutable_ref) return false;
+                bool pointee_same_base = types_equal(*arg_type.pointee, *candidate_param_type.pointee);
+                bool const_compatible_pointee =
+                    arg_type.pointee->kind == candidate_param_type.pointee->kind &&
+                    arg_type.pointee->name == candidate_param_type.pointee->name &&
+                    arg_type.pointee->template_args.size() == candidate_param_type.pointee->template_args.size() &&
+                    (!arg_type.pointee->is_const_qualified || candidate_param_type.pointee->is_const_qualified);
+                if (const_compatible_pointee) {
+                    for (std::size_t i = 0; i < arg_type.pointee->template_args.size(); i++) {
+                        if (!types_equal(arg_type.pointee->template_args[i], candidate_param_type.pointee->template_args[i])) {
+                            const_compatible_pointee = false;
+                            break;
+                        }
+                    }
+                }
+                if (!(pointee_same_base || const_compatible_pointee)) return false;
+                if (candidate_param_type.pointee->is_const_qualified) return true;
+                // ch05 §5.10 (pre-existing rule, preserved from before
+                // this function's stricter-pointee-matching rewrite): a
+                // *const* reference parameter accepts any argument
+                // reference regardless of the argument's own mutability
+                // (widening a mutable ref to a const one is always
+                // legal); a *mutable* reference parameter additionally
+                // requires the argument itself to be mutable.
+                return !candidate_param_type.is_mutable_ref || arg_type.is_mutable_ref;
             }
             return candidate_param_type.pointee != nullptr && types_equal(arg_type, *candidate_param_type.pointee);
         }

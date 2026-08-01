@@ -528,6 +528,17 @@ private:
     // type (Named(ClassName)), or nullopt if `fn` isn't a method at all
     // -- used to type a `[this]` lambda capture. `this` is always
     // params[0] when present (parser's make_this_param).
+    void maybe_mark_reference_wrapper_lifetime_source(Type& type) {
+        if (type.kind != TypeKind::Named || type.template_args.size() != 1 || !type.non_type_args.empty()) return;
+        if (type.name == "std::reference_wrapper") {
+            type.is_reference_wrapper_lifetime_source = true;
+            return;
+        }
+        if (type.name == "std::optional" && type.template_args[0].is_reference_wrapper_lifetime_source) {
+            type.is_reference_wrapper_lifetime_source = true;
+        }
+    }
+
     [[nodiscard]] static std::optional<Type> this_type_of(const Function& fn) {
         if (fn.params.empty() || fn.params[0].name != "this") return std::nullopt;
         return *fn.params[0].type.pointee;
@@ -548,9 +559,11 @@ private:
         Type inner = *type.pointee;
         Type collapsed;
         collapsed.kind = TypeKind::Reference;
-        collapsed.is_mutable_ref = inner.is_mutable_ref;
+        collapsed.is_mutable_ref = type.is_mutable_ref && inner.is_mutable_ref;
         collapsed.is_rvalue_ref = type.is_rvalue_ref && inner.is_rvalue_ref;
-        collapsed.pointee = std::make_shared<Type>(*inner.pointee);
+        Type collapsed_pointee = *inner.pointee;
+        collapsed_pointee.is_const_qualified = collapsed_pointee.is_const_qualified || inner.is_const_qualified;
+        collapsed.pointee = std::make_shared<Type>(std::move(collapsed_pointee));
         return collapsed;
     }
 
@@ -1951,9 +1964,13 @@ private:
         std::vector<Type> resolved_args;
         resolved_args.reserve(type.template_args.size());
         for (const Type& arg : type.template_args) resolved_args.push_back(resolve_generic_type(arg, loc));
+        bool wrapper_lifetime_source =
+            type.name == "std::reference_wrapper" ||
+            (type.name == "std::optional" && resolved_args.size() == 1 && resolved_args[0].is_reference_wrapper_lifetime_source);
         std::string concrete_name = instantiate_generic_type(type.name, resolved_args, loc);
         type.name = concrete_name;
         type.template_args.clear();
+        type.is_reference_wrapper_lifetime_source = wrapper_lifetime_source;
         return type;
     }
 
@@ -3095,7 +3112,7 @@ private:
                     if (arg_type.has_value()) {
                         Type concrete = is_forwarding_reference_parameter(tmpl.params[i], tmpl.template_params)
                                             ? forwarding_reference_deduced_type(*args[arg_cursor], *arg_type, body)
-                                            : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
+                                            : *arg_type;
                         if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                             Expr fake_call;
                             fake_call.loc = loc;
@@ -4247,7 +4264,9 @@ private:
                     walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
                 }
                 if (!stmt.ctor_args.empty() && stmt.type.kind == TypeKind::Named) {
-                    maybe_instantiate_generic_constructor_overloads(stmt.type.name, stmt.ctor_args, body, stmt.loc);
+                    Type concrete_ctor_type = stmt.type;
+                    maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
+                    maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, stmt.ctor_args, body, stmt.loc);
                 }
                 // ch05 §5.12: `auto name = expr;` -- infer the concrete
                 // type from the (by-now-fully-resolved, e.g. a Lambda's
@@ -4438,8 +4457,13 @@ private:
         for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
             if (!arg.is_type && arg.value) walk_expr(*arg.value, body, enclosing_this_type, allow_generic_monomorphization);
         }
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
+            rewrite_type_alias_constructor_call(expr, body);
+        }
         if (expr.kind == ExprKind::New && expr.type.kind == TypeKind::Named) {
-            maybe_instantiate_generic_constructor_overloads(expr.type.name, expr.args, body, expr.loc);
+            Type concrete_ctor_type = expr.type;
+            maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
+            maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
         }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
             (void)maybe_resolve_generic_type_constructor_call(expr, body);
@@ -4456,7 +4480,9 @@ private:
                 }
             }
             if (names_known_class) {
-                maybe_instantiate_generic_constructor_overloads(direct_call_type->name, expr.args, body, expr.loc);
+                Type concrete_ctor_type = *direct_call_type;
+                maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
+                maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
             }
         }
 

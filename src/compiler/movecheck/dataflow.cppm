@@ -36,7 +36,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                               BorrowMap& in_call_borrows, const Body& body,
                               const Signatures& signatures, bool report_errors);
-void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
+void check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                  DataflowState& state, const Body& body, const Signatures& signatures,
                                  bool report_errors);
 void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
@@ -57,6 +57,31 @@ void check_function(const Function& fn, const Program& program, const Signatures
                     const std::unordered_set<std::string>& classes_with_copy_assign,
                     const std::unordered_set<std::string>& witness_class_names);
 void check_moves_impl(const Program& program);
+
+[[nodiscard]] bool is_wrapper_constructor_call_compatible_with_lifetime_return(const Expr& expr, const Type& target_type,
+                                                                               const Body& body,
+                                                                               const Signatures& signatures) {
+    if (expr.kind != ExprKind::Call || expr.lhs != nullptr) return false;
+    if ((expr.name == "std::reference_wrapper" || expr.name == "reference_wrapper") && expr.args.size() == 1) {
+        std::optional<Type> arg_type = infer_expr_type(*expr.args[0], body, signatures);
+        if (!arg_type.has_value() || !is_reference(*arg_type) || arg_type->pointee == nullptr || target_type.template_args.size() != 1) {
+            return false;
+        }
+        const Type& wrapped = target_type.template_args[0];
+        const Type& expected_referent = wrapped.template_args.size() == 1 ? wrapped.template_args[0] : wrapped;
+        return types_equal(*arg_type->pointee, expected_referent) ||
+               (body.program != nullptr &&
+                types_compatible_with_base_conversion(*arg_type->pointee, expected_referent, *body.program,
+                                                      enclosing_class_name(body)));
+    }
+    if ((expr.name == "std::optional" || expr.name == "optional") && target_type.template_args.size() == 1) {
+        if (expr.args.empty()) return true;
+        if (expr.args.size() != 1) return false;
+        return is_wrapper_constructor_call_compatible_with_lifetime_return(*expr.args[0], target_type.template_args[0], body,
+                                                                           signatures);
+    }
+    return false;
+}
 
 [[nodiscard]] const GlobalVar* find_visible_global_for_name(const std::string& name, bool explicit_global_qualification,
                                                             const Body& body) {
@@ -530,8 +555,7 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
         if (source_type.has_value() &&
             !types_equal(*source_type, param_type) &&
             !types_compatible_with_base_conversion(*source_type, param_type, *body.program, enclosing_class_name(body))) {
-            throw DataflowError("cannot bind reference parameter from an incompatible source type",
-                                state.current_loc);
+            throw DataflowError("cannot bind reference parameter from an incompatible source type", state.current_loc);
         }
         }
     }
@@ -651,7 +675,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     std::optional<Type> direct_call_type = expr.lhs == nullptr ? infer_expr_type(expr, body, signatures) : std::nullopt;
     if (!expr.lhs && direct_call_type.has_value() && direct_call_type->kind == TypeKind::Named &&
         state.class_names != nullptr && state.class_names->contains(expr.name)) {
-        check_constructor_arguments(direct_call_type->name, expr.args, state, body, signatures, report_errors);
+        check_constructor_arguments(*direct_call_type, expr.args, state, body, signatures, report_errors);
         return;
     }
     CalleeSignature callee = resolve_callee_signature(expr, body, signatures, state.class_field_types);
@@ -901,9 +925,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // pattern -- except for zero-argument/default-brace construction, which
 // must be diagnosed here as "no default constructor" rather than
 // slipping through to codegen and crashing LLVM module verification.
-void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
+void check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors) {
+    std::string class_name = constructed_type.name;
     std::string ctor_name = class_name + "_new";
     auto is_constructor_clone_name = [&](std::string_view name) {
         return name == ctor_name || (!name.empty() && name.starts_with(ctor_name + "."));
@@ -1011,10 +1036,12 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     BorrowMap in_call_borrows;
     bool constructed_state_can_carry_lifetimes =
         report_errors && body.program != nullptr &&
-        type_contains_lifetime_carrying_state(named_type(class_name), *body.program);
+        type_contains_lifetime_carrying_state(constructed_type, *body.program) &&
+        !constructed_type.is_reference_wrapper_lifetime_source;
     auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) {
         Type effective_param_type;
         bool have_effective_param_type = false;
+        const Type* destination_type = &constructed_type;
         if (sig != nullptr && param_index < sig->param_types.size()) {
             effective_param_type = sig->param_types[param_index];
             if (param_index < sig->param_is_forwarding_reference.size() && sig->param_is_forwarding_reference[param_index] &&
@@ -1024,11 +1051,11 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
             }
             have_effective_param_type = true;
+            destination_type = &sig->param_types[param_index];
         }
         if (constructed_state_can_carry_lifetimes) {
-            reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors,
-                                                  "constructed object state",
-                                                  class_name == "std::reference_wrapper" || class_name == "reference_wrapper");
+            reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state",
+                                                  destination_type);
         }
         bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
         bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
@@ -1321,7 +1348,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                            is_copyable_class_lvalue_boundary_source(*expr.args[0], expr.type, body, signatures)) {
                     apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors);
                 } else {
-                    check_constructor_arguments(expr.type.name, expr.args, state, body, signatures, report_errors);
+                    check_constructor_arguments(expr.type, expr.args, state, body, signatures, report_errors);
                 }
                 return;
             }
@@ -1456,7 +1483,8 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 if (expr.lhs->kind == ExprKind::Member || expr.lhs->kind == ExprKind::Subscript) {
                     reject_lifetime_group_state_embedding(*expr.rhs, state, body, signatures, report_errors,
                                                           expr.lhs->kind == ExprKind::Member ? "object state"
-                                                                                            : "an array element");
+                                                                                            : "an array element",
+                                                          nullptr);
                 }
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto it = body.local_types.find(expr.lhs->name);
@@ -1918,7 +1946,7 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
                                report_errors);
                 } else {
-                    check_constructor_arguments(stmt.type.name, *stmt.ctor_args, state, body, signatures,
+                    check_constructor_arguments(stmt.type, *stmt.ctor_args, state, body, signatures,
                                                  report_errors);
                 }
             }
@@ -1926,7 +1954,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // comment above): a bare declaration always zero-initializes,
             // so it's always Initialized from this point on.
             state.locals[stmt.local] = LocalState::Initialized;
-            if (stmt.type.kind == TypeKind::Pointer) {
+            if (stmt.ctor_args != nullptr && stmt.type.is_reference_wrapper_lifetime_source && stmt.ctor_args->size() == 1) {
+                state.local_lifetime_sources[stmt.local] =
+                    resolve_lifetime_source_roots(*(*stmt.ctor_args)[0], state, body, signatures, report_errors);
+            } else if (stmt.type.kind == TypeKind::Pointer) {
                 state.local_lifetime_sources[stmt.local] = {};
             } else if (is_lifetime_eligible_type(stmt.type)) {
                 state.local_lifetime_sources.erase(stmt.local);
@@ -2294,7 +2325,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             return;
         case TerminatorKind::Return: {
             if (term.return_value == nullptr) return;
-            if (is_lifetime_eligible_type(fn.return_type)) {
+            if (is_pointer_return_lifetime_source_type(fn.return_type)) {
                 bool null_pointer_return =
                     fn.return_type.kind == TypeKind::Pointer &&
                     expr_is_definitely_null_pointer(*term.return_value, state, body);
@@ -2316,13 +2347,37 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                             types_compatible_with_base_conversion(*returned_type, *fn.return_type.pointee,
                                                                   *body.program, state.current_class);
                     }
+                    if (!return_type_compatible && fn.return_type.is_reference_wrapper_lifetime_source) {
+                        if (types_equal(*returned_type, fn.return_type)) {
+                            return_type_compatible = true;
+                        } else if (returned_type->kind == TypeKind::Pointer && returned_type->pointee != nullptr &&
+                                   fn.return_type.template_args.size() == 1) {
+                            const Type& wrapped = fn.return_type.template_args[0];
+                            const Type& expected_referent = wrapped.template_args.size() == 1 ? wrapped.template_args[0] : wrapped;
+                            return_type_compatible =
+                                types_equal(*returned_type->pointee, expected_referent) ||
+                                types_compatible_with_base_conversion(*returned_type->pointee, expected_referent,
+                                                                      *body.program, state.current_class);
+                        }
+                    }
+                    if (!return_type_compatible &&
+                        is_wrapper_constructor_call_compatible_with_lifetime_return(*term.return_value, fn.return_type, body,
+                                                                                   signatures)) {
+                        return_type_compatible = true;
+                    }
+                }
+                RootSet returned_roots =
+                    resolve_lifetime_source_roots(*term.return_value, state, body, signatures, /*report_errors=*/true);
+                if (fn.return_type.is_reference_wrapper_lifetime_source && returned_roots.empty()) {
+                    return;
+                }
+                if (!return_type_compatible && fn.return_type.is_reference_wrapper_lifetime_source && !returned_roots.empty()) {
+                    return_type_compatible = true;
                 }
                 if (!return_type_compatible) {
                     throw DataflowError("function '" + fn.name + "' returns a lifetime-tracked value from an incompatible source type",
                                         state.current_loc);
                 }
-                RootSet returned_roots =
-                    resolve_lifetime_source_roots(*term.return_value, state, body, signatures, /*report_errors=*/true);
                 if (fn.return_type.kind == TypeKind::Pointer && returned_roots.empty()) {
                     return;
                 }
@@ -2567,6 +2622,9 @@ void check_function(const Function& fn, const Program& program, const Signatures
         entry_state.locals[param.name] = LocalState::Initialized;
         if (param.lifetime.present()) entry_state.parameter_lifetimes[param.name] = param.lifetime;
         if (is_pointer_return_lifetime_source_type(param.type)) {
+            entry_state.local_lifetime_sources[param.name] = single_root(param.name);
+        }
+        if (is_reference(param.type)) {
             entry_state.local_lifetime_sources[param.name] = single_root(param.name);
         }
     }
