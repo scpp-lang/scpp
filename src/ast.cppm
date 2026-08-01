@@ -1890,16 +1890,16 @@ public:
                 return std::optional<TypeLayoutInfo>{TypeLayoutInfo{8, 8}};
             }
             if (name == "size_t" || name == "ptrdiff_t") {
-                std::uint64_t align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
+                std::uint64_t align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
                 return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes, align}};
             }
-            return std::nullopt;
+            return std::optional<TypeLayoutInfo>{};
         }
 
         [[nodiscard]] std::optional<TypeLayoutInfo> compute(const Type& current) {
             if (current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference ||
                 current.kind == TypeKind::FunctionPointer) {
-                std::uint64_t align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
+                std::uint64_t align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
                 if ((current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference) && current.pointee &&
                     current.pointee->kind == TypeKind::Named) {
                     const ClassDef* referent = find_class(current.pointee->name);
@@ -1909,35 +1909,35 @@ public:
                 }
                 return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes, align}};
             }
-            if (current.kind == TypeKind::Function) return std::nullopt;
+            if (current.kind == TypeKind::Function) return std::optional<TypeLayoutInfo>{};
             if (current.kind == TypeKind::Span) {
-                std::uint64_t pointer_align = target.pointer_align_bytes < 1 ? 1 : target.pointer_align_bytes;
+                std::uint64_t pointer_align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
                 std::uint64_t count_align = 8;
                 std::uint64_t size = align_up(target.pointer_size_bytes, count_align) + 8;
                 return std::optional<TypeLayoutInfo>{
                     TypeLayoutInfo{align_up(size, std::max(pointer_align, count_align)), std::max(pointer_align, count_align)}};
             }
             if (current.kind == TypeKind::Array) {
-                if (!current.element || current.array_size < 0) return std::nullopt;
+                if (!current.element || current.array_size < 0) return std::optional<TypeLayoutInfo>{};
                 std::optional<TypeLayoutInfo> element = this->compute(*current.element);
-                if (!element.has_value()) return std::nullopt;
+                if (!element.has_value()) return std::optional<TypeLayoutInfo>{};
                 return std::optional<TypeLayoutInfo>{
                     TypeLayoutInfo{element->size_bytes * static_cast<std::uint64_t>(current.array_size), element->abi_align_bytes}};
             }
             if (current.kind == TypeKind::Named) {
-                if (current.name == "void") return std::nullopt;
+                if (current.name == "void") return std::optional<TypeLayoutInfo>{};
                 std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name);
                 if (scalar.has_value()) return scalar;
                 const EnumDef* enum_def = find_enum(current.name);
                 if (enum_def != nullptr) return this->compute(enum_def->underlying_type);
-                if (visiting_named_types.contains(current.name)) return std::nullopt;
+                if (visiting_named_types.contains(current.name)) return std::optional<TypeLayoutInfo>{};
                 visiting_named_types.insert(current.name);
                 auto clear_visit = [&]() { visiting_named_types.erase(current.name); };
                 const StructDef* struct_def = find_struct(current.name);
                 if (struct_def != nullptr) {
                     if (struct_def->is_forward_declaration) {
                         clear_visit();
-                        return std::nullopt;
+                        return std::optional<TypeLayoutInfo>{};
                     }
                     if (!struct_def->is_union) {
                         std::uint64_t offset = 0;
@@ -1947,7 +1947,7 @@ public:
                             std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                             if (!field_layout.has_value()) {
                                 clear_visit();
-                                return std::nullopt;
+                                return std::optional<TypeLayoutInfo>{};
                             }
                             std::uint64_t field_align =
                                 struct_def->is_packed ? 1 : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
@@ -1962,7 +1962,7 @@ public:
                     }
                     if (struct_def->fields.empty()) {
                         clear_visit();
-                        return std::nullopt;
+                        return std::optional<TypeLayoutInfo>{};
                     }
                     std::uint64_t max_size = 0;
                     std::uint64_t overall_align = 1;
@@ -1971,7 +1971,7 @@ public:
                         std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                         if (!field_layout.has_value()) {
                             clear_visit();
-                            return std::nullopt;
+                            return std::optional<TypeLayoutInfo>{};
                         }
                         max_size = std::max(max_size, field_layout->size_bytes);
                         std::uint64_t field_align =
@@ -1986,7 +1986,7 @@ public:
                 if (class_def != nullptr) {
                     if (class_def->is_forward_declaration) {
                         clear_visit();
-                        return std::nullopt;
+                        return std::optional<TypeLayoutInfo>{};
                     }
                     std::uint64_t offset = 0;
                     std::uint64_t overall_align = 1;
@@ -1995,7 +1995,7 @@ public:
                         std::optional<TypeLayoutInfo> base_layout = this->compute(base->base_type);
                         if (!base_layout.has_value()) {
                             clear_visit();
-                            return std::nullopt;
+                            return std::optional<TypeLayoutInfo>{};
                         }
                         offset = base_layout->size_bytes;
                         overall_align = std::max(overall_align, base_layout->abi_align_bytes);
@@ -2009,7 +2009,7 @@ public:
                         std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                         if (!field_layout.has_value()) {
                             clear_visit();
-                            return std::nullopt;
+                            return std::optional<TypeLayoutInfo>{};
                         }
                         std::uint64_t field_align = std::max(field_layout->abi_align_bytes, field.resolved_alignment);
                         offset = align_up(offset, field_align);
@@ -2021,9 +2021,9 @@ public:
                     return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(offset, overall_align), overall_align}};
                 }
                 clear_visit();
-                return std::nullopt;
+                return std::optional<TypeLayoutInfo>{};
             }
-            return std::nullopt;
+            return std::optional<TypeLayoutInfo>{};
         }
     };
 
