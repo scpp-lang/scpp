@@ -44,12 +44,54 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
 void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
                                            const Signatures& signatures, bool report_errors,
                                            std::string_view context,
-                                           bool permit_wrapper_lifetime_source = false);
+                                           const Type* destination_type = nullptr);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
 void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors);
+
+[[nodiscard]] bool is_single_arg_lifetime_wrapper_call(const Expr& expr) {
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.args.size() == 1 &&
+           (expr.name == "std::reference_wrapper" || expr.name == "reference_wrapper" ||
+            expr.name == "std::optional" || expr.name == "optional");
+}
+
+[[nodiscard]] bool is_zero_arg_lifetime_wrapper_call(const Expr& expr, const Body& body,
+                                                     const Signatures& signatures) {
+    if (expr.kind != ExprKind::Call || expr.lhs != nullptr || !expr.args.empty()) return false;
+    std::optional<Type> expr_type = infer_expr_type(expr, body, signatures);
+    return expr_type.has_value() && expr_type->is_reference_wrapper_lifetime_source;
+}
+
+[[nodiscard]] bool is_bare_reference_wrapper_constructor_call(const Expr& expr, const Body& body,
+                                                             const Signatures& signatures) {
+    if (expr.kind != ExprKind::Call || expr.lhs != nullptr || expr.args.size() != 1) return false;
+    std::optional<Type> expr_type = infer_expr_type(expr, body, signatures);
+    return expr_type.has_value() && expr_type->is_reference_wrapper_lifetime_source &&
+           expr_type->name.contains("reference_wrapper");
+}
+
+[[nodiscard]] bool expr_is_wrapper_lifetime_source_form(const Expr& expr, const Body& body,
+                                                        const Signatures& signatures) {
+    std::optional<Type> expr_type = infer_expr_type(expr, body, signatures);
+    if (expr_type.has_value() && expr_type->is_reference_wrapper_lifetime_source) return true;
+    if (expr.kind != ExprKind::Identifier) return false;
+    auto it = body.local_types.find(expr.name);
+    return it != body.local_types.end() && it->second.is_reference_wrapper_lifetime_source;
+}
+
+[[nodiscard]] bool expr_contains_wrapper_lifetime_source_form(const Expr& expr, const Body& body,
+                                                             const Signatures& signatures) {
+    if (expr_is_wrapper_lifetime_source_form(expr, body, signatures)) return true;
+    if (expr.lhs != nullptr && expr_contains_wrapper_lifetime_source_form(*expr.lhs, body, signatures)) return true;
+    if (expr.rhs != nullptr && expr_contains_wrapper_lifetime_source_form(*expr.rhs, body, signatures)) return true;
+    if (expr.third != nullptr && expr_contains_wrapper_lifetime_source_form(*expr.third, body, signatures)) return true;
+    for (const ExprPtr& arg : expr.args) {
+        if (arg != nullptr && expr_contains_wrapper_lifetime_source_form(*arg, body, signatures)) return true;
+    }
+    return false;
+}
 
 [[nodiscard]] std::optional<std::string> direct_write_root(const Expr& expr, const Body& body) {
     switch (expr.kind) {
@@ -109,9 +151,13 @@ std::optional<std::string> resolve_reborrow_lender(const Expr& expr, const Body&
         case ExprKind::Unary:
             return expr.lhs ? resolve_reborrow_lender(*expr.lhs, body, signatures) : std::nullopt;
         case ExprKind::Call: {
+            if (is_single_arg_lifetime_wrapper_call(expr)) {
+                return resolve_reborrow_lender(*expr.args[0], body, signatures);
+            }
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            bool returns_reference = sig != nullptr && !sig->returned_lifetime_param_indices.empty();
+            bool returns_reference =
+                sig != nullptr && !sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type);
             if (!returns_reference) return std::nullopt;
             if (sig->returned_lifetime_param_indices.size() != 1) return std::nullopt;
             std::size_t source_index = sig->returned_lifetime_param_indices.front();
@@ -643,7 +689,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            bool returns_reference = sig != nullptr && !sig->returned_lifetime_param_indices.empty();
+            bool returns_reference =
+                sig != nullptr && !sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type);
             if (!returns_reference) {
                 if (report_errors) {
                     throw DataflowError("cannot borrow the result of calling '" + expr.name +
@@ -740,9 +787,19 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         case ExprKind::Move:
             return expr.lhs ? resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors) : RootSet{};
         case ExprKind::Call: {
+            if (is_bare_reference_wrapper_constructor_call(expr, body, signatures)) {
+                return resolve_lifetime_source_roots(*expr.args[0], state, body, signatures, report_errors);
+            }
+            if (is_single_arg_lifetime_wrapper_call(expr)) {
+                return resolve_lifetime_source_roots(*expr.args[0], state, body, signatures, report_errors);
+            }
+            if (is_zero_arg_lifetime_wrapper_call(expr, body, signatures)) {
+                return {};
+            }
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            if (sig == nullptr || sig->returned_lifetime_param_indices.empty()) return {};
+            if (sig == nullptr) return {};
+            if (sig->returned_lifetime_param_indices.empty() || !is_pointer_return_lifetime_source_type(sig->return_type)) return {};
             RootSet roots;
             for (std::size_t source_index : sig->returned_lifetime_param_indices) {
                 if (source_index < callee.param_offset) {
@@ -796,13 +853,21 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 
 void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
                                            const Signatures& signatures, bool report_errors, std::string_view context,
-                                           bool permit_wrapper_lifetime_source) {
+                                           const Type* destination_type) {
     if (!report_errors) return;
     std::optional<Type> expr_type = infer_expr_type(expr, body, signatures);
-    if (!expr_type.has_value()) return;
-    if (permit_wrapper_lifetime_source && expr_type->is_reference_wrapper_lifetime_source) return;
-    if (!is_lifetime_eligible_type(*expr_type)) return;
+    if (!expr_type.has_value() || !is_pointer_return_lifetime_source_type(*expr_type)) return;
+    if (destination_type != nullptr &&
+        (destination_type->is_reference_wrapper_lifetime_source ||
+         (destination_type->kind == TypeKind::Reference && destination_type->pointee != nullptr &&
+          destination_type->pointee->is_reference_wrapper_lifetime_source) ||
+         expr_contains_wrapper_lifetime_source_form(expr, body, signatures))) {
+        return;
+    }
     RootSet roots = resolve_lifetime_source_roots(expr, state, body, signatures, report_errors);
+    if (expr_contains_wrapper_lifetime_source_form(expr, body, signatures) && roots_include_parameter_lifetime(roots, state)) {
+        return;
+    }
     if (!roots_include_parameter_lifetime(roots, state)) return;
     throw DataflowError("cannot store a reference, pointer, or span derived from " + format_roots(roots) +
                             " into " + std::string(context) +

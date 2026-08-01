@@ -1512,14 +1512,14 @@ void test_operator_arrow_member_decl_and_explicit_call_parse() {
     scpp::Program program = scpp::parse(
         "class Box {\n"
         "public:\n"
-        "    int* operator->() [[scpp::lifetime(self)]];\n"
+        "    int* operator->() [[scpp::lifetime(this)]];\n"
         "};\n"
         "int* f(Box& b) { return b.operator->(); }\n");
     const scpp::Function* op = find_function_named(program, "Box_operator_arrow");
     expect(op != nullptr, "operator_arrow_member_decl_and_explicit_call_parse: missing synthesized operator-> function");
     expect(op->params.size() == 1 && op->params[0].name == "this",
            "operator_arrow_member_decl_and_explicit_call_parse: operator-> should only have implicit this");
-    expect(op->return_lifetime.present() && op->return_lifetime.name == "self",
+    expect(op->return_lifetime.present() && op->return_lifetime.name == "this",
            "operator_arrow_member_decl_and_explicit_call_parse: return lifetime should parse");
     const scpp::Expr& expr = *program.functions.back().body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Call && expr.name == "operator_arrow",
@@ -1540,6 +1540,43 @@ void test_member_function_lifetime_this_parse() {
            "member_function_lifetime_this_parse: expected return lifetime 'this'");
     expect(fn->params.size() == 1 && fn->params[0].name == "this",
            "member_function_lifetime_this_parse: expected only implicit this param");
+}
+
+void test_member_decl_return_lifetime_this_parse() {
+    scpp::Program program = scpp::parse(
+        "class Box {\n"
+        "public:\n"
+        "    int* data() [[scpp::lifetime(this)]];\n"
+        "};\n");
+    const scpp::Function* fn = find_function_named(program, "Box_data");
+    expect(fn != nullptr, "member_decl_return_lifetime_this_parse: missing synthesized member function");
+    expect(fn != nullptr && fn->params.size() == 1 && fn->params[0].name == "this",
+           "member_decl_return_lifetime_this_parse: member should only have implicit this");
+    expect(fn != nullptr && fn->return_lifetime.present() && fn->return_lifetime.name == "this",
+           "member_decl_return_lifetime_this_parse: return lifetime should parse as 'this'");
+}
+
+
+void test_return_brace_constructed_optional_reference_wrapper_parses_as_call() {
+    scpp::Program program = parse_with_std_imports(
+        "import std;\n"
+        "class Foo { public: virtual ~Foo() = default; Foo() = default; Foo(const Foo&) = default; };\n"
+        "using OptionalFooRef = std::optional<std::reference_wrapper<const Foo>>;\n"
+        "OptionalFooRef f(const Foo& x [[scpp::lifetime(source)]]) [[scpp::lifetime(source)]] {\n"
+        "    return OptionalFooRef{std::reference_wrapper<const Foo>{x}};\n"
+        "}\n");
+    const scpp::Function* fn = find_function_named(program, "f");
+    expect(fn != nullptr, "return_brace_constructed_optional_reference_wrapper_parses_as_call: expected function 'f'");
+    const scpp::Expr& expr = *fn->body->statements[0]->expr;
+    expect(expr.kind == scpp::ExprKind::Call && expr.name == "OptionalFooRef",
+           "return_brace_constructed_optional_reference_wrapper_parses_as_call: outer should parse as call to alias");
+    expect(expr.args.size() == 1 && expr.args[0]->kind == scpp::ExprKind::Call,
+           "return_brace_constructed_optional_reference_wrapper_parses_as_call: expected nested call argument");
+    expect(expr.args[0]->name == "std::reference_wrapper",
+           "return_brace_constructed_optional_reference_wrapper_parses_as_call: inner should parse as reference_wrapper ctor");
+    expect(expr.args[0]->args.size() == 1 && expr.args[0]->args[0]->kind == scpp::ExprKind::Identifier &&
+               expr.args[0]->args[0]->name == "x",
+           "return_brace_constructed_optional_reference_wrapper_parses_as_call: inner ctor should keep identifier arg");
 }
 
 void test_nested_reference_wrapper_lifetime_parameter_parse() {
@@ -5115,6 +5152,8 @@ int main() {
     test_chained_arrow_and_dot();
     test_operator_arrow_member_decl_and_explicit_call_parse();
     test_member_function_lifetime_this_parse();
+    test_member_decl_return_lifetime_this_parse();
+    test_return_brace_constructed_optional_reference_wrapper_parses_as_call();
     test_multiplication_is_not_confused_with_dereference();
     test_parenthesized_expression();
     test_parse_error_on_missing_semicolon();
@@ -5221,6 +5260,7 @@ int main() {
     test_concept_requirement_unknown_argument_is_rejected();
     test_export_concept_outside_module_is_rejected();
     test_concept_inside_namespace_is_qualified();
+    test_return_brace_constructed_optional_reference_wrapper_parses_as_call();
     test_nested_reference_wrapper_lifetime_parameter_parse();
     test_generic_type_brace_init_return_expression_parses();
     test_generic_type_declaration_brace_init_still_parses_as_ctor_args();

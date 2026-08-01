@@ -6228,11 +6228,11 @@ private:
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
                 fn.params = parse_param_list();
-                parse_function_trailing_attributes(fn, "a member function declarator");
                 reject_generic_params(fn.params, "a method");
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
                 bool is_const = match(TokenKind::KwConst);
+                parse_function_trailing_attributes(fn, "a member function declarator");
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 if (member_is_static && (is_const || fn.receiver_ref_qualifier != ReceiverRefQualifier::None)) {
                     throw ParseError(member_loc.line, member_loc.column,

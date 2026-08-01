@@ -171,7 +171,7 @@ namespace {
 
 [[nodiscard]] bool type_contains_lifetime_carrying_state(const Type& type, const Program& program,
                                                          std::unordered_set<std::string> visiting) {
-    if (is_lifetime_eligible_type(type)) return true;
+    if (is_pointer_return_lifetime_source_type(type)) return true;
     if (type.kind == TypeKind::Array && type.element != nullptr) {
         return type_contains_lifetime_carrying_state(*type.element, program, std::move(visiting));
     }

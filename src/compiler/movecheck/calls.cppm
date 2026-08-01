@@ -50,12 +50,21 @@ struct CalleeSignature {
     return std::nullopt;
 }
 
+void rewrite_type_alias_constructor_call(Expr& expr, const Body& body) {
+    std::optional<Type> alias_type = resolve_direct_type_alias_call_type(expr, body);
+    if (!alias_type.has_value() || alias_type->kind != TypeKind::Named) return;
+    expr.name = alias_type->name;
+    expr.explicit_global_qualification = true;
+}
+
 [[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
     return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
 }
 
 [[nodiscard]] FunctionSignature function_pointer_signature(const Type& type);
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool is_reference_wrapper_constructor_call(const Expr& expr);
+[[nodiscard]] bool is_optional_constructor_call(const Expr& expr);
         void check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
                                                  const Signatures& signatures, const SourceLocation& loc);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
@@ -345,6 +354,21 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 // assignment eligibility check.
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body,
                                                  const Signatures& signatures);
+[[nodiscard]] bool is_reference_wrapper_constructor_call(const Expr& expr) {
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.args.size() == 1 &&
+           (expr.name == "std::reference_wrapper" || expr.name == "reference_wrapper");
+}
+
+[[nodiscard]] bool is_optional_constructor_call(const Expr& expr) {
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.args.size() == 1 &&
+           (expr.name == "std::optional" || expr.name == "optional");
+}
+
+[[nodiscard]] bool is_zero_arg_optional_constructor_call(const Expr& expr) {
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.args.empty() &&
+           (expr.name == "std::optional" || expr.name == "optional");
+}
+
 [[nodiscard]] bool is_named_class_type(const Type& type, const Body& body) {
     if (type.kind != TypeKind::Named || body.program == nullptr) return false;
     for (const ClassDef& def : body.program->classes) {
@@ -449,7 +473,12 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         if (arg_type.kind == TypeKind::Reference) {
             if (arg_type.pointee == nullptr || param_type.pointee == nullptr) return false;
             if (types_equal(*arg_type.pointee, *param_type.pointee)) {
-                return !param_type.is_mutable_ref || arg_type.is_mutable_ref;
+                if (param_type.is_mutable_ref) return arg_type.is_mutable_ref;
+                return true;
+            }
+            if (!param_type.is_mutable_ref && !arg_type.is_mutable_ref &&
+                types_equal(arg_type, param_type)) {
+                return true;
             }
             return body.program != nullptr &&
                    types_compatible_with_base_conversion(arg_type, param_type, *body.program, enclosing_class_name(body));
@@ -1365,12 +1394,41 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                 if (unwrapped.kind == TypeKind::Array || unwrapped.kind == TypeKind::Span) return named_type("int");
                 return std::nullopt;
             }
+            if (is_reference_wrapper_constructor_call(expr)) {
+                std::optional<Type> arg_type = infer_expr_type(*expr.args[0], body, signatures);
+                if (arg_type.has_value() && arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+                    Type wrapped;
+                    wrapped.kind = TypeKind::Named;
+                    wrapped.name = expr.name.starts_with("std::") ? "std::reference_wrapper" : "reference_wrapper";
+                    Type referent = *arg_type->pointee;
+                    referent.is_const_qualified = referent.is_const_qualified || !arg_type->is_mutable_ref;
+                    wrapped.template_args.push_back(referent);
+                    wrapped.is_reference_wrapper_lifetime_source = true;
+                    return wrapped;
+                }
+            }
+            if (is_optional_constructor_call(expr)) {
+                std::optional<Type> arg_type = infer_expr_type(*expr.args[0], body, signatures);
+                if (arg_type.has_value() && arg_type->is_reference_wrapper_lifetime_source) {
+                    Type opt;
+                    opt.kind = TypeKind::Named;
+                    opt.name = expr.name.starts_with("std::") ? "std::optional" : "optional";
+                    opt.template_args.push_back(*arg_type);
+                    opt.is_reference_wrapper_lifetime_source = true;
+                    return opt;
+                }
+            }
             if (std::optional<Type> alias_type = resolve_direct_type_alias_call_type(expr, body); alias_type.has_value()) {
                 return *alias_type;
             }
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig != nullptr) return sig->return_type;
+            if (is_zero_arg_optional_constructor_call(expr)) {
+                if (sig != nullptr && sig->return_type.is_reference_wrapper_lifetime_source) {
+                    return sig->return_type;
+                }
+            }
             if (expr.lhs == nullptr && body.program != nullptr) {
                 for (const ClassDef& def : body.program->classes) {
                     if (def.name == expr.name) return named_type(expr.name);

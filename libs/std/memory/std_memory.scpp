@@ -93,7 +93,7 @@ public:
         return this->ptr_;
     }
 
-    const T* get() [[scpp::lifetime(this)]] const {
+    const T* get() const [[scpp::lifetime(this)]] {
         return this->ptr_;
     }
 

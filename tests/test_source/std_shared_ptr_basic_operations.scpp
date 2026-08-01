@@ -26,6 +26,12 @@ int main() {
     int destroyed = 0;
     std::shared_ptr<Tracker> owner = std::make_shared<Tracker>(&destroyed);
     if (owner.use_count() != 1) return 1;
+    std::shared_ptr<Tracker> copied{owner};
+    if (owner.use_count() != 2) return 8;
+    if (copied.use_count() != 2) return 9;
+    if (copied->value() != 41) return 10;
+    copied.reset();
+    if (owner.use_count() != 1) return 11;
     {
         std::shared_ptr<Tracker> copy{};
         copy = owner;

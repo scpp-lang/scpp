@@ -139,6 +139,13 @@ private:
     std::unordered_map<std::string, scpp::Program> cache_;
 };
 
+scpp::Program parse_program_with_std_imports(std::string_view source) {
+    TestModuleCache cache(source_module_import_paths());
+    return scpp::parse(
+        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
 scpp::Program parse_with_std_imports(std::string_view source) {
     TestModuleCache cache(source_module_import_paths());
     return scpp::parse(
@@ -7584,6 +7591,51 @@ int main() {
     }
 }
 
+void run_member_lifetime_tests() {
+    {
+        std::string case_name = "member_function_return_lifetime_this_is_accepted";
+        cases_run++;
+        scpp::Program program = parse_program_with_std_imports(
+            "class Box {\n"
+            "public:\n"
+            "    virtual ~Box() = default;\n"
+            "    int value;\n"
+            "    int* data() [[scpp::lifetime(this)]] { return &value; }\n"
+            "};\n");
+        bool threw = false;
+        try {
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+        } catch (const scpp::DataflowError& e) {
+            threw = true;
+            expect(false, case_name + ": expected check_moves to accept receiver-tied member return, got '" + e.what() + "'");
+        }
+        expect(!threw, case_name + ": expected receiver-tied member return to pass");
+    }
+
+    {
+        std::string case_name = "member_function_return_lifetime_this_rejects_non_receiver_return";
+        cases_run++;
+        scpp::Program program = parse_program_with_std_imports(
+            "class Box {\n"
+            "public:\n"
+            "    virtual ~Box() = default;\n"
+            "    int value;\n"
+            "    int* data(int* p) [[scpp::lifetime(this)]] { return p; }\n"
+            "};\n");
+        bool threw = false;
+        try {
+            scpp::monomorphize_generics(program);
+            scpp::check_moves(program);
+        } catch (const scpp::DataflowError& e) {
+            threw = true;
+            expect(std::string(e.what()).find("not from lifetime group 'this'") != std::string::npos,
+                   case_name + ": expected receiver lifetime mismatch diagnostic, got '" + e.what() + "'");
+        }
+        expect(threw, case_name + ": expected check_moves to reject non-receiver return");
+    }
+}
+
 void run_reference_wrapper_tests() {
     {
         std::string case_name = "reference_wrapper_optional_rebinds";
@@ -7960,6 +8012,7 @@ int main() {
     run_unordered_set_tests();
     run_expected_tests();
     run_optional_tests();
+    run_member_lifetime_tests();
     run_reference_wrapper_tests();
     run_smart_pointer_nullptr_tests();
     run_subscripted_deref_tests();

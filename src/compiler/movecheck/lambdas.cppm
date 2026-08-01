@@ -106,7 +106,7 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
     };
     for (const LambdaCapture& capture : expr.lambda_captures) {
         if (capture.init) {
-            reject_lifetime_group_state_embedding(*capture.init, state, body, signatures, report_errors, "a closure capture");
+            reject_lifetime_group_state_embedding(*capture.init, state, body, signatures, report_errors, "a closure capture", nullptr);
             std::optional<Type> init_type = infer_expr_type(*capture.init, body, signatures);
             if (init_type.has_value()) {
                 apply_by_value_capture_source(*capture.init, *init_type, capture.name);
@@ -122,8 +122,7 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
                 capture_ident.kind = ExprKind::Identifier;
                 capture_ident.loc = expr.loc;
                 capture_ident.name = capture.name;
-                reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors,
-                                                      "a closure capture");
+                reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
                 apply_by_value_capture_source(capture_ident, type_it->second, capture.name);
                 continue;
             }
@@ -137,7 +136,7 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
         capture_ident.kind = ExprKind::Identifier;
         capture_ident.loc = expr.loc;
         capture_ident.name = capture.name;
-        reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture");
+        reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
         RootSet roots =
             resolve_borrow_source_root(capture_ident, state, body, signatures, report_errors);
         auto type_it = body.local_types.find(capture.name);
