@@ -1,0 +1,17 @@
+// ch05 §5.14: a bare witness value may be passed through to another
+// parameter of the same opaque type -- this is part of the universal
+// move/store/pass-through/return baseline, even though method calls on
+// that bare type itself remain forbidden.
+template<typename T>
+T passthrough(T value) {
+    return value;
+}
+
+template<typename T>
+T forward_again(T value) {
+    return passthrough(value);
+}
+
+int main() {
+    return forward_again(42);
+}
