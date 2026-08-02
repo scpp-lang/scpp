@@ -4572,6 +4572,7 @@ private:
         lambda_ctor.return_type = named_type("void");
         program_.functions.push_back(std::move(lambda_ctor));
         known_function_names_.insert(program_.functions.back().name);
+        walk_new_concrete_function(program_.functions.size() - 1);
 
         Function call_method;
         call_method.name = class_name + "_call";
@@ -5317,6 +5318,13 @@ private:
         // normally by movecheck (see monomorphize_generics's own
         // comment) and compiled normally by codegen.
 
+        // Full-header generic clones are walked by the active caller's
+        // in-flight body traversal immediately after this helper
+        // returns. Walking them here is unsafe because `tmpl` is often
+        // a reference into `program_.functions`; appending the clone can
+        // reallocate that vector, dangling the caller's `tmpl`
+        // reference before it finishes post-clone work like appending
+        // default arguments.
         program_.functions.push_back(std::move(clone));
         return cache_key;
     }
