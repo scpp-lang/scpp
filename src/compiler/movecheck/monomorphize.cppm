@@ -1467,6 +1467,11 @@ private:
                                                       field_types);
                 }
                 program_.functions.push_back(std::move(check_fn));
+                known_function_names_.insert(program_.functions.back().name);
+                if (program_.functions.back().is_generic_template) {
+                    generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+                }
+                walk_new_concrete_function(program_.functions.size() - 1);
             }
         }
     }
