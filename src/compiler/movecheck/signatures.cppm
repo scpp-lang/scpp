@@ -261,9 +261,9 @@ void validate_lifetime_annotation_placement(const Function& fn);
 }
 
 [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def) {
-    const BaseSpecifier* base = def.direct_ordinary_base();
-    if (base == nullptr || base->base_type.name.empty()) return false;
-    return member_name == base->base_type.name || member_name == unqualified_template_base_name(base->base_type.name);
+    auto base = def.direct_ordinary_base();
+    if (!base.has_value() || base->get().base_type.name.empty()) return false;
+    return member_name == base->get().base_type.name || member_name == unqualified_template_base_name(base->get().base_type.name);
 }
 
 void collect_virtual_interface_bases_in_construction_order(const Program& program, const ClassDef& def,
@@ -296,8 +296,8 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 }
 
 [[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def) {
-    const BaseSpecifier* base = def.direct_ordinary_base();
-    if (base == nullptr) return nullptr;
+    auto base = def.direct_ordinary_base();
+    if (!base.has_value()) return nullptr;
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (names_direct_base(init.member_name, def)) return &init;
     }
@@ -314,9 +314,9 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
     std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(program, def);
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
-    const BaseSpecifier* base = def.direct_ordinary_base();
-    if (explicit_base_init != nullptr && base != nullptr && direct_field_names.contains(base->base_type.name)) {
-        throw DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + base->base_type.name +
+    auto base = def.direct_ordinary_base();
+    if (explicit_base_init != nullptr && base.has_value() && direct_field_names.contains(base->get().base_type.name)) {
+        throw DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + base->get().base_type.name +
                                 "' in its member-initializer-list because that name matches both a direct field and "
                                 "the direct base class",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
@@ -561,48 +561,48 @@ void ensure_implicit_default_construction_is_valid(const std::string& class_name
         }
         return;
     }
-    if (const BaseSpecifier* base = class_def->direct_ordinary_base()) {
-        ensure_implicit_default_construction_is_valid(base->base_type.name, current_class, body, signatures, loc,
+    if (auto base = class_def->direct_ordinary_base()) {
+        ensure_implicit_default_construction_is_valid(base->get().base_type.name, current_class, body, signatures, loc,
                                                       context_message);
     }
 }
 
 void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                               const Signatures& signatures) {
-    const BaseSpecifier* base = def.direct_ordinary_base();
-    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || base == nullptr ||
+    auto base = def.direct_ordinary_base();
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || !base.has_value() ||
         is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
         return;
     }
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
     std::string context_message =
-        "constructor for class '" + def.name + "' must initialize its direct base class '" + base->base_type.name + "'";
+        "constructor for class '" + def.name + "' must initialize its direct base class '" + base->get().base_type.name + "'";
     if (explicit_base_init == nullptr) {
-        ensure_implicit_default_construction_is_valid(base->base_type.name, def.name, body, signatures, ctor.loc,
+        ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures, ctor.loc,
                                                       context_message);
         return;
     }
     const FunctionSignature* sig =
-        resolve_constructor_signature(base->base_type.name, explicit_base_init->initializer.brace_args, body, signatures);
+        resolve_constructor_signature(base->get().base_type.name, explicit_base_init->initializer.brace_args, body, signatures);
     if (sig == nullptr) {
-        if (body.program != nullptr && !class_has_any_constructor(base->base_type.name, *body.program) &&
+        if (body.program != nullptr && !class_has_any_constructor(base->get().base_type.name, *body.program) &&
             explicit_base_init->initializer.brace_args.empty()) {
-            ensure_implicit_default_construction_is_valid(base->base_type.name, def.name, body, signatures,
+            ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures,
                                                           explicit_base_init->loc, context_message);
             return;
         }
-        throw DataflowError("base-class initializer for '" + base->base_type.name +
+        throw DataflowError("base-class initializer for '" + base->get().base_type.name +
                                 "' does not match any constructor of that class",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
     }
     if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() && def.name != sig->member_owner_class) {
-        throw DataflowError("cannot call private constructor of base class '" + base->base_type.name +
+        throw DataflowError("cannot call private constructor of base class '" + base->get().base_type.name +
                                 "' from derived class '" + def.name + "'",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
     }
     if (sig->is_unsafe) {
-        throw DataflowError("cannot call base class '" + base->base_type.name +
+        throw DataflowError("cannot call base class '" + base->get().base_type.name +
                                 "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                                 "'[[scpp::unsafe]]'",
                             explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);

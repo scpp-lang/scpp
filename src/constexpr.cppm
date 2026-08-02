@@ -627,10 +627,10 @@ private:
 
     [[nodiscard]] std::vector<ClassField> collect_class_fields(const ClassDef& def) {
         std::vector<ClassField> fields;
-        if (const BaseSpecifier* base = def.direct_ordinary_base()) {
-            auto base_it = classes_by_name_.find(base->base_type.name);
+        if (auto base = def.direct_ordinary_base()) {
+            auto base_it = classes_by_name_.find(base->get().base_type.name);
             if (base_it == classes_by_name_.end()) {
-                throw ConstexprError({}, "missing constexpr class definition for base class '" + base->base_type.name + "'");
+                throw ConstexprError({}, "missing constexpr class definition for base class '" + base->get().base_type.name + "'");
             }
             std::vector<ClassField> base_fields = collect_class_fields(*base_it->second);
             fields.insert(fields.end(), base_fields.begin(), base_fields.end());
@@ -1033,9 +1033,9 @@ private:
         while (true) {
             auto it = classes_by_name_.find(current);
             if (it == classes_by_name_.end()) return false;
-            const BaseSpecifier* base = it->second->direct_ordinary_base();
-            if (base == nullptr) return false;
-            current = base->base_type.name;
+            auto base = it->second->direct_ordinary_base();
+            if (!base.has_value()) return false;
+            current = base->get().base_type.name;
             if (current == expected.name) return true;
         }
     }
@@ -2633,7 +2633,7 @@ private:
             return;
         }
         engine_.mark_type_incomplete(name);
-        if (BaseSpecifier* base = def->direct_ordinary_base()) resolve_array_bounds_type_dependencies(base->base_type);
+        if (auto base = def->direct_ordinary_base()) resolve_array_bounds_type_dependencies(base->base_type);
         for (ClassField& field : def->fields) resolve_array_bounds_type_dependencies(field.type);
         engine_.mark_type_complete(name);
         array_bounds_resolving_classes_.erase(name);
@@ -2722,8 +2722,8 @@ private:
 
     [[nodiscard]] std::uint64_t natural_class_alignment(const ClassDef& def) {
         std::uint64_t overall = 1;
-        if (const BaseSpecifier* base = def.direct_ordinary_base()) {
-            std::optional<TypeLayoutInfo> base_layout = layout_of_type(program_, base->base_type);
+        if (auto base = def.direct_ordinary_base()) {
+            std::optional<TypeLayoutInfo> base_layout = layout_of_type(program_, base->get().base_type);
             if (base_layout.has_value()) overall = std::max(overall, base_layout->abi_align_bytes);
         }
         for (const ClassField& field : def.fields) {
@@ -2819,7 +2819,7 @@ private:
             return;
         }
         engine_.mark_type_incomplete(name);
-        if (BaseSpecifier* base = def->direct_ordinary_base()) resolve_type_dependencies(base->base_type);
+        if (auto base = def->direct_ordinary_base()) resolve_type_dependencies(base->base_type);
         for (ClassField& field : def->fields) resolve_type_dependencies(field.type);
         for (ClassField& field : def->fields) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
