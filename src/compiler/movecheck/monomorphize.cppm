@@ -1500,6 +1500,19 @@ private:
     void reject_calls_on_bare_witness_type(const Stmt& stmt, const std::string& this_class_name,
                                             const std::string& bare_witness_name,
                                             const std::unordered_map<std::string, Type>& field_types) {
+        auto type_contains_bare_witness = [&](const Type& type, const auto& self) -> bool {
+            if (type.kind == TypeKind::Named && type.name == bare_witness_name) return true;
+            if (type.pointee && self(*type.pointee, self)) return true;
+            if (type.element && self(*type.element, self)) return true;
+            if (type.function_return && self(*type.function_return, self)) return true;
+            for (const Type& param_type : type.function_params) {
+                if (self(param_type, self)) return true;
+            }
+            for (const Type& arg : type.template_args) {
+                if (self(arg, self)) return true;
+            }
+            return false;
+        };
         // Resolves `expr`'s own type, restricted to exactly the two
         // shapes needed here: a bare `this` (always `this_class_name`)
         // and a single `this.field`/`self.field` projection off it
@@ -1521,6 +1534,14 @@ private:
         };
         std::function<void(const Expr&)> walk_expr = [&](const Expr& e) {
             if (e.kind == ExprKind::Call) {
+                bool bare_witness_pass_through = false;
+                for (const ExprPtr& arg : e.args) {
+                    std::optional<Type> arg_type = infer_expr_type(*arg, std::nullopt, signatures_);
+                    if (arg_type.has_value() && type_contains_bare_witness(*arg_type, type_contains_bare_witness)) {
+                        bare_witness_pass_through = true;
+                        break;
+                    }
+                }
                 if (e.lhs) {
                     std::optional<std::string> receiver_type = resolve_type_name(*e.lhs);
                     if (receiver_type.has_value() && *receiver_type == bare_witness_name) {
@@ -1532,6 +1553,7 @@ private:
                     }
                     walk_expr(*e.lhs);
                 }
+                if (bare_witness_pass_through && e.lhs == nullptr) return;
                 for (const auto& arg : e.args) walk_expr(*arg);
                 return;
             }
