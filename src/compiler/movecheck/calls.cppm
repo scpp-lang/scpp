@@ -399,6 +399,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         !is_freely_copyable_value_type(target_type, *body.program)) {
         return false;
     }
+    if (expr.kind == ExprKind::Lambda) return true;
     std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
     if (!source_type.has_value()) return false;
     if (types_equal(*source_type, target_type)) return true;
@@ -437,7 +438,11 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                  types_compatible_with_base_conversion(arg_type, param_type, *body.program, enclosing_class_name(body))));
     }
     if (arg_type.kind == TypeKind::Reference) {
-        return (arg_type.pointee != nullptr && types_equal(*arg_type.pointee, param_type)) ||
+        return (arg_type.pointee != nullptr &&
+                (types_equal(*arg_type.pointee, param_type) ||
+                 (body.program != nullptr &&
+                  types_compatible_with_base_conversion(*arg_type.pointee, param_type, *body.program,
+                                                        enclosing_class_name(body))))) ||
                (body.program != nullptr &&
                 types_compatible_with_base_conversion(arg_type, param_type, *body.program, enclosing_class_name(body)));
     }
@@ -507,13 +512,20 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] bool constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type,
                                                                    const Body& body, const Signatures& signatures) {
+    auto normalized_param_type = [&](Type type) {
+        if (type.kind == TypeKind::Named && !type.name.empty() && type.template_args.empty()) {
+            if (std::optional<Type> inferred = infer_expr_type(arg, body, signatures); inferred.has_value()) return *inferred;
+        }
+        return type;
+    };
     if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
-    if (is_reference(param_type) && param_type.is_rvalue_ref) {
-        return produces_rvalue_of_type(arg, *param_type.pointee, body, signatures);
+    Type effective_param_type = normalized_param_type(param_type);
+    if (is_reference(effective_param_type) && effective_param_type.is_rvalue_ref) {
+        return produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures);
     }
-    if (is_reference(param_type)) {
-        if (!param_type.is_mutable_ref && param_type.pointee != nullptr &&
-            produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
+    if (is_reference(effective_param_type)) {
+        if (!effective_param_type.is_mutable_ref && effective_param_type.pointee != nullptr &&
+            produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
             return true;
         }
         if (arg.kind == ExprKind::Move ||
@@ -523,14 +535,14 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             return false;
         }
         std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-        return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type, body);
+        return arg_type.has_value() && argument_type_matches_parameter(*arg_type, effective_param_type, body);
     }
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-    if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, param_type, body)) return false;
-    if (is_named_record_type_for_call_binding(param_type, body)) {
-        return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
-               is_freely_copyable_class_value_source(arg, param_type, body, signatures) ||
-               produces_rvalue_of_type(arg, param_type, body, signatures);
+    if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, effective_param_type, body)) return false;
+    if (is_named_record_type_for_call_binding(effective_param_type, body)) {
+        return is_copyable_class_lvalue_boundary_source(arg, effective_param_type, body, signatures) ||
+               is_freely_copyable_class_value_source(arg, effective_param_type, body, signatures) ||
+               produces_rvalue_of_type(arg, effective_param_type, body, signatures);
     }
     return true;
 }
@@ -542,20 +554,34 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
     const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures) {
-    if (class_type.kind != TypeKind::Named) return nullptr;
-    auto it = signatures.find(class_type.name + "_new");
-    if (it == signatures.end()) return nullptr;
-    for (const FunctionSignature& candidate : it->second) {
-        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (candidate.param_types.size() != 2) continue;
-        const Type& ctor_param_type = candidate.param_types[1];
-        if (types_equal(ctor_param_type, class_type) ||
-            (is_reference(ctor_param_type) && ctor_param_type.pointee != nullptr &&
-             types_equal(*ctor_param_type.pointee, class_type))) {
-            continue;
+    auto normalized_ctor_param_type = [&](const FunctionSignature& candidate) {
+        Type type = candidate.param_types[1];
+        if (!candidate.is_generic_template && type.kind == TypeKind::Reference && type.is_rvalue_ref &&
+            type.pointee != nullptr && produces_rvalue_of_type(arg, *type.pointee, body, signatures)) {
+            return *type.pointee;
         }
-        if (constructor_parameter_accepts_argument_directly(arg, candidate.param_types[1], body, signatures)) {
-            return &candidate;
+        return type;
+    };
+    if (class_type.kind != TypeKind::Named) return nullptr;
+    std::string ctor_name = class_type.name + "_new";
+    auto is_constructor_clone_name = [&](std::string_view name) {
+        return name == ctor_name || (!name.empty() && name.starts_with(ctor_name + "."));
+    };
+    for (const auto& [name, overloads] : signatures) {
+        if (!is_constructor_clone_name(name)) continue;
+        for (const FunctionSignature& candidate : overloads) {
+            if (candidate.member_owner_class != class_type.name) continue;
+            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+            if (candidate.param_types.size() != 2) continue;
+            Type ctor_param_type = normalized_ctor_param_type(candidate);
+            if (types_equal(ctor_param_type, class_type) ||
+                (is_reference(ctor_param_type) && ctor_param_type.pointee != nullptr &&
+                 types_equal(*ctor_param_type.pointee, class_type))) {
+                continue;
+            }
+            if (constructor_parameter_accepts_argument_directly(arg, ctor_param_type, body, signatures)) {
+                return &candidate;
+            }
         }
     }
     return nullptr;
@@ -567,8 +593,9 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         candidate.param_types[0].pointee == nullptr) {
         return true;
     }
-    bool receiver_is_rvalue =
-        produces_rvalue_of_type(receiver_expr, *candidate.param_types[0].pointee, body, signatures);
+    Type receiver_expected = *candidate.param_types[0].pointee;
+    receiver_expected.is_const_qualified = false;
+    bool receiver_is_rvalue = produces_rvalue_of_type(receiver_expr, receiver_expected, body, signatures);
     switch (candidate.receiver_ref_qualifier) {
         case ReceiverRefQualifier::None: return true;
         case ReceiverRefQualifier::LValue: return !receiver_is_rvalue;
@@ -1065,6 +1092,14 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
     std::optional<Type> actual_type = infer_expr_type(expr, body, signatures);
     if (!actual_type.has_value()) return false;
     if (types_equal(*actual_type, expected_type)) return true;
+    if (expected_type.is_const_qualified) {
+        Type unqualified_expected = expected_type;
+        unqualified_expected.is_const_qualified = false;
+        if (types_equal(*actual_type, unqualified_expected)) return true;
+        if (expr.kind == ExprKind::Move && actual_type->kind == TypeKind::Reference && actual_type->pointee != nullptr) {
+            return types_equal(*actual_type->pointee, unqualified_expected);
+        }
+    }
     if (expr.kind == ExprKind::Move && actual_type->kind == TypeKind::Reference && actual_type->pointee != nullptr) {
         return types_equal(*actual_type->pointee, expected_type);
     }
@@ -1328,7 +1363,8 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Member: {
             std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
             if (!base) return std::nullopt;
-            const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
+            const Type& base_named =
+                base->kind == TypeKind::Reference && base->pointee != nullptr ? *base->pointee : *base;
             if (base_named.kind != TypeKind::Named || body.program == nullptr) return std::nullopt;
             if (const ClassDef* def = find_class_def(*body.program, base_named.name)) {
                 for (const ClassField& field : def->fields) {

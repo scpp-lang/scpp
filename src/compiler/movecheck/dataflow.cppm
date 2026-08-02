@@ -717,11 +717,21 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         bool have_effective_param_type = false;
         if (sig != nullptr && param_index < sig->param_types.size()) {
             effective_param_type = sig->param_types[param_index];
+            if (!sig->member_owner_class.empty() && !sig->is_generic_template &&
+                param_index < sig->param_is_forwarding_reference.size() &&
+                sig->param_is_forwarding_reference[param_index]) {
+                effective_param_type.is_rvalue_ref = false;
+                effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
+                if (effective_param_type.pointee != nullptr) {
+                    effective_param_type.pointee->is_const_qualified = is_read_only_reachable(arg, body, signatures);
+                }
+            }
             if (param_index < sig->param_is_forwarding_reference.size() && sig->param_is_forwarding_reference[param_index] &&
                 is_reference(effective_param_type) && effective_param_type.pointee != nullptr &&
                 !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
                 effective_param_type.is_rvalue_ref = false;
                 effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
+                effective_param_type.pointee->is_const_qualified = is_read_only_reachable(arg, body, signatures);
             }
             have_effective_param_type = true;
         }
@@ -797,7 +807,12 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                          "caller can guarantee (ch01 §1.2/§1.3)",
                         state.current_loc);
                 }
-                const Type& ctor_param_type = converting_ctor->param_types[1];
+                Type ctor_param_type = converting_ctor->param_types[1];
+                if (!converting_ctor->is_generic_template && is_reference(ctor_param_type) &&
+                    ctor_param_type.is_rvalue_ref && ctor_param_type.pointee != nullptr &&
+                    produces_rvalue_of_type(arg, *ctor_param_type.pointee, body, signatures)) {
+                    ctor_param_type = *ctor_param_type.pointee;
+                }
                 if (is_reference(ctor_param_type) && ctor_param_type.is_rvalue_ref) {
                     if (report_errors && !produces_rvalue_of_type(arg, *ctor_param_type.pointee, body, signatures)) {
                         throw DataflowError(
@@ -890,33 +905,66 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors) {
     std::string ctor_name = class_name + "_new";
+    auto is_constructor_clone_name = [&](std::string_view name) {
+        return name == ctor_name || (!name.empty() && name.starts_with(ctor_name + "."));
+    };
     const FunctionSignature* sig = nullptr;
-    auto name_it = signatures.find(ctor_name);
-    if (name_it != signatures.end()) {
-        const std::vector<FunctionSignature>& candidates = name_it->second;
+    std::vector<const FunctionSignature*> constructor_candidates;
+    for (const auto& [name, overloads] : signatures) {
+        if (!is_constructor_clone_name(name)) continue;
+        for (const FunctionSignature& candidate : overloads) {
+            if (candidate.member_owner_class != class_name) continue;
+            constructor_candidates.push_back(&candidate);
+        }
+    }
+    if (!constructor_candidates.empty()) {
         std::vector<const FunctionSignature*> visible_arity_matches;
-        for (const FunctionSignature& candidate : candidates) {
-            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-            if (!function_signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
-            visible_arity_matches.push_back(&candidate);
+        for (const FunctionSignature* candidate : constructor_candidates) {
+            if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
+            if (!function_signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
+            visible_arity_matches.push_back(candidate);
         }
         if (visible_arity_matches.size() == 1) {
             sig = visible_arity_matches[0];
         }
         std::vector<const FunctionSignature*> matches;
         if (sig == nullptr) {
-            for (const FunctionSignature& candidate : candidates) {
-                if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-                if (!function_signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
+            for (const FunctionSignature* candidate : constructor_candidates) {
+                if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
+                if (!function_signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
                 bool all_match = true;
                 for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
                     all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                                     candidate.param_types[i + 1], body,
+                                                                                     candidate->param_types[i + 1], body,
                                                                                      signatures);
                 }
-                if (all_match) matches.push_back(&candidate);
+                if (all_match) matches.push_back(candidate);
             }
             if (matches.size() == 1) sig = matches[0];
+            if (sig == nullptr) {
+                for (const FunctionSignature* candidate : matches) {
+                    if (!candidate->is_generic_template) {
+                        sig = candidate;
+                        break;
+                    }
+                }
+            }
+            if (sig == nullptr && !matches.empty()) {
+                auto exact_type_match = [&](const FunctionSignature* candidate) {
+                    for (std::size_t i = 0; i < ctor_args.size(); i++) {
+                        std::optional<Type> arg_type = infer_expr_type(*ctor_args[i], body, signatures);
+                        if (!arg_type.has_value()) return false;
+                        if (!types_equal(*arg_type, candidate->param_types[i + 1])) return false;
+                    }
+                    return true;
+                };
+                for (const FunctionSignature* candidate : matches) {
+                    if (exact_type_match(candidate)) {
+                        sig = candidate;
+                        break;
+                    }
+                }
+            }
         }
     }
     if (sig == nullptr && report_errors && ctor_args.empty()) {
@@ -954,15 +1002,29 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         report_errors && body.program != nullptr &&
         type_contains_lifetime_carrying_state(named_type(class_name), *body.program);
     auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) {
+        Type effective_param_type;
+        bool have_effective_param_type = false;
+        if (sig != nullptr && param_index < sig->param_types.size()) {
+            effective_param_type = sig->param_types[param_index];
+            if (param_index < sig->param_is_forwarding_reference.size() && sig->param_is_forwarding_reference[param_index] &&
+                is_reference(effective_param_type) && effective_param_type.pointee != nullptr &&
+                !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
+                effective_param_type.is_rvalue_ref = false;
+                effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
+            }
+            have_effective_param_type = true;
+        }
         if (constructed_state_can_carry_lifetimes) {
             reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state");
         }
-        bool param_is_reference =
-            sig != nullptr && param_index < sig->param_types.size() && is_reference(sig->param_types[param_index]);
-        bool param_is_rvalue_reference = param_is_reference && sig->param_types[param_index].is_rvalue_ref;
+        bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
+        bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
+        bool allow_temporary_reference_binding =
+            param_is_reference && !effective_param_type.is_mutable_ref &&
+            const_reference_binds_materialized_temporary(arg, effective_param_type, body, signatures);
         if (param_is_rvalue_reference) {
             if (report_errors &&
-                !produces_rvalue_of_type(arg, *sig->param_types[param_index].pointee, body, signatures)) {
+                !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
                 throw DataflowError(
                     "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
                     "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
@@ -970,8 +1032,10 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                     state.current_loc);
             }
             apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+        } else if (param_is_reference && allow_temporary_reference_binding) {
+            apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors);
         } else if (param_is_reference) {
-            apply_reference_argument(arg, sig->param_types[param_index], state, in_call_borrows, body, signatures,
+            apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures,
                                       report_errors);
         } else {
             bool class_value_param =
@@ -981,6 +1045,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             bool freely_copyable_value_source =
                 class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
+            if (arg.kind == ExprKind::Lambda) freely_copyable_value_source = class_value_param;
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +

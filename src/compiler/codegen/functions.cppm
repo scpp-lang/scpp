@@ -109,6 +109,10 @@ namespace scpp {
                 llvm::LLVMValueRef fat_this = build_interface_value(
                     arg, llvm::LLVMConstPointerNull(llvm::LLVMPointerTypeInContext(context_, 0)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
+            } else if (param.type.kind == TypeKind::Reference && param.type.is_rvalue_ref && param.type.pointee != nullptr) {
+                slot = llvm::LLVMBuildAlloca(builder_, to_llvm_type(param.type), param.name.c_str());
+                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                llvm::LLVMBuildStore(builder_, arg, slot);
             } else {
                 slot = llvm::LLVMBuildAlloca(builder_, llvm::LLVMTypeOf(arg), param.name.c_str());
                 if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
@@ -191,6 +195,10 @@ namespace scpp {
                 llvm::LLVMValueRef fat_this = build_interface_value(
                     arg, llvm::LLVMConstPointerNull(llvm::LLVMPointerTypeInContext(context_, 0)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
+            } else if (param.type.kind == TypeKind::Reference && param.type.is_rvalue_ref && param.type.pointee != nullptr) {
+                slot = llvm::LLVMBuildAlloca(builder_, to_llvm_type(param.type), param.name.c_str());
+                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                llvm::LLVMBuildStore(builder_, arg, slot);
             } else {
                 slot = llvm::LLVMBuildAlloca(builder_, llvm::LLVMTypeOf(arg), param.name.c_str());
                 if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);

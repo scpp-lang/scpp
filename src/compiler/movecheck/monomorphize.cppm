@@ -2872,7 +2872,7 @@ private:
                                                                            Body& body, SourceLocation loc) {
         std::string ctor_name = class_name + "_new";
         for (const Function& tmpl : program_.functions) {
-            if (tmpl.name != ctor_name || tmpl.template_params.empty()) continue;
+            if (!(tmpl.name == ctor_name || tmpl.name.starts_with(ctor_name + ".")) || tmpl.template_params.empty()) continue;
             try {
                 std::unordered_map<std::string, Type> type_bindings;
                 std::unordered_map<std::string, int> value_bindings;
@@ -2956,6 +2956,14 @@ private:
                     cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings[tp.name]))
                                                 : ("." + mangle_type_for_clone_name(type_bindings[tp.name]));
                 }
+                for (std::size_t i = 1; i < tmpl.params.size() && i - 1 < args.size(); i++) {
+                    if (is_forwarding_reference_parameter(tmpl.params[i], tmpl.template_params)) {
+                        if (std::optional<Type> arg_type = infer_expr_type(*args[i - 1], body, signatures_); arg_type.has_value()) {
+                            cache_key += "." + mangle_type_for_clone_name(
+                                forwarding_reference_deduced_type(*args[i - 1], *arg_type, body));
+                        }
+                    }
+                }
                 for (std::size_t i = 0; i < tmpl.params.size(); i++) {
                     if (!tmpl.params[i].is_parameter_pack) continue;
                     for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
@@ -2966,8 +2974,7 @@ private:
                 Function clone;
                 std::string concrete_ctor_owner_name = class_name;
                 if (std::optional<Type> this_type = this_type_of(tmpl)) concrete_ctor_owner_name = this_type->name;
-                clone.name = class_name +
-                             method_suffix_after_owner_prefix(tmpl, concrete_ctor_owner_name, tmpl.generic_method_owner_id);
+                clone.name = cache_key;
                 clone.loc = tmpl.loc;
                 clone.namespace_path = tmpl.namespace_path;
                 clone.is_exported = false;
@@ -2975,7 +2982,7 @@ private:
                 clone.is_nodiscard = tmpl.is_nodiscard;
                 clone.nodiscard_reason = tmpl.nodiscard_reason;
                 clone.visibility_module = tmpl.visibility_module.empty() ? tmpl.owning_module : tmpl.visibility_module;
-                clone.member_owner_class = class_name;
+                clone.member_owner_class = concrete_ctor_owner_name;
                 clone.is_static = tmpl.is_static;
                 clone.access = tmpl.access;
                 clone.return_type = tmpl.return_type;
@@ -3023,6 +3030,12 @@ private:
                         }
                     }
                     p.type = resolve_generic_type(p.type, tmpl.loc);
+                    if (is_forwarding_reference_parameter(tmpl.params[i], tmpl.template_params) && arg_cursor > 0) {
+                        std::optional<Type> instantiated_arg_type = infer_expr_type(*args[arg_cursor - 1], body, signatures_);
+                        if (instantiated_arg_type.has_value()) {
+                            p.type = forwarding_reference_deduced_type(*args[arg_cursor - 1], *instantiated_arg_type, body);
+                        }
+                    }
                     clone.params.push_back(std::move(p));
                 }
                 clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
@@ -3067,7 +3080,7 @@ private:
         }
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (i < concrete_param_types.size() && i < use_concrete_param_types.size() && use_concrete_param_types[i] &&
-                !tmpl.params[i].is_parameter_pack) {
+                !tmpl.params[i].is_parameter_pack && !(i == 0 && !tmpl.member_owner_class.empty())) {
                 cache_key += "." + mangle_type_for_clone_name(concrete_param_types[i]);
                 continue;
             }
@@ -3075,7 +3088,15 @@ private:
             for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
         }
         auto cached = generic_function_clone_cache_.find(cache_key);
-        if (cached != generic_function_clone_cache_.end()) return cached->second;
+        if (cached != generic_function_clone_cache_.end()) {
+            if (tmpl.name == "std::thread_new") {
+                std::cerr << "[ctor-cache-hit] " << cache_key << " -> " << cached->second << "\n";
+            }
+            return cached->second;
+        }
+        if (tmpl.name == "std::thread_new") {
+            std::cerr << "[ctor-cache-new] " << cache_key << "\n";
+        }
         generic_function_clone_cache_[cache_key] = cache_key;
 
         Function clone;
@@ -3618,7 +3639,12 @@ private:
 
         std::optional<Type> resolved_type;
         for (const Function& tmpl : program_.functions) {
-            if (tmpl.name != expr.name + "_new" || !compile_time_dependency_visible(tmpl, body)) {
+            if (!((tmpl.name == expr.name + "_new") ||
+                  (tmpl.name.starts_with(expr.name + "_new.") ||
+                   (!tmpl.member_owner_class.empty() && tmpl.name.ends_with(expr.name + "_new") &&
+                    tmpl.name.size() > expr.name.size() + 4 &&
+                    tmpl.name[tmpl.name.size() - (expr.name.size() + 4) - 1] == '.'))) ||
+                !compile_time_dependency_visible(tmpl, body)) {
                 continue;
             }
             Function deduction_tmpl = clone_function(tmpl);
@@ -4489,6 +4515,7 @@ private:
         }
 
         std::string class_name = "__lambda" + std::to_string(lambda_counter_++);
+        expr.name = class_name;
         ClassDef closure_class;
         closure_class.name = class_name;
         closure_class.fields.reserve(expr.lambda_captures.size());
@@ -4501,6 +4528,45 @@ private:
         }
         program_.classes.push_back(std::move(closure_class));
         known_type_names_.insert(class_name);
+
+        Function lambda_ctor;
+        lambda_ctor.name = class_name + "_new";
+        lambda_ctor.loc = expr.loc;
+        lambda_ctor.member_owner_class = class_name;
+        Param ctor_this;
+        ctor_this.name = "this";
+        Type ctor_this_type;
+        ctor_this_type.kind = TypeKind::Reference;
+        ctor_this_type.is_mutable_ref = true;
+        ctor_this_type.pointee = std::make_shared<Type>(named_type(class_name));
+        ctor_this.type = std::move(ctor_this_type);
+        lambda_ctor.params.push_back(std::move(ctor_this));
+        for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
+            Param capture_param;
+            capture_param.name = expr.lambda_captures[i].name;
+            capture_param.type = field_types[i];
+            lambda_ctor.params.push_back(std::move(capture_param));
+            MemberInitializer init;
+            init.member_name = expr.lambda_captures[i].name;
+            init.loc = expr.loc;
+            auto capture_expr = std::make_unique<Expr>();
+            capture_expr->kind = ExprKind::Identifier;
+            capture_expr->loc = expr.loc;
+            capture_expr->name = expr.lambda_captures[i].name;
+            init.initializer.expr = std::move(capture_expr);
+            lambda_ctor.member_initializers.push_back(std::move(init));
+        }
+        auto ctor_body = std::make_unique<Stmt>();
+        ctor_body->kind = StmtKind::Block;
+        ctor_body->loc = expr.loc;
+        auto ctor_return = std::make_unique<Stmt>();
+        ctor_return->kind = StmtKind::Return;
+        ctor_return->loc = expr.loc;
+        ctor_body->statements.push_back(std::move(ctor_return));
+        lambda_ctor.body = std::move(ctor_body);
+        lambda_ctor.return_type = named_type("void");
+        program_.functions.push_back(std::move(lambda_ctor));
+        known_function_names_.insert(program_.functions.back().name);
 
         Function call_method;
         call_method.name = class_name + "_call";

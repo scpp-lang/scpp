@@ -2915,6 +2915,7 @@ private:
         }
         if (match(TokenKind::Amp)) {
             auto pointee = std::make_shared<Type>(std::move(type));
+            pointee->is_const_qualified = has_const;
             type = Type{};
             type.kind = TypeKind::Reference;
             type.pointee = std::move(pointee);
@@ -4417,6 +4418,7 @@ private:
         this_type.pointee = std::make_shared<Type>();
         this_type.pointee->kind = TypeKind::Named;
         this_type.pointee->name = class_name;
+        this_type.pointee->is_const_qualified = is_const;
         this_type.is_mutable_ref = !is_const;
         this_param.type = std::move(this_type);
         return this_param;

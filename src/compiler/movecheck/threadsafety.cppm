@@ -11,6 +11,18 @@ import :calls;
 
 namespace scpp {
 
+void collect_interfaces_for_thread_safety(const Program& program, const std::string& class_name,
+                                          std::unordered_set<std::string>& out) {
+    const ClassDef* def = find_class_def(program, class_name);
+    if (def == nullptr) return;
+    for (const BaseSpecifier& base : def->base_specifiers) {
+        const ClassDef* base_def = find_class_def(program, base.base_type.name);
+        if (base_def == nullptr) continue;
+        if (base_def->is_interface) out.insert(base_def->name);
+        collect_interfaces_for_thread_safety(program, base.base_type.name, out);
+    }
+}
+
 [[nodiscard]] bool evaluate_thread_bool_constant_expr_for_program(const Expr& expr, const Program& program,
                                                                   std::unordered_set<std::string> visiting = {});
 [[nodiscard]] bool thread_movable_of(const Type& type, const Program& program,
@@ -43,17 +55,28 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
     return param_interface != nullptr && param_interface->is_interface;
 }
 
+[[nodiscard]] std::optional<Type> concrete_interface_argument_type(const Expr& arg, const Type& param_type, const Body& body,
+                                                                   const Signatures& signatures) {
+    if (body.program == nullptr || !parameter_names_interface_type(param_type, body)) return std::nullopt;
+    std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
+    if (!source_type.has_value()) return std::nullopt;
+    const Type& source = *source_type;
+    if (!argument_type_matches_parameter(source, param_type, body)) return std::nullopt;
+    if (source.kind == TypeKind::Reference && source.pointee != nullptr) return *source.pointee;
+    if (source.kind == TypeKind::Pointer && source.pointee != nullptr) return *source.pointee;
+    if (source.kind == TypeKind::Named) return source;
+    return std::nullopt;
+}
+
 [[nodiscard]] Type thread_safety_constraint_subject_type(const Expr& arg, const Type& param_type, const Body& body,
                                                          const Signatures& signatures) {
-    if ((param_type.kind == TypeKind::Reference || param_type.kind == TypeKind::Pointer) &&
-        parameter_names_interface_type(param_type, body)) {
+    if (param_type.kind == TypeKind::Named && !param_type.name.empty()) {
         std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
-        if (source_type.has_value()) {
-            Type source = *source_type;
-            if (source.kind == TypeKind::Reference && source.pointee != nullptr) return *source.pointee;
-            if (source.kind == TypeKind::Pointer && source.pointee != nullptr) return *source.pointee;
-            return source;
-        }
+        if (source_type.has_value()) return *source_type;
+    }
+    if (std::optional<Type> concrete = concrete_interface_argument_type(arg, param_type, body, signatures);
+        concrete.has_value()) {
+        return *concrete;
     }
     return param_type;
 }
@@ -66,13 +89,26 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
         return;
     }
     Type subject = thread_safety_constraint_subject_type(arg, sig.param_types[param_index], body, signatures);
+    if (subject.kind != TypeKind::Reference && sig.param_types[param_index].kind == TypeKind::Reference &&
+        sig.param_types[param_index].pointee != nullptr) {
+        Type wrapped = sig.param_types[param_index];
+        wrapped.pointee = std::make_shared<Type>(subject);
+        subject = std::move(wrapped);
+    }
     std::string param_name = parameter_display_name(sig, param_index);
     if (sig.param_require_thread_movable[param_index] && !thread_movable_of(subject, *body.program)) {
         throw DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
                                 callee_name + "' does not satisfy '[[scpp::thread_movable]]' (spec §8.1/§8.5(6))",
             loc);
     }
-    if (sig.param_require_thread_shareable[param_index] && !thread_shareable_of(subject, *body.program)) {
+    bool shareable_ok = !sig.param_require_thread_shareable[param_index] || thread_shareable_of(subject, *body.program);
+    if (!shareable_ok) {
+        if (std::optional<Type> concrete = concrete_interface_argument_type(arg, sig.param_types[param_index], body, signatures);
+            concrete.has_value()) {
+            shareable_ok = thread_shareable_of(*concrete, *body.program);
+        }
+    }
+    if (!shareable_ok) {
         throw DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
                                 callee_name + "' does not satisfy '[[scpp::thread_shareable]]' (spec §8.1/§8.5(6))",
             loc);
@@ -122,6 +158,7 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
     switch (type.kind) {
         case TypeKind::Named: {
             if (is_scalar_type_name(type.name)) return true;
+            if (find_enum_def(&program, type.name) != nullptr) return true;
             if (visiting.contains(type.name)) return true;
             visiting.insert(type.name);
             for (const ClassDef& c : program.classes) {
@@ -166,10 +203,17 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
             visiting.insert(type.name);
             for (const ClassDef& c : program.classes) {
                 if (c.name != type.name) continue;
+                if (c.is_interface) return true;
                 if (c.thread_shareable_override) return true;
                 if (c.thread_movable_if_shareable_expr) {
                     return evaluate_thread_bool_constant_expr_for_program(*c.thread_movable_if_shareable_expr, program,
                                                                           visiting);
+                }
+                std::unordered_set<std::string> interfaces;
+                collect_interfaces_for_thread_safety(program, c.name, interfaces);
+                for (const std::string& interface_name : interfaces) {
+                    const ClassDef* iface = find_class_def(program, interface_name);
+                    if (iface != nullptr && iface->thread_shareable_override && c.fields.empty()) return true;
                 }
                 for (const ClassField& f : c.fields) {
                     if (!thread_shareable_of(f.type, program, visiting)) return false;

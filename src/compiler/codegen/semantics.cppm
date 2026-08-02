@@ -65,6 +65,12 @@ namespace {
            is_float_scalar_name(target_type.name);
 }
 
+[[nodiscard]] bool is_named_record_type_for_call_binding(const Type& type, const Program& program) {
+    if (type.kind != TypeKind::Named) return false;
+    if (std::ranges::any_of(program.classes, [&](const ClassDef& def) { return def.name == type.name; })) return true;
+    return std::ranges::any_of(program.structs, [&](const StructDef& def) { return def.name == type.name; });
+}
+
 [[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
     return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
 }
@@ -239,13 +245,16 @@ namespace {
                 if (!base) return std::nullopt;
                 // See codegen_lvalue's Identifier case: a Reference-typed
                 // base (e.g. `this`) auto-dereferences to its pointee.
-                const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
+                const Type& base_named =
+                    base->kind == TypeKind::Reference && base->pointee != nullptr ? *base->pointee : *base;
                 if (base_named.kind != TypeKind::Named) return std::nullopt;
                 auto struct_it = structs_.find(base_named.name);
                 if (struct_it == structs_.end()) return std::nullopt;
                 const StructInfo& info = struct_it->second;
                 std::optional<std::size_t> field_index = info.find_field_index(expr.name);
-                if (!field_index.has_value()) return std::nullopt;
+                if (!field_index.has_value()) {
+                    return resolve_function_designator_type(expr);
+                }
                 const Type& field_type = info.field_types[*field_index];
                 // ch05 §5.12: a Reference-typed field (e.g. a closure's
                 // own by-reference capture) auto-dereferences to its
@@ -396,6 +405,7 @@ namespace {
                 if (is_for_range_size_builtin(expr)) return named_type("int");
                 if (expr.lhs == nullptr) {
                     if (structs_.contains(expr.name)) return named_type(expr.name);
+                    if (find_class_def(expr.name) != nullptr) return named_type(expr.name);
                 }
                 if (expr.lhs != nullptr && expr.name.empty()) {
                     const Expr* callee_expr = expr.lhs.get();
@@ -413,6 +423,22 @@ namespace {
                     locals_.at(expr.name).type.kind == TypeKind::FunctionPointer) {
                     return *locals_.at(expr.name).type.function_return;
                 }
+                auto inferred_call_argument_type = [&](const Expr& arg, const Type& param_type) -> std::optional<Type> {
+                    std::optional<Type> inferred = infer_type(arg);
+                    if (inferred.has_value()) return inferred;
+                    if (arg.kind == ExprKind::Identifier && param_type.kind == TypeKind::Reference &&
+                        !param_type.is_mutable_ref && !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
+                        auto it = locals_.find(arg.name);
+                        if (it != locals_.end() && it->second.type.kind == TypeKind::Reference &&
+                            it->second.type.is_rvalue_ref && it->second.type.pointee != nullptr &&
+                            types_equal(*it->second.type.pointee, *param_type.pointee)) {
+                            Type fallback = it->second.type;
+                            fallback.name = it->second.type.pointee->name;
+                            return fallback;
+                        }
+                    }
+                    return std::nullopt;
+                };
                 std::string callee_name = expr.name;
                 std::size_t param_offset = 0;
                 bool receiver_is_mutable = true;
@@ -420,7 +446,7 @@ namespace {
                     std::optional<Type> receiver = infer_type(*expr.lhs);
                     if (!receiver) return std::nullopt;
                     const Type& receiver_named =
-                        receiver->kind == TypeKind::Reference ? *receiver->pointee : *receiver;
+                        receiver->kind == TypeKind::Reference && receiver->pointee != nullptr ? *receiver->pointee : *receiver;
                     if (receiver_named.kind != TypeKind::Named) return std::nullopt;
                     callee_name = receiver_named.name + "_" + expr.name;
                     param_offset = 1;
@@ -428,6 +454,36 @@ namespace {
                 }
                 const Function* callee =
                     resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get());
+                if (callee == nullptr && expr.lhs != nullptr) {
+                    for (const Function& fn : program_->functions) {
+                        if (fn.name != callee_name || fn.is_generic_template) continue;
+                        if (!function_accepts_argument_count(fn, expr.args.size(), param_offset)) continue;
+                        if (param_offset == 1 && !receiver_matches_method_qualifier(*expr.lhs, fn)) continue;
+                        bool all_match = true;
+                        std::size_t fixed_param_count = fn.params.size() - param_offset;
+                        for (std::size_t i = 0; all_match && i < expr.args.size() && i < fixed_param_count; i++) {
+                            const Type& param_type = fn.params[i + param_offset].type;
+                            std::optional<Type> arg_type = inferred_call_argument_type(*expr.args[i], param_type);
+                            if (!arg_type.has_value()) {
+                                all_match = false;
+                                break;
+                            }
+                            if (param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
+                                !param_type.is_rvalue_ref && param_type.pointee != nullptr &&
+                                arg_type->kind == TypeKind::Reference && arg_type->is_rvalue_ref &&
+                                arg_type->pointee != nullptr) {
+                                all_match = types_equal(*arg_type->pointee, *param_type.pointee);
+                            } else {
+                                all_match = argument_type_matches_parameter(*arg_type, param_type) ||
+                                            literal_matches_scalar_parameter(*expr.args[i], param_type);
+                            }
+                        }
+                        if (all_match) {
+                            callee = &fn;
+                            break;
+                        }
+                    }
+                }
                 return callee == nullptr ? std::nullopt : std::optional<Type>(callee->return_type);
             }
         }
@@ -472,6 +528,10 @@ namespace {
         if (param_type.kind != TypeKind::Reference || param_type.is_rvalue_ref || param_type.is_mutable_ref ||
             param_type.pointee == nullptr) {
             return false;
+        }
+        if (arg.kind == ExprKind::StringLiteral && param_type.pointee->kind == TypeKind::Named &&
+            param_type.pointee->name == "std::string_view") {
+            return true;
         }
         if (produces_rvalue_of_type(arg, *param_type.pointee)) return true;
         return is_named_record_type(*param_type.pointee) &&
@@ -519,9 +579,15 @@ namespace {
 
     const Function* Codegen::find_single_argument_converting_constructor(const std::string& class_name, const Expr& arg)
 {
+        auto is_constructor_clone = [&](const Function& fn) {
+            return fn.name == class_name + "_new" ||
+                   (!fn.member_owner_class.empty() && fn.member_owner_class == class_name &&
+                    fn.name.starts_with(class_name + "_new."));
+        };
         std::vector<const Function*> matches;
         for (const Function& fn : program_->functions) {
-            if (fn.name != class_name + "_new" || fn.params.size() != 2) continue;
+            if (!is_constructor_clone(fn)) continue;
+            if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
             const Type& ctor_param_type = fn.params[1].type;
             if (types_equal(ctor_param_type, named_type(class_name)) ||
                 (ctor_param_type.kind == TypeKind::Reference && ctor_param_type.pointee != nullptr &&
@@ -550,13 +616,17 @@ namespace {
         if (candidate_param_type.kind == TypeKind::Reference) {
             if (arg_type.kind == TypeKind::Reference) {
                 if (arg_type.pointee == nullptr || candidate_param_type.pointee == nullptr) return false;
+                if (candidate_param_type.is_rvalue_ref != arg_type.is_rvalue_ref) return false;
                 return types_equal(*arg_type.pointee, *candidate_param_type.pointee) &&
                        (!candidate_param_type.is_mutable_ref || arg_type.is_mutable_ref);
             }
             return candidate_param_type.pointee != nullptr && types_equal(arg_type, *candidate_param_type.pointee);
         }
         if (arg_type.kind == TypeKind::Reference) {
-            return arg_type.pointee != nullptr && types_equal(*arg_type.pointee, candidate_param_type);
+            return arg_type.pointee != nullptr &&
+                   (types_equal(*arg_type.pointee, candidate_param_type) ||
+                    types_compatible_with_base_conversion(*arg_type.pointee, candidate_param_type,
+                                                          current_enclosing_class_name()));
         }
         return types_equal(arg_type, candidate_param_type);
     }
@@ -604,7 +674,7 @@ namespace {
             }
             return false;
         }
-        if (is_named_record_type(param_type)) {
+        if (is_named_record_type_for_call_binding(param_type, *program_)) {
             return (is_bare_same_type_copy_source(arg, param_type) && is_copy_constructible(param_type.name)) ||
                    produces_rvalue_of_type(arg, param_type);
         }
@@ -614,13 +684,29 @@ namespace {
 
     bool Codegen::constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type)
 {
+        auto inferred_argument_type = [&]() -> std::optional<Type> {
+            std::optional<Type> inferred = infer_type(arg);
+            if (inferred.has_value()) return inferred;
+            if (arg.kind == ExprKind::Identifier) {
+                auto it = locals_.find(arg.name);
+                if (it != locals_.end() && it->second.type.kind == TypeKind::Reference && it->second.type.is_rvalue_ref &&
+                    it->second.type.pointee != nullptr) {
+                    return *it->second.type.pointee;
+                }
+            }
+            return std::nullopt;
+        };
+        auto normalized_param_type = [&](Type type) {
+            return type;
+        };
         if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
-        if (param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref) {
-            return produces_rvalue_of_type(arg, *param_type.pointee);
+        Type effective_param_type = normalized_param_type(param_type);
+        if (effective_param_type.kind == TypeKind::Reference && effective_param_type.is_rvalue_ref) {
+            return produces_rvalue_of_type(arg, *effective_param_type.pointee);
         }
-        if (param_type.kind == TypeKind::Reference) {
-            if (!param_type.is_mutable_ref && param_type.pointee != nullptr &&
-                produces_rvalue_of_type(arg, *param_type.pointee)) {
+        if (effective_param_type.kind == TypeKind::Reference) {
+            if (!effective_param_type.is_mutable_ref && effective_param_type.pointee != nullptr &&
+                produces_rvalue_of_type(arg, *effective_param_type.pointee)) {
                 return true;
             }
             if (arg.kind == ExprKind::Move || arg.kind == ExprKind::New ||
@@ -629,14 +715,14 @@ namespace {
                 arg.kind == ExprKind::CharLiteral || arg.kind == ExprKind::StringLiteral) {
                 return false;
             }
-            std::optional<Type> arg_type = infer_type(arg);
-            return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type);
+            std::optional<Type> arg_type = inferred_argument_type();
+            return arg_type.has_value() && argument_type_matches_parameter(*arg_type, effective_param_type);
         }
-        std::optional<Type> arg_type = infer_type(arg);
-        if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, param_type)) return false;
-        if (is_named_record_type(param_type)) {
-            return (is_bare_same_type_copy_source(arg, param_type) && is_copy_constructible(param_type.name)) ||
-                   produces_rvalue_of_type(arg, param_type);
+        std::optional<Type> arg_type = inferred_argument_type();
+        if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, effective_param_type)) return false;
+        if (is_named_record_type(effective_param_type)) {
+            return (is_bare_same_type_copy_source(arg, effective_param_type) && is_copy_constructible(effective_param_type.name)) ||
+                   produces_rvalue_of_type(arg, effective_param_type);
         }
         return true;
     }
@@ -678,7 +764,9 @@ namespace {
         if (fn.params.empty() || fn.params[0].type.kind != TypeKind::Reference || fn.params[0].type.pointee == nullptr) {
             return true;
         }
-        bool receiver_is_rvalue = produces_rvalue_of_type(receiver_expr, *fn.params[0].type.pointee);
+        Type receiver_expected = *fn.params[0].type.pointee;
+        receiver_expected.is_const_qualified = false;
+        bool receiver_is_rvalue = produces_rvalue_of_type(receiver_expr, receiver_expected);
         switch (fn.receiver_ref_qualifier) {
             case ReceiverRefQualifier::None: return true;
             case ReceiverRefQualifier::LValue: return !receiver_is_rvalue;
@@ -692,27 +780,106 @@ namespace {
                                               std::size_t param_offset, bool receiver_is_mutable ,
                                               const Expr* receiver_expr)
 {
+        auto rvalue_ref_collapses_to_value = [&](const Function& fn, std::size_t param_index, const Expr& arg) {
+            if (param_offset == 0) return false;
+            if (!fn.member_owner_class.empty()) return false;
+            if (param_index >= fn.params.size()) return false;
+            const Type& param_type = fn.params[param_index].type;
+            return param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref && param_type.pointee != nullptr &&
+                   produces_rvalue_of_type(arg, *param_type.pointee);
+        };
+        auto normalized_param_type = [&](const Expr& arg, Type type) {
+            if (type.kind == TypeKind::Named && !type.name.empty() && type.template_args.empty() &&
+                !type.name.empty() && std::isupper(static_cast<unsigned char>(type.name[0]))) {
+                if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) return *inferred;
+            }
+            return type;
+        };
+        auto scalar_exact_match_score = [&](const Function* fn) {
+            int score = 0;
+            std::size_t fixed_param_count = fn->params.size() - param_offset;
+            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
+                std::optional<Type> arg_type = infer_type(*args[i]);
+                if (!arg_type.has_value()) continue;
+                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
+                if (candidate_param_type.kind == TypeKind::Reference) continue;
+                if (types_equal(*arg_type, candidate_param_type)) score += 4;
+                else if (literal_matches_scalar_parameter(*args[i], candidate_param_type)) score += 1;
+            }
+            return score;
+        };
+        auto is_constructor_clone = [&](const Function& fn) {
+            return callee_name.ends_with("_new") &&
+                   fn.name.starts_with(callee_name + ".");
+        };
+        auto is_dotted_clone = [&](const Function& fn) {
+            return fn.name.ends_with(callee_name) &&
+                   fn.name.size() > callee_name.size() &&
+                   fn.name[fn.name.size() - callee_name.size() - 1] == '.';
+        };
+        auto matches_receiver_method_name = [&](const Function& fn) {
+            if (!receiver_expr || param_offset != 1) return true;
+            if (fn.name == callee_name) return true;
+            if (is_dotted_clone(fn)) {
+                std::size_t sep = callee_name.rfind('_');
+                if (sep == std::string::npos) return false;
+                std::string owner = callee_name.substr(0, sep);
+                if (fn.member_owner_class.empty() || fn.member_owner_class != owner) return false;
+                std::string member = callee_name.substr(sep + 1);
+                return fn.name == owner + "." + callee_name || fn.name == owner + "." + member;
+            }
+            std::size_t sep = callee_name.rfind('_');
+            return sep != std::string::npos && !fn.member_owner_class.empty() &&
+                   fn.member_owner_class == callee_name.substr(0, sep);
+        };
+        auto is_concrete_receiver_helper = [&](const Function& fn) {
+            if (!receiver_expr || param_offset != 1) return false;
+            if (fn.member_owner_class.empty()) return false;
+            if (fn.name == callee_name || is_dotted_clone(fn)) return false;
+            std::size_t sep = callee_name.rfind('_');
+            if (sep == std::string::npos) return false;
+            std::string_view owner = std::string_view(callee_name).substr(0, sep);
+            std::string_view member = std::string_view(callee_name).substr(sep + 1);
+            return fn.member_owner_class == owner && fn.name == std::string(member) &&
+                   owner.find('.') != std::string::npos;
+        };
         std::vector<const Function*> candidates;
         for (const Function& fn : program_->functions) {
-            if (fn.name == callee_name) {
+            bool name_eq = fn.name == callee_name;
+            bool concrete_helper = is_concrete_receiver_helper(fn);
+            bool ctor_clone = is_constructor_clone(fn);
+            bool dotted = is_dotted_clone(fn);
+            bool receiver_ok = matches_receiver_method_name(fn);
+            if ((name_eq || concrete_helper || ctor_clone || dotted) &&
+                receiver_ok) {
                 candidates.push_back(&fn);
             }
         }
         if (candidates.empty()) return nullptr;
-        if (candidates.size() == 1) {
+        if (candidates.size() == 1 && !candidates[0]->is_generic_template) {
             if (param_offset == 1 && receiver_expr != nullptr) {
                 if (candidates[0]->params.size() > 0 && candidates[0]->params[0].type.kind == TypeKind::Reference &&
                     candidates[0]->params[0].type.is_mutable_ref && !receiver_is_mutable) {
                     return nullptr;
                 }
-                if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) return nullptr;
+                if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) {
+                    return nullptr;
+                }
             }
             if (!function_accepts_argument_count(*candidates[0], args.size(), param_offset)) {
                 return nullptr;
             }
             std::size_t fixed_param_count = candidates[0]->params.size() - param_offset;
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-                if (!argument_matches_parameter(*args[i], candidates[0]->params[i + param_offset].type)) {
+                Type candidate_param_type = normalized_param_type(*args[i], candidates[0]->params[i + param_offset].type);
+                if (rvalue_ref_collapses_to_value(*candidates[0], i + param_offset, *args[i])) {
+                    candidate_param_type = *candidate_param_type.pointee;
+                }
+                bool arg_matches = argument_matches_parameter(*args[i], candidate_param_type);
+                if (!arg_matches && literal_matches_scalar_parameter(*args[i], candidate_param_type)) {
+                    arg_matches = true;
+                }
+                if (!arg_matches) {
                     return nullptr;
                 }
             }
@@ -721,25 +888,100 @@ namespace {
 
         std::vector<const Function*> matches;
         for (const Function* fn : candidates) {
-            if (!function_accepts_argument_count(*fn, args.size(), param_offset)) continue;
+            if (!function_accepts_argument_count(*fn, args.size(), param_offset)) {
+                if (callee_name.find("__bucket_index_for_hash") != std::string::npos) {
+                    std::cerr << "[bucket-reject] arity " << fn->name << "\n";
+                }
+                continue;
+            }
             // The receiver (`this`): viable only if the candidate's own
             // `this` mutability doesn't demand more than the receiver
             // place can actually provide.
-            if (param_offset == 1 && fn->params[0].type.is_mutable_ref && !receiver_is_mutable) continue;
+            if (param_offset == 1 && fn->params[0].type.is_mutable_ref && !receiver_is_mutable) {
+                if (callee_name.find("__bucket_index_for_hash") != std::string::npos) {
+                    std::cerr << "[bucket-reject] mutable-this " << fn->name << "\n";
+                }
+                continue;
+            }
             if (param_offset == 1 && receiver_expr != nullptr &&
                 !receiver_matches_method_qualifier(*receiver_expr, *fn)) {
+                if (callee_name.find("__bucket_index_for_hash") != std::string::npos) {
+                    std::cerr << "[bucket-reject] qualifier " << fn->name << "\n";
+                }
                 continue;
             }
             std::size_t fixed_param_count = fn->params.size() - param_offset;
             bool all_match = true;
             for (std::size_t i = 0; all_match && i < args.size() && i < fixed_param_count; i++) {
-                all_match = argument_matches_parameter(*args[i], fn->params[i + param_offset].type);
+                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
+                if (rvalue_ref_collapses_to_value(*fn, i + param_offset, *args[i])) {
+                    candidate_param_type = *candidate_param_type.pointee;
+                }
+                bool arg_match = argument_matches_parameter(*args[i], candidate_param_type) ||
+                                 literal_matches_scalar_parameter(*args[i], candidate_param_type);
+                if (callee_name.find("__bucket_index_for_hash") != std::string::npos && !arg_match) {
+                    std::cerr << "[bucket-reject] arg" << i << " " << fn->name << "\n";
+                }
+                all_match = arg_match;
             }
             if (all_match) matches.push_back(fn);
         }
         if (matches.empty()) return nullptr;
         if (matches.size() == 1) return matches[0];
-
+        auto exact_non_reference_match = [&](const Function* fn) {
+            std::size_t fixed_param_count = fn->params.size() - param_offset;
+            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
+                std::optional<Type> arg_type = infer_type(*args[i]);
+                if (!arg_type.has_value()) return false;
+                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
+                if (!types_equal(*arg_type, candidate_param_type)) return false;
+            }
+            return true;
+        };
+        if (callee_name.ends_with("_new")) {
+            for (const Function* fn : matches) {
+                if (!fn->is_generic_template && exact_non_reference_match(fn) && fn->name.starts_with(callee_name + ".")) {
+                    return fn;
+                }
+            }
+            for (const Function* fn : matches) {
+                if (!fn->is_generic_template && fn->name.starts_with(callee_name + ".")) return fn;
+            }
+            for (const Function* fn : matches) {
+                if (!fn->is_generic_template) return fn;
+            }
+        }
+        const Function* best_exact = nullptr;
+        int best_exact_score = -1;
+        bool unique_exact = true;
+        for (const Function* fn : matches) {
+            int score = exact_non_reference_match(fn) ? 1000 + scalar_exact_match_score(fn) : scalar_exact_match_score(fn);
+            if (score > best_exact_score) {
+                best_exact = fn;
+                best_exact_score = score;
+                unique_exact = true;
+            } else if (score == best_exact_score) {
+                unique_exact = false;
+            }
+        }
+        if (best_exact != nullptr && unique_exact && best_exact_score > 0) {
+            bool exact_path_has_reference_axis_difference = false;
+            for (std::size_t i = 0; i < matches.size() && !exact_path_has_reference_axis_difference; i++) {
+                for (std::size_t j = i + 1; j < matches.size() && !exact_path_has_reference_axis_difference; j++) {
+                    std::size_t fixed_param_count =
+                        std::min(matches[i]->params.size(), matches[j]->params.size()) - param_offset;
+                    for (std::size_t k = 0; k < args.size() && k < fixed_param_count; k++) {
+                        bool lhs_ref = matches[i]->params[k + param_offset].type.kind == TypeKind::Reference;
+                        bool rhs_ref = matches[j]->params[k + param_offset].type.kind == TypeKind::Reference;
+                        if (lhs_ref != rhs_ref) {
+                            exact_path_has_reference_axis_difference = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!exact_path_has_reference_axis_difference) return best_exact;
+        }
         // Tie-break ("T& beats const T& for a mutable lvalue", ch05
         // §5.10): prefer whichever match has the most mutable-reference
         // parameters (including `this`) among positions where the
@@ -749,7 +991,9 @@ namespace {
             int score = 0;
             if (param_offset == 1 && fn->params[0].type.is_mutable_ref && receiver_is_mutable) score++;
             if (param_offset == 1 && receiver_expr != nullptr && fn->params[0].type.pointee != nullptr) {
-                bool receiver_is_rvalue = produces_rvalue_of_type(*receiver_expr, *fn->params[0].type.pointee);
+                Type receiver_expected = *fn->params[0].type.pointee;
+                receiver_expected.is_const_qualified = false;
+                bool receiver_is_rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
                 if ((receiver_is_rvalue && fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue) ||
                     (!receiver_is_rvalue && fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue)) {
                     score += 2;
@@ -764,11 +1008,59 @@ namespace {
             }
             return score;
         };
+        auto value_vs_reference_axis_score = [&](const Function* fn) {
+            int score = 0;
+            std::size_t fixed_param_count = fn->params.size() - param_offset;
+            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
+                const Type& param_type = fn->params[i + param_offset].type;
+                bool arg_is_bare_name = args[i]->kind == ExprKind::Identifier &&
+                                        !args[i]->explicit_global_qualification &&
+                                        !locals_.contains(args[i]->name);
+                bool arg_is_local_rvalue_ref = false;
+                if (args[i]->kind == ExprKind::Identifier && !args[i]->explicit_global_qualification) {
+                    auto it = locals_.find(args[i]->name);
+                    arg_is_local_rvalue_ref =
+                        it != locals_.end() && it->second.type.kind == TypeKind::Reference && it->second.type.is_rvalue_ref;
+                }
+                bool arg_is_lvalue_like = args[i]->kind == ExprKind::Identifier || args[i]->kind == ExprKind::Member ||
+                                          args[i]->kind == ExprKind::Subscript;
+                bool arg_is_prvalue_like = args[i]->kind == ExprKind::Move || args[i]->kind == ExprKind::New ||
+                                           args[i]->kind == ExprKind::IntegerLiteral || args[i]->kind == ExprKind::FloatLiteral ||
+                                           args[i]->kind == ExprKind::BoolLiteral || args[i]->kind == ExprKind::CharLiteral ||
+                                           args[i]->kind == ExprKind::StringLiteral;
+                if (arg_is_bare_name) continue;
+                if (arg_is_local_rvalue_ref) continue;
+                if (arg_is_lvalue_like) {
+                    if (param_type.kind == TypeKind::Reference) score += 4;
+                    else score -= 4;
+                } else if (arg_is_prvalue_like) {
+                    if (param_type.kind != TypeKind::Reference) score += 4;
+                    else score -= 4;
+                }
+            }
+            return score;
+        };
+        bool has_reference_axis_difference = false;
+        for (std::size_t i = 0; i < matches.size() && !has_reference_axis_difference; i++) {
+            for (std::size_t j = i + 1; j < matches.size() && !has_reference_axis_difference; j++) {
+                std::size_t fixed_param_count = std::min(matches[i]->params.size(), matches[j]->params.size()) - param_offset;
+                for (std::size_t k = 0; k < args.size() && k < fixed_param_count; k++) {
+                    bool lhs_ref = matches[i]->params[k + param_offset].type.kind == TypeKind::Reference;
+                    bool rhs_ref = matches[j]->params[k + param_offset].type.kind == TypeKind::Reference;
+                    if (lhs_ref != rhs_ref) {
+                        has_reference_axis_difference = true;
+                        break;
+                    }
+                }
+            }
+        }
         const Function* best = matches[0];
-        int best_score = mutable_ref_score(best);
+        int best_score = (has_reference_axis_difference ? value_vs_reference_axis_score(best) * 100 : 0) +
+                         mutable_ref_score(best);
         bool unique_best = true;
         for (std::size_t i = 1; i < matches.size(); i++) {
-            int score = mutable_ref_score(matches[i]);
+            int score = (has_reference_axis_difference ? value_vs_reference_axis_score(matches[i]) * 100 : 0) +
+                        mutable_ref_score(matches[i]);
             if (score > best_score) {
                 best = matches[i];
                 best_score = score;
@@ -783,9 +1075,14 @@ namespace {
 
     const Function* Codegen::resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args)
 {
+        auto is_constructor_clone = [&](const Function& fn) {
+            return fn.name == class_name + "_new" ||
+                   (!fn.member_owner_class.empty() && fn.member_owner_class == class_name &&
+                    fn.name.starts_with(class_name + "_new."));
+        };
         std::vector<const Function*> matches;
         for (const Function& fn : program_->functions) {
-            if (fn.name != class_name + "_new") continue;
+            if (!is_constructor_clone(fn)) continue;
             if (!function_accepts_argument_count(fn, args.size(), 1)) continue;
             bool all_match = true;
             for (std::size_t i = 0; all_match && i < args.size(); i++) {
@@ -794,6 +1091,17 @@ namespace {
             if (all_match) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
+        auto exact_type_match = [&](const Function* fn) {
+            for (std::size_t i = 0; i < args.size(); i++) {
+                std::optional<Type> inferred = infer_type(*args[i]);
+                if (!inferred.has_value()) return false;
+                if (!types_equal(*inferred, fn->params[i + 1].type)) return false;
+            }
+            return true;
+        };
+        for (const Function* fn : matches) {
+            if (exact_type_match(fn)) return fn;
+        }
         if (matches.size() == 1) return matches[0];
         auto mutable_ref_score = [&](const Function* fn) {
             int score = 0;

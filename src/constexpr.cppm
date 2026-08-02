@@ -1071,7 +1071,16 @@ private:
                                                             bool require_constexpr) {
         const Type& arg_type = arg->type;
         if (param_type.kind == TypeKind::Reference) {
-            return param_type.pointee && is_same_or_base_class_type(*param_type.pointee, arg_type);
+            if (!param_type.pointee) return false;
+            if (types_equal(*param_type.pointee, arg_type) || is_same_or_base_class_type(*param_type.pointee, arg_type)) {
+                return true;
+            }
+            if (param_type.pointee->is_const_qualified) {
+                Type unqualified = *param_type.pointee;
+                unqualified.is_const_qualified = false;
+                return types_equal(unqualified, arg_type) || is_same_or_base_class_type(unqualified, arg_type);
+            }
+            return false;
         }
         if (is_same_or_base_class_type(param_type, arg_type)) return true;
         if (param_type.kind == TypeKind::Named && is_class_name(param_type.name)) {
@@ -1095,7 +1104,17 @@ private:
                 const Type& param_type = fn->params[i + 1].type;
                 const Type& arg_type = args[i]->type;
                 if (param_type.kind == TypeKind::Reference) {
-                    if (!param_type.pointee || !types_equal(*param_type.pointee, arg_type)) {
+                    if (!param_type.pointee) {
+                        params_match = false;
+                        break;
+                    }
+                    if (types_equal(*param_type.pointee, arg_type)) continue;
+                    if (param_type.pointee->is_const_qualified) {
+                        Type unqualified = *param_type.pointee;
+                        unqualified.is_const_qualified = false;
+                        if (types_equal(unqualified, arg_type)) continue;
+                    }
+                    {
                         params_match = false;
                         break;
                     }
@@ -1519,7 +1538,10 @@ private:
 
             const Type& this_type = fn->params[0].type;
             if (this_type.kind == TypeKind::Reference) {
-                if (!this_type.pointee || !is_same_or_base_class_type(*this_type.pointee, receiver_value->type)) continue;
+                if (!this_type.pointee) continue;
+                Type receiver_expected = *this_type.pointee;
+                receiver_expected.is_const_qualified = false;
+                if (!is_same_or_base_class_type(receiver_expected, receiver_value->type)) continue;
                 if (this_type.is_mutable_ref && (!receiver_is_lvalue || receiver_read_only)) continue;
             } else if (!is_same_or_base_class_type(this_type, receiver_value->type)) {
                 continue;
