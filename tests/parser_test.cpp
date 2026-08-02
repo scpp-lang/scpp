@@ -1528,6 +1528,20 @@ void test_operator_arrow_member_decl_and_explicit_call_parse() {
            "operator_arrow_member_decl_and_explicit_call_parse: explicit .operator->() must not use arrow protocol");
 }
 
+void test_member_function_lifetime_this_parse() {
+    scpp::Program program = scpp::parse(
+        "struct Box {\n"
+        "    int value;\n"
+        "    int* ptr() [[scpp::lifetime(this)]];\n"
+        "};\n");
+    const scpp::Function* fn = find_function_named(program, "Box_ptr");
+    expect(fn != nullptr, "member_function_lifetime_this_parse: missing synthesized member function");
+    expect(fn->return_lifetime.name == "this",
+           "member_function_lifetime_this_parse: expected return lifetime 'this'");
+    expect(fn->params.size() == 1 && fn->params[0].name == "this",
+           "member_function_lifetime_this_parse: expected only implicit this param");
+}
+
 void test_nested_reference_wrapper_lifetime_parameter_parse() {
     scpp::Program program = parse_with_std_imports(
         "import std;\n"
@@ -5100,6 +5114,7 @@ int main() {
     test_arrow_parses_as_deferred_operator_arrow_access();
     test_chained_arrow_and_dot();
     test_operator_arrow_member_decl_and_explicit_call_parse();
+    test_member_function_lifetime_this_parse();
     test_multiplication_is_not_confused_with_dereference();
     test_parenthesized_expression();
     test_parse_error_on_missing_semicolon();
