@@ -43,7 +43,8 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
 [[nodiscard]] bool roots_include_parameter_lifetime(const RootSet& roots, const DataflowState& state);
 void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
                                            const Signatures& signatures, bool report_errors,
-                                           std::string_view context);
+                                           std::string_view context,
+                                           bool permit_wrapper_lifetime_source = false);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
@@ -794,10 +795,13 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 }
 
 void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
-                                           const Signatures& signatures, bool report_errors, std::string_view context) {
+                                           const Signatures& signatures, bool report_errors, std::string_view context,
+                                           bool permit_wrapper_lifetime_source) {
     if (!report_errors) return;
     std::optional<Type> expr_type = infer_expr_type(expr, body, signatures);
-    if (!expr_type.has_value() || !is_lifetime_eligible_type(*expr_type)) return;
+    if (!expr_type.has_value()) return;
+    if (permit_wrapper_lifetime_source && expr_type->is_reference_wrapper_lifetime_source) return;
+    if (!is_lifetime_eligible_type(*expr_type)) return;
     RootSet roots = resolve_lifetime_source_roots(expr, state, body, signatures, report_errors);
     if (!roots_include_parameter_lifetime(roots, state)) return;
     throw DataflowError("cannot store a reference, pointer, or span derived from " + format_roots(roots) +
