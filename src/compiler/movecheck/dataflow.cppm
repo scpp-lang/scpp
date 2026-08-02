@@ -1015,7 +1015,9 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             have_effective_param_type = true;
         }
         if (constructed_state_can_carry_lifetimes) {
-            reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state");
+            reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors,
+                                                  "constructed object state",
+                                                  class_name == "std::reference_wrapper" || class_name == "reference_wrapper");
         }
         bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
         bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;

@@ -28,6 +28,28 @@ struct CalleeSignature {
     std::optional<FunctionSignature> direct_signature;
 };
 
+[[nodiscard]] std::optional<Type> resolve_direct_type_alias_call_type(const Expr& call_expr, const Body& body) {
+    if (body.program == nullptr || call_expr.lhs != nullptr || call_expr.name.empty()) return std::nullopt;
+    auto matches_name = [&](std::string_view alias_name) {
+        if (alias_name == call_expr.name) return true;
+        if (!call_expr.explicit_global_qualification && !body.function_namespace_path.empty()) {
+            std::string qualified;
+            for (std::size_t i = 0; i < body.function_namespace_path.size(); i++) {
+                if (i != 0) qualified += "::";
+                qualified += body.function_namespace_path[i];
+            }
+            qualified += "::";
+            qualified += call_expr.name;
+            return alias_name == qualified;
+        }
+        return false;
+    };
+    for (const TypeAliasDecl& alias : body.program->type_aliases) {
+        if (matches_name(alias.name)) return alias.underlying_type;
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
     return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
 }
@@ -1342,6 +1364,9 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                                             : *range_type;
                 if (unwrapped.kind == TypeKind::Array || unwrapped.kind == TypeKind::Span) return named_type("int");
                 return std::nullopt;
+            }
+            if (std::optional<Type> alias_type = resolve_direct_type_alias_call_type(expr, body); alias_type.has_value()) {
+                return *alias_type;
             }
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
