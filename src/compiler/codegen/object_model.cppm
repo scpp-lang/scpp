@@ -324,8 +324,8 @@ namespace scpp {
         }
         std::vector<const Function*> methods;
         std::unordered_map<std::string, std::size_t> slot_indices;
-        if (const BaseSpecifier* base = def->direct_ordinary_base()) {
-            for (const Function* method : ordinary_virtual_methods(base->base_type.name)) {
+        if (auto base = def->direct_ordinary_base()) {
+            for (const Function* method : ordinary_virtual_methods(base->get().base_type.name)) {
                 slot_indices.emplace(interface_method_slot_key(*method), methods.size());
                 methods.push_back(method);
             }
@@ -498,9 +498,9 @@ namespace scpp {
 
     [[nodiscard]] bool Codegen::names_direct_base(const std::string& member_name, const ClassDef& def) const
 {
-        const BaseSpecifier* base = def.direct_ordinary_base();
-        if (base == nullptr || base->base_type.name.empty()) return false;
-        return member_name == base->base_type.name || member_name == unqualified_template_base_name(base->base_type.name);
+        auto base = def.direct_ordinary_base();
+        if (!base.has_value() || base->get().base_type.name.empty()) return false;
+        return member_name == base->get().base_type.name || member_name == unqualified_template_base_name(base->get().base_type.name);
     }
 
 
@@ -632,7 +632,7 @@ namespace scpp {
         }
         llvm::LLVMValueRef object_ptr = load_this_object_ptr();
         if (class_def != nullptr) {
-            if (const BaseSpecifier* base = class_def->direct_ordinary_base()) {
+            if (auto base = class_def->direct_ordinary_base()) {
                 const MemberInitializer* explicit_base_init = nullptr;
                 for (const MemberInitializer& init : fn.member_initializers) {
                     if (names_direct_base(init.member_name, *class_def)) {
@@ -640,15 +640,15 @@ namespace scpp {
                         break;
                     }
                 }
-                const ClassDef* base_def = find_class_def(base->base_type.name);
+                const ClassDef* base_def = find_class_def(base->get().base_type.name);
                 if (base_def == nullptr) {
-                    throw CodegenError("unknown base class '" + base->base_type.name + "'", current_loc_);
+                    throw CodegenError("unknown base class '" + base->get().base_type.name + "'", current_loc_);
                 }
                 static const std::vector<ExprPtr> no_base_args;
                 const std::vector<ExprPtr>* base_args =
                     explicit_base_init != nullptr ? &explicit_base_init->initializer.brace_args : nullptr;
                 const Function* base_ctor =
-                    resolve_constructor_overload_exact(base->base_type.name, base_args != nullptr ? *base_args : no_base_args);
+                    resolve_constructor_overload_exact(base->get().base_type.name, base_args != nullptr ? *base_args : no_base_args);
                 if (base_ctor != nullptr) {
                     std::vector<llvm::LLVMValueRef> ctor_args =
                         codegen_call_args(base_args != nullptr ? *base_args : no_base_args, base_ctor, /*param_offset=*/1);
@@ -658,7 +658,7 @@ namespace scpp {
                     emit_default_initializers_for_class_storage(object_ptr, *base_def,
                                                                 /*initialize_virtual_interface_bases=*/false);
                 } else {
-                    throw CodegenError("base-class initializer for '" + base->base_type.name +
+                    throw CodegenError("base-class initializer for '" + base->get().base_type.name +
                                            "' does not match any constructor of that class",
                                        current_loc_);
                 }
@@ -706,19 +706,19 @@ namespace scpp {
                                                     bool initialize_virtual_interface_bases)
 {
         if (initialize_virtual_interface_bases) emit_complete_object_interface_initializers(class_def, nullptr, object_ptr);
-        if (const BaseSpecifier* base = class_def.direct_ordinary_base()) {
-            const ClassDef* base_def = find_class_def(base->base_type.name);
+        if (auto base = class_def.direct_ordinary_base()) {
+            const ClassDef* base_def = find_class_def(base->get().base_type.name);
             if (base_def == nullptr) {
-                throw CodegenError("unknown base class '" + base->base_type.name + "'", current_loc_);
+                throw CodegenError("unknown base class '" + base->get().base_type.name + "'", current_loc_);
             }
-            const Function* base_ctor = resolve_constructor_overload_exact(base->base_type.name, {});
+            const Function* base_ctor = resolve_constructor_overload_exact(base->get().base_type.name, {});
             if (base_ctor != nullptr) {
                 build_call(llvm::LLVMGetNamedFunction(module_, overload_names_.at(base_ctor).c_str()), {object_ptr});
-            } else if (!class_has_any_constructor(base->base_type.name)) {
+            } else if (!class_has_any_constructor(base->get().base_type.name)) {
                 emit_default_initializers_for_class_storage(object_ptr, *base_def, /*initialize_virtual_interface_bases=*/false);
             } else {
                 throw CodegenError("class '" + class_def.name + "' cannot be implicitly default-constructed because base class '" +
-                                      base->base_type.name + "' has no accessible default constructor",
+                                      base->get().base_type.name + "' has no accessible default constructor",
                                    current_loc_);
             }
         }

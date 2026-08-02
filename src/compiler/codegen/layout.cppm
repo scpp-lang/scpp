@@ -320,8 +320,8 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         std::vector<llvm::LLVMTypeRef> llvm_field_types;
         std::size_t offset = 0;
         std::size_t overall_align = std::max<std::size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<std::size_t>(def.resolved_alignment));
-        if (const BaseSpecifier* base = def.direct_ordinary_base()) {
-            const StructInfo& base_info = structs_.at(base->base_type.name);
+        if (auto base = def.direct_ordinary_base()) {
+            const StructInfo& base_info = structs_.at(base->get().base_type.name);
             info.field_names = base_info.field_names;
             info.field_types = base_info.field_types;
             info.field_alignments = base_info.field_alignments;

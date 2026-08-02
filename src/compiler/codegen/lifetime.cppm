@@ -243,8 +243,8 @@ namespace scpp {
         if (find_destructor(class_name) != nullptr) return true;
         const ClassDef* def = find_class_def(class_name);
         if (def == nullptr) return false;
-        if (const BaseSpecifier* base = def->direct_ordinary_base()) {
-            if (class_has_destructor_in_chain(base->base_type.name)) return true;
+        if (auto base = def->direct_ordinary_base()) {
+            if (class_has_destructor_in_chain(base->get().base_type.name)) return true;
         }
         for (const ClassDef* interface_def : collect_virtual_interface_bases_in_construction_order(*def)) {
             if (interface_def != nullptr && find_destructor(interface_def->name) != nullptr) return true;
@@ -260,8 +260,8 @@ namespace scpp {
         }
         const ClassDef* def = find_class_def(class_name);
         if (def != nullptr) {
-            if (const BaseSpecifier* base = def->direct_ordinary_base()) {
-                emit_destructor_chain_calls(base->base_type.name, object_ptr);
+            if (auto base = def->direct_ordinary_base()) {
+                emit_destructor_chain_calls(base->get().base_type.name, object_ptr);
             }
             std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*def);
             for (auto it = interface_bases.rbegin(); it != interface_bases.rend(); ++it) {

@@ -1583,12 +1583,12 @@ struct ClassDef {
     bool is_nodiscard = false;
     std::string nodiscard_reason;
 
-    [[nodiscard]] const BaseSpecifier* direct_ordinary_base() const {
+    [[nodiscard]] std::optional<std::reference_wrapper<const BaseSpecifier>> direct_ordinary_base() const {
         for (std::size_t i = 0; i < base_specifiers.size(); i++) {
             const BaseSpecifier& base = base_specifiers[i];
-            if (base.kind != BaseClassKind::Interface) return &base;
+            if (base.kind != BaseClassKind::Interface) return std::cref(base);
         }
-        return nullptr;
+        return std::nullopt;
     }
 
     [[nodiscard]] BaseSpecifier* direct_ordinary_base() {
@@ -1844,32 +1844,32 @@ public:
             return ((value + align - 1) / align) * align;
         }
 
-        [[nodiscard]] const EnumDef* find_enum(std::string_view name) const {
+        [[nodiscard]] std::optional<std::reference_wrapper<const EnumDef>> find_enum(std::string_view name) const {
             for (std::size_t i = 0; i < program.enums.size(); i++) {
                 const EnumDef& def = program.enums[i];
-                if (std::string_view{def.name} == name) return &def;
+                if (std::string_view{def.name} == name) return std::cref(def);
             }
-            return nullptr;
+            return std::nullopt;
         }
 
-        [[nodiscard]] const StructDef* find_struct(std::string_view name) const {
-            const StructDef* forward_decl = nullptr;
+        [[nodiscard]] std::optional<std::reference_wrapper<const StructDef>> find_struct(std::string_view name) const {
+            std::optional<std::reference_wrapper<const StructDef>> forward_decl;
             for (std::size_t i = 0; i < program.structs.size(); i++) {
                 const StructDef& def = program.structs[i];
                 if (std::string_view{def.name} != name) continue;
-                if (!def.is_forward_declaration) return &def;
-                if (forward_decl == nullptr) forward_decl = &def;
+                if (!def.is_forward_declaration) return std::cref(def);
+                if (!forward_decl.has_value()) forward_decl = std::cref(def);
             }
             return forward_decl;
         }
 
-        [[nodiscard]] const ClassDef* find_class(std::string_view name) const {
-            const ClassDef* forward_decl = nullptr;
+        [[nodiscard]] std::optional<std::reference_wrapper<const ClassDef>> find_class(std::string_view name) const {
+            std::optional<std::reference_wrapper<const ClassDef>> forward_decl;
             for (std::size_t i = 0; i < program.classes.size(); i++) {
                 const ClassDef& def = program.classes[i];
                 if (std::string_view{def.name} != name) continue;
-                if (!def.is_forward_declaration) return &def;
-                if (forward_decl == nullptr) forward_decl = &def;
+                if (!def.is_forward_declaration) return std::cref(def);
+                if (!forward_decl.has_value()) forward_decl = std::cref(def);
             }
             return forward_decl;
         }
@@ -1902,8 +1902,8 @@ public:
                 std::uint64_t align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
                 if ((current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference) && current.pointee &&
                     current.pointee->kind == TypeKind::Named) {
-                    const ClassDef* referent = find_class(current.pointee->name);
-                    if (referent != nullptr && referent->is_interface) {
+                    auto referent = find_class(current.pointee->name);
+                    if (referent.has_value() && referent->get().is_interface) {
                         return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes * 2, align}};
                     }
                 }
@@ -1928,46 +1928,47 @@ public:
                 if (current.name == "void") return std::optional<TypeLayoutInfo>{};
                 std::optional<TypeLayoutInfo> scalar = named_scalar_layout(current.name);
                 if (scalar.has_value()) return scalar;
-                const EnumDef* enum_def = find_enum(current.name);
-                if (enum_def != nullptr) return this->compute(enum_def->underlying_type);
+                auto enum_def = find_enum(current.name);
+                if (enum_def.has_value()) return this->compute(enum_def->get().underlying_type);
                 if (visiting_named_types.contains(current.name)) return std::optional<TypeLayoutInfo>{};
                 visiting_named_types.insert(current.name);
                 auto clear_visit = [&]() { visiting_named_types.erase(current.name); };
-                const StructDef* struct_def = find_struct(current.name);
-                if (struct_def != nullptr) {
-                    if (struct_def->is_forward_declaration) {
+                auto struct_def = find_struct(current.name);
+                if (struct_def.has_value()) {
+                    const StructDef& struct_ref = struct_def->get();
+                    if (struct_ref.is_forward_declaration) {
                         clear_visit();
                         return std::optional<TypeLayoutInfo>{};
                     }
-                    if (!struct_def->is_union) {
+                    if (!struct_ref.is_union) {
                         std::uint64_t offset = 0;
                         std::uint64_t overall_align = 1;
-                        for (std::size_t i = 0; i < struct_def->fields.size(); i++) {
-                            const StructField& field = struct_def->fields[i];
+                        for (std::size_t i = 0; i < struct_ref.fields.size(); i++) {
+                            const StructField& field = struct_ref.fields[i];
                             std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                             if (!field_layout.has_value()) {
                                 clear_visit();
                                 return std::optional<TypeLayoutInfo>{};
                             }
                             std::uint64_t field_align =
-                                struct_def->is_packed ? 1 : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
+                                struct_ref.is_packed ? 1 : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
                             offset = align_up(offset, field_align);
                             offset += field_layout->size_bytes;
                             overall_align = std::max(overall_align, field_align);
                         }
                         overall_align =
-                            struct_def->is_packed ? 1 : std::max(overall_align, struct_def->resolved_alignment);
+                            struct_ref.is_packed ? 1 : std::max(overall_align, struct_ref.resolved_alignment);
                         clear_visit();
                         return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(offset, overall_align), overall_align}};
                     }
-                    if (struct_def->fields.empty()) {
+                    if (struct_ref.fields.empty()) {
                         clear_visit();
                         return std::optional<TypeLayoutInfo>{};
                     }
                     std::uint64_t max_size = 0;
                     std::uint64_t overall_align = 1;
-                    for (std::size_t i = 0; i < struct_def->fields.size(); i++) {
-                        const StructField& field = struct_def->fields[i];
+                    for (std::size_t i = 0; i < struct_ref.fields.size(); i++) {
+                        const StructField& field = struct_ref.fields[i];
                         std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                         if (!field_layout.has_value()) {
                             clear_visit();
@@ -1975,24 +1976,25 @@ public:
                         }
                         max_size = std::max(max_size, field_layout->size_bytes);
                         std::uint64_t field_align =
-                            struct_def->is_packed ? 1 : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
+                            struct_ref.is_packed ? 1 : std::max(field_layout->abi_align_bytes, field.resolved_alignment);
                         overall_align = std::max(overall_align, field_align);
                     }
-                    overall_align = struct_def->is_packed ? 1 : std::max(overall_align, struct_def->resolved_alignment);
+                    overall_align = struct_ref.is_packed ? 1 : std::max(overall_align, struct_ref.resolved_alignment);
                     clear_visit();
                     return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(max_size, overall_align), overall_align}};
                 }
-                const ClassDef* class_def = find_class(current.name);
-                if (class_def != nullptr) {
-                    if (class_def->is_forward_declaration) {
+                auto class_def = find_class(current.name);
+                if (class_def.has_value()) {
+                    const ClassDef& class_ref = class_def->get();
+                    if (class_ref.is_forward_declaration) {
                         clear_visit();
                         return std::optional<TypeLayoutInfo>{};
                     }
                     std::uint64_t offset = 0;
                     std::uint64_t overall_align = 1;
-                    const BaseSpecifier* base = class_def->direct_ordinary_base();
-                    if (base != nullptr) {
-                        std::optional<TypeLayoutInfo> base_layout = this->compute(base->base_type);
+                    auto base = class_ref.direct_ordinary_base();
+                    if (base.has_value()) {
+                        std::optional<TypeLayoutInfo> base_layout = this->compute(base->get().base_type);
                         if (!base_layout.has_value()) {
                             clear_visit();
                             return std::optional<TypeLayoutInfo>{};
@@ -2000,12 +2002,12 @@ public:
                         offset = base_layout->size_bytes;
                         overall_align = std::max(overall_align, base_layout->abi_align_bytes);
                     }
-                    if (!class_def->is_interface && offset == 0) {
+                    if (!class_ref.is_interface && offset == 0) {
                         offset = target.pointer_size_bytes;
                         overall_align = std::max(overall_align, target.pointer_align_bytes);
                     }
-                    for (std::size_t i = 0; i < class_def->fields.size(); i++) {
-                        const ClassField& field = class_def->fields[i];
+                    for (std::size_t i = 0; i < class_ref.fields.size(); i++) {
+                        const ClassField& field = class_ref.fields[i];
                         std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                         if (!field_layout.has_value()) {
                             clear_visit();
@@ -2016,7 +2018,7 @@ public:
                         offset += field_layout->size_bytes;
                         overall_align = std::max(overall_align, field_align);
                     }
-                    overall_align = std::max(overall_align, class_def->resolved_alignment);
+                    overall_align = std::max(overall_align, class_ref.resolved_alignment);
                     clear_visit();
                     return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(offset, overall_align), overall_align}};
                 }
