@@ -299,8 +299,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (find_class_def(expr.name) != nullptr) {
                 const Function* ctor_def = nullptr;
                 if (!expr.args.empty() || expr.has_paren_init) {
-                    std::string ctor_name = expr.name + "_new";
-                    ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
+                    ctor_def = resolve_constructor_overload_exact(expr.name, expr.args);
                     if (ctor_def == nullptr) {
                         if (expr.args.empty()) {
                             return CallResult{codegen_constructed_class_value(expr.name, expr.args, nullptr, &expr), nullptr};
@@ -352,6 +351,39 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // parameter.
         const Function* callee_def =
             resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get());
+        if (callee_def == nullptr && expr.lhs != nullptr) {
+            for (const Function& fn : program_->functions) {
+                if (fn.name != callee_name || fn.is_generic_template) continue;
+                std::size_t required = fn.params.size() >= param_offset ? fn.params.size() - param_offset : 0;
+                if (expr.args.size() > required) continue;
+                if (param_offset == 1 && !receiver_matches_method_qualifier(*expr.lhs, fn)) continue;
+                bool all_match = true;
+                for (std::size_t i = 0; all_match && i < expr.args.size(); i++) {
+                    const Type& param_type = fn.params[param_offset + i].type;
+                    if (expr.args[i]->kind == ExprKind::Identifier &&
+                        param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
+                        !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
+                        auto it = locals_.find(expr.args[i]->name);
+                        all_match = it != locals_.end() && it->second.type.kind == TypeKind::Reference &&
+                                    it->second.type.is_rvalue_ref && it->second.type.pointee != nullptr &&
+                                    types_equal(*it->second.type.pointee, *param_type.pointee);
+                    } else if (param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
+                               !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
+                        std::optional<Type> arg_type = infer_type(*expr.args[i]);
+                        all_match = arg_type.has_value() &&
+                                    ((arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr &&
+                                      types_equal(*arg_type->pointee, *param_type.pointee)) ||
+                                     types_equal(*arg_type, *param_type.pointee));
+                    } else {
+                        all_match = false;
+                    }
+                }
+                if (all_match) {
+                    callee_def = &fn;
+                    break;
+                }
+            }
+        }
         if (callee_def == nullptr) {
             throw CodegenError("call to unknown function '" + callee_name + "' (resolve)",
                 current_loc_);
@@ -423,10 +455,40 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     bool Codegen::try_initialize_class_storage_from_same_type_source(const Codegen::LValue& target, const std::vector<ExprPtr>& args)
 {
+        auto same_type_moved_source_ptr = [&](const Expr& expr) -> std::optional<llvm::LLVMValueRef> {
+            if (expr.kind != ExprKind::Move || expr.lhs == nullptr) return std::nullopt;
+            std::optional<Type> moved_source_type = infer_type(*expr.lhs);
+            if (!moved_source_type.has_value()) return std::nullopt;
+            Type source_value_type =
+                moved_source_type->kind == TypeKind::Reference && moved_source_type->pointee != nullptr
+                    ? *moved_source_type->pointee
+                    : *moved_source_type;
+            if (!types_equal(source_value_type, target.type)) return std::nullopt;
+            return codegen_lvalue(*expr.lhs).ptr;
+        };
+        auto is_moved_class_source = [&](const Expr& expr) {
+            return same_type_moved_source_ptr(expr).has_value();
+        };
         if (!is_named_record_type(target.type) || args.size() != 1) {
             return false;
         }
-        if (produces_rvalue_of_type(*args[0], target.type)) {
+        if (std::optional<llvm::LLVMValueRef> moved_src_ptr = same_type_moved_source_ptr(*args[0]); moved_src_ptr.has_value()) {
+            llvm::LLVMValueRef moved_value = create_load(to_llvm_type(target.type), *moved_src_ptr, std::nullopt, "movetmp");
+            create_store(moved_value, target.ptr, target.alignment);
+            zero_initialize_storage(*moved_src_ptr, target.type, std::nullopt);
+            if (args[0]->lhs != nullptr && args[0]->lhs->kind == ExprKind::Identifier) {
+                auto local_it = locals_.find(args[0]->lhs->name);
+                if (local_it != locals_.end() && local_it->second.moved_flag != nullptr) {
+                    llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0),
+                                         local_it->second.moved_flag);
+                }
+            }
+            if (class_has_ordinary_vtable(target.type.name)) {
+                initialize_ordinary_vtable_pointer(target.type.name, target.ptr);
+            }
+            return true;
+        }
+        if (produces_rvalue_of_type(*args[0], target.type) && !is_moved_class_source(*args[0])) {
             create_store(codegen_expr(*args[0]), target.ptr, target.alignment);
             if (class_has_ordinary_vtable(target.type.name)) {
                 initialize_ordinary_vtable_pointer(target.type.name, target.ptr);
@@ -554,11 +616,24 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             codegen_copy_construct_class(temp, codegen_lvalue(expr).ptr, target_type.name);
             return llvm::LLVMBuildLoad2(builder_, llvm_type, temp, "classtransport.value");
         }
+        if (expr.kind == ExprKind::Move) {
+            std::optional<Type> moved_source_type = infer_type(*expr.lhs);
+            if (moved_source_type.has_value()) {
+                Type source_value_type =
+                    moved_source_type->kind == TypeKind::Reference && moved_source_type->pointee != nullptr
+                        ? *moved_source_type->pointee
+                        : *moved_source_type;
+                if (types_equal(source_value_type, target_type)) {
+                    return codegen_expr(expr);
+                }
+            }
+        }
         if (expr.kind == ExprKind::Lambda) {
             llvm::LLVMValueRef temp = codegen_expr(expr);
             return llvm::LLVMBuildLoad2(builder_, llvm_type, temp, "classtransport.lambda");
         }
-        if (produces_rvalue_of_type(expr, target_type)) {
+        if (produces_rvalue_of_type(expr, target_type) &&
+            !(expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref)) {
             return codegen_expr(expr);
         }
         if (allow_implicit_converting_ctor) {
@@ -676,10 +751,29 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 {
         std::vector<llvm::LLVMValueRef> result;
         auto emit_arg = [&](const Expr& arg, std::size_t i) {
-            bool param_is_reference = callee_def != nullptr && i + param_offset < callee_def->params.size() &&
-                                       callee_def->params[i + param_offset].type.kind == TypeKind::Reference;
-            const Type* ref_param_type =
-                param_is_reference ? &callee_def->params[i + param_offset].type : nullptr;
+            Type effective_param_type;
+            bool have_effective_param_type = false;
+            bool collapsed_forwarding_reference_value = false;
+            if (callee_def != nullptr && i + param_offset < callee_def->params.size()) {
+                effective_param_type = callee_def->params[i + param_offset].type;
+                if (callee_def->is_generic_template &&
+                    effective_param_type.kind == TypeKind::Named && !effective_param_type.name.empty() &&
+                    effective_param_type.template_args.empty()) {
+                    if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) {
+                        effective_param_type = *inferred;
+                    }
+                }
+                if (!callee_def->is_generic_template && effective_param_type.kind == TypeKind::Reference &&
+                    effective_param_type.is_rvalue_ref && effective_param_type.pointee != nullptr &&
+                    param_offset > 0 && callee_def->member_owner_class.empty() &&
+                    produces_rvalue_of_type(arg, *effective_param_type.pointee)) {
+                    effective_param_type = *effective_param_type.pointee;
+                    collapsed_forwarding_reference_value = true;
+                }
+                have_effective_param_type = true;
+            }
+            bool param_is_reference = have_effective_param_type && effective_param_type.kind == TypeKind::Reference;
+            const Type* ref_param_type = param_is_reference ? &effective_param_type : nullptr;
             bool param_is_interface_reference = param_is_reference && is_interface_reference_type(*ref_param_type);
             bool param_is_rvalue_reference = param_is_reference && ref_param_type->is_rvalue_ref;
             // ch05 §5.x: a *const* (non-rvalue, non-mutable) reference
@@ -702,7 +796,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 result.push_back(param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(arg)
                                                            : codegen_materialize_const_reference_source(
                                                                  arg, *ref_param_type->pointee));
-            } else if (param_is_reference) {
+            } else if (param_is_reference && !collapsed_forwarding_reference_value) {
                 // Bind the reference parameter to the argument's address
                 // rather than passing its value, exactly like a local
                 // reference's own VarDecl.
@@ -714,8 +808,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // initializer/plain assignment's identical treatment,
                 // rather than defaulting to `int`/`double` and failing
                 // the callee's own parameter-type check.
-                if (callee_def != nullptr && i + param_offset < callee_def->params.size()) {
-                    const Type& param_type = callee_def->params[i + param_offset].type;
+                if (have_effective_param_type) {
+                    const Type& param_type = effective_param_type;
                     if (is_named_record_type(param_type)) {
                         result.push_back(codegen_class_value_for_boundary(arg, param_type,
                                                                          /*allow_implicit_converting_ctor=*/true));

@@ -174,7 +174,9 @@ namespace scpp {
                                        LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args)) {
                         } else {
                             std::string ctor_name = stmt.type.name + "_new";
-                            const Function* ctor_def = resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
+                            const Function* ctor_def = stmt.type.name == "std::thread"
+                                                           ? resolve_constructor_overload_exact(stmt.type.name, stmt.ctor_args)
+                                                           : resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
                             if (ctor_def == nullptr) {
                                 const ClassDef* class_def = find_class_def(stmt.type.name);
                                 if (stmt.ctor_args.empty() && class_def == nullptr) {
@@ -209,7 +211,9 @@ namespace scpp {
                     } else if (stmt.init) {
                         if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name) &&
                             stmt.init->kind == ExprKind::Identifier) {
-                            LValue src = codegen_lvalue(*stmt.init);
+                            const Expr& source_expr =
+                                *stmt.init;
+                            LValue src = codegen_lvalue(source_expr);
                             if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
                                 llvm::LLVMValueRef ctor =
                                     llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
@@ -422,7 +426,9 @@ namespace scpp {
                     // constructors (all synthesized as "ClassName_new"),
                     // resolved by exact argument-type match exactly like
                     // any other overloaded name.
-                    const Function* ctor_def = resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
+                    const Function* ctor_def = stmt.type.name == "std::thread"
+                                                   ? resolve_constructor_overload_exact(stmt.type.name, stmt.ctor_args)
+                                                   : resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
                     if (ctor_def == nullptr) {
                         const ClassDef* class_def = find_class_def(stmt.type.name);
                         if (stmt.ctor_args.empty() && class_def == nullptr) {
@@ -477,7 +483,8 @@ namespace scpp {
                         // §6.5's own worked example -- actually run,
                         // unlike a blind byte copy); otherwise the
                         // compiler-provided recursive memberwise copy.
-                        LValue src = codegen_lvalue(*stmt.init);
+                        const Expr& source_expr = *stmt.init;
+                        LValue src = codegen_lvalue(source_expr);
                         if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
                             llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
                             build_call(ctor, {slot, src.ptr});

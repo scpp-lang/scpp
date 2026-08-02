@@ -52,6 +52,12 @@ void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, 
 
 [[nodiscard]] std::optional<std::string> direct_write_root(const Expr& expr, const Body& body) {
     switch (expr.kind) {
+        case ExprKind::IntegerLiteral:
+        case ExprKind::FloatLiteral:
+        case ExprKind::BoolLiteral:
+        case ExprKind::CharLiteral:
+        case ExprKind::StringLiteral:
+            return {};
         case ExprKind::Identifier: {
             auto it = body.local_types.find(expr.name);
             if (it != body.local_types.end() && (is_reference(it->second) || is_span(it->second))) {
@@ -544,6 +550,14 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // ranges (shortened by the liveness analysis below) from overlapping.
 [[nodiscard]] RootSet resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
                                                  const Signatures& signatures, bool report_errors) {
+    auto literal_has_no_borrow_root = [&](const Expr& candidate) {
+        return candidate.kind == ExprKind::IntegerLiteral || candidate.kind == ExprKind::FloatLiteral ||
+               candidate.kind == ExprKind::BoolLiteral || candidate.kind == ExprKind::CharLiteral ||
+               candidate.kind == ExprKind::StringLiteral;
+    };
+    if (literal_has_no_borrow_root(expr)) {
+        if (!report_errors) return {};
+    }
     switch (expr.kind) {
         case ExprKind::Identifier: {
             const std::string& bound_name = expr.name;

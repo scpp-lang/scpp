@@ -312,6 +312,9 @@ void collect_class_reachable_edges(const scpp::ClassDef& def, const std::unorder
     if (!def.name.empty()) {
         function_names.insert(def.name + "_new");
         function_names.insert(def.name + "_delete");
+        for (const std::string& known_name : known_function_names) {
+            if (known_name.starts_with(def.name + "_")) function_names.insert(known_name);
+        }
     }
     std::unordered_set<std::string> empty_bound_names;
     for (const scpp::ClassField& field : def.fields) {
@@ -1450,7 +1453,6 @@ struct GenericMethodOwnerRemap {
         if (!is_local_module_function(fn)) continue;
         if (reachable_function_indices.contains(i)) functions.push_back(&fn);
     }
-
     std::ostringstream payload(std::ios::binary);
     payload.write(SCPPM_COMPILE_TIME_AST_MAGIC.data(), static_cast<std::streamsize>(SCPPM_COMPILE_TIME_AST_MAGIC.size()));
     write_u32_le(payload, SCPPM_COMPILE_TIME_AST_VERSION);

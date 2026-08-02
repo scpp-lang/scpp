@@ -246,6 +246,9 @@ namespace scpp {
         if (index == 0 && interface_destructor_uses_raw_this(fn)) {
             return llvm::LLVMPointerTypeInContext(context_, 0);
         }
+        if (param.type.kind == TypeKind::Reference && param.type.is_rvalue_ref && param.type.pointee != nullptr) {
+            return llvm::LLVMPointerTypeInContext(context_, 0);
+        }
         return to_llvm_type(param.type);
     }
 

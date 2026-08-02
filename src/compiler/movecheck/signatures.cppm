@@ -73,6 +73,42 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
                                                                        const Body& body,
                                                                        const Signatures& signatures);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+
+[[nodiscard]] std::string describe_type_brief(const Type& type) {
+    switch (type.kind) {
+        case TypeKind::Named: {
+            std::string result = type.is_const_qualified ? "const " + type.name : type.name;
+            if (!type.template_args.empty()) {
+                result += "<";
+                for (std::size_t i = 0; i < type.template_args.size(); i++) {
+                    if (i != 0) result += ",";
+                    result += describe_type_brief(type.template_args[i]);
+                }
+                result += ">";
+            }
+            return result;
+        }
+        case TypeKind::Reference:
+            if (type.pointee == nullptr) return "&?";
+            return describe_type_brief(*type.pointee) + (type.is_rvalue_ref ? "&&" : (type.is_mutable_ref ? "&mut" : "&"));
+        case TypeKind::Pointer:
+            if (type.pointee == nullptr) return "*?";
+            return describe_type_brief(*type.pointee) + "*";
+        default: return "<type>";
+    }
+}
+
+[[nodiscard]] std::string describe_constructor_candidate(const FunctionSignature& candidate) {
+    std::string result = candidate.member_owner_class + "_new(";
+    for (std::size_t i = 1; i < candidate.param_types.size(); i++) {
+        if (i != 1) result += ", ";
+        result += describe_type_brief(candidate.param_types[i]);
+    }
+    result += ")";
+    if (candidate.is_generic_template) result += " [generic]";
+    return result;
+}
 
 [[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program);
 [[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program);
@@ -406,22 +442,65 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
                                                                      const Body& body, const Signatures& signatures) {
-    auto it = signatures.find(class_name + "_new");
-    if (it == signatures.end()) return nullptr;
+    auto is_constructor_clone_name = [&](std::string_view name) {
+        return name == class_name + "_new" ||
+               (!name.empty() && name.starts_with(class_name + "_new."));
+    };
     std::vector<const FunctionSignature*> matches;
-    for (const FunctionSignature& candidate : it->second) {
-        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-        if (!signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
-        bool all_match = true;
-        for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
-            all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                             candidate.param_types[i + 1], body,
-                                                                             signatures);
+    auto should_trace = [&] {
+        return class_name == "std::thread" && ctor_args.size() == 1;
+    };
+    for (const auto& [name, overloads] : signatures) {
+        if (!is_constructor_clone_name(name)) continue;
+        for (const FunctionSignature& candidate : overloads) {
+            if (candidate.member_owner_class != class_name) continue;
+            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+            if (!signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
+            bool all_match = true;
+            for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
+                all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
+                                                                                 candidate.param_types[i + 1], body,
+                                                                                 signatures);
+            }
+            if (all_match) matches.push_back(&candidate);
         }
-        if (all_match) matches.push_back(&candidate);
     }
     if (matches.empty()) return nullptr;
+    if (should_trace()) {
+        std::cerr << "[ctor-select] class=" << class_name << " arg0="
+                  << (infer_expr_type(*ctor_args[0], body, signatures).has_value()
+                          ? describe_type_brief(*infer_expr_type(*ctor_args[0], body, signatures))
+                          : std::string("<unknown>"))
+                  << " candidates=" << matches.size() << "\n";
+        for (const FunctionSignature* candidate : matches) {
+            std::cerr << "  candidate " << describe_constructor_candidate(*candidate) << "\n";
+        }
+    }
+    auto exact_type_match = [&](const FunctionSignature* candidate) {
+        for (std::size_t i = 0; i < ctor_args.size(); i++) {
+            std::optional<Type> arg_type = infer_expr_type(*ctor_args[i], body, signatures);
+            if (!arg_type.has_value()) return false;
+            if (!types_equal(*arg_type, candidate->param_types[i + 1])) return false;
+        }
+        return true;
+    };
+    for (const FunctionSignature* candidate : matches) {
+        if (exact_type_match(candidate)) {
+            if (should_trace()) {
+                std::cerr << "  winner exact " << describe_constructor_candidate(*candidate) << "\n";
+            }
+            return candidate;
+        }
+    }
     if (matches.size() == 1) return matches[0];
+    for (const FunctionSignature* candidate : matches) {
+        if (!candidate->is_generic_template) {
+            if (should_trace()) {
+                std::cerr << "  winner first-non-generic " << describe_constructor_candidate(*candidate) << "\n";
+            }
+            return candidate;
+        }
+    }
     auto mutable_ref_score = [&](const FunctionSignature& candidate) {
         int score = 0;
         for (std::size_t i = 0; i < ctor_args.size(); i++) {
@@ -446,7 +525,12 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
             unique_best = false;
         }
     }
-    return unique_best ? best : matches[0];
+    const FunctionSignature* winner = unique_best ? best : matches[0];
+    if (should_trace()) {
+        std::cerr << "  winner mutable-ref-score " << describe_constructor_candidate(*winner)
+                  << " unique=" << (unique_best ? "yes" : "no") << "\n";
+    }
+    return winner;
 }
 
 void ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
@@ -829,6 +913,7 @@ void validate_operator_arrow_signature(const Function& fn) {
         sig.is_generic_template = fn.is_generic_template;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
+            if (existing.is_generic_template != sig.is_generic_template) continue;
             bool same_params = existing.param_types.size() == sig.param_types.size();
             for (std::size_t i = 0; same_params && i < sig.param_types.size(); i++) {
                 same_params = types_equal(existing.param_types[i], sig.param_types[i]);
