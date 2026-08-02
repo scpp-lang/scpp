@@ -698,13 +698,15 @@ private:
                             result.thread_movable_if_shareable_expr = parse_expr();
                             expect(TokenKind::RParen, "')'");
                         } else if (ns == "scpp" && token == "lifetime") {
-                            if (!check(TokenKind::Identifier)) {
+                            if (!check(TokenKind::Identifier) && !check(TokenKind::KwThis)) {
                                 const Token& tok = peek();
                                 throw ParseError(tok.line, tok.column,
                                                  "'[[scpp::lifetime(name)]]' requires exactly one identifier argument");
                             }
-                            result.lifetime.name =
-                                std::string(expect(TokenKind::Identifier, "lifetime group name").text);
+                            Token group_tok = check(TokenKind::KwThis)
+                                                  ? expect(TokenKind::KwThis, "lifetime group name")
+                                                  : expect(TokenKind::Identifier, "lifetime group name");
+                            result.lifetime.name = std::string(group_tok.text);
                             if (!check(TokenKind::RParen)) {
                                 const Token& tok = peek();
                                 throw ParseError(tok.line, tok.column,

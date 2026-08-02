@@ -774,8 +774,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                                       std::string_view group_name) {
     if (roots.empty()) return false;
     for (const std::string& root : roots) {
-        if (root == "this" && !fn.member_owner_class.empty() && fn.name.ends_with("_operator_arrow") &&
-            fn.return_lifetime.name == group_name) {
+        if (root == "this" && !fn.member_owner_class.empty() && fn.return_lifetime.name == group_name &&
+            (fn.name.ends_with("_operator_arrow") || group_name == "this")) {
             continue;
         }
         std::optional<std::size_t> param_index = find_function_param_by_root(fn, root);

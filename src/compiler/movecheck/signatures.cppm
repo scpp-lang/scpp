@@ -730,6 +730,11 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
     return found;
 }
 
+[[nodiscard]] bool is_explicit_this_lifetime_annotation(const Function& fn) {
+    return fn.return_lifetime.name == "this" && !fn.params.empty() && fn.params[0].name == "this" &&
+           is_reference(fn.params[0].type);
+}
+
 [[nodiscard]] std::vector<std::size_t> infer_pointer_return_source_param_indices(const Function& fn) {
     if (fn.return_lifetime.present() || fn.return_type.kind != TypeKind::Pointer) return {};
     if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) return {0};
@@ -815,6 +820,7 @@ void validate_operator_arrow_signature(const Function& fn) {
 [[nodiscard]] std::vector<std::size_t> resolve_returned_lifetime_param_indices(const Function& fn) {
     validate_lifetime_annotation_placement(fn);
     if (fn.return_lifetime.present()) {
+        if (is_explicit_this_lifetime_annotation(fn)) return {0};
         if (fn.return_lifetime.is_any()) {
             throw DataflowError("function '" + fn.name +
                                     "' cannot name the reserved lifetime group 'any' in its return annotation",

@@ -1,0 +1,23 @@
+// spec §6.2/§6.5: a member function may explicitly tie its returned
+// pointer/reference lifetime to the receiver with [[scpp::lifetime(this)]],
+// generalizing the older operator->-only receiver-tied rule.
+struct Box {
+private:
+    int value{};
+public:
+    Box(int value_) : value{value_} {
+        return;
+    }
+
+    int* ptr() [[scpp::lifetime(this)]] {
+        return &this->value;
+    }
+};
+
+int main() {
+    Box box{17};
+    int* p = box.ptr();
+    [[scpp::unsafe]] {
+        return *p;
+    }
+}
