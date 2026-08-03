@@ -1,0 +1,31 @@
+// std_algorithm.scpp
+//
+// The `:algorithm` interface partition (ch11 §11.4) of the "std" module:
+// `namespace std { export ... max/min ... }`. Only the two-argument
+// `max`/`min` overloads real C++ declares in `<algorithm>` live here so
+// far; both keep C++'s own signature -- a `const T&` return bound to
+// whichever argument wins -- rather than returning by value, so no copy
+// is introduced for a class-typed `T`. That reference is tied to both
+// arguments through one shared named lifetime group (ch05 §5.13), which
+// is exactly what "returns a reference to one of its operands" means to
+// the borrow checker. std.scpp (the module's primary interface unit)
+// aggregates this partition via `export import :algorithm;`.
+export module std:algorithm;
+
+namespace std {
+
+export template<typename T>
+const T& max(const T& a [[scpp::lifetime(operands)]], const T& b [[scpp::lifetime(operands)]])
+    [[scpp::lifetime(operands)]] {
+    if (a < b) return b;
+    return a;
+}
+
+export template<typename T>
+const T& min(const T& a [[scpp::lifetime(operands)]], const T& b [[scpp::lifetime(operands)]])
+    [[scpp::lifetime(operands)]] {
+    if (b < a) return b;
+    return a;
+}
+
+} // namespace std

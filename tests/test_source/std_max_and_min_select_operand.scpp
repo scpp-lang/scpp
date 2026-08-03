@@ -1,0 +1,19 @@
+import std;
+
+int main() {
+    std::uint64_t small = 3;
+    std::uint64_t large = 9;
+    std::uint64_t larger = std::max(small, large);
+    std::uint64_t smaller = std::min(small, large);
+    std::uint64_t larger_swapped = std::max(large, small);
+    std::uint64_t smaller_swapped = std::min(large, small);
+    print_int(static_cast<int>(larger));
+    print_int(static_cast<int>(smaller));
+    print_int(static_cast<int>(larger_swapped));
+    print_int(static_cast<int>(smaller_swapped));
+    int negative = 0 - 4;
+    int positive = 6;
+    print_int(std::max(negative, positive));
+    print_int(std::min(negative, positive));
+    return 0;
+}

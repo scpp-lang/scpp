@@ -25,6 +25,10 @@ void rewrite_captured_identifiers_as_field_access(Stmt& stmt,
                                                   const std::unordered_set<std::string>& captured_names);
 void rewrite_captured_identifiers_as_field_access(Expr& expr,
                                                   const std::unordered_set<std::string>& captured_names);
+void rewrite_unqualified_member_calls(Stmt& stmt, const std::unordered_map<std::string, std::string>& instance_methods,
+                                      const std::unordered_map<std::string, std::string>& static_methods);
+void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::string, std::string>& instance_methods,
+                                      const std::unordered_map<std::string, std::string>& static_methods);
 void reject_write_to_nonmutable_by_value_capture(const Expr& expr,
                                                  const std::unordered_set<std::string>& by_value_names);
 void reject_write_to_nonmutable_by_value_capture(const Stmt& stmt,
@@ -330,6 +334,81 @@ void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unorder
             return;
         case StmtKind::Block:
             for (StmtPtr& s : stmt.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names);
+            return;
+    }
+}
+
+// ch05 §5.9: inside a member function, an unqualified call names the
+// enclosing class's own member first -- real C++ unqualified lookup
+// searches class scope before namespace scope, so `area()` inside a
+// method means `this->area()`. The parser can't know that (it only sees
+// a receiver-less Call), so the call is rewritten here, before any
+// other pass looks at it, into the spelling the rest of the pipeline
+// already resolves: `this->m(...)` for an instance method, and the
+// owner-mangled `Owner_m(...)` -- exactly what a spelled `Owner::m(...)`
+// parses to -- for a static one. Both maps are keyed by the member's
+// plain (unmangled) name; a name that is shadowed by a parameter or a
+// local, or that is explicitly `::`-qualified, is never rewritten.
+void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::string, std::string>& instance_methods,
+                                      const std::unordered_map<std::string, std::string>& static_methods) {
+    if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification &&
+        !expr.name.empty()) {
+        if (auto instance_it = instance_methods.find(expr.name); instance_it != instance_methods.end()) {
+            auto this_ref = std::make_unique<Expr>();
+            this_ref->kind = ExprKind::Identifier;
+            this_ref->loc = expr.loc;
+            this_ref->name = "this";
+            expr.lhs = std::move(this_ref);
+        } else if (auto static_it = static_methods.find(expr.name); static_it != static_methods.end()) {
+            expr.name = static_it->second;
+        }
+    }
+    if (expr.lhs) rewrite_unqualified_member_calls(*expr.lhs, instance_methods, static_methods);
+    if (expr.rhs) rewrite_unqualified_member_calls(*expr.rhs, instance_methods, static_methods);
+    if (expr.third) rewrite_unqualified_member_calls(*expr.third, instance_methods, static_methods);
+    for (ExprPtr& arg : expr.args) rewrite_unqualified_member_calls(*arg, instance_methods, static_methods);
+    if (expr.kind == ExprKind::Lambda && expr.lambda_body) {
+        rewrite_unqualified_member_calls(*expr.lambda_body, instance_methods, static_methods);
+    }
+}
+
+void rewrite_unqualified_member_calls(Stmt& stmt, const std::unordered_map<std::string, std::string>& instance_methods,
+                                      const std::unordered_map<std::string, std::string>& static_methods) {
+    switch (stmt.kind) {
+        case StmtKind::VarDecl:
+            if (stmt.init) rewrite_unqualified_member_calls(*stmt.init, instance_methods, static_methods);
+            for (ExprPtr& arg : stmt.ctor_args) rewrite_unqualified_member_calls(*arg, instance_methods, static_methods);
+            return;
+        case StmtKind::Return:
+        case StmtKind::ExprStmt:
+            if (stmt.expr) rewrite_unqualified_member_calls(*stmt.expr, instance_methods, static_methods);
+            return;
+        case StmtKind::If:
+            rewrite_unqualified_member_calls(*stmt.condition, instance_methods, static_methods);
+            rewrite_unqualified_member_calls(*stmt.then_branch, instance_methods, static_methods);
+            if (stmt.else_branch) rewrite_unqualified_member_calls(*stmt.else_branch, instance_methods, static_methods);
+            return;
+        case StmtKind::While:
+            rewrite_unqualified_member_calls(*stmt.condition, instance_methods, static_methods);
+            rewrite_unqualified_member_calls(*stmt.then_branch, instance_methods, static_methods);
+            return;
+        case StmtKind::Switch:
+            rewrite_unqualified_member_calls(*stmt.condition, instance_methods, static_methods);
+            for (SwitchCase& switch_case : stmt.switch_cases) {
+                if (switch_case.value) {
+                    rewrite_unqualified_member_calls(*switch_case.value, instance_methods, static_methods);
+                }
+                for (StmtPtr& s : switch_case.statements) {
+                    rewrite_unqualified_member_calls(*s, instance_methods, static_methods);
+                }
+            }
+            return;
+        case StmtKind::Break:
+        case StmtKind::Continue:
+        case StmtKind::Fallthrough:
+            return;
+        case StmtKind::Block:
+            for (StmtPtr& s : stmt.statements) rewrite_unqualified_member_calls(*s, instance_methods, static_methods);
             return;
     }
 }
