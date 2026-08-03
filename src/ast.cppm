@@ -82,6 +82,8 @@ class LifetimeAnnotation {
     LifetimeAnnotation() = default;
     LifetimeAnnotation(const LifetimeAnnotation&) = default;
     LifetimeAnnotation& operator=(const LifetimeAnnotation&) = default;
+    LifetimeAnnotation(LifetimeAnnotation&&) = default;
+    LifetimeAnnotation& operator=(LifetimeAnnotation&&) = default;
 
     // Empty when no `[[scpp::lifetime(...)]]` is present on this
     // declaration. Otherwise the raw identifier spelled in source --
@@ -1278,6 +1280,8 @@ class GenericTypeParam {
     GenericTypeParam() = default;
     GenericTypeParam(const GenericTypeParam&) = default;
     GenericTypeParam& operator=(const GenericTypeParam&) = default;
+    GenericTypeParam(GenericTypeParam&&) = default;
+    GenericTypeParam& operator=(GenericTypeParam&&) = default;
 
     std::string name;
     std::string concept_name; // empty = bare (type parameter only)
@@ -1303,6 +1307,8 @@ class BaseSpecifier {
     BaseSpecifier() = default;
     BaseSpecifier(const BaseSpecifier&) = default;
     BaseSpecifier& operator=(const BaseSpecifier&) = default;
+    BaseSpecifier(BaseSpecifier&&) = default;
+    BaseSpecifier& operator=(BaseSpecifier&&) = default;
 
     Type base_type;
     AccessSpecifier access = AccessSpecifier::Private;
@@ -1845,6 +1851,8 @@ class StructField {
     StructField() = default;
     StructField(const StructField&) = default;
     StructField& operator=(const StructField&) = default;
+    StructField(StructField&&) = default;
+    StructField& operator=(StructField&&) = default;
 
     SourceLocation loc;
     Type type;
@@ -1861,6 +1869,8 @@ class StructDef {
     StructDef() = default;
     StructDef(const StructDef&) = default;
     StructDef& operator=(const StructDef&) = default;
+    StructDef(StructDef&&) = default;
+    StructDef& operator=(StructDef&&) = default;
 
     SourceLocation loc;
     std::string name;
@@ -1934,6 +1944,8 @@ class ClassField {
     ClassField() = default;
     ClassField(const ClassField&) = default;
     ClassField& operator=(const ClassField&) = default;
+    ClassField(ClassField&&) = default;
+    ClassField& operator=(ClassField&&) = default;
 
     SourceLocation loc;
     Type type;
@@ -2249,6 +2261,8 @@ class ConceptDef {
     ConceptDef() = default;
     ConceptDef(const ConceptDef&) = default;
     ConceptDef& operator=(const ConceptDef&) = default;
+    ConceptDef(ConceptDef&&) = default;
+    ConceptDef& operator=(ConceptDef&&) = default;
     std::string name;
     // The template header's own type-parameter name, e.g. "T" in
     // `template<typename T>` -- recorded so the parser can recognize
@@ -2295,6 +2309,8 @@ class EnumDef {
     }
     EnumDef(const EnumDef&) = default;
     EnumDef& operator=(const EnumDef&) = default;
+    EnumDef(EnumDef&&) = default;
+    EnumDef& operator=(EnumDef&&) = default;
 
     std::string name;
     Type underlying_type;
@@ -2566,8 +2582,8 @@ public:
             if (current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference ||
                 current.kind == TypeKind::FunctionPointer) {
                 std::uint64_t align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
-                if ((current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference) && current.pointee &&
-                    current.pointee->kind == TypeKind::Named) {
+                if ((current.kind == TypeKind::Pointer || current.kind == TypeKind::Reference) &&
+                    current.pointee != nullptr && current.pointee->kind == TypeKind::Named) {
                     std::optional<std::reference_wrapper<const ClassDef>> referent{find_class(current.pointee->name)};
                     if (referent.has_value() && referent->get().is_interface) {
                         TypeLayoutInfo layout{target.pointer_size_bytes * 2, align};
@@ -2587,7 +2603,7 @@ public:
                 return std::optional<TypeLayoutInfo>{layout};
             }
             if (current.kind == TypeKind::Array) {
-                if (!current.element || current.array_size < 0) return std::optional<TypeLayoutInfo>{};
+                if (current.element == nullptr || current.array_size < 0) return std::optional<TypeLayoutInfo>{};
                 std::optional<TypeLayoutInfo> element = this->compute(*current.element);
                 if (!element.has_value()) return std::optional<TypeLayoutInfo>{};
                 TypeLayoutInfo layout{element->size_bytes * static_cast<std::uint64_t>(current.array_size),

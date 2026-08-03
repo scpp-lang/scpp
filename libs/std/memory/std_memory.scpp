@@ -122,6 +122,13 @@ void* __shared_ptr_detail_erase(T* ptr) {
     }
 }
 
+template<typename T>
+T* __shared_ptr_detail_unerase(void* erased) {
+    [[scpp::unsafe]] {
+        return static_cast<T*>(erased);
+    }
+}
+
 class __shared_handle {
 private:
     void* control_{};
@@ -240,6 +247,17 @@ public:
     shared_ptr(T* ptr) {
         this->ptr_ = ptr;
         this->handle_.reset(std::__shared_ptr_detail_erase<T>(ptr), std::__shared_ptr_detail_destroy<T>);
+        return;
+    }
+
+    // Copying a shared_ptr is its whole point, so it is spelled out
+    // explicitly: this class declares its own copy-assignment operator
+    // just below, and scpp (unlike real C++, which only deprecates the
+    // implicit one) then provides no implicit copy *constructor* at all.
+    shared_ptr(const shared_ptr<T>& other) {
+        __shared_handle copied = other.__copy_handle();
+        this->handle_.copy_from(copied);
+        this->ptr_ = std::__shared_ptr_detail_unerase<T>(this->handle_.ptr_);
         return;
     }
 

@@ -1372,7 +1372,8 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 }
                 std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
                 std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
-                if (then_type.has_value() && else_type.has_value() && !types_equal(*then_type, *else_type)) {
+                if (then_type.has_value() && else_type.has_value() &&
+                    !conditional_arm_types_agree(*expr.rhs, *then_type, *expr.third, *else_type)) {
                     throw DataflowError("conditional operator requires both arms to have the same type",
                                         state.current_loc);
                 }

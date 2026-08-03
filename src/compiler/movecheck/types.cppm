@@ -45,6 +45,8 @@ namespace scpp {
 [[nodiscard]] bool pointer_supports_arithmetic(const Type& type);
 [[nodiscard]] std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs);
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type);
+[[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& then_type, const Expr& else_arm,
+                                               const Type& else_type);
 
 [[nodiscard]] std::string enclosing_class_name(const Body& body);
 [[nodiscard]] bool is_interface_representation_type(const Type& type, const Program& program);
@@ -318,6 +320,34 @@ namespace {
         case ExprKind::CharLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "char";
         default: return false;
     }
+}
+
+// ch05/ch06: `?:` yields a *value*, and its two arms have to agree on
+// that value's type. They are allowed to disagree in exactly the two
+// ways a binary operator's own operands already may (see
+// binary_expr_has_compatible_types, which this deliberately mirrors):
+//
+//   - a *scalar lvalue* arm contributes its referent type, since the
+//     conditional is a value rather than a place -- `packed ? size :
+//     std::max(a, b)` agrees even though `std::max` returns `const
+//     std::uint64_t&`. Deliberately restricted to scalars: decaying a
+//     class-typed reference arm to a value would be a silent copy,
+//     which scpp never performs implicitly.
+//   - an untyped numeric/bool/char literal arm adopts the other arm's
+//     type, the same rule literal_compatible_with_type applies to a
+//     binary operand -- `packed ? 1 : alignment`.
+//
+// Everything else still has to match exactly: scpp has no implicit
+// scalar conversions (ch06).
+[[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& then_type, const Expr& else_arm,
+                                               const Type& else_type) {
+    if (types_equal(then_type, else_type)) return true;
+    const Type& then_value = binary_operand_type(then_type);
+    const Type& else_value = binary_operand_type(else_type);
+    if (is_scalar_named_type(then_value) && is_scalar_named_type(else_value) && types_equal(then_value, else_value)) {
+        return true;
+    }
+    return literal_compatible_with_type(then_arm, else_value) || literal_compatible_with_type(else_arm, then_value);
 }
 [[nodiscard]] std::string enclosing_class_name(const Body& body) {
     auto it = body.local_types.find("this");

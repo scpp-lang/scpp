@@ -881,6 +881,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     llvm::LLVMValueRef Codegen::bool_to_i1(llvm::LLVMValueRef v)
 {
+        require_bool_representation(v);
+        return llvm::LLVMBuildTrunc(builder_, v, llvm::LLVMInt1TypeInContext(context_), "tobool");
+    }
+
+
+    void Codegen::require_bool_representation(llvm::LLVMValueRef v)
+{
         if (!(llvm::LLVMGetTypeKind(llvm::LLVMTypeOf(v)) == llvm::LLVMIntegerTypeKind && llvm::LLVMGetIntTypeWidth(llvm::LLVMTypeOf(v)) == 8)) {
             throw CodegenError(
                 "expected a 'bool' value here (e.g. an if/while condition, or an '&&'/'||' operand); "
@@ -888,7 +895,6 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 "(spec ch06)",
                 current_loc_);
         }
-        return llvm::LLVMBuildTrunc(builder_, v, llvm::LLVMInt1TypeInContext(context_), "tobool");
     }
 
 
@@ -1107,6 +1113,43 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return llvm::LLVMBuildGlobalString(builder_, expr.name.c_str(), "str");
 
             case ExprKind::Conditional: {
+                // ch05/ch06: the conditional yields a *value*, so each arm
+                // is generated against the one type both agree on (see
+                // movecheck's conditional_arm_types_agree, which decides
+                // the very same question): an untyped literal arm is
+                // materialized at the other arm's width, and a scalar
+                // lvalue arm (e.g. a `const T&`-returning call) is read
+                // through as an ordinary value. Falls back to plain
+                // codegen_expr whenever neither arm has an inferable type.
+                auto arm_value_type = [&](const Expr& arm) -> std::optional<Type> {
+                    std::optional<Type> arm_type = infer_type(arm);
+                    if (!arm_type.has_value()) return std::nullopt;
+                    if (arm_type->kind == TypeKind::Reference && arm_type->pointee != nullptr) return *arm_type->pointee;
+                    return arm_type;
+                };
+                std::optional<Type> then_type = arm_value_type(*expr.rhs);
+                std::optional<Type> else_type = arm_value_type(*expr.third);
+                auto is_untyped_numeric_literal = [](const Expr& arm) {
+                    const Expr& literal = arm.kind == ExprKind::Unary && arm.unary_op == UnaryOp::Neg && arm.lhs != nullptr
+                                              ? *arm.lhs
+                                              : arm;
+                    return literal.kind == ExprKind::IntegerLiteral || literal.kind == ExprKind::FloatLiteral;
+                };
+                auto is_scalar_target = [](const std::optional<Type>& type) {
+                    return type.has_value() && type->kind == TypeKind::Named && is_scalar_type_name(type->name);
+                };
+                std::optional<Type> common_type;
+                if (then_type.has_value() && else_type.has_value() && types_equal(*then_type, *else_type)) {
+                    common_type = then_type;
+                } else if (is_scalar_target(then_type) && is_untyped_numeric_literal(*expr.third)) {
+                    common_type = then_type;
+                } else if (is_scalar_target(else_type) && is_untyped_numeric_literal(*expr.rhs)) {
+                    common_type = else_type;
+                }
+                auto codegen_arm = [&](const Expr& arm) {
+                    return common_type.has_value() ? codegen_value_for_target(arm, *common_type) : codegen_expr(arm);
+                };
+
                 llvm::LLVMValueRef cond = codegen_contextual_bool_i1(*expr.lhs);
                 llvm::LLVMValueRef current_function = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
                 llvm::LLVMBasicBlockRef then_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "cond.then");
@@ -1115,12 +1158,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 llvm::LLVMBuildCondBr(builder_, cond, then_block, else_block);
 
                 llvm::LLVMPositionBuilderAtEnd(builder_, then_block);
-                llvm::LLVMValueRef then_value = codegen_expr(*expr.rhs);
+                llvm::LLVMValueRef then_value = codegen_arm(*expr.rhs);
                 llvm::LLVMBuildBr(builder_, merge_block);
                 llvm::LLVMBasicBlockRef then_end = llvm::LLVMGetInsertBlock(builder_);
 
                 llvm::LLVMPositionBuilderAtEnd(builder_, else_block);
-                llvm::LLVMValueRef else_value = codegen_expr(*expr.third);
+                llvm::LLVMValueRef else_value = codegen_arm(*expr.third);
                 llvm::LLVMBuildBr(builder_, merge_block);
                 llvm::LLVMBasicBlockRef else_end = llvm::LLVMGetInsertBlock(builder_);
 
@@ -2650,6 +2693,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
         llvm::LLVMPositionBuilderAtEnd(builder_, rhs_block);
         llvm::LLVMValueRef rhs = codegen_contextual_bool_value(*expr.rhs);
+        require_bool_representation(rhs);
         llvm::LLVMBasicBlockRef rhs_end_block = llvm::LLVMGetInsertBlock(builder_);
         llvm::LLVMBuildBr(builder_, merge_block);
 
