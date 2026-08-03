@@ -22,6 +22,11 @@ extern "C" {
 
 void* scpp_string_new(const char* s) { return new std::string(s != nullptr ? s : ""); }
 
+void* scpp_string_new_sized(const char* s, std::size_t n) {
+    if (s == nullptr) return new std::string();
+    return new std::string(s, n);
+}
+
 void* scpp_string_copy(const void* handle) { return new std::string(*as_string(handle)); }
 
 void scpp_string_delete(void* handle) { delete as_string(handle); }

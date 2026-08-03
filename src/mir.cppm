@@ -144,6 +144,7 @@ struct BasicBlock {
 // pop_scope in codegen.cppm).
 struct Body {
     std::vector<BasicBlock> blocks;
+    StmtPtr owned_body;
     std::unordered_map<std::string, Type> local_types;
     std::vector<std::string> locals_in_order;
     // Block-scope `static` locals: their names still participate in
@@ -187,7 +188,9 @@ namespace {
 
 class MirBuilder {
 public:
-    explicit MirBuilder(const Function& fn) : fn_(fn) {}
+    explicit MirBuilder(const Function& fn) : fn_(fn) {
+        body_.owned_body = deep_clone_stmt(*fn.body);
+    }
 
     Body build() {
         body_.function_owning_module = fn_.owning_module;
@@ -199,7 +202,7 @@ public:
             declare_local(param.name, param.type);
         }
         current_block_ = new_block();
-        lower_stmt(*fn_.body);
+        lower_stmt(*body_.owned_body);
         insert_drops_before_returns();
         return std::move(body_);
     }
