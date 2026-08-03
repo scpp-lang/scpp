@@ -93,9 +93,14 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs);
 [[nodiscard]] bool is_program_lifetime_root(std::string_view root);
 
 bool DataflowState::operator==(const DataflowState& other) const {
+    if (parameter_lifetimes.size() != other.parameter_lifetimes.size()) return false;
+    for (const auto& [name, lifetime] : parameter_lifetimes) {
+        auto it = other.parameter_lifetimes.find(name);
+        if (it == other.parameter_lifetimes.end()) return false;
+        if (lifetime.name != it->second.name) return false;
+    }
     return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
            local_lifetime_sources == other.local_lifetime_sources &&
-           parameter_lifetimes == other.parameter_lifetimes &&
            suspended_reborrows == other.suspended_reborrows &&
            closure_capture_borrows == other.closure_capture_borrows &&
            unsafe_depth == other.unsafe_depth && current_class == other.current_class &&

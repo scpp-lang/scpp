@@ -2633,7 +2633,10 @@ private:
             return;
         }
         engine_.mark_type_incomplete(name);
-        if (auto base = def->direct_ordinary_base()) resolve_array_bounds_type_dependencies(base->base_type);
+        if (auto base = def->direct_ordinary_base()) {
+            Type base_type = base->get().base_type;
+            resolve_array_bounds_type_dependencies(base_type);
+        }
         for (ClassField& field : def->fields) resolve_array_bounds_type_dependencies(field.type);
         engine_.mark_type_complete(name);
         array_bounds_resolving_classes_.erase(name);
@@ -2819,7 +2822,10 @@ private:
             return;
         }
         engine_.mark_type_incomplete(name);
-        if (auto base = def->direct_ordinary_base()) resolve_type_dependencies(base->base_type);
+        if (auto base = def->direct_ordinary_base()) {
+            Type base_type = base->get().base_type;
+            resolve_type_dependencies(base_type);
+        }
         for (ClassField& field : def->fields) resolve_type_dependencies(field.type);
         for (ClassField& field : def->fields) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);

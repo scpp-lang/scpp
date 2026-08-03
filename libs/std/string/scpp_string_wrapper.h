@@ -27,6 +27,7 @@ extern "C" {
 // opaque handle; ownership transfers to the caller, who must eventually
 // pass it to scpp_string_delete exactly once.
 void* scpp_string_new(const char* s);
+void* scpp_string_new_sized(const char* s, std::size_t n);
 
 // Allocates a new std::string whose content is a deep copy of `handle`'s
 // string value. Returns a distinct owning handle that the caller must later

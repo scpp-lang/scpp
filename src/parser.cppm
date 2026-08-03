@@ -523,7 +523,7 @@ private:
             if (capture.init) cloned.init = clone_expr_tree(*capture.init);
             clone->lambda_captures.push_back(std::move(cloned));
         }
-        clone->lambda_body.reset();
+        if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
         return clone;
     }
 
@@ -1370,6 +1370,7 @@ private:
         clone->lambda_is_mutable = expr.lambda_is_mutable;
         if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
         clone->type = expr.type;
+        clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
         clone->has_paren_init = expr.has_paren_init;
         clone->destroy_through_pointer = expr.destroy_through_pointer;
         clone->through_arrow = expr.through_arrow;
@@ -1394,6 +1395,8 @@ private:
         clone->if_mode = stmt.if_mode;
         if (stmt.then_branch) clone->then_branch = clone_stmt(*stmt.then_branch);
         if (stmt.else_branch) clone->else_branch = clone_stmt(*stmt.else_branch);
+        clone->switch_cases.clear();
+        for (const SwitchCase& switch_case : stmt.switch_cases) clone->switch_cases.push_back(switch_case);
         clone->statements.clear();
         for (const StmtPtr& s : stmt.statements) clone->statements.push_back(clone_stmt(*s));
         clone->is_unsafe = stmt.is_unsafe;
@@ -3235,6 +3238,7 @@ private:
         clone.nodiscard_reason = fn.nodiscard_reason;
         clone.is_compile_time_dependency = fn.is_compile_time_dependency;
         clone.skip_imported_body_verification = fn.skip_imported_body_verification;
+        clone.eval_mode = fn.eval_mode;
         clone.has_varargs = fn.has_varargs;
         clone.method_requires_concept = fn.method_requires_concept;
         clone.is_generic_template = fn.is_generic_template;
@@ -3250,7 +3254,6 @@ private:
         clone.is_pure = fn.is_pure;
         clone.is_defaulted = fn.is_defaulted;
         clone.expects_out_of_line_definition = false;
-        clone.eval_mode = fn.eval_mode;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
         clone.is_exported = is_reexport && fn.is_exported;

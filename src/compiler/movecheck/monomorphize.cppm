@@ -173,8 +173,10 @@ public:
             Body body = build_mir(program_.functions[i]);
             body.program = &program_;
             bool allow_generic_monomorphization = !program_.functions[i].is_generic_template;
-            walk_stmt(*program_.functions[i].body, body, this_type_of(program_.functions[i]),
-                      allow_generic_monomorphization);
+            std::optional<Type> enclosing_this_type = this_type_of(program_.functions[i]);
+            StmtPtr walk_body = deep_clone_stmt(*program_.functions[i].body);
+            walk_stmt(*walk_body, body, enclosing_this_type, allow_generic_monomorphization);
+            program_.functions[i].body = std::move(walk_body);
         }
     }
 
@@ -1660,7 +1662,11 @@ private:
             // program_.functions/classes/structs reallocating elsewhere
             // -- so resolving Types *inside* it can safely mutate in
             // place (see resolve_generic_types_in_stmt/_in_expr).
-            if (program_.functions[i].body) resolve_generic_types_in_stmt(*program_.functions[i].body);
+            if (program_.functions[i].body) {
+                StmtPtr body_clone = deep_clone_stmt(*program_.functions[i].body);
+                resolve_generic_types_in_stmt(*body_clone);
+                program_.functions[i].body = std::move(body_clone);
+            }
         }
     }
 
@@ -1708,7 +1714,11 @@ private:
         expr.type = resolve_generic_type(expr.type, expr.loc);
         if (expr.lhs) resolve_generic_types_in_expr(*expr.lhs);
         if (expr.rhs) resolve_generic_types_in_expr(*expr.rhs);
+        if (expr.third) resolve_generic_types_in_expr(*expr.third);
         for (ExprPtr& arg : expr.args) resolve_generic_types_in_expr(*arg);
+        for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            if (!arg.is_type && arg.value) resolve_generic_types_in_expr(*arg.value);
+        }
         for (Param& p : expr.lambda_params) p.type = resolve_generic_type(p.type, expr.loc);
         for (LambdaCapture& c : expr.lambda_captures) {
             if (c.init) resolve_generic_types_in_expr(*c.init);
@@ -4249,7 +4259,11 @@ private:
 
         if (expr.lhs) walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization);
         if (expr.rhs) walk_expr(*expr.rhs, body, enclosing_this_type, allow_generic_monomorphization);
+        if (expr.third) walk_expr(*expr.third, body, enclosing_this_type, allow_generic_monomorphization);
         for (ExprPtr& arg : expr.args) walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
+        for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
+            if (!arg.is_type && arg.value) walk_expr(*arg.value, body, enclosing_this_type, allow_generic_monomorphization);
+        }
         if (expr.kind == ExprKind::New && expr.type.kind == TypeKind::Named) {
             maybe_instantiate_generic_constructor_overloads(expr.type.name, expr.args, body, expr.loc);
         }

@@ -138,6 +138,7 @@ namespace {
             clone->explicit_template_args.push_back(std::move(cloned_arg));
         }
         clone->type = expr.type;
+        clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
         clone->lambda_blanket_mode = expr.lambda_blanket_mode;
         for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
         clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
