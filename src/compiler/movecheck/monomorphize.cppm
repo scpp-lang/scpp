@@ -17,6 +17,28 @@ namespace scpp {
 
 void monomorphize_generics_impl(Program& program);
 
+// ch05 §5.14: monomorphization pushes freshly synthesized definitions
+// into program_.functions/classes/structs *while* walking an existing
+// definition's own body, so every raw Stmt*/Expr* the walk is holding has
+// to survive the resulting vector growth. It only does when growth
+// *moves* its elements: these AST node types are all deliberately
+// copyable, and their copy constructors deep-clone (Function's clones its
+// whole body), so a vector that reallocates by copy would silently free
+// the very tree being walked. std::vector only moves when the element
+// type is nothrow-move-constructible, hence this guard -- adding a
+// user-declared copy constructor/destructor to any of these without also
+// declaring the move operations suppresses the move constructor and
+// reintroduces that use-after-free.
+static_assert(std::is_nothrow_move_constructible_v<Function>);
+static_assert(std::is_nothrow_move_constructible_v<ClassDef>);
+static_assert(std::is_nothrow_move_constructible_v<StructDef>);
+static_assert(std::is_nothrow_move_constructible_v<EnumDef>);
+static_assert(std::is_nothrow_move_constructible_v<ConceptDef>);
+static_assert(std::is_nothrow_move_constructible_v<Stmt>);
+static_assert(std::is_nothrow_move_constructible_v<Expr>);
+static_assert(std::is_nothrow_move_constructible_v<Type>);
+static_assert(std::is_nothrow_move_constructible_v<Param>);
+
 class Monomorphizer {
 public:
     explicit Monomorphizer(Program& program) : program_(program) {

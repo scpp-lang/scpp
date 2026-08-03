@@ -814,9 +814,21 @@ namespace {
                    fn.name.starts_with(callee_name + ".");
         };
         auto is_dotted_clone = [&](const Function& fn) {
-            return fn.name.ends_with(callee_name) &&
-                   fn.name.size() > callee_name.size() &&
-                   fn.name[fn.name.size() - callee_name.size() - 1] == '.';
+            if (!fn.name.ends_with(callee_name) || fn.name.size() <= callee_name.size()) return false;
+            std::size_t separator = fn.name.size() - callee_name.size() - 1;
+            if (fn.name[separator] != '.') return false;
+            // ch05 §5.14: the text before that '.' has to be this
+            // function's own owner class -- the shape
+            // matches_receiver_method_name below validates
+            // ("Owner.Owner_member"). Without the check, a *different*
+            // class's monomorphized instantiation is mistaken for a clone
+            // of `callee_name` whenever its own mangled type argument
+            // happens to end with it: `std::shared_ptr<Bar>`'s own
+            // constructor is named `std::shared_ptr.Bar_new`, which ends
+            // with ".Bar_new" and so used to satisfy a plain `new Bar()`
+            // looking for `Bar_new` -- silently running shared_ptr's
+            // constructor over a Bar-sized allocation.
+            return fn.name.compare(0, separator, fn.member_owner_class) == 0;
         };
         auto matches_receiver_method_name = [&](const Function& fn) {
             if (!receiver_expr || param_offset != 1) return true;

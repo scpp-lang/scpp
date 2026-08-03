@@ -1,0 +1,43 @@
+import std;
+
+class Tracker {
+private:
+    int* destroyed_{};
+
+public:
+    Tracker(int* destroyed) {
+        this->destroyed_ = destroyed;
+        return;
+    }
+
+    virtual ~Tracker() {
+        [[scpp::unsafe]] {
+            *this->destroyed_ = *this->destroyed_ + 1;
+        }
+        return;
+    }
+
+    int value() const {
+        return 41;
+    }
+};
+
+int main() {
+    int destroyed = 0;
+    std::shared_ptr<Tracker> owner = std::make_shared<Tracker>(&destroyed);
+    {
+        std::shared_ptr<Tracker> copy{owner};
+        print_int(owner.use_count());
+        print_int(copy.operator*().value());
+        std::vector<std::shared_ptr<Tracker>> holders{};
+        holders.push_back(copy);
+        std::vector<std::shared_ptr<Tracker>> cloned{holders};
+        print_int(owner.use_count());
+        print_int(static_cast<int>(cloned.size()));
+    }
+    print_int(owner.use_count());
+    print_int(destroyed);
+    owner.reset();
+    print_int(destroyed);
+    return 0;
+}

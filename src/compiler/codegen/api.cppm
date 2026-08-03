@@ -854,6 +854,14 @@ private:
     // width check). Left as a known limitation rather than expanded scope.
     llvm::LLVMValueRef bool_to_i1(llvm::LLVMValueRef v);
 
+    // The same "is this actually a bool?" check bool_to_i1 performs,
+    // without the truncation -- for a value that stays in the i8 bool
+    // representation but still has to be one, notably the right-hand
+    // operand of `&&`/`||` (codegen_short_circuit feeds it straight into
+    // an i8 PHI rather than branching on it, so nothing else would ever
+    // look at its type).
+    void require_bool_representation(llvm::LLVMValueRef v);
+
     // The inverse of bool_to_i1: widens an i1 (an icmp result, or another
     // logical operation already in the 1-bit domain) back up to the i8
     // representation every ordinary bool value uses -- the choke point
