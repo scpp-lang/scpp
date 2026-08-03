@@ -7632,13 +7632,89 @@ int main() {
     }
 
     {
+        std::string case_name = "reference_wrapper_const_class_target_binds_const_reference_argument";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+class Item {
+public:
+    int value = 0;
+    virtual ~Item() = default;
+};
+std::optional<std::reference_wrapper<const Item>> wrap(const Item& item) {
+    return std::optional<std::reference_wrapper<const Item>>{std::reference_wrapper<const Item>{item}};
+}
+int main() {
+    Item item{};
+    item.value = 9;
+    std::optional<std::reference_wrapper<const Item>> wrapped = wrap(item);
+    if (!wrapped.has_value()) return 1;
+    print_int(wrapped->get().value);
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "9\n",
+               case_name + ": expected stdout '9\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "const_qualified_type_argument_makes_substituted_reference_read_only";
+        cases_run++;
+        bool threw = false;
+        try {
+            (void)compile_and_run(
+                R"SCPP(import std;
+template<typename T>
+class Mutator {
+public:
+    Mutator(T& value) { value = 42; return; }
+    virtual ~Mutator() = default;
+};
+int main() {
+    int value = 1;
+    Mutator<const int> mutator{value};
+    return value;
+}
+)SCPP",
+                case_name);
+        } catch (const scpp::DataflowError&) {
+            threw = true;
+        }
+        expect(threw, case_name + ": expected a write through 'T&' with 'T = const int' to be rejected");
+    }
+
+    {
+        std::string case_name = "const_qualified_type_argument_deduces_through_pointer_parameter";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+template<typename T>
+int size_of_pointee(T* value) {
+    return static_cast<int>(sizeof(T));
+}
+int main() {
+    int value = 3;
+    const int* readonly = &value;
+    print_int(size_of_pointee(readonly));
+    return 0;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+        expect(result.stdout_text == "4\n",
+               case_name + ": expected stdout '4\\n', got '" + result.stdout_text + "'");
+    }
+
+    {
         std::string case_name = "reference_wrapper_optional_lifetime_annotation_supports_pointer_return";
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "reference_wrapper_optional_lifetime_annotation_supports_pointer_return_exe";
         scpp::compile_to_executable(
             R"SCPP(import std;
-int* find_visible(std::optional<std::reference_wrapper<const int [[scpp::lifetime(source)]]>> source)
+const int* find_visible(std::optional<std::reference_wrapper<const int [[scpp::lifetime(source)]]>> source)
     [[scpp::lifetime(source)]] {
     return &source->get();
 }

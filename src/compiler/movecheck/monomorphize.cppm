@@ -476,6 +476,58 @@ private:
         return collapsed;
     }
 
+    // ch05 §5.7/§5.14: scpp spells a read-only borrow/view as a flag on
+    // the *referring* type, never as a `const` qualifier on its pointee
+    // -- parse_type builds `const T&` as Reference{is_mutable_ref=false,
+    // pointee=T}, `const T*` as Pointer{is_mutable_pointee=false,
+    // pointee=T}, and `std::span<const T>` as Span{is_mutable_ref=false,
+    // pointee=T}. Substituting a const-qualified template argument
+    // (`T = const Foo`) into a pattern like `T&`/`T*`/`std::span<T>`
+    // therefore has to fold that argument's own top-level `const` into
+    // the referring type's flag; leaving it stranded on the pointee
+    // produces a type no other pass recognizes -- it still reads as a
+    // *mutable* borrow to the borrow checker, and compares unequal
+    // (types_equal checks is_const_qualified) to the identically-spelled
+    // `const Foo&` an argument or overload candidate actually carries.
+    // Only applied when substitution is what introduced the qualifier,
+    // so an already-const-qualified pointee (e.g. a const method's own
+    // `this`) keeps whatever shape its producer chose.
+    [[nodiscard]] static Type absorb_substituted_pointee_const(Type type) {
+        if (!type.pointee || !type.pointee->is_const_qualified) return type;
+        if (type.kind == TypeKind::Reference) {
+            if (type.is_rvalue_ref) return type;
+            type.is_mutable_ref = false;
+        } else if (type.kind == TypeKind::Span) {
+            type.is_mutable_ref = false;
+        } else if (type.kind == TypeKind::Pointer) {
+            type.is_mutable_pointee = false;
+        } else {
+            return type;
+        }
+        Type unqualified_pointee = *type.pointee;
+        unqualified_pointee.is_const_qualified = false;
+        type.pointee = std::make_shared<Type>(std::move(unqualified_pointee));
+        return type;
+    }
+
+    // True when substituting into `original`'s pointee is what turned it
+    // const-qualified -- see absorb_substituted_pointee_const above.
+    [[nodiscard]] static bool substitution_introduced_pointee_const(const Type& original, const Type& substituted) {
+        return original.pointee != nullptr && substituted.pointee != nullptr &&
+               !original.pointee->is_const_qualified && substituted.pointee->is_const_qualified;
+    }
+
+    // The exact inverse of absorb_substituted_pointee_const, for template
+    // *argument deduction*: deducing the pattern `T*`/`T&`/`std::span<T>`
+    // against a read-only concrete type (`const A*`, `const A&`,
+    // `std::span<const A>`) has to hand the pattern's own type parameter
+    // the const-qualified `A` that, re-substituted, reproduces exactly
+    // that concrete type (ch05 §5.11/§5.14).
+    [[nodiscard]] static Type const_qualified(Type type) {
+        type.is_const_qualified = true;
+        return type;
+    }
+
     [[nodiscard]] Type substitute_type_param(const Type& type, const std::string& param_name,
                                              const Type& replacement) {
         if (type.kind == TypeKind::Named && type.name == param_name) return replacement;
@@ -485,6 +537,9 @@ private:
         }
         if (result.pointee) {
             result.pointee = std::make_shared<Type>(substitute_type_param(*result.pointee, param_name, replacement));
+            if (substitution_introduced_pointee_const(type, result)) {
+                result = absorb_substituted_pointee_const(std::move(result));
+            }
         }
         if (result.element) {
             result.element = std::make_shared<Type>(substitute_type_param(*result.element, param_name, replacement));
@@ -533,6 +588,9 @@ private:
         result.template_args = std::move(expanded_template_args);
         if (result.pointee) {
             result.pointee = std::make_shared<Type>(substitute_type_pack(*result.pointee, pack_name, pack_elems));
+            if (substitution_introduced_pointee_const(type, result)) {
+                result = absorb_substituted_pointee_const(std::move(result));
+            }
         }
         if (result.element) {
             result.element = std::make_shared<Type>(substitute_type_pack(*result.element, pack_name, pack_elems));
@@ -1005,6 +1063,9 @@ private:
         if (result.pointee) {
             result.pointee =
                 std::make_shared<Type>(instantiate_type_pattern(*result.pointee, replacements, pack_replacements));
+            if (substitution_introduced_pointee_const(type, result)) {
+                result = absorb_substituted_pointee_const(std::move(result));
+            }
         }
         if (result.element) {
             result.element =
@@ -2758,17 +2819,34 @@ private:
                 return deduce_type_list(pattern.template_args, *concrete_template_args);
             }
             case TypeKind::Pointer:
-                return pattern.is_mutable_pointee == concrete.is_mutable_pointee && pattern.pointee && concrete.pointee &&
-                       deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
+                if (!pattern.pointee || !concrete.pointee) return false;
+                if (pattern.is_mutable_pointee != concrete.is_mutable_pointee) {
+                    if (!pattern.is_mutable_pointee) return false;
+                    return deduce_template_bindings_from_type_pattern(
+                        *pattern.pointee, const_qualified(*concrete.pointee), template_params, type_bindings,
+                        value_bindings, pack_bindings);
+                }
+                return deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
                                                                   type_bindings, value_bindings, pack_bindings);
             case TypeKind::Reference:
-                return pattern.is_mutable_ref == concrete.is_mutable_ref &&
-                       pattern.is_rvalue_ref == concrete.is_rvalue_ref && pattern.pointee && concrete.pointee &&
-                       deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
+                if (pattern.is_rvalue_ref != concrete.is_rvalue_ref || !pattern.pointee || !concrete.pointee) return false;
+                if (!pattern.is_rvalue_ref && pattern.is_mutable_ref != concrete.is_mutable_ref) {
+                    if (!pattern.is_mutable_ref) return false;
+                    return deduce_template_bindings_from_type_pattern(
+                        *pattern.pointee, const_qualified(*concrete.pointee), template_params, type_bindings,
+                        value_bindings, pack_bindings);
+                }
+                return deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
                                                                   type_bindings, value_bindings, pack_bindings);
             case TypeKind::Span:
-                return pattern.is_mutable_ref == concrete.is_mutable_ref && pattern.pointee && concrete.pointee &&
-                       deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
+                if (!pattern.pointee || !concrete.pointee) return false;
+                if (pattern.is_mutable_ref != concrete.is_mutable_ref) {
+                    if (!pattern.is_mutable_ref) return false;
+                    return deduce_template_bindings_from_type_pattern(
+                        *pattern.pointee, const_qualified(*concrete.pointee), template_params, type_bindings,
+                        value_bindings, pack_bindings);
+                }
+                return deduce_template_bindings_from_type_pattern(*pattern.pointee, *concrete.pointee, template_params,
                                                                   type_bindings, value_bindings, pack_bindings);
             case TypeKind::Array:
                 return pattern.array_size == concrete.array_size && pattern.element && concrete.element &&
