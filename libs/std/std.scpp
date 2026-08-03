@@ -2,9 +2,14 @@
 //
 // scpp's "std" module: the primary interface unit. Concrete library
 // surface area lives in dedicated interface partitions, which this file
-// simply re-exports for consumers of `import std;`.
+// simply re-exports for consumers of `import std;`. The order these are
+// listed in is meaningless -- `:algorithm` sits first deliberately,
+// because that is the position that used to trip constructor selection's
+// own dependence on hash-table enumeration order (see
+// check_constructor_arguments' exact-type-match comment).
 export module std;
 
+export import :algorithm;
 export import :string;
 export import :string_view;
 export import :cstdlib;
@@ -18,4 +23,3 @@ export import :thread;
 export import :print;
 export import :random;
 export import :charconv;
-export import :algorithm;

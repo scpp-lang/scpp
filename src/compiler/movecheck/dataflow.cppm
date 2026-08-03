@@ -941,14 +941,17 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 if (all_match) matches.push_back(candidate);
             }
             if (matches.size() == 1) sig = matches[0];
-            if (sig == nullptr) {
-                for (const FunctionSignature* candidate : matches) {
-                    if (!candidate->is_generic_template) {
-                        sig = candidate;
-                        break;
-                    }
-                }
-            }
+            // ch05 §5.10: an *exact* argument-type match is strictly more
+            // specific than merely "already monomorphized", so it is tried
+            // first. Trying the concrete-candidate fallback below first
+            // instead made the choice depend on the order `signatures`
+            // (an unordered_map) happens to enumerate its overloads in --
+            // e.g. `std::move_only_function<int(int)> f{Adder(2)};` picked
+            // whichever of that class's own already-instantiated
+            // constructor clones came out of the hash table first, which
+            // could be the `move_only_function<int(int)>` one rather than
+            // the `Adder` one, and changed when an unrelated `std` module
+            // partition was added.
             if (sig == nullptr && !matches.empty()) {
                 auto exact_type_match = [&](const FunctionSignature* candidate) {
                     for (std::size_t i = 0; i < ctor_args.size(); i++) {
@@ -960,6 +963,14 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
                 };
                 for (const FunctionSignature* candidate : matches) {
                     if (exact_type_match(candidate)) {
+                        sig = candidate;
+                        break;
+                    }
+                }
+            }
+            if (sig == nullptr) {
+                for (const FunctionSignature* candidate : matches) {
+                    if (!candidate->is_generic_template) {
                         sig = candidate;
                         break;
                     }
