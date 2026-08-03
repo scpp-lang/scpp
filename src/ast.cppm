@@ -2289,12 +2289,15 @@ class EnumVariant {
 class EnumDef {
   public:
     virtual ~EnumDef() = default;
-    EnumDef() = default;
+    EnumDef()
+        : name{}, underlying_type{}, variants{}, namespace_path{}, owning_module{} {
+        underlying_type = named_type("int");
+    }
     EnumDef(const EnumDef&) = default;
     EnumDef& operator=(const EnumDef&) = default;
 
     std::string name;
-    Type underlying_type = named_type("int");
+    Type underlying_type;
     std::vector<EnumVariant> variants;
     std::vector<std::string> namespace_path;
     bool is_exported = false;
@@ -2409,7 +2412,9 @@ find_visible_global(std::optional<std::reference_wrapper<const Program [[scpp::l
                     const std::string& name, bool explicit_global_qualification = false) [[scpp::lifetime(program)]] {
     if (!program.has_value()) return nullptr;
     auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
-        return global.decl.get() != nullptr && std::string_view{global.decl->var_name} == candidate;
+        if (global.decl.get() == nullptr) return false;
+        std::string_view global_name{global.decl->var_name};
+        return global_name == candidate;
     };
     if (explicit_global_qualification) {
         for (std::size_t i = 0; i < program->get().globals.size(); i++) {
@@ -2486,7 +2491,8 @@ public:
         [[nodiscard]] std::optional<std::reference_wrapper<const EnumDef>> find_enum(std::string_view name) const {
             for (std::size_t i = 0; i < program.enums.size(); i++) {
                 const EnumDef& def = program.enums[i];
-                if (std::string_view{def.name} == name) {
+                std::string_view def_name{def.name};
+                if (def_name == name) {
                     return std::optional<std::reference_wrapper<const EnumDef>>{std::reference_wrapper<const EnumDef>{def}};
                 }
             }
@@ -2497,7 +2503,8 @@ public:
             std::optional<std::reference_wrapper<const StructDef>> forward_decl{};
             for (std::size_t i = 0; i < program.structs.size(); i++) {
                 const StructDef& def = program.structs[i];
-                if (std::string_view{def.name} != name) continue;
+                std::string_view def_name{def.name};
+                if (def_name != name) continue;
                 if (!def.is_forward_declaration) {
                     return std::optional<std::reference_wrapper<const StructDef>>{
                         std::reference_wrapper<const StructDef>{def}};
@@ -2514,7 +2521,8 @@ public:
             std::optional<std::reference_wrapper<const ClassDef>> forward_decl{};
             for (std::size_t i = 0; i < program.classes.size(); i++) {
                 const ClassDef& def = program.classes[i];
-                if (std::string_view{def.name} != name) continue;
+                std::string_view def_name{def.name};
+                if (def_name != name) continue;
                 if (!def.is_forward_declaration) {
                     return std::optional<std::reference_wrapper<const ClassDef>>{
                         std::reference_wrapper<const ClassDef>{def}};
@@ -2529,22 +2537,27 @@ public:
 
         [[nodiscard]] std::optional<TypeLayoutInfo> named_scalar_layout(std::string_view name) const {
             if (name == "bool" || name == "char" || name == "int8_t" || name == "uint8_t") {
-                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{1, 1}};
+                TypeLayoutInfo layout{1, 1};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             if (name == "int16_t" || name == "uint16_t") {
-                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{2, 2}};
+                TypeLayoutInfo layout{2, 2};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             if (name == "int" || name == "unsigned int" || name == "int32_t" || name == "uint32_t" ||
                 name == "float" || name == "float32_t") {
-                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{4, 4}};
+                TypeLayoutInfo layout{4, 4};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             if (name == "long" || name == "unsigned long" || name == "int64_t" || name == "uint64_t" ||
                 name == "double" || name == "float64_t") {
-                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{8, 8}};
+                TypeLayoutInfo layout{8, 8};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             if (name == "size_t" || name == "ptrdiff_t") {
                 std::uint64_t align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
-                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes, align}};
+                TypeLayoutInfo layout{target.pointer_size_bytes, align};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             return std::optional<TypeLayoutInfo>{};
         }
@@ -2557,25 +2570,29 @@ public:
                     current.pointee->kind == TypeKind::Named) {
                     std::optional<std::reference_wrapper<const ClassDef>> referent{find_class(current.pointee->name)};
                     if (referent.has_value() && referent->get().is_interface) {
-                        return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes * 2, align}};
+                        TypeLayoutInfo layout{target.pointer_size_bytes * 2, align};
+                        return std::optional<TypeLayoutInfo>{layout};
                     }
                 }
-                return std::optional<TypeLayoutInfo>{TypeLayoutInfo{target.pointer_size_bytes, align}};
+                TypeLayoutInfo layout{target.pointer_size_bytes, align};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             if (current.kind == TypeKind::Function) return std::optional<TypeLayoutInfo>{};
             if (current.kind == TypeKind::Span) {
                 std::uint64_t pointer_align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
                 std::uint64_t count_align = 8;
                 std::uint64_t size = align_up(target.pointer_size_bytes, count_align) + 8;
-                return std::optional<TypeLayoutInfo>{
-                    TypeLayoutInfo{align_up(size, std::max(pointer_align, count_align)), std::max(pointer_align, count_align)}};
+                TypeLayoutInfo layout{align_up(size, std::max(pointer_align, count_align)),
+                                      std::max(pointer_align, count_align)};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             if (current.kind == TypeKind::Array) {
                 if (!current.element || current.array_size < 0) return std::optional<TypeLayoutInfo>{};
                 std::optional<TypeLayoutInfo> element = this->compute(*current.element);
                 if (!element.has_value()) return std::optional<TypeLayoutInfo>{};
-                return std::optional<TypeLayoutInfo>{
-                    TypeLayoutInfo{element->size_bytes * static_cast<std::uint64_t>(current.array_size), element->abi_align_bytes}};
+                TypeLayoutInfo layout{element->size_bytes * static_cast<std::uint64_t>(current.array_size),
+                                      element->abi_align_bytes};
+                return std::optional<TypeLayoutInfo>{layout};
             }
             if (current.kind == TypeKind::Named) {
                 if (current.name == "void") return std::optional<TypeLayoutInfo>{};
@@ -2613,7 +2630,8 @@ public:
                         overall_align =
                             struct_ref.is_packed ? 1 : std::max(overall_align, struct_ref.resolved_alignment);
                         clear_visit();
-                        return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(offset, overall_align), overall_align}};
+                        TypeLayoutInfo layout{align_up(offset, overall_align), overall_align};
+                        return std::optional<TypeLayoutInfo>{layout};
                     }
                     if (struct_ref.fields.size() == 0) {
                         clear_visit();
@@ -2636,7 +2654,8 @@ public:
                     }
                     overall_align = struct_ref.is_packed ? 1 : std::max(overall_align, struct_ref.resolved_alignment);
                     clear_visit();
-                    return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(max_size, overall_align), overall_align}};
+                    TypeLayoutInfo layout{align_up(max_size, overall_align), overall_align};
+                    return std::optional<TypeLayoutInfo>{layout};
                 }
                 std::optional<std::reference_wrapper<const ClassDef>> class_def{find_class(current.name)};
                 if (class_def.has_value()) {
@@ -2677,7 +2696,8 @@ public:
                     }
                     overall_align = std::max(overall_align, class_ref.resolved_alignment);
                     clear_visit();
-                    return std::optional<TypeLayoutInfo>{TypeLayoutInfo{align_up(offset, overall_align), overall_align}};
+                    TypeLayoutInfo layout{align_up(offset, overall_align), overall_align};
+                    return std::optional<TypeLayoutInfo>{layout};
                 }
                 clear_visit();
                 return std::optional<TypeLayoutInfo>{};
