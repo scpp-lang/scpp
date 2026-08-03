@@ -162,6 +162,7 @@ public:
                 continue;
             }
             rewrite_implicit_member_field_access(program_.functions[i]);
+            rewrite_implicit_member_method_calls(program_.functions[i]);
             // build_mir's own Body holds raw (const Expr*) pointers into
             // this Function's *own* Stmt/Expr tree (see mir.cppm's
             // Terminator) -- safe to keep using after program_.functions
@@ -413,6 +414,7 @@ private:
         Function& fn = program_.functions[fn_index];
         if (fn.body == nullptr || !fn.template_params.empty()) return;
         rewrite_implicit_member_field_access(fn);
+        rewrite_implicit_member_method_calls(fn);
         signatures_ = build_signatures(program_);
         Body body = build_mir(fn);
         body.program = &program_;
@@ -444,6 +446,60 @@ private:
         if (member_field_names.empty()) return;
 
         rewrite_captured_identifiers_as_field_access(*fn.body, member_field_names);
+    }
+
+    // ch05 §5.9: builds the "plain member name -> mangled function name"
+    // maps rewrite_unqualified_member_calls needs for `fn`'s own
+    // enclosing class, then applies them. A method's mangled name is
+    // always "<synthesized owner>_<member>" (parser.cppm's
+    // parse_record_body_into), where <synthesized owner> is the owner
+    // class name, optionally suffixed with "__<template owner id>" for a
+    // partial/variadic specialization -- so the plain member name is
+    // recovered by stripping exactly that prefix. Names that a parameter
+    // or a local variable shadows are dropped first, matching real C++
+    // (a local declaration hides a member of the same name), as are
+    // names that also name a type, where a receiver-less Call is the
+    // brace-construction spelling `TypeName{args}` rather than a call.
+    void rewrite_implicit_member_method_calls(Function& fn) {
+        if (fn.body == nullptr || fn.member_owner_class.empty()) return;
+
+        std::string owner_prefix = fn.member_owner_class + "_";
+        for (const ClassDef& def : program_.classes) {
+            if (def.name != fn.member_owner_class || def.template_owner_id.empty()) continue;
+            std::string specialization_prefix = fn.member_owner_class + "__" + def.template_owner_id + "_";
+            if (fn.name.starts_with(specialization_prefix)) {
+                owner_prefix = std::move(specialization_prefix);
+                break;
+            }
+        }
+
+        std::unordered_map<std::string, std::string> instance_methods;
+        std::unordered_map<std::string, std::string> static_methods;
+        for (const Function& candidate : program_.functions) {
+            if (candidate.member_owner_class != fn.member_owner_class) continue;
+            if (!candidate.name.starts_with(owner_prefix)) continue;
+            std::string member_name = candidate.name.substr(owner_prefix.size());
+            if (member_name.empty() || member_name.find('.') != std::string::npos) continue;
+            if (known_type_names_.contains(member_name)) continue;
+            if (candidate.is_static) {
+                static_methods[member_name] = candidate.name;
+            } else {
+                instance_methods[member_name] = candidate.name;
+            }
+        }
+        if (fn.is_static) instance_methods.clear();
+        if (instance_methods.empty() && static_methods.empty()) return;
+
+        std::unordered_set<std::string> shadowing_names;
+        for (const Param& param : fn.params) shadowing_names.insert(param.name);
+        collect_locally_declared_names(*fn.body, shadowing_names);
+        for (const std::string& shadowed : shadowing_names) {
+            instance_methods.erase(shadowed);
+            static_methods.erase(shadowed);
+        }
+        if (instance_methods.empty() && static_methods.empty()) return;
+
+        rewrite_unqualified_member_calls(*fn.body, instance_methods, static_methods);
     }
 
     // ch04 §4.2/ch05 §5.9: the enclosing function's own `this` parameter

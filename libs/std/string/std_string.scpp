@@ -135,6 +135,14 @@ public:
     bool operator!=(const char* other) const {
         return !this->equals(other);
     }
+
+    bool operator==(const string& other) const {
+        return this->equals(other.c_str());
+    }
+
+    bool operator!=(const string& other) const {
+        return !this->equals(other.c_str());
+    }
 };
 
 } // namespace std
