@@ -2650,12 +2650,11 @@ public:
                 if (enum_def.has_value()) return this->compute(enum_def->get().underlying_type);
                 if (visiting_named_types.contains(current.name)) return std::optional<TypeLayoutInfo>{};
                 visiting_named_types.insert(current.name);
-                auto clear_visit = [&]() { visiting_named_types.erase(current.name); };
                 std::optional<std::reference_wrapper<const StructDef>> struct_def{find_struct(current.name)};
                 if (struct_def.has_value()) {
                     const StructDef& struct_ref = struct_def->get();
                     if (struct_ref.is_forward_declaration) {
-                        clear_visit();
+                        this->visiting_named_types.erase(current.name);
                         return std::optional<TypeLayoutInfo>{};
                     }
                     if (!struct_ref.is_union) {
@@ -2665,7 +2664,7 @@ public:
                             const StructField& field = struct_ref.fields[i];
                             std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                             if (!field_layout.has_value()) {
-                                clear_visit();
+                                this->visiting_named_types.erase(current.name);
                                 return std::optional<TypeLayoutInfo>{};
                             }
                             TypeLayoutInfo field_layout_value{value_of_type_layout(field_layout)};
@@ -2677,12 +2676,12 @@ public:
                         }
                         overall_align =
                             struct_ref.is_packed ? 1 : std::max(overall_align, struct_ref.resolved_alignment);
-                        clear_visit();
+                        this->visiting_named_types.erase(current.name);
                         TypeLayoutInfo layout{align_up(offset, overall_align), overall_align};
                         return std::optional<TypeLayoutInfo>{layout};
                     }
                     if (struct_ref.fields.size() == 0) {
-                        clear_visit();
+                        this->visiting_named_types.erase(current.name);
                         return std::optional<TypeLayoutInfo>{};
                     }
                     std::uint64_t max_size = 0;
@@ -2691,7 +2690,7 @@ public:
                         const StructField& field = struct_ref.fields[i];
                         std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                         if (!field_layout.has_value()) {
-                            clear_visit();
+                            this->visiting_named_types.erase(current.name);
                             return std::optional<TypeLayoutInfo>{};
                         }
                         TypeLayoutInfo field_layout_value{value_of_type_layout(field_layout)};
@@ -2701,7 +2700,7 @@ public:
                         overall_align = std::max(overall_align, field_align);
                     }
                     overall_align = struct_ref.is_packed ? 1 : std::max(overall_align, struct_ref.resolved_alignment);
-                    clear_visit();
+                    this->visiting_named_types.erase(current.name);
                     TypeLayoutInfo layout{align_up(max_size, overall_align), overall_align};
                     return std::optional<TypeLayoutInfo>{layout};
                 }
@@ -2709,7 +2708,7 @@ public:
                 if (class_def.has_value()) {
                     const ClassDef& class_ref = class_def->get();
                     if (class_ref.is_forward_declaration) {
-                        clear_visit();
+                        this->visiting_named_types.erase(current.name);
                         return std::optional<TypeLayoutInfo>{};
                     }
                     std::uint64_t offset = 0;
@@ -2718,7 +2717,7 @@ public:
                     if (base.has_value()) {
                         std::optional<TypeLayoutInfo> base_layout = this->compute(base->get().base_type);
                         if (!base_layout.has_value()) {
-                            clear_visit();
+                            this->visiting_named_types.erase(current.name);
                             return std::optional<TypeLayoutInfo>{};
                         }
                         TypeLayoutInfo base_layout_value{value_of_type_layout(base_layout)};
@@ -2733,7 +2732,7 @@ public:
                         const ClassField& field = class_ref.fields[i];
                         std::optional<TypeLayoutInfo> field_layout = this->compute(field.type);
                         if (!field_layout.has_value()) {
-                            clear_visit();
+                            this->visiting_named_types.erase(current.name);
                             return std::optional<TypeLayoutInfo>{};
                         }
                         TypeLayoutInfo field_layout_value{value_of_type_layout(field_layout)};
@@ -2743,11 +2742,11 @@ public:
                         overall_align = std::max(overall_align, field_align);
                     }
                     overall_align = std::max(overall_align, class_ref.resolved_alignment);
-                    clear_visit();
+                    this->visiting_named_types.erase(current.name);
                     TypeLayoutInfo layout{align_up(offset, overall_align), overall_align};
                     return std::optional<TypeLayoutInfo>{layout};
                 }
-                clear_visit();
+                this->visiting_named_types.erase(current.name);
                 return std::optional<TypeLayoutInfo>{};
             }
             return std::optional<TypeLayoutInfo>{};

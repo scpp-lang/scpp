@@ -89,6 +89,14 @@ public:
         return this->ptr_;
     }
 
+    T* get() [[scpp::lifetime(this)]] {
+        return this->ptr_;
+    }
+
+    const T* get() [[scpp::lifetime(this)]] const {
+        return this->ptr_;
+    }
+
     T* release() {
         T* raw = this->ptr_;
         T* empty{};
