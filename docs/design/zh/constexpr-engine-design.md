@@ -11,7 +11,7 @@
 
 核心建议是：
 
-1. 保持 scpp 的**真实 C++ 拼写原则**：直接复用 `constexpr`、`consteval`、`if consteval`、`std::is_constant_evaluated()`，不发明新语法；[^spec-front-matter][^old-book-consteval]
+1. 保持 scpp 的**真实 C++ 拼写原则**：直接复用 `constexpr`、`consteval`、`if consteval`、`std::is_constant_evaluated()`，不发明新语法；[^spec-front-matter][^spec-constexpr-surface]
 2. 用**前端解释器**实现编译期求值，而不是降到 LLVM IR 之后再执行，更不是运行宿主机代码；[^clang-users][^gcc-constexpr][^rust-dev-guide]
 3. 把该解释器接到**泛型调用单态化 + 语义检查**阶段，而不是接到 codegen；
 4. 明确给出一个**诚实、可文档化的 v1 子集**，但这个子集已经足以覆盖格式串验证、常量表达式初始化、递归辅助函数、以及直接的编译期解析器。
@@ -36,7 +36,7 @@
 现有泛型调用路径已经能处理：
 
 - `T x` 这类直接参数位置上的普通类型推导；以及
-- tuple 风格递归继承所需的那一个特殊“基类链推导”模式。[^movecheck-deduction][^movecheck-base-deduction][^old-book-generic-types]
+- tuple 风格递归继承所需的那一个特殊“基类链推导”模式。[^movecheck-deduction][^movecheck-base-deduction][^spec-function-template-deduction]
 
 但当前实现本质上仍然是**单趟、从左到右**的。它只会在下面两种位置绑定模板参数包：
 
@@ -62,9 +62,9 @@ void print(std::format_string<Args...> fmt, Args&&... args);
 
 当前 lexer 没有 `KwConstexpr` / `KwConsteval`，AST 的 `Function` 也没有“求值模式”字段，语句解析里也没有 `if consteval`。[^lexer-keywords][^ast-function]
 
-此外，旧版书还明确解释过：scpp 早期只保留 `consteval`，刻意不支持 `constexpr` 函数，因为它的行为会依赖调用上下文。[^old-book-consteval]
+当前正式规范已经把这条语义分界写清楚了：`consteval` 始终是立即函数；而 `constexpr` 只有在外层上下文要求常量表达式时才参与编译期求值，否则仍然是普通运行期调用。[^spec-constexpr-surface][^spec-constant-evaluation]
 
-这段历史很重要，但同一段文字也留下了一个回旋空间：如果以后真的出现“同一个函数既要服务编译期又要服务运行期”的强需求，那么应该重新引入 `constexpr`。`std::format_string<Args...>` 正是这个需求。[^old-book-consteval]
+也正因为存在这条分界，设计现在才可以在确有必要时支持真正的“同一套接口同时服务编译期与运行期”。`std::format_string<Args...>` 正是这样的需求。[^spec-constexpr-surface][^spec-constant-evaluation]
 
 ### 1.4 现有“编译期求值”只是一小块局部逻辑
 
@@ -765,8 +765,9 @@ note: format string expects 3 arguments, but call supplies 2
 ## Sources
 
 [^spec-front-matter]: `scpp-reference/docs/spec/en/00-front-matter.md`, especially Clause 1 and Clause 4.
-[^old-book-consteval]: `scpp-reference/docs/old-book/en/ch06-safe-subset.md:142-160`.
-[^old-book-generic-types]: `scpp-reference/docs/old-book/en/ch05-static-checks.md:368-379, 473-516`.
+[^spec-constexpr-surface]: `scpp-reference/docs/spec/en/07-constexpr-and-consteval.md`, especially 9.1(2)-9.1(4) and 9.2.
+[^spec-constant-evaluation]: `scpp-reference/docs/spec/en/06-constant-evaluation.md`, especially 7.1(2)-7.1(4).
+[^spec-function-template-deduction]: `scpp-reference/docs/spec/en/08-function-template-argument-deduction.md`, especially 13.1(3)-13.1(6).
 [^driver-pipeline]: `scpp-reference/src/driver.cppm:660-701`.
 [^driver-sgen]: `scpp-reference/src/driver.cppm:86-121`.
 [^driver-scppm-read]: `scpp-reference/src/driver.cppm:211-243`.
