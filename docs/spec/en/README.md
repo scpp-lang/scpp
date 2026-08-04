@@ -30,6 +30,7 @@ is still designed (see the book) but not yet formalized in this document.
 9. [The `constexpr` and `consteval` specifiers](07-constexpr-and-consteval.md)
 13. [Function template argument deduction](08-function-template-argument-deduction.md)
 14. [Enumeration conversions](09-enumeration-conversions.md)
+15. [Compound requirements in `requires`-expressions](08-function-template-argument-deduction.md#132-compound-requirements-in-requires-expressions-exprprimreqcompoundscpp)
 8. [Iteration statements](10-iteration-statements.md)
 11. [Inheritance and Interfaces](11-inheritance-and-interfaces.md)
 10. [Modules and Namespaces](12-modules-and-namespaces.md)
