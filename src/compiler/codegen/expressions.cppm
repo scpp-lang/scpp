@@ -2500,6 +2500,42 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         std::optional<Type> lhs_type = infer_type(*expr.lhs);
         std::optional<Type> rhs_type = infer_type(*expr.rhs);
         if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
+            // `rawPtr == nullptr` (or `!=`) -- unlike a smart pointer
+            // (which defines a real overloaded operator== taking a
+            // literal T*, handled below via resolve_equality_receiver),
+            // a raw pointer has no such overload to dispatch through.
+            // `nullptr` itself has no fixed type at all (see
+            // codegen_value_for_target's own identical recognition,
+            // used for argument-passing/initialization), so it can
+            // never contribute a usable lhs_type/rhs_type the way an
+            // ordinary scalar literal would (lhs_is_literal/
+            // rhs_is_literal above only ever recognize IntegerLiteral/
+            // FloatLiteral). Recognized directly here, building the
+            // icmp against a genuine null pointer constant of the
+            // *other* side's own pointer type -- mirroring
+            // codegen_value_for_target exactly -- rather than falling
+            // through to the generic operand codegen further below,
+            // which would otherwise try to evaluate "nullptr" as an
+            // ordinary named value and fail.
+            auto is_nullptr_identifier = [](const Expr& operand) {
+                return operand.kind == ExprKind::Identifier && operand.name == "nullptr" &&
+                       !operand.explicit_global_qualification;
+            };
+            bool lhs_is_nullptr = is_nullptr_identifier(*expr.lhs);
+            bool rhs_is_nullptr = is_nullptr_identifier(*expr.rhs);
+            if (lhs_is_nullptr != rhs_is_nullptr) {
+                const Expr& pointer_expr = lhs_is_nullptr ? *expr.rhs : *expr.lhs;
+                const std::optional<Type>& pointer_expr_type = lhs_is_nullptr ? rhs_type : lhs_type;
+                if (pointer_expr_type.has_value() && pointer_expr_type->kind == TypeKind::Pointer) {
+                    llvm::LLVMValueRef pointer_value = codegen_expr(pointer_expr);
+                    llvm::LLVMValueRef null_value = llvm::LLVMConstNull(to_llvm_type(*pointer_expr_type));
+                    return i1_to_bool(expr.binary_op == BinaryOp::Eq
+                                          ? llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, pointer_value, null_value,
+                                                                "nulleqtmp")
+                                          : llvm::LLVMBuildICmp(builder_, llvm::LLVMIntNE, pointer_value, null_value,
+                                                                "nullnetmp"));
+                }
+            }
             const Type* lhs_named =
                 lhs_type.has_value() ? &(lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee
                                                                                                      : *lhs_type)
