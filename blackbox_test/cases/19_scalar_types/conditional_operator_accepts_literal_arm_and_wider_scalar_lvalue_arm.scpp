@@ -1,0 +1,18 @@
+// ch06 scalar table: "No implicit conversions between any two distinct
+// scalar types above, ever, full stop" -- `?:` (PR #392) mirrors the two
+// ways a binary operator's own operands are already allowed to agree
+// despite that rule (binary_expr_has_compatible_types): an untyped
+// numeric-literal arm adopts the other arm's scalar type, and a scalar
+// *lvalue* arm is read through as a value -- so a literal `1` arm and a
+// `std::max(a, b)` arm (which yields `const std::uint64_t&`) now agree,
+// exactly the shape `src/ast.cppm`'s own
+// `is_packed ? 1 : std::max(overall_align, resolved_alignment)` needs.
+import std;
+
+int main() {
+    bool packed = true;
+    std::uint64_t a = 3;
+    std::uint64_t b = 9;
+    std::uint64_t result = packed ? 1 : std::max(a, b);
+    return static_cast<int>(result) - 1;
+}

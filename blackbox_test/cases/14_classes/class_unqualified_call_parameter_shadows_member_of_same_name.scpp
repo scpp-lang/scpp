@@ -1,0 +1,25 @@
+// PR #391 / ch05 §5.3: a parameter with the same name as a member still
+// shadows the member, even though scpp now resolves an unqualified
+// same-class call at all. `helper` here names a function-pointer
+// *parameter*, not the class's own `helper()` method, so
+// `use_override`'s unqualified `helper()` call must invoke the argument
+// passed in (`alternate`), not the member of the same name.
+int alternate() {
+    return 9;
+}
+
+class Reporter {
+public:
+    int helper() const {
+        return 1;
+    }
+    int use_override(int (*helper)()) const {
+        return helper();
+    }
+    virtual ~Reporter() = default;
+};
+
+int main() {
+    Reporter reporter{};
+    return reporter.use_override(&alternate) - 9;
+}

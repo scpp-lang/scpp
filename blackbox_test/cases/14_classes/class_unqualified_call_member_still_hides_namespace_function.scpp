@@ -1,0 +1,24 @@
+// PR #391 / ch05 §5.3: a member function still hides a namespace-scope
+// free function of the same name -- an unqualified call to `identify()`
+// inside `Thing::run` means the class's own instance method, not the
+// free function `identify()` at global scope, even though scpp's
+// unqualified same-class-member resolution is new here.
+int identify() {
+    return 3;
+}
+
+class Thing {
+public:
+    int identify() const {
+        return 8;
+    }
+    int run() const {
+        return identify();
+    }
+    virtual ~Thing() = default;
+};
+
+int main() {
+    Thing thing{};
+    return thing.run() - 8;
+}

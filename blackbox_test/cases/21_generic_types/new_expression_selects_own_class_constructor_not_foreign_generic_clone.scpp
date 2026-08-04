@@ -1,0 +1,51 @@
+// ch05 §5.14 (Generic Types): `new T(...)`'s "dotted clone"
+// constructor-selection rule used to only check whether a candidate's
+// mangled name *ended with* ".T_new" -- a monomorphized generic
+// instantiation mangles its own type argument into its name, so
+// `std::shared_ptr<Payload>`'s own constructor is named
+// `std::shared_ptr.Payload_new`, which ends with ".Payload_new" and
+// therefore satisfied a plain `new Payload()` looking for `Payload_new`.
+// codegen then ran shared_ptr's own (larger) constructor over a
+// Payload-sized heap block, smashing malloc's top chunk -- the symptom
+// was a `Fatal glibc error: malloc.c:2371 (sysmalloc): assertion failed`
+// at some later, unrelated allocation (exit=134 on origin/main before
+// the fix, PR #392). The dotted-clone rule now also requires the text
+// before that '.' to be the candidate's own owner class, so a foreign
+// generic instantiation is never mistaken for one of `Payload`'s own
+// constructors. `guard` first forces `std::shared_ptr<Payload>` (and
+// therefore its whole constructor set, including its 0-arg default
+// constructor) to be monomorphized; the plain `new Payload()` right
+// after must still allocate a correctly Payload-sized, Payload-shaped
+// object, and the loop of further heap churn afterward is there so any
+// reintroduced heap corruption reliably crashes rather than staying
+// silently unnoticed.
+import std;
+
+struct Payload {
+    int value;
+};
+
+int main() {
+    Payload* guard_ptr{};
+    [[scpp::unsafe]] {
+        guard_ptr = new Payload();
+    }
+    std::shared_ptr<Payload> guard{guard_ptr};
+
+    int result = 0;
+    [[scpp::unsafe]] {
+        Payload* p = new Payload();
+        p->value = 7;
+        result = p->value;
+        delete p;
+    }
+
+    for (int i = 0; i < 64; i = i + 1) {
+        [[scpp::unsafe]] {
+            int* filler = new int(i);
+            delete filler;
+        }
+    }
+
+    return result - 7;
+}
