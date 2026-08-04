@@ -179,6 +179,85 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     return true;
 }
 
+// spec §13.2(5): substitutes every occurrence of the concept's own
+// template_param_name (e.g. "T") appearing (possibly nested, inside a
+// pointer/reference/array/template-argument position) within `type`
+// with `concrete_type` -- used to turn a construction requirement's own
+// argument types (spelled against the concept's abstract "T") into the
+// real argument types to check against a specific candidate type's own
+// constructors. Deliberately a small, self-contained duplicate of
+// monomorphize.cppm's own (private, inaccessible from here)
+// substitute_type_param, same existing precedent as this file's own
+// independently-duplicated types_equal/mangle_type_for_clone_name.
+[[nodiscard]] Type substitute_concept_template_param(Type type, const std::string& template_param_name,
+                                                     const Type& concrete_type) {
+    if (type.kind == TypeKind::Named && type.template_args.empty() && type.name == template_param_name) {
+        return concrete_type;
+    }
+    if (type.pointee) {
+        type.pointee =
+            std::make_shared<Type>(substitute_concept_template_param(*type.pointee, template_param_name, concrete_type));
+    }
+    if (type.element) {
+        type.element =
+            std::make_shared<Type>(substitute_concept_template_param(*type.element, template_param_name, concrete_type));
+    }
+    for (Type& arg : type.template_args) arg = substitute_concept_template_param(arg, template_param_name, concrete_type);
+    return type;
+}
+
+// spec §13.2(5)-(6): whether an argument of type `arg_type` may be
+// passed to a real constructor parameter of type `param_type`,
+// structurally -- exact match, or (since a construction requirement's
+// own probe argument, e.g. `t` in `T{t}`, is always an ordinary named
+// lvalue, never an rvalue -- there is no syntax in this v0.1 requires-
+// expression grammar to spell one) binding to a same-typed lvalue
+// reference parameter, const or otherwise. Never models the fuller
+// overload-resolution/value-category machinery calls.cppm's own
+// constructor_parameter_accepts_argument_directly needs for a *real*
+// constructor call (which has an actual argument Expr, and thus an
+// actual value category, to inspect) -- this concept-checking pass has
+// never had access to that machinery (see type_satisfies_concept's own
+// pre-existing method-call matching just below, which is equally exact-
+// match-only), and a construction requirement's own probe parameters
+// never carry enough information (no real expression, just a bare
+// Type) to do better than this.
+[[nodiscard]] bool construction_argument_type_matches(Type arg_type, Type param_type) {
+    if (param_type.kind == TypeKind::Reference) {
+        if (param_type.is_rvalue_ref || param_type.pointee == nullptr) return false;
+        param_type = *param_type.pointee;
+    }
+    param_type.is_const_qualified = false;
+    if (arg_type.kind == TypeKind::Reference && arg_type.pointee != nullptr) arg_type = *arg_type.pointee;
+    arg_type.is_const_qualified = false;
+    return types_equal(arg_type, param_type);
+}
+
+// spec §13.2(5): whether `target_type` (a concrete, ordinary type) has
+// a real constructor accepting exactly `arg_types` (already substituted
+// -- see substitute_concept_template_param) -- reuses is_constructor_
+// function (ast.cppm), the same "ClassName_new" recognition every other
+// constructor-aware pass in this compiler (calls.cppm,
+// signatures.cppm's own is_copy_constructible, ...) already shares, so
+// this doesn't duplicate a *second*, independent notion of "which
+// function is a constructor" -- only the (necessarily different, see
+// construction_argument_type_matches's own comment) argument-matching
+// rule is specific to this concept-checking pass.
+[[nodiscard]] bool type_has_matching_constructor(const Type& target_type, const std::vector<Type>& arg_types,
+                                                 const Program& program) {
+    if (target_type.kind != TypeKind::Named) return false;
+    for (const Function& fn : program.functions) {
+        if (fn.member_owner_class != target_type.name || !is_constructor_function(fn)) continue;
+        if (fn.params.size() != arg_types.size() + 1) continue;
+        bool args_match = true;
+        for (std::size_t i = 0; args_match && i < arg_types.size(); i++) {
+            args_match = construction_argument_type_matches(arg_types[i], fn.params[i + 1].type);
+        }
+        if (args_match) return true;
+    }
+    return false;
+}
+
 // ch05 §5.11: whether `type` (a concrete, ordinary type -- never a
 // witness class) structurally satisfies `concept_def`: for every
 // requirement, the class named by `type` must have a real method
@@ -194,9 +273,29 @@ StmtPtr clone_stmt(const Stmt& stmt) {
 // to honor that same lifetime-grouping relation (see
 // probe_lifetime_groups_match) -- this is a real constraint on concept
 // satisfaction, not merely syntax the probe parameter tolerates.
+// spec §13.2: a construction-shaped requirement (req.is_construct) is
+// checked differently -- see type_has_matching_constructor -- rather
+// than searching for a same-named method at all.
 [[nodiscard]] bool type_satisfies_concept(const Type& type, const ConceptDef& concept_def, const Program& program) {
     if (type.kind != TypeKind::Named) return false;
     for (const ConceptRequirement& req : concept_def.requirements) {
+        if (req.is_construct) {
+            Type target_type;
+            if (req.construct_type_name == concept_def.template_param_name) {
+                target_type = type;
+            } else {
+                target_type.kind = TypeKind::Named;
+                target_type.name = req.construct_type_name;
+            }
+            std::vector<Type> substituted_args;
+            substituted_args.reserve(req.arg_types.size());
+            for (const Type& arg_type : req.arg_types) {
+                substituted_args.push_back(
+                    substitute_concept_template_param(arg_type, concept_def.template_param_name, type));
+            }
+            if (!type_has_matching_constructor(target_type, substituted_args, program)) return false;
+            continue;
+        }
         std::string method_name = type.name + "_" + req.method_name;
         bool found = false;
         for (const Function& fn : program.functions) {

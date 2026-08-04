@@ -2211,7 +2211,12 @@ inline ClassDef& ClassDef::operator=(const ClassDef& other) {
 // std::same_as<T>;` (compound, exact-type only, never
 // std::convertible_to -- ch05 §5.11's own reasoning: scpp has no
 // implicit scalar conversions at all, so the two would mean the same
-// thing anyway). Arbitrary expressions, type-requirements
+// thing anyway). Spec §13.2 additionally permits a compound requirement
+// (never a simple one -- §13.2(3) scopes this to "an unqualified
+// compound-requirement of the form { E }" only) whose own `{ E }` has no
+// trailing `-> constraint`, to instead be a construction expression --
+// see is_construct/construct_type_name below. Arbitrary *other*
+// expressions (e.g. a binary operator), type-requirements
 // (`typename T::Foo;`), and nested requirements (arbitrary boolean
 // constant-expressions) are explicitly out of scope for v0.1.
 class ConceptRequirement {
@@ -2221,12 +2226,39 @@ class ConceptRequirement {
     ConceptRequirement(const ConceptRequirement&) = default;
     ConceptRequirement& operator=(const ConceptRequirement&) = default;
 
+    // True for a construction-shaped compound requirement (spec
+    // §13.2(3.3)): `{ T(args...) };` or `{ T{args...} };`. When true,
+    // method_name is unused (there is no method being called at all --
+    // arg_types/arg_lifetimes below instead describe the constructor
+    // call's own argument list) and construct_type_name/has_return_
+    // constraint take over describing the requirement's shape --
+    // construction shape can never carry a trailing `-> std::same_as<T>`
+    // constraint (spec §13.2(3)'s own precondition), so has_return_
+    // constraint is always false whenever this is true.
+    bool is_construct = false;
+    // Only meaningful when is_construct is true: the spelled name of the
+    // type being constructed, e.g. "T" in `requires(T t) { T{t}; }` --
+    // almost always the concept's own template_param_name (ConceptDef),
+    // substituted for the concrete type under test at concept-
+    // satisfaction time (see generics_support.cppm's
+    // type_satisfies_concept), but spec §13.2(3.3) permits any named
+    // type, so a fixed, already-declared type name is also accepted and
+    // left un-substituted.
+    std::string construct_type_name;
     std::string method_name;
     // The call's own argument types (e.g. `f(x)` where `x: int` ->
     // {int}) -- excludes the implicit receiver (the placeholder itself),
     // exactly like Function::params excludes nothing but `this` is
     // always params[0] elsewhere; here there is no receiver slot at all
-    // since the placeholder is never itself part of this list.
+    // since the placeholder is never itself part of this list. When
+    // is_construct is true, this instead holds the construction
+    // expression's own argument types (e.g. `T{t}` -> {T}, with "T"
+    // represented as a Named type spelled exactly like the concept's own
+    // template_param_name, substituted for the concrete type under test
+    // at concept-satisfaction time) -- the placeholder itself may appear
+    // here (unlike the call-shaped forms above), since a construction
+    // expression's whole point is normally to probe the placeholder's
+    // own type (e.g. copy-constructibility, `T{t}`).
     std::vector<Type> arg_types;
     // Parallel to arg_types: the corresponding probe parameter's own
     // `[[scpp::lifetime(...)]]` annotation (spec §6.2(13.1)), or a
