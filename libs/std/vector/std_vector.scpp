@@ -1,6 +1,7 @@
 export module std:vector;
 
 import :cstdlib;
+import :concepts;
 
 extern "C" {
     void* scpp_vector_allocate(uint64_t bytes, uint64_t align);
@@ -107,7 +108,7 @@ private:
         return;
     }
 
-    T* __copy_data_from(const std::vector<T>& other) {
+    T* __copy_data_from(const std::vector<T>& other) requires std::copy_constructible<T> {
         size_t other_size = other.size();
         T* fresh = this->__allocate_for(other_size);
         size_t i = 0;
@@ -123,14 +124,14 @@ private:
 public:
     vector() { return; }
 
-    vector(const std::vector<T>& other) {
+    vector(const std::vector<T>& other) requires std::copy_constructible<T> {
         this->data_ = this->__copy_data_from(other);
         this->size_ = other.size();
         this->capacity_ = other.size();
         return;
     }
 
-    void operator=(const std::vector<T>& other) {
+    void operator=(const std::vector<T>& other) requires std::copy_constructible<T> {
         T* copied = this->__copy_data_from(other);
         this->__destroy_live_elements();
         this->__deallocate_storage();
@@ -146,7 +147,7 @@ public:
         return;
     }
 
-    void push_back(const T& value) {
+    void push_back(const T& value) requires std::copy_constructible<T> {
         this->__ensure_capacity_for_one_more();
         [[scpp::unsafe]] {
             new (&this->data_[this->size_]) T(value);

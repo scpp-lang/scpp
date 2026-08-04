@@ -5,6 +5,7 @@ module scpp.compiler.movecheck:generics_support;
 import std;
 import scpp.ast;
 import :types;
+import :signatures;
 
 namespace scpp {
 
@@ -246,6 +247,36 @@ StmtPtr clone_stmt(const Stmt& stmt) {
 [[nodiscard]] bool type_has_matching_constructor(const Type& target_type, const std::vector<Type>& arg_types,
                                                  const Program& program) {
     if (target_type.kind != TypeKind::Named) return false;
+    // A single argument structurally identical to target_type itself is
+    // exactly real C++'s own copy-construction shape -- the spec's own
+    // worked example, `requires(T t) { T{t}; }` -- and is also, by far,
+    // this requirement shape's single most common real use (std::vector
+    // itself, see std_vector.scpp, only ever needs this exact shape).
+    // Unlike a converting/multi-argument constructor, a scalar/enum's
+    // own copy-constructibility, and a class/struct's *implicit*
+    // (compiler-provided, never user-declared, spec §6.5) copy
+    // constructor, are never represented as a real "ClassName_new"
+    // Function this pass could find by searching program.functions
+    // below -- so this shape instead reuses signatures.cppm's own,
+    // already-general is_copy_constructible (the exact same notion of
+    // copy-constructibility this compiler's real dataflow/move-checking
+    // already uses everywhere else, e.g. calls.cppm's is_copyable_class_
+    // lvalue_boundary_source), which already correctly covers every
+    // category this compiler recognizes.
+    if (arg_types.size() == 1) {
+        Type single_arg = arg_types[0];
+        if (single_arg.kind == TypeKind::Reference && single_arg.pointee != nullptr) single_arg = *single_arg.pointee;
+        single_arg.is_const_qualified = false;
+        Type unqualified_target = target_type;
+        unqualified_target.is_const_qualified = false;
+        if (types_equal(single_arg, unqualified_target)) {
+            if (is_scalar_named_type(target_type) || is_enum_type(target_type, &program)) return true;
+            if (find_class_def(program, target_type.name) != nullptr ||
+                find_struct_def(program, target_type.name) != nullptr) {
+                return is_copy_constructible(target_type.name, program);
+            }
+        }
+    }
     for (const Function& fn : program.functions) {
         if (fn.member_owner_class != target_type.name || !is_constructor_function(fn)) continue;
         if (fn.params.size() != arg_types.size() + 1) continue;
