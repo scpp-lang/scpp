@@ -1,0 +1,24 @@
+// std_concepts.scpp
+//
+// The `:concepts` interface partition of the "std" module: a first,
+// minimal home for standard-library concepts, consumed via
+// `import std;` through std.scpp's `export import :concepts;`
+// aggregation, exactly like std::optional's own `:optional` partition.
+// Mirrors real C++20's own `<concepts>` header -- only the one concept
+// this module currently needs (std::vector<T>'s own copy-related
+// members, see std_vector.scpp) is defined here so far; more of real
+// C++20's `<concepts>` surface can be added the same way as later needs
+// arise.
+export module std:concepts;
+
+namespace std {
+
+// Real C++20's own `std::copy_constructible<T>` (`<concepts>`), defined
+// exactly the way the real standard library itself does: `T` is
+// copy_constructible when a `T` can be constructed from an lvalue of
+// its own type -- spec §13.2's own worked example of a construction-
+// shaped compound requirement.
+export template<typename T>
+concept copy_constructible = requires(T t) { T{t}; };
+
+} // namespace std
