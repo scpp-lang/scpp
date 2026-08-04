@@ -13,7 +13,7 @@ add_custom_target(httpserver_app ALL
         ${SCPP_HTTPSERVER_BUILD_FLAGS}
     BYPRODUCTS "${SCPP_HTTPSERVER_DEFAULT_BINARY_PATH}"
     DEPENDS scpp
-        scpp_std_artifacts
+        scpp_stdlib_artifacts
         "${CMAKE_CURRENT_SOURCE_DIR}/main.scpp"
         "${SCPP_HTTPSERVER_MODULE_PATH}"
     VERBATIM)
