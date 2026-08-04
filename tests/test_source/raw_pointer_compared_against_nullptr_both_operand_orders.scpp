@@ -1,0 +1,24 @@
+// src/compiler/codegen/expressions.cppm: comparing a raw (non-smart)
+// pointer against a bare `nullptr` literal used to fail at codegen time
+// with "use of undeclared variable nullptr" -- codegen_binary's Eq/Ne
+// handling didn't recognize `nullptr` as a literal-with-no-fixed-type the
+// way it already recognized integer/float literals. This end-to-end case
+// covers both `==`/`!=` and both operand orderings (`p == nullptr` and
+// `nullptr == p`) against both a null and a non-null raw pointer.
+int main() {
+    int* empty{};
+    int value = 5;
+    int* full = &value;
+
+    if (!(empty == nullptr)) return 1;
+    if (empty != nullptr) return 2;
+    if (!(nullptr == empty)) return 3;
+    if (nullptr != empty) return 4;
+
+    if (full == nullptr) return 5;
+    if (!(full != nullptr)) return 6;
+    if (nullptr == full) return 7;
+    if (!(nullptr != full)) return 8;
+
+    return 0;
+}

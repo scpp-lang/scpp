@@ -1,0 +1,1 @@
+sequence: %nullnetmp = icmp ne ptr %loadtmp, null | %nullnetmp2 = icmp ne ptr %loadtmp1, null

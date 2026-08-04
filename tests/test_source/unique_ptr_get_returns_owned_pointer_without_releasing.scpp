@@ -1,0 +1,56 @@
+import std;
+// libs/std/memory/std_memory.scpp: std::unique_ptr<T>::get() (both the
+// mutable and the const overload) returns the owned raw pointer without
+// releasing ownership, unlike release() (which hands out the pointer and
+// then clears the owned pointer/ownership flag as a side effect).
+class Probe {
+public:
+    int value{};
+
+    Probe(int v) {
+        this->value = v;
+        return;
+    }
+
+    virtual ~Probe() {
+        print_int(900);
+        return;
+    }
+};
+
+int read_via_const_get(const std::unique_ptr<Probe>& owner) {
+    const Probe* raw = owner.get();
+    [[scpp::unsafe]] {
+        return raw->value;
+    }
+}
+
+int main() {
+    std::unique_ptr<Probe> p = std::make_unique<Probe>(42);
+
+    // Mutable get() returns the pointee's real, owned address (not a
+    // copy) -- writing through it is visible through `p` itself.
+    Probe* raw = p.get();
+    [[scpp::unsafe]] {
+        print_int(raw->value);
+        raw->value = 99;
+    }
+    print_int((*p).value);
+
+    // get() is idempotent and side-effect free: calling it again returns
+    // the exact same address.
+    print_int(p.get() == raw ? 1 : 0);
+
+    // Unlike release(), get() must not clear the owned pointer.
+    print_int(p == nullptr ? 1 : 0);
+
+    // const overload, dispatched through a const& parameter (the same
+    // receiver-const-dispatch shape already used by operator->()'s pair).
+    print_int(read_via_const_get(p));
+
+    // `p` still owns the pointee here: it is deleted exactly once when
+    // `p` falls out of scope below (no leak, no double free) -- proven
+    // by the destructor's own print firing exactly once, after main's
+    // body finishes.
+    return 0;
+}

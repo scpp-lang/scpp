@@ -1,0 +1,6 @@
+int main() {
+    int* p{};
+    bool a = p == nullptr;
+    bool b = nullptr == p;
+    return a && b ? 0 : 1;
+}
