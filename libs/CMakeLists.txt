@@ -3,8 +3,6 @@ set(SCPP_STDLIB_STD_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libstd.scppa")
 set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/scpp.scppm")
 set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libscpp.scppa")
 
-set(SCPP_STDLIB_STAGE_WORKSPACE_DIR "${CMAKE_BINARY_DIR}/scpp-libs-workspace")
-
 file(GLOB_RECURSE SCPP_STDLIB_BUILD_INPUTS CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/../scpp.toml"
     "${CMAKE_CURRENT_SOURCE_DIR}/std/scpp.toml"
@@ -18,49 +16,40 @@ file(GLOB_RECURSE SCPP_STDLIB_BUILD_INPUTS CONFIGURE_DEPENDS
 # source of the scpp_ast CMake target (see the top-level CMakeLists.txt),
 # so any edit to it already invalidates the `scpp` target this command's
 # own DEPENDS below already lists, which in turn already forces this
-# command to re-run. Only src/scpp.toml (the manifest describing *how*
+# command to re-run (verified directly: touching src/ast.cppm alone
+# triggers a rebuild of the `scpp` binary and therefore a re-run of this
+# custom command). Only src/scpp.toml (the manifest describing *how*
 # ast.cppm is packaged for the scpp-driven build below, e.g. its
 # `sources`/`[dependencies]`) needs to be listed explicitly, since editing
 # it alone (with no ast.cppm/compiler source change) wouldn't otherwise be
 # noticed.
 
-# The real workspace root (repo-root scpp.toml) declares three members --
-# "libs/std", "libs/scpp", and "src" (see the design doc's ch6 "Workspace
-# model"). The root manifest has no `default-members` (a virtual workspace
-# with that key omitted defaults to *every* declared member -- see
-# resolve_workspace in src/project.cppm), so the plain `scpp build --lib`
-# invoked below (no `-p`/`--workspace`) builds all three packages,
-# including "src"'s ast.cppm self-hosting target, every time this custom
-# command runs. That means a self-hosting regression in ast.cppm now fails
-# this custom command (and therefore the whole `cmake --build`), the same
-# way a real std/scpp stdlib build failure always has -- this is
-# intentional: it turns the self-hosting probe into a continuously
-# enforced part of the ordinary CMake build rather than a separately-run
-# check. "src" is symlinked into the staged workspace below (alongside
-# "libs/std"/"libs/scpp") so its declared member path resolves and its
-# ast.cppm sources are reachable from the staging tree; its build products
-# (scpp.ast.scppm / libscpp-compiler.scppa) aren't copied out to a stable
-# path below like std/scpp's are, since nothing else in this build
-# consumes them yet -- only actually building (and thus validating) "src"
-# is needed here, not exposing its artifacts elsewhere. Note this build
-# still only produces the stdlib's own std/scpp artifacts as tracked
-# CMake OUTPUTs (below); adding ast.cppm's own artifacts as tracked
-# outputs is left for whenever something else in the build actually needs
-# to consume them.
+# This runs the just-built `scpp` compiler against its own real workspace
+# root manifest (the repo-root scpp.toml, which declares members
+# "libs/std", "libs/scpp", and "src" -- see the design doc's ch6
+# "Workspace model" -- with no `default-members`, so a plain
+# `scpp build --lib` builds all three). Earlier revisions of this command
+# staged a throwaway copy of the workspace (via a private
+# ${CMAKE_BINARY_DIR}/scpp-libs-workspace directory, symlinking each
+# member in and copying scpp.toml over) purely to give `.scpp/build/`
+# somewhere to land other than the real source tree; that indirection has
+# been dropped in favor of running directly in ${CMAKE_SOURCE_DIR}, the
+# real top-level source directory where the real scpp.toml already lives.
+# Trade-off, explicitly accepted: `.scpp/build/` (already gitignored) is
+# now written straight into the source tree and shared by every CMake
+# binary directory built from this checkout -- e.g. a second, parallel
+# build directory would reuse the same cache rather than getting its own
+# isolated one -- in exchange for actually simplifying this command and
+# matching the same day-to-day workflow a human contributor gets by
+# running `scpp build --lib` from the repo root themselves.
 add_custom_command(
     OUTPUT
         "${SCPP_STDLIB_STD_INTERFACE_PATH}"
         "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
         "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
         "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/libs"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/../scpp.toml" "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/scpp.toml"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/std" "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/libs/std"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/scpp" "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/libs/scpp"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/../src" "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/src"
-    COMMAND ${CMAKE_COMMAND} -E chdir "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}" $<TARGET_FILE:scpp> build --lib
-    COMMAND /bin/sh -c "set -eu; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/std/modules/std.scppm' | head -n 1`\" \"${SCPP_STDLIB_STD_INTERFACE_PATH}\"; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/std/archives/libstd.scppa' | head -n 1`\" \"${SCPP_STDLIB_STD_ARCHIVE_PATH}\"; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/scpp/modules/scpp.scppm' | head -n 1`\" \"${SCPP_STDLIB_SCPP_INTERFACE_PATH}\"; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/scpp/archives/libscpp.scppa' | head -n 1`\" \"${SCPP_STDLIB_SCPP_ARCHIVE_PATH}\""
+    COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_SOURCE_DIR}" $<TARGET_FILE:scpp> build --lib
+    COMMAND /bin/sh -c "set -eu; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/std/modules/std.scppm' | head -n 1`\" \"${SCPP_STDLIB_STD_INTERFACE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/std/archives/libstd.scppa' | head -n 1`\" \"${SCPP_STDLIB_STD_ARCHIVE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/scpp/modules/scpp.scppm' | head -n 1`\" \"${SCPP_STDLIB_SCPP_INTERFACE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/scpp/archives/libscpp.scppa' | head -n 1`\" \"${SCPP_STDLIB_SCPP_ARCHIVE_PATH}\""
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     DEPENDS
         scpp
