@@ -4635,13 +4635,36 @@ private:
     // into ConceptRequirement::arg_lifetimes -- spec §6.2(22) makes it
     // constrain concept satisfaction itself (see generics_support.cppm's
     // type_satisfies_concept).
+    //
+    // spec §13.2 additionally recognizes a *construction*-shaped
+    // requirement -- `T(args...);` / `T{args...};` (simple), or
+    // `{ T(args...) };` / `{ T{args...} };` (compound, never with a
+    // trailing `-> constraint` -- spec §13.2(3)'s own precondition),
+    // where `T` names a type (almost always the concept's own
+    // `template_param_name`) rather than the requires-expression's
+    // placeholder -- alongside the call-shaped forms above; see
+    // parse_construction_shaped_concept_requirement below. This is only
+    // ever recognized when the leading identifier is *not* the
+    // placeholder's own name -- a placeholder-led expression always
+    // means one of the call-shaped forms above, exactly as before.
     ConceptRequirement parse_concept_requirement(
-        const std::string& placeholder_name, const std::unordered_map<std::string, Type>& helper_param_types,
+        const std::string& placeholder_name, const std::string& template_param_name,
+        const std::unordered_map<std::string, Type>& helper_param_types,
         const std::unordered_map<std::string, LifetimeAnnotation>& helper_param_lifetimes) {
         ConceptRequirement req;
         bool is_compound = match(TokenKind::LBrace);
 
-        const Token& receiver_tok = expect(TokenKind::Identifier, "the concept's own requires-parameter name");
+        const Token& receiver_tok = peek();
+        bool leading_is_placeholder =
+            receiver_tok.kind == TokenKind::Identifier && receiver_tok.text == placeholder_name;
+        if (!leading_is_placeholder && receiver_tok.kind == TokenKind::Identifier &&
+            (receiver_tok.text == template_param_name || is_visible_type_name(std::string(receiver_tok.text))) &&
+            (peek_at(1).kind == TokenKind::LParen || peek_at(1).kind == TokenKind::LBrace)) {
+            return parse_construction_shaped_concept_requirement(is_compound, placeholder_name, template_param_name,
+                                                                  helper_param_types, helper_param_lifetimes);
+        }
+
+        expect(TokenKind::Identifier, "the concept's own requires-parameter name");
         if (receiver_tok.text != placeholder_name) {
             throw ParseError(receiver_tok.line, receiver_tok.column,
                               "expected a requirement shaped as a call on '" + placeholder_name +
@@ -4693,6 +4716,82 @@ private:
             req.return_type = parse_type();
             expect(TokenKind::Greater, "'>'");
             req.has_return_constraint = true;
+        }
+        expect(TokenKind::Semicolon, "';'");
+        return req;
+    }
+
+    // spec §13.2(3.3)/(4): parses a construction-shaped requirement,
+    // `T(args...);` / `T{args...};` (simple) or `{ T(args...) };` /
+    // `{ T{args...} };` (compound) -- called by parse_concept_requirement
+    // only once its own lookahead has already confirmed the leading
+    // token is a type name (not the requires-expression's own
+    // placeholder) immediately followed by '(' or '{', so every
+    // `expect`/`check` call below is only ever reached in a context
+    // where it's already known to succeed on the *shape*, not just
+    // hoped for. `is_compound` mirrors parse_concept_requirement's own
+    // (already-consumed) leading-brace check -- when true, an extra
+    // outer '}' must be consumed before the trailing ';'. Per spec
+    // §13.2(3)'s own precondition ("no type-constraint follows the
+    // closing }"), this shape can never carry a trailing `->
+    // std::same_as<T>` constraint the way the call-shaped compound forms
+    // in parse_concept_requirement can -- has_return_constraint is
+    // always left false.
+    ConceptRequirement parse_construction_shaped_concept_requirement(
+        bool is_compound, const std::string& placeholder_name, const std::string& template_param_name,
+        const std::unordered_map<std::string, Type>& helper_param_types,
+        const std::unordered_map<std::string, LifetimeAnnotation>& helper_param_lifetimes) {
+        ConceptRequirement req;
+        req.is_construct = true;
+        req.construct_type_name = std::string(expect(TokenKind::Identifier, "a constructed type name").text);
+
+        bool paren_form = match(TokenKind::LParen);
+        if (!paren_form) expect(TokenKind::LBrace, "'(' or '{'");
+        TokenKind close_kind = paren_form ? TokenKind::RParen : TokenKind::RBrace;
+        if (!check(close_kind)) {
+            do {
+                const Token& arg_tok =
+                    expect(TokenKind::Identifier, "a requirement argument (a requires-expression parameter name)");
+                if (arg_tok.text == placeholder_name) {
+                    // spec's own note: this is the whole point of the
+                    // construction shape -- probing the placeholder's
+                    // own type's constructibility (e.g. `T{t}` for
+                    // copy-constructibility). Represented as a Named
+                    // type spelled exactly like the concept's own
+                    // template_param_name, substituted for the concrete
+                    // type under test at concept-satisfaction time (see
+                    // generics_support.cppm's type_satisfies_concept).
+                    Type placeholder_type;
+                    placeholder_type.kind = TypeKind::Named;
+                    placeholder_type.name = template_param_name;
+                    req.arg_types.push_back(std::move(placeholder_type));
+                    req.arg_lifetimes.push_back(LifetimeAnnotation{});
+                } else {
+                    auto it = helper_param_types.find(std::string(arg_tok.text));
+                    if (it == helper_param_types.end()) {
+                        throw ParseError(arg_tok.line, arg_tok.column,
+                                          "'" + std::string(arg_tok.text) +
+                                              "' is not one of this concept's own requires-expression parameters "
+                                              "-- v0.1 only supports a requirement argument that is a bare "
+                                              "reference to one of them (or the placeholder itself)");
+                    }
+                    req.arg_types.push_back(it->second);
+                    req.arg_lifetimes.push_back(helper_param_lifetimes.at(std::string(arg_tok.text)));
+                }
+            } while (match(TokenKind::Comma));
+        }
+        expect(close_kind, paren_form ? "')'" : "'}'");
+        if (is_compound) {
+            expect(TokenKind::RBrace, "'}'");
+            if (check(TokenKind::Arrow)) {
+                const Token& tok = peek();
+                throw ParseError(tok.line, tok.column,
+                                  "a construction-shaped compound requirement ('" + req.construct_type_name +
+                                      "(...)' or '" + req.construct_type_name +
+                                      "{...}') cannot be followed by a '-> constraint' in this version (spec "
+                                      "§13.2(3) only recognizes this shape for a requirement with no trailing "
+                                      "type-constraint)");
+            }
         }
         expect(TokenKind::Semicolon, "';'");
         return req;
@@ -4972,7 +5071,8 @@ private:
         expect(TokenKind::LBrace, "'{'");
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             def.requirements.push_back(
-                parse_concept_requirement(def.requires_param_name, helper_param_types, helper_param_lifetimes));
+                parse_concept_requirement(def.requires_param_name, template_param_name, helper_param_types,
+                                          helper_param_lifetimes));
         }
         expect(TokenKind::RBrace, "'}'");
         expect(TokenKind::Semicolon, "';'");
