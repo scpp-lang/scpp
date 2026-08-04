@@ -1546,6 +1546,37 @@ private:
         return !resolve_visible_type_name(spelled_name).empty() || resolve_visible_type_alias(spelled_name).has_value();
     }
 
+    // ch05 §5.14/spec §13.2: resolves a (possibly namespace-qualified)
+    // spelled concept name to the fully-qualified name it was declared
+    // under (concept_names_ always stores a concept's own qualify_name'd
+    // name, mirroring struct_names_ for a class/struct) -- the same
+    // progressive-namespace-prefix search resolve_visible_type_name
+    // above already uses for a type name, just checked against
+    // concept_names_ instead of struct_names_. Returns an empty string
+    // when no visible concept matches. Currently only consulted by
+    // parse_optional_method_requires_clause (a per-method `requires
+    // Concept<T>` clause, ch05 §5.14) -- the abbreviated `Concept auto`
+    // parameter form and the full `template<Concept T>` header
+    // (parse_param_type/parse_generic_type_header) still only accept an
+    // unqualified concept name, unchanged; extending those too is
+    // orthogonal to this fix's own scope.
+    [[nodiscard]] std::string resolve_visible_concept_name(const std::string& spelled_name) const {
+        if (spelled_name.empty()) return {};
+        if (concept_names_.contains(spelled_name)) return spelled_name;
+        if (!namespace_stack_.empty()) {
+            for (std::size_t depth = namespace_stack_.size(); depth > 0; depth--) {
+                std::string candidate;
+                for (std::size_t i = 0; i < depth; i++) {
+                    candidate += namespace_stack_[i];
+                    candidate += "::";
+                }
+                candidate += spelled_name;
+                if (concept_names_.contains(candidate)) return candidate;
+            }
+        }
+        return {};
+    }
+
     [[nodiscard]] const InjectedGenericTypeName* find_injected_generic_type_name(const std::string& spelled_name) const {
         for (auto it = injected_generic_type_name_stack_.rbegin(); it != injected_generic_type_name_stack_.rend(); ++it) {
             if (it->spelled_name == spelled_name) return &*it;
@@ -3386,6 +3417,32 @@ private:
             clone.is_exported = is_reexport && clone.is_exported;
             program.type_aliases.push_back(std::move(clone));
         }
+        // See merge_partition's identical comment -- a concept exported
+        // from a genuinely separate module (e.g. `import std;` picking
+        // up std::copy_constructible) needs the same treatment an
+        // ordinary exported struct/class/type-alias already gets here:
+        // registered into concept_names_ and program.concepts so both
+        // name resolution and later concept-satisfaction checking can
+        // see it, gated by is_exported exactly like every other cross-
+        // module symbol above.
+        for (const ConceptDef& def : imported.concepts) {
+            std::string effective_owner = def.owning_module.empty() ? imported_name : def.owning_module;
+            if (!def.is_exported) continue;
+            concept_names_.insert(def.name);
+            auto existing = std::find_if(program.concepts.begin(), program.concepts.end(),
+                                         [&](const ConceptDef& current) {
+                                             return current.owning_module == effective_owner &&
+                                                    current.name == def.name;
+                                         });
+            if (existing != program.concepts.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                continue;
+            }
+            ConceptDef clone = def;
+            if (clone.owning_module.empty()) clone.owning_module = imported_name;
+            clone.is_exported = is_reexport && clone.is_exported;
+            program.concepts.push_back(std::move(clone));
+        }
         for (const Function& fn : imported.functions) {
             std::string effective_owner = fn.owning_module.empty() ? imported_name : fn.owning_module;
             if (!fn.is_exported && effective_owner != imported_name) continue;
@@ -3539,6 +3596,30 @@ private:
             }
             alias.is_exported = is_reexport && alias.is_exported;
             program.type_aliases.push_back(std::move(alias));
+        }
+        // ch05 §5.11/ch11 §11.4: a concept declared in one partition of
+        // this same module (e.g. std_concepts.scpp's own `:concepts`)
+        // must be visible -- both for name resolution
+        // (concept_names_, so resolve_visible_concept_name/parse_
+        // optional_method_requires_clause and the abbreviated-form
+        // lookups above can find it) and for concept-satisfaction
+        // checking later (program.concepts, consulted by
+        // monomorphize.cppm's own concepts_by_name_) -- to every *other*
+        // partition of the same module (e.g. `:vector`), exactly like a
+        // struct/class/type-alias declared in one partition already is.
+        for (ConceptDef& def : partition.concepts) {
+            concept_names_.insert(def.name);
+            auto existing = std::find_if(program.concepts.begin(), program.concepts.end(),
+                                         [&](const ConceptDef& current) {
+                                             return current.owning_module == def.owning_module &&
+                                                    current.name == def.name;
+                                         });
+            if (existing != program.concepts.end()) {
+                existing->is_exported = existing->is_exported || (is_reexport && def.is_exported);
+                continue;
+            }
+            def.is_exported = is_reexport && def.is_exported;
+            program.concepts.push_back(std::move(def));
         }
         for (Function& fn : partition.functions) {
             auto existing = std::find_if(program.functions.begin(), program.functions.end(), [&](const Function& current) {
@@ -4880,20 +4961,29 @@ private:
     // verbatim, appearing after the parameter list (and, for a method,
     // its trailing `const`) and before the body. `T` must name the
     // enclosing generic type's own single template parameter exactly
-    // (this version has only one to match). Returns the concept's own
-    // name (Function::method_requires_concept), or empty if no such
-    // clause is present -- always empty when `template_params` itself
-    // is empty (an ordinary, non-generic class/struct's member can never
-    // have one, since there's no type parameter left to constrain).
+    // (this version has only one to match). `ConceptName` may be
+    // namespace-qualified (e.g. `std::copy_constructible`) -- resolved
+    // via resolve_visible_concept_name exactly like an ordinary type
+    // name would be, so a concept declared inside `namespace std { ...
+    // }` (e.g. std_concepts.scpp's own std::copy_constructible) can be
+    // named either that way or, from within namespace std itself, bare.
+    // Returns the concept's own fully-qualified name
+    // (Function::method_requires_concept), or empty if no such clause is
+    // present -- always empty when `template_params` itself is empty (an
+    // ordinary, non-generic class/struct's member can never have one,
+    // since there's no type parameter left to constrain).
     std::string parse_optional_method_requires_clause(const std::vector<GenericTypeParam>& template_params) {
         if (template_params.empty() || !check(TokenKind::KwRequires)) return "";
         advance(); // 'requires'
-        std::string concept_name(expect(TokenKind::Identifier, "concept name").text);
-        if (!concept_names_.contains(concept_name)) {
-            const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                              "'" + concept_name + "' is not a declared concept (ch05 §5.14)");
+        const Token& concept_tok = peek();
+        std::string spelled_concept_name = peek_qualified_name();
+        if (spelled_concept_name.empty()) expect(TokenKind::Identifier, "concept name");
+        std::string concept_name = resolve_visible_concept_name(spelled_concept_name);
+        if (concept_name.empty()) {
+            throw ParseError(concept_tok.line, concept_tok.column,
+                              "'" + spelled_concept_name + "' is not a declared concept (ch05 §5.14)");
         }
+        parse_qualified_name(); // now actually consume it, having already resolved it above
         expect(TokenKind::Less, "'<'");
         const Token& param_tok = peek();
         std::string arg_name(expect(TokenKind::Identifier, "the generic type's own template parameter name").text);
@@ -5085,6 +5175,13 @@ private:
         program.classes.push_back(std::move(witness));
 
         for (const ConceptRequirement& req : def.requirements) {
+            // spec §13.2: a construction-shaped requirement has no
+            // "method" at all for a generic body to call against (see
+            // type_satisfies_concept's own, entirely separate,
+            // constructor-matching path for how it's actually checked)
+            // -- so, unlike every call-shaped requirement above, it
+            // synthesizes no per-requirement witness Function here.
+            if (req.is_construct) continue;
             Function fn;
             fn.loc = loc;
             fn.name = def.name + "_" + req.method_name;
