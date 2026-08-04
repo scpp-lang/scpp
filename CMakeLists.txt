@@ -235,16 +235,37 @@ add_test(NAME driver_test COMMAND driver_test)
 # a signature over each module's source digest, manifest digest,
 # compiler-binary digest, target triple, profile, and dependency
 # digests). Maintaining a second, independent "which files matter" list
-# here purely to decide whether to invoke `scpp build --lib` at all
-# would just be drift-prone duplication of information scpp's own cache
+# here purely to decide whether to invoke `scpp build` at all would
+# just be drift-prone duplication of information scpp's own cache
 # already tracks more precisely -- e.g. it also reacts correctly to a
 # rebuilt compiler or a changed profile/target triple, which a plain
 # CMake file glob never would have. So this target's COMMAND runs
-# unconditionally on every `cmake --build`, trusting `scpp build --lib`
-# to make that a fast cache-hit no-op whenever nothing relevant actually
+# unconditionally on every `cmake --build`, trusting `scpp build` to
+# make that a fast cache-hit no-op whenever nothing relevant actually
 # changed (measured: roughly 1-3 seconds of overhead for the whole
 # chdir+build+copy recipe on a fully cached, nothing-changed rebuild --
 # see the PR description for exact numbers).
+#
+# No `--lib`: none of the 3 member manifests (libs/std, libs/scpp, src)
+# declare a [[bin]] target, so `--lib` (which only skips [[bin]]
+# targets -- see build_lib_only/build_binaries in src/project.cppm) is
+# currently a pure no-op here; dropped for clarity rather than kept as
+# defensive-but-dead ceremony.
+#
+# The artifact paths under .scpp/build/ contain the LLVM target-triple
+# and build-profile as path components (.scpp/build/<triple>/<profile>/
+# dev/<package>/...). The profile is hardcoded to the literal `dev`
+# below because `scpp build` itself defaults to it (profile_name =
+# options.release ? "release" : options.selected_profile.value_or("dev")
+# in src/project.cppm) and this command never passes --release/
+# --profile. The triple is `${LLVM_HOST_TRIPLE}`, a normal CMake
+# variable already set by `find_package(LLVM REQUIRED CONFIG)` above in
+# this same file/scope -- confirmed to match scpp's own
+# host_target_triple() exactly on every platform this project targets,
+# since both ultimately describe the same LLVM host. Using it directly
+# means no `find`-based path search or `llvm-config` shell-out is
+# needed to locate these files: plain, direct `${CMAKE_COMMAND} -E
+# copy` commands suffice, consistent with this file's usual style.
 #
 # DEPENDS only the `scpp` target itself, purely for build ordering (the
 # compiler binary must exist before this can shell out to it) -- not for
@@ -257,8 +278,19 @@ add_test(NAME driver_test COMMAND driver_test)
 # established pattern httpserver_app itself already uses for its own
 # always-run `scpp` invocation.
 add_custom_target(scpp_stdlib_artifacts ALL
-    COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_SOURCE_DIR}" $<TARGET_FILE:scpp> build --lib
-    COMMAND /bin/sh -c "set -eu; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/std/modules/std.scppm' | head -n 1`\" \"${SCPP_STDLIB_STD_INTERFACE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/std/archives/libstd.scppa' | head -n 1`\" \"${SCPP_STDLIB_STD_ARCHIVE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/scpp/modules/scpp.scppm' | head -n 1`\" \"${SCPP_STDLIB_SCPP_INTERFACE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/scpp/archives/libscpp.scppa' | head -n 1`\" \"${SCPP_STDLIB_SCPP_ARCHIVE_PATH}\""
+    COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_SOURCE_DIR}" $<TARGET_FILE:scpp> build
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/std/modules/std.scppm"
+        "${SCPP_STDLIB_STD_INTERFACE_PATH}"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/std/archives/libstd.scppa"
+        "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/scpp/modules/scpp.scppm"
+        "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/scpp/archives/libscpp.scppa"
+        "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
     BYPRODUCTS
         "${SCPP_STDLIB_STD_INTERFACE_PATH}"
         "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
