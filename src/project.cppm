@@ -2335,10 +2335,34 @@ int build_manifest_project(const std::filesystem::path& start_dir, const Project
         std::filesystem::path shared_output_root;
         bool invoked_from_workspace_root = false;
 
+        // An ancestor `[workspace]` manifest only governs manifests it actually
+        // declares as `members` (or the workspace root manifest itself) -- a
+        // standalone `[package]` manifest that simply happens to be nested
+        // somewhere below an unrelated ancestor workspace (for example a
+        // scratch/test project created under this repo's own gitignored
+        // `build/` directory, now that the repo root itself carries a
+        // `[workspace]` manifest covering `libs/std`/`libs/scpp`/`src`) must
+        // not be silently absorbed into that workspace's shared output root.
+        // Verify membership before committing to workspace mode, mirroring
+        // Cargo's requirement that workspace membership be explicit rather
+        // than inferred from directory nesting.
         if (discovery.workspace_manifest.has_value()) {
-            workspace_info = load_workspace(*discovery.workspace_manifest);
-            shared_output_root = discovery.workspace_manifest->manifest_path.parent_path();
-            invoked_from_workspace_root = discovery.current_manifest->manifest_path == discovery.workspace_manifest->manifest_path;
+            WorkspaceInfo candidate_workspace = load_workspace(*discovery.workspace_manifest);
+            bool current_is_workspace_root =
+                discovery.current_manifest->manifest_path == discovery.workspace_manifest->manifest_path;
+            bool current_is_declared_member = current_is_workspace_root ||
+                std::any_of(candidate_workspace.member_manifests.begin(), candidate_workspace.member_manifests.end(),
+                           [&](const ManifestData& member) {
+                               return member.manifest_path == discovery.current_manifest->manifest_path;
+                           });
+            if (current_is_declared_member) {
+                workspace_info = std::move(candidate_workspace);
+                shared_output_root = discovery.workspace_manifest->manifest_path.parent_path();
+                invoked_from_workspace_root = current_is_workspace_root;
+            }
+        }
+
+        if (workspace_info.has_value()) {
             if (!discovery.current_manifest->package_name.has_value() && !invoked_from_workspace_root) {
                 throw ManifestError("current manifest is not a package manifest");
             }

@@ -16,7 +16,6 @@ The project convention is:
 
 | Path | Role |
 |---|---|
-| `scpp.toml` | Workspace manifest that dogfoods `scpp build` for the shipped libraries |
 | `std/scpp.toml` | `std` package manifest: `[[lib]]` source set plus `[additional_objs.std-native]` wrapper-object build step |
 | `std/std.scpp` | Primary interface unit of module `std`; re-exports its partitions with `export import :...;` |
 | `std/` | Real-C++-mirroring library partitions and native wrappers for module `std` |
@@ -35,13 +34,19 @@ The project convention is:
 
 ## Manifest workspace
 
-`libs/` now dogfoods the same manifest-based flow the book teaches:
+`libs/` dogfoods the same manifest-based flow the book teaches, as two members of
+the repository's top-level workspace manifest (`../scpp.toml`, moved up from
+`libs/scpp.toml` so it can also cover `src/`, this compiler's own self-hosting
+sources -- see `../src/scpp.toml`):
 
-- `libs/scpp.toml` is a two-member workspace (`std`, `scpp`)
+- the root `scpp.toml` workspace declares `members = ["libs/std", "libs/scpp", "src"]`
+  with `default-members = ["libs/std", "libs/scpp"]`, so a plain `scpp build` (no
+  `-p`/`--workspace`) from the repo root, and the CMake staging below, only ever
+  build the two library packages here
 - `libs/std/scpp.toml` defines the `std` library package
 - `libs/scpp/scpp.toml` defines the `scpp` library package and depends on `std`
 
-`libs/` now keeps wrapper compilation inside the manifest build itself:
+`libs/` also keeps wrapper compilation inside the manifest build itself:
 
 - `[[lib]]` declares the scpp module source set
 - `[additional_objs.std-native]` / `[additional_objs.scpp-native]` each run one `${CXX:-c++} -c ...`
@@ -52,6 +57,11 @@ The project convention is:
 So the only non-manifest piece left is the tiny CMake staging layer that runs
 the workspace build in a throwaway build-tree directory and copies the resulting
 artifacts to the stable paths the rest of the top-level build already consumes.
+That staging copies the real root `scpp.toml` verbatim, so it also symlinks a
+`src` entry alongside `libs/std`/`libs/scpp` purely so workspace loading (which
+validates every declared member has a real manifest, whether or not it is
+selected for the build) succeeds; `default-members` keeps the actual build
+scoped to `libs/std`/`libs/scpp` only, exactly as before.
 
 ## Consuming `std`
 

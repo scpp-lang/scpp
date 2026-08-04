@@ -15,7 +15,6 @@
 
 | 路径 | 作用 |
 |---|---|
-| `scpp.toml` | `libs/` 的 workspace manifest，用来直接 dogfood `scpp build` |
 | `std/scpp.toml` | `std` 包的 manifest：`[[lib]]` 源集合，加上 `[additional_objs.std-native]` 包装层对象构建步骤 |
 | `std/std.scpp` | `std` 模块的主接口单元；通过 `export import :...;` 重新导出各分区 |
 | `std/` | `std` 模块的各分区和原生包装库 |
@@ -26,9 +25,15 @@
 
 ## Manifest workspace
 
-现在 `libs/` 自己也使用书里教给用户的 manifest-based flow：
+现在 `libs/` 作为仓库顶层 workspace manifest（`../scpp.toml`，从
+`libs/scpp.toml` 上移一层，这样它也能覆盖 `src/`——本编译器自身的
+self-hosting 源码，见 `../src/scpp.toml`）的两个成员，使用书里教给用户的
+manifest-based flow：
 
-- `libs/scpp.toml` 是一个两成员 workspace（`std`、`scpp`）
+- 根目录的 `scpp.toml` workspace 声明了 `members = ["libs/std", "libs/scpp", "src"]`，
+  并设置 `default-members = ["libs/std", "libs/scpp"]`，所以从仓库根目录直接执行
+  `scpp build`（不带 `-p`/`--workspace`）以及下面的 CMake staging，都只会构建这
+  两个库包
 - `libs/std/scpp.toml` 定义 `std` 这个库包
 - `libs/scpp/scpp.toml` 定义 `scpp` 这个库包，并通过 path dependency 依赖 `std`
 
@@ -42,7 +47,11 @@
 
 因此现在唯一留在 manifest 之外的，只剩下一层很小的 CMake staging：在
 build 树里准备一次性 workspace，执行 workspace build，再把产物复制回顶层
-其余构建逻辑已经消费的稳定路径。
+其余构建逻辑已经消费的稳定路径。这一步会原样复制根目录的 `scpp.toml`，
+所以除了 `libs/std`/`libs/scpp` 之外，它还会顺带 symlink 出一个 `src`
+目录——纯粹是因为 workspace 加载会校验每个声明的成员都有真实的
+manifest（不论该成员是否会被这次构建实际选中）；实际构建范围仍然靠
+`default-members` 限定在 `libs/std`/`libs/scpp`，和之前完全一样。
 
 ## 如何使用 `std`
 
