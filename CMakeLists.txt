@@ -222,8 +222,68 @@ target_compile_definitions(driver_test PRIVATE
 
 add_test(NAME driver_test COMMAND driver_test)
 
-# Builds the shipped std/scpp/src manifest workspace (see libs/CMakeLists.txt)
-# and copies the std/scpp artifacts into build/libs. Library behavior itself
-# is covered by tests/, not demos.
-add_subdirectory(libs)
+# Builds the shipped std/scpp/src manifest workspace (root scpp.toml,
+# libs/std/scpp.toml, libs/scpp/scpp.toml, src/scpp.toml) via scpp's own
+# package manager, and copies the resulting std/scpp artifacts into
+# build/libs. Library *behavior* itself is covered by tests/, not demos.
+file(GLOB_RECURSE SCPP_STDLIB_BUILD_INPUTS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/std/scpp.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp/scpp.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/scpp.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/std/*.scpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/std/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp/*.scpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp/*.cpp")
+# src/ast.cppm itself is *not* globbed here -- it's already a real source
+# of the scpp_ast target defined above, so any edit to it already
+# invalidates the `scpp` target this command's own DEPENDS below already
+# lists, which in turn already forces this command to re-run (verified
+# directly: touching src/ast.cppm alone triggers a rebuild of the `scpp`
+# binary and therefore a re-run of this custom command). Only
+# src/scpp.toml (the manifest describing *how* ast.cppm is packaged for
+# the scpp-driven build below) needs to be listed explicitly, since
+# editing it alone (with no ast.cppm/compiler source change) wouldn't
+# otherwise be noticed.
+
+# Runs the just-built `scpp` compiler against its own real workspace root
+# manifest (repo-root scpp.toml, declaring members "libs/std",
+# "libs/scpp", and "src" -- see the design doc's ch6 "Workspace model" --
+# with no `default-members`, so a plain `scpp build --lib` builds all
+# three). This chdir's into ${CMAKE_SOURCE_DIR} (the true top-level
+# source directory -- this project has exactly one project() call, right
+# here) and runs the exact same command a human contributor would run by
+# hand from the repo root. Trade-off, explicitly accepted: `.scpp/build/`
+# (already gitignored) is written directly into this source tree and
+# shared by every CMake binary directory built from this checkout -- a
+# second, parallel build directory reuses the same cache rather than
+# getting its own isolated one -- in exchange for this simplicity. Since
+# there's no `default-members`, this also genuinely compiles src's
+# ast.cppm every time, so a self-hosting regression there now fails this
+# step (and therefore the whole `cmake --build`), the same way a real
+# stdlib build failure always has.
+add_custom_command(
+    OUTPUT
+        "${SCPP_STDLIB_STD_INTERFACE_PATH}"
+        "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
+        "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
+        "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
+    COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_SOURCE_DIR}" $<TARGET_FILE:scpp> build --lib
+    COMMAND /bin/sh -c "set -eu; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/std/modules/std.scppm' | head -n 1`\" \"${SCPP_STDLIB_STD_INTERFACE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/std/archives/libstd.scppa' | head -n 1`\" \"${SCPP_STDLIB_STD_ARCHIVE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/scpp/modules/scpp.scppm' | head -n 1`\" \"${SCPP_STDLIB_SCPP_INTERFACE_PATH}\"; cp \"`find \"${CMAKE_SOURCE_DIR}/.scpp/build\" -path '*/dev/scpp/archives/libscpp.scppa' | head -n 1`\" \"${SCPP_STDLIB_SCPP_ARCHIVE_PATH}\""
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    DEPENDS
+        scpp
+        ${SCPP_STDLIB_BUILD_INPUTS}
+    VERBATIM)
+
+add_custom_target(scpp_std_artifacts ALL
+    DEPENDS
+        "${SCPP_STDLIB_STD_INTERFACE_PATH}"
+        "${SCPP_STDLIB_STD_ARCHIVE_PATH}")
+
+add_custom_target(scpp_scpp_artifacts ALL
+    DEPENDS
+        "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
+        "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}")
+
 add_subdirectory(applications/httpserver)

@@ -22,7 +22,6 @@ The project convention is:
 | `scpp/scpp.toml` | `scpp` package manifest with a path dependency on `../std` |
 | `scpp/scpp.scpp` | Primary interface unit of module `scpp`; re-exports scpp-specific partitions |
 | `scpp/rand/` | `scpp:rand` partition with `scpp::rand::uniform_int_distribution<int>` |
-| `CMakeLists.txt` | Only stages a temporary workspace under the build tree, runs `scpp build --lib`, and copies final artifacts back to stable `build/libs` paths |
 | `llvm/llvm.cpp` | Primary interface unit of module `llvm`; re-exports its six partitions with `export import :...;` -- plain clang++-compiled, not a workspace member |
 | `llvm/types.cpp` | Partition `llvm:types`: hand-written opaque handle struct tags/aliases mirroring the `llvm-c/Types.h` subset `llvm:core`, `llvm:debug_info`, and `src/compiler/codegen/api.cppm` use -- plain clang++-compiled, not a workspace member |
 | `llvm/core.cpp` | Partition `llvm:core`: hand-written `extern "C"` mirror of the `llvm-c/Core.h` subset this compiler's own codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
@@ -41,8 +40,9 @@ sources -- see `../src/scpp.toml`):
 
 - the root `scpp.toml` workspace declares `members = ["libs/std", "libs/scpp", "src"]`
   with no `default-members`, so a plain `scpp build` (no `-p`/`--workspace`) from
-  the repo root -- and the CMake step below -- builds all three member
-  packages, including `src`'s `ast.cppm` self-hosting target
+  the repo root -- and the top-level `CMakeLists.txt`'s custom command
+  described below -- builds all three member packages, including `src`'s
+  `ast.cppm` self-hosting target
 - `libs/std/scpp.toml` defines the `std` library package
 - `libs/scpp/scpp.toml` defines the `scpp` library package and depends on `std`
 
@@ -54,24 +54,25 @@ sources -- see `../src/scpp.toml`):
 - `additional_objs = "..."` attaches those outputs to the final `libstd.scppa`
   / `libscpp.scppa` archives
 
-So the only non-manifest piece left is the tiny CMake step that runs the
+So the only non-manifest piece left is the tiny `add_custom_command` in the
+top-level `../CMakeLists.txt` (there's no `libs/CMakeLists.txt` -- `libs/` has
+no CMake targets of its own besides `llvm/`, see below) that runs the
 just-built `scpp` compiler against the real repo-root `scpp.toml` (`cd` to
 `${CMAKE_SOURCE_DIR}`, then `scpp build --lib`) and copies the resulting
 `std`/`scpp` artifacts to the stable paths the rest of the top-level build
 already consumes -- exactly the same command a human contributor would run by
-hand from the repo root. Earlier revisions staged a throwaway copy of the
-workspace in the CMake build tree so `.scpp/build/` wouldn't land in the real
-source tree; that indirection has been dropped in favor of running directly
-in the source tree (`.scpp/` is already gitignored), accepting that
-`.scpp/build/` is now a single cache shared by every CMake binary directory
-built from the same checkout, in exchange for genuinely simplifying this step.
-Since the workspace has no `default-members`, this `scpp build --lib` step
-compiles `src`'s `ast.cppm` too, the same way it always has for `std`/`scpp` --
-so a self-hosting regression in `ast.cppm` now fails this CMake step (and
-therefore the whole `cmake --build`) exactly like a real stdlib build failure
-always has -- intentional, so the self-hosting probe is continuously enforced
-rather than a separately-run check. `src`'s own build products
-(`scpp.ast.scppm`/`libscpp-compiler.scppa`) aren't copied out to a stable path
+hand from the repo root. `.scpp/build/` (already gitignored) is written
+directly into the source tree and is a single cache shared by every CMake
+binary directory built from the same checkout -- an explicitly accepted
+trade-off in exchange for this step matching a human contributor's own
+workflow exactly. Since the workspace has no `default-members`, this
+`scpp build --lib` step compiles `src`'s `ast.cppm` too, the same way it
+always has for `std`/`scpp` -- so a self-hosting regression in `ast.cppm` now
+fails this CMake step (and therefore the whole `cmake --build`) exactly like
+a real stdlib build failure always has -- intentional, so the self-hosting
+probe is continuously enforced rather than a separately-run check. `src`'s
+own build products (`scpp.ast.scppm`/`libscpp-compiler.scppa`) aren't copied
+out to a stable path
 the way `std`/`scpp`'s are, since nothing else in this build consumes them yet.
 
 ## Consuming `std`

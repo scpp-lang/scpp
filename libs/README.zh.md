@@ -21,7 +21,6 @@
 | `scpp/scpp.toml` | `scpp` 包的 manifest；通过 path dependency 依赖 `../std` |
 | `scpp/scpp.scpp` | `scpp` 模块的主接口单元；重新导出 scpp 自己的扩展分区 |
 | `scpp/rand/` | `scpp:rand` 分区，提供 `scpp::rand::uniform_int_distribution<int>` |
-| `CMakeLists.txt` | 直接在仓库根目录（`${CMAKE_SOURCE_DIR}`）执行 `scpp build --lib`，再把 `std`/`scpp` 产物复制回稳定的 `build/libs` 路径 |
 
 ## Manifest workspace
 
@@ -32,8 +31,9 @@ manifest-based flow：
 
 - 根目录的 `scpp.toml` workspace 声明了 `members = ["libs/std", "libs/scpp", "src"]`，
   没有设置 `default-members`，所以从仓库根目录直接执行 `scpp build`
-  （不带 `-p`/`--workspace`）以及下面的 CMake 步骤，都会构建全部三个
-  成员包，包括 `src` 的 `ast.cppm` self-hosting 目标
+  （不带 `-p`/`--workspace`）以及下面提到的顶层 `CMakeLists.txt` 里的
+  custom command，都会构建全部三个成员包，包括 `src` 的 `ast.cppm`
+  self-hosting 目标
 - `libs/std/scpp.toml` 定义 `std` 这个库包
 - `libs/scpp/scpp.toml` 定义 `scpp` 这个库包，并通过 path dependency 依赖 `std`
 
@@ -45,24 +45,24 @@ manifest-based flow：
 - `additional_objs = "..."` 把这些输出接到最终的 `libstd.scppa` /
   `libscpp.scppa` 归档里
 
-因此现在唯一留在 manifest 之外的，只剩下一层很小的 CMake 步骤：直接
+因此现在唯一留在 manifest 之外的，只剩下顶层 `../CMakeLists.txt` 里一个
+很小的 `add_custom_command`（`libs/` 自己没有 `CMakeLists.txt`——除了
+下面会提到的 `llvm/` 之外，`libs/` 本身没有任何 CMake 目标）：直接
 `cd` 到 `${CMAKE_SOURCE_DIR}`（仓库真正的顶层源码目录，真正的
 `scpp.toml` 就在那里）执行刚构建出来的 `scpp build --lib`，再把 `std`/
 `scpp` 产物复制回顶层其余构建逻辑已经消费的稳定路径——和贡献者自己在
-仓库根目录手动执行的命令完全一样。早期版本会在 CMake build 树里搭建
-一份临时 workspace 副本，纯粹是为了不让 `.scpp/build/` 落在真正的源码
-树里；现在去掉了这层间接，直接在源码树里运行（`.scpp/` 本来就已经在
-`.gitignore` 里）。代价是显式接受的：`.scpp/build/` 现在是同一份缓存，
-会被基于同一份 checkout 搭建的每一个 CMake build 目录共享，而不是各自
-隔离——换来的是这一步骤真正意义上的简化。由于 workspace 没有设置
-`default-members`，这一步的 `scpp build --lib` 会真正编译 `src` 的
-`ast.cppm`，和一直以来对待 `std`/`scpp` 的方式完全一样。这意味着
-`ast.cppm` 一旦出现 self-hosting 回归，这一 CMake 步骤（进而整个
-`cmake --build`）就会失败，和真正的 stdlib 构建失败一样——这是有意为之，
-让 self-hosting probe 变成 CMake 构建本身持续执行的一部分，而不是一个
-单独运行的检查。`src` 自己的构建产物（`scpp.ast.scppm`/
-`libscpp-compiler.scppa`）目前不会像 `std`/`scpp` 的产物那样被复制到稳定
-路径，因为这次构建里还没有别的地方需要消费它们。
+仓库根目录手动执行的命令完全一样。`.scpp/build/`（本来就已经在
+`.gitignore` 里）会直接写进源码树，是同一个基于同一份 checkout 搭建的
+每一个 CMake build 目录共享的缓存，而不是各自隔离——这是显式接受的
+代价，换来的是这一步骤和贡献者自己的工作流完全一致。由于 workspace
+没有设置 `default-members`，这一步的 `scpp build --lib` 会真正编译
+`src` 的 `ast.cppm`，和一直以来对待 `std`/`scpp` 的方式完全一样。这
+意味着 `ast.cppm` 一旦出现 self-hosting 回归，这一 CMake 步骤（进而
+整个 `cmake --build`）就会失败，和真正的 stdlib 构建失败一样——这是
+有意为之，让 self-hosting probe 变成 CMake 构建本身持续执行的一部分，
+而不是一个单独运行的检查。`src` 自己的构建产物（`scpp.ast.scppm`/
+`libscpp-compiler.scppa`）目前不会像 `std`/`scpp` 的产物那样被复制到
+稳定路径，因为这次构建里还没有别的地方需要消费它们。
 
 ## 如何使用 `std`
 
