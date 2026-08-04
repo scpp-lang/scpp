@@ -3852,12 +3852,30 @@ private:
 
     void monomorphize_abbreviated_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
                                                         const std::string& cloned_method_suffix_prefix = "") {
+        // ch05 §5.11/§5.12: `tmpl` is frequently a reference straight
+        // into `program_.functions` (e.g. the synthesized closure "call"
+        // method looked up via generic_template_indices_ in walk_expr).
+        // get_or_create_clone below now walks the freshly synthesized
+        // clone's own body (see its own comment), which can itself
+        // recursively re-enter this same function -- for a
+        // self-recursive generic lambda ("Y combinator" style,
+        // `auto&& self` calling `self(...)` again), that nested call
+        // targets this *exact* template again, appending another entry
+        // to program_.functions and potentially reallocating it out from
+        // under `tmpl`. Snapshotting up front (exactly like
+        // monomorphize_generic_function_call's own `stable_tmpl` already
+        // does for the full-header form) keeps every later read below --
+        // including the `append_default_arguments_to_call` call after
+        // get_or_create_clone returns -- safe regardless of how many
+        // clones get created in between.
+        Function tmpl_snapshot = clone_function(tmpl);
+        const Function& stable_tmpl = tmpl_snapshot;
         std::vector<Type> concrete_param_types;
-        concrete_param_types.reserve(tmpl.params.size());
-        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+        concrete_param_types.reserve(stable_tmpl.params.size());
+        std::vector<std::vector<Type>> concrete_pack_param_types(stable_tmpl.params.size());
         std::size_t arg_cursor = 0;
-        for (std::size_t i = 0; i < tmpl.params.size(); i++) {
-            const Param& param = tmpl.params[i];
+        for (std::size_t i = 0; i < stable_tmpl.params.size(); i++) {
+            const Param& param = stable_tmpl.params[i];
             if (i < param_offset) {
                 concrete_param_types.push_back(param.type);
                 continue;
@@ -3873,7 +3891,7 @@ private:
                         if (!type_satisfies_concept(named, *concept_it->second, program_)) {
                             throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
                                                     param.generic_concept + "' required by generic function '" +
-                                                    tmpl.name +
+                                                    stable_tmpl.name +
                                                     "' (ch05 §5.11 -- every requirement's method must exist with a "
                                                     "matching signature)",
                                 expr.loc);
@@ -3900,7 +3918,7 @@ private:
                 if (concept_it == concepts_by_name_.end()) return;
                 if (!type_satisfies_concept(named, *concept_it->second, program_)) {
                     throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
-                                           param.generic_concept + "' required by generic function '" + tmpl.name +
+                                           param.generic_concept + "' required by generic function '" + stable_tmpl.name +
                                            "' (ch05 §5.11 -- every requirement's method must exist with a matching "
                                            "signature)",
                         expr.loc);
@@ -3911,20 +3929,20 @@ private:
             arg_cursor++;
         }
 
-        for (std::size_t i = param_offset; i < tmpl.params.size(); i++) {
-            const Param& param = tmpl.params[i];
+        for (std::size_t i = param_offset; i < stable_tmpl.params.size(); i++) {
+            const Param& param = stable_tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
             const std::vector<Type>* types_to_check = param.is_parameter_pack ? &concrete_pack_param_types[i] : nullptr;
             if (types_to_check == nullptr) {
                 if (param.require_thread_movable && !is_thread_movable(concrete_param_types[i])) {
                     throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
+                                            stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
                         expr.loc);
                 }
                 if (param.require_thread_shareable && !is_thread_shareable(concrete_param_types[i])) {
                     throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
+                                            stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
                         expr.loc);
                 }
@@ -3933,21 +3951,21 @@ private:
             for (const Type& concrete_type : *types_to_check) {
                 if (param.require_thread_movable && !is_thread_movable(concrete_type)) {
                     throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
+                                            stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
                         expr.loc);
                 }
                 if (param.require_thread_shareable && !is_thread_shareable(concrete_type)) {
                     throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                            tmpl.name +
+                                            stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
                         expr.loc);
                 }
             }
         }
 
-        std::string clone_name = get_or_create_clone(tmpl, concrete_param_types, concrete_pack_param_types);
-        append_default_arguments_to_call(expr, tmpl, param_offset);
+        std::string clone_name = get_or_create_clone(stable_tmpl, concrete_param_types, concrete_pack_param_types);
+        append_default_arguments_to_call(expr, stable_tmpl, param_offset);
         if (expr.lhs == nullptr) {
             expr.name = std::move(clone_name);
         } else {
@@ -5488,14 +5506,30 @@ private:
         // normally by movecheck (see monomorphize_generics's own
         // comment) and compiled normally by codegen.
 
-        // Full-header generic clones are walked by the active caller's
-        // in-flight body traversal immediately after this helper
-        // returns. Walking them here is unsafe because `tmpl` is often
-        // a reference into `program_.functions`; appending the clone can
-        // reallocate that vector, dangling the caller's `tmpl`
-        // reference before it finishes post-clone work like appending
-        // default arguments.
+        // Unlike a struct/class-template clone's methods (checked once,
+        // abstractly, at check_generic_type_methods_once -- ch05
+        // §5.14), an abbreviated generic *function*'s clone still needs
+        // its own body walked here, exactly like
+        // instantiate_full_header_generic_clone's own clone does: any
+        // nested generic-dispatch call inside it (another abbreviated-
+        // generic call, or a bare `f(x)` witness/closure invocation)
+        // still names its *template*, not this concrete clone, until a
+        // monomorphization walk resolves it. Without this, a closure's
+        // synthesized "call" method that recursively calls itself
+        // through its own `auto&&` parameter (the Y-combinator idiom,
+        // e.g. `[&](auto&& self, int n) { ... self(self, n - 1); ... }`)
+        // would leave that inner call permanently pointed at the
+        // generic template's own bare name, which codegen never emits
+        // (it's excluded, like every template) -- a "call to unknown
+        // function" failure at codegen, not monomorphization. Safe to
+        // walk from here (unlike the caller's own now-snapshotted
+        // `tmpl`, see monomorphize_abbreviated_generic_function_call's
+        // own comment): `fn_index` is captured *after* this push_back,
+        // so a further reallocation triggered by walking this clone's
+        // own body (e.g. a further nested clone of this very template,
+        // as the recursive case above does) cannot invalidate it.
         program_.functions.push_back(std::move(clone));
+        walk_new_concrete_function(program_.functions.size() - 1);
         return cache_key;
     }
 };
