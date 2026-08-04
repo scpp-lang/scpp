@@ -242,18 +242,18 @@ add_test(NAME driver_test COMMAND driver_test)
 # content-hash-based incremental build cache of its own (BuildDatabase,
 # a SQLite db at .scpp/cache/build.db -- see src/project.cppm, keyed by
 # a signature over each module's source digest, manifest digest,
-# compiler-binary digest, target triple, profile, and dependency
-# digests). Maintaining a second, independent "which files matter" list
-# here purely to decide whether to invoke `scpp build` at all would
-# just be drift-prone duplication of information scpp's own cache
-# already tracks more precisely -- e.g. it also reacts correctly to a
-# rebuilt compiler or a changed profile/target triple, which a plain
-# CMake file glob never would have. So this target's COMMAND runs
-# unconditionally on every `cmake --build`, trusting `scpp build` to
-# make that a fast cache-hit no-op whenever nothing relevant actually
-# changed (measured: roughly 1-3 seconds of overhead for the whole
-# chdir+build+copy recipe on a fully cached, nothing-changed rebuild --
-# see the PR description for exact numbers).
+# compiler-binary digest, target triple, and dependency digests).
+# Maintaining a second, independent "which files matter" list here
+# purely to decide whether to invoke `scpp build` at all would just be
+# drift-prone duplication of information scpp's own cache already
+# tracks more precisely -- e.g. it also reacts correctly to a rebuilt
+# compiler or a changed target triple, which a plain CMake file glob
+# never would have. So this target's COMMAND runs unconditionally on
+# every `cmake --build`, trusting `scpp build` to make that a fast
+# cache-hit no-op whenever nothing relevant actually changed (measured:
+# roughly 1-3 seconds of overhead for the whole chdir+build+copy recipe
+# on a fully cached, nothing-changed rebuild -- see the PR description
+# for exact numbers).
 #
 # No `--lib`: this workspace now genuinely has a [[bin]] target
 # (applications/httpserver), so omitting `--lib` (build_lib_only in
@@ -262,19 +262,20 @@ add_test(NAME driver_test COMMAND driver_test)
 # `libs/std`/`libs/scpp`/`src` still declare [[lib]] only, so this is
 # purely additive for them.
 #
-# The artifact paths under .scpp/build/ contain the LLVM target-triple
-# and build-profile as path components (.scpp/build/<triple>/<profile>/
-# dev/<package>/...). The profile is hardcoded to the literal `dev`
-# below because `scpp build` itself defaults to it (profile_name =
-# options.release ? "release" : options.selected_profile.value_or("dev")
-# in src/project.cppm) and this command never passes --release/
-# --profile. The triple is `${LLVM_HOST_TRIPLE}`, a normal CMake
-# variable already set by `find_package(LLVM REQUIRED CONFIG)` above in
-# this same file/scope -- confirmed to match scpp's own
-# host_target_triple() exactly on every platform this project targets,
-# since both ultimately describe the same LLVM host. Using it directly
-# means no `find`-based path search or `llvm-config` shell-out is
-# needed to locate these files: plain, direct `${CMAKE_COMMAND} -E
+# The artifact paths under .scpp/build/ contain only the LLVM
+# target-triple as a path component now (.scpp/build/<triple>/
+# <package>/...) -- scpp's manifest-driven `[profile.*]` build-profile
+# system (dev/release/custom profiles) was removed as underdesigned, so
+# there is no longer a profile path segment to account for here; static
+# linking is unconditional and opt-level/debug are fixed constants (see
+# kManifestBuildOptLevel/kManifestBuildEmitDebugInfo in project.cppm)
+# rather than per-profile settings. The triple is `${LLVM_HOST_TRIPLE}`,
+# a normal CMake variable already set by `find_package(LLVM REQUIRED
+# CONFIG)` above in this same file/scope -- confirmed to match scpp's
+# own host_target_triple() exactly on every platform this project
+# targets, since both ultimately describe the same LLVM host. Using it
+# directly means no `find`-based path search or `llvm-config` shell-out
+# is needed to locate these files: plain, direct `${CMAKE_COMMAND} -E
 # copy` commands suffice, consistent with this file's usual style.
 #
 # DEPENDS only the `scpp` target itself, purely for build ordering (the
@@ -290,16 +291,16 @@ add_test(NAME driver_test COMMAND driver_test)
 add_custom_target(scpp_workspace_artifacts ALL
     COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_SOURCE_DIR}" $<TARGET_FILE:scpp> build
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/std/modules/std.scppm"
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/modules/std.scppm"
         "${SCPP_STDLIB_STD_INTERFACE_PATH}"
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/std/archives/libstd.scppa"
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/archives/libstd.scppa"
         "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/scpp/modules/scpp.scppm"
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/modules/scpp.scppm"
         "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/scpp/archives/libscpp.scppa"
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/archives/libscpp.scppa"
         "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
     BYPRODUCTS
         "${SCPP_STDLIB_STD_INTERFACE_PATH}"

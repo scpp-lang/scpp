@@ -4374,11 +4374,11 @@ void run_cli_extension_tests() {
         std::filesystem::path root = std::filesystem::current_path() / "cli_project_build_builds_manifest_bin";
         std::filesystem::path src_dir = root / "src";
         std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "hello";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "hello";
         std::filesystem::path helper_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "modules" / "helper.scppm";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "modules" / "helper.scppm";
         std::filesystem::path helper_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "archives" / "libhelper.scppa";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "archives" / "libhelper.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(src_dir);
@@ -4417,11 +4417,11 @@ void run_cli_extension_tests() {
             std::filesystem::current_path() / "cli_project_build_builds_manifest_bin_with_cpp_named_sources";
         std::filesystem::path src_dir = root / "src";
         std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "hello";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "hello";
         std::filesystem::path helper_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "modules" / "helper.scppm";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "modules" / "helper.scppm";
         std::filesystem::path helper_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "hello" / "archives" / "libhelper.scppa";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "archives" / "libhelper.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(src_dir);
@@ -4460,9 +4460,9 @@ void run_cli_extension_tests() {
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_project_build_lib_with_flat_partition_layout_succeeds";
         std::filesystem::path iface_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "demo" / "modules" / "demo.scppm";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "modules" / "demo.scppm";
         std::filesystem::path archive_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "demo" / "archives" / "libdemo.scppa";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "archives" / "libdemo.scppa";
         std::filesystem::path consumer_source = root / "main.scpp";
         std::filesystem::path exe_path = root / "app";
         cases_run++;
@@ -4516,11 +4516,11 @@ void run_cli_extension_tests() {
         std::filesystem::path root = std::filesystem::current_path() / "cli_project_build_bare_scpp_aliases_build";
         std::filesystem::path src_dir = root / "src";
         std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "app";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "app";
         std::filesystem::path lib_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "modules" / "mylib.scppm";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "modules" / "mylib.scppm";
         std::filesystem::path lib_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "archives" / "libmylib.scppa";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "archives" / "libmylib.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(src_dir);
@@ -4565,11 +4565,11 @@ void run_cli_extension_tests() {
         std::filesystem::path net_dir = root / "net";
         std::filesystem::path app_dir = root / "app";
         std::filesystem::path app_exe =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "app";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "app";
         std::filesystem::path tls_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "tls" / "archives" / "libtls.scppa";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "tls" / "archives" / "libtls.scppa";
         std::filesystem::path net_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "net" / "archives" / "libnet.scppa";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "net" / "archives" / "libnet.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(tls_dir / "src");
@@ -4663,7 +4663,7 @@ void run_cli_extension_tests() {
                                      "cli_root_package_workspace_builds_root_package_by_default";
         std::filesystem::path dep_dir = root / "libs" / "tls";
         std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "rootapp" / "rootapp";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "rootapp" / "rootapp";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(dep_dir / "src");
@@ -4718,7 +4718,7 @@ void run_cli_extension_tests() {
                                      "cli_incremental_build_skips_recompile_on_impl_change_and_recompiles_on_interface_change";
         std::filesystem::path dep_dir = root / "dep";
         std::filesystem::path app_dir = root / "app";
-        std::filesystem::path build_root = root / ".scpp" / "build" / scpp::host_target_triple() / "dev";
+        std::filesystem::path build_root = root / ".scpp" / "build" / scpp::host_target_triple();
         std::filesystem::path dep_archive = build_root / "dep" / "archives" / "libdep.scppa";
         std::filesystem::path dep_interface = build_root / "dep" / "modules" / "dep.scppm";
         std::filesystem::path app_object = build_root / "app" / "objects" / "app" / "0_main_scpp.o";
@@ -4830,7 +4830,7 @@ void run_cli_extension_tests() {
         std::filesystem::path net_dir = root / "net";
         std::filesystem::path app_dir = root / "app";
         std::filesystem::path app_exe =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "dev" / "app" / "app";
+            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "app";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(trig_dir / "src");

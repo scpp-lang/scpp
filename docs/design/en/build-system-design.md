@@ -10,7 +10,7 @@ The core recommendation is:
 
 1. keep **zero-config single-file operation** as the non-project case;
 2. use an **optional manifest** (`scpp.toml`) as the boundary for package/workspace project mode;
-3. make the public UX **Cargo-like and integrated** (`scpp build`, `scpp run`, `scpp package`, workspaces, profiles, dependency declarations);
+3. make the public UX **Cargo-like and integrated** (`scpp build`, `scpp run`, `scpp package`, workspaces, dependency declarations);
 4. keep the internal model **artifact-first**, built around scpp's existing `.scppm` / `.scppa` split rather than around CMake-style hand-maintained target graphs.
 
 In short: **Cargo-like user experience, CMake-like project scale, scpp-native artifact semantics.**
@@ -52,7 +52,6 @@ This is useful as a **narrow manifestless directory-build precedent**, but it ca
 
 - path dependencies,
 - multi-package repositories,
-- profiles,
 - native-library requirements,
 - multiple binaries,
 - publishable package identity.
@@ -92,8 +91,18 @@ Keep:
 - manifest-per-package;
 - workspace root with shared output/cache;
 - direct dependency declarations;
-- explicit profiles;
 - package-oriented thinking rather than file-oriented thinking.
+
+Do **not** keep:
+
+- explicit, named build profiles. scpp tried an early `[profile.<name>]` manifest
+  design directly modeled on Cargo's `dev`/`release`/custom profiles (see §10's
+  history below), but removed it before it was ever exercised by real users: it
+  added a whole extra manifest concept, CLI flags, cache-key dimension, and
+  output-path segment for a single practical benefit (toggling optimization,
+  debug info, and static linking), and the feature was judged underdesigned
+  relative to that cost. scpp v1 instead hardcodes one fixed, always-on build
+  configuration (see §10).
 
 Do **not** copy directly:
 
@@ -211,7 +220,7 @@ Meson's best lesson is for **native / foreign dependency declarations**:
 From the research and scpp's current architecture, I think the build system should follow these rules.
 
 1. **Package-oriented, not file-oriented.**
-   Single-file `scpp foo.scpp` remains valid, but large-project build must think in packages/workspaces/profiles.
+   Single-file `scpp foo.scpp` remains valid, but large-project build must think in packages/workspaces.
 
 2. **Manifest-based project mode; manifestless non-project mode.**
    Zero-config single-file use stays valid, but package/workspace builds are manifest-based.
@@ -320,16 +329,6 @@ sources = ["src/**/*.scpp"]
 net = { path = "../net" }
 json = { scppkg = "vendor/json.scppkg" }
 
-[profile.dev]
-opt-level = 0
-debug = true
-static = false
-
-[profile.release]
-opt-level = 3
-debug = false
-static = true
-
 [native]
 links = ["pthread"]
 search = ["native/lib"]
@@ -360,7 +359,6 @@ Recommended initial fields:
   - `sources`
   - optional `additional_objs`
 - `[dependencies]`
-- `[profile.dev]`, `[profile.release]`, optional custom `[profile.<name>]`
 - `[native]` for package-wide native link requirements
 - `[additional_objs.<name>]` for a named custom build step that can produce additional objects
 - `[package.metadata]` reserved for external tools
@@ -389,14 +387,6 @@ default-members = ["apps/httpserver"]
 [workspace.dependencies]
 net = { path = "libs/net" }
 json = { path = "libs/json" }
-
-[profile.dev]
-opt-level = 0
-debug = true
-
-[profile.release]
-opt-level = 3
-debug = false
 ```
 
 Member manifest:
@@ -425,7 +415,6 @@ Recommended rules:
   - a **virtual workspace** (`[workspace]` only), or
   - a **root package workspace** (`[workspace]` + `[package]`), mirroring Cargo.[^cargo-workspaces]
 - `scpp build` from workspace root builds `default-members`; `scpp build --workspace` builds every member.
-- profiles defined at the workspace root override member-local profile tables, mirroring Cargo's root-owned profiles.[^cargo-workspaces][^cargo-profiles]
 - workspace root owns the shared build/cache output directory.
 
 ### Why workspaces instead of CMake `add_subdirectory()`?
@@ -573,16 +562,15 @@ Recommended workspace-local output root:
 .scpp/
   build/
     <triple>/
-      <profile>/
-        <package>/
-          modules/
-            foo.scppm
-            bar.scppm
-          archives/
-            libfoo.scppa
-            libbar.scppa
-          objects/
-          package-metadata.json
+      <package>/
+        modules/
+          foo.scppm
+          bar.scppm
+        archives/
+          libfoo.scppa
+          libbar.scppa
+        objects/
+        package-metadata.json
   cache/
     build.db
 ```
@@ -617,7 +605,7 @@ scpp package
 Behavior:
 
 - valid only for packages with `[[lib]]`;
-- builds the package in the selected profile/target;
+- builds the package for the selected target;
 - bundles the produced `.scppm` / `.scppa` artifacts and manifest metadata into a `.scppkg` file following the existing spec.[^scppkg-spec]
 
 Suggested default output location:
@@ -638,48 +626,63 @@ For v1, target-level/package-level native requirements can be lowered into that 
 
 That is slightly coarse, but correct, and can be refined later if per-module declarations become necessary.
 
-## 10. Profiles and configuration
+## 10. Build configuration (profiles removed)
 
-## 10.1 Built-in profiles
+## 10.1 History: why scpp does not have Cargo-style profiles
 
-Adopt built-in profiles:
+Early drafts of this design (and the first implementation of `scpp build`)
+adopted a Cargo-style `[profile.<name>]` manifest concept more or less
+directly: built-in `dev`/`release` profiles, optional custom profiles, a
+`--profile <name>` / `--release` CLI surface, and a profile-name path
+segment in the local build output tree (`.scpp/build/<triple>/<profile>/...`),
+mirroring Cargo's own profile model.[^cargo-profiles]
 
-- `dev`
-- `release`
+This was tried and then deliberately removed before scpp had any real users
+depending on it. In practice it added a whole extra manifest section, two
+CLI flags, an extra build-cache-key dimension, and an extra output-path
+segment — for a feature whose only real, exercised effect was choosing
+between a small number of `opt-level`/`debug`/`static` combinations. The
+feature was judged **underdesigned relative to its cost**: unlike Cargo,
+scpp does not yet have per-profile overrides worth spanning multiple named
+configurations for (no LTO pipeline, no per-profile dependency features,
+no workspace-level profile inheritance actually implemented), so the
+profile system mostly added indirection without adding real flexibility.
 
-with optional custom profiles, mirroring Cargo.[^cargo-profiles]
+The decision (see §2.1 "Cargo lessons for scpp") is to **not** copy Cargo's
+profile model into scpp v1. If a real need for multiple named build
+configurations emerges later (for example, once LTO or per-profile
+dependency features are actually implemented), profiles can be
+reintroduced then, designed against real requirements rather than copied
+from Cargo by default.
 
-Recommended defaults:
+## 10.2 Current fixed build configuration
 
-### `dev`
+scpp v1 has exactly **one** build configuration; there is no profile
+manifest section and no `--profile <name>` / `--release` CLI flag. Every
+manifest-driven build (`scpp build`) uses fixed settings:
 
 - `opt-level = 0`
-- `debug = true`
-- `static = false`
-- incremental rebuilds enabled
+- `debug = true` (debug info always emitted)
+- linking is **always static** — `link_executable` unconditionally passes
+  `-static`; there is no dynamic-link option for manifest-driven binaries
 
-### `release`
+These values match what the former `dev` profile used, since that is what
+this project has actually built and tested against throughout its
+development. Static linking is the one setting that changed rather than
+simply being fixed at its old default: scpp now follows Rust/Cargo's own
+convention of producing self-contained static binaries as the default
+outcome of an ordinary build, rather than requiring an opt-in flag or
+profile for it.
 
-- `opt-level = 3`
-- `debug = false`
-- `static = false` by default, overridable per project
-- more aggressive codegen / LTO hooks later
+Because there is only one configuration, the local build output tree also
+drops the profile path segment entirely (see §9.2): outputs live directly
+at `.scpp/build/<triple>/<package>/...`, not
+`.scpp/build/<triple>/<profile>/<package>/...`.
 
-## 10.2 CLI/profile interaction
-
-Recommended commands:
-
-- `scpp build` => `dev`
-- `scpp build --release` => `release`
-- `scpp build --profile release-lto` => custom named profile
-- `scpp run` => builds with `dev` unless overridden
-
-Existing one-off flags should map cleanly:
-
-- existing single-file `-g` concept maps to `debug = true`
-- existing `--static` concept maps to `static = true`
-
-For project mode, these should become **profile properties first**, CLI overrides second.
+The pre-existing, unrelated single-file CLI `--static` flag (`scpp
+foo.scpp --static`, predating and independent of the manifest/profile
+system) is unaffected by this change and keeps working as documented
+elsewhere; it was never part of the profile system this section describes.
 
 ## 10.3 Why no Cargo-style features in v1?
 
@@ -740,10 +743,10 @@ Retain:
 Recommended new commands:
 
 ```console
-scpp build [--workspace] [-p <package>] [--bin <name>] [--lib] [--profile <name>] [--release]
-scpp run   [--workspace] [-p <package>] [--bin <name>] [--profile <name>] [--release] [-- <program args>]
-scpp test  [--workspace] [-p <package>] [--profile <name>] [--release] [-- <test args>]
-scpp package [-p <package>] [--profile <name>] [--release]
+scpp build [--workspace] [-p <package>] [--bin <name>] [--lib]
+scpp run   [--workspace] [-p <package>] [--bin <name>] [-- <program args>]
+scpp test  [--workspace] [-p <package>] [-- <test args>]
+scpp package [-p <package>]
 scpp clean
 ```
 
@@ -797,7 +800,6 @@ Recommended internal state:
 - one row per compiled module / plain source / binary target / package artifact
 - cached keys include:
   - source file digests or mtimes + sizes
-  - active profile
   - target triple
   - compiler version
   - resolved dependency artifact digests/paths
@@ -839,7 +841,7 @@ Rejected as the main solution.
 
 Why:
 
-- cannot express dependencies/workspaces/profiles/native link metadata cleanly;
+- cannot express dependencies/workspaces/native link metadata cleanly;
 - cannot support publishable package identity without additional files anyway;
 - would force increasingly magical heuristics as projects scale.
 
@@ -886,7 +888,7 @@ Why:
 ## Phase B — manifest parser + single-package builds
 
 1. parse `scpp.toml`
-2. support `[package]`, `[[lib]]`, `[[bin]]`, `[profile.*]`
+2. support `[package]`, `[[lib]]`, `[[bin]]`
 3. build one manifest-based package with no external dependencies
 4. write local outputs under `.scpp/build/...`
 

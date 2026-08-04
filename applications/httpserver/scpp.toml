@@ -11,14 +11,10 @@ sources = ["**/*.scpp"]
 [dependencies]
 std = { path = "../../libs/std" }
 
-# Preserves the old SCPP_HTTPSERVER_BUILD_STATIC CMake option's "give me a
-# fully static, deployable binary" capability, now as an explicit,
-# discoverable profile (`scpp build -p httpserver --profile static`)
-# instead of a separate build-system-level toggle. Not the default: `scpp
-# build`/`scpp build --workspace` (no --profile) still use the `dev`
-# profile, same as every other workspace member, which links dynamically
-# (static defaults to false -- see src/project.cppm's ProfileSettings).
-[profile.static]
-opt-level = 3
-debug = false
-static = true
+# scpp's manifest-driven `[profile.*]` system (which used to let this
+# package opt into a fully static, deployable binary via a dedicated
+# `static` profile) was removed entirely as underdesigned. Static linking
+# is now unconditional for every manifest-driven build (see
+# link_executable in src/driver.cppm) -- the ordinary `scpp build`/`scpp
+# build --workspace` step already produces a fully static httpserver
+# binary, so there is no separate profile or flag left to opt into here.

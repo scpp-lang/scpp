@@ -19,9 +19,7 @@ struct ProjectBuildOptions {
     bool build_lib_only = false;
     std::optional<std::string> selected_bin;
     std::optional<std::string> selected_lib;
-    std::optional<std::string> selected_profile;
     std::optional<std::string> selected_package;
-    bool release = false;
     bool build_workspace = false;
 };
 
@@ -233,12 +231,6 @@ std::string read_manifest_value(std::string value, std::ifstream& input, int& li
     throw ManifestError(manifest_path.string() + ":" + std::to_string(line_number) +
                         (needs_multiline_string ? ": unterminated multiline TOML string"
                                                 : ": unterminated multiline TOML collection"));
-}
-
-bool parse_bool_literal(std::string_view text, const std::string& context) {
-    if (text == "true") return true;
-    if (text == "false") return false;
-    throw ManifestError(context + " must be true or false");
 }
 
 int parse_int_literal(std::string_view text, const std::string& context) {
@@ -574,11 +566,17 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
     std::cerr << "^\n";
 }
 
-struct ProfileSettings {
-    int opt_level = 0;
-    bool debug = true;
-    bool static_link = false;
-};
+// scpp's manifest-driven builds used to expose a Cargo-style `[profile.*]`
+// system (`dev`/`release`/custom profiles selecting opt-level, debug info,
+// and opt-in static linking). That system was removed as underdesigned --
+// v1 needed something much simpler. Manifest-driven builds now always use
+// one fixed configuration: the values below match what the former `dev`
+// profile used, since that is what this whole project-build feature has
+// actually been built and tested against so far. Static linking is no
+// longer profile-gated at all; see `link_executable` in driver.cppm, which
+// now links statically unconditionally.
+constexpr int kManifestBuildOptLevel = 0;
+constexpr bool kManifestBuildEmitDebugInfo = true;
 
 struct DependencySpec {
     std::string alias;
@@ -616,8 +614,6 @@ struct ManifestData {
     std::vector<ManifestTarget> lib_targets;
     std::vector<ManifestTarget> bin_targets;
     std::map<std::string, CustomCommand> custom_commands;
-    std::map<std::string, ProfileSettings> profiles;
-    std::unordered_set<std::string> explicit_profiles;
     std::filesystem::path manifest_path;
     std::optional<WorkspaceConfig> workspace;
     std::vector<DependencySpec> dependencies;
@@ -689,8 +685,6 @@ struct ProjectDiscovery {
 ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
     ManifestData manifest;
     manifest.manifest_path = normalized_path(manifest_path);
-    manifest.profiles["dev"] = ProfileSettings{0, true, false};
-    manifest.profiles["release"] = ProfileSettings{3, false, false};
 
     std::ifstream input(manifest.manifest_path);
     if (!input) throw ManifestError("cannot open manifest '" + manifest.manifest_path.string() + "'");
@@ -701,7 +695,6 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
         Lib,
         Bin,
         Custom,
-        Profile,
         Dependencies,
         Native,
         Workspace,
@@ -711,7 +704,6 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
     };
 
     Section current_section = Section::Root;
-    std::string current_profile;
     std::string current_custom;
     ManifestTarget* current_bin = nullptr;
     ManifestTarget* current_lib = nullptr;
@@ -781,19 +773,6 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                 manifest.workspace->has_workspace_dependencies = true;
             } else if (section_name == "package.metadata") {
                 current_section = Section::PackageMetadata;
-            } else if (section_name.rfind("profile.", 0) == 0) {
-                current_section = Section::Profile;
-                current_profile = section_name.substr(std::string("profile.").size());
-                if (current_profile.empty()) {
-                    throw ManifestError(manifest.manifest_path.string() + ":" + std::to_string(line_number) +
-                                        ": profile section name cannot be empty");
-                }
-                manifest.explicit_profiles.insert(current_profile);
-                if (!manifest.profiles.contains(current_profile)) {
-                    manifest.profiles[current_profile] = (current_profile == "release")
-                        ? ProfileSettings{3, false, false}
-                        : ProfileSettings{0, true, false};
-                }
             } else {
                 current_section = Section::Ignored;
             }
@@ -868,17 +847,6 @@ ManifestData parse_manifest(const std::filesystem::path& manifest_path) {
                     manifest.custom_commands[current_custom].command = parse_string_literal(value, context);
                 } else {
                     throw ManifestError(context + " is not supported in [additional_objs." + current_custom + "]");
-                }
-                break;
-            case Section::Profile:
-                if (key == "opt-level") {
-                    manifest.profiles[current_profile].opt_level = parse_int_literal(value, context);
-                } else if (key == "debug") {
-                    manifest.profiles[current_profile].debug = parse_bool_literal(value, context);
-                } else if (key == "static") {
-                    manifest.profiles[current_profile].static_link = parse_bool_literal(value, context);
-                } else {
-                    throw ManifestError(context + " is not supported in [profile." + current_profile + "]");
                 }
                 break;
             case Section::Dependencies: {
@@ -1243,7 +1211,6 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
                                                   int opt_level,
                                                   const ManifestData& manifest,
                                                   const ManifestTarget* target,
-                                                  std::string_view profile_name,
                                                   BuildDatabase& database) {
     std::map<std::string, SourceInfo> primary_modules;
     for (const SourceInfo& source : sources) {
@@ -1330,15 +1297,13 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
                 std::string signature = fnv1a64_hex(join_for_digest({
                     "kind=module",
                     "source=" + digest_file(source.path),
-                    "profile=" + std::string(profile_name),
                     "triple=" + scpp::host_target_triple(),
                     "compiler=" + compiler_key,
                     "manifest=" + manifest_key,
                     "opt=" + std::to_string(opt_level),
                     "deps=" + join_for_digest(dep_keys),
                 }));
-                std::string record_key =
-                    "module|" + manifest.manifest_path.string() + "|" + std::string(profile_name) + "|" + module_name;
+                std::string record_key = "module|" + manifest.manifest_path.string() + "|" + module_name;
                 if (std::optional<BuildRecord> cached = database.get(record_key); cached.has_value() &&
                     cached->signature == signature && std::filesystem::exists(interface_path) &&
                     std::filesystem::exists(archive_path)) {
@@ -1624,37 +1589,15 @@ WorkspaceInfo load_workspace(const ManifestData& workspace_manifest) {
     return workspace;
 }
 
-ProfileSettings resolve_profile(const ManifestData& package_manifest,
-                                const std::optional<ManifestData>& workspace_manifest,
-                                const std::string& profile_name) {
-    auto package_it = package_manifest.profiles.find(profile_name);
-    if (package_it == package_manifest.profiles.end()) {
-        throw ManifestError("unknown profile '" + profile_name + "'");
-    }
-    ProfileSettings profile = package_it->second;
-    if (workspace_manifest.has_value() && workspace_manifest->explicit_profiles.contains(profile_name)) {
-        auto workspace_it = workspace_manifest->profiles.find(profile_name);
-        if (workspace_it == workspace_manifest->profiles.end()) {
-            throw ManifestError("unknown workspace profile '" + profile_name + "'");
-        }
-        profile = workspace_it->second;
-    }
-    return profile;
-}
-
 std::filesystem::path package_output_root(const std::filesystem::path& shared_root_dir,
-                                          std::string_view profile_name,
                                           std::string_view package_name) {
-    return shared_root_dir / ".scpp" / "build" / scpp::host_target_triple() / std::string(profile_name) /
-           std::string(package_name);
+    return shared_root_dir / ".scpp" / "build" / scpp::host_target_triple() / std::string(package_name);
 }
 
-void write_metadata_file(const PackageBuildResult& result, std::string_view profile_name,
-                         const std::filesystem::path& metadata_path) {
+void write_metadata_file(const PackageBuildResult& result, const std::filesystem::path& metadata_path) {
     std::ostringstream json;
     json << "{\n";
     json << "  \"package\": \"" << escape_json(*result.manifest.package_name) << "\",\n";
-    json << "  \"profile\": \"" << escape_json(profile_name) << "\",\n";
     json << "  \"triple\": \"" << escape_json(scpp::host_target_triple()) << "\",\n";
     json << "  \"modules\": [\n";
     for (std::size_t i = 0; i < result.library_modules.size(); i++) {
@@ -1680,11 +1623,9 @@ void write_metadata_file(const PackageBuildResult& result, std::string_view prof
 class PackageBuilder {
 public:
     PackageBuilder(std::filesystem::path shared_root_dir,
-                   std::string profile_name,
                    std::optional<ManifestData> workspace_manifest,
                    std::optional<WorkspaceInfo> workspace_info)
         : shared_root_dir_(normalized_path(shared_root_dir)),
-          profile_name_(std::move(profile_name)),
           workspace_manifest_(std::move(workspace_manifest)),
           workspace_info_(std::move(workspace_info)),
           database_(shared_root_dir_ / ".scpp" / "cache" / "build.db") {}
@@ -1692,7 +1633,7 @@ public:
     PackageBuildResult& build_package(const std::filesystem::path& manifest_path, bool build_binaries,
                                       const scpp::ProjectBuildOptions& options) {
         std::filesystem::path normalized_manifest = normalized_path(manifest_path);
-        std::string key = normalized_manifest.string() + "|" + profile_name_;
+        std::string key = normalized_manifest.string();
         thread_local std::unordered_set<std::string> recursion_stack;
         if (!recursion_stack.insert(key).second) {
             throw BuildError("cyclic package dependency involving '" + normalized_manifest.string() + "'");
@@ -1746,10 +1687,9 @@ public:
         try {
             trace_build("build package " + normalized_manifest.string());
             ManifestData manifest = load_package_manifest(normalized_manifest);
-            ProfileSettings profile = resolve_profile(manifest, workspace_manifest_, profile_name_);
             PackageBuildResult result;
             result.manifest = manifest;
-            result.package_output_root = package_output_root(shared_root_dir_, profile_name_, *manifest.package_name);
+            result.package_output_root = package_output_root(shared_root_dir_, *manifest.package_name);
             result.native_link_inputs = expand_native_link_inputs(manifest);
             std::filesystem::create_directories(result.package_output_root / "modules");
             std::filesystem::create_directories(result.package_output_root / "archives");
@@ -1831,11 +1771,11 @@ public:
                 auto it = std::find_if(manifest.lib_targets.begin(), manifest.lib_targets.end(),
                                        [&](const ManifestTarget& target) { return target.name == *options.selected_lib; });
                 build_library_target(manifest, *it, direct_import_paths, full_dependency_import_paths,
-                                     transitive_only_modules, result, profile);
+                                     transitive_only_modules, result);
             } else {
                 for (const ManifestTarget& lib_target : manifest.lib_targets) {
                     build_library_target(manifest, lib_target, direct_import_paths, full_dependency_import_paths,
-                                         transitive_only_modules, result, profile);
+                                         transitive_only_modules, result);
                 }
             }
             if (manifest.lib_targets.empty() && options.build_lib_only) {
@@ -1860,13 +1800,13 @@ public:
                     auto it = std::find_if(manifest.bin_targets.begin(), manifest.bin_targets.end(),
                                            [&](const ManifestTarget& target) { return target.name == *options.selected_bin; });
                     build_binary_target(manifest, *it, direct_import_paths, full_dependency_import_paths,
-                                        transitive_only_modules, result, profile);
+                                        transitive_only_modules, result);
                 } else {
                     std::vector<std::future<void>> futures;
                     for (const ManifestTarget& bin_target : manifest.bin_targets) {
                         futures.push_back(std::async(std::launch::async, [&, bin_target] {
                             build_binary_target(manifest, bin_target, direct_import_paths, full_dependency_import_paths,
-                                                transitive_only_modules, result, profile);
+                                                transitive_only_modules, result);
                         }));
                     }
                     for (auto& future : futures) future.get();
@@ -1874,13 +1814,12 @@ public:
             }
 
             std::filesystem::path metadata_path = result.package_output_root / "package-metadata.json";
-            write_metadata_file(result, profile_name_, metadata_path);
+            write_metadata_file(result, metadata_path);
             database_.put(BuildRecord{
-                "package|" + manifest.manifest_path.string() + "|" + profile_name_,
+                "package|" + manifest.manifest_path.string(),
                 "package",
                 fnv1a64_hex(join_for_digest({
                     "manifest=" + manifest_digest(manifest),
-                    "profile=" + profile_name_,
                     "triple=" + scpp::host_target_triple(),
                     "metadata=" + digest_file(metadata_path),
                 })),
@@ -1969,14 +1908,12 @@ private:
         std::string signature = fnv1a64_hex(join_for_digest({
             "kind=custom",
             "manifest=" + manifest_digest(manifest),
-            "profile=" + profile_name_,
             "compiler=" + compiler_version_key(),
             "command=" + step.command,
             "inputs=" + join_for_digest(input_keys),
             "outputs=" + join_for_digest(output_keys),
         }));
-        std::string record_key =
-            "custom|" + manifest.manifest_path.string() + "|" + profile_name_ + "|" + step_name;
+        std::string record_key = "custom|" + manifest.manifest_path.string() + "|" + step_name;
 
         bool outputs_exist = std::all_of(outputs.begin(), outputs.end(),
                                          [](const std::filesystem::path& output) { return std::filesystem::exists(output); });
@@ -2044,8 +1981,7 @@ private:
                               const std::unordered_map<std::string, std::string>& direct_dep_import_paths,
                               const std::unordered_map<std::string, std::string>& full_dependency_import_paths,
                               const std::unordered_map<std::string, std::string>& transitive_only_modules,
-                              PackageBuildResult& result,
-                              const ProfileSettings& profile) {
+                              PackageBuildResult& result) {
         std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
         std::vector<SourceInfo> lib_sources = classify_target_sources(manifest_dir, lib_target);
         std::unordered_set<std::string> own_library_module_names = local_primary_module_names(lib_sources);
@@ -2053,7 +1989,7 @@ private:
         result.uses_stdlib = result.uses_stdlib || sources_use_stdlib(lib_sources);
         std::vector<BuiltModule> built_lib_modules = build_modules_for_target(
             lib_sources, result.package_output_root / "modules", result.package_output_root / "archives",
-            full_dependency_import_paths, profile.opt_level, manifest, &lib_target, profile_name_, database_);
+            full_dependency_import_paths, kManifestBuildOptLevel, manifest, &lib_target, database_);
         std::vector<std::filesystem::path> lib_custom_outputs = collect_custom_outputs(result, lib_target);
         if (!lib_custom_outputs.empty()) {
             std::vector<std::string> archive_inputs;
@@ -2069,8 +2005,7 @@ private:
                              const std::unordered_map<std::string, std::string>& direct_dep_import_paths,
                              const std::unordered_map<std::string, std::string>& full_dependency_import_paths,
                              const std::unordered_map<std::string, std::string>& transitive_only_modules,
-                             PackageBuildResult& result,
-                             const ProfileSettings& profile) {
+                             PackageBuildResult& result) {
         std::filesystem::path manifest_dir = manifest.manifest_path.parent_path();
         std::vector<SourceInfo> sources = classify_target_sources(manifest_dir, bin_target);
 
@@ -2101,8 +2036,8 @@ private:
         std::filesystem::create_directories(object_dir);
 
         std::vector<BuiltModule> local_modules_built =
-            build_modules_for_target(local_module_sources, module_dir, archive_dir, base_import_paths, profile.opt_level,
-                                     manifest, nullptr, profile_name_, database_);
+            build_modules_for_target(local_module_sources, module_dir, archive_dir, base_import_paths,
+                                     kManifestBuildOptLevel, manifest, nullptr, database_);
         std::unordered_map<std::string, std::string> compile_import_paths = base_import_paths;
         append_import_maps(compile_import_paths, to_import_map(local_modules_built));
 
@@ -2115,7 +2050,7 @@ private:
             std::filesystem::path object_path = object_dir / (std::to_string(plain_index++) + "_" +
                                                               sanitize_filename(source.path.filename().string()) + ".o");
             build_object_with_cache("plain:" + bin_target.name + ":" + std::to_string(plain_index - 1), manifest, source,
-                                    object_path, compile_import_paths, profile);
+                                    object_path, compile_import_paths);
             plain_objects.push_back(object_path);
         }
 
@@ -2135,13 +2070,11 @@ private:
         append_unique_strings(extra_link_inputs, result.native_link_inputs);
 
         std::filesystem::path executable_path = result.package_output_root / bin_target.name;
-        std::string binary_key = "binary|" + manifest.manifest_path.string() + "|" + profile_name_ + "|" + bin_target.name;
+        std::string binary_key = "binary|" + manifest.manifest_path.string() + "|" + bin_target.name;
         std::vector<std::string> binary_inputs{
             "manifest=" + manifest_digest(manifest),
-            "profile=" + profile_name_,
             "triple=" + scpp::host_target_triple(),
             "compiler=" + compiler_version_key(),
-            "static=" + std::string(profile.static_link ? "1" : "0"),
         };
         for (const std::filesystem::path& object_path : plain_objects) {
             binary_inputs.push_back("obj=" + object_path.string() + "#" + path_digest_or_empty(object_path));
@@ -2160,7 +2093,11 @@ private:
             trace_build("cache hit link " + executable_path.string());
         } else {
             trace_build("link binary " + executable_path.string());
-            scpp::link_executable(extra_link_inputs, executable_path.string(), profile.static_link);
+            // Static linking is unconditional now that the profile system is
+            // gone (see link_executable in driver.cppm, which links
+            // statically regardless of this argument) -- pass `true`
+            // explicitly rather than a no-longer-existing profile setting.
+            scpp::link_executable(extra_link_inputs, executable_path.string(), /*static_link=*/true);
             database_.put(BuildRecord{
                 binary_key,
                 "binary",
@@ -2184,8 +2121,7 @@ private:
                                  const ManifestData& manifest,
                                  const SourceInfo& source,
                                  const std::filesystem::path& object_path,
-                                 const std::unordered_map<std::string, std::string>& import_paths,
-                                 const ProfileSettings& profile) {
+                                 const std::unordered_map<std::string, std::string>& import_paths) {
         std::vector<std::string> dep_keys;
         for (const std::string& imported : source.imported_modules) {
             auto it = import_paths.find(imported);
@@ -2196,15 +2132,14 @@ private:
         std::string signature = fnv1a64_hex(join_for_digest({
             "kind=object",
             "source=" + digest_file(source.path),
-            "profile=" + profile_name_,
             "triple=" + scpp::host_target_triple(),
             "compiler=" + compiler_version_key(),
             "manifest=" + manifest_digest(manifest),
-            "opt=" + std::to_string(profile.opt_level),
-            "debug=" + std::string(profile.debug ? "1" : "0"),
+            "opt=" + std::to_string(kManifestBuildOptLevel),
+            "debug=" + std::string(kManifestBuildEmitDebugInfo ? "1" : "0"),
             "deps=" + join_for_digest(dep_keys),
         }));
-        std::string record_key = "object|" + manifest.manifest_path.string() + "|" + profile_name_ + "|" + key_suffix;
+        std::string record_key = "object|" + manifest.manifest_path.string() + "|" + key_suffix;
         if (std::optional<BuildRecord> cached = database_.get(record_key); cached.has_value() &&
             cached->signature == signature && std::filesystem::exists(object_path)) {
             trace_build("cache hit object " + object_path.string());
@@ -2213,8 +2148,8 @@ private:
         trace_build("build object " + object_path.string());
         std::string source_text = read_file(source.path);
         try {
-            scpp::emit_object_file(source_text, object_path.string(), import_paths, {}, profile.debug, source.path.string(),
-                                   profile.opt_level);
+            scpp::emit_object_file(source_text, object_path.string(), import_paths, {}, kManifestBuildEmitDebugInfo,
+                                   source.path.string(), kManifestBuildOptLevel);
         } catch (const scpp::ParseError& e) {
             print_diagnostic(source.path.string(), source_text, e.loc, e.what());
             throw;
@@ -2249,7 +2184,6 @@ private:
     }
 
     std::filesystem::path shared_root_dir_;
-    std::string profile_name_;
     std::optional<ManifestData> workspace_manifest_;
     std::optional<WorkspaceInfo> workspace_info_;
     std::unordered_map<std::string, PackageBuildResult> cache_;
@@ -2325,11 +2259,6 @@ int build_manifest_project(const std::filesystem::path& start_dir, const Project
             return 1;
         }
 
-        std::string profile_name = options.release ? "release" : options.selected_profile.value_or("dev");
-        if (options.release && options.selected_profile.has_value()) {
-            throw ManifestError("--release and --profile cannot be used together");
-        }
-
         std::optional<WorkspaceInfo> workspace_info;
         std::vector<ManifestData> packages_to_build;
         std::filesystem::path shared_output_root;
@@ -2382,7 +2311,7 @@ int build_manifest_project(const std::filesystem::path& start_dir, const Project
             packages_to_build = {*discovery.current_manifest};
         }
 
-        PackageBuilder builder(shared_output_root, profile_name, discovery.workspace_manifest, workspace_info);
+        PackageBuilder builder(shared_output_root, discovery.workspace_manifest, workspace_info);
         std::vector<std::future<void>> futures;
         for (const ManifestData& manifest : packages_to_build) {
             std::filesystem::path manifest_path = manifest.manifest_path;

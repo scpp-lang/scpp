@@ -13,16 +13,14 @@
 set(SCPP_HTTPSERVER_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/httpserver.scpp")
 
 # The old SCPP_HTTPSERVER_BUILD_STATIC CMake option (default OFF, never
-# referenced by CI or docs) is gone too: `scpp build`'s profile is a
-# single, whole-invocation choice (src/project.cppm's profile_name is
-# computed once per `scpp build` call, applied to every package it
-# builds), so there is no way to statically link just httpserver while
-# scpp_workspace_artifacts builds the rest of the workspace at `dev` in
-# one shot. The equivalent capability now lives in
-# applications/httpserver/scpp.toml's own `[profile.static]` section --
-# run `$<TARGET_FILE:scpp> build -p httpserver --profile static`
-# manually for a fully static httpserver binary, same opt-in, non-default
-# nature as the CMake option it replaces.
+# referenced by CI or docs) is gone too: scpp's manifest-driven
+# `[profile.*]` system (which used to gate static linking behind an
+# explicit, opt-in profile choice) was removed entirely as underdesigned.
+# Static linking is now unconditional for every manifest-driven build
+# (see link_executable in src/driver.cppm), so the httpserver binary
+# scpp_workspace_artifacts already produces via the ordinary `scpp build`
+# step below is a fully static binary with no special profile/flag
+# needed -- there is nothing left to opt into.
 #
 # Convenience copy: land the workspace-built httpserver binary at a
 # stable, easy-to-find path for manual runs, same path
@@ -31,7 +29,7 @@ set(SCPP_HTTPSERVER_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/httpserver.scpp")
 set(SCPP_HTTPSERVER_BINARY_PATH "${CMAKE_CURRENT_BINARY_DIR}/httpserver_app_bin")
 add_custom_target(httpserver_app_artifact ALL
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/httpserver/httpserver"
+        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/httpserver/httpserver"
         "${SCPP_HTTPSERVER_BINARY_PATH}"
     BYPRODUCTS "${SCPP_HTTPSERVER_BINARY_PATH}"
     DEPENDS scpp_workspace_artifacts
