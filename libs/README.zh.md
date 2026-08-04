@@ -31,9 +31,9 @@ self-hosting 源码，见 `../src/scpp.toml`）的两个成员，使用书里教
 manifest-based flow：
 
 - 根目录的 `scpp.toml` workspace 声明了 `members = ["libs/std", "libs/scpp", "src"]`，
-  并设置 `default-members = ["libs/std", "libs/scpp"]`，所以从仓库根目录直接执行
-  `scpp build`（不带 `-p`/`--workspace`）以及下面的 CMake staging，都只会构建这
-  两个库包
+  没有设置 `default-members`，所以从仓库根目录直接执行 `scpp build`
+  （不带 `-p`/`--workspace`）以及下面的 CMake staging，都会构建全部三个
+  成员包，包括 `src` 的 `ast.cppm` self-hosting 目标
 - `libs/std/scpp.toml` 定义 `std` 这个库包
 - `libs/scpp/scpp.toml` 定义 `scpp` 这个库包，并通过 path dependency 依赖 `std`
 
@@ -46,12 +46,18 @@ manifest-based flow：
   `libscpp.scppa` 归档里
 
 因此现在唯一留在 manifest 之外的，只剩下一层很小的 CMake staging：在
-build 树里准备一次性 workspace，执行 workspace build，再把产物复制回顶层
-其余构建逻辑已经消费的稳定路径。这一步会原样复制根目录的 `scpp.toml`，
-所以除了 `libs/std`/`libs/scpp` 之外，它还会顺带 symlink 出一个 `src`
-目录——纯粹是因为 workspace 加载会校验每个声明的成员都有真实的
-manifest（不论该成员是否会被这次构建实际选中）；实际构建范围仍然靠
-`default-members` 限定在 `libs/std`/`libs/scpp`，和之前完全一样。
+build 树里准备一次性 workspace，执行 workspace build，再把 `std`/`scpp`
+产物复制回顶层其余构建逻辑已经消费的稳定路径。这一步会原样复制根目录的
+`scpp.toml`，所以除了 `libs/std`/`libs/scpp` 之外，它还会顺带 symlink 出
+一个 `src` 目录——由于 workspace 没有设置 `default-members`，这一步的
+`scpp build --lib` 现在会真正编译 `src` 的 `ast.cppm`（而不只是校验这个
+成员存在），和一直以来对待 `std`/`scpp` 的方式完全一样。这意味着
+`ast.cppm` 一旦出现 self-hosting 回归，这一 CMake 步骤（进而整个
+`cmake --build`）就会失败，和真正的 stdlib 构建失败一样——这是有意为之，
+让 self-hosting probe 变成 CMake 构建本身持续执行的一部分，而不是一个
+单独运行的检查。`src` 自己的构建产物（`scpp.ast.scppm`/
+`libscpp-compiler.scppa`）目前不会像 `std`/`scpp` 的产物那样被复制到稳定
+路径，因为这次构建里还没有别的地方需要消费它们。
 
 ## 如何使用 `std`
 

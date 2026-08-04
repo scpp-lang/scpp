@@ -2,4 +2,3 @@ manifest-version = 1
 
 [workspace]
 members = ["libs/std", "libs/scpp", "src"]
-default-members = ["libs/std", "libs/scpp"]

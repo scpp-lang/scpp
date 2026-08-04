@@ -222,7 +222,8 @@ target_compile_definitions(driver_test PRIVATE
 
 add_test(NAME driver_test COMMAND driver_test)
 
-# Builds the shipped std/scpp manifest workspace and copies its produced
-# artifacts into build/libs. Library behavior itself is covered by tests/, not demos.
+# Builds the shipped std/scpp/src manifest workspace (see libs/CMakeLists.txt)
+# and copies the std/scpp artifacts into build/libs. Library behavior itself
+# is covered by tests/, not demos.
 add_subdirectory(libs)
 add_subdirectory(applications/httpserver)

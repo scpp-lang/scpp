@@ -40,9 +40,9 @@ the repository's top-level workspace manifest (`../scpp.toml`, moved up from
 sources -- see `../src/scpp.toml`):
 
 - the root `scpp.toml` workspace declares `members = ["libs/std", "libs/scpp", "src"]`
-  with `default-members = ["libs/std", "libs/scpp"]`, so a plain `scpp build` (no
-  `-p`/`--workspace`) from the repo root, and the CMake staging below, only ever
-  build the two library packages here
+  with no `default-members`, so a plain `scpp build` (no `-p`/`--workspace`) from
+  the repo root -- and the CMake staging below -- builds all three member
+  packages, including `src`'s `ast.cppm` self-hosting target
 - `libs/std/scpp.toml` defines the `std` library package
 - `libs/scpp/scpp.toml` defines the `scpp` library package and depends on `std`
 
@@ -56,12 +56,18 @@ sources -- see `../src/scpp.toml`):
 
 So the only non-manifest piece left is the tiny CMake staging layer that runs
 the workspace build in a throwaway build-tree directory and copies the resulting
-artifacts to the stable paths the rest of the top-level build already consumes.
-That staging copies the real root `scpp.toml` verbatim, so it also symlinks a
-`src` entry alongside `libs/std`/`libs/scpp` purely so workspace loading (which
-validates every declared member has a real manifest, whether or not it is
-selected for the build) succeeds; `default-members` keeps the actual build
-scoped to `libs/std`/`libs/scpp` only, exactly as before.
+`std`/`scpp` artifacts to the stable paths the rest of the top-level build
+already consumes. That staging copies the real root `scpp.toml` verbatim, so it
+also symlinks a `src` entry alongside `libs/std`/`libs/scpp` -- and, since the
+workspace has no `default-members`, this `scpp build --lib` step now actually
+compiles `src`'s `ast.cppm` too (not just validates that the member exists), the
+same way it always has for `std`/`scpp`. That means a self-hosting regression in
+`ast.cppm` now fails this CMake step (and therefore the whole `cmake --build`)
+exactly like a real stdlib build failure always has -- intentional, so the
+self-hosting probe is continuously enforced rather than a separately-run check.
+`src`'s own build products (`scpp.ast.scppm`/`libscpp-compiler.scppa`) aren't
+copied out to a stable path the way `std`/`scpp`'s are, since nothing else in
+this build consumes them yet.
 
 ## Consuming `std`
 
