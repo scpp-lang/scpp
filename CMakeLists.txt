@@ -104,6 +104,11 @@ separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 # `:target`/`:target_machine`/`:analysis`) -- see libs/llvm/CMakeLists.txt.
 add_subdirectory(libs/llvm)
 
+# Validates that every scpp-language stdlib `.scpp` source file under
+# libs/std/ and libs/scpp/ is also valid, compilable real C++ -- see
+# libs/CMakeLists.txt for the full rationale.
+add_subdirectory(libs)
+
 add_subdirectory(src/compiler/codegen)
 
 add_subdirectory(src/compiler/movecheck)
