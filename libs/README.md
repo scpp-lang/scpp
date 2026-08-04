@@ -35,14 +35,15 @@ The project convention is:
 
 `libs/` dogfoods the same manifest-based flow the book teaches, as two members of
 the repository's top-level workspace manifest (`../scpp.toml`, moved up from
-`libs/scpp.toml` so it can also cover `src/`, this compiler's own self-hosting
-sources -- see `../src/scpp.toml`):
+`libs/scpp.toml` so it can also cover `src/` and `applications/httpserver/`
+-- see `../src/scpp.toml` and `../applications/httpserver/scpp.toml`):
 
-- the root `scpp.toml` workspace declares `members = ["libs/std", "libs/scpp", "src"]`
+- the root `scpp.toml` workspace declares
+  `members = ["libs/std", "libs/scpp", "src", "applications/httpserver"]`
   with no `default-members`, so a plain `scpp build` (no `-p`/`--workspace`) from
   the repo root -- and the top-level `CMakeLists.txt`'s custom command
-  described below -- builds all three member packages, including `src`'s
-  `ast.cppm` self-hosting target
+  described below -- builds all four member packages, including `src`'s
+  `ast.cppm` self-hosting target and `applications/httpserver`'s `[[bin]]`
 - `libs/std/scpp.toml` defines the `std` library package
 - `libs/scpp/scpp.toml` defines the `scpp` library package and depends on `std`
 
@@ -54,26 +55,36 @@ sources -- see `../src/scpp.toml`):
 - `additional_objs = "..."` attaches those outputs to the final `libstd.scppa`
   / `libscpp.scppa` archives
 
-So the only non-manifest piece left is the tiny `add_custom_command` in the
-top-level `../CMakeLists.txt` (there's no `libs/CMakeLists.txt` -- `libs/` has
-no CMake targets of its own besides `llvm/`, see below) that runs the
-just-built `scpp` compiler against the real repo-root `scpp.toml` (`cd` to
-`${CMAKE_SOURCE_DIR}`, then `scpp build --lib`) and copies the resulting
-`std`/`scpp` artifacts to the stable paths the rest of the top-level build
-already consumes -- exactly the same command a human contributor would run by
-hand from the repo root. `.scpp/build/` (already gitignored) is written
-directly into the source tree and is a single cache shared by every CMake
-binary directory built from the same checkout -- an explicitly accepted
-trade-off in exchange for this step matching a human contributor's own
-workflow exactly. Since the workspace has no `default-members`, this
-`scpp build --lib` step compiles `src`'s `ast.cppm` too, the same way it
-always has for `std`/`scpp` -- so a self-hosting regression in `ast.cppm` now
-fails this CMake step (and therefore the whole `cmake --build`) exactly like
-a real stdlib build failure always has -- intentional, so the self-hosting
-probe is continuously enforced rather than a separately-run check. `src`'s
-own build products (`scpp.ast.scppm`/`libscpp-compiler.scppa`) aren't copied
-out to a stable path
-the way `std`/`scpp`'s are, since nothing else in this build consumes them yet.
+The non-manifest piece left is the `add_custom_target(scpp_workspace_artifacts
+...)` in the top-level `../CMakeLists.txt` that runs the just-built `scpp`
+compiler against the real repo-root `scpp.toml` (`cd` to `${CMAKE_SOURCE_DIR}`,
+then plain `scpp build`, no `--lib`) and copies the resulting `std`/`scpp`
+artifacts to the stable paths the rest of the top-level build already
+consumes -- exactly the same command a human contributor would run by hand
+from the repo root. `.scpp/build/` (already gitignored) is written directly
+into the source tree and is a single cache shared by every CMake binary
+directory built from the same checkout -- an explicitly accepted trade-off in
+exchange for this step matching a human contributor's own workflow exactly.
+Since the workspace has no `default-members`, this `scpp build` step compiles
+`src`'s `ast.cppm` and `applications/httpserver`'s `[[bin]]` too, the same way
+it always has for `std`/`scpp` -- so a self-hosting regression in `ast.cppm`,
+or a build failure in `httpserver`, now fails this CMake step (and therefore
+the whole `cmake --build`) exactly like a real stdlib build failure always
+has -- intentional, so both are continuously enforced rather than separately-run
+checks. `src`'s own build products (`scpp.ast.scppm`/`libscpp-compiler.scppa`)
+aren't copied out to a stable path the way `std`/`scpp`'s are, since nothing
+else in this build consumes them yet; `applications/httpserver`'s built binary
+*is* copied to a stable path (`build/applications/httpserver/httpserver_app_bin`)
+by its own `httpserver_app_artifact` target -- see
+`../applications/httpserver/CMakeLists.txt`.
+
+`libs/CMakeLists.txt` exists again, but for an unrelated purpose: it declares
+an opt-in (`EXCLUDE_FROM_ALL`) `scpp_stdlib_cxx_validation` target that
+compiles every `libs/std/**/*.scpp` + `libs/scpp/**/*.scpp` file as real C++,
+validating the "every valid scpp file is also valid C++" language invariant --
+see that file's own header comment for the full rationale and current
+findings. It has no relationship to the manifest/workspace build described
+above.
 
 ## Consuming `std`
 

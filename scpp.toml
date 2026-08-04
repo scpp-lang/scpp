@@ -1,4 +1,4 @@
 manifest-version = 1
 
 [workspace]
-members = ["libs/std", "libs/scpp", "src"]
+members = ["libs/std", "libs/scpp", "src", "applications/httpserver"]

@@ -1,0 +1,24 @@
+manifest-version = 1
+
+[package]
+name = "httpserver"
+version = "0.1.0"
+
+[[bin]]
+name = "httpserver"
+sources = ["**/*.scpp"]
+
+[dependencies]
+std = { path = "../../libs/std" }
+
+# Preserves the old SCPP_HTTPSERVER_BUILD_STATIC CMake option's "give me a
+# fully static, deployable binary" capability, now as an explicit,
+# discoverable profile (`scpp build -p httpserver --profile static`)
+# instead of a separate build-system-level toggle. Not the default: `scpp
+# build`/`scpp build --workspace` (no --profile) still use the `dev`
+# profile, same as every other workspace member, which links dynamically
+# (static defaults to false -- see src/project.cppm's ProfileSettings).
+[profile.static]
+opt-level = 3
+debug = false
+static = true

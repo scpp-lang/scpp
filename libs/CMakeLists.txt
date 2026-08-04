@@ -2,9 +2,9 @@
 # is also valid, compilable real C++ -- the same principle already
 # enforced for src/*.cppm (dual-compiled: real C++ via this bootstrap
 # clang++ toolchain, and self-hosting via `scpp build` -- see
-# scpp_stdlib_artifacts in the top-level CMakeLists.txt), now extended to
+# scpp_workspace_artifacts in the top-level CMakeLists.txt), now extended to
 # the stdlib itself. libs/std/**/*.scpp and libs/scpp/**/*.scpp are, until
-# now, only ever compiled by the `scpp` compiler (via scpp_stdlib_artifacts's
+# now, only ever compiled by the `scpp` compiler (via scpp_workspace_artifacts's
 # `scpp build`); they had never been independently checked against a real
 # C++ compiler before this target. This target is that check.
 #

@@ -227,10 +227,14 @@ target_compile_definitions(driver_test PRIVATE
 
 add_test(NAME driver_test COMMAND driver_test)
 
-# Builds the shipped std/scpp/src manifest workspace (root scpp.toml,
-# libs/std/scpp.toml, libs/scpp/scpp.toml, src/scpp.toml) via scpp's own
-# package manager, and copies the resulting std/scpp artifacts into
-# build/libs. Library *behavior* itself is covered by tests/, not demos.
+# Builds the shipped workspace (root scpp.toml + libs/std/scpp.toml,
+# libs/scpp/scpp.toml, src/scpp.toml, applications/httpserver/scpp.toml)
+# via scpp's own package manager, and copies the resulting std/scpp
+# artifacts into build/libs. Library *behavior* itself is covered by
+# tests/, not demos. (Named scpp_workspace_artifacts, not
+# scpp_stdlib_artifacts: it covers the whole workspace now, not just the
+# two stdlib packages -- src's ast.cppm and applications/httpserver's
+# [[bin]] both build here too, see below.)
 #
 # Deliberately always-run (no file(GLOB_RECURSE ...)/CONFIGURE_DEPENDS
 # tracking of scpp.toml or *.scpp/*.cpp sources, unlike earlier
@@ -251,11 +255,12 @@ add_test(NAME driver_test COMMAND driver_test)
 # chdir+build+copy recipe on a fully cached, nothing-changed rebuild --
 # see the PR description for exact numbers).
 #
-# No `--lib`: none of the 3 member manifests (libs/std, libs/scpp, src)
-# declare a [[bin]] target, so `--lib` (which only skips [[bin]]
-# targets -- see build_lib_only/build_binaries in src/project.cppm) is
-# currently a pure no-op here; dropped for clarity rather than kept as
-# defensive-but-dead ceremony.
+# No `--lib`: this workspace now genuinely has a [[bin]] target
+# (applications/httpserver), so omitting `--lib` (build_lib_only in
+# src/project.cppm) is what makes that binary actually get built here,
+# not a no-op left over from clarity/dead-ceremony cleanup like before --
+# `libs/std`/`libs/scpp`/`src` still declare [[lib]] only, so this is
+# purely additive for them.
 #
 # The artifact paths under .scpp/build/ contain the LLVM target-triple
 # and build-profile as path components (.scpp/build/<triple>/<profile>/
@@ -278,11 +283,11 @@ add_test(NAME driver_test COMMAND driver_test)
 # reruns regardless of its DEPENDS. BYPRODUCTS declares the 4 real files
 # this recipe still produces on disk, so Ninja correctly cleans them and
 # so other targets that DEPENDS on this target *by name* (e.g.
-# applications/httpserver's httpserver_app, below) get correct ordering
-# even though this target has no file-level OUTPUT to track -- the same
-# established pattern httpserver_app itself already uses for its own
-# always-run `scpp` invocation.
-add_custom_target(scpp_stdlib_artifacts ALL
+# applications/httpserver's httpserver_app_artifact, below) get correct
+# ordering even though this target has no file-level OUTPUT to track --
+# the same established pattern httpserver_app_artifact itself uses for
+# its own always-run copy of the workspace-built httpserver binary.
+add_custom_target(scpp_workspace_artifacts ALL
     COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_SOURCE_DIR}" $<TARGET_FILE:scpp> build
     COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/dev/std/modules/std.scppm"
