@@ -1,0 +1,1 @@
+sequence: %nulleqtmp = icmp eq ptr %loadtmp, null | %nulleqtmp2 = icmp eq ptr %loadtmp1, null

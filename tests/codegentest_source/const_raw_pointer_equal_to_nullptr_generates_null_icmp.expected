@@ -1,0 +1,1 @@
+contains: %nulleqtmp = icmp eq ptr %loadtmp, null

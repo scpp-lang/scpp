@@ -1,0 +1,4 @@
+int main() {
+    const int* p{};
+    return p == nullptr ? 0 : 1;
+}
