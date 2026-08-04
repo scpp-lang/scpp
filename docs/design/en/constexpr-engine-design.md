@@ -11,7 +11,7 @@ This document proposes how scpp should add a **general-purpose compile-time eval
 
 The core recommendation is:
 
-1. keep scpp's **real-C++ spelling rule**: reuse `constexpr`, `consteval`, `if consteval`, and `std::is_constant_evaluated()` semantics rather than inventing new syntax;[^spec-front-matter][^old-book-consteval]
+1. keep scpp's **real-C++ spelling rule**: reuse `constexpr`, `consteval`, `if consteval`, and `std::is_constant_evaluated()` semantics rather than inventing new syntax;[^spec-front-matter][^spec-constexpr-surface]
 2. implement compile-time evaluation as a **frontend interpreter**, not by lowering to LLVM IR or executing host machine code;[^clang-users][^gcc-constexpr][^rust-dev-guide]
 3. integrate that interpreter into **generic-call monomorphization + semantic checking**, not into codegen;
 4. explicitly ship a **documented v1 subset** that is already enough for format-string validation, constant-expression initializers, recursive helper functions, and straightforward compile-time parsers.
@@ -36,7 +36,7 @@ That is the right place to add compile-time evaluation: **after parsing, before 
 The generic-call path already handles:
 
 - ordinary type-parameter deduction from direct parameter positions like `T x`, and
-- one special variadic base-class-deduction pattern for tuple-like recursive inheritance.[^movecheck-deduction][^movecheck-base-deduction][^old-book-generic-types]
+- one special variadic base-class-deduction pattern for tuple-like recursive inheritance.[^movecheck-deduction][^movecheck-base-deduction][^spec-function-template-deduction]
 
 But the current implementation is still fundamentally **single-pass and left-to-right**. It only binds a template pack when the pack appears in:
 
@@ -62,9 +62,9 @@ The current monomorphizer cannot do step 2 because it tries to decide each param
 
 The lexer currently has no `KwConstexpr` / `KwConsteval` tokens, the AST `Function` node has no evaluation-mode flag, and statement parsing has no `if consteval` support.[^lexer-keywords][^ast-function]
 
-The old book also explicitly documents the earlier design choice that scpp had `consteval` but intentionally omitted `constexpr` functions to avoid context-dependent behavior.[^old-book-consteval]
+The current formal spec now makes the intended split explicit: `consteval` is always immediate, while `constexpr` participates in compile-time evaluation only when the surrounding context requires a constant expression, and otherwise remains an ordinary runtime call.[^spec-constexpr-surface][^spec-constant-evaluation]
 
-That historical rationale matters, but the same chapter also leaves room to revisit the choice if a real dual-use compile-time/runtime need appears. The `std::format_string<Args...>` case is exactly that need.[^old-book-consteval]
+That split is exactly why the design can now support real dual-use compile-time/runtime facilities when they are justified. The `std::format_string<Args...>` case is exactly that need.[^spec-constexpr-surface][^spec-constant-evaluation]
 
 ### 1.4 Existing constant-evaluation support is intentionally tiny and local
 
@@ -769,8 +769,9 @@ That gives scpp the smallest architecture that is still genuinely general-purpos
 ## Sources
 
 [^spec-front-matter]: `scpp-reference/docs/spec/en/00-front-matter.md`, especially Clause 1 and Clause 4.
-[^old-book-consteval]: `scpp-reference/docs/old-book/en/ch06-safe-subset.md:142-160`.
-[^old-book-generic-types]: `scpp-reference/docs/old-book/en/ch05-static-checks.md:368-379, 473-516`.
+[^spec-constexpr-surface]: `scpp-reference/docs/spec/en/07-constexpr-and-consteval.md`, especially 9.1(2)-9.1(4) and 9.2.
+[^spec-constant-evaluation]: `scpp-reference/docs/spec/en/06-constant-evaluation.md`, especially 7.1(2)-7.1(4).
+[^spec-function-template-deduction]: `scpp-reference/docs/spec/en/08-function-template-argument-deduction.md`, especially 13.1(3)-13.1(6).
 [^driver-pipeline]: `scpp-reference/src/driver.cppm:660-701`.
 [^driver-sgen]: `scpp-reference/src/driver.cppm:86-121`.
 [^driver-scppm-read]: `scpp-reference/src/driver.cppm:211-243`.
