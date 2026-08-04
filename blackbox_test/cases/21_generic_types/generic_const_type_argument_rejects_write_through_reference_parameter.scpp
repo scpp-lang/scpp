@@ -1,0 +1,24 @@
+// ch05 §5.14 (Generic Types) / §5.2 (Borrow & Aliasing): this was a real
+// soundness hole -- because a generic type's substituted reference
+// stayed `is_mutable_ref=true` even when its own type argument was
+// const-qualified, a write through a `T&` parameter of a `T = const
+// int` instantiation used to be silently accepted, even though writing
+// through an ordinary `const int&` parameter is correctly rejected.
+// Generic substitution (PR #390) now folds that const qualifier onto
+// the reference's own mutability flag, so this write is correctly
+// rejected too.
+template<typename T>
+class Mutator {
+public:
+    Mutator(T& value) {
+        value = 42;
+        return;
+    }
+    virtual ~Mutator() = default;
+};
+
+int main() {
+    int value = 1;
+    Mutator<const int> mutator{value};
+    return value;
+}

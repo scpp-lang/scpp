@@ -1,0 +1,26 @@
+// ch05 §5.14 (Generic Types): a generic type instantiated with a
+// const-qualified type argument correctly binds a genuine `const T&`
+// argument to its `T&`-typed constructor parameter. Generic
+// substitution (PR #390) now folds a substitution-introduced pointee
+// `const` onto the referring type's own mutability flag instead of
+// stranding it on the pointee, so
+// `std::reference_wrapper<const Item>{item}` finds its own constructor
+// when `item` is spelled `const Item&`.
+import std;
+
+class Item {
+public:
+    int value = 0;
+    virtual ~Item() = default;
+};
+
+std::reference_wrapper<const Item> wrap(const Item& item) {
+    return std::reference_wrapper<const Item>{item};
+}
+
+int main() {
+    Item item{};
+    item.value = 9;
+    std::reference_wrapper<const Item> wrapped = wrap(item);
+    return wrapped.get().value - 9;
+}

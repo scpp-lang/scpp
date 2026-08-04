@@ -1,0 +1,15 @@
+// ch06 scalar table: "No implicit conversions between any two distinct
+// scalar types above, ever, full stop." `?:`'s relaxed arm-typing rule
+// (PR #392: an untyped literal adopting the other arm's scalar type, a
+// scalar lvalue arm read as a value) still rejects two genuinely
+// distinct scalar types outright -- an `int` arm and a `std::uint64_t`
+// arm never agree.
+import std;
+
+int main() {
+    int a = 3;
+    std::uint64_t b = 9;
+    bool flag = true;
+    std::uint64_t result = flag ? a : b;
+    return static_cast<int>(result);
+}

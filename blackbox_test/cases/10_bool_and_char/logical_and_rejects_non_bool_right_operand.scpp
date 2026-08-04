@@ -1,0 +1,16 @@
+// ch06 scalar table / PR #392: `&&`/`||` require both operands to
+// already be `bool` -- scpp has no implicit conversion to `bool`, so a
+// class-typed right operand like `flag && someSharedPtr` must be
+// rejected. Before PR #392, `codegen_short_circuit` fed its right
+// operand straight into an i8 PHI without the bool check its left
+// operand already goes through, so this silently emitted invalid LLVM
+// IR instead of failing to compile; it now produces the ordinary
+// "expected a 'bool' value" diagnostic at the operand.
+import std;
+
+int main() {
+    bool flag = true;
+    std::shared_ptr<int> shared = std::make_shared<int>(4);
+    bool result = flag && shared;
+    return result ? 0 : 1;
+}

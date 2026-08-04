@@ -108,7 +108,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `07_extern_c` | `extern "C"` declarations/definitions, real libc interop |
 | `08_address_of` | `&expr`, `const T*`/`T*` distinction |
 | `09_integer_overflow` | checked-abort by default, wrapping in `[[scpp::unsafe]]`, div/mod special cases |
-| `10_bool_and_char` | no implicit scalar conversions, short-circuit evaluation |
+| `10_bool_and_char` | no implicit scalar conversions, short-circuit evaluation, and rejection of a non-bool `&&`/`||` right operand |
 | `12_struct_vs_class` | `struct` vs `class` access-control divergence |
 | `13_unsupported_robustness` | unsupported/not-yet-implemented syntax fails cleanly, never crashes |
 | `14_classes` | constructors/destructors, default member initializers and constructor member-initializer lists, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
@@ -116,9 +116,9 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup, and leading `::` global-scope lookup; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, exported type aliases, `export namespace { ... }` blocks, relaxed exported-namespace placement, cross-module import/export/re-export, bare `extern`, partitions, and a workspace/path-dependency build whose cross-module `.scppm` binary artifact must correctly round-trip a still-generic exported class's template-parameter-dependent array bound |
 | `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
-| `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, and comparison rules for same-type vs mixed-type scalars |
+| `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, comparison rules for same-type vs mixed-type scalars, and `?:`'s matching arm-typing rules (literal/wider-scalar-lvalue acceptance, distinct-scalar-type rejection) |
 | `20_generic_functions` | ch05 §5.11 revisions: full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
-| `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access |
+| `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access, a const-qualified type argument correctly binding/rejecting-writes-through its substituted reference, and `new T(...)` selecting its own class's constructor rather than a foreign monomorphized generic clone |
 | `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime, and `[[scpp::lifetime(...)]]` on `requires(...)` probe parameters constraining concept satisfaction (any/named-group matching, untagged no-op, non-reference rejection) |
 | `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` (ch05 §5.15): structural derivation and manual override |
 | `24_function_pointers` | function pointers (ch05 §5.16): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, automatic address-type selection (ordinary / `[[scpp::unsafe]]` / bodyless `extern "C"` / with-body `extern "C"`), one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution |
