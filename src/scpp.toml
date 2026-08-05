@@ -13,4 +13,4 @@ sources = ["ast.cppm"]
 
 [[lib]]
 name = "scpp-compiler-lexer"
-sources = ["lexer.cppm"]
+sources = ["compiler/lexer.cppm"]

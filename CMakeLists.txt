@@ -69,7 +69,7 @@ add_library(scpp_lexer)
 target_sources(scpp_lexer
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/lexer.cppm)
+            src/compiler/lexer.cppm)
 
 add_library(scpp_ast)
 target_sources(scpp_ast
