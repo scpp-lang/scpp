@@ -98,6 +98,14 @@ enum class TokenKind {
     KwOverride, // trailing virt-specifier on a member function.
     KwUsing,   // class-scope `using Base::member;`.
     KwDefault, // `= default` on a member declaration.
+    KwExplicit, // Constructor specifier (docs/book/en/ch05-01: "One-
+                // argument constructors can convert at call sites").
+                // Only accepted directly before an in-class constructor
+                // declaration in this version; actually suppressing the
+                // converting-constructor behavior isn't implemented yet
+                // -- parsed and accepted like a free function's own
+                // `inline` (parse_function), but not yet semantically
+                // enforced.
     KwPublic,  // Only legal directly above a member *function* -- ch04
                // §4.2 permanently forbids a public member variable
                // (including a class-level constant).
@@ -197,14 +205,17 @@ struct Token {
     std::string_view text;
     int line;
     int column;
+
+    Token(TokenKind kind, std::string_view text, int line, int column)
+        : kind{kind}, text{text}, line{line}, column{column} {}
 };
 
-class Lexer {
+struct Lexer {
 public:
-    explicit Lexer(std::string_view source) : source_(source) {}
+    explicit Lexer(std::string_view source) : source_{source} {}
 
     std::vector<Token> tokenize() {
-        std::vector<Token> tokens;
+        std::vector<Token> tokens{};
         for (;;) {
             Token tok = next();
             bool is_eof = tok.kind == TokenKind::EndOfFile;
@@ -224,11 +235,11 @@ private:
 
     char peek(std::size_t offset = 0) const {
         std::size_t idx = pos_ + offset;
-        return idx < source_.size() ? source_[idx] : '\0';
+        return idx < source_.size() ? source_.at(idx) : '\0';
     }
 
     char advance() {
-        char c = source_[pos_++];
+        char c = source_.at(pos_++);
         if (c == '\n') {
             line_++;
             column_ = 1;
@@ -259,8 +270,8 @@ private:
         }
     }
 
-    static bool is_ident_start(char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_'; }
-    static bool is_ident_continue(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
+    static bool is_ident_start(char c) { return std::isalpha(static_cast<std::uint8_t>(c)) || c == '_'; }
+    static bool is_ident_continue(char c) { return std::isalnum(static_cast<std::uint8_t>(c)) || c == '_'; }
 
     static TokenKind keyword_kind(std::string_view text) {
         if (text == "int") return TokenKind::KwInt;
@@ -308,6 +319,7 @@ private:
         if (text == "override") return TokenKind::KwOverride;
         if (text == "using") return TokenKind::KwUsing;
         if (text == "default") return TokenKind::KwDefault;
+        if (text == "explicit") return TokenKind::KwExplicit;
         if (text == "public") return TokenKind::KwPublic;
         if (text == "private") return TokenKind::KwPrivate;
         if (text == "this") return TokenKind::KwThis;
@@ -328,7 +340,8 @@ private:
     }
 
     Token make_token(TokenKind kind, std::size_t start, int start_line, int start_col) {
-        return Token{kind, source_.substr(start, pos_ - start), start_line, start_col};
+        Token tok{kind, source_.substr(start, pos_ - start), start_line, start_col};
+        return tok;
     }
 
     Token next() {
@@ -345,7 +358,9 @@ private:
         skip_whitespace_and_comments();
 
         if (at_end()) {
-            return Token{TokenKind::EndOfFile, {}, pre_skip_line, pre_skip_col};
+            std::string_view empty_text{};
+            Token eof_tok{TokenKind::EndOfFile, empty_text, pre_skip_line, pre_skip_col};
+            return eof_tok;
         }
 
         std::size_t start = pos_;
@@ -356,11 +371,12 @@ private:
         if (is_ident_start(c)) {
             while (!at_end() && is_ident_continue(peek())) advance();
             std::string_view text = source_.substr(start, pos_ - start);
-            return Token{keyword_kind(text), text, start_line, start_col};
+            Token ident_tok{keyword_kind(text), text, start_line, start_col};
+            return ident_tok;
         }
 
-        if (std::isdigit(static_cast<unsigned char>(c))) {
-            while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) advance();
+        if (std::isdigit(static_cast<std::uint8_t>(c))) {
+            while (!at_end() && std::isdigit(static_cast<std::uint8_t>(peek()))) advance();
             // A `.` followed by at least one digit makes this a
             // FloatLiteral instead (`1.5`) -- a bare trailing `.` with no
             // following digit (`1.`) is *not* consumed here, left as an
@@ -368,9 +384,9 @@ private:
             // access on an integer literal is nonsensical but not this
             // lexer's problem to reject).
             if (!at_end() && peek() == '.' && pos_ + 1 < source_.size() &&
-                std::isdigit(static_cast<unsigned char>(source_[pos_ + 1]))) {
+                std::isdigit(static_cast<std::uint8_t>(source_.at(pos_ + 1)))) {
                 advance(); // '.'
-                while (!at_end() && std::isdigit(static_cast<unsigned char>(peek()))) advance();
+                while (!at_end() && std::isdigit(static_cast<std::uint8_t>(peek()))) advance();
                 return make_token(TokenKind::FloatLiteral, start, start_line, start_col);
             }
             return make_token(TokenKind::IntegerLiteral, start, start_line, start_col);
@@ -469,7 +485,7 @@ private:
 };
 
 std::vector<Token> tokenize(std::string_view source) {
-    Lexer lexer(source);
+    Lexer lexer{source};
     return lexer.tokenize();
 }
 

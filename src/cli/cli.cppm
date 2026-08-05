@@ -69,6 +69,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::KwOverride: return "KwOverride";
         case scpp::TokenKind::KwUsing: return "KwUsing";
         case scpp::TokenKind::KwDefault: return "KwDefault";
+        case scpp::TokenKind::KwExplicit: return "KwExplicit";
         case scpp::TokenKind::KwPublic: return "KwPublic";
         case scpp::TokenKind::KwPrivate: return "KwPrivate";
         case scpp::TokenKind::KwThis: return "KwThis";

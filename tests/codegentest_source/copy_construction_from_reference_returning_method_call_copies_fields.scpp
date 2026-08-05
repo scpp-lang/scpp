@@ -1,0 +1,21 @@
+struct Box {
+    int value;
+
+    Box(int value) : value{value} {}
+};
+
+struct Holder {
+    Box item;
+
+    Holder(int v) : item{v} {}
+
+    const Box& get() const {
+        return this->item;
+    }
+};
+
+int main() {
+    Holder h{42};
+    Box copy{h.get()};
+    return copy.value - 42;
+}

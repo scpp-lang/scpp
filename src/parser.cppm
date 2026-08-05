@@ -3728,8 +3728,7 @@ private:
         } else if (check(TokenKind::KwStruct)) {
             reject_unsafe_if_requested("a 'struct' declaration");
             SourceLocation loc = current_loc();
-            StructDef def = parse_struct_def(program, {}, std::move(leading_alignments));
-            def.is_exported = is_exported || exported_forward_struct_exists(program, def.name);
+            StructDef def = parse_struct_def(program, is_exported, {}, std::move(leading_alignments));
             check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwEnum)) {
@@ -3826,8 +3825,7 @@ private:
                 }
                 SourceLocation loc = current_loc();
                 std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-                StructDef def = parse_struct_def(program, std::move(template_params));
-                def.is_exported = is_exported;
+                StructDef def = parse_struct_def(program, is_exported, std::move(template_params));
                 check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
                 program.structs.push_back(std::move(def));
             } else if (after_header_kind == TokenKind::KwUnion) {
@@ -3957,7 +3955,7 @@ private:
                 advance(); // '{'
                 while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
                     if (check(TokenKind::KwStruct)) {
-                        program.structs.push_back(parse_struct_def(program));
+                        program.structs.push_back(parse_struct_def(program, /*is_exported=*/false));
                         continue;
                     }
                     if (check(TokenKind::KwUnion)) {
@@ -4167,7 +4165,7 @@ private:
     // parameter's own bare name as a temporary type name for the
     // duration of this one struct's body, removed again immediately
     // afterward.
-    StructDef parse_struct_def(Program& program, std::vector<GenericTypeParam> template_params = {},
+    StructDef parse_struct_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {},
                                std::vector<AlignmentSpecifier> leading_alignments = {},
                                std::optional<std::string> forced_qualified_name = std::nullopt,
                                bool is_local_definition = false) {
@@ -4210,6 +4208,7 @@ private:
                                                      : (is_local_definition ? fresh_local_type_name(bare_name)
                                                                             : qualify_name(bare_name));
         def.namespace_path = namespace_stack_;
+        def.is_exported = is_exported || exported_forward_struct_exists(program, def.name);
         register_record_tag_kind(def.name, RecordTagKind::Struct, loc);
         if (is_local_definition || forced_qualified_name.has_value()) register_local_type_name(bare_name, def.name, loc);
         // Register the (fully-qualified) name before parsing the body so
@@ -5861,6 +5860,7 @@ private:
             std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
             bool member_is_static = false;
             bool member_is_virtual = false;
+            bool member_is_explicit = false;
             FunctionEvalMode member_eval_mode = FunctionEvalMode::RuntimeOnly;
             for (;;) {
                 if (match(TokenKind::KwStatic)) {
@@ -5869,6 +5869,10 @@ private:
                 }
                 if (match(TokenKind::KwVirtual)) {
                     member_is_virtual = true;
+                    continue;
+                }
+                if (match(TokenKind::KwExplicit)) {
+                    member_is_explicit = true;
                     continue;
                 }
                 if (member_eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConstexpr)) {
@@ -5891,6 +5895,11 @@ private:
             }
             if (member_is_virtual && !allow_virtual_members) {
                 throw ParseError(member_loc.line, member_loc.column, std::string(virtual_member_error));
+            }
+            if (member_is_explicit && !(check(TokenKind::Identifier) && std::string(peek().text) == owner_name &&
+                                        peek_at(1).kind == TokenKind::LParen)) {
+                throw ParseError(member_loc.line, member_loc.column,
+                                 "'explicit' is only allowed directly before a constructor declaration");
             }
             if (check(TokenKind::KwUsing)) {
                 if (!allow_using_declarations) {
@@ -6508,7 +6517,8 @@ private:
             throw ParseError(loc.line, loc.column, "internal parser error: local type definition without active program");
         }
         if (check(TokenKind::KwStruct)) {
-            current_program_->structs.push_back(parse_struct_def(*current_program_, {}, {}, std::nullopt, true));
+            current_program_->structs.push_back(
+                parse_struct_def(*current_program_, /*is_exported=*/false, {}, {}, std::nullopt, true));
         } else {
             parse_class_def(*current_program_, /*is_exported=*/false, {}, {}, std::nullopt, true);
         }

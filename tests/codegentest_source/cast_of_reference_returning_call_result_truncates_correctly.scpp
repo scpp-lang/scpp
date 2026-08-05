@@ -1,0 +1,13 @@
+struct Box {
+    long value;
+
+    const long& get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    Box b{};
+    b.value = 200;
+    return static_cast<int>(b.get());
+}

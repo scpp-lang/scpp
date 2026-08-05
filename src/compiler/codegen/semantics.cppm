@@ -548,6 +548,23 @@ namespace {
             case ExprKind::Member:
             case ExprKind::Subscript:
                 return expr.lhs != nullptr && is_lvalue_copy_source_shape(*expr.lhs);
+            case ExprKind::Call: {
+                // A call expression is only a genuine lvalue "place"
+                // (an alias to an already-existing object, e.g.
+                // `container.at(i)`) when it returns by reference --
+                // mirrors produces_rvalue_of_type's own Call handling,
+                // which likewise treats a reference-returning call as
+                // *not* a fresh rvalue, for the same reason. A call that
+                // returns by value is a fresh prvalue and must stay
+                // excluded here so it is (already correctly) handled by
+                // that produces_rvalue_of_type path instead -- see the
+                // branch order in try_initialize_class_storage_from_
+                // same_type_source -- rather than being miscategorized
+                // as a copyable place (which codegen_lvalue's own Call
+                // case would then reject as "not assignable").
+                std::optional<Type> call_type = infer_type(expr);
+                return call_type.has_value() && call_type->kind == TypeKind::Reference;
+            }
             default:
                 return false;
         }

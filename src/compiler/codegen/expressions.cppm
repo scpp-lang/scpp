@@ -1193,20 +1193,28 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     throw CodegenError("casts involving interface-typed pointers or references are not supported",
                                        current_loc_);
                 }
-                if (source_type->kind == TypeKind::Pointer && expr.type.kind == TypeKind::Pointer) {
-                    return codegen_value_for_target(*expr.lhs, *source_type);
+                // A reference-returning call/field (e.g. `std::string_view::
+                // at`'s `const char&`) is just as castable as the plain value
+                // it refers to -- unwrap via binary_operand_type (the same
+                // helper every binary-operator codegen path already uses)
+                // so the checks/codegen below see the referent's own type,
+                // not "is a Reference" itself (movecheck's dataflow.cppm
+                // Cast case unwraps identically, for the same reason).
+                const Type& source_operand = binary_operand_type(*source_type);
+                if (source_operand.kind == TypeKind::Pointer && expr.type.kind == TypeKind::Pointer) {
+                    return codegen_value_for_target(*expr.lhs, source_operand);
                 }
-                if (source_type->kind != TypeKind::Named || expr.type.kind != TypeKind::Named) {
+                if (source_operand.kind != TypeKind::Named || expr.type.kind != TypeKind::Named) {
                     throw CodegenError("cast is only supported between scalar types or raw pointer types in this version",
                                        current_loc_);
                 }
-                if (is_integral_scalar_type_name(source_type->name) && find_enum_def(program_, expr.type.name) != nullptr) {
+                if (is_integral_scalar_type_name(source_operand.name) && find_enum_def(program_, expr.type.name) != nullptr) {
                     throw CodegenError("cannot cast an integer value to enum class '" + expr.type.name +
                                            "'; use scpp::enum_cast<" + expr.type.name + ">(value) instead",
                                        current_loc_);
                 }
                 bool source_is_scalar_or_enum =
-                    is_scalar_type_name(source_type->name) || find_enum_def(program_, source_type->name) != nullptr;
+                    is_scalar_type_name(source_operand.name) || find_enum_def(program_, source_operand.name) != nullptr;
                 bool target_is_scalar_or_enum =
                     is_scalar_type_name(expr.type.name) || find_enum_def(program_, expr.type.name) != nullptr;
                 if (!source_is_scalar_or_enum || !target_is_scalar_or_enum) {
@@ -1215,8 +1223,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         "underlying integer type in this version",
                         current_loc_);
                 }
-                llvm::LLVMValueRef operand = codegen_value_for_target(*expr.lhs, *source_type);
-                return codegen_scalar_cast(operand, *source_type, expr.type);
+                llvm::LLVMValueRef operand = codegen_value_for_target(*expr.lhs, source_operand);
+                return codegen_scalar_cast(operand, source_operand, expr.type);
             }
 
             case ExprKind::Identifier: {

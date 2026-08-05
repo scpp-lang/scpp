@@ -1,0 +1,31 @@
+// std_cctype.scpp
+//
+// The `:cctype` interface partition (ch11 §11.4) of the "std" module:
+// `namespace std { export ... isdigit/isalpha/isalnum ... }`, mirroring
+// real C++'s <cctype> byte-classification predicates. Each takes a
+// `uint8_t` (not a possibly-signed `char`) so a caller must classify the
+// same byte value it holds -- exactly the `static_cast<std::uint8_t>(c)`
+// idiom real C++'s own isdigit/isalpha require to avoid negative-char
+// undefined behavior, just made mandatory by the parameter type instead
+// of merely recommended. Only plain ASCII is classified (no locale
+// support, matching the "C" locale real C++ defaults to). std.scpp (the
+// module's primary interface unit) aggregates this partition via
+// `export import :cctype;`.
+export module std:cctype;
+
+namespace std {
+
+export bool isdigit(uint8_t c) {
+    return c >= static_cast<uint8_t>('0') && c <= static_cast<uint8_t>('9');
+}
+
+export bool isalpha(uint8_t c) {
+    return (c >= static_cast<uint8_t>('a') && c <= static_cast<uint8_t>('z')) ||
+           (c >= static_cast<uint8_t>('A') && c <= static_cast<uint8_t>('Z'));
+}
+
+export bool isalnum(uint8_t c) {
+    return isalpha(c) || isdigit(c);
+}
+
+} // namespace std

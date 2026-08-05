@@ -1,0 +1,10 @@
+int classify(char c) {
+    switch (c) {
+        case 'a':
+            return 1;
+        case 'b':
+            return 2;
+        default:
+            return 0;
+    }
+}
