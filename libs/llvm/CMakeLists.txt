@@ -63,7 +63,6 @@ target_sources(llvm
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             ${LLVM_MODULE_SOURCES})
-target_compile_features(llvm PRIVATE cxx_std_26)
 
 # `llvm_target_native_init`: a tiny, separate static library bridging the
 # one confirmed gap in `:target`'s own official-LLVM-C surface (target.scpp,
@@ -81,7 +80,6 @@ target_compile_features(llvm PRIVATE cxx_std_26)
 add_library(llvm_target_native_init STATIC native_target_init.scpp)
 target_include_directories(llvm_target_native_init SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(llvm_target_native_init PRIVATE ${LLVM_DEFINITIONS_LIST})
-target_compile_features(llvm_target_native_init PRIVATE cxx_std_26)
 # native_target_init.scpp's compiled object code itself references real,
 # concrete-architecture LLVM symbols (e.g. LLVMInitializeX86Target, via the
 # LLVMInitializeNativeTarget()/LLVMInitializeNativeAsmPrinter() inline

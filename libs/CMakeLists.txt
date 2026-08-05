@@ -53,7 +53,6 @@ target_sources(scpp_stdlib_cxx_validation
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             ${SCPP_STDLIB_CXX_VALIDATION_SOURCES})
-target_compile_features(scpp_stdlib_cxx_validation PRIVATE cxx_std_26)
 
 # libs/std/std.scpp declares `export module std;` -- scpp's own,
 # self-contained stdlib module, unrelated to (and unaware of) any real C++

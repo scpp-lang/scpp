@@ -36,7 +36,6 @@ add_custom_target(httpserver_app_artifact ALL
     VERBATIM)
 
 add_executable(httpserver_test tests/httpserver_test.cpp)
-target_compile_features(httpserver_test PRIVATE cxx_std_26)
 target_compile_definitions(httpserver_test PRIVATE
     SCPP_BINARY_PATH="$<TARGET_FILE:scpp>"
     SCPP_HTTPSERVER_MODULE_PATH="${SCPP_HTTPSERVER_MODULE_PATH}"
