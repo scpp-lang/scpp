@@ -1,0 +1,14 @@
+import std;
+
+struct Holder {
+    std::string_view text;
+};
+
+int use_holder() {
+    std::vector<Holder> items{};
+    std::string_view sv{"hello"};
+    Holder h{};
+    h.text = sv;
+    items.push_back(h);
+    return 0;
+}

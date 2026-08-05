@@ -1255,13 +1255,20 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                             "pointer representations",
                                         state.current_loc);
                 }
-                bool scalar_source = source_type.has_value() && source_type->kind == TypeKind::Named &&
-                                     is_scalar_type_name(source_type->name);
+                // A reference-returning call/field (e.g. `std::string_view::
+                // at`'s `const char&`) is just as castable as the plain value
+                // it refers to -- unwrap via binary_operand_type (the same
+                // helper every binary-operator check in this file already
+                // uses) so the checks below see the referent's own type,
+                // not "is a Reference" itself.
+                const Type* source_operand = source_type.has_value() ? &binary_operand_type(*source_type) : nullptr;
+                bool scalar_source = source_operand != nullptr && source_operand->kind == TypeKind::Named &&
+                                     is_scalar_type_name(source_operand->name);
                 bool scalar_target = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
                 if (scalar_source && scalar_target) return;
 
-                bool integral_source = source_type.has_value() && source_type->kind == TypeKind::Named &&
-                                       is_integral_scalar_type_name(source_type->name);
+                bool integral_source = source_operand != nullptr && source_operand->kind == TypeKind::Named &&
+                                       is_integral_scalar_type_name(source_operand->name);
                 bool target_is_enum = is_enum_type(expr.type, body.program);
                 if (integral_source && target_is_enum) {
                     throw DataflowError("cannot cast an integer value to enum class '" + expr.type.name +
@@ -1270,14 +1277,14 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 }
 
                 const Type* source_enum_underlying =
-                    source_type.has_value() && source_type->kind == TypeKind::Named ? enum_underlying_type(*source_type, body.program)
+                    source_operand != nullptr && source_operand->kind == TypeKind::Named ? enum_underlying_type(*source_operand, body.program)
                                                                                     : nullptr;
-                if (source_type.has_value() && source_enum_underlying != nullptr && expr.type.kind == TypeKind::Named &&
+                if (source_operand != nullptr && source_enum_underlying != nullptr && expr.type.kind == TypeKind::Named &&
                     types_equal(*source_enum_underlying, expr.type)) {
                     return;
                 }
 
-                bool raw_pointer_source = source_type.has_value() && source_type->kind == TypeKind::Pointer;
+                bool raw_pointer_source = source_operand != nullptr && source_operand->kind == TypeKind::Pointer;
                 bool raw_pointer_target = expr.type.kind == TypeKind::Pointer;
                 if (raw_pointer_source && raw_pointer_target) {
                     if (state.unsafe_depth == 0) {
@@ -2457,7 +2464,7 @@ struct SwitchCaseKey {
 };
 
 [[nodiscard]] std::optional<long long> integer_case_label_value(const Expr& expr) {
-    if (expr.kind == ExprKind::IntegerLiteral) return expr.int_value;
+    if (expr.kind == ExprKind::IntegerLiteral || expr.kind == ExprKind::CharLiteral) return expr.int_value;
     if (expr.kind == ExprKind::BoolLiteral) return expr.bool_value ? 1LL : 0LL;
     if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs &&
         expr.lhs->kind == ExprKind::IntegerLiteral) {

@@ -95,6 +95,10 @@ void test_inline_is_a_keyword() {
     expect_kinds("inline", {scpp::TokenKind::KwInline, scpp::TokenKind::EndOfFile}, "inline_is_a_keyword");
 }
 
+void test_explicit_is_a_keyword() {
+    expect_kinds("explicit", {scpp::TokenKind::KwExplicit, scpp::TokenKind::EndOfFile}, "explicit_is_a_keyword");
+}
+
 void test_builtin_scalar_alias_keywords() {
     expect_kinds(
         "size_t ptrdiff_t int64_t uint32_t std::size_t std::ptrdiff_t std::int64_t std::uint32_t",
@@ -411,6 +415,7 @@ int main() {
     test_safe_is_no_longer_a_keyword();
     test_static_is_a_keyword();
     test_inline_is_a_keyword();
+    test_explicit_is_a_keyword();
     test_builtin_scalar_alias_keywords();
     test_unsafe_is_not_a_keyword();
     test_identifier_text();

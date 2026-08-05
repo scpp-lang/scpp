@@ -1,0 +1,1 @@
+sequence: call ptr @Holder_get | %copiedfield = load i32, ptr %value1 | store i32 %copiedfield, ptr %value

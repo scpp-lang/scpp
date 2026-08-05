@@ -271,6 +271,18 @@ StmtPtr clone_stmt(const Stmt& stmt) {
         unqualified_target.is_const_qualified = false;
         if (types_equal(single_arg, unqualified_target)) {
             if (is_scalar_named_type(target_type) || is_enum_type(target_type, &program)) return true;
+            // Same named-wrapper carve-out is_field_copy_constructible
+            // and is_freely_copyable_class_value_source already apply at
+            // every other copy-related boundary (spec §6.5(5)): a stdlib
+            // "view" wrapper such as std::string_view is spelled as a
+            // class with user-declared special members in the library
+            // source, but is still meant to behave like a freely
+            // copyable scalar pair -- checked before the ordinary class/
+            // struct is_copy_constructible path below, which would
+            // otherwise see its user-declared destructor and (correctly,
+            // for an ordinary class) conclude it has no implicit copy
+            // constructor.
+            if (is_freely_copyable_value_type(target_type, program)) return true;
             if (find_class_def(program, target_type.name) != nullptr ||
                 find_struct_def(program, target_type.name) != nullptr) {
                 return is_copy_constructible(target_type.name, program);

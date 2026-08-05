@@ -393,6 +393,15 @@ std::string path_digest_or_empty(const std::filesystem::path& path) {
     return std::filesystem::exists(path) ? digest_file(path) : std::string();
 }
 
+std::vector<std::string> path_digests(const std::vector<std::filesystem::path>& paths) {
+    std::vector<std::string> digests;
+    digests.reserve(paths.size());
+    for (const std::filesystem::path& path : paths) {
+        digests.push_back(path.string() + "#" + path_digest_or_empty(path));
+    }
+    return digests;
+}
+
 struct ManifestData;
 
 struct BuildRecord {
@@ -1275,6 +1284,19 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
     }
     const std::string manifest_key = manifest_digest(manifest);
     const std::string compiler_key = compiler_version_key();
+    // A primary interface module's compiled output also depends on the
+    // content of every interface/implementation partition it re-exports
+    // (e.g. `std.scpp`'s `export import :string_view;` pulls in
+    // `string_view/std_string_view.scpp`), not just the primary file
+    // itself -- so the cache signature below must cover all of them, or
+    // editing a partition's own file alone would never invalidate the
+    // cached module artifact.
+    std::unordered_map<std::string, std::vector<std::filesystem::path>> partition_paths_by_module;
+    for (const SourceInfo& source : sources) {
+        if (source.kind == SourceInfo::Kind::InterfacePartition || source.kind == SourceInfo::Kind::ImplementationPartition) {
+            partition_paths_by_module[source.module_name].push_back(source.path);
+        }
+    }
     while (!ready.empty()) {
         std::vector<std::string> batch = ready;
         ready.clear();
@@ -1294,9 +1316,14 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
                     dep_keys.push_back(imported + "=" + it->second + "#" + path_digest_or_empty(it->second));
                 }
                 std::sort(dep_keys.begin(), dep_keys.end());
+                std::vector<std::filesystem::path> module_source_paths = {source.path};
+                if (auto it = partition_paths_by_module.find(module_name); it != partition_paths_by_module.end()) {
+                    module_source_paths.insert(module_source_paths.end(), it->second.begin(), it->second.end());
+                }
+                std::sort(module_source_paths.begin(), module_source_paths.end());
                 std::string signature = fnv1a64_hex(join_for_digest({
                     "kind=module",
-                    "source=" + digest_file(source.path),
+                    "source=" + join_for_digest(path_digests(module_source_paths)),
                     "triple=" + scpp::host_target_triple(),
                     "compiler=" + compiler_key,
                     "manifest=" + manifest_key,
@@ -1454,15 +1481,6 @@ void prepare_custom_workdir(const std::filesystem::path& manifest_dir, const std
                              "': " + ec.message());
         }
     }
-}
-
-std::vector<std::string> path_digests(const std::vector<std::filesystem::path>& paths) {
-    std::vector<std::string> digests;
-    digests.reserve(paths.size());
-    for (const std::filesystem::path& path : paths) {
-        digests.push_back(path.string() + "#" + path_digest_or_empty(path));
-    }
-    return digests;
 }
 
 std::vector<std::string> expand_native_link_inputs(const ManifestData& manifest) {

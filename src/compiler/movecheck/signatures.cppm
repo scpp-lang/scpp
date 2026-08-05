@@ -209,14 +209,21 @@ void validate_lifetime_annotation_placement(const Function& fn);
 // spec §6.5(5)'s own note: a field's own copy-constructibility -- a
 // reference always is (bound once, from the source's own referent,
 // exactly like move construction's identical carve-out, spec §6.4); a
-// nested class recurses; everything else (scalar, struct -- always
-// bitwise-copyable per ch04 §4.1 regardless of its own fields, raw
-// pointer, array of any of these) is unconditionally
+// nested class recurses (except the same named "freely copyable value
+// type" stdlib view-wrappers is_freely_copyable_value_type already
+// carves out at every other copy-related boundary -- e.g.
+// is_freely_copyable_class_value_source -- a struct/class field of one
+// of those types, such as std::string_view, is copy-constructible
+// exactly like the wrapper itself always is, regardless of its own
+// user-declared special members); everything else (scalar, struct --
+// always bitwise-copyable per ch04 §4.1 regardless of its own fields,
+// raw pointer, array of any of these) is unconditionally
 // copy-constructible.
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program) {
     if (type.kind == TypeKind::Reference) return true;
     if (type.kind == TypeKind::Array) return is_field_copy_constructible(*type.element, program);
     if (type.kind == TypeKind::Named) {
+        if (is_freely_copyable_value_type(type, program)) return true;
         for (const ClassDef& def : program.classes) {
             if (def.name == type.name) return is_copy_constructible(type.name, program);
         }

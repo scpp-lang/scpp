@@ -17,7 +17,18 @@ namespace std {
     return len;
 }
 
-export class [[scpp::thread_movable, scpp::thread_shareable]] string_view {
+// A non-owning view (raw pointer + length) with no polymorphism and no
+// ownership-tracked fields -- the textbook `struct` profile (ch05 §5.1):
+// plain data plus non-virtual member functions only, so it stays a
+// trivial, freely copyable value type (like real C++'s own
+// std::string_view) rather than requiring the mandatory virtual
+// destructor -- and the "no implicit copy constructor once a
+// destructor is user-declared" consequence that would come with it --
+// that every `class` needs (spec §11.5(1)/§6.5(2)). This also lets
+// string_view be used as a field of another `struct` (e.g. a lexer's
+// own `Token`), since a struct field must itself be trivial (spec ch04)
+// and a `class` never is, regardless of its own fields.
+export struct [[scpp::thread_movable, scpp::thread_shareable]] string_view {
 private:
     const char* data_{};
     size_t size_{};
@@ -28,8 +39,6 @@ private:
     }
 
 public:
-    virtual ~string_view() { return; }
-
     string_view() { return; }
 
     string_view(const char* s) {

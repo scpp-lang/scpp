@@ -1,0 +1,11 @@
+struct Box {
+    int value;
+
+    const int& get() const {
+        return this->value;
+    }
+};
+
+long use_box(const Box& b) {
+    return static_cast<long>(b.get());
+}

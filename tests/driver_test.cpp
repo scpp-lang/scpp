@@ -3701,6 +3701,65 @@ void run_cli_extension_tests() {
     }
 
     {
+        // Regression test: an exported struct's own public member function must
+        // itself be treated as exported (not a hidden compile-time dependency),
+        // the inverse of the hidden-function case above. `parse_struct_def` used
+        // to compute `def.is_exported` only *after* parsing the struct body, so
+        // every member function synthesized while parsing that body observed a
+        // stale `is_exported=false` and was hidden even though the struct itself
+        // was exported.
+        std::string case_name = "cli_exported_struct_member_function_is_directly_callable";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_exported_struct_member_function_is_directly_callable";
+        std::filesystem::path module_source = root / "helper.scpp";
+        std::filesystem::path interface_path = root / "helper.scppm";
+        std::filesystem::path archive_path = root / "libhelper.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module helper;\n"
+                        "namespace helper {\n"
+                        "    export struct Counter {\n"
+                        "        int value;\n"
+                        "        Counter(int value) : value{value} {\n"
+                        "            return;\n"
+                        "        }\n"
+                        "        int add(int amount) const {\n"
+                        "            return this->value + amount;\n"
+                        "        }\n"
+                        "    };\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import helper;\n"
+                        "int main() {\n"
+                        "    helper::Counter counter{10};\n"
+                        "    return counter.add(32) - 42;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import helper=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": exported struct's public member function should build directly from .scppm payload, "
+                           "got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected exported struct member-function-backed binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_build_module_allows_local_extern_c_redeclaration_of_hidden_payload_helper";
         std::filesystem::path root = std::filesystem::current_path() /
                                      "cli_build_module_allows_local_extern_c_redeclaration_of_hidden_payload_helper";
@@ -4827,6 +4886,88 @@ void run_cli_extension_tests() {
         expect(run_result.exit_code == 0,
                case_name + ": executable should still run after incremental rebuilds, got " +
                    std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        // Regression test: a primary interface module's build-cache signature
+        // used to hash only the primary source file itself, not any interface
+        // partitions it re-exports via `export import :part;`. That meant
+        // editing ONLY a partition file left the cached signature unchanged,
+        // so `scpp build` incorrectly treated the module/archive as already
+        // up to date and never recompiled it, silently keeping stale behavior.
+        std::string case_name = "cli_project_build_lib_rebuilds_when_only_partition_file_changes";
+        std::filesystem::path root =
+            std::filesystem::current_path() / "cli_project_build_lib_rebuilds_when_only_partition_file_changes";
+        std::filesystem::path iface_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "modules" / "demo.scppm";
+        std::filesystem::path archive_path =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "archives" / "libdemo.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"demo\"\n"
+                        "\n"
+                        "[[lib]]\n"
+                        "name = \"demo\"\n"
+                        "sources = [\"**/*.scpp\"]\n");
+        write_text_file(root / "demo.scpp",
+                        "export module demo;\n"
+                        "export import :part;\n"
+                        "namespace demo {\n"
+                        "    export int primary() { return answer() + 1; }\n"
+                        "}\n");
+        write_text_file(root / "part.scpp",
+                        "export module demo:part;\n"
+                        "namespace demo {\n"
+                        "    export int answer() { return 41; }\n"
+                        "}\n");
+        RunResult first_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                    shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
+        expect(first_build.exit_code == 0,
+               case_name + ": initial build should succeed, got '" + first_build.stdout_text + "'");
+        auto first_archive_time = std::filesystem::last_write_time(archive_path);
+        write_text_file(consumer_source,
+                        "import demo;\n"
+                        "int main() { return demo::answer(); }\n");
+        RunResult first_consumer_build =
+            run_command_capture("cd " + shell_quote(root.string()) + " && " + shell_quote(SCPP_BINARY_PATH) +
+                                " main.scpp -o app --import demo=" + shell_quote(iface_path.string()) + " 2>&1");
+        expect(first_consumer_build.exit_code == 0,
+               case_name + ": expected initial consumer build to succeed, got '" +
+                   first_consumer_build.stdout_text + "'");
+        RunResult first_run = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(first_run.exit_code == 41,
+               case_name + ": expected initial partition value 41, got " + std::to_string(first_run.exit_code));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        write_text_file(root / "part.scpp",
+                        "export module demo:part;\n"
+                        "namespace demo {\n"
+                        "    export int answer() { return 42; }\n"
+                        "}\n");
+        RunResult second_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
+        expect(second_build.exit_code == 0,
+               case_name + ": rebuild after partition-only change should succeed, got '" +
+                   second_build.stdout_text + "'");
+        expect(std::filesystem::last_write_time(archive_path) > first_archive_time,
+               case_name + ": expected archive to rebuild after partition-only source change");
+        RunResult second_consumer_build =
+            run_command_capture("cd " + shell_quote(root.string()) + " && " + shell_quote(SCPP_BINARY_PATH) +
+                                " main.scpp -o app --import demo=" + shell_quote(iface_path.string()) + " 2>&1");
+        expect(second_consumer_build.exit_code == 0,
+               case_name + ": expected second consumer build to succeed, got '" +
+                   second_consumer_build.stdout_text + "'");
+        RunResult second_run = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(second_run.exit_code == 42,
+               case_name + ": expected updated partition value 42 after partition-only rebuild, got " +
+                   std::to_string(second_run.exit_code));
         std::filesystem::remove_all(root);
     }
 

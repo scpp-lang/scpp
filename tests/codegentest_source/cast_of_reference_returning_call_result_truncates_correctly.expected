@@ -1,0 +1,1 @@
+sequence: call ptr @Box_get | load i64, ptr %0 | trunc i64 %derefcalltmp to i32
