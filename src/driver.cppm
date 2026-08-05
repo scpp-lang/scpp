@@ -2625,13 +2625,23 @@ void archive_objects(const std::vector<std::string>& object_paths, const std::st
 // compiled object file, see compile_to_executable below) or
 // `-lname`/`-Lpath` flags a caller wants forwarded straight to the linker;
 // empty by default (an ordinary, no-C++-interop build needs none of this).
+//
+// Static linking is unconditional here now, mirroring Cargo's own
+// static-by-default posture for its targets: scpp's manifest-driven
+// `[profile.*]` system (the only mechanism that could ever have asked for
+// a *dynamic* link from this function) was removed as underdesigned, so
+// there is no longer any supported way to opt out. The `static_link`
+// parameter is kept, but unnamed, purely so `compile_to_executable`'s own
+// long-standing, unrelated single-file `--static` CLI flag (see
+// cli.cppm) keeps a value to forward positionally without having to
+// change that independent call site's signature; the value itself is now
+// ignored.
 void link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
-                     bool static_link = false) {
+                     bool /*static_link*/ = false) {
     if (link_inputs.empty()) {
         throw DriverError("linker command requires at least one input for '" + executable_path + "'");
     }
-    std::string command = "cc";
-    if (static_link) command += " -static";
+    std::string command = "cc -static";
     for (const std::string& input : link_inputs) {
         command += " \"" + input + "\"";
     }

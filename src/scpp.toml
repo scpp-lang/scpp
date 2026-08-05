@@ -1,0 +1,12 @@
+manifest-version = 1
+
+[package]
+name = "scpp-compiler"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../libs/std" }
+
+[[lib]]
+name = "scpp-compiler"
+sources = ["ast.cppm"]

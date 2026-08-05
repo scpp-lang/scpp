@@ -1,44 +1,121 @@
-set(SCPP_STDLIB_STD_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/std.scppm")
-set(SCPP_STDLIB_STD_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libstd.scppa")
-set(SCPP_STDLIB_SCPP_INTERFACE_PATH "${CMAKE_CURRENT_BINARY_DIR}/scpp.scppm")
-set(SCPP_STDLIB_SCPP_ARCHIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/libscpp.scppa")
-
-set(SCPP_STDLIB_STAGE_WORKSPACE_DIR "${CMAKE_BINARY_DIR}/scpp-libs-workspace")
-
-file(GLOB_RECURSE SCPP_STDLIB_BUILD_INPUTS CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/scpp.toml"
-    "${CMAKE_CURRENT_SOURCE_DIR}/std/scpp.toml"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/scpp.toml"
+# scpp (the language) is designed so that every valid `.scpp` source file
+# is also valid, compilable real C++ -- the same principle already
+# enforced for src/*.cppm (dual-compiled: real C++ via this bootstrap
+# clang++ toolchain, and self-hosting via `scpp build` -- see
+# scpp_workspace_artifacts in the top-level CMakeLists.txt), now extended to
+# the stdlib itself. libs/std/**/*.scpp and libs/scpp/**/*.scpp are, until
+# now, only ever compiled by the `scpp` compiler (via scpp_workspace_artifacts's
+# `scpp build`); they had never been independently checked against a real
+# C++ compiler before this target. This target is that check.
+#
+# This is compile-only, invariant validation, not a real, used library:
+# the resulting object code is never linked into anything (see OBJECT
+# below) -- it exists purely to prove/track C++-compilability.
+#
+# libs/llvm/*.scpp is deliberately NOT included here: unlike every file
+# below, it is already plain, ordinary C++ (not scpp-language stdlib
+# source at all -- see libs/llvm/CMakeLists.txt's own header comment for
+# why), and it is already compiled as real C++ and linked into the real
+# `scpp` compiler via the `llvm` target (top-level CMakeLists.txt).
+# Re-validating it here would just be duplicate compilation of files that
+# already prove their own C++-validity by being part of the real build.
+#
+# Unlike scpp_workspace_artifacts's own "no file list at all, always rerun
+# and trust scpp build's own incremental cache" approach elsewhere in this
+# repo, a file(GLOB_RECURSE ...) source list is the right, non-redundant
+# tool for *this* target specifically: this is a genuine, CMake-native
+# OBJECT library compiled directly by this project's own clang++
+# toolchain, so CMake itself genuinely needs an accurate source list to
+# generate correct build rules -- no other system (unlike scpp's own
+# BuildDatabase for scpp_workspace_artifacts) independently tracks these
+# files' C++-compilability. CONFIGURE_DEPENDS makes CMake re-glob (and
+# thus notice newly-added/removed stdlib files) on the next build, so
+# nobody has to remember to keep an explicit file list in sync by hand.
+file(GLOB_RECURSE SCPP_STDLIB_CXX_VALIDATION_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/std/*.scpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/std/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/*.scpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/*.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/*.scpp")
 
-add_custom_command(
-    OUTPUT
-        "${SCPP_STDLIB_STD_INTERFACE_PATH}"
-        "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
-        "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
-        "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E rm -rf "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/scpp.toml" "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/scpp.toml"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/std" "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/std"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink "${CMAKE_CURRENT_SOURCE_DIR}/scpp" "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/scpp"
-    COMMAND ${CMAKE_COMMAND} -E chdir "${SCPP_STDLIB_STAGE_WORKSPACE_DIR}" $<TARGET_FILE:scpp> build --lib
-    COMMAND /bin/sh -c "set -eu; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/std/modules/std.scppm' | head -n 1`\" \"${SCPP_STDLIB_STD_INTERFACE_PATH}\"; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/std/archives/libstd.scppa' | head -n 1`\" \"${SCPP_STDLIB_STD_ARCHIVE_PATH}\"; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/scpp/modules/scpp.scppm' | head -n 1`\" \"${SCPP_STDLIB_SCPP_INTERFACE_PATH}\"; cp \"`find \"${SCPP_STDLIB_STAGE_WORKSPACE_DIR}/.scpp/build\" -path '*/dev/scpp/archives/libscpp.scppa' | head -n 1`\" \"${SCPP_STDLIB_SCPP_ARCHIVE_PATH}\""
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-    DEPENDS
-        scpp
-        ${SCPP_STDLIB_BUILD_INPUTS}
-    VERBATIM)
+# `.scpp` isn't a CMake-recognized extension -- force it back to C++,
+# mirroring the exact technique libs/llvm/CMakeLists.txt already uses for
+# its own (unrelated, already-real-C++) `.scpp` files.
+set_source_files_properties(
+    ${SCPP_STDLIB_CXX_VALIDATION_SOURCES}
+    PROPERTIES LANGUAGE CXX)
 
-add_custom_target(scpp_std_artifacts ALL
-    DEPENDS
-        "${SCPP_STDLIB_STD_INTERFACE_PATH}"
-        "${SCPP_STDLIB_STD_ARCHIVE_PATH}")
+# EXCLUDE_FROM_ALL: this target currently does NOT compile cleanly (see
+# below), so it must not be part of the default `ALL` build -- doing so
+# would break `cmake --build build` for everyone. It stays available as an
+# explicit, opt-in target (`cmake --build build --target
+# scpp_stdlib_cxx_validation`) so it can be built on demand to track
+# progress as the underlying findings are addressed.
+add_library(scpp_stdlib_cxx_validation OBJECT EXCLUDE_FROM_ALL)
+target_sources(scpp_stdlib_cxx_validation
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES FILES
+            ${SCPP_STDLIB_CXX_VALIDATION_SOURCES})
 
-add_custom_target(scpp_scpp_artifacts ALL
-    DEPENDS
-        "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
-        "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}")
+# libs/std/std.scpp declares `export module std;` -- scpp's own,
+# self-contained stdlib module, unrelated to (and unaware of) any real C++
+# standard library module. It happens to share the literal name "std" with
+# the one module name every C++ compiler recognizes specially (module
+# names starting with "std" are reserved by the standard,
+# [module.reserved]), so real compilers diagnose it. CXX_MODULE_STD must
+# also be off for this target specifically: leaving it on would
+# additionally try to make the compiler's own real `std` module available
+# alongside our own same-named one -- a genuine conflict distinct from
+# (and on top of) the reserved-name diagnostic below.
+set_target_properties(scpp_stdlib_cxx_validation PROPERTIES CXX_MODULE_STD 0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Same precedent as scpp_ast's own -Wno-error=unknown-attributes
+    # above: scpp vendor attributes ([[scpp::lifetime(...)]],
+    # [[scpp::unsafe]], etc.) are valid, ignorable vendor syntax per the
+    # standard's attribute rules, but trip Clang's "unknown attribute
+    # ignored" warning, which would otherwise be a hard error under this
+    # project's global -Werror-equivalent. Likewise for the reserved
+    # module name discussed above.
+    target_compile_options(scpp_stdlib_cxx_validation PRIVATE
+        -Wno-error=unknown-attributes
+        -Wno-error=reserved-module-identifier)
+endif()
+
+# ---------------------------------------------------------------------
+# FINDING (as of this target's introduction): the "every valid scpp file
+# is also valid C++" invariant does NOT currently hold for the stdlib.
+# `cmake --build build --target scpp_stdlib_cxx_validation` fails with
+# real, structural incompatibilities -- not just fixable CMake/warning
+# config issues (those are already handled above). Confirmed root causes,
+# found by actually attempting this build and reading Clang's own
+# diagnostics (see PR description for the full investigation):
+#
+#  1. Fixed-width/size integer aliases (`size_t`, `uint32_t`, `uint64_t`,
+#     ...) are used throughout (e.g. std/vector, std/random, std/string,
+#     std/string_view, std/unordered_set, std/functional,
+#     scpp/rand) with no declaration anywhere in the visible source --
+#     no `#include`, no `import`. scpp itself evidently treats these as
+#     compiler-intrinsic/built-in types; real C++ requires
+#     <cstddef>/<cstdint> (or `import std;`) to declare them, which these
+#     files never do.
+#  2. `std::move` is called in multiple files (std/expected, std/memory,
+#     std/optional, std/thread, std/vector) but is not defined by any
+#     `.scpp` file in the stdlib -- scpp evidently treats it as an
+#     intrinsic too, with no real declaration for a C++ compiler to find.
+#  3. std/memory/std_memory.scpp's `get() const` accessor places its
+#     attribute BEFORE the trailing `const` qualifier
+#     (`const T* get() [[scpp::lifetime(this)]] const { ... }`). Standard
+#     C++ grammar only allows attribute-specifier-seq AFTER the trailing
+#     cv/ref-qualifiers and noexcept-specifier in a function declarator,
+#     not before -- so Clang misparses this as two same-signature
+#     overloads differing only by return type.
+#
+# Confirmed directly compiling as real C++ with no changes needed beyond
+# the config-level fixes above: std/algorithm, std/charconv,
+# std/concepts, std/cstdlib. The remaining files' own status is unknown --
+# they transitively `import` one of the files above via a partition
+# dependency and so never got compiled in this attempt.
+#
+# Per the task that introduced this target: these are scpp-language
+# stdlib source semantics, not CMake/build-system config -- deciding
+# whether/how to change them (e.g. adding real typedefs, defining
+# `std::move` for real, reordering the attribute) is a language-design
+# call for the project owner, not something to patch unilaterally here.
+# ---------------------------------------------------------------------

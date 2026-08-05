@@ -1,0 +1,20 @@
+manifest-version = 1
+
+[package]
+name = "httpserver"
+version = "0.1.0"
+
+[[bin]]
+name = "httpserver"
+sources = ["**/*.scpp"]
+
+[dependencies]
+std = { path = "../../libs/std" }
+
+# scpp's manifest-driven `[profile.*]` system (which used to let this
+# package opt into a fully static, deployable binary via a dedicated
+# `static` profile) was removed entirely as underdesigned. Static linking
+# is now unconditional for every manifest-driven build (see
+# link_executable in src/driver.cppm) -- the ordinary `scpp build`/`scpp
+# build --workspace` step already produces a fully static httpserver
+# binary, so there is no separate profile or flag left to opt into here.

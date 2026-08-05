@@ -878,20 +878,12 @@ int run(int argc, char** argv) {
                 options.selected_bin = argv[++i];
             } else if ((arg == "-p" || arg == "--package") && i + 1 < argc) {
                 options.selected_package = argv[++i];
-            } else if (arg == "--profile" && i + 1 < argc) {
-                options.selected_profile = argv[++i];
-            } else if (arg == "--release") {
-                options.release = true;
             } else if (arg == "--workspace") {
                 options.build_workspace = true;
             } else {
                 std::cerr << "error: unknown build option '" << arg << "'\n";
                 return 1;
             }
-        }
-        if (options.release && options.selected_profile.has_value()) {
-            std::cerr << "error: --release and --profile cannot be used together\n";
-            return 1;
         }
         return scpp::build_manifest_project(std::filesystem::current_path(), options);
     }
@@ -958,7 +950,7 @@ int run(int argc, char** argv) {
     std::cout << "       " << name
               << " <file.scpp> [<more.scpp>...] [--source <file>]... [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...\n";
     std::cout << "       " << name
-              << " build [--workspace] [-p <package>] [--lib [<name>]] [--bin <name>] [--profile <name>] [--release]\n";
+              << " build [--workspace] [-p <package>] [--lib [<name>]] [--bin <name>]\n";
     std::cout << "       " << name
               << " build-module <file.scpp> [<more.scpp>...] [--source <file>]... --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...\n";
     return 0;

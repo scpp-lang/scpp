@@ -1,4 +1,0 @@
-manifest-version = 1
-
-[workspace]
-members = ["std", "scpp"]

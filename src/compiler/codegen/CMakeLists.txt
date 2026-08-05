@@ -26,4 +26,3 @@ target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
 # real LLVM-C symbols every partition's own declarations ultimately
 # resolve to.
 target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr llvm ${LLVM_LIBS})
-target_compile_features(scpp_codegen PRIVATE cxx_std_26)

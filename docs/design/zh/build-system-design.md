@@ -10,7 +10,7 @@
 
 1. 将新的**零配置目录约定**保留为最简单场景；
 2. 对超出该简单场景的情况，增加一个**可选清单文件**（`scpp.toml`）；
-3. 让公开 UX 保持**类似 Cargo 且一体化**（`scpp build`、`scpp run`、`scpp package`、工作区、profile、依赖声明）；
+3. 让公开 UX 保持**类似 Cargo 且一体化**（`scpp build`、`scpp run`、`scpp package`、工作区、依赖声明）；
 4. 让内部模型保持**artifact-first（制品优先）**，围绕 scpp 现有的 `.scppm` / `.scppa` 分层来构建，而不是围绕类似 CMake、需要手工维护的 target graph。
 
 简言之：**Cargo 风格的用户体验，CMake 级别的项目规模，scpp 原生的制品语义。**
@@ -52,7 +52,6 @@
 
 - 路径依赖，
 - 多包仓库，
-- profile，
 - 原生库需求，
 - 多个二进制目标，
 - 可发布的包身份。
@@ -92,8 +91,21 @@ $ cargo build --workspace
 - 每个 package 一个 manifest；
 - 带共享输出 / 缓存的 workspace root；
 - 直接依赖声明；
-- 显式 profile；
 - 以 package 为中心而不是以文件为中心的思维方式。
+
+**不要**保留：
+
+- 显式的具名构建 profile。scpp 早期确实几乎直接照搬了 Cargo 的
+  `dev`/`release`/自定义 profile 模型，实现为 `[profile.<name>]` manifest
+  概念（历史与理由见下文第 10 节），但在真正有用户依赖它之前就已被
+  移除：它引入了一整个额外的 manifest 段落、CLI 参数、构建缓存键维度，
+  以及输出路径分段，换来的实际收益却只是在少数几种
+  `opt-level`/`debug`/`static` 组合之间切换。这一功能被判定为
+  **相对其成本而言设计不足**：与 Cargo 不同，scpp 目前还没有真正值得
+  用多个具名配置去覆盖的 per-profile 能力（没有 LTO 流水线、没有
+  per-profile 依赖 feature、也没有真正实现的 workspace 级 profile
+  继承），所以 profile 系统更多是增加了间接层，而没有带来真正的灵活性。
+  scpp v1 转而采用第 10 节所述的单一、固定、始终生效的构建配置。
 
 **不要**直接照搬：
 
@@ -211,7 +223,7 @@ Meson 最好的启示在于**原生 / 外部依赖声明**：
 基于上述研究和 scpp 当前架构，我认为构建系统应遵循以下规则。
 
 1. **以 package 为中心，而不是以文件为中心。**
-   单文件 `scpp foo.scpp` 依然有效，但大型项目构建必须以 package / workspace / profile 为思考单位。
+   单文件 `scpp foo.scpp` 依然有效，但大型项目构建必须以 package / workspace 为思考单位。
 
 2. **基于 manifest 的项目模式；无 manifest 的非项目模式。**
    零配置的单文件用法继续有效，但 package / workspace 构建应基于 manifest。
@@ -320,16 +332,6 @@ sources = ["src/**/*.scpp"]
 net = { path = "../net" }
 json = { scppkg = "vendor/json.scppkg" }
 
-[profile.dev]
-opt-level = 0
-debug = true
-static = false
-
-[profile.release]
-opt-level = 3
-debug = false
-static = true
-
 [native]
 links = ["pthread"]
 search = ["native/lib"]
@@ -360,7 +362,6 @@ search = ["native/lib"]
   - `sources`
   - 可选 `additional_objs`
 - `[dependencies]`
-- `[profile.dev]`、`[profile.release]`、可选的自定义 `[profile.<name>]`
 - `[native]`，用于 package 级原生链接需求
 - `[additional_objs.<name>]`，用于可被 target 引用、能产出额外对象文件的自定义构建步骤
 - `[package.metadata]`，预留给外部工具
@@ -389,14 +390,6 @@ default-members = ["apps/httpserver"]
 [workspace.dependencies]
 net = { path = "libs/net" }
 json = { path = "libs/json" }
-
-[profile.dev]
-opt-level = 0
-debug = true
-
-[profile.release]
-opt-level = 3
-debug = false
 ```
 
 成员 manifest：
@@ -425,7 +418,6 @@ json = { workspace = true }
   - **virtual workspace**（只有 `[workspace]`），或
   - **root package workspace**（`[workspace]` + `[package]`），与 Cargo 保持一致。[^cargo-workspaces]
 - 在 workspace root 运行 `scpp build` 会构建 `default-members`；`scpp build --workspace` 会构建全部成员。
-- 定义在 workspace root 的 profile 会覆盖成员本地 profile table，与 Cargo 的“profile 归根所有”模型保持一致。[^cargo-workspaces][^cargo-profiles]
 - workspace root 拥有共享的 build / cache 输出目录。
 
 ### 为什么用 workspace，而不是 CMake 的 `add_subdirectory()`？
@@ -570,16 +562,15 @@ scpp 现有的制品分层，本身就已经是正确的增量边界：
 .scpp/
   build/
     <triple>/
-      <profile>/
-        <package>/
-          modules/
-            foo.scppm
-            bar.scppm
-          archives/
-            libfoo.scppa
-            libbar.scppa
-          objects/
-          package-metadata.json
+      <package>/
+        modules/
+          foo.scppm
+          bar.scppm
+        archives/
+          libfoo.scppa
+          libbar.scppa
+        objects/
+        package-metadata.json
   cache/
     build.db
 ```
@@ -614,7 +605,7 @@ scpp package
 行为：
 
 - 仅对带 `[[lib]]` 的 package 有效；
-- 在所选 profile / target 下构建该 package；
+- 为所选 target 构建该 package；
 - 按照现有规范，将生成的 `.scppm` / `.scppa` 制品和 manifest 元数据一起打包进 `.scppkg` 文件。[^scppkg-spec]
 
 建议的默认输出位置：
@@ -635,48 +626,57 @@ dist/<package-name>-<version>-<target-triple>.scppkg
 
 这会略显粗粒度，但它是正确的，以后若有需要可以再细化为按模块声明。
 
-## 10. profile 与配置
+## 10. 构建配置（profile 已移除）
 
-## 10.1 内建 profile
+## 10.1 历史：为什么 scpp 没有 Cargo 风格的 profile
 
-采用内建 profile：
+本文档早期草案（以及 `scpp build` 的第一版实现）曾相当直接地照搬了
+Cargo 风格的 `[profile.<name>]` manifest 概念：内建的 `dev`/`release`
+profile、可选的自定义 profile、`--profile <name>` / `--release` CLI
+参数，以及本地构建输出目录中的 profile 名称路径分段
+（`.scpp/build/<triple>/<profile>/...`），与 Cargo 自身的 profile 模型
+如出一辙。[^cargo-profiles]
 
-- `dev`
-- `release`
+这一设计被尝试过，随后在还没有真正用户依赖它之前就被主动移除了。
+实践中，它引入了一整个额外的 manifest 段落、两个 CLI flag、一个额外
+的构建缓存键维度，以及一个额外的输出路径分段——而这一切换来的
+唯一真正被使用的效果，只是在少数几种 `opt-level`/`debug`/`static`
+组合之间做选择。这个功能被判定为**相对其成本而言设计不足**：与
+Cargo 不同，scpp 目前还没有真正值得用多个具名配置去覆盖的
+per-profile 能力（没有 LTO 流水线、没有 per-profile 依赖 feature、
+也没有真正实现的 workspace 级 profile 继承），所以 profile 系统更多
+是增加了间接层，而没有带来真正的灵活性。
 
-并允许可选的自定义 profile，与 Cargo 保持一致。[^cargo-profiles]
+最终决定（见第 2.1 节“Cargo 对 scpp 的启示”）是**不**把 Cargo 的
+profile 模型照搬进 scpp v1。如果以后确实出现了对多个具名构建配置的
+真实需求（例如真正实现了 LTO 或 per-profile 依赖 feature 之后），
+可以届时基于真实需求重新设计 profile，而不是默认照搬 Cargo。
 
-推荐默认值：
+## 10.2 当前固定的构建配置
 
-### `dev`
+scpp v1 只有**一种**构建配置；既没有 profile manifest 段落，也没有
+`--profile <name>` / `--release` CLI flag。每一次基于 manifest 的构建
+（`scpp build`）都使用固定设置：
 
 - `opt-level = 0`
-- `debug = true`
-- `static = false`
-- 启用增量重建
+- `debug = true`（始终生成调试信息）
+- 链接**始终是静态的**——`link_executable` 无条件传入 `-static`；
+  基于 manifest 构建的可执行文件没有动态链接选项
 
-### `release`
+这些取值与旧版 `dev` profile 的取值一致，因为这正是本项目从始至终
+实际构建和测试所依赖的配置。静态链接是唯一真正发生变化（而不是
+简单固定为旧默认值）的设置：scpp 现在遵循 Rust / Cargo 自身的惯例，
+把生成自包含的静态二进制作为普通构建的默认结果，而不需要专门的
+flag 或 profile 才能选择它。
 
-- `opt-level = 3`
-- `debug = false`
-- 默认 `static = false`，可按项目覆盖
-- 以后再加入更激进的 codegen / LTO hook
+由于只有一种配置，本地构建输出目录（见第 9.2 节）也相应地去掉了
+profile 路径分段：输出直接位于 `.scpp/build/<triple>/<package>/...`，
+而不是 `.scpp/build/<triple>/<profile>/<package>/...`。
 
-## 10.2 CLI / profile 交互
-
-推荐命令：
-
-- `scpp build` => `dev`
-- `scpp build --release` => `release`
-- `scpp build --profile release-lto` => 自定义命名 profile
-- `scpp run` => 默认用 `dev` 构建，除非被覆盖
-
-现有的一次性 flag 应能自然映射：
-
-- 现有单文件 `-g` 概念映射到 `debug = true`
-- 现有 `--static` 概念映射到 `static = true`
-
-对于项目模式，这些应当**先是 profile 属性，其次才是 CLI override**。
+预先已经存在、与本节所述 profile 系统无关的单文件 CLI `--static`
+flag（`scpp foo.scpp --static`，先于并独立于 manifest / profile
+系统）不受此次改动影响，继续按原有文档所述工作；它从来都不是本节
+所描述的 profile 系统的一部分。
 
 ## 10.3 为什么 v1 不提供 Cargo 风格的 feature？
 
@@ -737,10 +737,10 @@ Meson 的例子仍然有价值，因为它说明了：**声明式依赖描述优
 推荐新增命令：
 
 ```console
-scpp build [--workspace] [-p <package>] [--bin <name>] [--lib] [--profile <name>] [--release]
-scpp run   [--workspace] [-p <package>] [--bin <name>] [--profile <name>] [--release] [-- <program args>]
-scpp test  [--workspace] [-p <package>] [--profile <name>] [--release] [-- <test args>]
-scpp package [-p <package>] [--profile <name>] [--release]
+scpp build [--workspace] [-p <package>] [--bin <name>] [--lib]
+scpp run   [--workspace] [-p <package>] [--bin <name>] [-- <program args>]
+scpp test  [--workspace] [-p <package>] [-- <test args>]
+scpp package [-p <package>]
 scpp clean
 ```
 
@@ -794,7 +794,6 @@ scpp gen --backend ninja
 - 每个已编译模块 / 普通源文件 / binary target / package 制品一行
 - 缓存键包括：
   - 源文件摘要，或 mtime + size
-  - 活跃 profile
   - target triple
   - 编译器版本
   - 已解析依赖制品的摘要 / 路径
@@ -836,7 +835,7 @@ scpp gen --backend ninja
 
 原因：
 
-- 无法干净地表达依赖 / workspace / profile / 原生链接元数据；
+- 无法干净地表达依赖 / workspace / 原生链接元数据；
 - 无论如何都无法在没有额外文件的前提下支持可发布的 package identity；
 - 随着项目规模扩大，只会被迫引入越来越“魔法”的启发式规则。
 
@@ -883,7 +882,7 @@ scpp gen --backend ninja
 ## Phase B —— manifest 解析器 + 单 package 构建
 
 1. 解析 `scpp.toml`
-2. 支持 `[package]`、`[[lib]]`、`[[bin]]`、`[profile.*]`
+2. 支持 `[package]`、`[[lib]]`、`[[bin]]`
 3. 构建一个不含外部依赖的 manifest-based package
 4. 将本地输出写到 `.scpp/build/...`
 
