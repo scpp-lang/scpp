@@ -19,28 +19,21 @@
 # `scpp` compiler via the `llvm` target (top-level CMakeLists.txt).
 # Re-validating it here would just be duplicate compilation of files that
 # already prove their own C++-validity by being part of the real build.
-set(SCPP_STDLIB_CXX_VALIDATION_SOURCES
-    std/std.scpp
-    std/algorithm/std_algorithm.scpp
-    std/charconv/std_charconv.scpp
-    std/concepts/std_concepts.scpp
-    std/cstdlib/std_cstdlib.scpp
-    std/expected/std_expected.scpp
-    std/format/std_format.scpp
-    std/functional/std_functional.scpp
-    std/memory/std_memory.scpp
-    std/optional/std_optional.scpp
-    std/print/std_print.scpp
-    std/random/std_random.scpp
-    std/string/std_string.scpp
-    std/string_view/std_string_view.scpp
-    std/thread/std_thread.scpp
-    std/unordered_set/std_unordered_set.scpp
-    std/vector/std_vector.scpp
-    scpp/scpp.scpp
-    scpp/enum_cast/scpp_enum_cast.scpp
-    scpp/io/scpp_io.scpp
-    scpp/rand/scpp_rand.scpp)
+#
+# Unlike scpp_workspace_artifacts's own "no file list at all, always rerun
+# and trust scpp build's own incremental cache" approach elsewhere in this
+# repo, a file(GLOB_RECURSE ...) source list is the right, non-redundant
+# tool for *this* target specifically: this is a genuine, CMake-native
+# OBJECT library compiled directly by this project's own clang++
+# toolchain, so CMake itself genuinely needs an accurate source list to
+# generate correct build rules -- no other system (unlike scpp's own
+# BuildDatabase for scpp_workspace_artifacts) independently tracks these
+# files' C++-compilability. CONFIGURE_DEPENDS makes CMake re-glob (and
+# thus notice newly-added/removed stdlib files) on the next build, so
+# nobody has to remember to keep an explicit file list in sync by hand.
+file(GLOB_RECURSE SCPP_STDLIB_CXX_VALIDATION_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/std/*.scpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/scpp/*.scpp")
 
 # `.scpp` isn't a CMake-recognized extension -- force it back to C++,
 # mirroring the exact technique libs/llvm/CMakeLists.txt already uses for
