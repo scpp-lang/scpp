@@ -1,2 +1,2 @@
-.scpp/build/*/dev/libnative/package-metadata.json
-.scpp/build/*/dev/app/package-metadata.json
+.scpp/build/*/libnative/package-metadata.json
+.scpp/build/*/app/package-metadata.json

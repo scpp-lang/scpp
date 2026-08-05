@@ -1,4 +1,4 @@
-.scpp/build/*/dev/selectlib/modules/alpha.scppm
-.scpp/build/*/dev/selectlib/archives/libalpha.scppa
-!.scpp/build/*/dev/selectlib/modules/beta.scppm
-!.scpp/build/*/dev/selectlib/archives/libbeta.scppa
+.scpp/build/*/selectlib/modules/alpha.scppm
+.scpp/build/*/selectlib/archives/libalpha.scppa
+!.scpp/build/*/selectlib/modules/beta.scppm
+!.scpp/build/*/selectlib/archives/libbeta.scppa
