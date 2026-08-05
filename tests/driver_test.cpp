@@ -4972,6 +4972,129 @@ void run_cli_extension_tests() {
     }
 
     {
+        // Regression test: a [[lib]] target may bundle multiple independent
+        // primary modules (not partitions of one another) into a single
+        // build, each still producing its own interface/archive artifact.
+        // Archive naming falls back to being keyed by module name (rather
+        // than the shared target name) specifically to avoid two modules'
+        // archives colliding on the same path.
+        std::string case_name = "cli_project_build_lib_supports_multiple_independent_primary_modules";
+        std::filesystem::path root = std::filesystem::current_path() /
+                                     "cli_project_build_lib_supports_multiple_independent_primary_modules";
+        std::filesystem::path modone_iface =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "modules" / "modone.scppm";
+        std::filesystem::path modtwo_iface =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "modules" / "modtwo.scppm";
+        std::filesystem::path modone_archive =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "archives" / "libmodone.scppa";
+        std::filesystem::path modtwo_archive =
+            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "archives" / "libmodtwo.scppa";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"multilib\"\n"
+                        "\n"
+                        "[[lib]]\n"
+                        "name = \"multilib\"\n"
+                        "sources = [\"*.scpp\"]\n");
+        write_text_file(root / "modone.scpp",
+                        "export module modone;\n"
+                        "namespace modone {\n"
+                        "    export int value_one() { return 10; }\n"
+                        "}\n");
+        write_text_file(root / "modtwo.scpp",
+                        "export module modtwo;\n"
+                        "namespace modtwo {\n"
+                        "    export int value_two() { return 20; }\n"
+                        "}\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": build of a [[lib]] target with two independent primary modules should succeed, got '" +
+                   build_result.stdout_text + "'");
+        expect(std::filesystem::exists(modone_iface), case_name + ": expected modone interface artifact");
+        expect(std::filesystem::exists(modtwo_iface), case_name + ": expected modtwo interface artifact");
+        expect(std::filesystem::exists(modone_archive),
+               case_name + ": expected modone archive named after its own module, not the shared target");
+        expect(std::filesystem::exists(modtwo_archive),
+               case_name + ": expected modtwo archive named after its own module, not the shared target");
+        write_text_file(root / "main.scpp",
+                        "import modone;\n"
+                        "import modtwo;\n"
+                        "int main() { return modone::value_one() + modtwo::value_two() - 30; }\n");
+        RunResult consumer_build =
+            run_command_capture("cd " + shell_quote(root.string()) + " && " + shell_quote(SCPP_BINARY_PATH) +
+                                " main.scpp -o app --import modone=" + shell_quote(modone_iface.string()) +
+                                " --import modtwo=" + shell_quote(modtwo_iface.string()) + " 2>&1");
+        expect(consumer_build.exit_code == 0,
+               case_name + ": expected consumer importing both modules to build, got '" +
+                   consumer_build.stdout_text + "'");
+        RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected both modules' archives to link and run correctly (10 + 20 - 30 == 0), got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        // Regression test: the exactly-one-primary-module restriction is
+        // still enforced when a [[lib]] target also has additional_objs
+        // configured, since build_library_target's native-object merge has
+        // to pick a single archive to merge into and can't do so
+        // unambiguously when the target builds more than one module.
+        std::string case_name =
+            "cli_project_build_lib_rejects_multiple_primary_modules_with_additional_objs";
+        std::filesystem::path root =
+            std::filesystem::current_path() /
+            "cli_project_build_lib_rejects_multiple_primary_modules_with_additional_objs";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(root / "scpp.toml",
+                        "manifest-version = 1\n"
+                        "\n"
+                        "[package]\n"
+                        "name = \"multilib\"\n"
+                        "\n"
+                        "[[lib]]\n"
+                        "name = \"multilib\"\n"
+                        "sources = [\"*.scpp\"]\n"
+                        "additional_objs = \"custom\"\n"
+                        "\n"
+                        "[additional_objs.custom]\n"
+                        "input = [\"native.cpp\"]\n"
+                        "output = [\"native.o\"]\n"
+                        "command = \"\"\"\\\n"
+                        "${CXX:-c++} -std=c++26 -O2 -c native.cpp\n"
+                        "\"\"\"\n");
+        write_text_file(root / "native.cpp", "int scpp_multilib_native_marker() { return 7; }\n");
+        write_text_file(root / "modone.scpp",
+                        "export module modone;\n"
+                        "namespace modone {\n"
+                        "    export int value_one() { return 10; }\n"
+                        "}\n");
+        write_text_file(root / "modtwo.scpp",
+                        "export module modtwo;\n"
+                        "namespace modtwo {\n"
+                        "    export int value_two() { return 20; }\n"
+                        "}\n");
+        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
+        expect(build_result.exit_code != 0,
+               case_name + ": expected a [[lib]] target with two primary modules and additional_objs to be rejected");
+        expect(build_result.stdout_text.find(
+                   "must contain exactly one primary interface module when using additional_objs") !=
+                   std::string::npos,
+               case_name + ": expected the additional_objs-specific error, got '" + build_result.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_native_links_propagate_transitively";
         std::filesystem::path root = std::filesystem::current_path() / "cli_native_links_propagate_transitively";
         std::filesystem::path trig_dir = root / "trig";

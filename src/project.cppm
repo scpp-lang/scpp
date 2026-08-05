@@ -1276,10 +1276,20 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
     std::sort(ready.begin(), ready.end());
     if (target != nullptr) {
         if (primary_modules.empty()) {
-            throw BuildError("[[lib]] target must contain exactly one primary interface module");
+            throw BuildError("[[lib]] target must contain at least one primary interface module");
         }
-        if (primary_modules.size() != 1) {
-            throw BuildError("[[lib]] target must contain exactly one primary interface module");
+        // A [[lib]] target may bundle multiple independent primary modules into
+        // one build (each still gets its own interface/archive artifact -- see
+        // archive_base_name below, and topo_sort_modules/the ready-batch loop
+        // above already build an arbitrary number of them in dependency order).
+        // The one thing that still requires exactly one primary module is
+        // additional_objs: build_library_target merges its native object
+        // outputs into built_lib_modules.front().archive_path, which can't
+        // unambiguously pick a merge target when there's more than one module.
+        if (primary_modules.size() != 1 && !target->additional_obj_steps.empty()) {
+            throw BuildError("[[lib]] target '" + target->name +
+                             "' must contain exactly one primary interface module when using additional_objs "
+                             "(archive merging can't tell which module's archive to merge native objects into)");
         }
     }
     const std::string manifest_key = manifest_digest(manifest);
@@ -1305,8 +1315,15 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
             futures.push_back(std::async(std::launch::async, [&, module_name]() -> BuiltModule {
                 const SourceInfo& source = primary_modules.at(module_name);
                 std::filesystem::path interface_path = module_dir / (module_name + ".scppm");
+                // When a [[lib]] target has exactly one primary module (the
+                // common case today), keep naming its archive after the
+                // target for backward compatibility. With multiple primary
+                // modules sharing one target, fall back to naming each
+                // archive after its own module instead, so they don't all
+                // collide on the same lib<target-name>.scppa path.
                 std::string archive_base_name =
-                    (target != nullptr && !target->name.empty()) ? target->name : module_name;
+                    (target != nullptr && !target->name.empty() && primary_modules.size() == 1) ? target->name
+                                                                                                  : module_name;
                 std::filesystem::path archive_path = archive_dir / ("lib" + archive_base_name + ".scppa");
                 std::string module_source = read_file(source.path);
                 std::vector<std::string> dep_keys;
