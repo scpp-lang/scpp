@@ -75,7 +75,7 @@ add_library(scpp_ast)
 target_sources(scpp_ast
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/ast.cppm)
+            src/compiler/ast.cppm)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(scpp_ast PRIVATE -Wno-error=unknown-attributes)
 endif()
