@@ -104,19 +104,22 @@ public:
         if (it != cache_.end()) return it->second;
         auto path_it = import_paths_.find(module_name);
         if (path_it == import_paths_.end()) throw std::runtime_error("unknown test module '" + module_name + "'");
-        scpp::Program parsed = scpp::parse(
+        auto parsed_result = scpp::parse(
             read_file(path_it->second), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
-        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed));
+        if (!parsed_result.has_value()) throw std::move(parsed_result).error();
+        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed_result).value());
         return inserted->second;
     }
 
     scpp::Program resolve_partition(const std::string& key) {
         std::optional<std::string> path = infer_partition_path(key);
         if (!path.has_value()) throw std::runtime_error("unknown test partition '" + key + "'");
-        return scpp::parse(
+        auto result = scpp::parse(
             read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
+        if (!result.has_value()) throw std::move(result).error();
+        return std::move(result).value();
     }
 
 private:
@@ -141,16 +144,20 @@ private:
 
 scpp::Program parse_program_with_std_imports(std::string_view source) {
     TestModuleCache cache(source_module_import_paths());
-    return scpp::parse(
+    auto result = scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+    if (!result.has_value()) throw std::move(result).error();
+    return std::move(result).value();
 }
 
 scpp::Program parse_with_std_imports(std::string_view source) {
     TestModuleCache cache(source_module_import_paths());
-    return scpp::parse(
+    auto result = scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+    if (!result.has_value()) throw std::move(result).error();
+    return std::move(result).value();
 }
 
 struct RunResult {
@@ -354,14 +361,14 @@ void run_error_location_tests() {
     };
     for (const Case& c : parse_cases) {
         cases_run++;
-        try {
-            scpp::parse(c.source);
-            expect(false, c.name + ": expected a ParseError, none was thrown");
-        } catch (const scpp::ParseError& e) {
+        if (auto result = scpp::parse(c.source); !result.has_value()) {
+            const scpp::ParseError& e = result.error();
             expect(e.loc.is_known(), c.name + ": ParseError has no location");
             expect(e.loc.line == c.expected_line, c.name + ": expected line " +
                                                        std::to_string(c.expected_line) + ", got " +
                                                        std::to_string(e.loc.line));
+        } else {
+            expect(false, c.name + ": expected a ParseError, none was thrown");
         }
     }
 
@@ -392,7 +399,9 @@ void run_error_location_tests() {
     for (const Case& c : codegen_cases) {
         cases_run++;
         try {
-            scpp::Program program = scpp::parse(c.source);
+            auto program_result = scpp::parse(c.source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
             expect(false, c.name + ": expected a CodegenError, none was thrown");
@@ -490,9 +499,13 @@ void run_module_system_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program lib_program = scpp::parse(read_file(lib_path));
-            scpp::Program program = scpp::parse(
+            auto lib_program_result = scpp::parse(read_file(lib_path));
+            if (!lib_program_result.has_value()) throw std::move(lib_program_result).error();
+            scpp::Program lib_program = std::move(lib_program_result.value());
+            auto program_result = scpp::parse(
                 main_source, [&lib_program](const std::string&) -> const scpp::Program& { return lib_program; });
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
@@ -1088,7 +1101,9 @@ void run_concept_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1174,7 +1189,9 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1219,7 +1236,9 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1261,7 +1280,9 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1298,7 +1319,9 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1343,7 +1366,9 @@ void run_generic_pack_deduction_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1387,7 +1412,9 @@ void run_generic_pack_deduction_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1429,7 +1456,9 @@ void run_generic_pack_deduction_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
         } catch (const scpp::DataflowError&) {
             threw = true;
@@ -1463,7 +1492,9 @@ void run_generic_pack_deduction_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1500,7 +1531,9 @@ void run_generic_pack_deduction_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
         } catch (const scpp::DataflowError&) {
             threw = true;
@@ -1545,7 +1578,9 @@ void run_generic_pack_deduction_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1597,7 +1632,9 @@ void run_generic_pack_deduction_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1634,7 +1671,9 @@ void run_generic_function_overload_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1672,7 +1711,9 @@ void run_generic_function_overload_tests() {
             "}\n";
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(source);
+            auto program_result = scpp::parse(source);
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1755,7 +1796,7 @@ void run_reference_overload_forwarding_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(
+            auto program_result = scpp::parse(
                 "namespace demo {\n"
                 "int f(int a, int& b, int c) {\n"
                 "    return a + b + c;\n"
@@ -1768,6 +1809,8 @@ void run_reference_overload_forwarding_tests() {
                 "    int x = 1;\n"
                 "    return demo::f(2, x) - 13;\n"
                 "}\n");
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -1847,13 +1890,15 @@ void run_thread_tests() {
 void test_compile_time_payload_plan_collects_exported_roots_and_helpers() {
     std::string case_name = "compile_time_payload_plan_collects_exported_roots_and_helpers";
     cases_run++;
-    scpp::Program program = scpp::parse(
+    auto program_result = scpp::parse(
         "export module math;\n"
         "namespace math {\n"
         "    class Helper { public: constexpr Helper(int v) : value{v} { return; } int value{}; };\n"
         "    int helper_value(const Helper& h) { return h.value; }\n"
         "    export constexpr int answer() { Helper h{42}; return helper_value(h); }\n"
         "}\n");
+    if (!program_result.has_value()) throw std::move(program_result).error();
+    scpp::Program program = std::move(program_result.value());
     scpp::CompileTimePayloadPlan plan = scpp::plan_compile_time_payload(program);
     expect(plan.format_version == scpp::SCPPM_COMPILE_TIME_AST_VERSION,
            case_name + ": expected current compile-time payload format version");
@@ -2236,8 +2281,10 @@ void run_explicit_destructor_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(
+            auto program_result = scpp::parse(
                 "class Box { public: virtual ~Box() { return; } }; int main() { Box b{}; [[scpp::unsafe]] { b.~Box(); } return 0; }");
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -5239,10 +5286,12 @@ void run_enum_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(
+            auto program_result = scpp::parse(
                 "enum class Color { red };\n"
                 "enum class Shape { red };\n"
                 "int main() { return Color::red == Shape::red; }\n");
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -5262,9 +5311,11 @@ void run_enum_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(
+            auto program_result = scpp::parse(
                 "enum class Color { red };\n"
                 "int main() { Color color = static_cast<Color>(1); return 0; }\n");
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -5288,9 +5339,11 @@ void run_enum_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(
+            auto program_result = scpp::parse(
                 "enum class Color { red };\n"
                 "int main() { int value = Color::red; return value; }\n");
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
             scpp::Codegen codegen("test_module");
@@ -5434,7 +5487,7 @@ void run_switch_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(
+            auto program_result = scpp::parse(
                 "int main() {\n"
                 "    switch (1) {\n"
                 "        case 1:\n"
@@ -5443,6 +5496,8 @@ void run_switch_tests() {
                 "            return 0;\n"
                 "    }\n"
                 "}\n");
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
         } catch (const scpp::DataflowError& e) {
@@ -5458,7 +5513,7 @@ void run_switch_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::Program program = scpp::parse(
+            auto program_result = scpp::parse(
                 "struct Box { int value; };\n"
                 "int main() {\n"
                 "    Box box{1};\n"
@@ -5467,6 +5522,8 @@ void run_switch_tests() {
                 "            return 0;\n"
                 "    }\n"
                 "}\n");
+            if (!program_result.has_value()) throw std::move(program_result).error();
+            scpp::Program program = std::move(program_result.value());
             scpp::monomorphize_generics(program);
             scpp::check_moves(program);
         } catch (const scpp::DataflowError& e) {
@@ -6480,8 +6537,7 @@ void run_local_type_definition_tests() {
     {
         std::string case_name = "local_type_name_is_not_visible_outside_its_function";
         cases_run++;
-        try {
-            scpp::parse(
+        if (auto parse_result = scpp::parse(
                 "int make() {\n"
                 "    struct Local { int value; };\n"
                 "    Local ok{};\n"
@@ -6491,10 +6547,12 @@ void run_local_type_definition_tests() {
                 "    Local bad{};\n"
                 "    return bad.value;\n"
                 "}\n");
-            expect(false, case_name + ": expected parse failure for out-of-scope local type name");
-        } catch (const scpp::ParseError& e) {
+            !parse_result.has_value()) {
+            const scpp::ParseError& e = parse_result.error();
             expect(e.loc.line == 7, case_name + ": expected out-of-scope use to fail on line 7, got " +
                                             std::to_string(e.loc.line));
+        } else {
+            expect(false, case_name + ": expected parse failure for out-of-scope local type name");
         }
     }
 }

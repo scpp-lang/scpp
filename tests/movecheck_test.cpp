@@ -48,19 +48,22 @@ public:
         if (it != cache_.end()) return it->second;
         const std::string* path = module_path(module_name);
         if (path == nullptr) throw std::runtime_error("unknown test module '" + module_name + "'");
-        scpp::Program parsed = scpp::parse(
+        auto parsed_result = scpp::parse(
             read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
-        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed));
+        if (!parsed_result.has_value()) throw std::move(parsed_result).error();
+        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed_result.value()));
         return inserted->second;
     }
 
     scpp::Program resolve_partition(const std::string& key) {
         std::optional<std::string> path = infer_partition_path(key);
         if (!path.has_value()) throw std::runtime_error("unknown test partition '" + key + "'");
-        return scpp::parse(
+        auto parsed_result = scpp::parse(
             read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
+        if (!parsed_result.has_value()) throw std::move(parsed_result).error();
+        return std::move(parsed_result.value());
     }
 
 private:
@@ -89,9 +92,11 @@ private:
 
 scpp::Program parse_with_std_imports(std::string_view source) {
     TestModuleCache cache;
-    return scpp::parse(
+    auto result = scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+    if (!result.has_value()) throw std::move(result).error();
+    return std::move(result.value());
 }
 
 std::optional<std::string> move_error_message(std::string_view source) {

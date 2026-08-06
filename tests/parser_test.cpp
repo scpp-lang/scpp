@@ -63,19 +63,22 @@ public:
         if (it != cache_.end()) return it->second;
         const std::string* path = module_path(module_name);
         if (path == nullptr) throw std::runtime_error("unknown test module '" + module_name + "'");
-        scpp::Program parsed = scpp::parse(
+        auto parsed_result = scpp::parse(
             read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
-        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed));
+        if (!parsed_result.has_value()) throw std::move(parsed_result).error();
+        auto [inserted, _] = cache_.emplace(module_name, std::move(parsed_result.value()));
         return inserted->second;
     }
 
     scpp::Program resolve_partition(const std::string& key) {
         std::optional<std::string> path = infer_partition_path(key);
         if (!path.has_value()) throw std::runtime_error("unknown test partition '" + key + "'");
-        return scpp::parse(
+        auto parsed_result = scpp::parse(
             read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
             [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
+        if (!parsed_result.has_value()) throw std::move(parsed_result).error();
+        return std::move(parsed_result.value());
     }
 
 private:
@@ -104,13 +107,35 @@ private:
 
 scpp::Program parse_with_std_imports(std::string_view source) {
     TestModuleCache cache;
-    return scpp::parse(
+    auto result = scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+    if (!result.has_value()) throw std::move(result).error();
+    return std::move(result.value());
+}
+
+// Test-only convenience for the overwhelmingly common "this source is
+// expected to parse successfully" case: unwraps scpp::parse's
+// std::expected result, reporting a clear test failure (via expect(),
+// this file's own existing failure-reporting idiom) with the real
+// ParseError message if parsing unexpectedly fails, rather than letting
+// callers repeat a has_value() check at every one of this file's own
+// call sites. Only ever used for happy-path parses -- a test that
+// expects parsing to *fail* checks scpp::parse's result directly (see
+// e.g. test_bare_local_var_decl_is_rejected above). Forwards every
+// optional parameter scpp::parse itself accepts, since a handful of
+// callers below need a partition_resolver (ch11 §11.4 coverage).
+scpp::Program expect_parse_ok(std::string_view source, const scpp::ModuleResolver& resolver = {},
+                              const scpp::PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
+    auto result = scpp::parse(source, resolver, partition_resolver, std::move(source_path));
+    if (!result.has_value()) {
+        throw std::runtime_error(std::string("scpp::parse unexpectedly failed: ") + result.error().what());
+    }
+    return std::move(result.value());
 }
 
 void test_int_main_return() {
-    scpp::Program program = scpp::parse("int main() { return 42; }");
+    scpp::Program program = expect_parse_ok("int main() { return 42; }");
     expect(program.functions.size() == 1, "int_main_return: expected 1 function");
     const scpp::Function& fn = program.functions[0];
     expect(is_named_type(fn.return_type, "int"), "int_main_return: return type should be 'int'");
@@ -127,7 +152,7 @@ void test_int_main_return() {
 }
 
 void test_function_with_params() {
-    scpp::Program program = scpp::parse("int add(int a, int b) { return a + b; }");
+    scpp::Program program = expect_parse_ok("int add(int a, int b) { return a + b; }");
     expect(program.functions.size() == 1, "function_with_params: expected 1 function");
     const scpp::Function& fn = program.functions[0];
     expect(fn.params.size() == 2, "function_with_params: expected 2 params");
@@ -146,7 +171,7 @@ void test_function_with_params() {
 }
 
 void test_var_decl_and_if_else() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int f() {"
         "    int x = 1;"
         "    if (x < 2) { return 1; } else { return 0; }"
@@ -171,7 +196,7 @@ void test_var_decl_and_if_else() {
 }
 
 void test_class_var_decl_with_brace_init_parses_ctor_args() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box {\n"
         "public:\n"
         "    Box(int value) {}\n"
@@ -201,8 +226,7 @@ void test_class_var_decl_with_brace_init_parses_ctor_args() {
 
 void test_class_var_decl_with_paren_init_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "class Box {\n"
             "public:\n"
             "    Box(int value) {}\n"
@@ -210,8 +234,8 @@ void test_class_var_decl_with_paren_init_is_rejected() {
             "int main() {\n"
             "    Box box(42);\n"
             "    return 0;\n"
-            "}\n");
-    } catch (const scpp::ParseError& e) {
+            "}\n"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(std::string(e.what()).find("use brace-init instead") != std::string::npos,
                "class_var_decl_with_paren_init_is_rejected: expected brace-init guidance in error message");
@@ -221,9 +245,8 @@ void test_class_var_decl_with_paren_init_is_rejected() {
 
 void test_bare_local_var_decl_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int main() { int x; return 0; }");
-    } catch (const scpp::ParseError& e) {
+    if (auto _r = scpp::parse("int main() { int x; return 0; }"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(std::string(e.what()).find("explicit initializer") != std::string::npos,
                "bare_local_var_decl_is_rejected: expected explicit-initializer guidance");
@@ -258,7 +281,7 @@ void test_static_local_var_decl_parses_and_allows_no_initializer() {
 }
 
 void test_fixed_width_integer_keywords_and_std_qualification_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Box {};\n"
         "struct Pair {\n"
@@ -314,7 +337,7 @@ void test_fixed_width_integer_keywords_and_std_qualification_parse() {
 }
 
 void test_size_t_and_ptrdiff_t_keywords_and_std_qualification_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Box {};\n"
         "struct Pair {\n"
@@ -371,7 +394,7 @@ void test_size_t_and_ptrdiff_t_keywords_and_std_qualification_parse() {
 }
 
 void test_valid_local_initializer_forms_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Pair { int first; int second; };\n"
         "int main() {\n"
         "    int a{};\n"
@@ -400,7 +423,7 @@ void test_valid_local_initializer_forms_parse() {
 }
 
 void test_class_default_member_initializers_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box {\n"
         "    int a{};\n"
         "    int b = 7;\n"
@@ -433,7 +456,7 @@ void test_class_default_member_initializers_parse() {
 }
 
 void test_constructor_member_initializer_list_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Holder {\n"
         "    int value;\n"
         "    int& ref;\n"
@@ -458,7 +481,7 @@ void test_constructor_member_initializer_list_parses() {
 }
 
 void test_constructor_base_initializer_list_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Base {\n"
         "public:\n"
         "    Base(int seed) { return; }\n"
@@ -480,7 +503,7 @@ void test_constructor_base_initializer_list_parses() {
 }
 
 void test_while_loop() {
-    scpp::Program program = scpp::parse("int f() { while (true) { x = x - 1; } }");
+    scpp::Program program = expect_parse_ok("int f() { while (true) { x = x - 1; } }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& while_stmt = *fn.body->statements[0];
     expect(while_stmt.kind == scpp::StmtKind::While, "while_loop: statement should be While");
@@ -495,7 +518,7 @@ void test_while_loop() {
 }
 
 void test_classic_for_loop_desugars_with_scoped_init() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() { for (int i = 0; i < 3; i = i + 1) { x = i; } return 0; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.body->statements.size() == 2, "classic_for_loop_desugars_with_scoped_init: expected loop + return");
@@ -522,7 +545,7 @@ void test_classic_for_loop_desugars_with_scoped_init() {
 }
 
 void test_classic_for_loop_with_expression_init_desugars() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() { int i = 5; for (i = 3; i > 0; i = i - 1) i = i - 1; return i; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.body->statements.size() == 3,
@@ -540,7 +563,7 @@ void test_classic_for_loop_with_expression_init_desugars() {
 }
 
 void test_range_for_loop_desugars_over_array() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() { int values[3]; for (auto& value : values) { value = 1; } return 0; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.body->statements.size() == 3, "range_for_loop_desugars_over_array: expected decl + loop + return");
@@ -587,7 +610,7 @@ void test_range_for_loop_desugars_over_span() {
 }
 
 void test_range_for_loop_named_element_forms_desugar() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Box { int value = 0; };\n"
         "int main() {\n"
         "    Box boxes[2];\n"
@@ -668,7 +691,7 @@ void test_range_for_body_parse_errors_are_not_misattributed_to_loop_var() {
 void test_unsafe_block_sets_is_unsafe_flag() {
     // `[[scpp::unsafe]] { }` (ch01 §1.3) is an ordinary Block statement
     // with is_unsafe set -- see parse_statement's attribute handling.
-    scpp::Program program = scpp::parse("int f() { [[scpp::unsafe]] { int x = 1; } return 0; }");
+    scpp::Program program = expect_parse_ok("int f() { [[scpp::unsafe]] { int x = 1; } return 0; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.body->statements.size() == 2, "unsafe_block_sets_is_unsafe_flag: expected 2 statements");
 
@@ -686,7 +709,7 @@ void test_ordinary_block_is_not_unsafe() {
     // Sanity check for the flag's default: a plain `{ }` (no
     // `[[scpp::unsafe]]` attribute) must never be mistaken for an
     // unsafe block.
-    scpp::Program program = scpp::parse("int f() { { int x = 1; } return 0; }");
+    scpp::Program program = expect_parse_ok("int f() { { int x = 1; } return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& plain_block = *fn.body->statements[0];
     expect(plain_block.kind == scpp::StmtKind::Block, "ordinary_block_is_not_unsafe: should be a Block");
@@ -696,8 +719,7 @@ void test_ordinary_block_is_not_unsafe() {
 void test_nested_unsafe_blocks_parse() {
     // `[[scpp::unsafe]] { [[scpp::unsafe]] { ... } }` (ch01 §1.3's
     // nesting rule) -- both levels independently set is_unsafe.
-    scpp::Program program =
-        scpp::parse("int f() { [[scpp::unsafe]] { [[scpp::unsafe]] { int x = 1; } } return 0; }");
+    scpp::Program program = expect_parse_ok("int f() { [[scpp::unsafe]] { [[scpp::unsafe]] { int x = 1; } } return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& outer = *fn.body->statements[0];
     expect(outer.is_unsafe, "nested_unsafe_blocks_parse: outer block should be unsafe");
@@ -715,9 +737,7 @@ void test_nested_unsafe_blocks_parse() {
 // operator/`;` in between) -- not because "unsafe" demands a `{` next.
 void test_bare_unsafe_identifier_followed_by_return_is_parse_error() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { unsafe return 1; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { unsafe return 1; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "bare_unsafe_identifier_followed_by_return_is_parse_error: expected a ParseError to be thrown");
@@ -729,7 +749,7 @@ void test_bare_unsafe_identifier_followed_by_return_is_parse_error() {
 // real C++ compiler accepts-and-ignores an attribute it doesn't act on
 // in that position (mirrors `[[likely]] return 1;`, real, legal C++).
 void test_unsafe_attribute_on_non_block_statement_has_no_effect() {
-    scpp::Program program = scpp::parse("int f() { [[scpp::unsafe]] return 1; }");
+    scpp::Program program = expect_parse_ok("int f() { [[scpp::unsafe]] return 1; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.body->statements.size() == 1,
            "unsafe_attribute_on_non_block_statement_has_no_effect: expected 1 statement");
@@ -741,7 +761,7 @@ void test_unsafe_attribute_on_non_block_statement_has_no_effect() {
 // `[[scpp::unsafe]]` before a function's own return type makes
 // Function::is_unsafe true.
 void test_function_level_unsafe_marker_parses() {
-    scpp::Program program = scpp::parse("[[scpp::unsafe]] int f(int x) { return x; }\n"
+    scpp::Program program = expect_parse_ok("[[scpp::unsafe]] int f(int x) { return x; }\n"
                                          "int main() { return 0; }\n");
     const scpp::Function* f_fn = nullptr;
     for (const scpp::Function& fn : program.functions) {
@@ -752,7 +772,7 @@ void test_function_level_unsafe_marker_parses() {
 }
 
 void test_nodiscard_function_and_method_attributes_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "[[nodiscard(\"use the result\")]] int f() { return 1; }\n"
         "class Box {\n"
         "public:\n"
@@ -772,7 +792,7 @@ void test_nodiscard_function_and_method_attributes_parse() {
 }
 
 void test_inline_function_modifier_parses_with_existing_modifiers() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module sample;\n"
         "export [[nodiscard(\"use it\")]] inline constexpr int answer() { return 42; }\n");
     const scpp::Function* fn = find_function_named(program, "answer");
@@ -787,7 +807,7 @@ void test_inline_function_modifier_parses_with_existing_modifiers() {
 }
 
 void test_default_parameter_expression_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int add(int lhs, int rhs = 1 + 2) { return lhs + rhs; }\n"
         "int zero(int value = {}) { return value; }\n"
         "class Box {\n"
@@ -812,16 +832,15 @@ void test_default_parameter_expression_parses() {
 
 void test_default_parameter_trailing_rule_is_enforced() {
     bool threw = false;
-    try {
-        (void)scpp::parse("int bad(int x = 1, int y) { return x + y; }\n");
-    } catch (const scpp::ParseError& e) {
+    if (auto _r = scpp::parse("int bad(int x = 1, int y) { return x + y; }\n"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = std::string(e.what()).find("every later parameter must also have one") != std::string::npos;
     }
     expect(threw, "default_parameter_trailing_rule_is_enforced: expected trailing-only diagnostic");
 }
 
 void test_static_member_function_parses_without_this() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box {\n"
         "public:\n"
         "    static int make(int value) { return value; }\n"
@@ -842,7 +861,7 @@ void test_static_member_function_parses_without_this() {
 }
 
 void test_template_specialization_static_member_call_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Box;\n"
         "template<>\n"
@@ -864,7 +883,7 @@ void test_template_specialization_static_member_call_parses() {
 }
 
 void test_full_class_template_specialization_parses_as_concrete_specialization() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Box;\n"
         "template<>\n"
@@ -889,7 +908,7 @@ void test_full_class_template_specialization_parses_as_concrete_specialization()
 }
 
 void test_struct_forward_declaration_parses_and_reconciles() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Node;\n"
         "struct Node { Node* next; int value; };\n");
     expect(program.structs.size() == 2,
@@ -903,7 +922,7 @@ void test_struct_forward_declaration_parses_and_reconciles() {
 }
 
 void test_class_forward_declaration_parses_and_reconciles() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box;\n"
         "class Box {\n"
         "public:\n"
@@ -920,9 +939,7 @@ void test_class_forward_declaration_parses_and_reconciles() {
 
 void test_record_forward_declaration_tag_mismatch_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("struct Box;\nclass Box { public: virtual ~Box() { return; } };\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("struct Box;\nclass Box { public: virtual ~Box() { return; } };\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "record_forward_declaration_tag_mismatch_is_rejected: expected a ParseError");
@@ -933,10 +950,8 @@ void test_record_forward_declaration_tag_mismatch_is_rejected() {
 // struct/class declaration is ill-formed.
 void test_unsafe_attribute_on_struct_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("[[scpp::unsafe]] struct Foo { int x; };\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("[[scpp::unsafe]] struct Foo { int x; };\n"
+                    "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "unsafe_attribute_on_struct_is_rejected: expected a ParseError");
@@ -945,7 +960,7 @@ void test_unsafe_attribute_on_struct_is_rejected() {
 // ch05 §5.15: `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` on a
 // struct's own declaration set the manual-override flags.
 void test_thread_safety_attribute_on_struct_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct [[scpp::thread_movable, nodiscard(\"keep this handle\")]] RawBufferHandle { int* data; int len; };\n"
         "int main() { return 0; }\n");
     const scpp::StructDef* s = nullptr;
@@ -963,7 +978,7 @@ void test_thread_safety_attribute_on_struct_parses() {
 // Same attribute grammar slot on a class's own declaration; both
 // attributes may be given together, comma-separated inside one `[[...]]`.
 void test_thread_safety_attributes_on_class_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class [[scpp::thread_movable, scpp::thread_shareable]] Handle {\n"
         "public:\n"
         "    Handle(int* d) { this.data = d; return; }\n"
@@ -984,7 +999,7 @@ void test_thread_safety_attributes_on_class_parse() {
 // (trailing, same slot as an ordinary declarator attribute) sets the
 // constraint flag on that Param.
 void test_thread_safety_attribute_on_parameter_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "void spawn(T&& f [[scpp::thread_movable]]) { return; }\n"
         "int main() { return 0; }\n");
@@ -1006,14 +1021,12 @@ void test_thread_safety_attribute_on_parameter_parses() {
 // §6.4(2)).
 void test_user_declared_move_constructor_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("class Foo {\n"
+    if (auto _r = scpp::parse("class Foo {\n"
                     "public:\n"
                     "    Foo() { return; }\n"
                     "    Foo(Foo&& other) { return; }\n"
                     "};\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+                    "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "user_declared_move_constructor_is_rejected: expected a ParseError");
@@ -1023,7 +1036,7 @@ void test_user_declared_move_constructor_is_rejected() {
 // (not the enclosing class's own) is not a move constructor at all, and
 // must continue to parse normally.
 void test_constructor_taking_other_type_rvalue_reference_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Foo {\n"
         "public:\n"
         "    Foo() { return; }\n"
@@ -1046,7 +1059,7 @@ void test_constructor_taking_other_type_rvalue_reference_parses() {
 // ordinary method mangled to "ClassName_operator_assign", with the
 // implicit `this` inserted as params[0] like any other method.
 void test_operator_assign_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Widget {\n"
         "public:\n"
         "    Widget(int v) { this.v = v; return; }\n"
@@ -1066,7 +1079,7 @@ void test_operator_assign_parses() {
 }
 
 void test_out_of_line_constructor_definition_parses_and_merges() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box {\n"
         "private:\n"
         "    int value_{};\n"
@@ -1100,7 +1113,7 @@ void test_out_of_line_constructor_definition_parses_and_merges() {
 }
 
 void test_out_of_line_destructor_definition_parses_and_merges() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box {\n"
         "public:\n"
         "    virtual ~Box();\n"
@@ -1118,7 +1131,7 @@ void test_out_of_line_destructor_definition_parses_and_merges() {
 }
 
 void test_out_of_line_operator_assign_definition_parses_and_merges() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Widget {\n"
         "public:\n"
         "    virtual ~Widget() = default;\n"
@@ -1143,15 +1156,14 @@ void test_out_of_line_operator_assign_definition_parses_and_merges() {
 
 void test_out_of_line_member_definition_signature_mismatch_is_rejected() {
     bool threw = false;
-    try {
-        (void)scpp::parse(
+    if (auto _r = scpp::parse(
             "class Box {\n"
             "public:\n"
             "    virtual ~Box() = default;\n"
             "    int value() const;\n"
             "};\n"
-            "bool Box::value() const { return true; }\n");
-    } catch (const scpp::ParseError& e) {
+            "bool Box::value() const { return true; }\n"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(std::string(e.what()).find("does not match its earlier declaration exactly") != std::string::npos,
                "out_of_line_member_definition_signature_mismatch_is_rejected: expected mismatch diagnostic");
@@ -1170,21 +1182,19 @@ void test_out_of_line_member_definition_signature_mismatch_is_rejected() {
 // correctly is.
 void test_user_declared_move_assignment_operator_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("class Foo {\n"
+    if (auto _r = scpp::parse("class Foo {\n"
                     "public:\n"
                     "    Foo() { return; }\n"
                     "    Foo& operator=(Foo&& other) { return this; }\n"
                     "};\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+                    "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "user_declared_move_assignment_operator_is_rejected: expected a ParseError");
 }
 
 void test_defaulted_move_special_members_parse_without_parameter_names() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Foo {\n"
         "public:\n"
         "    Foo() = default;\n"
@@ -1206,20 +1216,18 @@ void test_defaulted_move_special_members_parse_without_parameter_names() {
 
 void test_defaulted_non_special_member_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("class Foo {\n"
+    if (auto _r = scpp::parse("class Foo {\n"
                     "public:\n"
                     "    int value() = default;\n"
                     "};\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+                    "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "defaulted_non_special_member_is_rejected: expected a ParseError");
 }
 
 void test_equality_operator_methods_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Point {\n"
         "    int x = 0;\n"
         "    int y = 0;\n"
@@ -1238,7 +1246,7 @@ void test_equality_operator_methods_parse() {
 // ch06 §6: `static_cast<T>(expr)` parses to a Cast expression with `type`
 // set to the target type and the operand in `lhs`.
 void test_static_cast_parses() {
-    scpp::Program program = scpp::parse("int f(bool b) { return static_cast<int>(b); }");
+    scpp::Program program = expect_parse_ok("int f(bool b) { return static_cast<int>(b); }");
     const scpp::Stmt& ret = *program.functions[0].body->statements[0];
     expect(ret.kind == scpp::StmtKind::Return, "static_cast_parses: expected Return");
     const scpp::Expr& cast = *ret.expr;
@@ -1251,7 +1259,7 @@ void test_static_cast_parses() {
 // ch06 §6: `(T)expr` (the C-style cast) parses identically to
 // `static_cast<T>(expr)` -- same Cast node shape.
 void test_c_style_cast_parses() {
-    scpp::Program program = scpp::parse("int f(bool b) { return (int)b; }");
+    scpp::Program program = expect_parse_ok("int f(bool b) { return (int)b; }");
     const scpp::Stmt& ret = *program.functions[0].body->statements[0];
     const scpp::Expr& cast = *ret.expr;
     expect(cast.kind == scpp::ExprKind::Cast, "c_style_cast_parses: expected Cast");
@@ -1265,14 +1273,14 @@ void test_c_style_cast_parses() {
 // not be misdetected as a C-style cast -- e.g. `(x)` where `x` is a
 // plain local variable, or `(x + y)`.
 void test_parenthesized_expression_is_not_misdetected_as_cast() {
-    scpp::Program program = scpp::parse("int f(int x, int y) { return (x) + (x + y) * 2; }");
+    scpp::Program program = expect_parse_ok("int f(int x, int y) { return (x) + (x + y) * 2; }");
     const scpp::Stmt& ret = *program.functions[0].body->statements[0];
     expect(ret.expr->kind == scpp::ExprKind::Binary,
            "parenthesized_expression_is_not_misdetected_as_cast: expected Binary");
 }
 
 void test_sizeof_type_expression_parses() {
-    scpp::Program program = scpp::parse("int f() { return (int)sizeof(int); }");
+    scpp::Program program = expect_parse_ok("int f() { return (int)sizeof(int); }");
     const scpp::Stmt& ret = *program.functions[0].body->statements[0];
     const scpp::Expr& cast = *ret.expr;
     expect(cast.kind == scpp::ExprKind::Cast, "sizeof_type_expression_parses: expected outer Cast");
@@ -1283,7 +1291,7 @@ void test_sizeof_type_expression_parses() {
 }
 
 void test_sizeof_value_expression_parses() {
-    scpp::Program program = scpp::parse("int f() { return (int)sizeof(x + 1); }");
+    scpp::Program program = expect_parse_ok("int f() { return (int)sizeof(x + 1); }");
     const scpp::Stmt& ret = *program.functions[0].body->statements[0];
     const scpp::Expr& cast = *ret.expr;
     expect(cast.kind == scpp::ExprKind::Cast, "sizeof_value_expression_parses: expected outer Cast");
@@ -1297,7 +1305,7 @@ void test_sizeof_value_expression_parses() {
 
 void test_operator_precedence() {
     // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3.
-    scpp::Program program = scpp::parse("int f() { return 1 + 2 * 3; }");
+    scpp::Program program = expect_parse_ok("int f() { return 1 + 2 * 3; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0].get()->expr;
     expect(expr.kind == scpp::ExprKind::Binary && expr.binary_op == scpp::BinaryOp::Add,
            "operator_precedence: top-level op should be Add");
@@ -1308,7 +1316,7 @@ void test_operator_precedence() {
 }
 
 void test_unary_and_call() {
-    scpp::Program program = scpp::parse("int f() { return -foo(1, 2); }");
+    scpp::Program program = expect_parse_ok("int f() { return -foo(1, 2); }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Unary && expr.unary_op == scpp::UnaryOp::Neg,
            "unary_and_call: top-level should be unary Neg");
@@ -1320,7 +1328,7 @@ void test_unary_and_call() {
 }
 
 void test_dereference_expression() {
-    scpp::Program program = scpp::parse("int f() { return *p; }");
+    scpp::Program program = expect_parse_ok("int f() { return *p; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Unary && expr.unary_op == scpp::UnaryOp::Deref,
            "dereference_expression: top-level should be unary Deref");
@@ -1330,7 +1338,7 @@ void test_dereference_expression() {
 
 void test_address_of_plain_variable() {
     // `&x` (ch05 §5.7) -- a new prefix unary operator, sibling to Deref.
-    scpp::Program program = scpp::parse("int f() { return &x; }");
+    scpp::Program program = expect_parse_ok("int f() { return &x; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Unary && expr.unary_op == scpp::UnaryOp::AddressOf,
            "address_of_plain_variable: top-level should be unary AddressOf");
@@ -1341,14 +1349,14 @@ void test_address_of_plain_variable() {
 void test_address_of_field_and_subscript() {
     // `&p.x` and `&arr[i]` -- same operand shapes already accepted as a
     // borrow source for `T&`/`const T&` (ch05.2), reused here.
-    scpp::Program field_program = scpp::parse("int f() { return &p.x; }");
+    scpp::Program field_program = expect_parse_ok("int f() { return &p.x; }");
     const scpp::Expr& field_expr = *field_program.functions[0].body->statements[0]->expr;
     expect(field_expr.kind == scpp::ExprKind::Unary && field_expr.unary_op == scpp::UnaryOp::AddressOf,
            "address_of_field_and_subscript: &p.x top-level should be unary AddressOf");
     expect(field_expr.lhs->kind == scpp::ExprKind::Member && field_expr.lhs->name == "x",
            "address_of_field_and_subscript: &p.x operand should be Member 'x'");
 
-    scpp::Program subscript_program = scpp::parse("int f() { return &arr[i]; }");
+    scpp::Program subscript_program = expect_parse_ok("int f() { return &arr[i]; }");
     const scpp::Expr& subscript_expr = *subscript_program.functions[0].body->statements[0]->expr;
     expect(subscript_expr.kind == scpp::ExprKind::Unary && subscript_expr.unary_op == scpp::UnaryOp::AddressOf,
            "address_of_field_and_subscript: &arr[i] top-level should be unary AddressOf");
@@ -1359,7 +1367,7 @@ void test_address_of_field_and_subscript() {
 void test_address_of_dereference_chain() {
     // `&*p` -- address-of applied to a dereference, recursing off Deref
     // just like Neg/Not/Deref's own operands already do (parse_unary).
-    scpp::Program program = scpp::parse("int f() { return &*p; }");
+    scpp::Program program = expect_parse_ok("int f() { return &*p; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Unary && expr.unary_op == scpp::UnaryOp::AddressOf,
            "address_of_dereference_chain: top-level should be unary AddressOf");
@@ -1370,7 +1378,7 @@ void test_address_of_dereference_chain() {
 }
 
 void test_increment_and_decrement_operators_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() {\n"
         "    int x = 5;\n"
         "    int a = ++x;\n"
@@ -1418,7 +1426,7 @@ void test_increment_and_decrement_operators_parse() {
 }
 
 void test_compound_assignment_operators_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() {\n"
         "    int x = 1;\n"
         "    x += 2;\n"
@@ -1454,7 +1462,7 @@ void test_compound_assignment_operators_parse() {
 }
 
 void test_local_type_definitions_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() {\n"
         "    struct Point {\n"
         "        int x;\n"
@@ -1485,7 +1493,7 @@ void test_local_type_definitions_parse() {
 }
 
 void test_arrow_parses_as_deferred_operator_arrow_access() {
-    scpp::Program program = scpp::parse("int f() { return p->x; }");
+    scpp::Program program = expect_parse_ok("int f() { return p->x; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Member && expr.name == "x",
            "arrow_parses_as_deferred_operator_arrow_access: top-level should be Member 'x'");
@@ -1496,7 +1504,7 @@ void test_arrow_parses_as_deferred_operator_arrow_access() {
 }
 
 void test_chained_arrow_and_dot() {
-    scpp::Program program = scpp::parse("int f() { return p->x.y; }");
+    scpp::Program program = expect_parse_ok("int f() { return p->x.y; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Member && expr.name == "y",
            "chained_arrow_and_dot: outer should be Member 'y'");
@@ -1509,7 +1517,7 @@ void test_chained_arrow_and_dot() {
 }
 
 void test_operator_arrow_member_decl_and_explicit_call_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box {\n"
         "public:\n"
         "    int* operator->() [[scpp::lifetime(this)]];\n"
@@ -1529,7 +1537,7 @@ void test_operator_arrow_member_decl_and_explicit_call_parse() {
 }
 
 void test_member_function_lifetime_this_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Box {\n"
         "    int value;\n"
         "    int* ptr() [[scpp::lifetime(this)]];\n"
@@ -1543,7 +1551,7 @@ void test_member_function_lifetime_this_parse() {
 }
 
 void test_member_decl_return_lifetime_this_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box {\n"
         "public:\n"
         "    int* data() [[scpp::lifetime(this)]];\n"
@@ -1596,7 +1604,7 @@ void test_nested_reference_wrapper_lifetime_parameter_parse() {
 void test_multiplication_is_not_confused_with_dereference() {
     // `a * b` (binary multiply) must stay distinct from a leading `*b`
     // (unary deref) -- see parse_unary's comment.
-    scpp::Program program = scpp::parse("int f() { return a * b; }");
+    scpp::Program program = expect_parse_ok("int f() { return a * b; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Binary && expr.binary_op == scpp::BinaryOp::Mul,
            "multiplication_is_not_confused_with_dereference: should be Binary Mul, not Unary Deref");
@@ -1604,7 +1612,7 @@ void test_multiplication_is_not_confused_with_dereference() {
 
 void test_parenthesized_expression() {
     // (1 + 2) * 3 should parse with the addition grouped first.
-    scpp::Program program = scpp::parse("int f() { return (1 + 2) * 3; }");
+    scpp::Program program = expect_parse_ok("int f() { return (1 + 2) * 3; }");
     const scpp::Expr& expr = *program.functions[0].body->statements[0]->expr;
     expect(expr.kind == scpp::ExprKind::Binary && expr.binary_op == scpp::BinaryOp::Mul,
            "parenthesized_expression: top-level op should be Mul");
@@ -1614,16 +1622,14 @@ void test_parenthesized_expression() {
 
 void test_parse_error_on_missing_semicolon() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { return 1 }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { return 1 }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "parse_error_on_missing_semicolon: expected a ParseError to be thrown");
 }
 
 void test_struct_declaration() {
-    scpp::Program program = scpp::parse("struct Point { int x; int y; }; int f() { return 0; }");
+    scpp::Program program = expect_parse_ok("struct Point { int x; int y; }; int f() { return 0; }");
     expect(program.structs.size() == 1, "struct_declaration: expected 1 struct");
     const scpp::StructDef& def = program.structs[0];
     expect(def.name == "Point", "struct_declaration: name should be 'Point'");
@@ -1638,7 +1644,7 @@ void test_struct_declaration() {
 }
 
 void test_struct_access_specifier_sections_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Box {\n"
         "public:\n"
         "    int value{};\n"
@@ -1661,7 +1667,7 @@ void test_struct_access_specifier_sections_parse() {
 }
 
 void test_struct_constructors_and_methods_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Size {\n"
         "public:\n"
         "    int width{};\n"
@@ -1722,9 +1728,8 @@ void test_struct_constructors_and_methods_parse() {
 
 void test_struct_interface_attribute_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("struct [[scpp::interface]] Box { int value{}; };");
-    } catch (const scpp::ParseError& e) {
+    if (auto _r = scpp::parse("struct [[scpp::interface]] Box { int value{}; };"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(std::string(e.what()).find("shall not be marked '[[scpp::interface]]'") != std::string::npos,
                "struct_interface_attribute_is_rejected: expected interface-only diagnostic");
@@ -1734,16 +1739,15 @@ void test_struct_interface_attribute_is_rejected() {
 
 void test_struct_base_clause_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "class Base {\n"
             "public:\n"
             "    Base() { return; }\n"
             "};\n"
             "struct Derived : public Base {\n"
             "    int value{};\n"
-            "};\n");
-    } catch (const scpp::ParseError& e) {
+            "};\n"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(std::string(e.what()).find("shall not have a base-clause") != std::string::npos,
                "struct_base_clause_is_rejected: expected base-clause diagnostic");
@@ -1753,13 +1757,12 @@ void test_struct_base_clause_is_rejected() {
 
 void test_struct_virtual_member_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "struct Box {\n"
             "public:\n"
             "    virtual int value();\n"
-            "};\n");
-    } catch (const scpp::ParseError& e) {
+            "};\n"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(std::string(e.what()).find("shall not declare a virtual member function") != std::string::npos,
                "struct_virtual_member_is_rejected: expected virtual-member diagnostic");
@@ -1768,7 +1771,7 @@ void test_struct_virtual_member_is_rejected() {
 }
 
 void test_union_declaration() {
-    scpp::Program program = scpp::parse("union Payload { int i; char c; }; int f() { return 0; }");
+    scpp::Program program = expect_parse_ok("union Payload { int i; char c; }; int f() { return 0; }");
     expect(program.structs.size() == 1, "union_declaration: expected 1 aggregate");
     const scpp::StructDef& def = program.structs[0];
     expect(def.name == "Payload", "union_declaration: name should be 'Payload'");
@@ -1782,7 +1785,7 @@ void test_union_declaration() {
 }
 
 void test_packed_struct_and_union_attributes_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct [[scpp::packed]] Event { char tag; int value; };"
         "union [[scpp::packed]] Bits { int i; char raw[4]; };"
         "int f() { return 0; }");
@@ -1797,10 +1800,9 @@ void test_packed_struct_and_union_attributes_parse() {
 
 void test_packed_attribute_on_function_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("[[scpp::packed]]\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError& e) {
+    if (auto _r = scpp::parse("[[scpp::packed]]\n"
+                    "int main() { return 0; }\n"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(std::string(e.what()).find("only to a struct or union declaration") != std::string::npos,
                "packed_attribute_on_function_is_rejected: diagnostic should mention struct/union-only support");
@@ -1809,7 +1811,7 @@ void test_packed_attribute_on_function_is_rejected() {
 }
 
 void test_struct_variable_and_member_access() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Point { int x; int y; };"
         "int f() {"
         "    Point p{};"
@@ -1845,7 +1847,7 @@ void test_struct_variable_and_member_access() {
 }
 
 void test_nested_member_access() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Inner { int v; };"
         "struct Outer { Inner inner; };"
         "int f() {"
@@ -1863,7 +1865,7 @@ void test_nested_member_access() {
 }
 
 void test_pointer_field_type() {
-    scpp::Program program = scpp::parse("struct Node { int value; Node* next; };");
+    scpp::Program program = expect_parse_ok("struct Node { int value; Node* next; };");
     const scpp::StructDef& def = program.structs[0];
     expect(def.fields[1].name == "next", "pointer_field_type: field 1 should be named 'next'");
     const scpp::Type& next_type = def.fields[1].type;
@@ -1873,7 +1875,7 @@ void test_pointer_field_type() {
 }
 
 void test_array_field_and_subscript() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Buffer { int values[4]; };"
         "int f() {"
         "    Buffer b{};"
@@ -1910,7 +1912,7 @@ void test_array_parameter_decays_to_pointer() {
     // element type, exactly as in ordinary C++ (`int arr[4]` and
     // `int* arr` are the same parameter type) -- needed so `extern "C"`
     // signatures can use arrays "in parameter position", per the spec.
-    scpp::Program program = scpp::parse("int f(int arr[4]) { return arr[0]; }");
+    scpp::Program program = expect_parse_ok("int f(int arr[4]) { return arr[0]; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.params.size() == 1, "array_parameter_decays_to_pointer: expected 1 parameter");
     const scpp::Type& param_type = fn.params[0].type;
@@ -1921,7 +1923,7 @@ void test_array_parameter_decays_to_pointer() {
 }
 
 void test_local_array_declaration() {
-    scpp::Program program = scpp::parse("int f() { int values[8]; return values[0]; }");
+    scpp::Program program = expect_parse_ok("int f() { int values[8]; return values[0]; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "local_array_declaration: statement 0 should be VarDecl");
@@ -1935,9 +1937,7 @@ void test_local_array_declaration() {
 
 void test_struct_before_use_is_required() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { Point p{}; return 0; } struct Point { int x; };");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { Point p{}; return 0; } struct Point { int x; };"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "struct_before_use_is_required: expected a ParseError when Point is used before declaration");
@@ -1971,7 +1971,7 @@ void test_unique_ptr_of_struct_type() {
 }
 
 void test_span_type_declaration() {
-    scpp::Program program = scpp::parse("int f() { int arr[3]; std::span<int> s = arr; return 0; }");
+    scpp::Program program = expect_parse_ok("int f() { int arr[3]; std::span<int> s = arr; return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[1];
     expect(decl.kind == scpp::StmtKind::VarDecl, "span_type_declaration: statement 1 should be VarDecl");
@@ -2004,7 +2004,7 @@ void test_std_string_view_type_and_calls_parse() {
 }
 
 void test_span_of_const_element_type() {
-    scpp::Program program = scpp::parse("int f() { int arr[3]; std::span<const int> s = arr; return 0; }");
+    scpp::Program program = expect_parse_ok("int f() { int arr[3]; std::span<const int> s = arr; return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[1];
     expect(decl.type.kind == scpp::TypeKind::Span, "span_of_const_element_type: type should be Span");
@@ -2164,7 +2164,7 @@ void test_make_unique_of_struct_type() {
 }
 
 void test_new_and_delete_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int f() { [[scpp::unsafe]] { int* p = new int(7); delete p; } return 0; }");
     const scpp::Stmt& unsafe_block = *program.functions[0].body->statements[0];
     expect(unsafe_block.kind == scpp::StmtKind::Block && unsafe_block.is_unsafe,
@@ -2188,7 +2188,7 @@ void test_new_and_delete_parse() {
 }
 
 void test_placement_new_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int f() { [[scpp::unsafe]] { alignas(int) char slot[sizeof(int)]{}; int* p = new ((int*)&slot) int(7); } return 0; }");
     const scpp::Stmt& unsafe_block = *program.functions[0].body->statements[0];
     const scpp::Stmt& decl = *unsafe_block.statements[1];
@@ -2201,7 +2201,7 @@ void test_placement_new_parse() {
 }
 
 void test_explicit_destructor_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Box { public: ~Box() { return; } }; int f() { [[scpp::unsafe]] { Box* p = (Box*)0; p->~Box(); } return 0; }");
     const scpp::Function& fn = *find_function_named(program, "f");
     const scpp::Stmt& unsafe_block = *fn.body->statements[0];
@@ -2214,7 +2214,7 @@ void test_explicit_destructor_parse() {
 }
 
 void test_full_header_parameter_pack_and_new_pack_expansion_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T, typename... Args>\n"
         "T* make_it(Args... args) { [[scpp::unsafe]] { return new T(args...); } }\n");
     expect(program.functions.size() == 1,
@@ -2248,7 +2248,7 @@ void test_full_header_parameter_pack_and_new_pack_expansion_parse() {
 }
 
 void test_full_header_transformed_pointer_parameter_pack_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename... Tail>\n"
         "int bridge(Tail*... ptrs) { return 0; }\n");
     expect(program.functions.size() == 1,
@@ -2264,7 +2264,7 @@ void test_full_header_transformed_pointer_parameter_pack_parses() {
 }
 
 void test_full_header_wrapped_template_parameter_pack_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Token {\n"
         "public:\n"
@@ -2286,7 +2286,7 @@ void test_full_header_wrapped_template_parameter_pack_parses() {
 
 void test_extern_c_single_declaration() {
     // ch02 §2.1: a bodyless `extern "C"` declaration.
-    scpp::Program program = scpp::parse("extern \"C\" int c_abs(int n); int main() { return 0; }");
+    scpp::Program program = expect_parse_ok("extern \"C\" int c_abs(int n); int main() { return 0; }");
     expect(program.functions.size() == 2, "extern_c_single_declaration: expected 2 functions");
     const scpp::Function& fn = program.functions[0];
     expect(fn.is_extern_c, "extern_c_single_declaration: is_extern_c should be true");
@@ -2299,7 +2299,7 @@ void test_extern_c_single_declaration() {
 void test_extern_c_block_form() {
     // ch02 §2.1: the block form is sugar for repeating `extern "C"` on
     // each nested declaration.
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "extern \"C\" {"
         "    int c_abs(int n);"
         "    void c_exit(int code);"
@@ -2319,7 +2319,7 @@ void test_extern_c_definition_is_checked_like_any_function() {
     // ordinary, fully-checked function that additionally requests C
     // linkage -- every function is checked by default (ch01), so there's
     // no separate flag to assert here beyond is_extern_c/body itself.
-    scpp::Program program = scpp::parse("extern \"C\" int add(int a, int b) { return a + b; }");
+    scpp::Program program = expect_parse_ok("extern \"C\" int add(int a, int b) { return a + b; }");
     const scpp::Function& fn = program.functions[0];
     expect(fn.is_extern_c, "extern_c_definition_is_checked_like_any_function: is_extern_c should be true");
     expect(fn.body != nullptr, "extern_c_definition_is_checked_like_any_function: body should be present");
@@ -2328,9 +2328,7 @@ void test_extern_c_definition_is_checked_like_any_function() {
 void test_extern_cpp_linkage_is_rejected() {
     // v0.1 only accepts the literal "C" linkage string.
     bool threw = false;
-    try {
-        scpp::parse("extern \"C++\" int foo(int x);");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("extern \"C++\" int foo(int x);"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "extern_cpp_linkage_is_rejected: expected a ParseError");
@@ -2339,14 +2337,14 @@ void test_extern_cpp_linkage_is_rejected() {
 void test_extern_c_varargs_declaration() {
     // ch02 §2.1: `...` is parsed and stored as has_varargs on a bodyless
     // extern "C" declaration.
-    scpp::Program program = scpp::parse("extern \"C\" int my_printf(int fmt, ...);");
+    scpp::Program program = expect_parse_ok("extern \"C\" int my_printf(int fmt, ...);");
     const scpp::Function& fn = program.functions[0];
     expect(fn.has_varargs, "extern_c_varargs_declaration: has_varargs should be true");
     expect(fn.params.size() == 1, "extern_c_varargs_declaration: expected exactly 1 named parameter");
 }
 
 void test_extern_c_function_pointer_parameter_declaration() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "extern \"C\" void* scpp_thread_spawn(void (*trampoline)(void*), void* arg);"
         "int main() { return 0; }");
     expect(program.functions.size() == 2,
@@ -2375,9 +2373,7 @@ void test_varargs_on_definition_is_rejected() {
     // v0.1 only supports `...` on a bodyless extern "C" declaration, not
     // a definition (ch02 §2.1).
     bool threw = false;
-    try {
-        scpp::parse("extern \"C\" int f(int a, ...) { return a; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("extern \"C\" int f(int a, ...) { return a; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "varargs_on_definition_is_rejected: expected a ParseError");
@@ -2386,9 +2382,7 @@ void test_varargs_on_definition_is_rejected() {
 void test_varargs_on_non_extern_function_is_rejected() {
     // `...` is only meaningful for extern "C" declarations (ch02 §2.1).
     bool threw = false;
-    try {
-        scpp::parse("int f(int a, ...);");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f(int a, ...);"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "varargs_on_non_extern_function_is_rejected: expected a ParseError");
@@ -2397,7 +2391,7 @@ void test_varargs_on_non_extern_function_is_rejected() {
 void test_void_return_and_void_pointer_types() {
     // ch02 §2.1's `void` prerequisite: valid as a return type and as a
     // pointer's pointee.
-    scpp::Program program = scpp::parse("extern \"C\" void free(void* p);");
+    scpp::Program program = expect_parse_ok("extern \"C\" void free(void* p);");
     const scpp::Function& fn = program.functions[0];
     expect(is_named_type(fn.return_type, "void"), "void_return_and_void_pointer_types: return type should be 'void'");
     expect(fn.params.size() == 1 && fn.params[0].type.kind == scpp::TypeKind::Pointer,
@@ -2407,7 +2401,7 @@ void test_void_return_and_void_pointer_types() {
 }
 
 void test_char_type_declaration() {
-    scpp::Program program = scpp::parse("int f() { char c{}; return 0; }");
+    scpp::Program program = expect_parse_ok("int f() { char c{}; return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "char_type_declaration: statement should be VarDecl");
@@ -2415,7 +2409,7 @@ void test_char_type_declaration() {
 }
 
 void test_char_literal_expression() {
-    scpp::Program program = scpp::parse("int f() { char c = 'a'; return 0; }");
+    scpp::Program program = expect_parse_ok("int f() { char c = 'a'; return 0; }");
     const scpp::Function& fn = program.functions[0];
     const scpp::Stmt& decl = *fn.body->statements[0];
     expect(decl.init != nullptr && decl.init->kind == scpp::ExprKind::CharLiteral,
@@ -2434,7 +2428,7 @@ void test_char_literal_escape_sequences_decode_correctly() {
         {"int f() { char c = '\\0'; return 0; }", '\0'},
     };
     for (const Case& c : cases) {
-        scpp::Program program = scpp::parse(c.source);
+        scpp::Program program = expect_parse_ok(c.source);
         const scpp::Stmt& decl = *program.functions[0].body->statements[0];
         expect(decl.init->int_value == c.expected,
                "char_literal_escape_sequences_decode_correctly: mismatch for " + std::string(c.source));
@@ -2443,9 +2437,7 @@ void test_char_literal_escape_sequences_decode_correctly() {
 
 void test_empty_char_literal_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { char c = ''; return 0; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { char c = ''; return 0; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "empty_char_literal_is_rejected: expected a ParseError");
@@ -2453,9 +2445,7 @@ void test_empty_char_literal_is_rejected() {
 
 void test_multi_character_char_literal_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { char c = 'ab'; return 0; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { char c = 'ab'; return 0; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "multi_character_char_literal_is_rejected: expected a ParseError");
@@ -2463,16 +2453,14 @@ void test_multi_character_char_literal_is_rejected() {
 
 void test_unsupported_char_escape_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { char c = '\\z'; return 0; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { char c = '\\z'; return 0; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "unsupported_char_escape_is_rejected: expected a ParseError");
 }
 
 void test_string_literal_expression() {
-    scpp::Program program = scpp::parse("int f(char* p) { p = \"hello\"; return 0; }");
+    scpp::Program program = expect_parse_ok("int f(char* p) { p = \"hello\"; return 0; }");
     const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
     expect(assign.rhs->kind == scpp::ExprKind::StringLiteral,
            "string_literal_expression: rhs should be a StringLiteral");
@@ -2488,7 +2476,7 @@ void test_string_literal_escape_sequences_decode_correctly() {
         {"int f(char* p) { p = \"say \\\"hi\\\"\"; return 0; }", "say \"hi\""},
     };
     for (const Case& c : cases) {
-        scpp::Program program = scpp::parse(c.source);
+        scpp::Program program = expect_parse_ok(c.source);
         const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
         expect(assign.rhs->name == c.expected,
                "string_literal_escape_sequences_decode_correctly: mismatch for " + std::string(c.source));
@@ -2499,7 +2487,7 @@ void test_empty_string_literal_is_allowed() {
     // Unlike an empty char literal (always rejected -- there's no ordinal
     // value for it to hold), an empty string is a perfectly ordinary,
     // zero-length C string.
-    scpp::Program program = scpp::parse("int f(char* p) { p = \"\"; return 0; }");
+    scpp::Program program = expect_parse_ok("int f(char* p) { p = \"\"; return 0; }");
     const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
     expect(assign.rhs->kind == scpp::ExprKind::StringLiteral,
            "empty_string_literal_is_allowed: rhs should be a StringLiteral");
@@ -2508,9 +2496,7 @@ void test_empty_string_literal_is_allowed() {
 
 void test_unsupported_string_escape_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int f(char* p) { p = \"\\z\"; return 0; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f(char* p) { p = \"\\z\"; return 0; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "unsupported_string_escape_is_rejected: expected a ParseError");
@@ -2521,7 +2507,7 @@ void test_const_char_pointer_type() {
     // `const char* fmt`) parses as its own distinct Pointer type: scpp
     // now properly tracks pointer constness via is_mutable_pointee (ch05
     // §5.7, ch08 Q9), rather than silently dropping `const`.
-    scpp::Program program = scpp::parse("extern \"C\" int puts(const char* s);");
+    scpp::Program program = expect_parse_ok("extern \"C\" int puts(const char* s);");
     const scpp::Function& fn = program.functions[0];
     expect(fn.params.size() == 1, "const_char_pointer_type: expected 1 parameter");
     const scpp::Type& param_type = fn.params[0].type;
@@ -2534,7 +2520,7 @@ void test_const_char_pointer_type() {
 void test_plain_pointer_defaults_to_mutable_pointee() {
     // `T*` (no `const`) should default to is_mutable_pointee == true --
     // the common case, unaffected by ch05 §5.7's new tracking.
-    scpp::Program program = scpp::parse("extern \"C\" int f(int* p);");
+    scpp::Program program = expect_parse_ok("extern \"C\" int f(int* p);");
     const scpp::Type& param_type = program.functions[0].params[0].type;
     expect(param_type.kind == scpp::TypeKind::Pointer, "plain_pointer_defaults_to_mutable_pointee: should be Pointer");
     expect(param_type.is_mutable_pointee, "plain_pointer_defaults_to_mutable_pointee: is_mutable_pointee should be true");
@@ -2545,7 +2531,7 @@ void test_plain_pointer_defaults_to_mutable_pointee() {
 // distinct from `const T&`/`const T*`'s own, separately-tracked
 // read-only-ness (Type::is_mutable_ref/is_mutable_pointee).
 void test_const_local_variable_parses() {
-    scpp::Program program = scpp::parse("int f() { const int x = 5; return x; }");
+    scpp::Program program = expect_parse_ok("int f() { const int x = 5; return x; }");
     const scpp::Stmt& decl = *program.functions[0].body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "const_local_variable_parses: statement 0 should be VarDecl");
     expect(decl.is_const, "const_local_variable_parses: is_const should be true");
@@ -2555,7 +2541,7 @@ void test_const_local_variable_parses() {
 // A plain (non-const) local must default to is_const == false -- the
 // overwhelmingly common case, unaffected by the new tracking above.
 void test_ordinary_local_variable_is_not_const() {
-    scpp::Program program = scpp::parse("int f() { int x = 5; return x; }");
+    scpp::Program program = expect_parse_ok("int f() { int x = 5; return x; }");
     const scpp::Stmt& decl = *program.functions[0].body->statements[0];
     expect(!decl.is_const, "ordinary_local_variable_is_not_const: is_const should be false");
 }
@@ -2565,9 +2551,7 @@ void test_ordinary_local_variable_is_not_const() {
 // be declared bare) is rejected right at parse time.
 void test_const_local_variable_without_initializer_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { const int x; return x; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { const int x; return x; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "const_local_variable_without_initializer_is_rejected: expected a ParseError");
@@ -2576,19 +2560,19 @@ void test_const_local_variable_without_initializer_is_rejected() {
 // Phase A: `constexpr` / `consteval` syntax is now represented directly in
 // the AST so later constant-evaluation phases can consume it.
 void test_constexpr_function_parses() {
-    scpp::Program program = scpp::parse("constexpr int answer() { return 42; }\n");
+    scpp::Program program = expect_parse_ok("constexpr int answer() { return 42; }\n");
     expect(program.functions[0].eval_mode == scpp::FunctionEvalMode::Constexpr,
            "constexpr_function_parses: eval_mode should be Constexpr");
 }
 
 void test_consteval_function_parses() {
-    scpp::Program program = scpp::parse("consteval int answer() { return 42; }\n");
+    scpp::Program program = expect_parse_ok("consteval int answer() { return 42; }\n");
     expect(program.functions[0].eval_mode == scpp::FunctionEvalMode::Consteval,
            "consteval_function_parses: eval_mode should be Consteval");
 }
 
 void test_constexpr_constructor_parses() {
-    scpp::Program program = scpp::parse("class Box { public: constexpr Box(int v) { value = v; } int value; };\n");
+    scpp::Program program = expect_parse_ok("class Box { public: constexpr Box(int v) { value = v; } int value; };\n");
     const scpp::Function* ctor = nullptr;
     for (const scpp::Function& fn : program.functions) {
         if (fn.name == "Box_new") ctor = &fn;
@@ -2601,7 +2585,7 @@ void test_constexpr_constructor_parses() {
 }
 
 void test_constexpr_local_variable_parses() {
-    scpp::Program program = scpp::parse("int f() { constexpr int x = 5; return x; }\n");
+    scpp::Program program = expect_parse_ok("int f() { constexpr int x = 5; return x; }\n");
     const scpp::Stmt& decl = *program.functions[0].body->statements[0];
     expect(decl.kind == scpp::StmtKind::VarDecl, "constexpr_local_variable_parses: statement 0 should be VarDecl");
     expect(decl.is_constexpr, "constexpr_local_variable_parses: is_constexpr should be true");
@@ -2610,16 +2594,14 @@ void test_constexpr_local_variable_parses() {
 
 void test_constexpr_local_variable_without_initializer_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int f() { constexpr int x; return x; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f() { constexpr int x; return x; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "constexpr_local_variable_without_initializer_is_rejected: expected a ParseError");
 }
 
 void test_if_consteval_parses() {
-    scpp::Program program = scpp::parse("int f() { if consteval { return 1; } else { return 2; } }\n");
+    scpp::Program program = expect_parse_ok("int f() { if consteval { return 1; } else { return 2; } }\n");
     const scpp::Stmt& stmt = *program.functions[0].body->statements[0];
     expect(stmt.kind == scpp::StmtKind::If, "if_consteval_parses: statement 0 should be If");
     expect(stmt.if_mode == scpp::IfMode::ConstevalTrue, "if_consteval_parses: if_mode should be ConstevalTrue");
@@ -2627,7 +2609,7 @@ void test_if_consteval_parses() {
 }
 
 void test_if_not_consteval_parses() {
-    scpp::Program program = scpp::parse("int f() { if !consteval { return 1; } else { return 2; } }\n");
+    scpp::Program program = expect_parse_ok("int f() { if !consteval { return 1; } else { return 2; } }\n");
     const scpp::Stmt& stmt = *program.functions[0].body->statements[0];
     expect(stmt.if_mode == scpp::IfMode::ConstevalFalse,
            "if_not_consteval_parses: if_mode should be ConstevalFalse");
@@ -2635,7 +2617,7 @@ void test_if_not_consteval_parses() {
 
 // ch11 §11.3: `export module name;` marks a primary interface unit.
 void test_export_module_declaration() {
-    scpp::Program program = scpp::parse("export module std;\n");
+    scpp::Program program = expect_parse_ok("export module std;\n");
     expect(program.module_name == "std", "export_module_declaration: module_name should be 'std'");
     expect(program.is_module_interface, "export_module_declaration: should be an interface unit");
     expect(!program.is_module_impl, "export_module_declaration: should not be an implementation unit");
@@ -2645,13 +2627,13 @@ void test_export_module_declaration() {
 // segment (Identifier Dot Identifier ...), matching real module-name
 // syntax, not namespace `::` syntax.
 void test_dotted_module_name_declaration() {
-    scpp::Program program = scpp::parse("export module org.lotx.cmath;\n");
+    scpp::Program program = expect_parse_ok("export module org.lotx.cmath;\n");
     expect(program.module_name == "org.lotx.cmath", "dotted_module_name_declaration: expected 'org.lotx.cmath'");
 }
 
 // ch11 §11.3: `module name;` (no `export`) is an implementation unit.
 void test_plain_module_declaration_is_implementation_unit() {
-    scpp::Program program = scpp::parse("module std;\n");
+    scpp::Program program = expect_parse_ok("module std;\n");
     expect(program.module_name == "std", "plain_module_declaration_is_implementation_unit: module_name should be 'std'");
     expect(!program.is_module_interface,
            "plain_module_declaration_is_implementation_unit: should not be an interface unit");
@@ -2659,7 +2641,7 @@ void test_plain_module_declaration_is_implementation_unit() {
 }
 
 void test_global_module_fragment_before_interface_module_declaration() {
-    scpp::Program program = scpp::parse("module;\nexport module std;\n");
+    scpp::Program program = expect_parse_ok("module;\nexport module std;\n");
     expect(program.module_name == "std",
            "global_module_fragment_before_interface_module_declaration: module_name should be 'std'");
     expect(program.is_module_interface,
@@ -2667,7 +2649,7 @@ void test_global_module_fragment_before_interface_module_declaration() {
 }
 
 void test_global_module_fragment_before_partition_declaration() {
-    scpp::Program program = scpp::parse("module;\nexport module mylib.math:trig;\n");
+    scpp::Program program = expect_parse_ok("module;\nexport module mylib.math:trig;\n");
     expect(program.module_name == "mylib.math",
            "global_module_fragment_before_partition_declaration: expected 'mylib.math'");
     expect(program.partition_name == "trig",
@@ -2678,9 +2660,7 @@ void test_global_module_fragment_before_partition_declaration() {
 
 void test_global_module_fragment_without_following_module_declaration_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("module;\nint main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("module;\nint main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw,
@@ -2690,7 +2670,7 @@ void test_global_module_fragment_without_following_module_declaration_is_rejecte
 // A file with no module declaration at all is unaffected -- module_name
 // stays empty, matching every scpp file before this chapter.
 void test_no_module_declaration_leaves_module_name_empty() {
-    scpp::Program program = scpp::parse("int main() { return 0; }");
+    scpp::Program program = expect_parse_ok("int main() { return 0; }");
     expect(program.module_name.empty(), "no_module_declaration_leaves_module_name_empty: module_name should be empty");
     expect(!program.is_module_interface && !program.is_module_impl,
            "no_module_declaration_leaves_module_name_empty: neither interface nor impl unit");
@@ -2700,7 +2680,7 @@ void test_no_module_declaration_leaves_module_name_empty() {
 // declaration's name with the namespace prefix, and records
 // namespace_path separately.
 void test_namespace_qualifies_struct_name() {
-    scpp::Program program = scpp::parse("namespace std { struct Point { int x; }; }");
+    scpp::Program program = expect_parse_ok("namespace std { struct Point { int x; }; }");
     expect(program.structs.size() == 1, "namespace_qualifies_struct_name: expected 1 struct");
     const scpp::StructDef& def = program.structs[0];
     expect(def.name == "std::Point", "namespace_qualifies_struct_name: name should be 'std::Point'");
@@ -2711,7 +2691,7 @@ void test_namespace_qualifies_struct_name() {
 // ch11 §11.4: the C++17 one-line nested namespace form (`namespace
 // a::b { ... }`) records every segment in namespace_path, in order.
 void test_nested_namespace_one_liner_qualifies_function_name() {
-    scpp::Program program = scpp::parse("namespace a::b { int f() { return 0; } }");
+    scpp::Program program = expect_parse_ok("namespace a::b { int f() { return 0; } }");
     expect(program.functions.size() == 1, "nested_namespace_one_liner: expected 1 function");
     const scpp::Function& fn = program.functions[0];
     expect(fn.name == "a::b::f", "nested_namespace_one_liner: name should be 'a::b::f'");
@@ -2722,8 +2702,7 @@ void test_nested_namespace_one_liner_qualifies_function_name() {
 // A namespace-qualified type reference (`std::Point`) resolves once the
 // declaration itself has already registered its fully-qualified name.
 void test_qualified_type_reference_parses() {
-    scpp::Program program =
-        scpp::parse("namespace std { struct Point { int x; }; }\n"
+    scpp::Program program = expect_parse_ok("namespace std { struct Point { int x; }; }\n"
                      "int use_it() { std::Point p{}; return p.x; }");
     expect(program.functions.size() == 1, "qualified_type_reference_parses: expected 1 function");
     const scpp::Stmt& decl = *program.functions[0].body->statements[0];
@@ -2733,7 +2712,7 @@ void test_qualified_type_reference_parses() {
 
 // ch11 §11.3: `export` prefixing a top-level function marks it exported.
 void test_export_prefix_marks_function_exported() {
-    scpp::Program program = scpp::parse("export module std;\nnamespace std { export int f() { return 0; } }");
+    scpp::Program program = expect_parse_ok("export module std;\nnamespace std { export int f() { return 0; } }");
     expect(program.functions.size() == 1, "export_prefix_marks_function_exported: expected 1 function");
     expect(program.functions[0].is_exported, "export_prefix_marks_function_exported: should be exported");
 }
@@ -2741,14 +2720,14 @@ void test_export_prefix_marks_function_exported() {
 // A declaration with no `export` prefix defaults to not-exported, even
 // inside a namespace.
 void test_no_export_prefix_leaves_function_not_exported() {
-    scpp::Program program = scpp::parse("namespace std { int f() { return 0; } }");
+    scpp::Program program = expect_parse_ok("namespace std { int f() { return 0; } }");
     expect(!program.functions[0].is_exported, "no_export_prefix_leaves_function_not_exported: should not be exported");
 }
 
 // ch11 §11.3: `export { ... }` groups several declarations under one
 // export marker, equivalent to prefixing each individually.
 void test_export_group_marks_multiple_declarations_exported() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module std;\n"
         "namespace std { export { int f() { return 0; } int g() { return 1; } } }");
     expect(program.functions.size() == 2, "export_group_marks_multiple_declarations_exported: expected 2 functions");
@@ -2759,7 +2738,7 @@ void test_export_group_marks_multiple_declarations_exported() {
 // `export namespace ns { ... }` is sugar for exporting the direct
 // declarations inside the namespace block.
 void test_export_namespace_block_marks_direct_members_exported() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module demo;\n"
         "export namespace demo {\n"
         "    int f() { return 0; }\n"
@@ -2777,13 +2756,13 @@ void test_export_namespace_block_marks_direct_members_exported() {
 // Whole-namespace export is equivalent to spelling `export` on each direct
 // declaration individually.
 void test_export_namespace_block_matches_per_declaration_exports() {
-    scpp::Program block_program = scpp::parse(
+    scpp::Program block_program = expect_parse_ok(
         "export module demo;\n"
         "export namespace demo {\n"
         "    int f() { return 0; }\n"
         "    class Box { public: Box() { return; } };\n"
         "}\n");
-    scpp::Program per_decl_program = scpp::parse(
+    scpp::Program per_decl_program = expect_parse_ok(
         "export module demo;\n"
         "namespace demo {\n"
         "    export int f() { return 0; }\n"
@@ -2805,7 +2784,7 @@ void test_export_namespace_block_matches_per_declaration_exports() {
 // every synthesized method inherits is_exported, not just the class
 // name entry itself.
 void test_export_class_propagates_to_methods() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module std;\n"
         "namespace std { export class Point { public: Point() { return; } }; }");
     expect(program.classes.size() == 1, "export_class_propagates_to_methods: expected 1 class");
@@ -2820,14 +2799,14 @@ void test_export_class_propagates_to_methods() {
 // Exported declarations may live in any namespace; export validity is not
 // tied to the module's dotted name.
 void test_export_in_non_matching_namespace_is_allowed() {
-    scpp::Program program = scpp::parse("export module std;\nnamespace other { export int f() { return 0; } }");
+    scpp::Program program = expect_parse_ok("export module std;\nnamespace other { export int f() { return 0; } }");
     expect(program.functions.size() == 1, "export_in_non_matching_namespace_is_allowed: expected 1 function");
     expect(program.functions[0].is_exported, "export_in_non_matching_namespace_is_allowed: should be exported");
 }
 
 // Global-scope exports are also allowed in a module interface.
 void test_export_with_no_namespace_is_allowed() {
-    scpp::Program program = scpp::parse("export module std;\nexport int f() { return 0; }");
+    scpp::Program program = expect_parse_ok("export module std;\nexport int f() { return 0; }");
     expect(program.functions.size() == 1, "export_with_no_namespace_is_allowed: expected 1 function");
     expect(program.functions[0].is_exported, "export_with_no_namespace_is_allowed: should be exported");
 }
@@ -2835,7 +2814,7 @@ void test_export_with_no_namespace_is_allowed() {
 // Namespaces that happen to nest under the module name still continue to
 // work; they're just no longer special-cased.
 void test_export_in_deeper_nested_namespace_is_allowed() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module org.lotx.cmath;\n"
         "namespace org::lotx::cmath::trig { export int f() { return 0; } }");
     expect(program.functions.size() == 1, "export_in_deeper_nested_namespace_is_allowed: expected 1 function");
@@ -2846,9 +2825,7 @@ void test_export_in_deeper_nested_namespace_is_allowed() {
 // declaration at all has nothing to export from -- rejected.
 void test_export_without_any_module_declaration_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("namespace std { export int f() { return 0; } }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("namespace std { export int f() { return 0; } }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "export_without_any_module_declaration_is_rejected: expected a ParseError");
@@ -2858,7 +2835,7 @@ void test_export_without_any_module_declaration_is_rejected() {
 // scpp linkage -- a bodyless declaration distinct from `extern "C"`
 // (is_extern_c stays false, is_module_extern is set instead).
 void test_bare_extern_declaration_is_module_extern() {
-    scpp::Program program = scpp::parse("extern int square(int x);");
+    scpp::Program program = expect_parse_ok("extern int square(int x);");
     expect(program.functions.size() == 1, "bare_extern_declaration_is_module_extern: expected 1 function");
     const scpp::Function& fn = program.functions[0];
     expect(fn.is_module_extern, "bare_extern_declaration_is_module_extern: is_module_extern should be true");
@@ -2869,14 +2846,14 @@ void test_bare_extern_declaration_is_module_extern() {
 // A bare `extern` declaration is namespace-qualified like any ordinary
 // scpp-linkage declaration (unlike `extern "C"`, which never is).
 void test_bare_extern_declaration_is_namespace_qualified() {
-    scpp::Program program = scpp::parse("namespace org::lotx::cmath { extern int sqrt(int x); }");
+    scpp::Program program = expect_parse_ok("namespace org::lotx::cmath { extern int sqrt(int x); }");
     expect(program.functions.size() == 1, "bare_extern_declaration_is_namespace_qualified: expected 1 function");
     expect(program.functions[0].name == "org::lotx::cmath::sqrt",
            "bare_extern_declaration_is_namespace_qualified: expected qualified name");
 }
 
 void test_module_forward_declarations_reconcile_to_definitions() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module mathlib;\n"
         "namespace mathlib {\n"
         "    export int is_even(int x);\n"
@@ -2906,14 +2883,12 @@ void test_module_forward_declarations_reconcile_to_definitions() {
 
 void test_module_forward_declaration_mismatched_definition_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "export module mathlib;\n"
             "namespace mathlib {\n"
             "    export int value(int x);\n"
             "    int value(char x) { return x; }\n"
-            "}\n");
-    } catch (const scpp::ParseError&) {
+            "}\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "module_forward_declaration_mismatched_definition_is_rejected: expected a ParseError");
@@ -2923,7 +2898,7 @@ void test_module_forward_declaration_mismatched_definition_is_rejected() {
 // partition -- module_name stays just the base dotted name, with the
 // part after ':' recorded separately in partition_name.
 void test_partition_declaration_sets_partition_name() {
-    scpp::Program program = scpp::parse("export module mylib.math:trig;\n");
+    scpp::Program program = expect_parse_ok("export module mylib.math:trig;\n");
     expect(program.module_name == "mylib.math", "partition_declaration_sets_partition_name: expected 'mylib.math'");
     expect(program.partition_name == "trig", "partition_declaration_sets_partition_name: expected 'trig'");
     expect(program.is_module_interface, "partition_declaration_sets_partition_name: should be an interface partition");
@@ -2932,7 +2907,7 @@ void test_partition_declaration_sets_partition_name() {
 // ch11 §11.4: `module name:part;` (no `export`) declares an
 // implementation partition.
 void test_implementation_partition_declaration() {
-    scpp::Program program = scpp::parse("module mylib.math:detail;\n");
+    scpp::Program program = expect_parse_ok("module mylib.math:detail;\n");
     expect(program.module_name == "mylib.math", "implementation_partition_declaration: expected 'mylib.math'");
     expect(program.partition_name == "detail", "implementation_partition_declaration: expected 'detail'");
     expect(!program.is_module_interface, "implementation_partition_declaration: should not be an interface partition");
@@ -2943,9 +2918,7 @@ void test_implementation_partition_declaration() {
 // of its own makes no sense -- partitions only exist within a module.
 void test_partition_import_outside_module_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("import :trig;\nint main() { return 0; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("import :trig;\nint main() { return 0; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "partition_import_outside_module_is_rejected: expected a ParseError");
@@ -2956,9 +2929,7 @@ void test_partition_import_outside_module_is_rejected() {
 // rejected with a clear error rather than crashing.
 void test_partition_import_without_resolver_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("export module mylib.math;\nimport :trig;\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("export module mylib.math;\nimport :trig;\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "partition_import_without_resolver_is_rejected: expected a ParseError");
@@ -2971,14 +2942,16 @@ void test_partition_import_without_resolver_is_rejected() {
 void test_partition_import_merges_with_body() {
     scpp::PartitionResolver partition_resolver = [](const std::string& key) -> scpp::Program {
         expect(key == "mylib.math:trig", "partition_import_merges_with_body: expected key 'mylib.math:trig'");
-        return scpp::parse(
+        auto result = scpp::parse(
             "export module mylib.math:trig;\n"
             "namespace mylib::math {\n"
             "    export int sin_deg_approx(int degrees) { return degrees / 2; }\n"
             "    int private_helper(int x) { return x; }\n"
             "}\n");
+        if (!result.has_value()) throw std::move(result).error();
+        return std::move(result.value());
     };
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module mylib.math;\n"
         "export import :trig;\n"
         "namespace mylib::math { export int square(int x) { return x * x; } }\n",
@@ -3016,11 +2989,13 @@ void test_partition_import_merges_with_body() {
 // they must not leak to an external importer of the whole module.
 void test_plain_partition_import_does_not_reexport() {
     scpp::PartitionResolver partition_resolver = [](const std::string&) -> scpp::Program {
-        return scpp::parse(
+        auto result = scpp::parse(
             "export module mylib.math:trig;\n"
             "namespace mylib::math { export int sin_deg_approx(int degrees) { return degrees / 2; } }\n");
+        if (!result.has_value()) throw std::move(result).error();
+        return std::move(result.value());
     };
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module mylib.math;\n"
         "import :trig;\n"
         "namespace mylib::math { export int square(int x) { return x * x; } }\n",
@@ -3039,12 +3014,12 @@ void test_plain_partition_import_does_not_reexport() {
 // construction.
 void test_export_import_on_implementation_partition_is_rejected() {
     scpp::PartitionResolver partition_resolver = [](const std::string&) -> scpp::Program {
-        return scpp::parse("module mylib.math:detail;\nnamespace mylib::math { export int f() { return 0; } }\n");
+        auto result = scpp::parse("module mylib.math:detail;\nnamespace mylib::math { export int f() { return 0; } }\n");
+        if (!result.has_value()) throw std::move(result).error();
+        return std::move(result.value());
     };
     bool threw = false;
-    try {
-        scpp::parse("export module mylib.math;\nexport import :detail;\n", /*resolver=*/{}, partition_resolver);
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("export module mylib.math;\nexport import :detail;\n", /*resolver=*/{}, partition_resolver); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "export_import_on_implementation_partition_is_rejected: expected a ParseError");
@@ -3055,7 +3030,7 @@ void test_export_import_on_implementation_partition_is_rejected() {
 // rvalue-reference parameter is always fully mutable/ownable inside the
 // callee).
 void test_rvalue_reference_parameter_parses() {
-    scpp::Program program = scpp::parse("int take(int&& x) { return x; }");
+    scpp::Program program = expect_parse_ok("int take(int&& x) { return x; }");
     expect(program.functions.size() == 1, "rvalue_reference_parameter_parses: expected 1 function");
     const scpp::Function& fn = program.functions[0];
     expect(fn.params.size() == 1, "rvalue_reference_parameter_parses: expected 1 param");
@@ -3070,7 +3045,7 @@ void test_rvalue_reference_parameter_parses() {
 // is_rvalue_ref left false -- this flag must not accidentally default to
 // true or leak across unrelated parameters.
 void test_ordinary_reference_parameter_is_not_rvalue_ref() {
-    scpp::Program program = scpp::parse("int take(int& x, const int& y) { return x + y; }");
+    scpp::Program program = expect_parse_ok("int take(int& x, const int& y) { return x + y; }");
     const scpp::Function& fn = program.functions[0];
     expect(!fn.params[0].type.is_rvalue_ref, "ordinary_reference_parameter_is_not_rvalue_ref: 'int&' param");
     expect(!fn.params[1].type.is_rvalue_ref, "ordinary_reference_parameter_is_not_rvalue_ref: 'const int&' param");
@@ -3080,9 +3055,7 @@ void test_ordinary_reference_parameter_is_not_rvalue_ref() {
 // move *from*, so `const` can never qualify an rvalue reference.
 void test_const_rvalue_reference_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int take(const int&& x) { return x; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int take(const int&& x) { return x; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "const_rvalue_reference_is_rejected: expected a ParseError");
@@ -3095,14 +3068,14 @@ void test_const_rvalue_reference_is_rejected() {
 void test_rvalue_reference_rejected_outside_parameter_position() {
     auto expect_rejected = [](const std::string& source, const char* label) {
         bool threw = false;
-        try {
-            if (source.find("import std;") != std::string::npos) {
+        if (source.find("import std;") != std::string::npos) {
+            try {
                 parse_with_std_imports(source);
-            } else {
-                scpp::parse(source);
+            } catch (const scpp::ParseError&) {
+                threw = true;
             }
-        } catch (const scpp::ParseError&) {
-            threw = true;
+        } else {
+            if (auto _r = scpp::parse(source); !_r.has_value()) threw = true;
         }
         expect(threw, std::string("rvalue_reference_rejected_outside_parameter_position: ") + label);
     };
@@ -3126,7 +3099,7 @@ void test_rvalue_reference_rejected_outside_parameter_position() {
 // return type and parameter (receiver) shape are exactly what an
 // ordinary method's would be.
 void test_concept_compound_requirement_synthesizes_witness_class() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "concept Shape = requires(const T& t) {\n"
         "    { t.area() } -> std::same_as<int>;\n"
@@ -3183,7 +3156,7 @@ void test_concept_compound_requirement_synthesizes_witness_class() {
 // closure's own compiler-synthesized operator() (ch05 §5.12), so both
 // resolve through the same "bare Call redirects to a method call" sugar.
 void test_concept_simple_direct_invocation_requirement_synthesizes_call_method() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "concept IntConsumer = requires(T f, int x) { f(x); };\n"
         "int main() { return 0; }\n");
@@ -3231,13 +3204,11 @@ void test_concept_simple_direct_invocation_requirement_synthesizes_call_method()
 // rejected (v0.1 does not support an arbitrary requirement expression).
 void test_concept_requirement_on_wrong_receiver_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "template<typename T>\n"
             "concept Shape = requires(const T& t) {\n"
             "    { other.area() } -> std::same_as<int>;\n"
-            "};\n");
-    } catch (const scpp::ParseError&) {
+            "};\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "concept_requirement_on_wrong_receiver_is_rejected: expected a ParseError");
@@ -3249,13 +3220,11 @@ void test_concept_requirement_on_wrong_receiver_is_rejected() {
 // would mean the same thing anyway).
 void test_concept_convertible_to_constraint_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "template<typename T>\n"
             "concept Shape = requires(const T& t) {\n"
             "    { t.area() } -> std::convertible_to<int>;\n"
-            "};\n");
-    } catch (const scpp::ParseError&) {
+            "};\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "concept_convertible_to_constraint_is_rejected: expected a ParseError");
@@ -3266,9 +3235,7 @@ void test_concept_convertible_to_constraint_is_rejected() {
 // -- an unknown identifier is rejected.
 void test_concept_requirement_unknown_argument_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("template<typename T>\nconcept IntConsumer = requires(T f, int x) { f(y); };\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("template<typename T>\nconcept IntConsumer = requires(T f, int x) { f(y); };\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "concept_requirement_unknown_argument_is_rejected: expected a ParseError");
@@ -3279,9 +3246,7 @@ void test_concept_requirement_unknown_argument_is_rejected() {
 // file.
 void test_export_concept_outside_module_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("export template<typename T>\nconcept Shape = requires(const T& t) { t.area(); };\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("export template<typename T>\nconcept Shape = requires(const T& t) { t.area(); };\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "export_concept_outside_module_is_rejected: expected a ParseError");
@@ -3291,7 +3256,7 @@ void test_export_concept_outside_module_is_rejected() {
 // namespace-qualifies its own name and its witness class/method exactly
 // like a struct/class/function would.
 void test_concept_inside_namespace_is_qualified() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module shapes;\n"
         "namespace shapes {\n"
         "export template<typename T>\n"
@@ -3314,7 +3279,7 @@ void test_concept_inside_namespace_is_qualified() {
 // Param::generic_concept records which concept produced it, and the
 // enclosing Function is marked is_generic_template.
 void test_generic_parameter_const_auto_ref_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "concept Shape = requires(const T& t) { t.area(); };\n"
         "int print_area(const Shape auto& s) { return 0; }\n");
@@ -3342,7 +3307,7 @@ void test_generic_parameter_const_auto_ref_parses() {
 // preserved in Type::is_rvalue_ref; later call resolution may collapse it
 // like a forwarding reference when deduction binds it to an lvalue.
 void test_generic_parameter_auto_rvalue_ref_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "concept InvocableRvalue = requires(T f, int x) { f(x); };\n"
         "int for_each_doubled(InvocableRvalue auto&& f) { return 0; }\n");
@@ -3366,7 +3331,7 @@ void test_generic_parameter_auto_rvalue_ref_parses() {
 // ch05 §5.11: `ConceptName auto&` (mutable, no leading const) parses as
 // a mutable-reference generic parameter.
 void test_generic_parameter_mutable_auto_ref_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "concept Shape = requires(const T& t) { t.area(); };\n"
         "int touch(Shape auto& s) { return 0; }\n");
@@ -3385,7 +3350,7 @@ void test_generic_parameter_mutable_auto_ref_parses() {
 // "$auto" witness (parse_program's own comment), never a real,
 // user-spellable concept name.
 void test_bare_auto_parameter_parses() {
-    scpp::Program program = scpp::parse("int identity(auto x) { return 0; }\n");
+    scpp::Program program = expect_parse_ok("int identity(auto x) { return 0; }\n");
     const scpp::Function* identity_fn = nullptr;
     for (const scpp::Function& fn : program.functions) {
         if (fn.name == "identity") identity_fn = &fn;
@@ -3407,7 +3372,7 @@ void test_bare_auto_parameter_parses() {
 // before resolution" check) -- so this inspects the raw Lambda
 // expression's own lambda_params directly, exactly like that test does.
 void test_bare_auto_lambda_parameter_parses() {
-    scpp::Program program = scpp::parse("int main() { return [](auto x) { return 0; }(1); }\n");
+    scpp::Program program = expect_parse_ok("int main() { return [](auto x) { return 0; }(1); }\n");
     const scpp::Function& main_fn = program.functions[0];
     const scpp::Expr& call_expr = *main_fn.body->statements[0]->expr;
     expect(call_expr.kind == scpp::ExprKind::Call, "bare_auto_lambda_parameter_parses: expected Call");
@@ -3424,9 +3389,7 @@ void test_bare_auto_lambda_parameter_parses() {
 // than silently mis-parsing or crashing).
 void test_generic_parameter_unknown_concept_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int f(NotAConcept auto& x) { return 0; }");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int f(NotAConcept auto& x) { return 0; }"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "generic_parameter_unknown_concept_is_rejected: expected a ParseError");
@@ -3437,16 +3400,14 @@ void test_generic_parameter_unknown_concept_is_rejected() {
 // or constructor.
 void test_generic_parameter_on_method_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "template<typename T>\n"
             "concept Shape = requires(const T& t) { t.area(); };\n"
             "class Widget {\n"
             "public:\n"
             "    Widget() { return; }\n"
             "    int touch(Shape auto& s) { return 0; }\n"
-            "};\n");
-    } catch (const scpp::ParseError&) {
+            "};\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "generic_parameter_on_method_is_rejected: expected a ParseError");
@@ -3459,7 +3420,7 @@ void test_generic_parameter_on_method_is_rejected() {
 // (that's movecheck's closure-resolution pass's job, see
 // Expr::name's own comment).
 void test_lambda_with_explicit_captures_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int apply(int x, int y) { return x; }\n"
         "int main() {\n"
         "    int x = 5;\n"
@@ -3502,7 +3463,7 @@ void test_lambda_with_explicit_captures_parses() {
 // resolution happens later (movecheck's closure-resolution pass), not
 // here.
 void test_lambda_blanket_capture_modes_parse() {
-    scpp::Program value_program = scpp::parse(
+    scpp::Program value_program = expect_parse_ok(
         "int apply(int x, int y) { return x; }\n"
         "int main() {\n"
         "    int x = 5;\n"
@@ -3519,7 +3480,7 @@ void test_lambda_blanket_capture_modes_parse() {
     expect(lambda1.lambda_captures.empty(),
            "lambda_blanket_capture_modes_parse: '[=]' should have no explicit captures");
 
-    scpp::Program ref_program = scpp::parse(
+    scpp::Program ref_program = expect_parse_ok(
         "int apply(int x, int y) { return x; }\n"
         "int main() {\n"
         "    int x = 5;\n"
@@ -3535,7 +3496,7 @@ void test_lambda_blanket_capture_modes_parse() {
            "lambda_blanket_capture_modes_parse: '[&]' should be ByReference");
 
     // Mixed: `[&, x]` -- blanket by-reference, 'x' explicitly by-value.
-    scpp::Program mixed_program = scpp::parse(
+    scpp::Program mixed_program = expect_parse_ok(
         "int apply(int x, int y) { return x; }\n"
         "int main() {\n"
         "    int x = 5;\n"
@@ -3582,7 +3543,7 @@ void test_lambda_init_capture_parses() {
 // ch05 §5.12: `[this]` captures a reference to the enclosing method's
 // own receiver, while `[*this]` captures the enclosing object by value.
 void test_lambda_this_and_star_this_captures_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int apply(int x, int y) { return x; }\n"
         "class Widget {\n"
         "public:\n"
@@ -3602,7 +3563,7 @@ void test_lambda_this_and_star_this_captures_parse() {
                lambda.lambda_captures[0].by_reference,
            "lambda_this_and_star_this_captures_parse: expected 1 capture '&this'");
 
-    scpp::Program star_program = scpp::parse(
+    scpp::Program star_program = expect_parse_ok(
         "int apply(int x, int y) { return x; }\n"
         "class Widget {\n"
         "public:\n"
@@ -3624,7 +3585,7 @@ void test_lambda_this_and_star_this_captures_parse() {
 }
 
 void test_function_pointer_declarators_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "struct Op { int (*fn)(int, int); };\n"
         "int add(int a, int b) { return a + b; }\n"
         "int main() {\n"
@@ -3657,16 +3618,14 @@ void test_function_pointer_declarators_parse() {
 // mirrors the same restriction on methods/constructors.
 void test_lambda_generic_parameter_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "template<typename T>\n"
             "concept Shape = requires(const T& t) { t.area(); };\n"
             "int apply(int x) { return x; }\n"
             "int main() {\n"
             "    apply([](Shape auto& s) { return 0; });\n"
             "    return 0;\n"
-            "}\n");
-    } catch (const scpp::ParseError&) {
+            "}\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "lambda_generic_parameter_is_rejected: expected a ParseError");
@@ -3674,7 +3633,7 @@ void test_lambda_generic_parameter_is_rejected() {
 
 // ch05 §5.12: `mutable` parses and sets lambda_is_mutable.
 void test_lambda_mutable_keyword_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int apply(int x) { return x; }\n"
         "int main() {\n"
         "    int x = 5;\n"
@@ -3696,7 +3655,7 @@ void test_lambda_mutable_keyword_parses() {
 // temporary type name scoped to this one declaration's own body, so a
 // field/param typed "T" parses as an ordinary Named type.
 void test_generic_class_bare_type_param_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Vec {\n"
         "    T item;\n"
@@ -3720,7 +3679,7 @@ void test_generic_class_bare_type_param_parses() {
 }
 
 void test_generic_class_multiple_type_params_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename First, typename Second>\n"
         "class Pair {\n"
         "    First first;\n"
@@ -3746,7 +3705,7 @@ void test_generic_class_multiple_type_params_parse() {
 }
 
 void test_generic_class_named_pack_method_params_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename R, typename... Args>\n"
         "class Invoker {\n"
         "public:\n"
@@ -3765,7 +3724,7 @@ void test_generic_class_named_pack_method_params_parse() {
 }
 
 void test_generic_class_named_pack_function_pointer_params_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename R, typename... Args>\n"
         "class Invoker {\n"
         "    R (*fp)(Args...);\n"
@@ -3789,7 +3748,7 @@ void test_generic_class_named_pack_function_pointer_params_parse() {
 }
 
 void test_class_member_templates_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Sink {\n"
         "public:\n"
         "    template<typename T>\n"
@@ -3811,7 +3770,7 @@ void test_class_member_templates_parse() {
 }
 
 void test_function_type_template_argument_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename Sig>\n"
         "class Holder {\n"
         "public:\n"
@@ -3836,7 +3795,7 @@ void test_function_type_template_argument_parses() {
 }
 
 void test_qualified_function_type_template_argument_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename Sig>\n"
         "class Holder {\n"
         "public:\n"
@@ -3859,7 +3818,7 @@ void test_qualified_function_type_template_argument_parses() {
 }
 
 void test_ref_qualified_methods_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Callable {\n"
         "public:\n"
         "    int call() & { return 1; }\n"
@@ -3878,7 +3837,7 @@ void test_ref_qualified_methods_parse() {
 }
 
 void test_explicit_template_function_designator_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "int thunk(T x) { return x; }\n"
         "int main() {\n"
@@ -3899,7 +3858,7 @@ void test_explicit_template_function_designator_parses() {
 }
 
 void test_const_qualified_template_type_argument_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Box { public: virtual ~Box() { return; } };\n"
         "int main() {\n"
@@ -3920,7 +3879,7 @@ void test_const_qualified_template_type_argument_parses() {
 }
 
 void test_const_qualified_explicit_template_argument_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "int thunk(T x) { return x; }\n"
         "int main() {\n"
@@ -3942,7 +3901,7 @@ void test_const_qualified_explicit_template_argument_parses() {
 }
 
 void test_global_qualified_call_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() {\n"
         "    return ::foo::bar();\n"
         "}\n");
@@ -3960,7 +3919,7 @@ void test_global_qualified_call_parses() {
 }
 
 void test_class_partial_specialization_on_function_type_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename Sig>\n"
         "class Holder;\n"
         "template<typename R, typename... Args>\n"
@@ -4001,7 +3960,7 @@ void test_class_partial_specialization_on_function_type_parses() {
 }
 
 void test_variadic_specialization_member_names_include_owner_id() {
-    scpp::Program program = scpp::parse("template<typename... Ts> class Box;\n"
+    scpp::Program program = expect_parse_ok("template<typename... Ts> class Box;\n"
                                          "template<> class Box<> {\n"
                                          "public:\n"
                                          "    Box(const char* s) { return; }\n"
@@ -4048,7 +4007,7 @@ void test_variadic_specialization_member_names_include_owner_id() {
 // recorded on Function::method_requires_concept -- independent of
 // whether the class's own type parameter is itself bare or constrained.
 void test_generic_class_method_requires_clause_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "concept Describable = requires(const T& t) {\n"
         "    { t.magnitude() } -> std::same_as<int>;\n"
@@ -4081,7 +4040,7 @@ void test_generic_class_method_requires_clause_parses() {
 // whole-type property no per-member clause could decompose the way a
 // class's own methods can.
 void test_generic_struct_concept_constrained_type_param_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "concept Describable = requires(const T& t) {\n"
         "    { t.magnitude() } -> std::same_as<int>;\n"
@@ -4104,14 +4063,12 @@ void test_generic_struct_concept_constrained_type_param_parses() {
 
 void test_generic_struct_bare_type_param_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "template<typename T>\n"
             "struct Pair {\n"
             "    T x;\n"
             "};\n"
-            "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+            "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "generic_struct_bare_type_param_is_rejected: expected a ParseError");
@@ -4122,7 +4079,7 @@ void test_generic_struct_bare_type_param_is_rejected() {
 // holds the (single, v0.1-only) concrete argument -- left unresolved
 // for movecheck's Monomorphizer (see Type::template_args' own comment).
 void test_generic_type_instantiation_parses_with_template_args() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
         "class Vec {\n"
         "    T item;\n"
@@ -4147,7 +4104,7 @@ void test_generic_type_instantiation_parses_with_template_args() {
 // ch05 §5.14: `class Derived : public Base { ... };` records one
 // BaseSpecifier on the ClassDef.
 void test_class_public_inheritance_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Animal {\n"
         "public:\n"
         "    Animal() { return; }\n"
@@ -4174,7 +4131,7 @@ void test_class_public_inheritance_parses() {
 // `class` (unlike `struct`, which defaults to public -- but structs
 // have no inheritance here at all).
 void test_class_inheritance_defaults_to_private() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Animal {\n"
         "public:\n"
         "    Animal() { return; }\n"
@@ -4198,21 +4155,19 @@ void test_class_inheritance_defaults_to_private() {
 // pass parsing) -- referencing an undeclared name is a ParseError.
 void test_class_inheritance_from_undeclared_class_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "class Dog : public Animal {\n"
             "public:\n"
             "    Dog() { return; }\n"
             "};\n"
-            "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+            "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "class_inheritance_from_undeclared_class_is_rejected: expected a ParseError");
 }
 
 void test_interface_attribute_sets_class_flag() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class [[scpp::interface]] IReader {\n"
         "public:\n"
         "    IReader() { return; }\n"
@@ -4228,7 +4183,7 @@ void test_interface_attribute_sets_class_flag() {
 }
 
 void test_multiple_base_specifiers_parse_with_access_and_virtual_flags() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Base1 { public: Base1() { return; } };\n"
         "class [[scpp::interface]] IFoo { public: virtual ~IFoo() = default; };\n"
         "class [[scpp::interface]] IBar { public: virtual ~IBar() = default; };\n"
@@ -4260,7 +4215,7 @@ void test_multiple_base_specifiers_parse_with_access_and_virtual_flags() {
 }
 
 void test_class_scope_using_declaration_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Base {\n"
         "public:\n"
         "    void work() { return; }\n"
@@ -4287,7 +4242,7 @@ void test_class_scope_using_declaration_parses() {
 }
 
 void test_virtual_override_pure_and_defaulted_member_flags_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class [[scpp::interface]] IBase {\n"
         "public:\n"
         "    virtual ~IBase() = default;\n"
@@ -4324,7 +4279,7 @@ void test_virtual_override_pure_and_defaulted_member_flags_parse() {
 }
 
 void test_override_without_virtual_member_flags_parse() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "class Base {\n"
         "public:\n"
         "    virtual ~Base() = default;\n"
@@ -4357,7 +4312,7 @@ void test_override_without_virtual_member_flags_parse() {
 // ClassDef is_variadic_primary_template, records its single pack
 // parameter, and pushes no fields/base at all.
 void test_variadic_primary_template_decl_parses() {
-    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+    scpp::Program program = expect_parse_ok("template<typename... Ts> class Tuple;\n"
                                          "int main() { return 0; }\n");
     const scpp::ClassDef* tuple = nullptr;
     for (const scpp::ClassDef& c : program.classes) {
@@ -4374,7 +4329,7 @@ void test_variadic_primary_template_decl_parses() {
 // ch05 §5.14: `template<> class Tuple<> {};` -- the empty-pack base-case
 // specialization of an already-declared variadic primary template.
 void test_variadic_empty_pack_specialization_parses() {
-    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+    scpp::Program program = expect_parse_ok("template<typename... Ts> class Tuple;\n"
                                          "template<> class Tuple<> {};\n"
                                          "int main() { return 0; }\n");
     const scpp::ClassDef* base_case = nullptr;
@@ -4394,7 +4349,7 @@ void test_variadic_empty_pack_specialization_parses() {
 // as the base's sole argument), and the field typed by the head
 // parameter.
 void test_variadic_recursive_specialization_parses() {
-    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+    scpp::Program program = expect_parse_ok("template<typename... Ts> class Tuple;\n"
                                          "template<> class Tuple<> {};\n"
                                          "template<typename Head, typename... Tail>\n"
                                          "class Tuple<Head, Tail...> : private Tuple<Tail...> {\n"
@@ -4427,7 +4382,7 @@ void test_variadic_recursive_specialization_parses() {
 // `Tuple<int, bool, char>`, parses with all 3 concrete arguments
 // recorded (in order) on Type::template_args.
 void test_variadic_instantiation_with_multiple_args_parses() {
-    scpp::Program program = scpp::parse("template<typename... Ts> class Tuple;\n"
+    scpp::Program program = expect_parse_ok("template<typename... Ts> class Tuple;\n"
                                          "template<> class Tuple<> {};\n"
                                          "template<typename Head, typename... Tail>\n"
                                          "class Tuple<Head, Tail...> : private Tuple<Tail...> {\n"
@@ -4455,10 +4410,8 @@ void test_variadic_instantiation_with_multiple_args_parses() {
 // inheritance, so it cannot vary its own layout by arity.
 void test_variadic_struct_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("template<typename... Ts> struct Tuple;\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("template<typename... Ts> struct Tuple;\n"
+                    "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "variadic_struct_is_rejected: expected a ParseError");
@@ -4468,10 +4421,8 @@ void test_variadic_struct_is_rejected() {
 // template is a ParseError.
 void test_variadic_specialization_without_primary_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("template<> class Tuple<> {};\n"
-                    "int main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("template<> class Tuple<> {};\n"
+                    "int main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "variadic_specialization_without_primary_is_rejected: expected a ParseError");
@@ -4482,7 +4433,7 @@ void test_variadic_specialization_without_primary_is_rejected() {
 // `Concept auto` form) -- records Function::template_params and marks
 // is_generic_template.
 void test_generic_function_full_header_form_parses() {
-    scpp::Program program = scpp::parse("template<typename T> T make() {\n"
+    scpp::Program program = expect_parse_ok("template<typename T> T make() {\n"
                                          "    T x{};\n"
                                          "    return x;\n"
                                          "}\n"
@@ -4501,7 +4452,7 @@ void test_generic_function_full_header_form_parses() {
 // ch05 §5.11: a full-header-form generic function may declare multiple
 // type parameters, each tied to its own function-parameter position.
 void test_generic_function_multiple_type_params_parses() {
-    scpp::Program program = scpp::parse("template<typename T, typename U> void f(T a, U b) { return; }\n"
+    scpp::Program program = expect_parse_ok("template<typename T, typename U> void f(T a, U b) { return; }\n"
                                          "int main() { return 0; }\n");
     const scpp::Function* f_fn = nullptr;
     for (const scpp::Function& fn : program.functions) {
@@ -4516,7 +4467,7 @@ void test_generic_function_multiple_type_params_parses() {
 // ch05 §5.11: an abbreviated generic parameter may be a trailing pack,
 // usable via a fold expression.
 void test_abbreviated_generic_parameter_pack_and_fold_parse() {
-    scpp::Program program = scpp::parse("template<typename T> concept HasGet = requires(T t) { t.get(); };\n"
+    scpp::Program program = expect_parse_ok("template<typename T> concept HasGet = requires(T t) { t.get(); };\n"
                                          "int sum_two(const HasGet auto&... args) {\n"
                                          "    return (args.get() + ...);\n"
                                          "}\n"
@@ -4539,7 +4490,7 @@ void test_abbreviated_generic_parameter_pack_and_fold_parse() {
 // argument (e.g. a "return-type-only" generic, `make<Circle>()`) --
 // recorded on the Call expression's own explicit_template_args.
 void test_explicit_type_template_argument_call_parses() {
-    scpp::Program program = scpp::parse("class Circle {\n"
+    scpp::Program program = expect_parse_ok("class Circle {\n"
                                          "public:\n"
                                          "    Circle() { return; }\n"
                                          "};\n"
@@ -4567,7 +4518,7 @@ void test_explicit_type_template_argument_call_parses() {
 // ordinary multi-argument Call expression, not as a one-argument call
 // accidentally terminated at the first comma.
 void test_explicit_template_argument_call_with_multiple_value_args_parses() {
-    scpp::Program program = scpp::parse("template<typename T> int pick(T x, int y) {\n"
+    scpp::Program program = expect_parse_ok("template<typename T> int pick(T x, int y) {\n"
                                          "    return y;\n"
                                          "}\n"
                                          "int main() {\n"
@@ -4593,7 +4544,7 @@ void test_explicit_template_argument_call_with_multiple_value_args_parses() {
 // `get<I>`) -- recorded as a non-type (value) ExplicitTemplateArg, not a
 // type one, disambiguating from the classic `a < b > c` parse.
 void test_explicit_non_type_template_argument_call_parses() {
-    scpp::Program program = scpp::parse("template<int Idx, typename... Ts> class TupleImpl;\n"
+    scpp::Program program = expect_parse_ok("template<int Idx, typename... Ts> class TupleImpl;\n"
                                          "template<int Idx> class TupleImpl<Idx> {};\n"
                                          "template<int Idx, typename Head, typename... Tail>\n"
                                          "class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {\n"
@@ -4626,7 +4577,7 @@ void test_explicit_non_type_template_argument_call_parses() {
 // and the recursive case's own base clause records a non-type base
 // argument (the "Idx + 1" expression) alongside pack_arg_name ("Tail").
 void test_variadic_specialization_with_leading_non_type_param_parses() {
-    scpp::Program program = scpp::parse("template<int Idx, typename... Ts> class TupleImpl;\n"
+    scpp::Program program = expect_parse_ok("template<int Idx, typename... Ts> class TupleImpl;\n"
                                          "template<int Idx> class TupleImpl<Idx> {};\n"
                                          "template<int Idx, typename Head, typename... Tail>\n"
                                          "class TupleImpl<Idx, Head, Tail...> : public TupleImpl<Idx + 1, Tail...> {\n"
@@ -4707,7 +4658,7 @@ void test_phase1_ast_metadata_fields_are_storable() {
 }
 
 void test_namespace_relative_qualified_generic_type_declaration_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "namespace m {\n"
         "namespace detail {\n"
         "template<typename Left, typename Right>\n"
@@ -4738,7 +4689,7 @@ void test_namespace_relative_qualified_generic_type_declaration_parses() {
 }
 
 void test_type_alias_declaration_parses_and_resolves() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "using Word = unsigned long;\n"
         "using WordRef = Word&;\n"
         "alignas(Word) Word global = 41;\n"
@@ -4790,7 +4741,7 @@ void test_type_alias_declaration_parses_and_resolves() {
 }
 
 void test_exported_type_alias_inside_namespace_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "export module demo;\n"
         "namespace demo {\n"
         "    export using Word = int;\n"
@@ -4805,7 +4756,7 @@ void test_exported_type_alias_inside_namespace_parses() {
 }
 
 void test_break_and_continue_parse_inside_loop() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() {\n"
         "    while (true) {\n"
         "        continue;\n"
@@ -4827,9 +4778,7 @@ void test_break_and_continue_parse_inside_loop() {
 
 void test_break_outside_loop_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int main() { break; return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int main() { break; return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "break_outside_loop_is_rejected: expected a ParseError");
@@ -4837,16 +4786,14 @@ void test_break_outside_loop_is_rejected() {
 
 void test_continue_outside_loop_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int main() { continue; return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int main() { continue; return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "continue_outside_loop_is_rejected: expected a ParseError");
 }
 
 void test_switch_statement_parses_with_cases_default_and_fallthrough() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "enum class Color { red = 1, green = 2 };\n"
         "int main() {\n"
         "    Color color = Color::red;\n"
@@ -4881,7 +4828,7 @@ void test_switch_statement_parses_with_cases_default_and_fallthrough() {
 }
 
 void test_namespaced_enum_case_label_resolves_to_qualified_enumerator() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "namespace calc {\n"
         "enum class Color { red = 1, green = 2 };\n"
         "int pick(Color color) {\n"
@@ -4916,7 +4863,7 @@ void test_namespaced_enum_case_label_resolves_to_qualified_enumerator() {
 }
 
 void test_break_parses_inside_switch() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() {\n"
         "    switch (1) {\n"
         "        case 1:\n"
@@ -4937,9 +4884,7 @@ void test_break_parses_inside_switch() {
 
 void test_fallthrough_outside_switch_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("int main() { [[fallthrough]]; return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("int main() { [[fallthrough]]; return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "fallthrough_outside_switch_is_rejected: expected a ParseError");
@@ -4947,8 +4892,7 @@ void test_fallthrough_outside_switch_is_rejected() {
 
 void test_fallthrough_must_be_last_in_case() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "int main() {\n"
             "    switch (1) {\n"
             "        case 1:\n"
@@ -4957,8 +4901,7 @@ void test_fallthrough_must_be_last_in_case() {
             "        default:\n"
             "            return 0;\n"
             "    }\n"
-            "}\n");
-    } catch (const scpp::ParseError&) {
+            "}\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "fallthrough_must_be_last_in_case: expected a ParseError");
@@ -4966,8 +4909,7 @@ void test_fallthrough_must_be_last_in_case() {
 
 void test_switch_case_requires_explicit_terminator() {
     bool threw = false;
-    try {
-        scpp::parse(
+    if (auto _r = scpp::parse(
             "int main() {\n"
             "    switch (1) {\n"
             "        case 1:\n"
@@ -4975,15 +4917,14 @@ void test_switch_case_requires_explicit_terminator() {
             "        default:\n"
             "            return 0;\n"
             "    }\n"
-            "}\n");
-    } catch (const scpp::ParseError&) {
+            "}\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "switch_case_requires_explicit_terminator: expected a ParseError");
 }
 
 void test_grouped_switch_case_labels_parse_as_empty_cases() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "int main() {\n"
         "    switch (2) {\n"
         "        case 1:\n"
@@ -5007,7 +4948,7 @@ void test_grouped_switch_case_labels_parse_as_empty_cases() {
 }
 
 void test_conditional_expression_parses() {
-    scpp::Program program = scpp::parse("int main() { return true ? 1 : 2; }\n");
+    scpp::Program program = expect_parse_ok("int main() { return true ? 1 : 2; }\n");
     const scpp::Function& main_fn = program.functions[0];
     expect(main_fn.body->statements.size() == 1, "conditional_expression_parses: expected 1 statement");
     const scpp::Stmt& ret = *main_fn.body->statements[0];
@@ -5019,7 +4960,7 @@ void test_conditional_expression_parses() {
 }
 
 void test_enum_class_declaration_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "enum class Color { red, green = 4, blue };\n"
         "int main() { return 0; }\n");
     expect(program.enums.size() == 1, "enum_class_declaration_parses: expected 1 enum");
@@ -5039,7 +4980,7 @@ void test_enum_class_declaration_parses() {
 }
 
 void test_enum_class_underlying_type_parses() {
-    scpp::Program program = scpp::parse(
+    scpp::Program program = expect_parse_ok(
         "enum class Small : uint8_t { a = 1, b = 3 };\n"
         "int main() { return 0; }\n");
     expect(program.enums.size() == 1, "enum_class_underlying_type_parses: expected 1 enum");
@@ -5058,12 +4999,43 @@ void test_enum_class_underlying_type_parses() {
 
 void test_old_style_enum_is_rejected() {
     bool threw = false;
-    try {
-        scpp::parse("enum Color { red, green };\nint main() { return 0; }\n");
-    } catch (const scpp::ParseError&) {
+    if (auto _r = scpp::parse("enum Color { red, green };\nint main() { return 0; }\n"); !_r.has_value()) {
         threw = true;
     }
     expect(threw, "old_style_enum_is_rejected: expected a ParseError");
+}
+
+// scpp::parse's public API surface returns std::expected<Program, ParseError>
+// rather than throwing ParseError (parser.cppm has no exceptions of its own,
+// a prerequisite for eventually self-hosting this file) -- these two tests
+// exercise that contract directly, independent of any test-file-local
+// helper (expect_parse_ok/parse_with_std_imports) that wraps it.
+void test_parse_returns_engaged_expected_on_success() {
+    std::expected<scpp::Program, scpp::ParseError> result = scpp::parse("int main() { return 0; }\n");
+    expect(result.has_value(), "parse_returns_engaged_expected_on_success: expected has_value() to be true");
+    if (!result.has_value()) return;
+    expect(result->functions.size() == 1,
+           "parse_returns_engaged_expected_on_success: expected 1 function via operator->");
+    expect(result.value().functions[0].name == "main",
+           "parse_returns_engaged_expected_on_success: expected function named 'main' via .value()");
+}
+
+void test_parse_returns_disengaged_expected_on_failure_without_throwing() {
+    // No try/catch here at all -- if scpp::parse still threw instead of
+    // returning std::expected, this call itself would already have
+    // aborted the test binary before reaching any of the expect() calls
+    // below, since nothing in this function catches exceptions.
+    std::expected<scpp::Program, scpp::ParseError> result = scpp::parse("int main() { return 0\n");
+    expect(!result.has_value(),
+           "parse_returns_disengaged_expected_on_failure_without_throwing: expected has_value() to be false");
+    if (result.has_value()) return;
+    const scpp::ParseError& error = result.error();
+    expect(error.loc.is_known(),
+           "parse_returns_disengaged_expected_on_failure_without_throwing: expected a known error location");
+    expect(error.line > 0 && error.column > 0,
+           "parse_returns_disengaged_expected_on_failure_without_throwing: expected positive line/column");
+    expect(std::string(error.what()).size() > 0,
+           "parse_returns_disengaged_expected_on_failure_without_throwing: expected a non-empty diagnostic message");
 }
 
 } // namespace
@@ -5105,6 +5077,8 @@ int main() {
     test_enum_class_declaration_parses();
     test_enum_class_underlying_type_parses();
     test_old_style_enum_is_rejected();
+    test_parse_returns_engaged_expected_on_success();
+    test_parse_returns_disengaged_expected_on_failure_without_throwing();
     test_bare_unsafe_identifier_followed_by_return_is_parse_error();
     test_unsafe_attribute_on_non_block_statement_has_no_effect();
     test_function_level_unsafe_marker_parses();

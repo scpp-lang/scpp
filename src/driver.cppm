@@ -1992,9 +1992,11 @@ public:
         // for internal bookkeeping below (cache dedup, module-object
         // naming, archive lookup) where deduplicating equivalent paths
         // genuinely matters.
-        Program imported = parse(
+        auto imported_result = parse(
             loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
             [this](const std::string& key) -> Program { return resolve_partition(key); }, path_it->second);
+        if (!imported_result.has_value()) throw std::move(imported_result).error();
+        Program imported = std::move(imported_result.value());
         imported.source_path = resolved_path;
         if (loaded.has_compile_time_payload) {
             merge_compile_time_payload(imported,
@@ -2059,10 +2061,12 @@ public:
         // comment above; partition.source_path just below is still the
         // absolute form internal bookkeeping (e.g. resolved_paths_) can
         // rely on.
-        Program partition = parse(
+        auto partition_result = parse(
             loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
             [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); },
             path_it->second);
+        if (!partition_result.has_value()) throw std::move(partition_result).error();
+        Program partition = std::move(partition_result.value());
         partition.source_path = absolute_source_path(path_it->second);
         partitions_resolving_.erase(key);
 
@@ -2579,9 +2583,11 @@ void emit_object_file(std::string_view source, const std::string& object_path,
                        const std::string& source_path = {},
                        int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
-    Program program = parse(
+    auto program_result = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
+    if (!program_result.has_value()) throw std::move(program_result).error();
+    Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
     emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
 }
@@ -2598,9 +2604,11 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
         }
     }
     ModuleCache cache(std::move(effective_import_paths), import_search_dirs);
-    Program program = parse(
+    auto program_result = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
+    if (!program_result.has_value()) throw std::move(program_result).error();
+    Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
     reject_not_yet_lowerable_constexpr_surface(program);
     if (!program.is_module_interface) {
@@ -2675,9 +2683,11 @@ void compile_to_executable(std::string_view source, const std::string& executabl
                             const std::string& source_path = {},
                             int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
-    Program program = parse(
+    auto program_result = parse(
         source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
+    if (!program_result.has_value()) throw std::move(program_result).error();
+    Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
 
     std::string object_path = executable_path + ".o";
