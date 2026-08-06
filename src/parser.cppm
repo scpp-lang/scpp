@@ -18,10 +18,10 @@ struct ParseError : std::runtime_error {
     // treat every error kind (Parse/Dataflow/Codegen) uniformly. Built
     // from a bare line/column pair above -- loc.source_path starts unset
     // -- since plumbing this parser instance's own source_path_ through
-    // every one of this file's 150+ throw sites isn't practical; the
-    // free parse() function at the bottom of this file stamps it in
-    // once, at the parse()/Parser boundary, instead (see its own
-    // comment).
+    // every one of this file's 150+ `return std::unexpected(ParseError(...))`
+    // sites isn't practical; the free parse() function at the bottom of
+    // this file stamps it in once, at the parse()/Parser boundary,
+    // instead (see its own comment).
     SourceLocation loc;
 };
 
@@ -114,14 +114,14 @@ public:
         }
     }
 
-    Program parse_program() {
+    [[nodiscard]] std::expected<Program, ParseError> parse_program() {
         Program program;
         current_program_ = &program;
-        parse_module_declaration(program);
-        parse_import_declarations(program);
-        parse_top_level_items(program);
+        if (auto _r = parse_module_declaration(program); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = parse_import_declarations(program); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = parse_top_level_items(program); !_r.has_value()) return std::unexpected(std::move(_r).error());
         reconcile_identical_extern_c_declarations(program);
-        reconcile_ordinary_forward_declarations(program);
+        if (auto _r = reconcile_ordinary_forward_declarations(program); !_r.has_value()) return std::unexpected(std::move(_r).error());
         qualify_same_namespace_function_calls(program);
         // ch05 §5.11: a reserved, globally-shared witness class for a
         // bare (unconstrained) `auto` parameter -- "the parameter's type
@@ -167,9 +167,10 @@ public:
     // current_loc()) so the free parse() function below can stamp it onto
     // a ParseError that reaches it with no file identity of its own yet:
     // ParseError's own constructor only ever takes a bare line/column
-    // pair (see ParseError above), so every one of its 150+ throw sites
-    // stays untouched -- this parse()-boundary stamp is the one place
-    // that attaches the file each error actually came from.
+    // pair (see ParseError above), so every one of its 150+ construction
+    // sites (each a `return std::unexpected(ParseError(...))`) stays
+    // untouched -- this parse()-boundary stamp is the one place that
+    // attaches the file each error actually came from.
     [[nodiscard]] std::shared_ptr<const std::string> source_path() const { return source_path_; }
 
 private:
@@ -318,11 +319,19 @@ private:
         return true;
     }
 
-    const Token& expect(TokenKind kind, const std::string& what) {
+    // Returns a *copy* of the matched token (rather than the `const Token&`
+    // this returned before conversion) since std::expected<T, E> cannot hold
+    // a reference type T -- neither real C++23's std::expected, nor scpp's
+    // own future one (libs/std/expected/std_expected.scpp stores T by value
+    // in an aligned byte buffer, which is likewise incompatible with
+    // reference types). Token (lexer.cppm) is a small, cheaply-copyable
+    // value (a TokenKind, a std::string_view, and two ints), so this is not
+    // a meaningful cost.
+    [[nodiscard]] std::expected<Token, ParseError> expect(TokenKind kind, const std::string& what) {
         if (!check(kind)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column, "expected " + what + " but found '" +
-                                                        std::string(tok.text) + "'");
+            return std::unexpected(ParseError(tok.line, tok.column, "expected " + what + " but found '" +
+                                                        std::string(tok.text) + "'"));
         }
         return advance();
     }
@@ -452,29 +461,42 @@ private:
         [[nodiscard]] bool has(const std::string& token) const { return scpp_tokens.contains(token); }
     };
 
-    std::vector<AlignmentSpecifier> parse_alignment_specifier_seq() {
+    [[nodiscard]] std::expected<std::vector<AlignmentSpecifier>, ParseError> parse_alignment_specifier_seq() {
         std::vector<AlignmentSpecifier> specs;
         while (check(TokenKind::KwAlignas)) {
             SourceLocation loc = current_loc();
             advance(); // alignas
-            expect(TokenKind::LParen, "'(' after 'alignas'");
+            auto lparen_result = expect(TokenKind::LParen, "'(' after 'alignas'");
+            if (!lparen_result.has_value()) return std::unexpected(std::move(lparen_result).error());
             AlignmentSpecifier spec;
             spec.loc = loc;
             std::size_t saved_pos = pos_;
-            try {
-                if (looks_like_type_start()) {
-                    Type queried_type = parse_type();
-                    expect(TokenKind::RParen, "')' after alignas type operand");
-                    spec.operand_is_type = true;
-                    spec.type = std::move(queried_type);
-                    specs.push_back(std::move(spec));
-                    continue;
+            // Speculative parse: attempt the type-operand form first: if
+            // parse_type() (or the ')' that must follow it) doesn't pan
+            // out, this falls back to the expression-operand form below,
+            // exactly like the try/catch(ParseError&) this replaces --
+            // `parsed_as_type` stands in for "no failure occurred", since
+            // there's no exception left to swallow.
+            bool parsed_as_type = false;
+            if (looks_like_type_start()) {
+                auto type_result = parse_type();
+                if (type_result.has_value()) {
+                    auto rparen_result = expect(TokenKind::RParen, "')' after alignas type operand");
+                    if (rparen_result.has_value()) {
+                        spec.operand_is_type = true;
+                        spec.type = std::move(type_result.value());
+                        specs.push_back(std::move(spec));
+                        parsed_as_type = true;
+                    }
                 }
-            } catch (const ParseError&) {
             }
+            if (parsed_as_type) continue;
             pos_ = saved_pos;
-            spec.expr = parse_expr();
-            expect(TokenKind::RParen, "')' after alignas expression operand");
+            auto expr_result = parse_expr();
+            if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+            spec.expr = std::move(expr_result.value());
+            auto rparen_result = expect(TokenKind::RParen, "')' after alignas expression operand");
+            if (!rparen_result.has_value()) return std::unexpected(std::move(rparen_result).error());
             specs.push_back(std::move(spec));
         }
         return specs;
@@ -598,12 +620,12 @@ private:
     // every group; a bare (non-namespaced) attribute, or one in any
     // other namespace, is always silently ignored (scpp defines nothing
     // outside its own `scpp` namespace).
-    void skip_attribute_arguments() {
+    [[nodiscard]] std::expected<void, ParseError> skip_attribute_arguments() {
         int depth = 1;
         while (depth > 0) {
             if (check(TokenKind::EndOfFile)) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column, "unterminated attribute argument list");
+                return std::unexpected(ParseError(tok.line, tok.column, "unterminated attribute argument list"));
             }
             if (match(TokenKind::LParen)) {
                 depth++;
@@ -613,16 +635,18 @@ private:
                 advance();
             }
         }
+        return {};
     }
 
-    void merge_lifetime_attribute(LifetimeAnnotation& dst, const LifetimeAnnotation& src, const Token& tok,
+    [[nodiscard]] std::expected<void, ParseError> merge_lifetime_attribute(LifetimeAnnotation& dst, const LifetimeAnnotation& src, const Token& tok,
                                   const char* where) {
-        if (!src.present()) return;
+        if (!src.present()) return {};
         if (dst.present()) {
-            throw ParseError(tok.line, tok.column,
-                             std::string(where) + " may bear at most one '[[scpp::lifetime(name)]]' attribute");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             std::string(where) + " may bear at most one '[[scpp::lifetime(name)]]' attribute"));
         }
         dst = src;
+        return {};
     }
 
     void collect_type_lifetime_annotations(const Type& type, std::vector<const LifetimeAnnotation*>& out) const {
@@ -643,32 +667,37 @@ private:
         for (Type& arg : type.template_args) clear_type_lifetime_annotations(arg);
     }
 
-    void hoist_type_lifetime_annotation(Type& type, LifetimeAnnotation& dst, const Token& tok, const char* where) {
+    [[nodiscard]] std::expected<void, ParseError> hoist_type_lifetime_annotation(Type& type, LifetimeAnnotation& dst, const Token& tok, const char* where) {
         std::vector<const LifetimeAnnotation*> annotations;
         collect_type_lifetime_annotations(type, annotations);
         if (annotations.size() > 1) {
-            throw ParseError(tok.line, tok.column,
-                             std::string(where) + " may bear at most one '[[scpp::lifetime(name)]]' attribute");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             std::string(where) + " may bear at most one '[[scpp::lifetime(name)]]' attribute"));
         }
-        if (!annotations.empty()) merge_lifetime_attribute(dst, *annotations.front(), tok, where);
+        if (!annotations.empty()) {
+            auto merge_result = merge_lifetime_attribute(dst, *annotations.front(), tok, where);
+            if (!merge_result.has_value()) return std::unexpected(std::move(merge_result).error());
+        }
         clear_type_lifetime_annotations(type);
+        return {};
     }
 
+    // Generic pass-through wrapper: since fn() now signals failure via a
+    // returned std::expected<T, ParseError> rather than by throwing (this
+    // file's own conversion, ParseError's own comment), there is no longer
+    // anything for a try/catch here to guard against -- `allow_type_
+    // lifetime_attributes_` only ever needs restoring on fn()'s ordinary
+    // return, whether that return holds a value or a ParseError.
     template<typename Fn>
     auto with_type_lifetime_attributes_enabled(Fn&& fn) {
         bool saved = allow_type_lifetime_attributes_;
         allow_type_lifetime_attributes_ = true;
-        try {
-            decltype(auto) result = fn();
-            allow_type_lifetime_attributes_ = saved;
-            return result;
-        } catch (...) {
-            allow_type_lifetime_attributes_ = saved;
-            throw;
-        }
+        decltype(auto) result = fn();
+        allow_type_lifetime_attributes_ = saved;
+        return result;
     }
 
-    [[nodiscard]] ParsedAttributes parse_attribute_specifier_seq() {
+    [[nodiscard]] std::expected<ParsedAttributes, ParseError> parse_attribute_specifier_seq() {
         ParsedAttributes result;
         while (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
             advance(); // '['
@@ -676,45 +705,62 @@ private:
             if (!check(TokenKind::RBracket)) {
                 do {
                     std::string ns;
-                    std::string token = std::string(expect(TokenKind::Identifier, "attribute token").text);
+                    auto token_result = expect(TokenKind::Identifier, "attribute token");
+                    if (!token_result.has_value()) return std::unexpected(std::move(token_result).error());
+                    std::string token = std::string(token_result.value().text);
                     if (match(TokenKind::ColonColon)) {
                         ns = token;
-                        token = std::string(expect(TokenKind::Identifier, "attribute token").text);
+                        auto token2_result = expect(TokenKind::Identifier, "attribute token");
+                        if (!token2_result.has_value()) return std::unexpected(std::move(token2_result).error());
+                        token = std::string(token2_result.value().text);
                     }
                     if (match(TokenKind::LParen)) {
                         if (ns.empty() && token == "nodiscard") {
                             if (!check(TokenKind::StringLiteral)) {
                                 const Token& tok = peek();
-                                throw ParseError(tok.line, tok.column,
-                                                 "'[[nodiscard]]' only accepts an optional single string literal reason");
+                                return std::unexpected(ParseError(tok.line, tok.column,
+                                                 "'[[nodiscard]]' only accepts an optional single string literal reason"));
                             }
                             result.has_nodiscard = true;
-                            result.nodiscard_reason =
-                                decode_string_literal(expect(TokenKind::StringLiteral, "a string literal"));
-                            expect(TokenKind::RParen, "')'");
+                            auto string_tok_result = expect(TokenKind::StringLiteral, "a string literal");
+                            if (!string_tok_result.has_value()) return std::unexpected(std::move(string_tok_result).error());
+                            auto reason_result = decode_string_literal(string_tok_result.value());
+                            if (!reason_result.has_value()) return std::unexpected(std::move(reason_result).error());
+                            result.nodiscard_reason = std::move(reason_result.value());
+                            auto rparen_result = expect(TokenKind::RParen, "')'");
+                            if (!rparen_result.has_value()) return std::unexpected(std::move(rparen_result).error());
                         } else if (ns == "scpp" && token == "thread_movable_if") {
-                            result.thread_movable_if_movable_expr = parse_expr();
-                            expect(TokenKind::Comma, "','");
-                            result.thread_movable_if_shareable_expr = parse_expr();
-                            expect(TokenKind::RParen, "')'");
+                            auto movable_expr_result = parse_expr();
+                            if (!movable_expr_result.has_value()) return std::unexpected(std::move(movable_expr_result).error());
+                            result.thread_movable_if_movable_expr = std::move(movable_expr_result.value());
+                            auto comma_result = expect(TokenKind::Comma, "','");
+                            if (!comma_result.has_value()) return std::unexpected(std::move(comma_result).error());
+                            auto shareable_expr_result = parse_expr();
+                            if (!shareable_expr_result.has_value()) return std::unexpected(std::move(shareable_expr_result).error());
+                            result.thread_movable_if_shareable_expr = std::move(shareable_expr_result.value());
+                            auto rparen_result = expect(TokenKind::RParen, "')'");
+                            if (!rparen_result.has_value()) return std::unexpected(std::move(rparen_result).error());
                         } else if (ns == "scpp" && token == "lifetime") {
                             if (!check(TokenKind::Identifier) && !check(TokenKind::KwThis)) {
                                 const Token& tok = peek();
-                                throw ParseError(tok.line, tok.column,
-                                                 "'[[scpp::lifetime(name)]]' requires exactly one identifier argument");
+                                return std::unexpected(ParseError(tok.line, tok.column,
+                                                 "'[[scpp::lifetime(name)]]' requires exactly one identifier argument"));
                             }
-                            Token group_tok = check(TokenKind::KwThis)
+                            auto group_tok_result = check(TokenKind::KwThis)
                                                   ? expect(TokenKind::KwThis, "lifetime group name")
                                                   : expect(TokenKind::Identifier, "lifetime group name");
-                            result.lifetime.name = std::string(group_tok.text);
+                            if (!group_tok_result.has_value()) return std::unexpected(std::move(group_tok_result).error());
+                            result.lifetime.name = std::string(group_tok_result.value().text);
                             if (!check(TokenKind::RParen)) {
                                 const Token& tok = peek();
-                                throw ParseError(tok.line, tok.column,
-                                                 "'[[scpp::lifetime(name)]]' requires exactly one identifier argument");
+                                return std::unexpected(ParseError(tok.line, tok.column,
+                                                 "'[[scpp::lifetime(name)]]' requires exactly one identifier argument"));
                             }
-                            expect(TokenKind::RParen, "')'");
+                            auto rparen_result = expect(TokenKind::RParen, "')'");
+                            if (!rparen_result.has_value()) return std::unexpected(std::move(rparen_result).error());
                         } else {
-                            skip_attribute_arguments();
+                            auto skip_result = skip_attribute_arguments();
+                            if (!skip_result.has_value()) return std::unexpected(std::move(skip_result).error());
                         }
                     }
                     if (ns.empty() && token == "nodiscard") result.has_nodiscard = true;
@@ -722,37 +768,39 @@ private:
                     if (ns == "scpp") result.scpp_tokens.insert(token);
                 } while (match(TokenKind::Comma));
             }
-            expect(TokenKind::RBracket, "']'");
-            expect(TokenKind::RBracket, "']'");
+            auto rbracket1_result = expect(TokenKind::RBracket, "']'");
+            if (!rbracket1_result.has_value()) return std::unexpected(std::move(rbracket1_result).error());
+            auto rbracket2_result = expect(TokenKind::RBracket, "']'");
+            if (!rbracket2_result.has_value()) return std::unexpected(std::move(rbracket2_result).error());
         }
         return result;
     }
 
-    void reject_packed_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
-        if (!attrs.has("packed")) return;
-        throw ParseError(attr_start_tok.line, attr_start_tok.column,
+    [[nodiscard]] std::expected<void, ParseError> reject_packed_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
+        if (!attrs.has("packed")) return {};
+        return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
                          "'[[scpp::packed]]' cannot appertain to " + std::string(what) +
-                             " -- only to a struct or union declaration (spec §9.2)");
+                             " -- only to a struct or union declaration (spec §9.2)"));
     }
 
-    void reject_alignment_specifiers(const std::vector<AlignmentSpecifier>& specs, const char* what) {
-        if (specs.empty()) return;
+    [[nodiscard]] std::expected<void, ParseError> reject_alignment_specifiers(const std::vector<AlignmentSpecifier>& specs, const char* what) {
+        if (specs.empty()) return {};
         const SourceLocation& loc = specs.front().loc;
-        throw ParseError(loc.line, loc.column,
+        return std::unexpected(ParseError(loc.line, loc.column,
                          "'alignas' cannot appertain to " + std::string(what) +
                              " -- only to a variable declaration, a non-static data member declaration, or a "
-                             "struct/class/union declaration (spec §9.3)");
+                             "struct/class/union declaration (spec §9.3)"));
     }
 
-    void reject_lifetime_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
-        if (!attrs.lifetime.present()) return;
-        throw ParseError(attr_start_tok.line, attr_start_tok.column,
+    [[nodiscard]] std::expected<void, ParseError> reject_lifetime_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
+        if (!attrs.lifetime.present()) return {};
+        return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
                          "'[[scpp::lifetime(name)]]' cannot appertain to " + std::string(what) +
-                             " -- only to an eligible parameter declaration or function declarator");
+                             " -- only to an eligible parameter declaration or function declarator"));
     }
 
 
-    [[nodiscard]] FunctionEvalMode parse_optional_function_eval_mode() {
+    [[nodiscard]] std::expected<FunctionEvalMode, ParseError> parse_optional_function_eval_mode() {
         FunctionEvalMode mode = FunctionEvalMode::RuntimeOnly;
         if (match(TokenKind::KwConstexpr)) {
             mode = FunctionEvalMode::Constexpr;
@@ -762,8 +810,8 @@ private:
         if (mode != FunctionEvalMode::RuntimeOnly &&
             (check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval))) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                              "a declaration may specify at most one of 'constexpr' or 'consteval'");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                              "a declaration may specify at most one of 'constexpr' or 'consteval'"));
         }
         return mode;
     }
@@ -784,7 +832,7 @@ private:
         return base;
     }
 
-    [[nodiscard]] BaseSpecifier parse_named_class_base_specifier(const Program& program) {
+    [[nodiscard]] std::expected<BaseSpecifier, ParseError> parse_named_class_base_specifier(const Program& program) {
         AccessSpecifier access = AccessSpecifier::Private;
         bool access_spelled = false;
         bool is_virtual = false;
@@ -810,37 +858,53 @@ private:
         }
         const Token& base_tok = peek();
         bool explicit_global = check(TokenKind::ColonColon);
-        std::string spelled_name = explicit_global ? parse_global_qualified_name() : parse_qualified_name();
+        std::string spelled_name;
+        if (explicit_global) {
+            auto spelled_result = parse_global_qualified_name();
+            if (!spelled_result.has_value()) return std::unexpected(std::move(spelled_result).error());
+            spelled_name = std::move(spelled_result.value());
+        } else {
+            spelled_name = parse_qualified_name();
+        }
         std::string base_name = explicit_global ? spelled_name : resolve_visible_type_name(spelled_name);
         if (base_name.empty() || !class_names_.contains(base_name)) {
-            throw ParseError(base_tok.line, base_tok.column,
+            return std::unexpected(ParseError(base_tok.line, base_tok.column,
                              "'" + spelled_name +
                                  "' is not a declared class -- a base class must be declared before use "
-                                 "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one");
+                                 "(ch05 §5.14), and only a class (never a struct, ch04 §4.1) may be one"));
         }
         BaseSpecifier base = make_named_base_specifier(program, base_name, access);
         base.is_virtual = is_virtual;
         return base;
     }
 
-    void parse_named_class_base_clause(const Program& program, std::vector<BaseSpecifier>& bases) {
-        if (!match(TokenKind::Colon)) return;
+    [[nodiscard]] std::expected<void, ParseError> parse_named_class_base_clause(const Program& program, std::vector<BaseSpecifier>& bases) {
+        if (!match(TokenKind::Colon)) return {};
         do {
-            bases.push_back(parse_named_class_base_specifier(program));
+            auto base_result = parse_named_class_base_specifier(program);
+            if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+            bases.push_back(std::move(base_result.value()));
         } while (match(TokenKind::Comma));
+        return {};
     }
 
-    void parse_class_using_declaration(ClassDef& def, AccessSpecifier current_access) {
-        const Token& using_tok = expect(TokenKind::KwUsing, "'using'");
+    [[nodiscard]] std::expected<void, ParseError> parse_class_using_declaration(ClassDef& def, AccessSpecifier current_access) {
+        auto using_tok_result = expect(TokenKind::KwUsing, "'using'");
+        if (!using_tok_result.has_value()) return std::unexpected(std::move(using_tok_result).error());
+        Token using_tok = using_tok_result.value();
         bool explicit_global = match(TokenKind::ColonColon);
         std::vector<std::string> segments;
-        segments.push_back(std::string(expect(TokenKind::Identifier, "base class name").text));
+        auto first_seg_result = expect(TokenKind::Identifier, "base class name");
+        if (!first_seg_result.has_value()) return std::unexpected(std::move(first_seg_result).error());
+        segments.push_back(std::string(first_seg_result.value().text));
         while (match(TokenKind::ColonColon)) {
-            segments.push_back(std::string(expect(TokenKind::Identifier, "identifier after '::'").text));
+            auto seg_result = expect(TokenKind::Identifier, "identifier after '::'");
+            if (!seg_result.has_value()) return std::unexpected(std::move(seg_result).error());
+            segments.push_back(std::string(seg_result.value().text));
         }
         if (segments.size() < 2) {
-            throw ParseError(using_tok.line, using_tok.column,
-                             "a class-scope using declaration must name a base member as 'using Base::member;'");
+            return std::unexpected(ParseError(using_tok.line, using_tok.column,
+                             "a class-scope using declaration must name a base member as 'using Base::member;'"));
         }
         std::string member_name = std::move(segments.back());
         segments.pop_back();
@@ -851,27 +915,37 @@ private:
         }
         std::string base_name = explicit_global ? spelled_base_name : resolve_visible_type_name(spelled_base_name);
         if (base_name.empty() || !class_names_.contains(base_name)) {
-            throw ParseError(using_tok.line, using_tok.column,
+            return std::unexpected(ParseError(using_tok.line, using_tok.column,
                              "'" + spelled_base_name +
                                  "' is not a declared class -- a class-scope using declaration must name a "
-                                 "declared base class");
+                                 "declared base class"));
         }
-        expect(TokenKind::Semicolon, "';'");
+        auto semi_result = expect(TokenKind::Semicolon, "';'");
+        if (!semi_result.has_value()) return std::unexpected(std::move(semi_result).error());
         def.using_declarations.push_back(ClassUsingDeclaration{std::move(base_name), std::move(member_name),
                                                                current_access});
+        return {};
     }
 
-    void parse_type_alias_decl(Program& program, bool is_exported) {
-        const Token& using_tok = expect(TokenKind::KwUsing, "'using'");
+    [[nodiscard]] std::expected<void, ParseError> parse_type_alias_decl(Program& program, bool is_exported) {
+        auto using_tok_result = expect(TokenKind::KwUsing, "'using'");
+        if (!using_tok_result.has_value()) return std::unexpected(std::move(using_tok_result).error());
+        Token using_tok = using_tok_result.value();
         SourceLocation loc{using_tok.line, using_tok.column, source_path_};
-        std::string bare_name(expect(TokenKind::Identifier, "alias name").text);
+        auto name_result = expect(TokenKind::Identifier, "alias name");
+        if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+        std::string bare_name(name_result.value().text);
         std::string qualified_name = qualify_name(bare_name);
-        expect(TokenKind::Assign, "'='");
-        Type underlying_type = parse_type();
-        expect(TokenKind::Semicolon, "';'");
+        auto assign_result = expect(TokenKind::Assign, "'='");
+        if (!assign_result.has_value()) return std::unexpected(std::move(assign_result).error());
+        auto underlying_type_result = parse_type();
+        if (!underlying_type_result.has_value()) return std::unexpected(std::move(underlying_type_result).error());
+        Type underlying_type = std::move(underlying_type_result.value());
+        auto semi_result = expect(TokenKind::Semicolon, "';'");
+        if (!semi_result.has_value()) return std::unexpected(std::move(semi_result).error());
         if (type_aliases_.contains(qualified_name) || struct_names_.contains(qualified_name) || concept_names_.contains(qualified_name)) {
-            throw ParseError(using_tok.line, using_tok.column,
-                             "'" + qualified_name + "' is already declared as a type or concept");
+            return std::unexpected(ParseError(using_tok.line, using_tok.column,
+                             "'" + qualified_name + "' is already declared as a type or concept"));
         }
         type_aliases_.emplace(qualified_name, underlying_type);
         TypeAliasDecl alias;
@@ -881,7 +955,9 @@ private:
         alias.namespace_path = namespace_stack_;
         alias.is_exported = is_exported;
         program.type_aliases.push_back(std::move(alias));
-        check_export_context(program, is_exported, namespace_stack_, loc, "type alias '" + qualified_name + "'");
+        auto export_ctx_result = check_export_context(program, is_exported, namespace_stack_, loc, "type alias '" + qualified_name + "'");
+        if (!export_ctx_result.has_value()) return std::unexpected(std::move(export_ctx_result).error());
+        return {};
     }
 
     [[nodiscard]] ExprPtr make_bool_literal_expr(SourceLocation loc, bool value) {
@@ -1225,9 +1301,12 @@ private:
         return joined;
     }
 
-    std::string parse_global_qualified_name() {
-        expect(TokenKind::ColonColon, "'::'");
-        std::string joined(expect(TokenKind::Identifier, "identifier after '::'").text);
+    [[nodiscard]] std::expected<std::string, ParseError> parse_global_qualified_name() {
+        auto colon_result = expect(TokenKind::ColonColon, "'::'");
+        if (!colon_result.has_value()) return std::unexpected(std::move(colon_result).error());
+        auto ident_result = expect(TokenKind::Identifier, "identifier after '::'");
+        if (!ident_result.has_value()) return std::unexpected(std::move(ident_result).error());
+        std::string joined(ident_result.value().text);
         while (check(TokenKind::ColonColon) && peek_at(1).kind == TokenKind::Identifier) {
             advance(); // ::
             joined += "::";
@@ -1305,31 +1384,45 @@ private:
             explicit_global_qualification ? base_name : resolve_visible_type_name(base_name);
         if (resolved_base.empty() || !generic_type_names_.contains(resolved_base)) return std::nullopt;
         std::size_t saved_pos = pos_;
-        try {
-            advance(); // '<'
-            std::vector<Type> template_args;
-            if (!check(TokenKind::Greater)) {
-                do {
-                    template_args.push_back(parse_template_type_argument());
-                } while (match(TokenKind::Comma));
-            }
-            expect(TokenKind::Greater, "'>'");
-            if (!match(TokenKind::ColonColon)) {
-                pos_ = saved_pos;
-                return std::nullopt;
-            }
-            std::string member_name = std::string(expect(TokenKind::Identifier, "member name").text);
-            std::string result = resolved_base + "<";
-            for (std::size_t i = 0; i < template_args.size(); i++) {
-                if (i != 0) result += ", ";
-                result += type_to_string(template_args[i]);
-            }
-            result += ">::" + member_name;
-            return result;
-        } catch (const ParseError&) {
+        advance(); // '<'
+        std::vector<Type> template_args;
+        // Speculative parse: any failure below means this wasn't actually a
+        // template-qualified static member access, so backtrack to
+        // saved_pos and report "not a match" via nullopt -- this replaces
+        // the try/catch(const ParseError&) that used to swallow the error.
+        bool ok = true;
+        if (!check(TokenKind::Greater)) {
+            do {
+                auto arg_result = parse_template_type_argument();
+                if (!arg_result.has_value()) { ok = false; break; }
+                template_args.push_back(std::move(arg_result.value()));
+            } while (ok && match(TokenKind::Comma));
+        }
+        if (ok) {
+            auto gt_result = expect(TokenKind::Greater, "'>'");
+            if (!gt_result.has_value()) ok = false;
+        }
+        if (!ok) {
             pos_ = saved_pos;
             return std::nullopt;
         }
+        if (!match(TokenKind::ColonColon)) {
+            pos_ = saved_pos;
+            return std::nullopt;
+        }
+        auto member_result = expect(TokenKind::Identifier, "member name");
+        if (!member_result.has_value()) {
+            pos_ = saved_pos;
+            return std::nullopt;
+        }
+        std::string member_name = std::string(member_result.value().text);
+        std::string result = resolved_base + "<";
+        for (std::size_t i = 0; i < template_args.size(); i++) {
+            if (i != 0) result += ", ";
+            result += type_to_string(template_args[i]);
+        }
+        result += ">::" + member_name;
+        return result;
     }
 
     ExprPtr clone_expr(const Expr& expr) {
@@ -1446,15 +1539,16 @@ private:
         return "$local_type_" + std::to_string(++next_local_type_id_) + "::" + bare_name;
     }
 
-    void register_local_type_name(const std::string& bare_name, const std::string& qualified_name, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<void, ParseError> register_local_type_name(const std::string& bare_name, const std::string& qualified_name, const SourceLocation& loc) {
         if (local_type_name_scopes_.empty()) {
-            throw ParseError(loc.line, loc.column, "internal parser error: missing block scope for local type definition");
+            return std::unexpected(ParseError(loc.line, loc.column, "internal parser error: missing block scope for local type definition"));
         }
         auto [_, inserted] = local_type_name_scopes_.back().emplace(bare_name, qualified_name);
         if (!inserted) {
-            throw ParseError(loc.line, loc.column,
-                             "redeclaration of local type '" + bare_name + "' in the same block scope");
+            return std::unexpected(ParseError(loc.line, loc.column,
+                             "redeclaration of local type '" + bare_name + "' in the same block scope"));
         }
+        return {};
     }
 
     [[nodiscard]] std::optional<Type> resolve_visible_type_alias(const std::string& spelled_name) const {
@@ -1862,14 +1956,15 @@ private:
         return "record";
     }
 
-    void register_record_tag_kind(const std::string& name, RecordTagKind kind, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<void, ParseError> register_record_tag_kind(const std::string& name, RecordTagKind kind, const SourceLocation& loc) {
         auto [it, inserted] = record_tag_kinds_.emplace(name, kind);
         if (!inserted && it->second != kind) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                              "'" + name + "' was previously declared as " +
                                  std::string(record_tag_keyword(it->second)) + " and cannot later be declared as " +
-                                 std::string(record_tag_keyword(kind)));
+                                 std::string(record_tag_keyword(kind))));
         }
+        return {};
     }
 
     [[nodiscard]] bool exported_forward_struct_exists(const Program& program, const std::string& name) const {
@@ -2032,10 +2127,20 @@ private:
             if (member_start != TokenKind::Identifier && member_start != TokenKind::Tilde) continue;
 
             if (explicit_global) advance();
-            expect(TokenKind::Identifier, "record name");
+            // These expect() calls are provably infallible here: every
+            // token position they consume was already verified via
+            // peek_at(...) lookahead above (the leading Identifier at
+            // `offset`, and each ColonColon/Identifier pair making up
+            // `segments`), with no intervening advance() other than the
+            // single one for an explicit leading '::' just above, which
+            // is itself accounted for in `offset`. `.value()` documents
+            // that -- unlike a real fallible call, there is deliberately
+            // no propagation path here to keep this function's own
+            // std::optional-based "no match" contract unchanged.
+            expect(TokenKind::Identifier, "record name").value();
             for (std::size_t i = 1; i < prefix_len; i++) {
-                expect(TokenKind::ColonColon, "'::'");
-                expect(TokenKind::Identifier, "identifier after '::'");
+                expect(TokenKind::ColonColon, "'::'").value();
+                expect(TokenKind::Identifier, "identifier after '::'").value();
             }
             ParsedOutOfLineMemberOwner owner;
             owner.spelled_name = std::move(spelled_name);
@@ -2109,11 +2214,11 @@ private:
         declared.expects_out_of_line_definition = false;
     }
 
-    bool parse_out_of_line_member_definition(Program& program, SourceLocation loc, bool is_unsafe = false,
+    [[nodiscard]] std::expected<bool, ParseError> parse_out_of_line_member_definition(Program& program, SourceLocation loc, bool is_unsafe = false,
                                              bool is_nodiscard = false, const std::string& nodiscard_reason = {}) {
         std::size_t saved_pos = pos_;
 
-        auto try_finish = [&](ParsedOutOfLineMemberDefinition parsed) {
+        auto try_finish = [&](ParsedOutOfLineMemberDefinition parsed) -> std::expected<bool, ParseError> {
             std::string expected_suffix = out_of_line_member_suffix(parsed.kind, parsed.member_name);
             Function* exact_match = nullptr;
             bool saw_mismatch = false;
@@ -2123,7 +2228,8 @@ private:
                 }
                 if (!candidate.name.ends_with(expected_suffix)) continue;
                 Function comparable = build_comparable_out_of_line_member_function(candidate, parsed);
-                validate_defaulted_special_member(comparable, parsed.fn.loc);
+                auto validate_result = validate_defaulted_special_member(comparable, parsed.fn.loc);
+                if (!validate_result.has_value()) return std::unexpected(std::move(validate_result).error());
                 if (same_function_signature(candidate, comparable)) {
                     exact_match = &candidate;
                     break;
@@ -2132,37 +2238,41 @@ private:
             }
             if (exact_match == nullptr) {
                 if (saw_mismatch) {
-                    throw ParseError(parsed.fn.loc.line, parsed.fn.loc.column,
+                    return std::unexpected(ParseError(parsed.fn.loc.line, parsed.fn.loc.column,
                                      "out-of-line definition of member '" + out_of_line_member_display_name(parsed) +
-                                         "' does not match its earlier declaration exactly");
+                                         "' does not match its earlier declaration exactly"));
                 }
-                throw ParseError(parsed.fn.loc.line, parsed.fn.loc.column,
+                return std::unexpected(ParseError(parsed.fn.loc.line, parsed.fn.loc.column,
                                  "out-of-line definition of member '" + out_of_line_member_display_name(parsed) +
-                                     "' requires an earlier class/struct member declaration");
+                                     "' requires an earlier class/struct member declaration"));
             }
             merge_out_of_line_member_definition_into(*exact_match, std::move(parsed));
             return true;
         };
 
-        auto parse_body_or_default = [&](Function& fn, const char* entity) {
+        auto parse_body_or_default = [&](Function& fn, const char* entity) -> std::expected<void, ParseError> {
             if (match(TokenKind::Assign)) {
                 if (!match(TokenKind::KwDefault)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column, std::string("expected 'default' after '=' in ") + entity);
+                    return std::unexpected(ParseError(tok.line, tok.column, std::string("expected 'default' after '=' in ") + entity));
                 }
                 fn.is_defaulted = true;
-                expect(TokenKind::Semicolon, "';'");
+                auto semi_result = expect(TokenKind::Semicolon, "';'");
+                if (!semi_result.has_value()) return std::unexpected(std::move(semi_result).error());
                 fn.body = nullptr;
-                return;
+                return {};
             }
             if (match(TokenKind::Semicolon)) {
                 fn.body = nullptr;
-                return;
+                return {};
             }
-            fn.body = parse_block();
+            auto block_result = parse_block();
+            if (!block_result.has_value()) return std::unexpected(std::move(block_result).error());
+            fn.body = std::move(block_result.value());
+            return {};
         };
 
-        auto parse_eval_mode = [&](Function& fn) {
+        auto parse_eval_mode = [&](Function& fn) -> std::expected<bool, ParseError> {
             if (fn.eval_mode == FunctionEvalMode::RuntimeOnly && check(TokenKind::KwConstexpr)) {
                 advance();
                 fn.eval_mode = FunctionEvalMode::Constexpr;
@@ -2176,8 +2286,8 @@ private:
             if ((check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval)) &&
                 fn.eval_mode != FunctionEvalMode::RuntimeOnly) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                 "a declaration may specify at most one of 'constexpr' or 'consteval'");
+                return std::unexpected(ParseError(tok.line, tok.column,
+                                 "a declaration may specify at most one of 'constexpr' or 'consteval'"));
             }
             return false;
         };
@@ -2187,18 +2297,24 @@ private:
         prefix.is_unsafe = is_unsafe;
         prefix.is_nodiscard = is_nodiscard;
         prefix.nodiscard_reason = nodiscard_reason;
-        while (parse_eval_mode(prefix)) {
+        while (true) {
+            auto eval_mode_result = parse_eval_mode(prefix);
+            if (!eval_mode_result.has_value()) return std::unexpected(std::move(eval_mode_result).error());
+            if (!eval_mode_result.value()) break;
         }
 
         std::size_t after_prefix = pos_;
         if (std::optional<ParsedOutOfLineMemberOwner> owner = parse_out_of_line_member_owner(); owner.has_value()) {
-            expect(TokenKind::ColonColon, "'::'");
+            auto colon_result = expect(TokenKind::ColonColon, "'::'");
+            if (!colon_result.has_value()) return std::unexpected(std::move(colon_result).error());
             if (match(TokenKind::Tilde)) {
-                const Token& name_tok = expect(TokenKind::Identifier, "destructor name");
+                auto name_tok_result = expect(TokenKind::Identifier, "destructor name");
+                if (!name_tok_result.has_value()) return std::unexpected(std::move(name_tok_result).error());
+                Token name_tok = name_tok_result.value();
                 if (std::string(name_tok.text) != owner->unqualified_name) {
-                    throw ParseError(name_tok.line, name_tok.column,
+                    return std::unexpected(ParseError(name_tok.line, name_tok.column,
                                      "destructor name '~" + std::string(name_tok.text) +
-                                         "' must match the declaring class/struct name '" + owner->unqualified_name + "'");
+                                         "' must match the declaring class/struct name '" + owner->unqualified_name + "'"));
                 }
                 ParsedOutOfLineMemberDefinition parsed;
                 parsed.fn.loc = prefix.loc;
@@ -2210,9 +2326,12 @@ private:
                 parsed.kind = OutOfLineMemberKind::Destructor;
                 parsed.fn.return_type.kind = TypeKind::Named;
                 parsed.fn.return_type.name = "void";
-                expect(TokenKind::LParen, "'('");
-                expect(TokenKind::RParen, "')'");
-                parse_body_or_default(parsed.fn, "an out-of-line destructor definition");
+                auto lparen_result = expect(TokenKind::LParen, "'('");
+                if (!lparen_result.has_value()) return std::unexpected(std::move(lparen_result).error());
+                auto rparen_result = expect(TokenKind::RParen, "')'");
+                if (!rparen_result.has_value()) return std::unexpected(std::move(rparen_result).error());
+                auto body_result = parse_body_or_default(parsed.fn, "an out-of-line destructor definition");
+                if (!body_result.has_value()) return std::unexpected(std::move(body_result).error());
                 return try_finish(std::move(parsed));
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == owner->unqualified_name &&
@@ -2228,12 +2347,18 @@ private:
                 parsed.kind = OutOfLineMemberKind::Constructor;
                 parsed.fn.return_type.kind = TypeKind::Named;
                 parsed.fn.return_type.name = "void";
-                parsed.fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
-                parse_function_trailing_attributes(parsed.fn, "a constructor declarator");
+                auto params_result = parse_param_list(/*allow_unnamed_single_parameter=*/true);
+                if (!params_result.has_value()) return std::unexpected(std::move(params_result).error());
+                parsed.fn.params = std::move(params_result.value());
+                auto trailing_attrs_result = parse_function_trailing_attributes(parsed.fn, "a constructor declarator");
+                if (!trailing_attrs_result.has_value()) return std::unexpected(std::move(trailing_attrs_result).error());
                 if (!check(TokenKind::Semicolon) && !check(TokenKind::Assign)) {
-                    parsed.fn.member_initializers = parse_constructor_member_initializer_list();
+                    auto member_inits_result = parse_constructor_member_initializer_list();
+                    if (!member_inits_result.has_value()) return std::unexpected(std::move(member_inits_result).error());
+                    parsed.fn.member_initializers = std::move(member_inits_result.value());
                 }
-                parse_body_or_default(parsed.fn, "an out-of-line constructor definition");
+                auto body_result = parse_body_or_default(parsed.fn, "an out-of-line constructor definition");
+                if (!body_result.has_value()) return std::unexpected(std::move(body_result).error());
                 return try_finish(std::move(parsed));
             }
             pos_ = saved_pos;
@@ -2241,19 +2366,23 @@ private:
         }
 
         pos_ = after_prefix;
-        Type return_type;
-        try {
-            return_type = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
-        } catch (const ParseError&) {
+        // Speculative parse: attempt the return-type-first out-of-line
+        // member form; on failure, this wasn't that form after all, so
+        // backtrack and report "no match" (false), just like the
+        // try/catch(const ParseError&) this replaces.
+        auto return_type_result = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
+        if (!return_type_result.has_value()) {
             pos_ = saved_pos;
             return false;
         }
+        Type return_type = std::move(return_type_result.value());
         std::optional<ParsedOutOfLineMemberOwner> owner = parse_out_of_line_member_owner();
         if (!owner.has_value()) {
             pos_ = saved_pos;
             return false;
         }
-        expect(TokenKind::ColonColon, "'::'");
+        auto colon_result2 = expect(TokenKind::ColonColon, "'::'");
+        if (!colon_result2.has_value()) return std::unexpected(std::move(colon_result2).error());
 
         ParsedOutOfLineMemberDefinition parsed;
         parsed.fn.loc = prefix.loc;
@@ -2278,22 +2407,28 @@ private:
                 parsed.kind = OutOfLineMemberKind::OperatorAssign;
             } else {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                 "unsupported out-of-line member operator definition in this version");
+                return std::unexpected(ParseError(tok.line, tok.column,
+                                 "unsupported out-of-line member operator definition in this version"));
             }
         } else {
             parsed.kind = OutOfLineMemberKind::Method;
-            parsed.member_name = std::string(expect(TokenKind::Identifier, "method name").text);
+            auto method_name_result = expect(TokenKind::Identifier, "method name");
+            if (!method_name_result.has_value()) return std::unexpected(std::move(method_name_result).error());
+            parsed.member_name = std::string(method_name_result.value().text);
         }
 
         bool allow_unnamed_single_parameter =
             parsed.kind == OutOfLineMemberKind::OperatorEqual || parsed.kind == OutOfLineMemberKind::OperatorNotEqual ||
             parsed.kind == OutOfLineMemberKind::OperatorAssign;
-        parsed.fn.params = parse_param_list(allow_unnamed_single_parameter);
-        parse_function_trailing_attributes(parsed.fn, "a member function declarator");
+        auto params_result2 = parse_param_list(allow_unnamed_single_parameter);
+        if (!params_result2.has_value()) return std::unexpected(std::move(params_result2).error());
+        parsed.fn.params = std::move(params_result2.value());
+        auto trailing_attrs_result2 = parse_function_trailing_attributes(parsed.fn, "a member function declarator");
+        if (!trailing_attrs_result2.has_value()) return std::unexpected(std::move(trailing_attrs_result2).error());
         parsed.is_const_method = match(TokenKind::KwConst);
         parsed.fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
-        parse_body_or_default(parsed.fn, "an out-of-line member definition");
+        auto body_result2 = parse_body_or_default(parsed.fn, "an out-of-line member definition");
+        if (!body_result2.has_value()) return std::unexpected(std::move(body_result2).error());
         return try_finish(std::move(parsed));
     }
 
@@ -2336,7 +2471,7 @@ private:
         program.functions = std::move(reconciled);
     }
 
-    void reconcile_ordinary_forward_declarations(Program& program) {
+    [[nodiscard]] std::expected<void, ParseError> reconcile_ordinary_forward_declarations(Program& program) {
         std::vector<Function> reconciled;
         reconciled.reserve(program.functions.size());
         std::vector<bool> consumed(program.functions.size(), false);
@@ -2372,15 +2507,15 @@ private:
                 for (std::size_t j = i + 1; j < program.functions.size(); j++) {
                     Function& candidate = program.functions[j];
                     if (!same_function_declarator(fn, candidate)) continue;
-                    throw ParseError(candidate.loc.line, candidate.loc.column,
+                    return std::unexpected(ParseError(candidate.loc.line, candidate.loc.column,
                                      "definition of ordinary forward declaration '" + fn.name +
-                                        "' does not match its earlier declaration exactly");
+                                        "' does not match its earlier declaration exactly"));
                 }
             }
             if (!merged) {
-                throw ParseError(fn.loc.line, fn.loc.column,
+                return std::unexpected(ParseError(fn.loc.line, fn.loc.column,
                                  "ordinary forward declaration of function '" + fn.name +
-                                     "' must be followed by a matching definition in the same translation unit");
+                                     "' must be followed by a matching definition in the same translation unit"));
             }
             consumed[i] = true;
         }
@@ -2389,9 +2524,10 @@ private:
             reconciled.push_back(std::move(program.functions[i]));
         }
         program.functions = std::move(reconciled);
+        return {};
     }
 
-    void ensure_member_forward_declarations_are_defined(const Program& program) {
+    [[nodiscard]] std::expected<void, ParseError> ensure_member_forward_declarations_are_defined(const Program& program) {
         for (const Function& fn : program.functions) {
             if (!is_bodyless_member_forward_decl(fn)) continue;
             std::string display_name = fn.member_owner_class + "::" + fn.name.substr(fn.name.rfind('_') + 1);
@@ -2414,10 +2550,11 @@ private:
             } else if (fn.name.ends_with("_operator_arrow")) {
                 display_name = fn.member_owner_class + "::operator->";
             }
-            throw ParseError(fn.loc.line, fn.loc.column,
+            return std::unexpected(ParseError(fn.loc.line, fn.loc.column,
                              "member declaration '" + display_name +
-                                 "' must be followed by a matching out-of-line definition in the same translation unit");
+                                 "' must be followed by a matching out-of-line definition in the same translation unit"));
         }
+        return {};
     }
 
     [[nodiscard]] static bool is_shadowed_local(
@@ -2573,16 +2710,17 @@ private:
     // `export` is only meaningful inside a module unit; once we're in a
     // module, real C++ places no namespace-shape restriction on the
     // exported declaration itself, so neither do we.
-    void check_export_context(const Program& program, bool is_exported,
+    [[nodiscard]] std::expected<void, ParseError> check_export_context(const Program& program, bool is_exported,
                                  const std::vector<std::string>& /*namespace_path*/, SourceLocation loc,
                                  const std::string& what) const {
-        if (!is_exported) return;
+        if (!is_exported) return {};
         if (program.module_name.empty()) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                               "'export' on " + what +
                                   " has no effect: this file has no 'export module'/'module' declaration "
-                                  "(ch11 §11.3)");
+                                  "(ch11 §11.3)"));
         }
+        return {};
     }
 
     // Parses a base type name (`int`, `bool`, `std::unique_ptr<T>`, or a
@@ -2596,7 +2734,7 @@ private:
     // real C++'s own reading of `const` as binding to the base type, not
     // an outer pointer level), never a later/outer one, mirroring how
     // real C++ reads `const int**` as "pointer to (pointer to const int)".
-    Type parse_unqualified_type(bool const_qualifies_first_pointer = false) {
+    [[nodiscard]] std::expected<Type, ParseError> parse_unqualified_type(bool const_qualifies_first_pointer = false) {
         if (std::optional<std::string_view> std_builtin_scalar = peek_std_qualified_builtin_scalar_type_name();
             std_builtin_scalar.has_value()) {
             Type type;
@@ -2616,14 +2754,18 @@ private:
         }
         if (check_std_qualified("span")) {
             consume_std_qualified();
-            expect(TokenKind::Less, "'<'");
+            auto lt_result = expect(TokenKind::Less, "'<'");
+            if (!lt_result.has_value()) return std::unexpected(std::move(lt_result).error());
             // `const` here qualifies the *element* type (`std::span<const
             // T>`, a read-only view), not a reference -- so it's parsed
             // directly rather than through parse_type() (which only
             // accepts a leading `const` when followed by `&`).
             bool element_is_const = match(TokenKind::KwConst);
-            Type element = parse_unqualified_type();
-            expect(TokenKind::Greater, "'>'");
+            auto element_result = parse_unqualified_type();
+            if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
+            Type element = std::move(element_result.value());
+            auto gt_result = expect(TokenKind::Greater, "'>'");
+            if (!gt_result.has_value()) return std::unexpected(std::move(gt_result).error());
             Type type;
             type.kind = TypeKind::Span;
             type.pointee = std::make_shared<Type>(std::move(element));
@@ -2657,9 +2799,9 @@ private:
                 type.name = "unsigned long";
             } else {
                 const Token& next = peek();
-                throw ParseError(next.line, next.column,
+                return std::unexpected(ParseError(next.line, next.column,
                                   "'unsigned' must be immediately followed by 'int' or 'long' (ch06 §6) -- the "
-                                  "bare 'unsigned' shorthand is not valid scpp");
+                                  "bare 'unsigned' shorthand is not valid scpp"));
             }
         } else if (tok.kind == TokenKind::Identifier &&
                    peek_at(1).kind != TokenKind::Less &&
@@ -2727,7 +2869,7 @@ private:
                     leading_non_type_count++;
                 }
             }
-            expect(TokenKind::Less, "'<'");
+            if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             std::size_t arg_index = 0;
             if (!check(TokenKind::Greater)) {
                 do {
@@ -2736,7 +2878,9 @@ private:
                                     : (ordinary_params != nullptr && arg_index < ordinary_params->size() &&
                                        (*ordinary_params)[arg_index].is_non_type);
                     if (parse_non_type_arg) {
-                        type.non_type_args.push_back(std::shared_ptr<Expr>(parse_additive().release()));
+                        auto non_type_arg_result = parse_additive();
+                        if (!non_type_arg_result.has_value()) return std::unexpected(std::move(non_type_arg_result).error());
+                        type.non_type_args.push_back(std::shared_ptr<Expr>(std::move(non_type_arg_result).value().release()));
                     } else if (is_variadic && check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
                         Type spread;
                         spread.kind = TypeKind::Named;
@@ -2745,12 +2889,14 @@ private:
                         spread.is_pack_expansion = true;
                         type.template_args.push_back(std::move(spread));
                     } else {
-                        type.template_args.push_back(parse_template_type_argument());
+                        auto template_arg_result = parse_template_type_argument();
+                        if (!template_arg_result.has_value()) return std::unexpected(std::move(template_arg_result).error());
+                        type.template_args.push_back(std::move(template_arg_result.value()));
                     }
                     arg_index++;
                 } while (match(TokenKind::Comma));
             }
-            expect(TokenKind::Greater, "'>'");
+            if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (!is_variadic && ordinary_params != nullptr) {
                 std::size_t expected_non_type_args = 0;
                 for (const GenericTypeParam& p : *ordinary_params) {
@@ -2758,9 +2904,9 @@ private:
                 }
                 std::size_t expected_type_args = ordinary_params->size() - expected_non_type_args;
                 if (type.template_args.size() != expected_type_args || type.non_type_args.size() != expected_non_type_args) {
-                    throw ParseError(name_tok.line, name_tok.column,
+                    return std::unexpected(ParseError(name_tok.line, name_tok.column,
                                       "'" + type.name + "' takes exactly " + std::to_string(ordinary_params->size()) +
-                                          " template argument(s) in this order (ch05 §5.14)");
+                                          " template argument(s) in this order (ch05 §5.14)"));
                 }
             }
            maybe_mark_reference_wrapper_lifetime_source(type);
@@ -2772,10 +2918,10 @@ private:
             } else if (is_visible_type_name(spelled_name)) {
                 type.name = resolve_visible_type_name(parse_qualified_name());
             } else {
-                throw ParseError(tok.line, tok.column, "expected a type name");
+                return std::unexpected(ParseError(tok.line, tok.column, "expected a type name"));
             }
         } else {
-            throw ParseError(tok.line, tok.column, "expected a type name");
+            return std::unexpected(ParseError(tok.line, tok.column, "expected a type name"));
         }
 
         bool first_star = true;
@@ -2817,10 +2963,12 @@ private:
     // parse_template_type_argument uses so `const T` can appear as a
     // generic/template type argument. Every other caller (a parameter,
     // struct/class field, or return type) keeps the original rejection.
-    Type parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr,
+    [[nodiscard]] std::expected<Type, ParseError> parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr,
                     bool allow_const_qualified_value_type = false) {
         bool has_const_prefix = match(TokenKind::KwConst);
-        Type type = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
+        auto type_result = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
+        if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
+        Type type = std::move(type_result.value());
 
         if (match(TokenKind::Amp)) {
             auto pointee = std::make_shared<Type>(std::move(type));
@@ -2834,17 +2982,17 @@ private:
         if (match(TokenKind::AmpAmp)) {
             if (!allow_rvalue_ref) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "'&&' (rvalue reference) is only supported for a function/method/"
                                   "constructor parameter's declared type in this version (ch03) -- not "
-                                  "a variable, field, return type, or nested type argument");
+                                  "a variable, field, return type, or nested type argument"));
             }
             if (has_const_prefix) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "'const' cannot qualify an rvalue reference ('const T&&') -- an "
                                   "rvalue-reference parameter always takes ownership via move (ch03), "
-                                  "which needs mutable access to the value being moved from");
+                                  "which needs mutable access to the value being moved from"));
             }
             auto pointee = std::make_shared<Type>(std::move(type));
             type = Type{};
@@ -2865,9 +3013,9 @@ private:
                 return type;
             }
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "'const' is only supported directly before a reference type ('const T&') "
-                              "or a pointer type ('const T*') in this version");
+                              "or a pointer type ('const T*') in this version"));
         }
         return type;
     }
@@ -2898,7 +3046,7 @@ private:
     // with zero new logic; only monomorphization (consulting
     // out_generic_concept, recorded on Param) needs to know this
     // parameter was ever generic at all.
-    Type parse_param_type(std::string& out_generic_concept) {
+    [[nodiscard]] std::expected<Type, ParseError> parse_param_type(std::string& out_generic_concept) {
         out_generic_concept.clear();
         std::size_t const_offset = check(TokenKind::KwConst) ? 1 : 0;
         bool next_is_identifier_then_auto =
@@ -2911,10 +3059,10 @@ private:
             concept_name = std::string(peek_at(const_offset).text);
             if (!concept_names_.contains(concept_name)) {
                 const Token& tok = peek_at(const_offset);
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "'" + concept_name +
                                       "' is not a declared concept -- 'Name auto' is only legal when 'Name' names a "
-                                      "concept, declared before use (ch05 §5.11)");
+                                      "concept, declared before use (ch05 §5.11)"));
             }
         } else {
             concept_name = "$auto";
@@ -2926,7 +3074,7 @@ private:
         std::string display_name = next_is_identifier_then_auto ? concept_name : std::string("auto");
         bool has_const = match(TokenKind::KwConst);
         if (next_is_identifier_then_auto) advance(); // the concept name itself
-        expect(TokenKind::KwAuto, "'auto'");
+        if (auto _r = expect(TokenKind::KwAuto, "'auto'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         out_generic_concept = concept_name;
 
         Type type;
@@ -2936,10 +3084,10 @@ private:
         if (match(TokenKind::AmpAmp)) {
             if (has_const) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "'const' cannot qualify an rvalue reference ('const " + display_name +
                                       " auto&&') -- an rvalue-reference parameter always takes ownership via "
-                                      "move (ch03), which needs mutable access to the value being moved from");
+                                      "move (ch03), which needs mutable access to the value being moved from"));
             }
             auto pointee = std::make_shared<Type>(std::move(type));
             type = Type{};
@@ -2960,9 +3108,9 @@ private:
         }
         if (has_const) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "'const' is only supported directly before a reference type ('const " +
-                                  display_name + " auto&') in this version");
+                                  display_name + " auto&') in this version"));
         }
         return type; // bare "ConceptName auto"/"auto" -- by value
     }
@@ -2983,7 +3131,7 @@ private:
     // template-parameter-dependent bound such as `sizeof(T)`, at each
     // point of instantiation -- see monomorphize.cppm), then fills in
     // `array_size` and clears `array_size_expr`.
-    Type parse_array_suffix(Type base) {
+    [[nodiscard]] std::expected<Type, ParseError> parse_array_suffix(Type base) {
         // ch00 §2/ch01 §1.3: `[[` (a doubled bracket) starts an
         // attribute-specifier-seq, never an array declarator -- stop
         // here rather than misparsing e.g. `T&& f [[scpp::thread_movable]]`
@@ -2994,11 +3142,13 @@ private:
         while (check(TokenKind::LBracket) && peek_at(1).kind != TokenKind::LBracket) {
             const Token& bracket_tok = peek();
             if (base.kind == TypeKind::Reference) {
-                throw ParseError(bracket_tok.line, bracket_tok.column, "arrays of references are not supported");
+                return std::unexpected(ParseError(bracket_tok.line, bracket_tok.column, "arrays of references are not supported"));
             }
             advance();
-            ExprPtr size_expr = parse_expr();
-            expect(TokenKind::RBracket, "']'");
+            auto size_expr_result = parse_expr();
+            if (!size_expr_result.has_value()) return std::unexpected(std::move(size_expr_result).error());
+            ExprPtr size_expr = std::move(size_expr_result.value());
+            if (auto _r = expect(TokenKind::RBracket, "']'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             auto element = std::make_shared<Type>(base);
             base = Type{};
             base.kind = TypeKind::Array;
@@ -3012,30 +3162,34 @@ private:
         return check(TokenKind::LParen) && peek_at(1).kind == TokenKind::Star;
     }
 
-    std::vector<Type> parse_function_pointer_param_types() {
+    [[nodiscard]] std::expected<std::vector<Type>, ParseError> parse_function_pointer_param_types() {
         std::vector<Type> params;
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!check(TokenKind::RParen)) {
             do {
-                Type param_type = parse_type(/*allow_rvalue_ref=*/true);
+                auto param_type_result = parse_type(/*allow_rvalue_ref=*/true);
+                if (!param_type_result.has_value()) return std::unexpected(std::move(param_type_result).error());
+                Type param_type = std::move(param_type_result.value());
                 if (match(TokenKind::Ellipsis)) {
                     if (!referenced_pack_type_param_name(param_type).has_value()) {
                         const Token& tok = peek();
-                        throw ParseError(tok.line, tok.column,
+                        return std::unexpected(ParseError(tok.line, tok.column,
                                           "a function-pointer parameter pack must name an enclosing type or "
-                                          "function template parameter pack");
+                                          "function template parameter pack"));
                     }
                     param_type.is_pack_expansion = true;
                     if (check(TokenKind::Identifier)) advance(); // optional parameter name, ignored in a function type
                     if (!check(TokenKind::RParen)) {
                         const Token& tok = peek();
-                        throw ParseError(tok.line, tok.column,
-                                          "a function-pointer parameter pack must be the last parameter in the list");
+                        return std::unexpected(ParseError(tok.line, tok.column,
+                                          "a function-pointer parameter pack must be the last parameter in the list"));
                     }
                 } else if (check(TokenKind::Identifier)) {
                     advance(); // optional parameter name, ignored in a function type
                 }
-                param_type = parse_array_suffix(param_type);
+                auto param_type_suffix_result = parse_array_suffix(param_type);
+                if (!param_type_suffix_result.has_value()) return std::unexpected(std::move(param_type_suffix_result).error());
+                param_type = std::move(param_type_suffix_result.value());
                 if (param_type.kind == TypeKind::Array) {
                     Type decayed;
                     decayed.kind = TypeKind::Pointer;
@@ -3045,15 +3199,17 @@ private:
                 params.push_back(std::move(param_type));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::RParen, "')'");
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return params;
     }
 
-    Type parse_function_type_suffix(Type return_type) {
+    [[nodiscard]] std::expected<Type, ParseError> parse_function_type_suffix(Type return_type) {
         Type type;
         type.kind = TypeKind::Function;
         type.function_return = std::make_shared<Type>(std::move(return_type));
-        type.function_params = parse_function_pointer_param_types();
+        auto _tmp_result = parse_function_pointer_param_types();
+        if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+        type.function_params = std::move(_tmp_result.value());
         type.is_const_function = match(TokenKind::KwConst);
         if (match(TokenKind::AmpAmp)) {
             type.function_ref_qualifier = ReceiverRefQualifier::RValue;
@@ -3063,46 +3219,62 @@ private:
         return type;
     }
 
-    Type parse_template_type_argument() {
-        Type type = parse_type(/*allow_rvalue_ref=*/false, /*out_bare_const=*/nullptr,
+    [[nodiscard]] std::expected<Type, ParseError> parse_template_type_argument() {
+        auto type_result = parse_type(/*allow_rvalue_ref=*/false, /*out_bare_const=*/nullptr,
                                /*allow_const_qualified_value_type=*/true);
+        if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
+        Type type = std::move(type_result.value());
         const Token& attr_start_tok = peek();
-        ParsedAttributes attrs = parse_attribute_specifier_seq();
+        auto attrs_result = parse_attribute_specifier_seq();
+        if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
+        ParsedAttributes attrs = std::move(attrs_result.value());
         if (attrs.lifetime.present() && !allow_type_lifetime_attributes_) {
-            throw ParseError(attr_start_tok.line, attr_start_tok.column,
+            return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
                              "'[[scpp::lifetime(name)]]' cannot appertain to a type-id here -- only to an eligible "
-                             "parameter declaration or function declarator");
+                             "parameter declaration or function declarator"));
         }
-        merge_lifetime_attribute(type.lifetime, attrs.lifetime, attr_start_tok,
-                                 "a type-id within a parameter or return type");
+        if (auto _r = merge_lifetime_attribute(type.lifetime, attrs.lifetime, attr_start_tok,
+                                 "a type-id within a parameter or return type"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (check(TokenKind::LParen)) {
-            type = parse_function_type_suffix(std::move(type));
+            auto suffix_result = parse_function_type_suffix(std::move(type));
+            if (!suffix_result.has_value()) return std::unexpected(std::move(suffix_result).error());
+            type = std::move(suffix_result.value());
         }
         return type;
     }
 
-    Type parse_function_pointer_declarator(Type return_type, std::string& out_name) {
-        expect(TokenKind::LParen, "'('");
-        expect(TokenKind::Star, "'*'");
+    [[nodiscard]] std::expected<Type, ParseError> parse_function_pointer_declarator(Type return_type, std::string& out_name) {
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::Star, "'*'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         const Token& attr_start_tok = peek();
-        ParsedAttributes ptr_attrs = parse_attribute_specifier_seq();
-        reject_packed_attribute(ptr_attrs, attr_start_tok, "a function-pointer declarator");
-        out_name = std::string(expect(TokenKind::Identifier, "function pointer name").text);
-        expect(TokenKind::RParen, "')'");
+        auto ptr_attrs_result = parse_attribute_specifier_seq();
+        if (!ptr_attrs_result.has_value()) return std::unexpected(std::move(ptr_attrs_result).error());
+        ParsedAttributes ptr_attrs = std::move(ptr_attrs_result.value());
+        if (auto _r = reject_packed_attribute(ptr_attrs, attr_start_tok, "a function-pointer declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        auto fn_ptr_name_result = expect(TokenKind::Identifier, "function pointer name");
+        if (!fn_ptr_name_result.has_value()) return std::unexpected(std::move(fn_ptr_name_result).error());
+        out_name = std::string(fn_ptr_name_result.value().text);
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         Type type;
         type.kind = TypeKind::FunctionPointer;
         type.function_return = std::make_shared<Type>(std::move(return_type));
-        type.function_params = parse_function_pointer_param_types();
+        auto _tmp_result = parse_function_pointer_param_types();
+        if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+        type.function_params = std::move(_tmp_result.value());
         type.is_unsafe_function_pointer = ptr_attrs.has("unsafe");
         return type;
     }
 
-    Type parse_named_declarator(Type base_type, std::string& out_name, const char* name_what) {
+    [[nodiscard]] std::expected<Type, ParseError> parse_named_declarator(Type base_type, std::string& out_name, const char* name_what) {
         if (starts_function_pointer_declarator()) {
             return parse_function_pointer_declarator(std::move(base_type), out_name);
         }
-        out_name = std::string(expect(TokenKind::Identifier, name_what).text);
-        Type declared_type = parse_array_suffix(base_type);
+        auto name_result = expect(TokenKind::Identifier, name_what);
+        if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+        out_name = std::string(name_result.value().text);
+        auto declared_type_result = parse_array_suffix(base_type);
+        if (!declared_type_result.has_value()) return std::unexpected(std::move(declared_type_result).error());
+        Type declared_type = std::move(declared_type_result.value());
         if (declared_type.kind == TypeKind::Array) {
             Type decayed;
             decayed.kind = TypeKind::Pointer;
@@ -3123,7 +3295,7 @@ private:
     // overwhelmingly common case): nothing is consumed,
     // `program.module_name` stays empty and every existing behavior is
     // unaffected.
-    void parse_module_declaration(Program& program) {
+    [[nodiscard]] std::expected<void, ParseError> parse_module_declaration(Program& program) {
         bool saw_global_module_fragment = false;
         if (check(TokenKind::KwModule) && peek_at(1).kind == TokenKind::Semicolon) {
             advance(); // 'module'
@@ -3134,17 +3306,21 @@ private:
         if (!leading_export && !check(TokenKind::KwModule)) {
             if (saw_global_module_fragment) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                 "a global module fragment ('module;') must be followed by a module declaration");
+                return std::unexpected(ParseError(tok.line, tok.column,
+                                 "a global module fragment ('module;') must be followed by a module declaration"));
             }
-            return;
+            return {};
         }
         if (leading_export) advance(); // 'export'
         advance(); // 'module'
-        std::string dotted(expect(TokenKind::Identifier, "module name").text);
+        auto module_name_tok_result = expect(TokenKind::Identifier, "module name");
+        if (!module_name_tok_result.has_value()) return std::unexpected(std::move(module_name_tok_result).error());
+        std::string dotted(module_name_tok_result.value().text);
         while (match(TokenKind::Dot)) {
             dotted += '.';
-            dotted += std::string(expect(TokenKind::Identifier, "module name segment").text);
+            auto segment_result = expect(TokenKind::Identifier, "module name segment");
+            if (!segment_result.has_value()) return std::unexpected(std::move(segment_result).error());
+            dotted += std::string(segment_result.value().text);
         }
         // ch11 §11.4: an optional `:partition` suffix -- designates this
         // file as one specific partition of `dotted`, rather than its
@@ -3154,12 +3330,15 @@ private:
         // keeps comparing against the *module's* own name, unaffected by
         // which partition happens to be declaring something.
         if (match(TokenKind::Colon)) {
-            program.partition_name = std::string(expect(TokenKind::Identifier, "partition name").text);
+            auto partition_name_result = expect(TokenKind::Identifier, "partition name");
+            if (!partition_name_result.has_value()) return std::unexpected(std::move(partition_name_result).error());
+            program.partition_name = std::string(partition_name_result.value().text);
         }
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         program.module_name = dotted;
         program.is_module_interface = leading_export;
         program.is_module_impl = !leading_export;
+        return {};
     }
 
     // ch11 §11.4/§11.8: parses zero or more `import name;` / `export
@@ -3172,11 +3351,11 @@ private:
     // imported names are visible (struct_names_/class_names_) to the
     // rest of this file, which is parsed next -- mirrors real C++20's
     // own requirement that imports precede every other declaration.
-    void parse_import_declarations(Program& program) {
+    [[nodiscard]] std::expected<void, ParseError> parse_import_declarations(Program& program) {
         for (;;) {
             bool is_reexport = check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::KwImport;
             bool is_plain_import = check(TokenKind::KwImport);
-            if (!is_reexport && !is_plain_import) return;
+            if (!is_reexport && !is_plain_import) return {};
             if (is_reexport) advance(); // 'export'
             const Token& import_tok = peek();
             advance(); // 'import'
@@ -3185,14 +3364,16 @@ private:
                 // ch11 §11.4: a same-module partition import -- only
                 // meaningful inside a file that is itself part of some
                 // module (primary unit or another partition).
-                std::string partition_name(expect(TokenKind::Identifier, "partition name").text);
-                expect(TokenKind::Semicolon, "';'");
+                auto partition_name_tok_result = expect(TokenKind::Identifier, "partition name");
+                if (!partition_name_tok_result.has_value()) return std::unexpected(std::move(partition_name_tok_result).error());
+                std::string partition_name(partition_name_tok_result.value().text);
+                if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
                 if (program.module_name.empty()) {
-                    throw ParseError(import_tok.line, import_tok.column,
+                    return std::unexpected(ParseError(import_tok.line, import_tok.column,
                                       "cannot import partition ':" + partition_name +
                                           "' -- this file has no 'module'/'export module' declaration of "
-                                          "its own (ch11 §11.4: partitions only exist within a module)");
+                                          "its own (ch11 §11.4: partitions only exist within a module)"));
                 }
                 ImportDecl import;
                 import.module_name = partition_name;
@@ -3202,21 +3383,28 @@ private:
 
                 std::string key = program.module_name + ":" + partition_name;
                 if (!partition_resolver_) {
-                    throw ParseError(import_tok.line, import_tok.column,
+                    return std::unexpected(ParseError(import_tok.line, import_tok.column,
                                       "cannot resolve partition '" + key +
                                           "' -- no partition resolver was configured for this build (see "
-                                          "the driver's --import " + key + "=path flag)");
+                                          "the driver's --import " + key + "=path flag)"));
                 }
-                merge_partition(program, partition_resolver_(key), import.is_reexport, key, import_tok);
+                if (auto _r = merge_partition(program, partition_resolver_(key), import.is_reexport, key, import_tok); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 continue;
             }
 
-            std::string dotted(expect(TokenKind::Identifier, "imported module name").text);
+            std::string dotted;
+            {
+                auto module_name_tok_result = expect(TokenKind::Identifier, "imported module name");
+                if (!module_name_tok_result.has_value()) return std::unexpected(std::move(module_name_tok_result).error());
+                dotted = std::string(module_name_tok_result.value().text);
+            }
             while (match(TokenKind::Dot)) {
                 dotted += '.';
-                dotted += std::string(expect(TokenKind::Identifier, "module name segment").text);
+                auto segment_result = expect(TokenKind::Identifier, "module name segment");
+                if (!segment_result.has_value()) return std::unexpected(std::move(segment_result).error());
+                dotted += std::string(segment_result.value().text);
             }
-            expect(TokenKind::Semicolon, "';'");
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
             ImportDecl import;
             import.module_name = dotted;
@@ -3224,12 +3412,12 @@ private:
             program.imports.push_back(std::move(import));
 
             if (!resolver_) {
-                throw ParseError(import_tok.line, import_tok.column,
+                return std::unexpected(ParseError(import_tok.line, import_tok.column,
                                   "cannot resolve imported module '" + dotted +
                                       "' -- no module resolver was configured for this build (see the "
-                                      "driver's --import name=path flag)");
+                                      "driver's --import name=path flag)"));
             }
-            merge_imported_module(program, resolver_(dotted), dotted, is_reexport);
+            if (auto _r = merge_imported_module(program, resolver_(dotted), dotted, is_reexport); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
     }
 
@@ -3323,7 +3511,7 @@ private:
     // declarations are visible to an importer at all -- a module-private
     // helper is invisible outside its own file, matching real C++20
     // modules.
-    void merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
+    [[nodiscard]] std::expected<void, ParseError> merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
                                 bool is_reexport) {
         std::unordered_set<std::string> hidden_function_designators = imported_hidden_function_designators(imported);
         for (const EnumDef& def : imported.enums) {
@@ -3350,7 +3538,7 @@ private:
             if (!def.is_exported && !def.is_compile_time_dependency) continue;
             if (def.is_exported) {
                 struct_names_.insert(def.name);
-                register_record_tag_kind(def.name, def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, def.loc);
+                if (auto _r = register_record_tag_kind(def.name, def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, def.loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             if (def.is_exported && !def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
@@ -3376,7 +3564,7 @@ private:
             if (def.is_exported) {
                 struct_names_.insert(def.name);
                 class_names_.insert(def.name);
-                register_record_tag_kind(def.name, RecordTagKind::Class, def.loc);
+                if (auto _r = register_record_tag_kind(def.name, RecordTagKind::Class, def.loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             if (def.is_exported && (!def.template_params.empty() || def.is_variadic_primary_template)) {
                 generic_type_names_.insert(def.name);
@@ -3490,6 +3678,7 @@ private:
             clone.is_exported = is_reexport && clone.is_exported;
             program.globals.push_back(std::move(clone));
         }
+        return {};
     }
 
     // Merges *every* declaration (exported or not -- ch11 §11.4: within a
@@ -3520,14 +3709,14 @@ private:
     // `export` on its own module declaration) is rejected: such a
     // partition can never export anything to the outside, by
     // construction, matching real C++20.
-    void merge_partition(Program& program, Program&& partition, bool is_reexport, const std::string& key,
+    [[nodiscard]] std::expected<void, ParseError> merge_partition(Program& program, Program&& partition, bool is_reexport, const std::string& key,
                           const Token& import_tok) {
         if (is_reexport && partition.is_module_impl) {
-            throw ParseError(import_tok.line, import_tok.column,
+            return std::unexpected(ParseError(import_tok.line, import_tok.column,
                               "cannot 'export import' partition '" + key +
                                   "': it is an implementation partition ('module ...;' with no 'export' on "
                                   "its own module declaration), so it can never export anything to the "
-                                  "outside (ch11 §11.4)");
+                                  "outside (ch11 §11.4)"));
         }
         for (EnumDef& def : partition.enums) {
             struct_names_.insert(def.name);
@@ -3544,7 +3733,7 @@ private:
         }
         for (StructDef& def : partition.structs) {
             struct_names_.insert(def.name);
-            register_record_tag_kind(def.name, def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, def.loc);
+            if (auto _r = register_record_tag_kind(def.name, def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, def.loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (!def.template_params.empty()) {
                 generic_type_names_.insert(def.name);
                 ordinary_generic_type_template_params_[def.name] = def.template_params;
@@ -3563,7 +3752,7 @@ private:
         for (ClassDef& def : partition.classes) {
             struct_names_.insert(def.name);
             class_names_.insert(def.name);
-            register_record_tag_kind(def.name, RecordTagKind::Class, def.loc);
+            if (auto _r = register_record_tag_kind(def.name, RecordTagKind::Class, def.loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (!def.template_params.empty() || def.is_variadic_primary_template) {
                 generic_type_names_.insert(def.name);
                 if (def.is_variadic_primary_template) {
@@ -3647,12 +3836,13 @@ private:
             global.is_exported = is_reexport && global.is_exported;
             program.globals.push_back(std::move(global));
         }
+        return {};
     }
 
-    void parse_exported_top_level_entry(Program& program, bool inherited_export) {
+    [[nodiscard]] std::expected<void, ParseError> parse_exported_top_level_entry(Program& program, bool inherited_export) {
         if (check(TokenKind::KwNamespace)) {
-            parse_namespace_block(program, inherited_export);
-            return;
+            if (auto _r = parse_namespace_block(program, inherited_export); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            return {};
         }
         if (check(TokenKind::KwExport) && peek_at(1).kind == TokenKind::LBrace) {
             // `export { <item> <item> ... }` -- groups several
@@ -3662,17 +3852,18 @@ private:
             advance(); // 'export'
             advance(); // '{'
             while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-                parse_exported_top_level_entry(program, /*inherited_export=*/true);
+                if (auto _r = parse_exported_top_level_entry(program, /*inherited_export=*/true); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
-            expect(TokenKind::RBrace, "'}'");
-            return;
+            if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            return {};
         }
         bool is_exported = inherited_export || match(TokenKind::KwExport);
         if (check(TokenKind::KwNamespace)) {
-            parse_namespace_block(program, is_exported);
-            return;
+            if (auto _r = parse_namespace_block(program, is_exported); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            return {};
         }
-        parse_top_level_item(program, is_exported);
+        if (auto _r = parse_top_level_item(program, is_exported); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        return {};
     }
 
     // The main "loop over top-level declarations" body, shared between
@@ -3681,16 +3872,17 @@ private:
     // ordinary parse error downstream exactly as it always has) and the
     // inside of a `namespace { ... }` block (`inside_namespace=true`,
     // also terminated by the block's own closing '}').
-    void parse_top_level_items(Program& program, bool inside_namespace = false) {
+    [[nodiscard]] std::expected<void, ParseError> parse_top_level_items(Program& program, bool inside_namespace = false) {
         while (!check(TokenKind::EndOfFile) && !(inside_namespace && check(TokenKind::RBrace))) {
-            parse_exported_top_level_entry(program, /*inherited_export=*/false);
+            if (auto _r = parse_exported_top_level_entry(program, /*inherited_export=*/false); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
+        return {};
     }
 
     // Parses exactly one enum/struct/class/concept/function(-or-extern-group)
     // top-level item, given whether an `export` marker (individual, or
     // inherited from an enclosing `export { }` group) applies to it.
-    void parse_top_level_item(Program& program, bool is_exported) {
+    [[nodiscard]] std::expected<void, ParseError> parse_top_level_item(Program& program, bool is_exported) {
         // ch01 §1.2/§1.3: a leading `[[scpp::unsafe]]` attribute-
         // specifier-seq, if any, applies to a function's own
         // declaration (the function-level unsafe marker) -- parsed once
@@ -3701,59 +3893,70 @@ private:
         // specifier-seq containing the attribute-token unsafe
         // appertains to anything other than [a compound-statement or a
         // function], the program is ill-formed").
-        std::vector<AlignmentSpecifier> leading_alignments = parse_alignment_specifier_seq();
+        auto leading_alignments_result = parse_alignment_specifier_seq();
+        if (!leading_alignments_result.has_value()) return std::unexpected(std::move(leading_alignments_result).error());
+        std::vector<AlignmentSpecifier> leading_alignments = std::move(leading_alignments_result.value());
         const Token& attr_start_tok = peek();
-        ParsedAttributes leading_attrs = parse_attribute_specifier_seq();
+        auto leading_attrs_result = parse_attribute_specifier_seq();
+        if (!leading_attrs_result.has_value()) return std::unexpected(std::move(leading_attrs_result).error());
+        ParsedAttributes leading_attrs = std::move(leading_attrs_result.value());
         bool requested_unsafe = leading_attrs.has("unsafe");
         bool requested_packed = leading_attrs.has("packed");
         bool requested_nodiscard = leading_attrs.has_nodiscard;
         std::string requested_nodiscard_reason = leading_attrs.nodiscard_reason;
-        auto reject_unsafe_if_requested = [&](const char* what) {
+        auto reject_unsafe_if_requested = [&](const char* what) -> std::expected<void, ParseError> {
             if (requested_unsafe) {
-                throw ParseError(attr_start_tok.line, attr_start_tok.column,
-                                  "'[[scpp::unsafe]]' cannot appertain to " + std::string(what) +
-                                      " -- only to a compound-statement or a function's own declaration "
-                                      "(ch01 §1.3)");
+                return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
+                                  "\'[[scpp::unsafe]]\' cannot appertain to " + std::string(what) +
+                                      " -- only to a compound-statement or a function\'s own declaration "
+                                      "(ch01 §1.3)"));
             }
+        return {};
         };
         if (check(TokenKind::KwUsing)) {
-            reject_unsafe_if_requested("a type alias declaration");
-            reject_alignment_specifiers(leading_alignments, "a type alias declaration");
-            reject_packed_attribute(leading_attrs, attr_start_tok, "a type alias declaration");
+            if (auto _r = reject_unsafe_if_requested("a type alias declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = reject_alignment_specifiers(leading_alignments, "a type alias declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = reject_packed_attribute(leading_attrs, attr_start_tok, "a type alias declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (requested_nodiscard) {
-                throw ParseError(attr_start_tok.line, attr_start_tok.column,
-                                 "'[[nodiscard]]' cannot appertain to a type alias declaration");
+                return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
+                                 "'[[nodiscard]]' cannot appertain to a type alias declaration"));
             }
-            parse_type_alias_decl(program, is_exported);
+            if (auto _r = parse_type_alias_decl(program, is_exported); !_r.has_value()) return std::unexpected(std::move(_r).error());
         } else if (check(TokenKind::KwStruct)) {
-            reject_unsafe_if_requested("a 'struct' declaration");
+            if (auto _r = reject_unsafe_if_requested("a 'struct' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             SourceLocation loc = current_loc();
-            StructDef def = parse_struct_def(program, is_exported, {}, std::move(leading_alignments));
-            check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
+            auto def_result = parse_struct_def(program, is_exported, {}, std::move(leading_alignments));
+            if (!def_result.has_value()) return std::unexpected(std::move(def_result).error());
+            StructDef def = std::move(def_result.value());
+            if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwEnum)) {
-            reject_unsafe_if_requested("an 'enum class' declaration");
-            reject_alignment_specifiers(leading_alignments, "an 'enum class' declaration");
-            reject_packed_attribute(leading_attrs, attr_start_tok, "an 'enum class' declaration");
+            if (auto _r = reject_unsafe_if_requested("an 'enum class' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = reject_alignment_specifiers(leading_alignments, "an 'enum class' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = reject_packed_attribute(leading_attrs, attr_start_tok, "an 'enum class' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             SourceLocation loc = current_loc();
-            EnumDef def = parse_enum_def();
+            auto def_result = parse_enum_def();
+            if (!def_result.has_value()) return std::unexpected(std::move(def_result).error());
+            EnumDef def = std::move(def_result.value());
             def.is_exported = is_exported;
-            check_export_context(program, is_exported, def.namespace_path, loc, "enum class '" + def.name + "'");
+            if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "enum class '" + def.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             program.enums.push_back(std::move(def));
         } else if (check(TokenKind::KwUnion)) {
-            reject_unsafe_if_requested("a 'union' declaration");
+            if (auto _r = reject_unsafe_if_requested("a 'union' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             SourceLocation loc = current_loc();
-            StructDef def = parse_union_def(std::move(leading_alignments));
+            auto def_result = parse_union_def(std::move(leading_alignments));
+            if (!def_result.has_value()) return std::unexpected(std::move(def_result).error());
+            StructDef def = std::move(def_result.value());
             def.is_exported = is_exported;
-            check_export_context(program, is_exported, def.namespace_path, loc, "union '" + def.name + "'");
+            if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "union '" + def.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             program.structs.push_back(std::move(def));
         } else if (check(TokenKind::KwClass)) {
-            reject_unsafe_if_requested("a 'class' declaration");
+            if (auto _r = reject_unsafe_if_requested("a 'class' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (requested_packed) {
-                throw ParseError(attr_start_tok.line, attr_start_tok.column,
-                                 "'[[scpp::packed]]' is only supported on struct/union declarations");
+                return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
+                                 "'[[scpp::packed]]' is only supported on struct/union declarations"));
             }
-            parse_class_def(program, is_exported, {}, std::move(leading_alignments));
+            if (auto _r = parse_class_def(program, is_exported, {}, std::move(leading_alignments)); !_r.has_value()) return std::unexpected(std::move(_r).error());
         } else if (check(TokenKind::KwTemplate)) {
             // ch05 §5.11/§5.14: `template<...>` introduces either a
             // `concept` declaration or a generic `class`/`struct` type
@@ -3764,8 +3967,8 @@ private:
             std::size_t after_header = offset_after_matching_angle(1); // peek_at(1) is the header's own '<'
             TokenKind after_header_kind = peek_at(after_header).kind;
             if (after_header_kind == TokenKind::KwClass) {
-                reject_unsafe_if_requested("a 'class' declaration");
-                reject_packed_attribute(leading_attrs, attr_start_tok, "a 'class' declaration");
+                if (auto _r = reject_unsafe_if_requested("a 'class' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_packed_attribute(leading_attrs, attr_start_tok, "a 'class' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 // A class name is immediately followed by `;` (a
                 // variadic primary template's own bodyless forward
                 // declaration, e.g. `template<typename... Ts> class
@@ -3776,7 +3979,9 @@ private:
                 // ch05 §5.14's phase-1 shape).
                 TokenKind after_name = peek_at(after_header + 2).kind;
                 if (after_name == TokenKind::Semicolon) {
-                    std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+                    auto template_params_result = parse_generic_type_header();
+                    if (!template_params_result.has_value()) return std::unexpected(std::move(template_params_result).error());
+                    std::vector<GenericTypeParam> template_params = std::move(template_params_result.value());
                     std::size_t leading_non_type_count = 0;
                     while (leading_non_type_count < template_params.size() &&
                            template_params[leading_non_type_count].is_non_type) {
@@ -3786,26 +3991,30 @@ private:
                         template_params.size() == leading_non_type_count + 1 &&
                         template_params.back().is_pack && !template_params.back().is_non_type;
                     if (is_variadic_primary) {
-                        parse_variadic_primary_template_decl(program, is_exported, std::move(template_params));
+                        if (auto _r = parse_variadic_primary_template_decl(program, is_exported, std::move(template_params)); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     } else {
-                        parse_ordinary_class_template_forward_decl(program, is_exported, std::move(template_params));
+                        if (auto _r = parse_ordinary_class_template_forward_decl(program, is_exported, std::move(template_params)); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     }
                 } else if (after_name == TokenKind::Less) {
                     std::size_t name_offset = after_header + 1;
                     std::string class_name = std::string(peek_at(name_offset).text);
                     std::string qualified_class_name = qualify_name(class_name);
                     if (variadic_primary_template_params_.contains(qualified_class_name)) {
-                        parse_variadic_specialization(program, is_exported);
+                        if (auto _r = parse_variadic_specialization(program, is_exported); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     } else {
-                        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-                        parse_ordinary_class_partial_specialization(program, is_exported, std::move(template_params));
+                        auto template_params_result = parse_generic_type_header();
+                        if (!template_params_result.has_value()) return std::unexpected(std::move(template_params_result).error());
+                        std::vector<GenericTypeParam> template_params = std::move(template_params_result.value());
+                        if (auto _r = parse_ordinary_class_partial_specialization(program, is_exported, std::move(template_params)); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     }
                 } else {
-                    std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-                    parse_class_def(program, is_exported, std::move(template_params));
+                    auto template_params_result = parse_generic_type_header();
+                    if (!template_params_result.has_value()) return std::unexpected(std::move(template_params_result).error());
+                    std::vector<GenericTypeParam> template_params = std::move(template_params_result.value());
+                    if (auto _r = parse_class_def(program, is_exported, std::move(template_params)); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 }
             } else if (after_header_kind == TokenKind::KwStruct) {
-                reject_unsafe_if_requested("a 'struct' declaration");
+                if (auto _r = reject_unsafe_if_requested("a 'struct' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 // ch05 §5.14: a variadic generic type is class-only --
                 // the only way to vary a type's own layout by arity is
                 // recursive inheritance (real C++ has no syntax to
@@ -3818,63 +4027,87 @@ private:
                 if (peek_at(after_header + 2).kind == TokenKind::Semicolon ||
                     peek_at(after_header + 2).kind == TokenKind::Less) {
                     const Token& tok = peek_at(after_header);
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                       "a variadic generic type (parameter packs, ch05 §5.14) is only "
                                       "supported for 'class', never 'struct' -- building one needs recursive "
-                                      "inheritance, which a struct doesn't have");
+                                      "inheritance, which a struct doesn't have"));
                 }
                 SourceLocation loc = current_loc();
-                std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-                StructDef def = parse_struct_def(program, is_exported, std::move(template_params));
-                check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'");
+                auto template_params_result = parse_generic_type_header();
+                if (!template_params_result.has_value()) return std::unexpected(std::move(template_params_result).error());
+                std::vector<GenericTypeParam> template_params = std::move(template_params_result.value());
+                auto def_result = parse_struct_def(program, is_exported, std::move(template_params));
+                if (!def_result.has_value()) return std::unexpected(std::move(def_result).error());
+                StructDef def = std::move(def_result.value());
+                if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "struct '" + def.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 program.structs.push_back(std::move(def));
             } else if (after_header_kind == TokenKind::KwUnion) {
-                reject_unsafe_if_requested("a 'union' declaration");
-                reject_alignment_specifiers(leading_alignments, "a generic 'union' declaration");
+                if (auto _r = reject_unsafe_if_requested("a 'union' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_alignment_specifiers(leading_alignments, "a generic 'union' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 const Token& tok = peek_at(after_header);
-                throw ParseError(tok.line, tok.column,
-                                  "generic unions are not supported in this version");
+                return std::unexpected(ParseError(tok.line, tok.column,
+                                  "generic unions are not supported in this version"));
             } else if (after_header_kind == TokenKind::KwConcept) {
-                reject_unsafe_if_requested("a 'concept' declaration");
-                reject_alignment_specifiers(leading_alignments, "a 'concept' declaration");
-                reject_packed_attribute(leading_attrs, attr_start_tok, "a 'concept' declaration");
-                parse_concept_def(program, is_exported);
+                if (auto _r = reject_unsafe_if_requested("a 'concept' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_alignment_specifiers(leading_alignments, "a 'concept' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_packed_attribute(leading_attrs, attr_start_tok, "a 'concept' declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = parse_concept_def(program, is_exported); !_r.has_value()) return std::unexpected(std::move(_r).error());
             } else {
-                reject_alignment_specifiers(leading_alignments, "a function declaration");
-                reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
+                if (auto _r = reject_alignment_specifiers(leading_alignments, "a function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 // ch05 §5.11: neither `class`/`struct` (a generic type,
                 // handled above) nor `concept` -- the only remaining
                 // legal shape is a full-header-form generic *function*
                 // (`template<...> ReturnType name(params) { body }`,
                 // ch05 §5.11's "generic functions may be spelled with
                 // either the abbreviated or full header form").
-                parse_generic_function_def(program, is_exported, requested_unsafe, requested_nodiscard,
+                if (auto _r = parse_generic_function_def(program, is_exported, requested_unsafe, requested_nodiscard,
                                            requested_nodiscard_reason);
-            }
-        } else {
-            reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration");
-            if (looks_like_type_start()) {
-                std::size_t saved_pos = pos_;
-                try {
-                    reject_unsafe_if_requested("a variable declaration");
-                    StmtPtr decl = parse_global_var_decl(std::move(leading_alignments));
-                    GlobalVar global;
-                    global.decl = std::move(decl);
-                    global.namespace_path = namespace_stack_;
-                    global.is_exported = is_exported;
-                    SourceLocation loc = global.decl->loc;
-                    check_export_context(program, is_exported, global.namespace_path, loc,
-                                           "variable '" + global.decl->var_name + "'");
-                    program.globals.push_back(std::move(global));
-                    return;
-                } catch (const ParseError&) {
-                    pos_ = saved_pos;
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
                 }
             }
-            reject_alignment_specifiers(leading_alignments, "a function declaration");
-            parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe, requested_nodiscard,
+        } else {
+            if (auto _r = reject_packed_attribute(leading_attrs, attr_start_tok, "a function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (looks_like_type_start()) {
+                std::size_t saved_pos = pos_;
+                bool parsed_as_var_decl = false;
+                // ch05: this whole "attempt to parse as a global variable
+                // declaration" block is a backtracking attempt -- ANY
+                // failure here (an ineligible `[[scpp::unsafe]]`, a
+                // malformed declarator, or a rejected export context) means
+                // this isn't a variable declaration after all, so we must
+                // fall through and retry as a function declaration instead
+                // of propagating the error outward.
+                auto unsafe_check = reject_unsafe_if_requested("a variable declaration");
+                if (unsafe_check.has_value()) {
+                    auto decl_result = parse_global_var_decl(std::move(leading_alignments));
+                    if (decl_result.has_value()) {
+                        StmtPtr decl = std::move(decl_result.value());
+                        GlobalVar global;
+                        global.decl = std::move(decl);
+                        global.namespace_path = namespace_stack_;
+                        global.is_exported = is_exported;
+                        SourceLocation loc = global.decl->loc;
+                        auto export_check = check_export_context(program, is_exported, global.namespace_path, loc,
+                                               "variable '" + global.decl->var_name + "'");
+                        if (export_check.has_value()) {
+                            program.globals.push_back(std::move(global));
+                            parsed_as_var_decl = true;
+                        }
+                    }
+                }
+                if (parsed_as_var_decl) return {};
+                pos_ = saved_pos;
+            }
+            if (auto _r = reject_alignment_specifiers(leading_alignments, "a function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = parse_top_level_function_or_extern_group(program, is_exported, requested_unsafe, requested_nodiscard,
                                                      requested_nodiscard_reason);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
+        return {};
     }
 
     // ch11 §11.4: `namespace a::b::c { ... }`, including the C++17
@@ -3885,25 +4118,28 @@ private:
     // `export_contents=true`, this is the sugar form `export namespace
     // ... { ... }`: every direct top-level item inside the block behaves
     // as though it had its own leading `export`.
-    void parse_namespace_block(Program& program, bool export_contents = false) {
-        expect(TokenKind::KwNamespace, "'namespace'");
+    [[nodiscard]] std::expected<void, ParseError> parse_namespace_block(Program& program, bool export_contents = false) {
+        if (auto _r = expect(TokenKind::KwNamespace, "'namespace'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::size_t pushed = 0;
         for (;;) {
-            std::string segment(expect(TokenKind::Identifier, "namespace name").text);
+            auto segment_result = expect(TokenKind::Identifier, "namespace name");
+            if (!segment_result.has_value()) return std::unexpected(std::move(segment_result).error());
+            std::string segment(segment_result.value().text);
             namespace_stack_.push_back(std::move(segment));
             pushed++;
             if (!match(TokenKind::ColonColon)) break;
         }
-        expect(TokenKind::LBrace, "'{'");
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (export_contents) {
             while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-                parse_exported_top_level_entry(program, /*inherited_export=*/true);
+                if (auto _r = parse_exported_top_level_entry(program, /*inherited_export=*/true); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
         } else {
-            parse_top_level_items(program, /*inside_namespace=*/true);
+            if (auto _r = parse_top_level_items(program, /*inside_namespace=*/true); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
-        expect(TokenKind::RBrace, "'}'");
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         for (std::size_t i = 0; i < pushed; i++) namespace_stack_.pop_back();
+        return {};
     }
 
     // Parses one top-level item that isn't a `struct`: an ordinary
@@ -3929,7 +4165,7 @@ private:
     // qualified or mangled (its name must stay the real, plain C symbol
     // regardless of enclosing namespace -- see qualify_name), so an
     // `export` marker on one is simply not applicable and is ignored.
-    void parse_top_level_function_or_extern_group(Program& program, bool is_exported, bool is_unsafe = false,
+    [[nodiscard]] std::expected<void, ParseError> parse_top_level_function_or_extern_group(Program& program, bool is_exported, bool is_unsafe = false,
                                                   bool is_nodiscard = false,
                                                   const std::string& nodiscard_reason = {}) {
         SourceLocation loc = current_loc();
@@ -3939,70 +4175,88 @@ private:
             if (!check(TokenKind::StringLiteral)) {
                 // Bare extern (ch11 §11.6): always a single bodyless
                 // declaration, ordinary scpp linkage.
-                Function fn =
+                auto fn_result =
                     parse_function(/*is_extern_c=*/false, /*is_module_extern=*/true, is_unsafe, is_nodiscard,
                                    nodiscard_reason);
+                if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
+                Function fn = std::move(fn_result.value());
                 fn.loc = loc;
                 fn.name = qualify_name(fn.name);
                 fn.namespace_path = namespace_stack_;
                 fn.is_exported = is_exported;
-                check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+                if (auto _r = check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 program.functions.push_back(std::move(fn));
-                return;
+                return {};
             }
-            parse_c_linkage_string();
+            if (auto _r = parse_c_linkage_string(); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (check(TokenKind::LBrace)) {
                 advance(); // '{'
                 while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
                     if (check(TokenKind::KwStruct)) {
-                        program.structs.push_back(parse_struct_def(program, /*is_exported=*/false));
+                        auto struct_result = parse_struct_def(program, /*is_exported=*/false);
+                        if (!struct_result.has_value()) return std::unexpected(std::move(struct_result).error());
+                        program.structs.push_back(std::move(struct_result.value()));
                         continue;
                     }
                     if (check(TokenKind::KwUnion)) {
-                        program.structs.push_back(parse_union_def());
+                        auto union_result = parse_union_def();
+                        if (!union_result.has_value()) return std::unexpected(std::move(union_result).error());
+                        program.structs.push_back(std::move(union_result.value()));
                         continue;
                     }
                     SourceLocation item_loc = current_loc();
-                    Function item_fn = parse_function(/*is_extern_c=*/true);
+                    auto item_fn_result = parse_function(/*is_extern_c=*/true);
+                    if (!item_fn_result.has_value()) return std::unexpected(std::move(item_fn_result).error());
+                    Function item_fn = std::move(item_fn_result.value());
                     item_fn.loc = item_loc;
                     program.functions.push_back(std::move(item_fn));
                 }
-                expect(TokenKind::RBrace, "'}'");
-                return;
+                if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                return {};
             }
-            Function fn =
+            auto fn_result =
                 parse_function(/*is_extern_c=*/true, /*is_module_extern=*/false, is_unsafe, is_nodiscard,
                                nodiscard_reason);
+            if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
+            Function fn = std::move(fn_result.value());
             fn.loc = loc;
             program.functions.push_back(std::move(fn));
-            return;
+            return {};
         }
-        if (parse_out_of_line_member_definition(program, loc, is_unsafe, is_nodiscard, nodiscard_reason)) {
-            return;
+        auto out_of_line_result = parse_out_of_line_member_definition(program, loc, is_unsafe, is_nodiscard, nodiscard_reason);
+        if (!out_of_line_result.has_value()) return std::unexpected(std::move(out_of_line_result).error());
+        if (out_of_line_result.value()) {
+            return {};
         }
-        Function fn =
+        auto fn_result =
             parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe, is_nodiscard,
                            nodiscard_reason);
+        if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
+        Function fn = std::move(fn_result.value());
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
         fn.is_exported = is_exported;
-        check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+        if (auto _r = check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         program.functions.push_back(std::move(fn));
+        return {};
     }
 
     // Consumes and validates the linkage string literal after `extern`.
     // v0.1 only accepts the literal "C" (not "C++" or anything else) --
     // see ch02 §2.1.
-    void parse_c_linkage_string() {
-        const Token& tok = expect(TokenKind::StringLiteral, "a linkage string (e.g. \"C\")");
+    [[nodiscard]] std::expected<void, ParseError> parse_c_linkage_string() {
+        auto tok_result = expect(TokenKind::StringLiteral, "a linkage string (e.g. \"C\")");
+        if (!tok_result.has_value()) return std::unexpected(std::move(tok_result).error());
+        const Token& tok = std::move(tok_result.value());
         // `tok.text` includes the surrounding quotes (see StringLiteral's
         // definition in lexer.cppm).
         if (tok.text != "\"C\"") {
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "unsupported linkage " + std::string(tok.text) +
-                                  ": only extern \"C\" is supported in this version");
+                                  ": only extern \"C\" is supported in this version"));
         }
+        return {};
     }
 
     // Decodes a StringLiteral token's text (e.g. "a\nb") into its byte
@@ -4011,9 +4265,9 @@ private:
     // minimal named-escape set as decode_char_literal above: \n \t \r \\
     // \' \" \0 -- no hex/octal escapes. Unlike a char literal, any number
     // of characters (including zero -- an empty string "") is valid.
-    std::string decode_string_literal(const Token& tok) {
+    [[nodiscard]] std::expected<std::string, ParseError> decode_string_literal(const Token& tok) {
         if (tok.text.size() < 2) {
-            throw ParseError(tok.line, tok.column, "unterminated string literal " + std::string(tok.text));
+            return std::unexpected(ParseError(tok.line, tok.column, "unterminated string literal " + std::string(tok.text)));
         }
         std::string_view inner = tok.text.substr(1, tok.text.size() - 2);
         std::string result;
@@ -4024,9 +4278,9 @@ private:
                 continue;
             }
             if (i + 1 >= inner.size()) {
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "invalid string literal " + std::string(tok.text) +
-                                      ": trailing '\\' with no following escape character");
+                                      ": trailing '\\' with no following escape character"));
             }
             i++;
             switch (inner[i]) {
@@ -4038,10 +4292,10 @@ private:
                 case '\'': result.push_back('\''); break;
                 case '"': result.push_back('"'); break;
                 default:
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                       "invalid string literal " + std::string(tok.text) +
                                           ": unsupported escape sequence '\\" + std::string(1, inner[i]) +
-                                          "' (supported: \\n \\t \\r \\\\ \\' \\\" \\0)");
+                                          "' (supported: \\n \\t \\r \\\\ \\' \\\" \\0)"));
             }
         }
         return result;
@@ -4052,15 +4306,15 @@ private:
     // quotes (see CharLiteral's definition in lexer.cppm). Supports the
     // same minimal named-escape set as decode_string_literal above: \n \t
     // \r \\ \' \" \0 -- no hex/octal escapes.
-    long long decode_char_literal(const Token& tok) {
+    [[nodiscard]] std::expected<long long, ParseError> decode_char_literal(const Token& tok) {
         // A well-formed literal is always at least `''` (2 quote chars);
         // anything shorter means the lexer hit EOF before a closing
         // quote (an unterminated literal) -- guard before the substr
         // below so that case reports a clear error instead of
         // underflowing `tok.text.size() - 2`.
         if (tok.text.size() < 2) {
-            throw ParseError(tok.line, tok.column,
-                              "unterminated char literal " + std::string(tok.text));
+            return std::unexpected(ParseError(tok.line, tok.column,
+                              "unterminated char literal " + std::string(tok.text)));
         }
         std::string_view inner = tok.text.substr(1, tok.text.size() - 2);
         if (inner.size() == 1 && inner[0] != '\\') {
@@ -4078,10 +4332,10 @@ private:
                 default: break;
             }
         }
-        throw ParseError(tok.line, tok.column,
+        return std::unexpected(ParseError(tok.line, tok.column,
                           "invalid char literal " + std::string(tok.text) +
                               ": must be exactly one character or one of the supported escape "
-                              "sequences (\\n \\t \\r \\\\ \\' \\\" \\0)");
+                              "sequences (\\n \\t \\r \\\\ \\' \\\" \\0)"));
     }
 
     [[nodiscard]] bool is_valid_enum_underlying_type(const Type& type) const {
@@ -4093,63 +4347,80 @@ private:
                 type.name == "size_t" || type.name == "ptrdiff_t");
     }
 
-    [[nodiscard]] long long parse_enum_constant_expr(const std::string& enum_name) {
-        ExprPtr expr = parse_unary();
-        std::function<long long(const Expr&)> eval = [&](const Expr& current) -> long long {
+    [[nodiscard]] std::expected<long long, ParseError> parse_enum_constant_expr(const std::string& enum_name) {
+        auto expr_result = parse_unary();
+        if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+        ExprPtr expr = std::move(expr_result.value());
+        std::function<std::expected<long long, ParseError>(const Expr&)> eval =
+            [&](const Expr& current) -> std::expected<long long, ParseError> {
             switch (current.kind) {
                 case ExprKind::IntegerLiteral:
                 case ExprKind::CharLiteral:
                     return current.int_value;
                 case ExprKind::Unary:
-                    if (current.unary_op == UnaryOp::Neg && current.lhs) return -eval(*current.lhs);
+                    if (current.unary_op == UnaryOp::Neg && current.lhs) {
+                        auto inner_result = eval(*current.lhs);
+                        if (!inner_result.has_value()) return std::unexpected(std::move(inner_result).error());
+                        return -inner_result.value();
+                    }
                     [[fallthrough]];
                 default:
-                    throw ParseError(current.loc.line, current.loc.column,
+                    return std::unexpected(ParseError(current.loc.line, current.loc.column,
                                      "enum class '" + enum_name +
-                                         "' only supports integer-literal enumerator values in this version");
+                                         "' only supports integer-literal enumerator values in this version"));
             }
         };
         return eval(*expr);
     }
 
-    EnumDef parse_enum_def() {
+    [[nodiscard]] std::expected<EnumDef, ParseError> parse_enum_def() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwEnum, "'enum'");
+        if (auto _r = expect(TokenKind::KwEnum, "'enum'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!match(TokenKind::KwClass)) {
-            throw ParseError(loc.line, loc.column,
-                             "only 'enum class' is supported in this version; old-style unscoped 'enum' is not supported");
+            return std::unexpected(ParseError(loc.line, loc.column,
+                             "only 'enum class' is supported in this version; old-style unscoped 'enum' is not supported"));
         }
 
         EnumDef def;
-        std::string bare_name = std::string(expect(TokenKind::Identifier, "enum class name").text);
+        auto bare_name_result = expect(TokenKind::Identifier, "enum class name");
+        if (!bare_name_result.has_value()) return std::unexpected(std::move(bare_name_result).error());
+        std::string bare_name = std::string(bare_name_result.value().text);
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
         if (match(TokenKind::Colon)) {
-            def.underlying_type = parse_type();
+            auto _tmp_result = parse_type();
+            if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+            def.underlying_type = std::move(_tmp_result.value());
             if (!is_valid_enum_underlying_type(def.underlying_type)) {
-                throw ParseError(loc.line, loc.column,
-                                 "enum class underlying type must be an integral scalar type in this version");
+                return std::unexpected(ParseError(loc.line, loc.column,
+                                 "enum class underlying type must be an integral scalar type in this version"));
             }
         }
         struct_names_.insert(def.name);
 
-        expect(TokenKind::LBrace, "'{'");
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         long long next_value = 0;
         bool first = true;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-            if (!first) expect(TokenKind::Comma, "','");
+            if (!first) { if (auto _r = expect(TokenKind::Comma, "','"); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
             if (check(TokenKind::RBrace)) break;
             first = false;
 
             EnumVariant variant;
-            variant.name = def.name + "::" + std::string(expect(TokenKind::Identifier, "enumerator name").text);
+            auto variant_name_result = expect(TokenKind::Identifier, "enumerator name");
+            if (!variant_name_result.has_value()) return std::unexpected(std::move(variant_name_result).error());
+            variant.name = def.name + "::" + std::string(variant_name_result.value().text);
             variant.value = next_value;
-            if (match(TokenKind::Assign)) variant.value = parse_enum_constant_expr(def.name);
+            if (match(TokenKind::Assign)) {
+                auto value_result = parse_enum_constant_expr(def.name);
+                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                variant.value = value_result.value();
+            }
             def.variants.push_back(std::move(variant));
             next_value = def.variants.back().value + 1;
         }
-        expect(TokenKind::RBrace, "'}'");
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return def;
     }
 
@@ -4165,26 +4436,30 @@ private:
     // parameter's own bare name as a temporary type name for the
     // duration of this one struct's body, removed again immediately
     // afterward.
-    StructDef parse_struct_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {},
+    [[nodiscard]] std::expected<StructDef, ParseError> parse_struct_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {},
                                std::vector<AlignmentSpecifier> leading_alignments = {},
                                std::optional<std::string> forced_qualified_name = std::nullopt,
                                bool is_local_definition = false) {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwStruct, "'struct'");
+        if (auto _r = expect(TokenKind::KwStruct, "'struct'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         StructDef def;
         def.loc = loc;
         // ch05 §5.15: `struct [[scpp::thread_movable]] Name { ... };` --
         // real C++ grammar already gives a class-head an optional
         // attribute-specifier-seq right after its class-key, the same
         // slot `struct [[deprecated]] Name { ... };` would use.
-        ParsedAttributes attrs = parse_attribute_specifier_seq();
-        std::vector<AlignmentSpecifier> trailing_alignments = parse_alignment_specifier_seq();
+        auto attrs_result = parse_attribute_specifier_seq();
+        if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
+        ParsedAttributes attrs = std::move(attrs_result.value());
+        auto trailing_alignments_result = parse_alignment_specifier_seq();
+        if (!trailing_alignments_result.has_value()) return std::unexpected(std::move(trailing_alignments_result).error());
+        std::vector<AlignmentSpecifier> trailing_alignments = std::move(trailing_alignments_result.value());
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
         if (attrs.has("interface")) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "a declaration introduced by 'struct' shall not be marked '[[scpp::interface]]' (spec §11.1(2.2))");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "a declaration introduced by 'struct' shall not be marked '[[scpp::interface]]' (spec §11.1(2.2))"));
         }
         def.is_packed = attrs.has("packed");
         def.alignment_specs = std::move(leading_alignments);
@@ -4195,22 +4470,27 @@ private:
         def.nodiscard_reason = attrs.nodiscard_reason;
         if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations"));
         }
-        std::string bare_name = std::string(expect(TokenKind::Identifier, "struct name").text);
+        std::string bare_name;
+        {
+            auto bare_name_result = expect(TokenKind::Identifier, "struct name");
+            if (!bare_name_result.has_value()) return std::unexpected(std::move(bare_name_result).error());
+            bare_name = std::string(bare_name_result.value().text);
+        }
         if (check(TokenKind::KwAlignas)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "'alignas' must appear before a struct name, not after it (spec §9.3)");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "'alignas' must appear before a struct name, not after it (spec §9.3)"));
         }
         def.name = forced_qualified_name.has_value() ? *forced_qualified_name
                                                      : (is_local_definition ? fresh_local_type_name(bare_name)
                                                                             : qualify_name(bare_name));
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported || exported_forward_struct_exists(program, def.name);
-        register_record_tag_kind(def.name, RecordTagKind::Struct, loc);
-        if (is_local_definition || forced_qualified_name.has_value()) register_local_type_name(bare_name, def.name, loc);
+        if (auto _r = register_record_tag_kind(def.name, RecordTagKind::Struct, loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (is_local_definition || forced_qualified_name.has_value()) { if (auto _r = register_local_type_name(bare_name, def.name, loc); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
         // Register the (fully-qualified) name before parsing the body so
         // a field can refer to the enclosing struct via a pointer (e.g.
         // `Node* next;`).
@@ -4224,13 +4504,13 @@ private:
                 saw_non_type = saw_non_type || param.is_non_type;
                 if (!param.is_non_type && param.concept_name.empty()) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                       "a generic struct's own type parameter '" + param.name +
                                           "' cannot be bare -- struct field triviality (ch04 §4.1) is a "
                                           "whole-type property, so it must be constrained by a concept at the "
                                           "struct itself (ch05 §5.14): write 'template<Concept " + param.name +
                                           "> struct " + bare_name +
-                                          "' instead, or use 'class' if per-method constraints are enough");
+                                          "' instead, or use 'class' if per-method constraints are enough"));
                 }
                 if (!param.is_non_type) {
                     struct_names_.insert(param.name);
@@ -4239,9 +4519,9 @@ private:
             }
             if (saw_type && saw_non_type) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "ordinary generic structs cannot yet mix type and non-type template "
-                                  "parameters in one parameter list");
+                                  "parameters in one parameter list"));
             }
             generic_type_names_.insert(def.name);
             ordinary_generic_type_template_params_[def.name] = template_params;
@@ -4252,45 +4532,48 @@ private:
         const Token& maybe_base_clause_tok = peek();
         if (match(TokenKind::Colon)) {
             const Token& tok = maybe_base_clause_tok;
-            throw ParseError(tok.line, tok.column,
-                             "a declaration introduced by 'struct' shall not have a base-clause (spec §11.1(2.1))");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "a declaration introduced by 'struct' shall not have a base-clause (spec §11.1(2.1))"));
         }
 
         if (match(TokenKind::Semicolon)) {
             if (is_generic) {
-                throw ParseError(loc.line, loc.column,
+                return std::unexpected(ParseError(loc.line, loc.column,
                                  "an ordinary bodyless forward declaration is only supported for a non-generic "
-                                 "'struct' in this version");
+                                 "'struct' in this version"));
             }
             if (def.is_packed || !def.alignment_specs.empty() || def.thread_movable_override || def.thread_shareable_override ||
                 def.is_nodiscard) {
-                throw ParseError(loc.line, loc.column,
+                return std::unexpected(ParseError(loc.line, loc.column,
                                  "scpp struct layout/thread/nodiscard attributes are not supported on a bodyless "
-                                 "forward declaration");
+                                 "forward declaration"));
             }
             def.is_forward_declaration = true;
             return def;
         }
 
-        parse_record_body_into(
-            program, bare_name, def.name, def.name, def.template_params, def.is_exported, def.template_owner_id,
-            AccessSpecifier::Public,
-            /*allow_using_declarations=*/false, /*allow_virtual_members=*/false, "struct",
-            "a struct member declaration",
-            "a declaration introduced by 'struct' shall not declare a virtual member function or virtual destructor "
-            "(spec §11.1(2.3))",
-            [](AccessSpecifier) {},
-            [&](Type field_type, std::string field_name, AccessSpecifier access,
-                std::optional<Initializer> default_initializer, std::vector<AlignmentSpecifier> alignment_specs) {
-                StructField field;
-                field.loc = current_loc();
-                field.type = std::move(field_type);
-                field.name = std::move(field_name);
-                field.access = access;
-                field.default_initializer = std::move(default_initializer);
-                field.alignment_specs = std::move(alignment_specs);
-                def.fields.push_back(std::move(field));
-            });
+        if (auto _r = parse_record_body_into(
+                program, bare_name, def.name, def.name, def.template_params, def.is_exported, def.template_owner_id,
+                AccessSpecifier::Public,
+                /*allow_using_declarations=*/false, /*allow_virtual_members=*/false, "struct",
+                "a struct member declaration",
+                "a declaration introduced by 'struct' shall not declare a virtual member function or virtual destructor "
+                "(spec §11.1(2.3))",
+                [](AccessSpecifier) -> std::expected<void, ParseError> { return {}; },
+                [&](Type field_type, std::string field_name, AccessSpecifier access,
+                    std::optional<Initializer> default_initializer, std::vector<AlignmentSpecifier> alignment_specs) {
+                    StructField field;
+                    field.loc = current_loc();
+                    field.type = std::move(field_type);
+                    field.name = std::move(field_name);
+                    field.access = access;
+                    field.default_initializer = std::move(default_initializer);
+                    field.alignment_specs = std::move(alignment_specs);
+                    def.fields.push_back(std::move(field));
+                });
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
 
         if (is_generic) {
             for (const GenericTypeParam& param : template_params) {
@@ -4303,14 +4586,18 @@ private:
         return def;
     }
 
-    StructDef parse_union_def(std::vector<AlignmentSpecifier> leading_alignments = {}) {
+    [[nodiscard]] std::expected<StructDef, ParseError> parse_union_def(std::vector<AlignmentSpecifier> leading_alignments = {}) {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwUnion, "'union'");
+        if (auto _r = expect(TokenKind::KwUnion, "'union'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         StructDef def;
         def.loc = loc;
         def.is_union = true;
-        ParsedAttributes attrs = parse_attribute_specifier_seq();
-        std::vector<AlignmentSpecifier> trailing_alignments = parse_alignment_specifier_seq();
+        auto attrs_result = parse_attribute_specifier_seq();
+        if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
+        ParsedAttributes attrs = std::move(attrs_result.value());
+        auto trailing_alignments_result = parse_alignment_specifier_seq();
+        if (!trailing_alignments_result.has_value()) return std::unexpected(std::move(trailing_alignments_result).error());
+        std::vector<AlignmentSpecifier> trailing_alignments = std::move(trailing_alignments_result.value());
         def.thread_movable_override = attrs.has("thread_movable");
         def.thread_shareable_override = attrs.has("thread_shareable");
         def.is_packed = attrs.has("packed");
@@ -4322,53 +4609,69 @@ private:
         def.nodiscard_reason = attrs.nodiscard_reason;
         if (attrs.thread_movable_if_movable_expr || attrs.thread_movable_if_shareable_expr) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "'[[scpp::thread_movable_if(a, b)]]' is only supported on class declarations"));
         }
-        std::string bare_name = std::string(expect(TokenKind::Identifier, "union name").text);
+        auto bare_name_result = expect(TokenKind::Identifier, "union name");
+        if (!bare_name_result.has_value()) return std::unexpected(std::move(bare_name_result).error());
+        std::string bare_name = std::string(bare_name_result.value().text);
         if (check(TokenKind::KwAlignas)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "'alignas' must appear before a union name, not after it (spec §9.3)");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "'alignas' must appear before a union name, not after it (spec §9.3)"));
         }
         def.name = qualify_name(bare_name);
         def.namespace_path = namespace_stack_;
-        register_record_tag_kind(def.name, RecordTagKind::Union, loc);
+        if (auto _r = register_record_tag_kind(def.name, RecordTagKind::Union, loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
         struct_names_.insert(def.name);
 
-        expect(TokenKind::LBrace, "'{'");
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         bool saw_field = false;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             StructField field;
             field.loc = current_loc();
-            field.alignment_specs = parse_alignment_specifier_seq();
-            Type base = parse_type();
+            auto _tmp_result = parse_alignment_specifier_seq();
+            if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+            field.alignment_specs = std::move(_tmp_result.value());
+            auto base_result = parse_type();
+            if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+            Type base = std::move(base_result.value());
             if (starts_function_pointer_declarator()) {
-                field.type = parse_function_pointer_declarator(std::move(base), field.name);
+                auto _tmp_result = parse_function_pointer_declarator(std::move(base), field.name);
+                if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+                field.type = std::move(_tmp_result.value());
                 if (check(TokenKind::Colon)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+                    return std::unexpected(ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version"));
                 }
-                field.default_initializer = parse_optional_default_initializer("a union member declaration");
+                auto default_init_result = parse_optional_default_initializer("a union member declaration");
+                if (!default_init_result.has_value()) return std::unexpected(std::move(default_init_result).error());
+                field.default_initializer = std::move(default_init_result.value());
             } else {
-                field.name = std::string(expect(TokenKind::Identifier, "field name").text);
+                auto field_name_result = expect(TokenKind::Identifier, "field name");
+                if (!field_name_result.has_value()) return std::unexpected(std::move(field_name_result).error());
+                field.name = std::string(field_name_result.value().text);
                 if (check(TokenKind::Colon)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+                    return std::unexpected(ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version"));
                 }
-                field.type = parse_array_suffix(base);
-                field.default_initializer = parse_optional_default_initializer("a union member declaration");
+                auto _tmp_result = parse_array_suffix(base);
+                if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+                field.type = std::move(_tmp_result.value());
+                auto default_init_result2 = parse_optional_default_initializer("a union member declaration");
+                if (!default_init_result2.has_value()) return std::unexpected(std::move(default_init_result2).error());
+                field.default_initializer = std::move(default_init_result2.value());
             }
-            expect(TokenKind::Semicolon, "';'");
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             def.fields.push_back(std::move(field));
             saw_field = true;
         }
-        expect(TokenKind::RBrace, "'}'");
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!saw_field) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "a union must declare at least one field");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "a union must declare at least one field"));
         }
         return def;
     }
@@ -4388,35 +4691,42 @@ private:
         return params.size() == 1 && params[0].name == kUnnamedDefaultedSingleParam;
     }
 
-    std::vector<Param> parse_param_list(bool allow_unnamed_single_parameter = false) {
+    [[nodiscard]] std::expected<std::vector<Param>, ParseError> parse_param_list(bool allow_unnamed_single_parameter = false) {
         std::vector<Param> params;
         bool saw_default_argument = false;
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!check(TokenKind::RParen)) {
             do {
                 Param param;
-                Type base_type = with_type_lifetime_attributes_enabled([&] {
-                    return parse_param_type(param.generic_concept);
-                });
+                Type base_type;
+                {
+                    auto base_type_result = with_type_lifetime_attributes_enabled([&] {
+                        return parse_param_type(param.generic_concept);
+                    });
+                    if (!base_type_result.has_value()) return std::unexpected(std::move(base_type_result).error());
+                    base_type = std::move(base_type_result.value());
+                }
                 param.is_parameter_pack = match(TokenKind::Ellipsis);
                 if (param.is_parameter_pack && param.generic_concept.empty() &&
                     !referenced_pack_type_param_name(base_type).has_value()) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                       "parameter packs are only supported for the abbreviated generic form "
-                                      "('Concept auto&... args') in this version (ch05 §5.11)");
+                                      "('Concept auto&... args') in this version (ch05 §5.11)"));
                 }
                 Type param_type;
                 if (allow_unnamed_single_parameter && params.empty() && !param.is_parameter_pack && check(TokenKind::RParen)) {
                     param.name = std::string(kUnnamedDefaultedSingleParam);
                     param_type = std::move(base_type);
                 } else {
-                    param_type = parse_named_declarator(std::move(base_type), param.name, "parameter name");
+                    auto param_type_result = parse_named_declarator(std::move(base_type), param.name, "parameter name");
+                    if (!param_type_result.has_value()) return std::unexpected(std::move(param_type_result).error());
+                    param_type = std::move(param_type_result.value());
                 }
                 if (param.is_parameter_pack && !check(TokenKind::RParen)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
-                                      "a parameter pack must be the last parameter in the list (ch05 §5.11)");
+                    return std::unexpected(ParseError(tok.line, tok.column,
+                                      "a parameter pack must be the last parameter in the list (ch05 §5.11)"));
                 }
                 param.type = std::move(param_type);
                 // ch05 §5.15: `T&& f [[scpp::thread_movable]]` -- a
@@ -4431,55 +4741,62 @@ private:
                 // this parameter's own type actually depends on one of
                 // the enclosing function's own template parameters.
                 const Token& param_attr_start_tok = peek();
-                ParsedAttributes param_attrs = parse_attribute_specifier_seq();
-                reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration");
+                auto param_attrs_result = parse_attribute_specifier_seq();
+                if (!param_attrs_result.has_value()) return std::unexpected(std::move(param_attrs_result).error());
+                ParsedAttributes param_attrs = std::move(param_attrs_result.value());
+                if (auto _r = reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
-                merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
-                                         "a parameter declaration");
-                hoist_type_lifetime_annotation(param.type, param.lifetime, param_attr_start_tok, "a parameter declaration");
+                if (auto _r = merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
+                                         "a parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = hoist_type_lifetime_annotation(param.type, param.lifetime, param_attr_start_tok, "a parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 if (match(TokenKind::Assign)) {
                     if (param.is_parameter_pack) {
                         const Token& tok = peek();
-                        throw ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument");
+                        return std::unexpected(ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument"));
                     }
-                    param.default_expr = std::shared_ptr<Expr>(parse_default_argument_expr(param.type).release());
+                    auto default_expr_result = parse_default_argument_expr(param.type);
+                    if (!default_expr_result.has_value()) return std::unexpected(std::move(default_expr_result).error());
+                    param.default_expr = std::shared_ptr<Expr>(std::move(default_expr_result.value()).release());
                     saw_default_argument = true;
                 } else if (saw_default_argument) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                      "once a parameter has a default argument, every later parameter must also "
-                                     "have one");
+                                     "have one"));
                 }
                 params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::RParen, "')'");
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return params;
     }
 
-    void reject_unnamed_defaulted_single_param_if_needed(const std::vector<Param>& params,
+    [[nodiscard]] std::expected<void, ParseError> reject_unnamed_defaulted_single_param_if_needed(const std::vector<Param>& params,
                                                          const Function& fn,
                                                          const SourceLocation& loc) const {
         if (has_unnamed_defaulted_single_param(params) && !fn.is_defaulted) {
-            throw ParseError(loc.line, loc.column,
-                             "an unnamed parameter is only supported in a '= default' declaration here");
+            return std::unexpected(ParseError(loc.line, loc.column,
+                             "an unnamed parameter is only supported in a '= default' declaration here"));
         }
+        return {};
     }
 
-    void validate_defaulted_special_member(const Function& fn, const SourceLocation& loc) const {
-        if (!fn.is_defaulted) return;
-        if (is_destructor_function(fn) || is_defaulted_special_member_equivalent_to_implicit_omission(fn)) return;
-        if (is_defaulted_equality_operator_function(fn)) return;
-        throw ParseError(loc.line, loc.column,
+    [[nodiscard]] std::expected<void, ParseError> validate_defaulted_special_member(const Function& fn, const SourceLocation& loc) const {
+        if (!fn.is_defaulted) return {};
+        if (is_destructor_function(fn) || is_defaulted_special_member_equivalent_to_implicit_omission(fn)) return {};
+        if (is_defaulted_equality_operator_function(fn)) return {};
+        return std::unexpected(ParseError(loc.line, loc.column,
                          "only a destructor, default constructor, copy/move constructor, copy/move assignment operator, "
-                         "or equality operator may be declared '= default' in this version");
+                         "or equality operator may be declared '= default' in this version"));
     }
 
-    [[nodiscard]] ExprPtr parse_default_argument_expr(const Type& param_type) {
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_default_argument_expr(const Type& param_type) {
         if (!check(TokenKind::LBrace)) return parse_expr();
         SourceLocation loc = current_loc();
-        std::vector<ExprPtr> args = parse_brace_initializer_args();
+        auto args_result = parse_brace_initializer_args();
+        if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+        std::vector<ExprPtr> args = std::move(args_result.value());
         if (args.empty()) return make_value_initialized_expr(loc, param_type);
         return make_call_expr(loc, type_to_string(param_type), std::move(args));
     }
@@ -4515,50 +4832,57 @@ private:
         return ReceiverRefQualifier::None;
     }
 
-    void parse_function_trailing_attributes(Function& fn, const char* what) {
+    [[nodiscard]] std::expected<void, ParseError> parse_function_trailing_attributes(Function& fn, const char* what) {
         const Token& attr_start_tok = peek();
-        ParsedAttributes attrs = parse_attribute_specifier_seq();
-        reject_packed_attribute(attrs, attr_start_tok, what);
-        merge_lifetime_attribute(fn.return_lifetime, attrs.lifetime, attr_start_tok, what);
-        hoist_type_lifetime_annotation(fn.return_type, fn.return_lifetime, attr_start_tok, what);
+        auto attrs_result = parse_attribute_specifier_seq();
+        if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
+        ParsedAttributes attrs = std::move(attrs_result.value());
+        if (auto _r = reject_packed_attribute(attrs, attr_start_tok, what); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = merge_lifetime_attribute(fn.return_lifetime, attrs.lifetime, attr_start_tok, what); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = hoist_type_lifetime_annotation(fn.return_type, fn.return_lifetime, attr_start_tok, what); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        return {};
     }
 
-    StmtPtr parse_member_function_suffix(Function& fn) {
-        parse_function_trailing_attributes(fn, "a member function declarator");
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_member_function_suffix(Function& fn) {
+        if (auto _r = parse_function_trailing_attributes(fn, "a member function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         fn.is_override = match(TokenKind::KwOverride);
         if (match(TokenKind::Assign)) {
             if (match(TokenKind::KwDefault)) {
                 fn.is_defaulted = true;
-                expect(TokenKind::Semicolon, "';'");
+                if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 return nullptr;
             }
-            const Token& value_tok = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+            auto value_tok_result = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+            if (!value_tok_result.has_value()) return std::unexpected(std::move(value_tok_result).error());
+            const Token& value_tok = std::move(value_tok_result.value());
             if (value_tok.text != "0") {
-                throw ParseError(value_tok.line, value_tok.column,
-                                 "expected 'default' or '0' after '=' in a member declaration");
+                return std::unexpected(ParseError(value_tok.line, value_tok.column,
+                                 "expected 'default' or '0' after '=' in a member declaration"));
             }
             fn.is_pure = true;
-            expect(TokenKind::Semicolon, "';'");
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             return nullptr;
         }
         if (match(TokenKind::Semicolon)) return nullptr;
         return parse_block();
     }
 
-    std::vector<ExprPtr> parse_brace_initializer_args() {
-        expect(TokenKind::LBrace, "'{'");
+    [[nodiscard]] std::expected<std::vector<ExprPtr>, ParseError> parse_brace_initializer_args() {
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::vector<ExprPtr> args;
         if (!check(TokenKind::RBrace)) {
             do {
-                args.push_back(parse_expr());
+                auto arg_result = parse_expr();
+                if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                args.push_back(std::move(arg_result.value()));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::RBrace, "'}'");
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return args;
     }
 
-    std::vector<ExplicitTemplateArg> parse_explicit_template_args(const std::vector<GenericTypeParam>& template_params) {
-        expect(TokenKind::Less, "'<'");
+    [[nodiscard]] std::expected<std::vector<ExplicitTemplateArg>, ParseError> parse_explicit_template_args(const std::vector<GenericTypeParam>& template_params) {
+        if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::vector<ExplicitTemplateArg> explicit_template_args;
         std::size_t arg_index = 0;
         if (!check(TokenKind::Greater)) {
@@ -4568,7 +4892,9 @@ private:
                     arg_index < template_params.size() && template_params[arg_index].is_non_type;
                 if (is_non_type) {
                     arg.is_type = false;
-                    arg.value = std::shared_ptr<Expr>(parse_additive().release());
+                    auto additive_result = parse_additive();
+                    if (!additive_result.has_value()) return std::unexpected(std::move(additive_result).error());
+                    arg.value = std::shared_ptr<Expr>(std::move(additive_result.value()).release());
                 } else if (arg_index < template_params.size() && template_params[arg_index].is_pack &&
                            check(TokenKind::Identifier) && peek_at(1).kind == TokenKind::Ellipsis) {
                     arg.is_type = true;
@@ -4578,17 +4904,19 @@ private:
                     arg.type.is_pack_expansion = true;
                 } else {
                     arg.is_type = true;
-                    arg.type = parse_template_type_argument();
+                    auto _tmp_result = parse_template_type_argument();
+                    if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+                    arg.type = std::move(_tmp_result.value());
                 }
                 explicit_template_args.push_back(std::move(arg));
                 arg_index++;
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::Greater, "'>'");
+        if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return explicit_template_args;
     }
 
-    std::optional<std::vector<ExplicitTemplateArg>>
+    [[nodiscard]] std::expected<std::optional<std::vector<ExplicitTemplateArg>>, ParseError>
     try_parse_explicit_generic_type_constructor_template_args(const std::string& spelled_name,
                                                               bool explicit_global_qualification) {
         std::string resolved_name =
@@ -4607,7 +4935,9 @@ private:
         if (template_params == nullptr) return std::nullopt;
 
         std::size_t saved_pos = pos_;
-        std::vector<ExplicitTemplateArg> args = parse_explicit_template_args(*template_params);
+        auto args_result = parse_explicit_template_args(*template_params);
+        if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+        std::vector<ExplicitTemplateArg> args = std::move(args_result.value());
         if (!check(TokenKind::LParen) && !check(TokenKind::LBrace)) {
             pos_ = saved_pos;
             return std::nullopt;
@@ -4615,49 +4945,57 @@ private:
         return args;
     }
 
-    std::optional<Initializer> parse_optional_default_initializer(const std::string& thing_name) {
+    [[nodiscard]] std::expected<std::optional<Initializer>, ParseError> parse_optional_default_initializer(const std::string& thing_name) {
         if (match(TokenKind::Assign)) {
             Initializer init;
-            init.expr = parse_expr();
+            auto _tmp_result = parse_expr();
+            if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+            init.expr = std::move(_tmp_result.value());
             return init;
         }
         if (check(TokenKind::LBrace)) {
             Initializer init;
             init.has_brace_args = true;
-            init.brace_args = parse_brace_initializer_args();
+            auto _tmp_result = parse_brace_initializer_args();
+            if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+            init.brace_args = std::move(_tmp_result.value());
             return init;
         }
         if (match(TokenKind::LParen)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                              "parenthesized direct-initialization is not allowed for " + thing_name +
-                                 "; use brace-init instead");
+                                 "; use brace-init instead"));
         }
         return std::nullopt;
     }
 
-    std::vector<MemberInitializer> parse_constructor_member_initializer_list() {
+    [[nodiscard]] std::expected<std::vector<MemberInitializer>, ParseError> parse_constructor_member_initializer_list() {
         std::vector<MemberInitializer> initializers;
         if (!match(TokenKind::Colon)) return initializers;
         std::unordered_set<std::string> seen_members;
         do {
-            const Token& name_tok = expect(TokenKind::Identifier, "member name");
+            auto name_tok_result = expect(TokenKind::Identifier, "member name");
+            if (!name_tok_result.has_value()) return std::unexpected(std::move(name_tok_result).error());
+            const Token& name_tok = std::move(name_tok_result.value());
             MemberInitializer init;
             init.member_name = std::string(name_tok.text);
             init.loc = make_source_location(name_tok.line, name_tok.column, source_path_);
             if (!seen_members.insert(init.member_name).second) {
-                throw ParseError(name_tok.line, name_tok.column,
+                return std::unexpected(ParseError(name_tok.line, name_tok.column,
                                  "member '" + init.member_name +
-                                     "' cannot appear more than once in the same constructor member-initializer-list");
+                                     "' cannot appear more than once in the same constructor member-initializer-list"));
             }
             if (check(TokenKind::LParen)) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                  "parenthesized expression-lists are not allowed in a constructor member-initializer; "
-                                 "use brace-init instead");
+                                 "use brace-init instead"));
             }
             init.initializer.has_brace_args = true;
-            init.initializer.brace_args = parse_brace_initializer_args();
+            auto _tmp_result = parse_brace_initializer_args();
+            if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+            init.initializer.brace_args = std::move(_tmp_result.value());
             initializers.push_back(std::move(init));
         } while (match(TokenKind::Comma));
         return initializers;
@@ -4671,14 +5009,15 @@ private:
     // without error, just with is_generic_template never set -- an
     // ordinary-looking Function that's actually unsound to compile as
     // one), reject it outright with a clear, scoped error message.
-    void reject_generic_params(const std::vector<Param>& params, const std::string& what) {
+    [[nodiscard]] std::expected<void, ParseError> reject_generic_params(const std::vector<Param>& params, const std::string& what) {
         for (const Param& param : params) {
             if (!param.generic_concept.empty()) {
-                throw ParseError(current_loc().line, current_loc().column,
+                return std::unexpected(ParseError(current_loc().line, current_loc().column,
                                   "a generic (concept-constrained) parameter is not supported on " + what +
-                                      " in this version (ch05 §5.11 -- only a free function may be generic)");
+                                      " in this version (ch05 §5.11 -- only a free function may be generic)"));
             }
         }
+        return {};
     }
 
     // ch05 §5.11: parses a single requirement inside a concept's
@@ -4727,7 +5066,7 @@ private:
     // ever recognized when the leading identifier is *not* the
     // placeholder's own name -- a placeholder-led expression always
     // means one of the call-shaped forms above, exactly as before.
-    ConceptRequirement parse_concept_requirement(
+    [[nodiscard]] std::expected<ConceptRequirement, ParseError> parse_concept_requirement(
         const std::string& placeholder_name, const std::string& template_param_name,
         const std::unordered_map<std::string, Type>& helper_param_types,
         const std::unordered_map<std::string, LifetimeAnnotation>& helper_param_lifetimes) {
@@ -4744,60 +5083,65 @@ private:
                                                                   helper_param_types, helper_param_lifetimes);
         }
 
-        expect(TokenKind::Identifier, "the concept's own requires-parameter name");
+        if (auto _r = expect(TokenKind::Identifier, "the concept's own requires-parameter name"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (receiver_tok.text != placeholder_name) {
-            throw ParseError(receiver_tok.line, receiver_tok.column,
+            return std::unexpected(ParseError(receiver_tok.line, receiver_tok.column,
                               "expected a requirement shaped as a call on '" + placeholder_name +
                                   "' (this concept's own constrained requires-parameter) -- v0.1 does not "
-                                  "support an arbitrary requirement expression");
+                                  "support an arbitrary requirement expression"));
         }
         if (match(TokenKind::Dot)) {
-            req.method_name = std::string(expect(TokenKind::Identifier, "method name").text);
+            auto method_name_result = expect(TokenKind::Identifier, "method name");
+            if (!method_name_result.has_value()) return std::unexpected(std::move(method_name_result).error());
+            req.method_name = std::string(method_name_result.value().text);
         } else {
             req.method_name = "call";
         }
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!check(TokenKind::RParen)) {
             do {
-                const Token& arg_tok =
-                    expect(TokenKind::Identifier, "a requirement argument (a requires-expression parameter name)");
+                auto arg_tok_result = expect(TokenKind::Identifier, "a requirement argument (a requires-expression parameter name)");
+                if (!arg_tok_result.has_value()) return std::unexpected(std::move(arg_tok_result).error());
+                const Token& arg_tok = arg_tok_result.value();
                 auto it = helper_param_types.find(std::string(arg_tok.text));
                 if (it == helper_param_types.end()) {
-                    throw ParseError(arg_tok.line, arg_tok.column,
+                    return std::unexpected(ParseError(arg_tok.line, arg_tok.column,
                                       "'" + std::string(arg_tok.text) +
                                           "' is not one of this concept's own requires-expression parameters -- "
                                           "v0.1 only supports a requirement argument that is a bare reference to "
-                                          "one of them");
+                                          "one of them"));
                 }
                 req.arg_types.push_back(it->second);
                 req.arg_lifetimes.push_back(helper_param_lifetimes.at(std::string(arg_tok.text)));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::RParen, "')'");
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         if (is_compound) {
-            expect(TokenKind::RBrace, "'}'");
+            if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             // ch05 §5.11: the result must be constrained to an *exact*
             // type -- 'std::same_as<T>' only, never
             // 'std::convertible_to<T>' (scpp has no implicit scalar
             // conversions at all, so the two would mean the same thing
             // anyway).
-            expect(TokenKind::Arrow,
+            if (auto _r = expect(TokenKind::Arrow,
                    "'->' (a brace-wrapped requirement must be followed by a 'std::same_as<T>' constraint in "
-                   "this version)");
+                   "this version)"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (!check_std_qualified("same_as")) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "a compound requirement's constraint must be 'std::same_as<T>' in this "
-                                  "version (never 'std::convertible_to<T>')");
+                                  "version (never 'std::convertible_to<T>')"));
             }
             consume_std_qualified();
-            expect(TokenKind::Less, "'<'");
-            req.return_type = parse_type();
-            expect(TokenKind::Greater, "'>'");
+            if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            auto _tmp_result = parse_type();
+            if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+            req.return_type = std::move(_tmp_result.value());
+            if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             req.has_return_constraint = true;
         }
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return req;
     }
 
@@ -4817,21 +5161,24 @@ private:
     // std::same_as<T>` constraint the way the call-shaped compound forms
     // in parse_concept_requirement can -- has_return_constraint is
     // always left false.
-    ConceptRequirement parse_construction_shaped_concept_requirement(
+    [[nodiscard]] std::expected<ConceptRequirement, ParseError> parse_construction_shaped_concept_requirement(
         bool is_compound, const std::string& placeholder_name, const std::string& template_param_name,
         const std::unordered_map<std::string, Type>& helper_param_types,
         const std::unordered_map<std::string, LifetimeAnnotation>& helper_param_lifetimes) {
         ConceptRequirement req;
         req.is_construct = true;
-        req.construct_type_name = std::string(expect(TokenKind::Identifier, "a constructed type name").text);
+        auto construct_type_name_result = expect(TokenKind::Identifier, "a constructed type name");
+        if (!construct_type_name_result.has_value()) return std::unexpected(std::move(construct_type_name_result).error());
+        req.construct_type_name = std::string(construct_type_name_result.value().text);
 
         bool paren_form = match(TokenKind::LParen);
-        if (!paren_form) expect(TokenKind::LBrace, "'(' or '{'");
+        if (!paren_form) { if (auto _r = expect(TokenKind::LBrace, "'(' or '{'"); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
         TokenKind close_kind = paren_form ? TokenKind::RParen : TokenKind::RBrace;
         if (!check(close_kind)) {
             do {
-                const Token& arg_tok =
-                    expect(TokenKind::Identifier, "a requirement argument (a requires-expression parameter name)");
+                auto arg_tok_result = expect(TokenKind::Identifier, "a requirement argument (a requires-expression parameter name)");
+                if (!arg_tok_result.has_value()) return std::unexpected(std::move(arg_tok_result).error());
+                const Token& arg_tok = arg_tok_result.value();
                 if (arg_tok.text == placeholder_name) {
                     // spec's own note: this is the whole point of the
                     // construction shape -- probing the placeholder's
@@ -4849,31 +5196,31 @@ private:
                 } else {
                     auto it = helper_param_types.find(std::string(arg_tok.text));
                     if (it == helper_param_types.end()) {
-                        throw ParseError(arg_tok.line, arg_tok.column,
+                        return std::unexpected(ParseError(arg_tok.line, arg_tok.column,
                                           "'" + std::string(arg_tok.text) +
                                               "' is not one of this concept's own requires-expression parameters "
                                               "-- v0.1 only supports a requirement argument that is a bare "
-                                              "reference to one of them (or the placeholder itself)");
+                                              "reference to one of them (or the placeholder itself)"));
                     }
                     req.arg_types.push_back(it->second);
                     req.arg_lifetimes.push_back(helper_param_lifetimes.at(std::string(arg_tok.text)));
                 }
             } while (match(TokenKind::Comma));
         }
-        expect(close_kind, paren_form ? "')'" : "'}'");
+        if (auto _r = expect(close_kind, paren_form ? "')'" : "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (is_compound) {
-            expect(TokenKind::RBrace, "'}'");
+            if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (check(TokenKind::Arrow)) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "a construction-shaped compound requirement ('" + req.construct_type_name +
                                       "(...)' or '" + req.construct_type_name +
                                       "{...}') cannot be followed by a '-> constraint' in this version (spec "
                                       "§13.2(3) only recognizes this shape for a requirement with no trailing "
-                                      "type-constraint)");
+                                      "type-constraint)"));
             }
         }
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return req;
     }
 
@@ -4909,16 +5256,18 @@ private:
     // has already confirmed, via lookahead past the whole header, that
     // this is a `class`/`struct` header rather than a `concept` one,
     // but hasn't consumed anything yet.
-    std::vector<GenericTypeParam> parse_generic_type_header() {
-        expect(TokenKind::KwTemplate, "'template'");
-        expect(TokenKind::Less, "'<'");
+    [[nodiscard]] std::expected<std::vector<GenericTypeParam>, ParseError> parse_generic_type_header() {
+        if (auto _r = expect(TokenKind::KwTemplate, "'template'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::vector<GenericTypeParam> params;
         if (!check(TokenKind::Greater)) {
             do {
                 GenericTypeParam param;
                 if (match(TokenKind::KwTypename)) {
                     param.is_pack = match(TokenKind::Ellipsis);
-                    param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                    auto name_result = expect(TokenKind::Identifier, "template parameter name");
+                    if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+                    param.name = std::string(name_result.value().text);
                 } else if (check(TokenKind::KwInt) || check(TokenKind::KwBool) || check(TokenKind::KwChar)) {
                     // ch05 §5.14: a non-type parameter -- restricted to
                     // scalar types (only int/bool/char exist as scpp
@@ -4926,32 +5275,39 @@ private:
                     // float32_t/float64_t/size_t are all deferred until
                     // those types themselves exist).
                     param.is_non_type = true;
-                    param.non_type_type = parse_unqualified_type();
-                    param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                    auto _tmp_result = parse_unqualified_type();
+                    if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+                    param.non_type_type = std::move(_tmp_result.value());
+                    auto name_result = expect(TokenKind::Identifier, "template parameter name");
+                    if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+                    param.name = std::string(name_result.value().text);
                 } else {
                     const Token& concept_tok = peek();
-                    std::string concept_name(
-                        expect(TokenKind::Identifier, "'typename', a scalar type, or a concept name").text);
+                    auto concept_name_tok_result = expect(TokenKind::Identifier, "'typename', a scalar type, or a concept name");
+                    if (!concept_name_tok_result.has_value()) return std::unexpected(std::move(concept_name_tok_result).error());
+                    std::string concept_name(concept_name_tok_result.value().text);
                     if (!concept_names_.contains(concept_name)) {
-                        throw ParseError(concept_tok.line, concept_tok.column,
+                        return std::unexpected(ParseError(concept_tok.line, concept_tok.column,
                                           "'" + concept_name +
                                               "' is not a declared concept -- a generic type's template "
                                               "parameter must be introduced by 'typename', a scalar type, or "
-                                              "an already-declared concept name (ch05 §5.14)");
+                                              "an already-declared concept name (ch05 §5.14)"));
                     }
                     param.concept_name = concept_name;
-                    param.name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                    auto name_result = expect(TokenKind::Identifier, "template parameter name");
+                    if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+                    param.name = std::string(name_result.value().text);
                 }
                 if (param.is_pack && !check(TokenKind::Greater)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                       "a parameter pack ('typename... " + param.name +
-                                          "') must be the last template parameter (ch05 §5.14)");
+                                          "') must be the last template parameter (ch05 §5.14)"));
                 }
                 params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::Greater, "'>'");
+        if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return params;
     }
 
@@ -4971,28 +5327,30 @@ private:
     // present -- always empty when `template_params` itself is empty (an
     // ordinary, non-generic class/struct's member can never have one,
     // since there's no type parameter left to constrain).
-    std::string parse_optional_method_requires_clause(const std::vector<GenericTypeParam>& template_params) {
+    [[nodiscard]] std::expected<std::string, ParseError> parse_optional_method_requires_clause(const std::vector<GenericTypeParam>& template_params) {
         if (template_params.empty() || !check(TokenKind::KwRequires)) return "";
         advance(); // 'requires'
         const Token& concept_tok = peek();
         std::string spelled_concept_name = peek_qualified_name();
-        if (spelled_concept_name.empty()) expect(TokenKind::Identifier, "concept name");
+        if (spelled_concept_name.empty()) { if (auto _r = expect(TokenKind::Identifier, "concept name"); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
         std::string concept_name = resolve_visible_concept_name(spelled_concept_name);
         if (concept_name.empty()) {
-            throw ParseError(concept_tok.line, concept_tok.column,
-                              "'" + spelled_concept_name + "' is not a declared concept (ch05 §5.14)");
+            return std::unexpected(ParseError(concept_tok.line, concept_tok.column,
+                              "'" + spelled_concept_name + "' is not a declared concept (ch05 §5.14)"));
         }
         parse_qualified_name(); // now actually consume it, having already resolved it above
-        expect(TokenKind::Less, "'<'");
+        if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         const Token& param_tok = peek();
-        std::string arg_name(expect(TokenKind::Identifier, "the generic type's own template parameter name").text);
+        auto arg_name_result = expect(TokenKind::Identifier, "the generic type's own template parameter name");
+        if (!arg_name_result.has_value()) return std::unexpected(std::move(arg_name_result).error());
+        std::string arg_name(arg_name_result.value().text);
         if (arg_name != template_params[0].name) {
-            throw ParseError(param_tok.line, param_tok.column,
+            return std::unexpected(ParseError(param_tok.line, param_tok.column,
                               "'requires " + concept_name + "<" + arg_name +
                                   ">' does not name this generic type's own template parameter '" +
-                                  template_params[0].name + "' (ch05 §5.14)");
+                                  template_params[0].name + "' (ch05 §5.14)"));
         }
-        expect(TokenKind::Greater, "'>'");
+        if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return concept_name;
     }
 
@@ -5020,10 +5378,12 @@ private:
     // function-parameter position for one anyway, so a bare `Tail x`
     // parameter would simply never resolve to anything real at
     // monomorphization time, surfacing there instead).
-    void parse_generic_function_def(Program& program, bool is_exported, bool is_unsafe = false,
+    [[nodiscard]] std::expected<void, ParseError> parse_generic_function_def(Program& program, bool is_exported, bool is_unsafe = false,
                                     bool is_nodiscard = false, const std::string& nodiscard_reason = {}) {
         SourceLocation loc = current_loc();
-        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
+        auto template_params_result = parse_generic_type_header();
+        if (!template_params_result.has_value()) return std::unexpected(std::move(template_params_result).error());
+        std::vector<GenericTypeParam> template_params = std::move(template_params_result.value());
         for (const GenericTypeParam& p : template_params) {
             if (p.is_non_type) continue;
             struct_names_.insert(p.name);
@@ -5032,17 +5392,19 @@ private:
 
         std::vector<GenericTypeParam> saved_template_params = current_function_template_params_;
         current_function_template_params_ = template_params;
-        Function fn =
+        auto fn_result =
             parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe, is_nodiscard,
                            nodiscard_reason);
         current_function_template_params_ = std::move(saved_template_params);
+        if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
+        Function fn = std::move(fn_result.value());
         fn.loc = loc;
         fn.name = qualify_name(fn.name);
         fn.namespace_path = namespace_stack_;
         fn.is_exported = is_exported;
         fn.template_params = template_params;
         fn.is_generic_template = true;
-        check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'");
+        if (auto _r = check_export_context(program, is_exported, fn.namespace_path, loc, "function '" + fn.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         generic_function_template_params_[fn.name] = template_params;
 
         for (const GenericTypeParam& p : template_params) {
@@ -5051,25 +5413,29 @@ private:
             class_names_.erase(p.name);
         }
         program.functions.push_back(std::move(fn));
+        return {};
     }
 
-    void parse_concept_def(Program& program, bool is_exported) {
+    [[nodiscard]] std::expected<void, ParseError> parse_concept_def(Program& program, bool is_exported) {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwTemplate, "'template'");
-        expect(TokenKind::Less, "'<'");
-        expect(TokenKind::KwTypename, "'typename'");
-        std::string template_param_name =
-            std::string(expect(TokenKind::Identifier, "template parameter name").text);
-        expect(TokenKind::Greater, "'>'");
+        if (auto _r = expect(TokenKind::KwTemplate, "'template'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::KwTypename, "'typename'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        auto template_param_name_result = expect(TokenKind::Identifier, "template parameter name");
+        if (!template_param_name_result.has_value()) return std::unexpected(std::move(template_param_name_result).error());
+        std::string template_param_name = std::string(template_param_name_result.value().text);
+        if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
-        expect(TokenKind::KwConcept, "'concept'");
+        if (auto _r = expect(TokenKind::KwConcept, "'concept'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         ConceptDef def;
-        std::string bare_name = std::string(expect(TokenKind::Identifier, "concept name").text);
+        auto bare_name_result = expect(TokenKind::Identifier, "concept name");
+        if (!bare_name_result.has_value()) return std::unexpected(std::move(bare_name_result).error());
+        std::string bare_name = std::string(bare_name_result.value().text);
         def.name = qualify_name(bare_name);
         def.template_param_name = template_param_name;
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
-        check_export_context(program, is_exported, def.namespace_path, loc, "concept '" + def.name + "'");
+        if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "concept '" + def.name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         concept_names_.insert(def.name);
         // The witness class shares the concept's own fully-qualified
         // name -- a concept and a class/struct can never collide in
@@ -5082,9 +5448,9 @@ private:
         struct_names_.insert(def.name);
         class_names_.insert(def.name);
 
-        expect(TokenKind::Assign, "'='");
-        expect(TokenKind::KwRequires, "'requires'");
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::Assign, "'='"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::KwRequires, "'requires'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         // The requires-expression's own (fake, unevaluated) parameter
         // list: exactly one parameter's declared type must be
@@ -5111,60 +5477,67 @@ private:
                 if (is_placeholder) {
                     if (found_placeholder) {
                         const Token& tok = peek();
-                        throw ParseError(tok.line, tok.column,
+                        return std::unexpected(ParseError(tok.line, tok.column,
                                           "a concept's requires-expression may only have one parameter of "
                                           "the constrained type '" +
-                                              template_param_name + "'");
+                                              template_param_name + "'"));
                     }
                     def.requires_param_is_const = match(TokenKind::KwConst);
                     advance(); // the template parameter name itself (e.g. "T")
                     match(TokenKind::Amp); // optional trailing '&' -- ref-ness itself
                                             // doesn't affect this v0.1
                                             // concept model
-                    def.requires_param_name =
-                        std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
+                    auto requires_param_name_result = expect(TokenKind::Identifier, "requires-parameter name");
+                    if (!requires_param_name_result.has_value()) return std::unexpected(std::move(requires_param_name_result).error());
+                    def.requires_param_name = std::string(requires_param_name_result.value().text);
                     found_placeholder = true;
                 } else {
-                    Type helper_type = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
-                    std::string helper_name =
-                        std::string(expect(TokenKind::Identifier, "requires-parameter name").text);
+                    auto helper_type_result = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
+                    if (!helper_type_result.has_value()) return std::unexpected(std::move(helper_type_result).error());
+                    Type helper_type = std::move(helper_type_result.value());
+                    auto helper_name_result = expect(TokenKind::Identifier, "requires-parameter name");
+                    if (!helper_name_result.has_value()) return std::unexpected(std::move(helper_name_result).error());
+                    std::string helper_name = std::string(helper_name_result.value().text);
                     // ch05 §5.13/spec §6.2(13.1): a probe parameter
                     // accepts the same trailing attribute-specifier-seq
                     // an ordinary function parameter does (see
                     // parse_function's identical handling) -- most
                     // importantly `[[scpp::lifetime(name)]]`.
                     const Token& helper_attr_start_tok = peek();
-                    ParsedAttributes helper_attrs = parse_attribute_specifier_seq();
-                    reject_packed_attribute(helper_attrs, helper_attr_start_tok,
-                                             "a requires-expression parameter declaration");
+                    auto helper_attrs_result = parse_attribute_specifier_seq();
+                    if (!helper_attrs_result.has_value()) return std::unexpected(std::move(helper_attrs_result).error());
+                    ParsedAttributes helper_attrs = std::move(helper_attrs_result.value());
+                    if (auto _r = reject_packed_attribute(helper_attrs, helper_attr_start_tok,
+                                             "a requires-expression parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     LifetimeAnnotation helper_lifetime;
-                    merge_lifetime_attribute(helper_lifetime, helper_attrs.lifetime, helper_attr_start_tok,
-                                              "a requires-expression parameter declaration");
-                    hoist_type_lifetime_annotation(helper_type, helper_lifetime, helper_attr_start_tok,
-                                                  "a requires-expression parameter declaration");
+                    if (auto _r = merge_lifetime_attribute(helper_lifetime, helper_attrs.lifetime, helper_attr_start_tok,
+                                              "a requires-expression parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (auto _r = hoist_type_lifetime_annotation(helper_type, helper_lifetime, helper_attr_start_tok,
+                                                  "a requires-expression parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     helper_param_types[helper_name] = std::move(helper_type);
                     helper_param_lifetimes[helper_name] = std::move(helper_lifetime);
                 }
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::RParen, "')'");
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!found_placeholder) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "concept '" + def.name +
                                   "'s requires-expression must have exactly one parameter of the "
                                   "constrained type '" +
-                                  template_param_name + "'");
+                                  template_param_name + "'"));
         }
 
-        expect(TokenKind::LBrace, "'{'");
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-            def.requirements.push_back(
-                parse_concept_requirement(def.requires_param_name, template_param_name, helper_param_types,
-                                          helper_param_lifetimes));
+            auto requirement_result = parse_concept_requirement(def.requires_param_name, template_param_name, helper_param_types,
+                                          helper_param_lifetimes);
+            if (!requirement_result.has_value()) return std::unexpected(std::move(requirement_result).error());
+            def.requirements.push_back(std::move(requirement_result.value()));
         }
-        expect(TokenKind::RBrace, "'}'");
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         ClassDef witness;
         witness.name = def.name;
@@ -5229,6 +5602,7 @@ private:
         }
 
         program.concepts.push_back(std::move(def));
+        return {};
     }
 
     // Parses `class Name { ... };` (ch04 §4.2/ch05 §5.9): fields (with
@@ -5249,19 +5623,25 @@ private:
     // nothing to instantiate directly (only a specialization, ever, is
     // -- see parse_variadic_specialization/the Monomorphizer's own
     // variadic-instantiation logic).
-    void parse_variadic_primary_template_decl(Program& program, bool is_exported,
+    [[nodiscard]] std::expected<void, ParseError> parse_variadic_primary_template_decl(Program& program, bool is_exported,
                                               std::vector<GenericTypeParam> template_params = {}) {
         SourceLocation loc = current_loc();
-        if (template_params.empty()) template_params = parse_generic_type_header();
-        expect(TokenKind::KwClass, "'class'");
-        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        if (template_params.empty()) {
+            auto template_params_result = parse_generic_type_header();
+            if (!template_params_result.has_value()) return std::unexpected(std::move(template_params_result).error());
+            template_params = std::move(template_params_result.value());
+        }
+        if (auto _r = expect(TokenKind::KwClass, "'class'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        auto class_name_result = expect(TokenKind::Identifier, "class name");
+        if (!class_name_result.has_value()) return std::unexpected(std::move(class_name_result).error());
+        std::string class_name = std::string(class_name_result.value().text);
         if (check(TokenKind::KwAlignas)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "'alignas' must appear before a class name, not after it (spec §9.3)");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "'alignas' must appear before a class name, not after it (spec §9.3)"));
         }
         std::string qualified_class_name = qualify_name(class_name);
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
@@ -5276,8 +5656,9 @@ private:
         def.template_params = template_params;
         def.template_owner_id = next_generic_template_owner_id();
         def.is_variadic_primary_template = true;
-        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         program.classes.push_back(std::move(def));
+        return {};
     }
 
     // ch05 §5.14: parses one of the exactly two fixed variadic
@@ -5290,55 +5671,61 @@ private:
     // header's parameter names, in order -- not a general/arbitrary
     // specialization pattern (ch05 §5.14's own scoping: "exactly two
     // fixed patterns... not arbitrary/general specialization").
-    void parse_variadic_specialization(Program& program, bool is_exported) {
+    [[nodiscard]] std::expected<void, ParseError> parse_variadic_specialization(Program& program, bool is_exported) {
         SourceLocation loc = current_loc();
-        std::vector<GenericTypeParam> template_params = parse_generic_type_header();
-        expect(TokenKind::KwClass, "'class'");
+        auto template_params_result = parse_generic_type_header();
+        if (!template_params_result.has_value()) return std::unexpected(std::move(template_params_result).error());
+        std::vector<GenericTypeParam> template_params = std::move(template_params_result.value());
+        if (auto _r = expect(TokenKind::KwClass, "'class'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         const Token& class_name_tok = peek();
-        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        auto class_name_result = expect(TokenKind::Identifier, "class name");
+        if (!class_name_result.has_value()) return std::unexpected(std::move(class_name_result).error());
+        std::string class_name = std::string(class_name_result.value().text);
         std::string qualified_class_name = qualify_name(class_name);
         auto primary_it = variadic_primary_template_params_.find(qualified_class_name);
         if (primary_it == variadic_primary_template_params_.end()) {
-            throw ParseError(class_name_tok.line, class_name_tok.column,
+            return std::unexpected(ParseError(class_name_tok.line, class_name_tok.column,
                               "'" + qualified_class_name +
                                   "' is not a declared variadic primary template -- a specialization requires "
                                   "a preceding 'template<typename... Ts> class " +
-                                  class_name + ";' forward declaration (ch05 §5.14)");
+                                  class_name + ";' forward declaration (ch05 §5.14)"));
         }
 
         // The specialization's own `<...>` argument list must exactly
         // restate template_params' own names, in order (empty for the
         // base case).
-        expect(TokenKind::Less, "'<'");
+        if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::size_t index = 0;
         if (!check(TokenKind::Greater)) {
             do {
                 if (index >= template_params.size()) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                       "this specialization's own '<...>' argument list has more entries than "
                                       "its own template header (ch05 §5.14 only supports restating the "
-                                      "header's own parameter names, in order)");
+                                      "header's own parameter names, in order)"));
                 }
                 const Token& name_tok = peek();
-                std::string arg_name = std::string(expect(TokenKind::Identifier, "template parameter name").text);
+                auto arg_name_result = expect(TokenKind::Identifier, "template parameter name");
+                if (!arg_name_result.has_value()) return std::unexpected(std::move(arg_name_result).error());
+                std::string arg_name = std::string(arg_name_result.value().text);
                 if (arg_name != template_params[index].name) {
-                    throw ParseError(name_tok.line, name_tok.column,
+                    return std::unexpected(ParseError(name_tok.line, name_tok.column,
                                       "expected this specialization's own template parameter '" +
                                           template_params[index].name + "', not '" + arg_name +
                                           "' (ch05 §5.14 only supports restating the header's own parameter "
-                                          "names, in order)");
+                                          "names, in order)"));
                 }
-                if (template_params[index].is_pack) expect(TokenKind::Ellipsis, "'...'");
+                if (template_params[index].is_pack) { if (auto _r = expect(TokenKind::Ellipsis, "'...'"); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
                 index++;
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::Greater, "'>'");
+        if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (index != template_params.size()) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "this specialization's own '<...>' argument list must restate every one of its "
-                              "own template header's parameters (ch05 §5.14)");
+                              "own template header's parameters (ch05 §5.14)"));
         }
 
         // Exactly two fixed shapes are legal (ch05 §5.14), after
@@ -5358,9 +5745,9 @@ private:
         for (std::size_t i = leading_non_type_count; i < template_params.size(); i++) {
             if (template_params[i].is_non_type) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "a variadic specialization's non-type parameter(s) must all come first, "
-                                  "before any type parameter (ch05 §5.14)");
+                                  "before any type parameter (ch05 §5.14)"));
             }
         }
         std::size_t remaining = template_params.size() - leading_non_type_count;
@@ -5368,11 +5755,11 @@ private:
                          !template_params[leading_non_type_count].is_pack;
         if (remaining != 0 && !has_pack) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "a variadic specialization's own template header must, after any leading "
                               "non-type parameter(s), be either empty (the empty-pack base case) or end in "
                               "exactly one type parameter followed by a parameter pack ('typename Head, "
-                              "typename... Tail', the recursive case) (ch05 §5.14)");
+                              "typename... Tail', the recursive case) (ch05 §5.14)"));
         }
 
         // Register every one of this specialization's own template
@@ -5394,7 +5781,7 @@ private:
         def.template_params = template_params;
         def.template_owner_id = next_generic_template_owner_id();
         def.is_variadic_specialization = true;
-        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         // ch05 §5.14: the recursive case's own base clause, `: private
         // Tuple<Tail...>` or (with a leading non-type parameter, e.g.
@@ -5419,8 +5806,8 @@ private:
             std::string base_name = parse_qualified_name();
             auto base_primary_it = variadic_primary_template_params_.find(base_name);
             if (base_primary_it == variadic_primary_template_params_.end()) {
-                throw ParseError(base_tok.line, base_tok.column,
-                                  "'" + base_name + "' is not a declared variadic primary template (ch05 §5.14)");
+                return std::unexpected(ParseError(base_tok.line, base_tok.column,
+                                  "'" + base_name + "' is not a declared variadic primary template (ch05 §5.14)"));
             }
             BaseSpecifier base = make_named_base_specifier(program, base_name, base_access);
             std::size_t base_leading_non_type_count = 0;
@@ -5428,22 +5815,26 @@ private:
                 if (!p.is_non_type) break;
                 base_leading_non_type_count++;
             }
-            expect(TokenKind::Less, "'<'");
+            if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             for (std::size_t i = 0; i < base_leading_non_type_count; i++) {
-                base.base_type.non_type_args.push_back(std::shared_ptr<Expr>(parse_additive().release()));
-                expect(TokenKind::Comma, "','");
+                auto non_type_arg_result = parse_additive();
+                if (!non_type_arg_result.has_value()) return std::unexpected(std::move(non_type_arg_result).error());
+                base.base_type.non_type_args.push_back(std::shared_ptr<Expr>(std::move(non_type_arg_result.value()).release()));
+                if (auto _r = expect(TokenKind::Comma, "','"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             const Token& pack_tok = peek();
-            std::string pack_name = std::string(expect(TokenKind::Identifier, "the pack parameter's own name").text);
+            auto pack_name_result = expect(TokenKind::Identifier, "the pack parameter's own name");
+            if (!pack_name_result.has_value()) return std::unexpected(std::move(pack_name_result).error());
+            std::string pack_name = std::string(pack_name_result.value().text);
             if (!has_pack || pack_name != template_params.back().name) {
-                throw ParseError(pack_tok.line, pack_tok.column,
+                return std::unexpected(ParseError(pack_tok.line, pack_tok.column,
                                   "a variadic specialization's own base class can only be instantiated by "
                                   "spreading this specialization's own pack parameter whole (e.g. '" +
                                       base_name + "<" + (has_pack ? template_params.back().name : "Tail") +
-                                      "...>') (ch05 §5.14)");
+                                      "...>') (ch05 §5.14)"));
             }
-            expect(TokenKind::Ellipsis, "'...'");
-            expect(TokenKind::Greater, "'>'");
+            if (auto _r = expect(TokenKind::Ellipsis, "'...'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             Type pack_arg = named_type(pack_name);
             pack_arg.is_pack_expansion = true;
             base.base_type.template_args.push_back(std::move(pack_arg));
@@ -5451,32 +5842,37 @@ private:
             def.base_specifiers.push_back(std::move(base));
         }
 
-        parse_class_body_into(program, def, class_name, template_params);
+        if (auto _r = parse_class_body_into(program, def, class_name, template_params); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         for (const GenericTypeParam& p : template_params) {
             if (p.is_non_type) continue;
             struct_names_.erase(p.name);
             class_names_.erase(p.name);
         }
+        return {};
     }
 
-    void parse_ordinary_class_template_forward_decl(Program& program, bool is_exported,
+    [[nodiscard]] std::expected<void, ParseError> parse_ordinary_class_template_forward_decl(Program& program, bool is_exported,
                                                     std::vector<GenericTypeParam> template_params) {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwClass, "'class'");
-        ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        if (auto _r = expect(TokenKind::KwClass, "'class'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        auto class_attrs_result = parse_attribute_specifier_seq();
+        if (!class_attrs_result.has_value()) return std::unexpected(std::move(class_attrs_result).error());
+        ParsedAttributes class_attrs = std::move(class_attrs_result.value());
         if (class_attrs.has("packed")) {
-            throw ParseError(loc.line, loc.column,
-                             "'[[scpp::packed]]' is only supported on struct/union declarations");
+            return std::unexpected(ParseError(loc.line, loc.column,
+                             "'[[scpp::packed]]' is only supported on struct/union declarations"));
         }
         if (!class_attrs.scpp_tokens.empty() || class_attrs.thread_movable_if_movable_expr ||
             class_attrs.thread_movable_if_shareable_expr) {
-            throw ParseError(loc.line, loc.column,
-                             "scpp class attributes are not supported on a bodyless template forward declaration");
+            return std::unexpected(ParseError(loc.line, loc.column,
+                             "scpp class attributes are not supported on a bodyless template forward declaration"));
         }
-        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        auto class_name_result = expect(TokenKind::Identifier, "class name");
+        if (!class_name_result.has_value()) return std::unexpected(std::move(class_name_result).error());
+        std::string class_name = std::string(class_name_result.value().text);
         std::string qualified_class_name = qualify_name(class_name);
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         bool saw_type = false;
         bool saw_non_type = false;
         for (const GenericTypeParam& param : template_params) {
@@ -5484,9 +5880,9 @@ private:
             saw_non_type = saw_non_type || param.is_non_type;
         }
         if (saw_type && saw_non_type) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                              "ordinary generic classes cannot yet mix type and non-type template "
-                             "parameters in one parameter list");
+                             "parameters in one parameter list"));
         }
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
@@ -5502,14 +5898,15 @@ private:
         def.template_params = std::move(template_params);
         def.template_owner_id = next_generic_template_owner_id();
         def.is_forward_declaration = true;
-        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         program.classes.push_back(std::move(def));
+        return {};
     }
 
-    void parse_ordinary_class_partial_specialization(Program& program, bool is_exported,
+    [[nodiscard]] std::expected<void, ParseError> parse_ordinary_class_partial_specialization(Program& program, bool is_exported,
                                                      std::vector<GenericTypeParam> template_params) {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwClass, "'class'");
+        if (auto _r = expect(TokenKind::KwClass, "'class'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         bool is_generic = !template_params.empty();
         if (is_generic) {
             for (const GenericTypeParam& param : template_params) {
@@ -5519,50 +5916,56 @@ private:
                 }
             }
         }
-        ParsedAttributes class_attrs = parse_attribute_specifier_seq();
+        auto class_attrs_result = parse_attribute_specifier_seq();
+        if (!class_attrs_result.has_value()) return std::unexpected(std::move(class_attrs_result).error());
+        ParsedAttributes class_attrs = std::move(class_attrs_result.value());
         if (class_attrs.has("packed")) {
-            throw ParseError(loc.line, loc.column,
-                             "'[[scpp::packed]]' is only supported on struct/union declarations");
+            return std::unexpected(ParseError(loc.line, loc.column,
+                             "'[[scpp::packed]]' is only supported on struct/union declarations"));
         }
-        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        auto class_name_result = expect(TokenKind::Identifier, "class name");
+        if (!class_name_result.has_value()) return std::unexpected(std::move(class_name_result).error());
+        std::string class_name = std::string(class_name_result.value().text);
         std::string qualified_class_name = qualify_name(class_name);
         auto primary_it = ordinary_generic_type_template_params_.find(qualified_class_name);
         if (primary_it == ordinary_generic_type_template_params_.end()) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                              "'" + qualified_class_name +
                                  "' is not a declared ordinary generic class template -- a partial "
-                                 "specialization requires a preceding primary template declaration");
+                                 "specialization requires a preceding primary template declaration"));
         }
         for (const GenericTypeParam& param : primary_it->second) {
             if (param.is_non_type) {
-                throw ParseError(loc.line, loc.column,
+                return std::unexpected(ParseError(loc.line, loc.column,
                                  "ordinary partial specialization is currently only supported for class "
-                                 "templates whose primary parameter list is all-type");
+                                 "templates whose primary parameter list is all-type"));
             }
         }
         bool saw_non_type = false;
         for (const GenericTypeParam& param : template_params) saw_non_type = saw_non_type || param.is_non_type;
         if (saw_non_type) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                              "ordinary partial specialization is currently only supported with type template "
-                             "parameters");
+                             "parameters"));
         }
 
         std::vector<Type> specialization_args;
         std::vector<GenericTypeParam> saved_class_template_params = current_class_template_params_;
         current_class_template_params_ = template_params;
-        expect(TokenKind::Less, "'<'");
+        if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!check(TokenKind::Greater)) {
             do {
-                specialization_args.push_back(parse_template_type_argument());
+                auto arg_result = parse_template_type_argument();
+                if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                specialization_args.push_back(std::move(arg_result.value()));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::Greater, "'>'");
+        if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         current_class_template_params_ = std::move(saved_class_template_params);
         if (specialization_args.size() != primary_it->second.size()) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                              "this partial specialization must provide exactly " +
-                                 std::to_string(primary_it->second.size()) + " specialization argument(s)");
+                                 std::to_string(primary_it->second.size()) + " specialization argument(s)"));
         }
 
         struct_names_.insert(qualified_class_name);
@@ -5577,13 +5980,13 @@ private:
         def.nodiscard_reason = class_attrs.nodiscard_reason;
         if (class_attrs.thread_movable_if_movable_expr || class_attrs.thread_movable_if_shareable_expr) {
             if (!(class_attrs.thread_movable_if_movable_expr && class_attrs.thread_movable_if_shareable_expr)) {
-                throw ParseError(loc.line, loc.column,
-                                 "'[[scpp::thread_movable_if(a, b)]]' requires exactly two boolean arguments");
+                return std::unexpected(ParseError(loc.line, loc.column,
+                                 "'[[scpp::thread_movable_if(a, b)]]' requires exactly two boolean arguments"));
             }
             if (def.thread_movable_override || def.thread_shareable_override) {
-                throw ParseError(loc.line, loc.column,
+                return std::unexpected(ParseError(loc.line, loc.column,
                                  "'[[scpp::thread_movable_if(a, b)]]' cannot be combined with bare "
-                                 "'[[scpp::thread_movable]]' or '[[scpp::thread_shareable]]' on the same class");
+                                 "'[[scpp::thread_movable]]' or '[[scpp::thread_shareable]]' on the same class"));
             }
             def.thread_movable_if_movable_expr = std::move(class_attrs.thread_movable_if_movable_expr);
             def.thread_movable_if_shareable_expr = std::move(class_attrs.thread_movable_if_shareable_expr);
@@ -5594,11 +5997,11 @@ private:
         def.template_owner_id = next_generic_template_owner_id();
         def.is_partial_specialization = true;
         def.specialization_template_args = std::move(specialization_args);
-        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
-        parse_named_class_base_clause(program, def.base_specifiers);
+        if (auto _r = parse_named_class_base_clause(program, def.base_specifiers); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
-        parse_class_body_into(program, def, class_name, def.template_params);
+        if (auto _r = parse_class_body_into(program, def, class_name, def.template_params); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         if (is_generic) {
             for (const GenericTypeParam& param : def.template_params) {
@@ -5608,6 +6011,7 @@ private:
                 }
             }
         }
+        return {};
     }
 
     // `template_params` (ch05 §5.14), non-empty exactly when the caller
@@ -5626,12 +6030,12 @@ private:
     // monomorphized/checked here -- see the Monomorphizer's generic-type
     // handling (movecheck.cppm) for both the once-at-definition abstract
     // check and each concrete instantiation's own clone.
-    void parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {},
+    [[nodiscard]] std::expected<void, ParseError> parse_class_def(Program& program, bool is_exported, std::vector<GenericTypeParam> template_params = {},
                          std::vector<AlignmentSpecifier> leading_alignments = {},
                          std::optional<std::string> forced_qualified_name = std::nullopt,
                          bool is_local_definition = false) {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwClass, "'class'");
+        if (auto _r = expect(TokenKind::KwClass, "'class'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         bool is_generic = !template_params.empty();
         if (is_generic) {
             for (const GenericTypeParam& param : template_params) {
@@ -5643,11 +6047,15 @@ private:
         }
         // ch05 §5.15: `class [[scpp::thread_movable]] Name { ... };` --
         // see parse_struct_def's identical handling.
-        ParsedAttributes class_attrs = parse_attribute_specifier_seq();
-        std::vector<AlignmentSpecifier> trailing_alignments = parse_alignment_specifier_seq();
+        auto class_attrs_result = parse_attribute_specifier_seq();
+        if (!class_attrs_result.has_value()) return std::unexpected(std::move(class_attrs_result).error());
+        ParsedAttributes class_attrs = std::move(class_attrs_result.value());
+        auto trailing_alignments_result = parse_alignment_specifier_seq();
+        if (!trailing_alignments_result.has_value()) return std::unexpected(std::move(trailing_alignments_result).error());
+        std::vector<AlignmentSpecifier> trailing_alignments = std::move(trailing_alignments_result.value());
         if (class_attrs.has("packed")) {
-            throw ParseError(loc.line, loc.column,
-                             "'[[scpp::packed]]' is only supported on struct/union declarations");
+            return std::unexpected(ParseError(loc.line, loc.column,
+                             "'[[scpp::packed]]' is only supported on struct/union declarations"));
         }
         // The bare, unqualified name as written -- used for the
         // constructor/destructor spelling checks below (`~string()`,
@@ -5658,7 +6066,9 @@ private:
         // from outside its own body: struct_names_/class_names_
         // registration, `this`'s declared type, and every synthesized
         // member function's own name.
-        std::string class_name = std::string(expect(TokenKind::Identifier, "class name").text);
+        auto class_name_result = expect(TokenKind::Identifier, "class name");
+        if (!class_name_result.has_value()) return std::unexpected(std::move(class_name_result).error());
+        std::string class_name = std::string(class_name_result.value().text);
         std::string qualified_class_name = qualify_name(class_name);
         // Register the name before parsing the body so a field/method can
         // refer to the enclosing class via a pointer, and so a
@@ -5667,9 +6077,9 @@ private:
         // registration order as parse_struct_def.
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
-        register_record_tag_kind(qualified_class_name, RecordTagKind::Class, loc);
+        if (auto _r = register_record_tag_kind(qualified_class_name, RecordTagKind::Class, loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (is_local_definition || forced_qualified_name.has_value()) {
-            register_local_type_name(class_name, qualified_class_name, loc);
+            if (auto _r = register_local_type_name(class_name, qualified_class_name, loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         if (is_generic) {
             bool saw_type = false;
@@ -5680,9 +6090,9 @@ private:
             }
             if (saw_type && saw_non_type) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "ordinary generic classes cannot yet mix type and non-type template "
-                                  "parameters in one parameter list");
+                                  "parameters in one parameter list"));
             }
             generic_type_names_.insert(qualified_class_name);
             ordinary_generic_type_template_params_[qualified_class_name] = template_params;
@@ -5701,13 +6111,13 @@ private:
         def.nodiscard_reason = class_attrs.nodiscard_reason;
         if (class_attrs.thread_movable_if_movable_expr || class_attrs.thread_movable_if_shareable_expr) {
             if (!(class_attrs.thread_movable_if_movable_expr && class_attrs.thread_movable_if_shareable_expr)) {
-                throw ParseError(loc.line, loc.column,
-                                 "'[[scpp::thread_movable_if(a, b)]]' requires exactly two boolean arguments");
+                return std::unexpected(ParseError(loc.line, loc.column,
+                                 "'[[scpp::thread_movable_if(a, b)]]' requires exactly two boolean arguments"));
             }
             if (def.thread_movable_override || def.thread_shareable_override) {
-                throw ParseError(loc.line, loc.column,
+                return std::unexpected(ParseError(loc.line, loc.column,
                                  "'[[scpp::thread_movable_if(a, b)]]' cannot be combined with bare "
-                                 "'[[scpp::thread_movable]]' or '[[scpp::thread_shareable]]' on the same class");
+                                 "'[[scpp::thread_movable]]' or '[[scpp::thread_shareable]]' on the same class"));
             }
             def.thread_movable_if_movable_expr = std::move(class_attrs.thread_movable_if_movable_expr);
             def.thread_movable_if_shareable_expr = std::move(class_attrs.thread_movable_if_shareable_expr);
@@ -5716,24 +6126,24 @@ private:
         def.is_exported = is_exported || exported_forward_class_exists(program, qualified_class_name);
         def.template_params = template_params;
         if (is_generic) def.template_owner_id = next_generic_template_owner_id();
-        check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'");
+        if (auto _r = check_export_context(program, is_exported, def.namespace_path, loc, "class '" + qualified_class_name + "'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         if (match(TokenKind::Semicolon)) {
             if (is_generic) {
-                throw ParseError(loc.line, loc.column,
+                return std::unexpected(ParseError(loc.line, loc.column,
                                  "an ordinary bodyless forward declaration is only supported for a non-generic "
-                                 "'class' in this version");
+                                 "'class' in this version"));
             }
             if (!def.alignment_specs.empty() || def.thread_movable_override || def.thread_shareable_override ||
                 def.thread_movable_if_movable_expr || def.thread_movable_if_shareable_expr || def.is_interface ||
                 def.is_nodiscard) {
-                throw ParseError(loc.line, loc.column,
+                return std::unexpected(ParseError(loc.line, loc.column,
                                  "scpp class layout/thread/interface/nodiscard attributes are not supported on a "
-                                 "bodyless forward declaration");
+                                 "bodyless forward declaration"));
             }
             def.is_forward_declaration = true;
             program.classes.push_back(std::move(def));
-            return;
+            return {};
         }
 
         // ch05 §5.14: `class Derived : public/private Base { ... };` --
@@ -5743,9 +6153,9 @@ private:
         // type's own base (e.g. `Tuple<Head, Tail...> : private
         // Tuple<Tail...>`) is handled separately by the specialization
         // parser, which never reaches this ordinary path.
-        parse_named_class_base_clause(program, def.base_specifiers);
+        if (auto _r = parse_named_class_base_clause(program, def.base_specifiers); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
-        parse_class_body_into(program, def, class_name, template_params);
+        if (auto _r = parse_class_body_into(program, def, class_name, template_params); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         if (is_generic) {
             // Un-register the temporary type-parameter name -- scoped
@@ -5758,6 +6168,7 @@ private:
                 }
             }
         }
+        return {};
     }
 
     // ch05 §5.14: parses a class's own `{ ... };` body (fields, access-
@@ -5772,7 +6183,7 @@ private:
     // base_specifiers/is_variadic_specialization must
     // already be set by the caller; only `fields` is populated here.
     template <typename HandleUsingFn, typename AddFieldFn>
-    void parse_record_body_into(Program& program, const std::string& owner_name, const std::string& qualified_owner_name,
+    [[nodiscard]] std::expected<void, ParseError> parse_record_body_into(Program& program, const std::string& owner_name, const std::string& qualified_owner_name,
                                 const std::string& synthesized_member_owner_name,
                                 const std::vector<GenericTypeParam>& template_params, bool is_exported,
                                 const std::string& generic_method_owner_id, AccessSpecifier default_access,
@@ -5809,7 +6220,7 @@ private:
                 class_names_.erase(p.name);
             }
         };
-        auto parse_member_body_or_declaration = [&]() -> StmtPtr {
+        auto parse_member_body_or_declaration = [&]() -> std::expected<StmtPtr, ParseError> {
             if (match(TokenKind::Semicolon)) return nullptr;
             return parse_block();
         };
@@ -5820,16 +6231,16 @@ private:
                 InjectedGenericTypeName{owner_name, qualified_owner_name, template_params});
         }
 
-        expect(TokenKind::LBrace, "'{'");
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         AccessSpecifier current_access = default_access;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             if (match(TokenKind::KwPublic)) {
-                expect(TokenKind::Colon, "':'");
+                if (auto _r = expect(TokenKind::Colon, "':'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 current_access = AccessSpecifier::Public;
                 continue;
             }
             if (match(TokenKind::KwPrivate)) {
-                expect(TokenKind::Colon, "':'");
+                if (auto _r = expect(TokenKind::Colon, "':'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 current_access = AccessSpecifier::Private;
                 continue;
             }
@@ -5839,7 +6250,9 @@ private:
             std::vector<GenericTypeParam> member_template_params;
             std::vector<GenericTypeParam> saved_function_template_params = current_function_template_params_;
             if (check(TokenKind::KwTemplate)) {
-                member_template_params = parse_generic_type_header();
+                auto member_template_params_result = parse_generic_type_header();
+                if (!member_template_params_result.has_value()) return std::unexpected(std::move(member_template_params_result).error());
+                member_template_params = std::move(member_template_params_result.value());
                 member_is_template = true;
                 enter_member_template_context(member_template_params);
             }
@@ -5851,10 +6264,14 @@ private:
             // member shape follows; rejected if it turns out to be a
             // field (unsafe is only ever meaningful on a function, ch01
             // §1.3 (1)).
-            std::vector<AlignmentSpecifier> member_alignments = parse_alignment_specifier_seq();
+            auto member_alignments_result = parse_alignment_specifier_seq();
+            if (!member_alignments_result.has_value()) return std::unexpected(std::move(member_alignments_result).error());
+            std::vector<AlignmentSpecifier> member_alignments = std::move(member_alignments_result.value());
             const Token& member_attr_start_tok = peek();
-            ParsedAttributes member_attrs = parse_attribute_specifier_seq();
-            reject_packed_attribute(member_attrs, member_attr_start_tok, member_decl_context.data());
+            auto member_attrs_result = parse_attribute_specifier_seq();
+            if (!member_attrs_result.has_value()) return std::unexpected(std::move(member_attrs_result).error());
+            ParsedAttributes member_attrs = std::move(member_attrs_result.value());
+            if (auto _r = reject_packed_attribute(member_attrs, member_attr_start_tok, member_decl_context.data()); !_r.has_value()) return std::unexpected(std::move(_r).error());
             bool member_requested_unsafe = member_attrs.has("unsafe");
             bool member_requested_nodiscard = member_attrs.has_nodiscard;
             std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
@@ -5888,62 +6305,64 @@ private:
                 if ((check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval)) &&
                     member_eval_mode != FunctionEvalMode::RuntimeOnly) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
-                                     "a declaration may specify at most one of 'constexpr' or 'consteval'");
+                    return std::unexpected(ParseError(tok.line, tok.column,
+                                     "a declaration may specify at most one of 'constexpr' or 'consteval'"));
                 }
                 break;
             }
             if (member_is_virtual && !allow_virtual_members) {
-                throw ParseError(member_loc.line, member_loc.column, std::string(virtual_member_error));
+                return std::unexpected(ParseError(member_loc.line, member_loc.column, std::string(virtual_member_error)));
             }
             if (member_is_explicit && !(check(TokenKind::Identifier) && std::string(peek().text) == owner_name &&
                                         peek_at(1).kind == TokenKind::LParen)) {
-                throw ParseError(member_loc.line, member_loc.column,
-                                 "'explicit' is only allowed directly before a constructor declaration");
+                return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                 "'explicit' is only allowed directly before a constructor declaration"));
             }
             if (check(TokenKind::KwUsing)) {
                 if (!allow_using_declarations) {
-                    throw ParseError(member_loc.line, member_loc.column,
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
                                      "a declaration introduced by '" + std::string(owner_keyword) +
                                          "' shall not declare a class-scope using declaration because a " +
-                                         std::string(owner_keyword) + " has no base-clause in this version");
+                                         std::string(owner_keyword) + " has no base-clause in this version"));
                 }
                 if (member_is_template) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                     "a class-scope using declaration cannot be a member template");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "a class-scope using declaration cannot be a member template"));
                 }
                 if (member_requested_unsafe || member_requested_nodiscard || member_is_static || member_is_virtual ||
                     member_eval_mode != FunctionEvalMode::RuntimeOnly) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                     "a class-scope using declaration cannot carry function specifiers or attributes");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "a class-scope using declaration cannot carry function specifiers or attributes"));
                 }
-                reject_alignment_specifiers(member_alignments, "a class-scope using declaration");
-                handle_using(current_access);
+                if (auto _r = reject_alignment_specifiers(member_alignments, "a class-scope using declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = handle_using(current_access); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 continue;
             }
             if (match(TokenKind::Tilde)) {
-                reject_alignment_specifiers(member_alignments, "a destructor declaration");
+                if (auto _r = reject_alignment_specifiers(member_alignments, "a destructor declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 if (member_is_template) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a destructor cannot be a member template");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a destructor cannot be a member template"));
                 }
                 if (member_is_static) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a destructor cannot be declared static");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a destructor cannot be declared static"));
                 }
                 if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a destructor cannot be declared constexpr or consteval");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a destructor cannot be declared constexpr or consteval"));
                 }
-                const Token& name_tok = expect(TokenKind::Identifier, "destructor name");
+                auto name_tok_result = expect(TokenKind::Identifier, "destructor name");
+                if (!name_tok_result.has_value()) return std::unexpected(std::move(name_tok_result).error());
+                const Token& name_tok = name_tok_result.value();
                 if (std::string(name_tok.text) != owner_name) {
-                    throw ParseError(name_tok.line, name_tok.column,
+                    return std::unexpected(ParseError(name_tok.line, name_tok.column,
                                       "destructor name '~" + std::string(name_tok.text) +
                                           "' must match the enclosing " + std::string(owner_keyword) + " name '" +
-                                          owner_name + "'");
+                                          owner_name + "'"));
                 }
-                expect(TokenKind::LParen, "'('");
-                expect(TokenKind::RParen, "')'");
+                if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
@@ -5956,8 +6375,10 @@ private:
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_delete";
                 fn.params.push_back(make_this_param(qualified_owner_name, /*is_const=*/false));
-                fn.body = parse_member_function_suffix(fn);
-                validate_defaulted_special_member(fn, member_loc);
+                auto fn_body_result = parse_member_function_suffix(fn);
+                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                fn.body = std::move(fn_body_result.value());
+                if (auto _r = validate_defaulted_special_member(fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -5965,11 +6386,11 @@ private:
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == owner_name &&
                 peek_at(1).kind == TokenKind::LParen) {
-                reject_alignment_specifiers(member_alignments, "a constructor declaration");
+                if (auto _r = reject_alignment_specifiers(member_alignments, "a constructor declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 advance(); // owner name
                 if (member_is_static) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a constructor cannot be declared static");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a constructor cannot be declared static"));
                 }
                 Function fn;
                 fn.loc = member_loc;
@@ -5983,46 +6404,56 @@ private:
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name + "_new";
-                fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
-                parse_function_trailing_attributes(fn, "a constructor declarator");
-                reject_generic_params(fn.params, "a constructor");
+                auto fn_params_result = parse_param_list(/*allow_unnamed_single_parameter=*/true);
+                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
+                fn.params = std::move(fn_params_result.value());
+                if (auto _r = parse_function_trailing_attributes(fn, "a constructor declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_generic_params(fn.params, "a constructor"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, /*is_const=*/false));
                 fn.is_override = match(TokenKind::KwOverride);
-                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
+                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
+                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
+                fn.method_requires_concept = std::move(fn_requires_result.value());
                 if (!check(TokenKind::Semicolon) && !check(TokenKind::Assign)) {
-                    fn.member_initializers = parse_constructor_member_initializer_list();
+                    auto fn_member_initializers_result = parse_constructor_member_initializer_list();
+                    if (!fn_member_initializers_result.has_value()) return std::unexpected(std::move(fn_member_initializers_result).error());
+                    fn.member_initializers = std::move(fn_member_initializers_result.value());
                 }
                 if (match(TokenKind::Assign)) {
                     if (match(TokenKind::KwDefault)) {
                         fn.is_defaulted = true;
-                        expect(TokenKind::Semicolon, "';'");
+                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                         fn.body = nullptr;
                     } else {
-                        const Token& value_tok = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+                        auto value_tok_result = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+                        if (!value_tok_result.has_value()) return std::unexpected(std::move(value_tok_result).error());
+                        const Token& value_tok = std::move(value_tok_result.value());
                         if (value_tok.text != "0") {
-                            throw ParseError(value_tok.line, value_tok.column,
-                                             "expected 'default' or '0' after '=' in a member declaration");
+                            return std::unexpected(ParseError(value_tok.line, value_tok.column,
+                                             "expected 'default' or '0' after '=' in a member declaration"));
                         }
                         fn.is_pure = true;
-                        expect(TokenKind::Semicolon, "';'");
+                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                         fn.body = nullptr;
                     }
                 } else {
-                    fn.body = parse_member_body_or_declaration();
+                    auto fn_body_result = parse_member_body_or_declaration();
+                    if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                    fn.body = std::move(fn_body_result.value());
                 }
-                reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc);
-                validate_defaulted_special_member(fn, member_loc);
+                if (auto _r = reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = validate_defaulted_special_member(fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 if (is_move_constructor_function(fn) && !fn.is_defaulted) {
-                    throw ParseError(member_loc.line, member_loc.column,
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
                                       "a move constructor cannot be user-declared for " + std::string(owner_keyword) +
                                           " '" + owner_name + "' -- the compiler always provides one (spec "
-                                          "§6.4(1)/(2), ch04 §4.2)");
+                                          "§6.4(1)/(2), ch04 §4.2)"));
                 }
                 if (fn.body == nullptr && !fn.member_initializers.empty()) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                     "a constructor member-initializer-list is only allowed on a constructor definition");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "a constructor member-initializer-list is only allowed on a constructor definition"));
                 }
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
@@ -6030,17 +6461,21 @@ private:
                 continue;
             }
 
-            Type member_type = parse_type();
+            auto member_type_result = parse_type();
+
+            if (!member_type_result.has_value()) return std::unexpected(std::move(member_type_result).error());
+
+            Type member_type = std::move(member_type_result.value());
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Star) {
-                reject_alignment_specifiers(member_alignments, "a member function declaration");
+                if (auto _r = reject_alignment_specifiers(member_alignments, "a member function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 if (member_is_template) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "an operator* cannot currently be a member template");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "an operator* cannot currently be a member template"));
                 }
                 if (member_is_static) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "an operator* cannot be declared static");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "an operator* cannot be declared static"));
                 }
                 advance(); // 'operator'
                 advance(); // '*'
@@ -6053,16 +6488,22 @@ private:
                 fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
-                fn.params = parse_param_list();
-                parse_function_trailing_attributes(fn, "a member function declarator");
-                reject_generic_params(fn.params, "an operator*");
+                auto fn_params_result = parse_param_list();
+                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
+                fn.params = std::move(fn_params_result.value());
+                if (auto _r = parse_function_trailing_attributes(fn, "a member function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_generic_params(fn.params, "an operator*"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_operator_deref";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
-                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                fn.body = parse_member_function_suffix(fn);
+                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
+                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
+                fn.method_requires_concept = std::move(fn_requires_result.value());
+                auto fn_body_result = parse_member_function_suffix(fn);
+                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                fn.body = std::move(fn_body_result.value());
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
@@ -6070,12 +6511,12 @@ private:
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Arrow) {
                 if (member_is_template) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "an operator-> cannot currently be a member template");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "an operator-> cannot currently be a member template"));
                 }
                 if (member_is_static) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "an operator-> cannot be declared static");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "an operator-> cannot be declared static"));
                 }
                 advance(); // 'operator'
                 advance(); // '->'
@@ -6088,23 +6529,29 @@ private:
                 fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
-                fn.params = parse_param_list();
-                parse_function_trailing_attributes(fn, "a member function declarator");
-                reject_generic_params(fn.params, "an operator->");
+                auto fn_params_result = parse_param_list();
+                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
+                fn.params = std::move(fn_params_result.value());
+                if (auto _r = parse_function_trailing_attributes(fn, "a member function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_generic_params(fn.params, "an operator->"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_operator_arrow";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
-                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                fn.body = parse_member_function_suffix(fn);
+                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
+                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
+                fn.method_requires_concept = std::move(fn_requires_result.value());
+                auto fn_body_result = parse_member_function_suffix(fn);
+                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                fn.body = std::move(fn_body_result.value());
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 (peek_at(1).kind == TokenKind::EqualEqual || peek_at(1).kind == TokenKind::NotEqual)) {
-                reject_alignment_specifiers(member_alignments, "a member function declaration");
+                if (auto _r = reject_alignment_specifiers(member_alignments, "a member function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 advance(); // 'operator'
                 TokenKind operator_kind = advance().kind;
                 Function fn;
@@ -6117,16 +6564,18 @@ private:
                 fn.is_static = member_is_static;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
-                fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
-                parse_function_trailing_attributes(fn, "a member function declarator");
-                reject_generic_params(fn.params, operator_kind == TokenKind::EqualEqual ? "an operator==" : "an operator!=");
+                auto fn_params_result = parse_param_list(/*allow_unnamed_single_parameter=*/true);
+                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
+                fn.params = std::move(fn_params_result.value());
+                if (auto _r = parse_function_trailing_attributes(fn, "a member function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_generic_params(fn.params, operator_kind == TokenKind::EqualEqual ? "an operator==" : "an operator!="); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 if (member_is_static && (is_const || fn.receiver_ref_qualifier != ReceiverRefQualifier::None)) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                     "a static member function cannot be const-qualified or ref-qualified");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "a static member function cannot be const-qualified or ref-qualified"));
                 }
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name +
@@ -6135,24 +6584,28 @@ private:
                     fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
                 }
                 fn.is_override = match(TokenKind::KwOverride);
-                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                fn.body = parse_member_function_suffix(fn);
-                reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc);
-                validate_defaulted_special_member(fn, member_loc);
+                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
+                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
+                fn.method_requires_concept = std::move(fn_requires_result.value());
+                auto fn_body_result = parse_member_function_suffix(fn);
+                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                fn.body = std::move(fn_body_result.value());
+                if (auto _r = reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = validate_defaulted_special_member(fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 continue;
             }
             if (check(TokenKind::Identifier) && std::string(peek().text) == "operator" &&
                 peek_at(1).kind == TokenKind::Assign) {
-                reject_alignment_specifiers(member_alignments, "a member function declaration");
+                if (auto _r = reject_alignment_specifiers(member_alignments, "a member function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 if (member_is_template) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "an operator= cannot currently be a member template");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "an operator= cannot currently be a member template"));
                 }
                 if (member_is_static) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "an operator= cannot be declared static");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "an operator= cannot be declared static"));
                 }
                 advance(); // 'operator'
                 advance(); // '='
@@ -6165,24 +6618,30 @@ private:
                 fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
-                fn.params = parse_param_list(/*allow_unnamed_single_parameter=*/true);
-                parse_function_trailing_attributes(fn, "a member function declarator");
-                reject_generic_params(fn.params, "an operator=");
+                auto fn_params_result = parse_param_list(/*allow_unnamed_single_parameter=*/true);
+                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
+                fn.params = std::move(fn_params_result.value());
+                if (auto _r = parse_function_trailing_attributes(fn, "a member function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = reject_generic_params(fn.params, "an operator="); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 bool is_const = match(TokenKind::KwConst);
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_operator_assign";
                 fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
-                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
-                fn.body = parse_member_function_suffix(fn);
-                reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc);
-                validate_defaulted_special_member(fn, member_loc);
+                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
+                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
+                fn.method_requires_concept = std::move(fn_requires_result.value());
+                auto fn_body_result = parse_member_function_suffix(fn);
+                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                fn.body = std::move(fn_body_result.value());
+                if (auto _r = reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = validate_defaulted_special_member(fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 if (is_move_assignment_function(fn) && !fn.is_defaulted) {
-                    throw ParseError(member_loc.line, member_loc.column,
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
                                       "a move assignment operator cannot be user-declared for " +
                                           std::string(owner_keyword) + " '" + owner_name +
                                           "' -- the compiler always provides one (spec "
-                                          "§6.4(1)/(2), ch04 §4.2)");
+                                          "§6.4(1)/(2), ch04 §4.2)"));
                 }
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
@@ -6190,42 +6649,47 @@ private:
             }
             if (starts_function_pointer_declarator()) {
                 if (member_is_template) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a member template declaration must declare a constructor or method, not a field");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a member template declaration must declare a constructor or method, not a field"));
                 }
                 if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "only a member function or constructor may be declared constexpr or consteval");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "only a member function or constructor may be declared constexpr or consteval"));
                 }
                 if (member_requested_unsafe) {
-                    throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
+                    return std::unexpected(ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
                                       "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
-                                      "compound-statement or a function's own declaration (ch01 §1.3)");
+                                      "compound-statement or a function's own declaration (ch01 §1.3)"));
                 }
                 if (member_is_static) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "static data members are not supported in this version");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "static data members are not supported in this version"));
                 }
                 if (member_is_virtual) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                     "a member variable cannot be declared virtual");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "a member variable cannot be declared virtual"));
                 }
                 std::string field_name;
-                Type field_type = parse_function_pointer_declarator(std::move(member_type), field_name);
+                auto field_type_result = parse_function_pointer_declarator(std::move(member_type), field_name);
+                if (!field_type_result.has_value()) return std::unexpected(std::move(field_type_result).error());
+                Type field_type = std::move(field_type_result.value());
                 if (check(TokenKind::Colon)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+                    return std::unexpected(ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version"));
                 }
-                std::optional<Initializer> default_initializer =
-                    parse_optional_default_initializer(std::string(member_decl_context));
-                expect(TokenKind::Semicolon, "';'");
+                auto default_initializer_result = parse_optional_default_initializer(std::string(member_decl_context));
+                if (!default_initializer_result.has_value()) return std::unexpected(std::move(default_initializer_result).error());
+                std::optional<Initializer> default_initializer = std::move(default_initializer_result.value());
+                if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 add_field(std::move(field_type), std::move(field_name), current_access, std::move(default_initializer),
                           std::move(member_alignments));
                 continue;
             }
-            std::string member_name = std::string(expect(TokenKind::Identifier, "field or method name").text);
+            auto member_name_tok_result = expect(TokenKind::Identifier, "field or method name");
+            if (!member_name_tok_result.has_value()) return std::unexpected(std::move(member_name_tok_result).error());
+            std::string member_name = std::string(member_name_tok_result.value().text);
             if (check(TokenKind::LParen)) {
-                reject_alignment_specifiers(member_alignments, "a member function declaration");
+                if (auto _r = reject_alignment_specifiers(member_alignments, "a member function declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 Function fn;
                 fn.loc = member_loc;
                 fn.is_unsafe = member_requested_unsafe;
@@ -6236,16 +6700,18 @@ private:
                 fn.is_static = member_is_static;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
-                fn.params = parse_param_list();
-                reject_generic_params(fn.params, "a method");
+                auto fn_params_result = parse_param_list();
+                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
+                fn.params = std::move(fn_params_result.value());
+                if (auto _r = reject_generic_params(fn.params, "a method"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
                 bool is_const = match(TokenKind::KwConst);
-                parse_function_trailing_attributes(fn, "a member function declarator");
+                if (auto _r = parse_function_trailing_attributes(fn, "a member function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
                 if (member_is_static && (is_const || fn.receiver_ref_qualifier != ReceiverRefQualifier::None)) {
-                    throw ParseError(member_loc.line, member_loc.column,
-                                      "a static member function cannot be const-qualified or ref-qualified");
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a static member function cannot be const-qualified or ref-qualified"));
                 }
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name + "_" + member_name;
@@ -6253,28 +6719,34 @@ private:
                     fn.params.insert(fn.params.begin(), make_this_param(qualified_owner_name, is_const));
                 }
                 fn.is_override = match(TokenKind::KwOverride);
-                fn.method_requires_concept = parse_optional_method_requires_clause(template_params);
+                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
+                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
+                fn.method_requires_concept = std::move(fn_requires_result.value());
                 if (match(TokenKind::Assign)) {
                     if (match(TokenKind::KwDefault)) {
                         fn.is_defaulted = true;
-                        expect(TokenKind::Semicolon, "';'");
+                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                         fn.body = nullptr;
                     } else {
-                        const Token& value_tok = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+                        auto value_tok_result = expect(TokenKind::IntegerLiteral, "'default' or '0'");
+                        if (!value_tok_result.has_value()) return std::unexpected(std::move(value_tok_result).error());
+                        const Token& value_tok = std::move(value_tok_result.value());
                         if (value_tok.text != "0") {
-                            throw ParseError(value_tok.line, value_tok.column,
-                                             "expected 'default' or '0' after '=' in a member declaration");
+                            return std::unexpected(ParseError(value_tok.line, value_tok.column,
+                                             "expected 'default' or '0' after '=' in a member declaration"));
                         }
                         fn.is_pure = true;
-                        expect(TokenKind::Semicolon, "';'");
+                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                         fn.body = nullptr;
                     }
                 } else if (match(TokenKind::Semicolon)) {
                     fn.body = nullptr;
                 } else {
-                    fn.body = parse_block();
+                    auto fn_body_result = parse_block();
+                    if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                    fn.body = std::move(fn_body_result.value());
                 }
-                validate_defaulted_special_member(fn, member_loc);
+                if (auto _r = validate_defaulted_special_member(fn, member_loc); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 finish_member_fn(fn);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
@@ -6282,68 +6754,76 @@ private:
             }
 
             if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
-                throw ParseError(member_loc.line, member_loc.column,
-                                  "only a member function or constructor may be declared constexpr or consteval");
+                return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                  "only a member function or constructor may be declared constexpr or consteval"));
             }
             if (member_requested_unsafe) {
-                throw ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
+                return std::unexpected(ParseError(member_attr_start_tok.line, member_attr_start_tok.column,
                                   "'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "
-                                  "compound-statement or a function's own declaration (ch01 §1.3)");
+                                  "compound-statement or a function's own declaration (ch01 §1.3)"));
             }
             if (member_is_static) {
-                throw ParseError(member_loc.line, member_loc.column,
-                                  "static data members are not supported in this version");
+                return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                  "static data members are not supported in this version"));
             }
             if (member_is_virtual) {
-                throw ParseError(member_loc.line, member_loc.column,
-                                 "a member variable cannot be declared virtual");
+                return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                 "a member variable cannot be declared virtual"));
             }
             if (member_is_template) {
-                throw ParseError(member_loc.line, member_loc.column,
-                                  "a member template declaration must declare a constructor or method, not a field");
+                return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                  "a member template declaration must declare a constructor or method, not a field"));
             }
             if (check(TokenKind::Colon)) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version");
+                return std::unexpected(ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version"));
             }
-            Type field_type = parse_array_suffix(std::move(member_type));
-            std::optional<Initializer> default_initializer =
-                parse_optional_default_initializer(std::string(member_decl_context));
-            expect(TokenKind::Semicolon, "';'");
+            auto field_type_result = parse_array_suffix(std::move(member_type));
+            if (!field_type_result.has_value()) return std::unexpected(std::move(field_type_result).error());
+            Type field_type = std::move(field_type_result.value());
+            auto default_initializer_result = parse_optional_default_initializer(std::string(member_decl_context));
+            if (!default_initializer_result.has_value()) return std::unexpected(std::move(default_initializer_result).error());
+            std::optional<Initializer> default_initializer = std::move(default_initializer_result.value());
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             add_field(std::move(field_type), std::move(member_name), current_access, std::move(default_initializer),
                       std::move(member_alignments));
         }
-        expect(TokenKind::RBrace, "'}'");
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!template_params.empty()) injected_generic_type_name_stack_.pop_back();
         current_class_template_params_ = std::move(saved_class_template_params);
+        return {};
     }
 
-    void parse_class_body_into(Program& program, ClassDef& def, const std::string& class_name,
+    [[nodiscard]] std::expected<void, ParseError> parse_class_body_into(Program& program, ClassDef& def, const std::string& class_name,
                                 const std::vector<GenericTypeParam>& template_params) {
         std::string qualified_class_name = def.name;
         std::string synthesized_member_owner_name = qualified_class_name;
         if ((def.is_partial_specialization || def.is_variadic_specialization) && !def.template_owner_id.empty()) {
             synthesized_member_owner_name += "__" + def.template_owner_id;
         }
-        parse_record_body_into(
-            program, class_name, qualified_class_name, synthesized_member_owner_name, template_params, def.is_exported,
-            def.template_owner_id, AccessSpecifier::Private,
-            /*allow_using_declarations=*/true, /*allow_virtual_members=*/true, "class", "a class member declaration",
-            /*virtual_member_error=*/"",
-            [&](AccessSpecifier access) { parse_class_using_declaration(def, access); },
-            [&](Type field_type, std::string field_name, AccessSpecifier access,
-                std::optional<Initializer> default_initializer, std::vector<AlignmentSpecifier> alignment_specs) {
-                ClassField field;
-                field.loc = current_loc();
-                field.type = std::move(field_type);
-                field.name = std::move(field_name);
-                field.access = access;
-                field.default_initializer = std::move(default_initializer);
-                field.alignment_specs = std::move(alignment_specs);
-                def.fields.push_back(std::move(field));
-            });
+        if (auto _r = parse_record_body_into(
+                program, class_name, qualified_class_name, synthesized_member_owner_name, template_params, def.is_exported,
+                def.template_owner_id, AccessSpecifier::Private,
+                /*allow_using_declarations=*/true, /*allow_virtual_members=*/true, "class", "a class member declaration",
+                /*virtual_member_error=*/"",
+                [&](AccessSpecifier access) -> std::expected<void, ParseError> { return parse_class_using_declaration(def, access); },
+                [&](Type field_type, std::string field_name, AccessSpecifier access,
+                    std::optional<Initializer> default_initializer, std::vector<AlignmentSpecifier> alignment_specs) {
+                    ClassField field;
+                    field.loc = current_loc();
+                    field.type = std::move(field_type);
+                    field.name = std::move(field_name);
+                    field.access = access;
+                    field.default_initializer = std::move(default_initializer);
+                    field.alignment_specs = std::move(alignment_specs);
+                    def.fields.push_back(std::move(field));
+                });
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         program.classes.push_back(std::move(def));
+        return {};
     }
 
     // Parses one function declaration or definition's `<return-type>
@@ -6357,7 +6837,7 @@ private:
     // runs, since their combination affects *which* prefixes were
     // already consumed (an item inside an `extern "C" { }` block isn't
     // preceded by its own `extern "C"` -- see that function).
-    Function parse_function(bool is_extern_c, bool is_module_extern = false, bool is_unsafe = false,
+    [[nodiscard]] std::expected<Function, ParseError> parse_function(bool is_extern_c, bool is_module_extern = false, bool is_unsafe = false,
                             bool is_nodiscard = false, const std::string& nodiscard_reason = {}) {
         Function fn;
         fn.loc = current_loc();
@@ -6386,15 +6866,19 @@ private:
             if ((check(TokenKind::KwConstexpr) || check(TokenKind::KwConsteval)) &&
                 fn.eval_mode != FunctionEvalMode::RuntimeOnly) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
-                                 "a declaration may specify at most one of 'constexpr' or 'consteval'");
+                return std::unexpected(ParseError(tok.line, tok.column,
+                                 "a declaration may specify at most one of 'constexpr' or 'consteval'"));
             }
             break;
         }
-        fn.return_type = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
-        fn.name = std::string(expect(TokenKind::Identifier, "function name").text);
+        auto return_type_result = with_type_lifetime_attributes_enabled([&] { return parse_type(); });
+        if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
+        fn.return_type = std::move(return_type_result.value());
+        auto fn_name_result = expect(TokenKind::Identifier, "function name");
+        if (!fn_name_result.has_value()) return std::unexpected(std::move(fn_name_result).error());
+        fn.name = std::string(fn_name_result.value().text);
 
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!check(TokenKind::RParen)) {
             do {
                 if (match(TokenKind::Ellipsis)) {
@@ -6406,22 +6890,29 @@ private:
                     break;
                 }
                 Param param;
-                Type base_type = with_type_lifetime_attributes_enabled([&] {
-                    return parse_param_type(param.generic_concept);
-                });
+                Type base_type;
+                {
+                    auto base_type_result = with_type_lifetime_attributes_enabled([&] {
+                        return parse_param_type(param.generic_concept);
+                    });
+                    if (!base_type_result.has_value()) return std::unexpected(std::move(base_type_result).error());
+                    base_type = std::move(base_type_result.value());
+                }
                 param.is_parameter_pack = match(TokenKind::Ellipsis);
                 if (param.is_parameter_pack && param.generic_concept.empty() &&
                     !referenced_pack_type_param_name(base_type).has_value()) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                       "parameter packs are only supported for the abbreviated generic form "
-                                      "('Concept auto&... args') in this version (ch05 §5.11)");
+                                      "('Concept auto&... args') in this version (ch05 §5.11)"));
                 }
-                Type param_type = parse_named_declarator(std::move(base_type), param.name, "parameter name");
+                auto param_type_result = parse_named_declarator(std::move(base_type), param.name, "parameter name");
+                if (!param_type_result.has_value()) return std::unexpected(std::move(param_type_result).error());
+                Type param_type = std::move(param_type_result.value());
                 if (param.is_parameter_pack && !check(TokenKind::RParen)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
-                                      "a parameter pack must be the last parameter in the list (ch05 §5.11)");
+                    return std::unexpected(ParseError(tok.line, tok.column,
+                                      "a parameter pack must be the last parameter in the list (ch05 §5.11)"));
                 }
                 param.type = std::move(param_type);
                 // ch05 §5.15: see parse_param_list's identical trailing-
@@ -6430,35 +6921,41 @@ private:
                 // ordinary/generic/extern functions), not shared with
                 // parse_param_list (class methods/lambdas).
                 const Token& param_attr_start_tok = peek();
-                ParsedAttributes param_attrs = parse_attribute_specifier_seq();
-                reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration");
+                auto param_attrs_result = parse_attribute_specifier_seq();
+                if (!param_attrs_result.has_value()) return std::unexpected(std::move(param_attrs_result).error());
+                ParsedAttributes param_attrs = std::move(param_attrs_result.value());
+                if (auto _r = reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
-                merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
-                                         "a parameter declaration");
-                hoist_type_lifetime_annotation(param.type, param.lifetime, param_attr_start_tok, "a parameter declaration");
+                if (auto _r = merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
+                                         "a parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = hoist_type_lifetime_annotation(param.type, param.lifetime, param_attr_start_tok, "a parameter declaration"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 if (match(TokenKind::Assign)) {
                     if (param.is_parameter_pack) {
                         const Token& tok = peek();
-                        throw ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument");
+                        return std::unexpected(ParseError(tok.line, tok.column, "a parameter pack cannot have a default argument"));
                     }
-                    param.default_expr = std::shared_ptr<Expr>(parse_default_argument_expr(param.type).release());
+                    auto default_expr_result = parse_default_argument_expr(param.type);
+                    if (!default_expr_result.has_value()) return std::unexpected(std::move(default_expr_result).error());
+                    param.default_expr = std::shared_ptr<Expr>(std::move(default_expr_result.value()).release());
                     saw_default_argument = true;
                 } else if (saw_default_argument) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
+                    return std::unexpected(ParseError(tok.line, tok.column,
                                      "once a parameter has a default argument, every later parameter must also "
-                                     "have one");
+                                     "have one"));
                 }
                 fn.params.push_back(std::move(param));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::RParen, "')'");
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         const Token& fn_attr_start_tok = peek();
-        ParsedAttributes fn_attrs = parse_attribute_specifier_seq();
-        reject_packed_attribute(fn_attrs, fn_attr_start_tok, "a function declarator");
-        merge_lifetime_attribute(fn.return_lifetime, fn_attrs.lifetime, fn_attr_start_tok, "a function declarator");
-        hoist_type_lifetime_annotation(fn.return_type, fn.return_lifetime, fn_attr_start_tok, "a function declarator");
+        auto fn_attrs_result = parse_attribute_specifier_seq();
+        if (!fn_attrs_result.has_value()) return std::unexpected(std::move(fn_attrs_result).error());
+        ParsedAttributes fn_attrs = std::move(fn_attrs_result.value());
+        if (auto _r = reject_packed_attribute(fn_attrs, fn_attr_start_tok, "a function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = merge_lifetime_attribute(fn.return_lifetime, fn_attrs.lifetime, fn_attr_start_tok, "a function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = hoist_type_lifetime_annotation(fn.return_type, fn.return_lifetime, fn_attr_start_tok, "a function declarator"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         // ch05 §5.11: a function with at least one concept-constrained
         // parameter is a *generic template* -- checked once, abstractly,
@@ -6477,9 +6974,9 @@ private:
 
         if (fn.has_varargs && !fn.is_extern_c) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "variadic parameters ('...') are only supported in an 'extern \"C\"' "
-                              "declaration (ch02 §2.1)");
+                              "declaration (ch02 §2.1)"));
         }
 
         if (match(TokenKind::Semicolon)) {
@@ -6488,67 +6985,73 @@ private:
 
         if (fn.has_varargs) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                               "variadic parameters ('...') are only supported for a bodyless "
-                              "'extern \"C\"' declaration, not a definition (ch02 §2.1)");
+                              "'extern \"C\"' declaration, not a definition (ch02 §2.1)"));
         }
-        fn.body = parse_block();
+        auto _tmp_result = parse_block();
+        if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+        fn.body = std::move(_tmp_result.value());
         return fn;
     }
 
-    StmtPtr parse_block() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_block() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::LBrace, "'{'");
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         local_type_name_scopes_.push_back({});
         auto block = std::make_unique<Stmt>();
         block->kind = StmtKind::Block;
         block->loc = loc;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
-            block->statements.push_back(parse_statement());
+            auto stmt_result = parse_statement();
+            if (!stmt_result.has_value()) return std::unexpected(std::move(stmt_result).error());
+            block->statements.push_back(std::move(stmt_result.value()));
         }
-        expect(TokenKind::RBrace, "'}'");
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         local_type_name_scopes_.pop_back();
         return block;
     }
 
-    StmtPtr parse_local_type_definition_statement() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_local_type_definition_statement() {
         SourceLocation loc = current_loc();
         if (current_program_ == nullptr) {
-            throw ParseError(loc.line, loc.column, "internal parser error: local type definition without active program");
+            return std::unexpected(ParseError(loc.line, loc.column, "internal parser error: local type definition without active program"));
         }
         if (check(TokenKind::KwStruct)) {
-            current_program_->structs.push_back(
-                parse_struct_def(*current_program_, /*is_exported=*/false, {}, {}, std::nullopt, true));
+            auto struct_result = parse_struct_def(*current_program_, /*is_exported=*/false, {}, {}, std::nullopt, true);
+            if (!struct_result.has_value()) return std::unexpected(std::move(struct_result).error());
+            current_program_->structs.push_back(std::move(struct_result.value()));
         } else {
-            parse_class_def(*current_program_, /*is_exported=*/false, {}, {}, std::nullopt, true);
+            if (auto _r = parse_class_def(*current_program_, /*is_exported=*/false, {}, {}, std::nullopt, true); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         return make_block_stmt(loc);
     }
 
-    void reject_nested_fallthrough(const Stmt& stmt) {
+    [[nodiscard]] std::expected<void, ParseError> reject_nested_fallthrough(const Stmt& stmt) {
         switch (stmt.kind) {
             case StmtKind::Fallthrough:
-                throw ParseError(stmt.loc.line, stmt.loc.column,
-                                 "'[[fallthrough]];' is only valid as the final top-level statement of a switch case");
+                return std::unexpected(ParseError(stmt.loc.line, stmt.loc.column,
+                                 "'[[fallthrough]];' is only valid as the final top-level statement of a switch case"));
             case StmtKind::If:
-                if (stmt.then_branch) reject_nested_fallthrough(*stmt.then_branch);
-                if (stmt.else_branch) reject_nested_fallthrough(*stmt.else_branch);
-                return;
+                if (stmt.then_branch) { if (auto _r = reject_nested_fallthrough(*stmt.then_branch); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
+                if (stmt.else_branch) { if (auto _r = reject_nested_fallthrough(*stmt.else_branch); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
+                return {};
             case StmtKind::While:
-                if (stmt.then_branch) reject_nested_fallthrough(*stmt.then_branch);
-                return;
+                if (stmt.then_branch) { if (auto _r = reject_nested_fallthrough(*stmt.then_branch); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
+                return {};
             case StmtKind::Switch:
-                return;
+                return {};
             case StmtKind::Block:
-                for (const StmtPtr& child : stmt.statements) reject_nested_fallthrough(*child);
-                return;
+                for (const StmtPtr& child : stmt.statements) { if (auto _r = reject_nested_fallthrough(*child); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
+                return {};
             case StmtKind::VarDecl:
             case StmtKind::Return:
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::ExprStmt:
-                return;
+                return {};
         }
+        return {};
     }
 
     [[nodiscard]] bool is_explicit_switch_case_terminator(const Stmt& stmt) {
@@ -6556,41 +7059,42 @@ private:
                stmt.kind == StmtKind::Fallthrough;
     }
 
-    void validate_switch_fallthrough(const Stmt& stmt) {
+    [[nodiscard]] std::expected<void, ParseError> validate_switch_fallthrough(const Stmt& stmt) {
         for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
             const SwitchCase& switch_case = stmt.switch_cases[i];
             for (std::size_t j = 0; j < switch_case.statements.size(); j++) {
                 const Stmt& child = *switch_case.statements[j];
                 if (child.kind == StmtKind::Fallthrough) {
                     if (j + 1 != switch_case.statements.size()) {
-                        throw ParseError(child.loc.line, child.loc.column,
-                                         "'[[fallthrough]];' must be the last statement in its switch case");
+                        return std::unexpected(ParseError(child.loc.line, child.loc.column,
+                                         "'[[fallthrough]];' must be the last statement in its switch case"));
                     }
                     if (i + 1 == stmt.switch_cases.size()) {
-                        throw ParseError(child.loc.line, child.loc.column,
-                                         "'[[fallthrough]];' requires a following case or default label");
+                        return std::unexpected(ParseError(child.loc.line, child.loc.column,
+                                         "'[[fallthrough]];' requires a following case or default label"));
                     }
                 } else {
-                    reject_nested_fallthrough(child);
+                    if (auto _r = reject_nested_fallthrough(child); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 }
             }
             if (switch_case.statements.empty()) {
                 if (i + 1 == stmt.switch_cases.size()) {
-                    throw ParseError(switch_case.loc.line, switch_case.loc.column,
-                                     "an empty switch case must be immediately followed by another case or default label");
+                    return std::unexpected(ParseError(switch_case.loc.line, switch_case.loc.column,
+                                     "an empty switch case must be immediately followed by another case or default label"));
                 }
                 continue;
             }
             const Stmt& tail = *switch_case.statements.back();
             if (!is_explicit_switch_case_terminator(tail)) {
-                throw ParseError(tail.loc.line, tail.loc.column,
+                return std::unexpected(ParseError(tail.loc.line, tail.loc.column,
                                  "a non-empty switch case must end with 'break;', 'return ...;', 'continue;', or "
-                                 "'[[fallthrough]];'");
+                                 "'[[fallthrough]];'"));
             }
         }
+        return {};
     }
 
-    StmtPtr parse_statement() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_statement() {
         // ch00 §2/ch01 §1.3: `[[scpp::unsafe]] { ... }` -- attribute-
         // driven now, not a keyword. Parses (and discards) any leading
         // attribute-specifier-seq first (real C++ grammar already
@@ -6605,22 +7109,26 @@ private:
         // recognized placement for `scpp::unsafe` (ch01 §1.3).
         if (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
             const Token& attr_start_tok = peek();
-            ParsedAttributes attrs = parse_attribute_specifier_seq();
-            reject_packed_attribute(attrs, attr_start_tok, "a statement");
+            auto attrs_result = parse_attribute_specifier_seq();
+            if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
+            ParsedAttributes attrs = std::move(attrs_result.value());
+            if (auto _r = reject_packed_attribute(attrs, attr_start_tok, "a statement"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (attrs.has_fallthrough) {
                 if (!check(TokenKind::Semicolon)) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column,
-                                     "'[[fallthrough]]' only applies to a standalone ';' statement");
+                    return std::unexpected(ParseError(tok.line, tok.column,
+                                     "'[[fallthrough]]' only applies to a standalone ';' statement"));
                 }
                 if (switch_depth_ == 0) {
-                    throw ParseError(attr_start_tok.line, attr_start_tok.column,
-                                     "'[[fallthrough]];' is only valid inside a switch statement");
+                    return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
+                                     "'[[fallthrough]];' is only valid inside a switch statement"));
                 }
-                expect(TokenKind::Semicolon, "';'");
+                if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 return make_fallthrough_stmt(make_source_location(attr_start_tok.line, attr_start_tok.column, source_path_));
             }
-            StmtPtr stmt = parse_statement();
+            auto stmt_result = parse_statement();
+            if (!stmt_result.has_value()) return std::unexpected(std::move(stmt_result).error());
+            StmtPtr stmt = std::move(stmt_result.value());
             if (attrs.has("unsafe") && stmt->kind == StmtKind::Block) stmt->is_unsafe = true;
             return stmt;
         }
@@ -6638,7 +7146,7 @@ private:
         return parse_expr_stmt();
     }
 
-    StmtPtr parse_var_decl_impl(std::vector<AlignmentSpecifier> leading_alignments, bool require_semicolon,
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_var_decl_impl(std::vector<AlignmentSpecifier> leading_alignments, bool require_semicolon,
                                 bool require_explicit_initializer, bool qualify_variable_name) {
         SourceLocation loc = current_loc();
         auto stmt = std::make_unique<Stmt>();
@@ -6660,33 +7168,47 @@ private:
             // synthesized class -- see its VarDecl case. Never reaches
             // check_moves/codegen unresolved.
             stmt->type = named_type("auto");
-            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            auto var_name_result = expect(TokenKind::Identifier, "variable name");
+            if (!var_name_result.has_value()) return std::unexpected(std::move(var_name_result).error());
+            stmt->var_name = std::string(var_name_result.value().text);
             if (qualify_variable_name) stmt->var_name = qualify_name(stmt->var_name);
             const Token& tok = peek();
             if (!match(TokenKind::Assign)) {
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                   "'auto' requires an initializer ('auto name = expr;') -- there is no other "
-                                  "way to know what concrete type to infer");
+                                  "way to know what concrete type to infer"));
             }
-            stmt->init = parse_expr();
-            if (require_semicolon) expect(TokenKind::Semicolon, "';'");
+            auto init_result = parse_expr();
+            if (!init_result.has_value()) return std::unexpected(std::move(init_result).error());
+            stmt->init = std::move(init_result.value());
+            if (require_semicolon) { if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error()); }
             return stmt;
         }
-        Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
+        auto base_result = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
+        if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+        Type base = std::move(base_result.value());
         if (check(TokenKind::KwAlignas)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "'alignas' must appear before the declared type in a variable declaration (spec §9.3)");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "'alignas' must appear before the declared type in a variable declaration (spec §9.3)"));
         }
         if (starts_function_pointer_declarator()) {
-            stmt->type = parse_function_pointer_declarator(std::move(base), stmt->var_name);
+            auto type_result = parse_function_pointer_declarator(std::move(base), stmt->var_name);
+            if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
+            stmt->type = std::move(type_result.value());
         } else {
-            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
-            stmt->type = parse_array_suffix(base);
+            auto var_name_result = expect(TokenKind::Identifier, "variable name");
+            if (!var_name_result.has_value()) return std::unexpected(std::move(var_name_result).error());
+            stmt->var_name = std::string(var_name_result.value().text);
+            auto type_result = parse_array_suffix(base);
+            if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
+            stmt->type = std::move(type_result.value());
         }
         if (qualify_variable_name) stmt->var_name = qualify_name(stmt->var_name);
         if (match(TokenKind::Assign)) {
-            stmt->init = parse_expr();
+            auto init_result = parse_expr();
+            if (!init_result.has_value()) return std::unexpected(std::move(init_result).error());
+            stmt->init = std::move(init_result.value());
         } else if (check(TokenKind::LBrace)) {
             // `ClassName name{args};` (ch04 §4.2 / spec §6.1): direct-
             // initialization via an explicit constructor call -- the
@@ -6698,13 +7220,15 @@ private:
             // `ClassName_new` from `stmt->type`, not from anything
             // recorded here.
             stmt->has_ctor_args = true;
-            stmt->ctor_args = parse_brace_initializer_args();
+            auto ctor_args_result = parse_brace_initializer_args();
+            if (!ctor_args_result.has_value()) return std::unexpected(std::move(ctor_args_result).error());
+            stmt->ctor_args = std::move(ctor_args_result.value());
         } else if (match(TokenKind::LParen)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
+            return std::unexpected(ParseError(tok.line, tok.column,
                              "parenthesized direct-initialization is not allowed for object declarations; "
                              "use brace-init instead ('" +
-                                 stmt->type.name + " " + stmt->var_name + "{...};')");
+                                 stmt->type.name + " " + stmt->var_name + "{...};')"));
         }
         // A `const`-qualified local (Stmt::is_const, set above by
         // parse_type via its out_bare_const out-parameter) must be
@@ -6714,49 +7238,57 @@ private:
         // own "default initialization of const variable" rejection.
         if (require_explicit_initializer && !stmt->is_static_local && stmt->type.kind != TypeKind::Array && !stmt->init &&
             !stmt->has_ctor_args) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                              "a non-array local variable declaration must include an explicit initializer "
                              "(write '" + stmt->type.name + " " + stmt->var_name +
                                  "{};', '" + stmt->type.name + " " + stmt->var_name +
-                                 "{...};', or '" + stmt->type.name + " " + stmt->var_name + " = ...;')");
+                                 "{...};', or '" + stmt->type.name + " " + stmt->var_name + " = ...;')"));
         }
         if (((stmt->is_const && !stmt->is_static_local) || stmt->is_constexpr) && !stmt->init && !stmt->has_ctor_args) {
-            throw ParseError(loc.line, loc.column,
+            return std::unexpected(ParseError(loc.line, loc.column,
                               "a constant variable must be initialized ('" +
                                   std::string(stmt->is_constexpr ? "constexpr " : "const ") + stmt->type.name +
-                                  " " + stmt->var_name + " = ...;') -- it can never be given a value afterward");
+                                  " " + stmt->var_name + " = ...;') -- it can never be given a value afterward"));
         }
-        if (require_semicolon) expect(TokenKind::Semicolon, "';'");
+        if (require_semicolon) {
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
         return stmt;
     }
 
-    StmtPtr parse_var_decl(bool require_semicolon = true) {
-        return parse_var_decl_impl(parse_alignment_specifier_seq(), require_semicolon,
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_var_decl(bool require_semicolon = true) {
+        auto alignments_result = parse_alignment_specifier_seq();
+        if (!alignments_result.has_value()) return std::unexpected(std::move(alignments_result).error());
+        return parse_var_decl_impl(std::move(alignments_result.value()), require_semicolon,
                                    /*require_explicit_initializer=*/true,
                                    /*qualify_variable_name=*/false);
     }
 
-    StmtPtr parse_global_var_decl(std::vector<AlignmentSpecifier> leading_alignments) {
-        StmtPtr stmt = parse_var_decl_impl(std::move(leading_alignments), /*require_semicolon=*/true,
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_global_var_decl(std::vector<AlignmentSpecifier> leading_alignments) {
+        auto stmt_result = parse_var_decl_impl(std::move(leading_alignments), /*require_semicolon=*/true,
                                           /*require_explicit_initializer=*/false,
                                           /*qualify_variable_name=*/true);
+        if (!stmt_result.has_value()) return std::unexpected(std::move(stmt_result).error());
+        StmtPtr stmt = std::move(stmt_result.value());
         if (stmt->type.kind == TypeKind::Reference && !stmt->init) {
-            throw ParseError(stmt->loc.line, stmt->loc.column,
-                             "a reference variable must be initialized at declaration");
+            return std::unexpected(ParseError(stmt->loc.line, stmt->loc.column,
+                             "a reference variable must be initialized at declaration"));
         }
         return stmt;
     }
 
-    StmtPtr parse_for_range_decl() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_for_range_decl() {
         SourceLocation loc = current_loc();
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::VarDecl;
         stmt->loc = loc;
-        stmt->alignment_specs = parse_alignment_specifier_seq();
+        auto alignments_result = parse_alignment_specifier_seq();
+        if (!alignments_result.has_value()) return std::unexpected(std::move(alignments_result).error());
+        stmt->alignment_specs = std::move(alignments_result.value());
 
         if (check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto)) {
             bool has_const = match(TokenKind::KwConst);
-            expect(TokenKind::KwAuto, "'auto'");
+            if (auto _r = expect(TokenKind::KwAuto, "'auto'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             Type declared = named_type("auto");
             if (match(TokenKind::Amp)) {
                 auto pointee = std::make_shared<Type>(std::move(declared));
@@ -6767,34 +7299,44 @@ private:
             } else if (has_const) {
                 stmt->is_const = true;
             }
-            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            auto var_name_result = expect(TokenKind::Identifier, "variable name");
+            if (!var_name_result.has_value()) return std::unexpected(std::move(var_name_result).error());
+            stmt->var_name = std::string(var_name_result.value().text);
             stmt->type = std::move(declared);
             return stmt;
         }
 
-        Type base = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
+        auto base_result = parse_type(/*allow_rvalue_ref=*/false, &stmt->is_const);
+        if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+        Type base = std::move(base_result.value());
         if (check(TokenKind::KwAlignas)) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column,
-                             "'alignas' must appear before the declared type in a variable declaration (spec §9.3)");
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "'alignas' must appear before the declared type in a variable declaration (spec §9.3)"));
         }
         if (starts_function_pointer_declarator()) {
-            stmt->type = parse_function_pointer_declarator(std::move(base), stmt->var_name);
+            auto type_result = parse_function_pointer_declarator(std::move(base), stmt->var_name);
+            if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
+            stmt->type = std::move(type_result.value());
         } else {
-            stmt->var_name = std::string(expect(TokenKind::Identifier, "variable name").text);
+            auto var_name_result = expect(TokenKind::Identifier, "variable name");
+            if (!var_name_result.has_value()) return std::unexpected(std::move(var_name_result).error());
+            stmt->var_name = std::string(var_name_result.value().text);
             stmt->type = std::move(base);
         }
         return stmt;
     }
 
-    StmtPtr parse_return() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_return() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwReturn, "'return'");
+        if (auto _r = expect(TokenKind::KwReturn, "'return'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::Return;
         stmt->loc = loc;
         if (!check(TokenKind::Semicolon)) {
-            stmt->expr = parse_expr();
+            auto expr_result = parse_expr();
+            if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+            stmt->expr = std::move(expr_result.value());
             if (stmt->expr != nullptr && stmt->expr->kind == ExprKind::Identifier && check(TokenKind::LBrace)) {
                 auto call = std::make_unique<Expr>();
                 call->kind = ExprKind::Call;
@@ -6802,17 +7344,19 @@ private:
                 call->name = stmt->expr->name;
                 call->explicit_global_qualification = stmt->expr->explicit_global_qualification;
                 call->explicit_template_args = std::move(stmt->expr->explicit_template_args);
-                call->args = parse_brace_initializer_args();
+                auto args_result = parse_brace_initializer_args();
+                if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+                call->args = std::move(args_result.value());
                 stmt->expr = std::move(call);
             }
         }
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return stmt;
     }
 
-    StmtPtr parse_if() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_if() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwIf, "'if'");
+        if (auto _r = expect(TokenKind::KwIf, "'if'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::If;
         stmt->loc = loc;
@@ -6820,96 +7364,115 @@ private:
             stmt->if_mode = IfMode::ConstevalTrue;
             stmt->condition = make_bool_literal_expr(loc, true);
         } else if (match(TokenKind::Bang)) {
-            expect(TokenKind::KwConsteval, "'consteval'");
+            if (auto _r = expect(TokenKind::KwConsteval, "'consteval'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             stmt->if_mode = IfMode::ConstevalFalse;
             stmt->condition = make_bool_literal_expr(loc, false);
         } else {
-            expect(TokenKind::LParen, "'('");
-            stmt->condition = parse_expr();
-            expect(TokenKind::RParen, "')'");
+            if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            auto condition_result = parse_expr();
+            if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+            stmt->condition = std::move(condition_result.value());
+            if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
-        stmt->then_branch = parse_statement();
+        auto then_result = parse_statement();
+        if (!then_result.has_value()) return std::unexpected(std::move(then_result).error());
+        stmt->then_branch = std::move(then_result.value());
         if (match(TokenKind::KwElse)) {
-            stmt->else_branch = parse_statement();
+            auto else_result = parse_statement();
+            if (!else_result.has_value()) return std::unexpected(std::move(else_result).error());
+            stmt->else_branch = std::move(else_result.value());
         }
         return stmt;
     }
 
-    StmtPtr parse_while() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_while() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwWhile, "'while'");
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::KwWhile, "'while'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::While;
         stmt->loc = loc;
-        stmt->condition = parse_expr();
-        expect(TokenKind::RParen, "')'");
+        auto condition_result = parse_expr();
+        if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+        stmt->condition = std::move(condition_result.value());
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         loop_depth_++;
-        stmt->then_branch = parse_statement();
+        auto then_result = parse_statement();
         loop_depth_--;
+        if (!then_result.has_value()) return std::unexpected(std::move(then_result).error());
+        stmt->then_branch = std::move(then_result.value());
         return stmt;
     }
 
-    StmtPtr parse_switch() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_switch() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwSwitch, "'switch'");
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::KwSwitch, "'switch'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::Switch;
         stmt->loc = loc;
-        stmt->condition = parse_expr();
-        expect(TokenKind::RParen, "')'");
-        expect(TokenKind::LBrace, "'{'");
+        auto condition_result = parse_expr();
+        if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+        stmt->condition = std::move(condition_result.value());
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         switch_depth_++;
         bool saw_default = false;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             SwitchCase switch_case{};
             switch_case.loc = current_loc();
             if (match(TokenKind::KwCase)) {
-                switch_case.value = parse_expr();
-                expect(TokenKind::Colon, "':'");
+                auto _tmp_result = parse_expr();
+                if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+                switch_case.value = std::move(_tmp_result.value());
+                if (auto _r = expect(TokenKind::Colon, "':'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             } else if (match(TokenKind::KwDefault)) {
                 if (saw_default) {
                     const Token& tok = peek();
-                    throw ParseError(tok.line, tok.column, "a switch statement may contain at most one 'default' label");
+                    return std::unexpected(ParseError(tok.line, tok.column, "a switch statement may contain at most one 'default' label"));
                 }
                 saw_default = true;
-                expect(TokenKind::Colon, "':'");
+                if (auto _r = expect(TokenKind::Colon, "':'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             } else {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column, "expected 'case' or 'default' inside switch body");
+                return std::unexpected(ParseError(tok.line, tok.column, "expected 'case' or 'default' inside switch body"));
             }
             while (!check(TokenKind::RBrace) && !check(TokenKind::KwCase) && !check(TokenKind::KwDefault) &&
                    !check(TokenKind::EndOfFile)) {
-                switch_case.statements.push_back(parse_statement());
+                auto case_stmt_result = parse_statement();
+                if (!case_stmt_result.has_value()) return std::unexpected(std::move(case_stmt_result).error());
+                switch_case.statements.push_back(std::move(case_stmt_result.value()));
             }
             stmt->switch_cases.push_back(std::move(switch_case));
         }
         switch_depth_--;
-        expect(TokenKind::RBrace, "'}'");
-        validate_switch_fallthrough(*stmt);
+        if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = validate_switch_fallthrough(*stmt); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return stmt;
     }
 
-    StmtPtr parse_for() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_for() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwFor, "'for'");
-        expect(TokenKind::LParen, "'('");
+        if (auto _r = expect(TokenKind::KwFor, "'for'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         if (is_range_for_decl_start()) {
             std::size_t saved_pos = pos_;
-            StmtPtr loop_var;
-            try {
-                loop_var = parse_for_range_decl();
-            } catch (const ParseError&) {
+            auto loop_var_result = parse_for_range_decl();
+            StmtPtr loop_var = loop_var_result.has_value() ? std::move(loop_var_result.value()) : nullptr;
+            if (!loop_var_result.has_value()) {
                 pos_ = saved_pos;
             }
             if (loop_var) {
                 if (match(TokenKind::Colon)) {
-                    ExprPtr range_expr = parse_expr();
-                    expect(TokenKind::RParen, "')'");
+                    auto range_expr_result = parse_expr();
+                    if (!range_expr_result.has_value()) return std::unexpected(std::move(range_expr_result).error());
+                    ExprPtr range_expr = std::move(range_expr_result.value());
+                    if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     loop_depth_++;
-                    StmtPtr body = parse_statement();
+                    auto body_result = parse_statement();
+                    if (!body_result.has_value()) return std::unexpected(std::move(body_result).error());
+                    StmtPtr body = std::move(body_result.value());
                     loop_depth_--;
                     return desugar_range_for(loc, std::move(loop_var), std::move(range_expr), std::move(body));
                 }
@@ -6920,61 +7483,80 @@ private:
         StmtPtr init_stmt;
         if (!check(TokenKind::Semicolon)) {
             if (looks_like_type_start()) {
-                init_stmt = parse_var_decl(/*require_semicolon=*/false);
+                auto init_stmt_result = parse_var_decl(/*require_semicolon=*/false);
+                if (!init_stmt_result.has_value()) return std::unexpected(std::move(init_stmt_result).error());
+                init_stmt = std::move(init_stmt_result.value());
             } else {
-                init_stmt = make_expr_stmt(current_loc(), parse_expr());
+                auto init_expr_result = parse_expr();
+                if (!init_expr_result.has_value()) return std::unexpected(std::move(init_expr_result).error());
+                init_stmt = make_expr_stmt(current_loc(), std::move(init_expr_result.value()));
             }
         }
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
-        ExprPtr condition = check(TokenKind::Semicolon) ? make_bool_literal_expr(loc, true) : parse_expr();
-        expect(TokenKind::Semicolon, "';'");
+        ExprPtr condition;
+        if (check(TokenKind::Semicolon)) {
+            condition = make_bool_literal_expr(loc, true);
+        } else {
+            auto condition_result = parse_expr();
+            if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+            condition = std::move(condition_result.value());
+        }
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         ExprPtr increment;
-        if (!check(TokenKind::RParen)) increment = parse_expr();
-        expect(TokenKind::RParen, "')'");
+        if (!check(TokenKind::RParen)) {
+            auto increment_result = parse_expr();
+            if (!increment_result.has_value()) return std::unexpected(std::move(increment_result).error());
+            increment = std::move(increment_result.value());
+        }
+        if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         loop_depth_++;
-        StmtPtr body = parse_statement();
+        auto body_result = parse_statement();
+        if (!body_result.has_value()) return std::unexpected(std::move(body_result).error());
+        StmtPtr body = std::move(body_result.value());
         loop_depth_--;
         return desugar_classic_for(loc, std::move(init_stmt), std::move(condition), std::move(increment), std::move(body));
     }
 
-    StmtPtr parse_break() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_break() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwBreak, "'break'");
+        if (auto _r = expect(TokenKind::KwBreak, "'break'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (loop_depth_ == 0 && switch_depth_ == 0) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column, "'break' is only valid inside a loop or switch");
+            return std::unexpected(ParseError(tok.line, tok.column, "'break' is only valid inside a loop or switch"));
         }
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::Break;
         stmt->loc = loc;
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return stmt;
     }
 
-    StmtPtr parse_continue() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_continue() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::KwContinue, "'continue'");
+        if (auto _r = expect(TokenKind::KwContinue, "'continue'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (loop_depth_ == 0) {
             const Token& tok = peek();
-            throw ParseError(tok.line, tok.column, "'continue' is only valid inside a loop");
+            return std::unexpected(ParseError(tok.line, tok.column, "'continue' is only valid inside a loop"));
         }
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::Continue;
         stmt->loc = loc;
-        expect(TokenKind::Semicolon, "';'");
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return stmt;
     }
 
-    StmtPtr parse_expr_stmt() {
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_expr_stmt() {
         SourceLocation loc = current_loc();
         auto stmt = std::make_unique<Stmt>();
         stmt->kind = StmtKind::ExprStmt;
         stmt->loc = loc;
-        stmt->expr = parse_expr();
-        expect(TokenKind::Semicolon, "';'");
+        auto expr_result = parse_expr();
+        if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+        stmt->expr = std::move(expr_result.value());
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         return stmt;
     }
 
@@ -6982,7 +7564,7 @@ private:
     // assignment -> conditional -> logic_or -> logic_and -> equality -> relational
     // -> additive -> multiplicative -> unary -> primary
 
-    ExprPtr parse_expr() { return parse_assignment(); }
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_expr() { return parse_assignment(); }
 
     std::optional<BinaryOp> parse_assignment_operator() {
         if (match(TokenKind::Assign)) return BinaryOp::Assign;
@@ -6993,10 +7575,14 @@ private:
         return std::nullopt;
     }
 
-    ExprPtr parse_assignment() {
-        ExprPtr lhs = parse_conditional();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_assignment() {
+        auto lhs_result = parse_conditional();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result.value());
         if (std::optional<BinaryOp> op = parse_assignment_operator(); op.has_value()) {
-            ExprPtr rhs = parse_assignment();
+            auto rhs_result = parse_assignment();
+            if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+            ExprPtr rhs = std::move(rhs_result.value());
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Binary;
             node->binary_op = *op;
@@ -7008,12 +7594,18 @@ private:
         return lhs;
     }
 
-    ExprPtr parse_conditional() {
-        ExprPtr condition = parse_logic_or();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_conditional() {
+        auto condition_result = parse_logic_or();
+        if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+        ExprPtr condition = std::move(condition_result.value());
         if (!match(TokenKind::Question)) return condition;
-        ExprPtr then_expr = parse_expr();
-        expect(TokenKind::Colon, "':'");
-        ExprPtr else_expr = parse_conditional();
+        auto then_expr_result = parse_expr();
+        if (!then_expr_result.has_value()) return std::unexpected(std::move(then_expr_result).error());
+        ExprPtr then_expr = std::move(then_expr_result.value());
+        if (auto _r = expect(TokenKind::Colon, "':'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        auto else_expr_result = parse_conditional();
+        if (!else_expr_result.has_value()) return std::unexpected(std::move(else_expr_result).error());
+        ExprPtr else_expr = std::move(else_expr_result.value());
         auto node = std::make_unique<Expr>();
         node->kind = ExprKind::Conditional;
         node->loc = condition->loc;
@@ -7023,31 +7615,45 @@ private:
         return node;
     }
 
-    ExprPtr parse_logic_or() {
-        ExprPtr lhs = parse_logic_and();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_logic_or() {
+        auto lhs_result = parse_logic_and();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result.value());
         while (check(TokenKind::PipePipe)) {
             advance();
-            lhs = make_binary(BinaryOp::Or, std::move(lhs), parse_logic_and());
+            auto rhs_result = parse_logic_and();
+            if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+            lhs = make_binary(BinaryOp::Or, std::move(lhs), std::move(rhs_result.value()));
         }
         return lhs;
     }
 
-    ExprPtr parse_logic_and() {
-        ExprPtr lhs = parse_equality();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_logic_and() {
+        auto lhs_result = parse_equality();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result.value());
         while (check(TokenKind::AmpAmp)) {
             advance();
-            lhs = make_binary(BinaryOp::And, std::move(lhs), parse_equality());
+            auto rhs_result = parse_equality();
+            if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+            lhs = make_binary(BinaryOp::And, std::move(lhs), std::move(rhs_result.value()));
         }
         return lhs;
     }
 
-    ExprPtr parse_equality() {
-        ExprPtr lhs = parse_relational();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_equality() {
+        auto lhs_result = parse_relational();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result.value());
         for (;;) {
             if (match(TokenKind::EqualEqual)) {
-                lhs = make_binary(BinaryOp::Eq, std::move(lhs), parse_relational());
+                auto rhs_result = parse_relational();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Eq, std::move(lhs), std::move(rhs_result.value()));
             } else if (match(TokenKind::NotEqual)) {
-                lhs = make_binary(BinaryOp::Ne, std::move(lhs), parse_relational());
+                auto rhs_result = parse_relational();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Ne, std::move(lhs), std::move(rhs_result.value()));
             } else {
                 break;
             }
@@ -7055,17 +7661,27 @@ private:
         return lhs;
     }
 
-    ExprPtr parse_relational() {
-        ExprPtr lhs = parse_additive();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_relational() {
+        auto lhs_result = parse_additive();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result.value());
         for (;;) {
             if (match(TokenKind::Less)) {
-                lhs = make_binary(BinaryOp::Lt, std::move(lhs), parse_additive());
+                auto rhs_result = parse_additive();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Lt, std::move(lhs), std::move(rhs_result.value()));
             } else if (match(TokenKind::Greater)) {
-                lhs = make_binary(BinaryOp::Gt, std::move(lhs), parse_additive());
+                auto rhs_result = parse_additive();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Gt, std::move(lhs), std::move(rhs_result.value()));
             } else if (match(TokenKind::LessEqual)) {
-                lhs = make_binary(BinaryOp::Le, std::move(lhs), parse_additive());
+                auto rhs_result = parse_additive();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Le, std::move(lhs), std::move(rhs_result.value()));
             } else if (match(TokenKind::GreaterEqual)) {
-                lhs = make_binary(BinaryOp::Ge, std::move(lhs), parse_additive());
+                auto rhs_result = parse_additive();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Ge, std::move(lhs), std::move(rhs_result.value()));
             } else {
                 break;
             }
@@ -7073,13 +7689,19 @@ private:
         return lhs;
     }
 
-    ExprPtr parse_additive() {
-        ExprPtr lhs = parse_multiplicative();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_additive() {
+        auto lhs_result = parse_multiplicative();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result.value());
         for (;;) {
             if (match(TokenKind::Plus)) {
-                lhs = make_binary(BinaryOp::Add, std::move(lhs), parse_multiplicative());
+                auto rhs_result = parse_multiplicative();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Add, std::move(lhs), std::move(rhs_result.value()));
             } else if (match(TokenKind::Minus)) {
-                lhs = make_binary(BinaryOp::Sub, std::move(lhs), parse_multiplicative());
+                auto rhs_result = parse_multiplicative();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Sub, std::move(lhs), std::move(rhs_result.value()));
             } else {
                 break;
             }
@@ -7087,13 +7709,19 @@ private:
         return lhs;
     }
 
-    ExprPtr parse_multiplicative() {
-        ExprPtr lhs = parse_unary();
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_multiplicative() {
+        auto lhs_result = parse_unary();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result.value());
         for (;;) {
             if (match(TokenKind::Star)) {
-                lhs = make_binary(BinaryOp::Mul, std::move(lhs), parse_unary());
+                auto rhs_result = parse_unary();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Mul, std::move(lhs), std::move(rhs_result.value()));
             } else if (match(TokenKind::Slash)) {
-                lhs = make_binary(BinaryOp::Div, std::move(lhs), parse_unary());
+                auto rhs_result = parse_unary();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                lhs = make_binary(BinaryOp::Div, std::move(lhs), std::move(rhs_result.value()));
             } else {
                 break;
             }
@@ -7101,18 +7729,20 @@ private:
         return lhs;
     }
 
-    ExprPtr parse_unary() {
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_unary() {
         SourceLocation loc = current_loc();
         if (match(TokenKind::KwAlignof)) {
-            expect(TokenKind::LParen, "'(' after 'alignof'");
+            if (auto _r = expect(TokenKind::LParen, "'(' after 'alignof'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (!looks_like_type_start()) {
                 const Token& tok = peek();
-                throw ParseError(tok.line, tok.column,
+                return std::unexpected(ParseError(tok.line, tok.column,
                                  "'alignof' requires a type-id operand; GNU-style 'alignof(expression)' is not "
-                                 "supported in SCPP26 (spec §9.3)");
+                                 "supported in SCPP26 (spec §9.3)"));
             }
-            Type queried_type = parse_type();
-            expect(TokenKind::RParen, "')' after alignof type operand");
+            auto queried_type_result = parse_type();
+            if (!queried_type_result.has_value()) return std::unexpected(std::move(queried_type_result).error());
+            Type queried_type = std::move(queried_type_result.value());
+            if (auto _r = expect(TokenKind::RParen, "')' after alignof type operand"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Alignof;
             node->loc = loc;
@@ -7120,27 +7750,33 @@ private:
             return node;
         }
         if (match(TokenKind::KwSizeof)) {
-            expect(TokenKind::LParen, "'(' after 'sizeof'");
+            if (auto _r = expect(TokenKind::LParen, "'(' after 'sizeof'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             std::size_t saved_pos = pos_;
-            try {
-                if (looks_like_type_start()) {
-                    Type target_type = parse_type();
-                    expect(TokenKind::RParen, "')' after sizeof type operand");
-                    auto node = std::make_unique<Expr>();
-                    node->kind = ExprKind::Sizeof;
-                    node->loc = loc;
-                    node->type = std::move(target_type);
-                    node->sizeof_operand_is_type = true;
-                    return node;
+            bool parsed_as_type = false;
+            std::unique_ptr<Expr> type_node;
+            if (looks_like_type_start()) {
+                auto target_type_result = parse_type();
+                if (target_type_result.has_value()) {
+                    Type target_type = std::move(target_type_result.value());
+                    if (auto _r = expect(TokenKind::RParen, "')' after sizeof type operand"); _r.has_value()) {
+                        type_node = std::make_unique<Expr>();
+                        type_node->kind = ExprKind::Sizeof;
+                        type_node->loc = loc;
+                        type_node->type = std::move(target_type);
+                        type_node->sizeof_operand_is_type = true;
+                        parsed_as_type = true;
+                    }
                 }
-            } catch (const ParseError&) {
             }
+            if (parsed_as_type) return type_node;
             pos_ = saved_pos;
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Sizeof;
             node->loc = loc;
-            node->lhs = parse_expr();
-            expect(TokenKind::RParen, "')' after sizeof expression operand");
+            auto lhs_result = parse_expr();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
+            if (auto _r = expect(TokenKind::RParen, "')' after sizeof expression operand"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             return node;
         }
         // ch06 §6: `(T)expr` -- the C-style cast spelling (real C++
@@ -7160,24 +7796,28 @@ private:
             std::size_t saved_pos = pos_;
             bool parsed_as_cast = false;
             std::unique_ptr<Expr> node;
-            try {
-                advance(); // '('
-                Type target_type = parse_type();
+            advance(); // '('
+            auto target_type_result = parse_type();
+            if (target_type_result.has_value()) {
+                Type target_type = std::move(target_type_result.value());
                 if (check(TokenKind::RParen)) {
                     advance(); // ')'
-                    node = std::make_unique<Expr>();
-                    node->kind = ExprKind::Cast;
-                    node->loc = loc;
-                    node->type = std::move(target_type);
-                    node->lhs = parse_unary();
-                    parsed_as_cast = true;
+                    auto lhs_result = parse_unary();
+                    if (lhs_result.has_value()) {
+                        node = std::make_unique<Expr>();
+                        node->kind = ExprKind::Cast;
+                        node->loc = loc;
+                        node->type = std::move(target_type);
+                        node->lhs = std::move(lhs_result.value());
+                        parsed_as_cast = true;
+                    }
                 }
-            } catch (const ParseError&) {
-                // Not a type after all (e.g. `(x + y)` where `x` happens
-                // to look like a type-start token but isn't followed by
-                // a well-formed type) -- fall through to backtracking
-                // below, same as the "no ')' immediately after" case.
             }
+            // Not a type after all (e.g. `(x + y)` where `x` happens to
+            // look like a type-start token but isn't followed by a
+            // well-formed type), or the cast's operand itself failed to
+            // parse -- fall through to backtracking below, same as the
+            // "no ')' immediately after" case.
             if (parsed_as_cast) return node;
             pos_ = saved_pos;
         }
@@ -7186,7 +7826,9 @@ private:
             node->kind = ExprKind::Unary;
             node->loc = loc;
             node->unary_op = UnaryOp::Neg;
-            node->lhs = parse_unary();
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
             return node;
         }
         if (match(TokenKind::PlusPlus)) {
@@ -7194,7 +7836,9 @@ private:
             node->kind = ExprKind::Unary;
             node->loc = loc;
             node->unary_op = UnaryOp::PreInc;
-            node->lhs = parse_unary();
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
             return node;
         }
         if (match(TokenKind::MinusMinus)) {
@@ -7202,7 +7846,9 @@ private:
             node->kind = ExprKind::Unary;
             node->loc = loc;
             node->unary_op = UnaryOp::PreDec;
-            node->lhs = parse_unary();
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
             return node;
         }
         if (match(TokenKind::Bang)) {
@@ -7210,7 +7856,9 @@ private:
             node->kind = ExprKind::Unary;
             node->loc = loc;
             node->unary_op = UnaryOp::Not;
-            node->lhs = parse_unary();
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
             return node;
         }
         if (match(TokenKind::Star)) {
@@ -7222,20 +7870,24 @@ private:
             node->kind = ExprKind::Unary;
             node->loc = loc;
             node->unary_op = UnaryOp::Deref;
-            node->lhs = parse_unary();
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
             return node;
         }
         if (match(TokenKind::KwDelete)) {
             if (match(TokenKind::LBracket)) {
-                expect(TokenKind::RBracket, "']' after 'delete['");
-                throw ParseError(loc.line, loc.column,
+                if (auto _r = expect(TokenKind::RBracket, "']' after 'delete['"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                return std::unexpected(ParseError(loc.line, loc.column,
                                   "'delete[]' is not supported in this version yet; only scalar/object 'delete "
-                                  "expr' is implemented");
+                                  "expr' is implemented"));
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Delete;
             node->loc = loc;
-            node->lhs = parse_unary();
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
             return node;
         }
         if (match(TokenKind::Amp)) {
@@ -7253,22 +7905,28 @@ private:
             node->kind = ExprKind::Unary;
             node->loc = loc;
             node->unary_op = UnaryOp::AddressOf;
-            node->lhs = parse_unary();
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result.value());
             return node;
         }
-        return parse_postfix(parse_primary());
+        auto primary_result = parse_primary();
+        if (!primary_result.has_value()) return std::unexpected(std::move(primary_result).error());
+        return parse_postfix(std::move(primary_result.value()));
     }
 
-    [[nodiscard]] std::string parse_member_access_name() {
+    [[nodiscard]] std::expected<std::string, ParseError> parse_member_access_name() {
         if (check(TokenKind::Identifier) && std::string(peek().text) == "operator") {
             advance(); // 'operator'
             if (match(TokenKind::Star)) return "operator_deref";
             if (match(TokenKind::Arrow)) return "operator_arrow";
             if (match(TokenKind::Assign)) return "operator_assign";
-            throw ParseError(current_loc().line, current_loc().column,
-                             "expected '*', '->', or '=' after 'operator' in member access");
+            return std::unexpected(ParseError(current_loc().line, current_loc().column,
+                             "expected '*', '->', or '=' after 'operator' in member access"));
         }
-        return std::string(expect(TokenKind::Identifier, "field or method name").text);
+        auto tok_result = expect(TokenKind::Identifier, "field or method name");
+        if (!tok_result.has_value()) return std::unexpected(std::move(tok_result).error());
+        return std::string(tok_result.value().text);
     }
 
     // Applies trailing `.name` (Member, or a method call -- ch05 §5.9 --
@@ -7278,13 +7936,15 @@ private:
     // rather than a real pointer), and `[index]` (Subscript) operators,
     // e.g. `p.x`, `arr[i]`, `p.inner.x`, `arr[i].x`, `p->x`,
     // `obj.method(args)`.
-    ExprPtr parse_postfix(ExprPtr expr) {
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_postfix(ExprPtr expr) {
         for (;;) {
             if (match(TokenKind::Dot)) {
                 if (match(TokenKind::Tilde)) {
-                    Type destroyed_type = parse_type();
-                    expect(TokenKind::LParen, "'('");
-                    expect(TokenKind::RParen, "')'");
+                    auto destroyed_type_result = parse_type();
+                    if (!destroyed_type_result.has_value()) return std::unexpected(std::move(destroyed_type_result).error());
+                    Type destroyed_type = std::move(destroyed_type_result.value());
+                    if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     auto node = std::make_unique<Expr>();
                     node->kind = ExprKind::Destroy;
                     node->loc = expr->loc;
@@ -7293,13 +7953,19 @@ private:
                     expr = std::move(node);
                     continue;
                 }
-                std::string name = parse_member_access_name();
-                expr = parse_member_or_method_call(std::move(expr), name);
+                auto name_result = parse_member_access_name();
+                if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+                std::string name = std::move(name_result.value());
+                auto expr_result = parse_member_or_method_call(std::move(expr), name);
+                if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+                expr = std::move(expr_result.value());
             } else if (match(TokenKind::Arrow)) {
                 if (match(TokenKind::Tilde)) {
-                    Type destroyed_type = parse_type();
-                    expect(TokenKind::LParen, "'('");
-                    expect(TokenKind::RParen, "')'");
+                    auto destroyed_type_result = parse_type();
+                    if (!destroyed_type_result.has_value()) return std::unexpected(std::move(destroyed_type_result).error());
+                    Type destroyed_type = std::move(destroyed_type_result.value());
+                    if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     auto node = std::make_unique<Expr>();
                     node->kind = ExprKind::Destroy;
                     node->loc = expr->loc;
@@ -7309,7 +7975,9 @@ private:
                     expr = std::move(node);
                     continue;
                 }
-                std::string name = parse_member_access_name();
+                auto name_result = parse_member_access_name();
+                if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+                std::string name = std::move(name_result.value());
                 // `this->x` (ch05 §5.9): `this` is represented as an
                 // ordinary Reference-typed pseudo-parameter (see parser's
                 // make_this_param), which already auto-dereferences on
@@ -7319,13 +7987,19 @@ private:
                 // unique_ptr `p` below, there is no separate pointee to
                 // Deref through first.
                 if (expr->kind == ExprKind::Identifier && expr->name == "this") {
-                    expr = parse_member_or_method_call(std::move(expr), name);
+                    auto expr_result = parse_member_or_method_call(std::move(expr), name);
+                    if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+                    expr = std::move(expr_result.value());
                     continue;
                 }
-                expr = parse_member_or_method_call(std::move(expr), name, /*through_arrow=*/true);
+                auto expr_result = parse_member_or_method_call(std::move(expr), name, /*through_arrow=*/true);
+                if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+                expr = std::move(expr_result.value());
             } else if (match(TokenKind::LBracket)) {
-                ExprPtr index = parse_expr();
-                expect(TokenKind::RBracket, "']'");
+                auto index_result = parse_expr();
+                if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
+                ExprPtr index = std::move(index_result.value());
+                if (auto _r = expect(TokenKind::RBracket, "']'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Subscript;
                 node->loc = expr->loc;
@@ -7381,10 +8055,12 @@ private:
                 }
                 if (!check(TokenKind::RParen)) {
                     do {
-                        node->args.push_back(parse_expr());
+                        auto arg_result = parse_expr();
+                        if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                        node->args.push_back(std::move(arg_result.value()));
                     } while (match(TokenKind::Comma));
                 }
-                expect(TokenKind::RParen, "')'");
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 expr = std::move(node);
             } else if (check(TokenKind::LBrace) && expr->kind == ExprKind::Identifier) {
                 auto node = std::make_unique<Expr>();
@@ -7393,7 +8069,9 @@ private:
                 node->name = expr->name;
                 node->explicit_global_qualification = expr->explicit_global_qualification;
                 node->explicit_template_args = std::move(expr->explicit_template_args);
-                node->args = parse_brace_initializer_args();
+                auto args_result = parse_brace_initializer_args();
+                if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+                node->args = std::move(args_result.value());
                 expr = std::move(node);
             } else {
                 break;
@@ -7409,7 +8087,7 @@ private:
     // synthesized function symbol only once `base`'s static type is known
     // (movecheck/codegen, not the parser). Otherwise it's a plain field
     // access, unchanged from before method calls existed.
-    ExprPtr parse_member_or_method_call(ExprPtr base, const std::string& name, bool through_arrow = false) {
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_member_or_method_call(ExprPtr base, const std::string& name, bool through_arrow = false) {
         SourceLocation loc = base->loc;
         if (match(TokenKind::LParen)) {
             auto node = std::make_unique<Expr>();
@@ -7420,10 +8098,12 @@ private:
             node->through_arrow = through_arrow;
             if (!check(TokenKind::RParen)) {
                 do {
-                    node->args.push_back(parse_expr());
+                    auto arg_result = parse_expr();
+                    if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                    node->args.push_back(std::move(arg_result.value()));
                 } while (match(TokenKind::Comma));
             }
-            expect(TokenKind::RParen, "')'");
+            if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             return node;
         }
         auto node = std::make_unique<Expr>();
@@ -7447,9 +8127,9 @@ private:
     // the same reason: it needs per-function type information the
     // parser doesn't have) for where both are resolved and the concrete
     // synthesized class this literal constructs is determined.
-    ExprPtr parse_lambda_expression() {
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_lambda_expression() {
         SourceLocation loc = current_loc();
-        expect(TokenKind::LBracket, "'['");
+        if (auto _r = expect(TokenKind::LBracket, "'['"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         auto node = std::make_unique<Expr>();
         node->kind = ExprKind::Lambda;
@@ -7480,7 +8160,7 @@ private:
                 first = false;
 
                 if (match(TokenKind::Star)) {
-                    expect(TokenKind::KwThis, "'this' (after '*' in a capture)");
+                    if (auto _r = expect(TokenKind::KwThis, "'this' (after '*' in a capture)"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     LambdaCapture capture;
                     capture.name = "this";
                     capture.by_reference = false;
@@ -7499,20 +8179,26 @@ private:
                     continue;
                 }
                 capture.by_reference = match(TokenKind::Amp);
-                capture.name = std::string(expect(TokenKind::Identifier, "captured variable name").text);
+                auto capture_name_result = expect(TokenKind::Identifier, "captured variable name");
+                if (!capture_name_result.has_value()) return std::unexpected(std::move(capture_name_result).error());
+                capture.name = std::string(capture_name_result.value().text);
                 if (match(TokenKind::Assign)) {
                     // Init-capture: `[name = expr]`/`[&name = expr]` --
                     // `expr` is evaluated in the *enclosing* scope; how
                     // a move-only type crosses into a closure (ch05
                     // §5.12), e.g. `[p = std::move(p)]`.
-                    capture.init = parse_expr();
+                    auto _tmp_result = parse_expr();
+                    if (!_tmp_result.has_value()) return std::unexpected(std::move(_tmp_result).error());
+                    capture.init = std::move(_tmp_result.value());
                 }
                 node->lambda_captures.push_back(std::move(capture));
             } while (match(TokenKind::Comma));
         }
-        expect(TokenKind::RBracket, "']'");
+        if (auto _r = expect(TokenKind::RBracket, "']'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
-        node->lambda_params = parse_param_list();
+        auto lambda_params_result = parse_param_list();
+        if (!lambda_params_result.has_value()) return std::unexpected(std::move(lambda_params_result).error());
+        node->lambda_params = std::move(lambda_params_result.value());
         // ch05 §5.12: real C++14 generic lambdas (a bare `auto`
         // parameter, e.g. `[](auto x) { ... }`) are supported -- only a
         // *named*-concept-constrained lambda parameter (`Shape auto`)
@@ -7529,25 +8215,29 @@ private:
         // cloning.
         for (const Param& param : node->lambda_params) {
             if (!param.generic_concept.empty() && param.generic_concept != "$auto") {
-                throw ParseError(current_loc().line, current_loc().column,
+                return std::unexpected(ParseError(current_loc().line, current_loc().column,
                                   "a generic (concept-constrained) parameter is not supported on a lambda "
                                   "parameter list in this version (ch05 §5.11 -- only a free function may be "
-                                  "generic); a bare 'auto' parameter is fine");
+                                  "generic); a bare 'auto' parameter is fine"));
             }
         }
 
         node->lambda_is_mutable = match(TokenKind::KwMutable);
 
         if (match(TokenKind::Arrow)) {
-            node->type = parse_type();
+            auto type_result = parse_type();
+            if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
+            node->type = std::move(type_result.value());
             node->has_lambda_explicit_return_type = true;
         }
 
-        node->lambda_body = parse_block();
+        auto lambda_body_result = parse_block();
+        if (!lambda_body_result.has_value()) return std::unexpected(std::move(lambda_body_result).error());
+        node->lambda_body = std::move(lambda_body_result.value());
         return node;
     }
 
-    ExprPtr parse_primary() {
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_primary() {
         const Token& tok = peek();
         // current_loc() (not a bare make_source_location(tok.line,
         // tok.column)) so every primary expression this function builds
@@ -7566,10 +8256,13 @@ private:
         if (check(TokenKind::ColonColon)) {
             std::string global_name = peek_global_qualified_name();
             if (global_name == "std::move") {
-                parse_global_qualified_name();
-                expect(TokenKind::LParen, "'('");
-                ExprPtr inner = parse_expr();
-                expect(TokenKind::RParen, "')'");
+                auto global_name_result = parse_global_qualified_name();
+                if (!global_name_result.has_value()) return std::unexpected(std::move(global_name_result).error());
+                if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                auto inner_result = parse_expr();
+                if (!inner_result.has_value()) return std::unexpected(std::move(inner_result).error());
+                ExprPtr inner = std::move(inner_result.value());
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Move;
                 node->loc = loc;
@@ -7578,10 +8271,13 @@ private:
             }
             if (global_name == "scpp::is_thread_movable" || global_name == "scpp::is_thread_shareable") {
                 bool movable = global_name == "scpp::is_thread_movable";
-                parse_global_qualified_name();
-                expect(TokenKind::LParen, "'('");
-                Type queried = parse_type();
-                expect(TokenKind::RParen, "')'");
+                auto global_name_result = parse_global_qualified_name();
+                if (!global_name_result.has_value()) return std::unexpected(std::move(global_name_result).error());
+                if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                auto queried_result = parse_type();
+                if (!queried_result.has_value()) return std::unexpected(std::move(queried_result).error());
+                Type queried = std::move(queried_result.value());
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::TypeTrait;
                 node->loc = loc;
@@ -7589,7 +8285,9 @@ private:
                 node->type = std::move(queried);
                 return node;
             }
-            std::string name = parse_global_qualified_name();
+            auto name_result = parse_global_qualified_name();
+            if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+            std::string name = std::move(name_result.value());
             if (std::optional<std::string> specialized_name =
                     try_parse_template_static_member_name(name, /*explicit_global_qualification=*/true)) {
                 name = *specialized_name;
@@ -7597,11 +8295,16 @@ private:
             auto generic_fn_it = generic_function_template_params_.find(name);
             std::vector<ExplicitTemplateArg> explicit_template_args;
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
-                explicit_template_args = parse_explicit_template_args(generic_fn_it->second);
-            } else if (std::optional<std::vector<ExplicitTemplateArg>> type_template_args =
-                           try_parse_explicit_generic_type_constructor_template_args(
-                               name, /*explicit_global_qualification=*/true)) {
-                explicit_template_args = std::move(*type_template_args);
+                auto template_args_result = parse_explicit_template_args(generic_fn_it->second);
+                if (!template_args_result.has_value()) return std::unexpected(std::move(template_args_result).error());
+                explicit_template_args = std::move(template_args_result.value());
+            } else {
+                auto type_template_args_result = try_parse_explicit_generic_type_constructor_template_args(
+                    name, /*explicit_global_qualification=*/true);
+                if (!type_template_args_result.has_value()) return std::unexpected(std::move(type_template_args_result).error());
+                if (type_template_args_result.value().has_value()) {
+                    explicit_template_args = std::move(type_template_args_result).value().value();
+                }
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
@@ -7618,9 +8321,11 @@ private:
 
         if (check_std_qualified("move")) {
             consume_std_qualified();
-            expect(TokenKind::LParen, "'('");
-            ExprPtr inner = parse_expr();
-            expect(TokenKind::RParen, "')'");
+            if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            auto inner_result = parse_expr();
+            if (!inner_result.has_value()) return std::unexpected(std::move(inner_result).error());
+            ExprPtr inner = std::move(inner_result.value());
+            if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Move;
             node->loc = loc;
@@ -7631,11 +8336,13 @@ private:
         if (check_scpp_qualified("is_thread_movable") || check_scpp_qualified("is_thread_shareable")) {
             bool movable = check_scpp_qualified("is_thread_movable");
             advance(); // scpp
-            expect(TokenKind::ColonColon, "'::'");
+            if (auto _r = expect(TokenKind::ColonColon, "'::'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             advance(); // is_thread_*
-            expect(TokenKind::LParen, "'('");
-            Type queried = parse_type();
-            expect(TokenKind::RParen, "')'");
+            if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            auto queried_result = parse_type();
+            if (!queried_result.has_value()) return std::unexpected(std::move(queried_result).error());
+            Type queried = std::move(queried_result.value());
+            if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::TypeTrait;
             node->loc = loc;
@@ -7647,15 +8354,19 @@ private:
         if (match(TokenKind::KwNew)) {
             ExprPtr placement;
             if (match(TokenKind::LParen)) {
-                placement = parse_expr();
-                expect(TokenKind::RParen, "')'");
+                auto placement_result = parse_expr();
+                if (!placement_result.has_value()) return std::unexpected(std::move(placement_result).error());
+                placement = std::move(placement_result.value());
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
-            Type element_type = parse_type();
+            auto element_type_result = parse_type();
+            if (!element_type_result.has_value()) return std::unexpected(std::move(element_type_result).error());
+            Type element_type = std::move(element_type_result.value());
             if (match(TokenKind::LBracket)) {
-                expect(TokenKind::RBracket, "']' after 'new T['");
-                throw ParseError(loc.line, loc.column,
+                if (auto _r = expect(TokenKind::RBracket, "']' after 'new T['"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                return std::unexpected(ParseError(loc.line, loc.column,
                                   "'new T[n]' is not supported in this version yet; only scalar/object 'new T' "
-                                  "and 'new T(args...)' are implemented");
+                                  "and 'new T(args...)' are implemented"));
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::New;
@@ -7666,10 +8377,12 @@ private:
                 node->has_paren_init = true;
                 if (!check(TokenKind::RParen)) {
                     do {
-                        node->args.push_back(parse_expr());
+                        auto arg_result = parse_expr();
+                        if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                        node->args.push_back(std::move(arg_result.value()));
                     } while (match(TokenKind::Comma));
                 }
-                expect(TokenKind::RParen, "')'");
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             return node;
         }
@@ -7684,11 +8397,15 @@ private:
         if (check(TokenKind::Identifier) && peek().text == "static_cast" && peek_at(1).kind == TokenKind::Less) {
             advance(); // 'static_cast'
             advance(); // '<'
-            Type target_type = parse_type();
-            expect(TokenKind::Greater, "'>'");
-            expect(TokenKind::LParen, "'('");
-            ExprPtr operand = parse_expr();
-            expect(TokenKind::RParen, "')'");
+            auto target_type_result = parse_type();
+            if (!target_type_result.has_value()) return std::unexpected(std::move(target_type_result).error());
+            Type target_type = std::move(target_type_result.value());
+            if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            auto operand_result = parse_expr();
+            if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
+            ExprPtr operand = std::move(operand_result.value());
+            if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Cast;
             node->loc = loc;
@@ -7715,14 +8432,18 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::CharLiteral;
             node->loc = loc;
-            node->int_value = decode_char_literal(tok);
+            auto int_value_result = decode_char_literal(tok);
+            if (!int_value_result.has_value()) return std::unexpected(std::move(int_value_result).error());
+            node->int_value = int_value_result.value();
             return node;
         }
         if (match(TokenKind::StringLiteral)) {
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::StringLiteral;
             node->loc = loc;
-            node->name = decode_string_literal(tok);
+            auto name_result = decode_string_literal(tok);
+            if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+            node->name = std::move(name_result.value());
             return node;
         }
         if (match(TokenKind::KwThis)) {
@@ -7778,11 +8499,16 @@ private:
             auto generic_fn_it = generic_function_template_params_.find(name);
             std::vector<ExplicitTemplateArg> explicit_template_args;
             if (generic_fn_it != generic_function_template_params_.end() && check(TokenKind::Less)) {
-                explicit_template_args = parse_explicit_template_args(generic_fn_it->second);
-            } else if (std::optional<std::vector<ExplicitTemplateArg>> type_template_args =
-                           try_parse_explicit_generic_type_constructor_template_args(
-                               name, /*explicit_global_qualification=*/false)) {
-                explicit_template_args = std::move(*type_template_args);
+                auto template_args_result = parse_explicit_template_args(generic_fn_it->second);
+                if (!template_args_result.has_value()) return std::unexpected(std::move(template_args_result).error());
+                explicit_template_args = std::move(template_args_result.value());
+            } else {
+                auto type_template_args_result = try_parse_explicit_generic_type_constructor_template_args(
+                    name, /*explicit_global_qualification=*/false);
+                if (!type_template_args_result.has_value()) return std::unexpected(std::move(type_template_args_result).error());
+                if (type_template_args_result.value().has_value()) {
+                    explicit_template_args = std::move(type_template_args_result).value().value();
+                }
             }
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
@@ -7801,11 +8527,13 @@ private:
                 std::optional<BinaryOp> op = parse_fold_operator();
                 if (!op.has_value()) {
                     const Token& bad = peek();
-                    throw ParseError(bad.line, bad.column,
-                                      "expected a fold operator after '...' (ch05 §5.11)");
+                    return std::unexpected(ParseError(bad.line, bad.column,
+                                      "expected a fold operator after '...' (ch05 §5.11)"));
                 }
-                ExprPtr pack = parse_unary();
-                expect(TokenKind::RParen, "')'");
+                auto pack_result = parse_unary();
+                if (!pack_result.has_value()) return std::unexpected(std::move(pack_result).error());
+                ExprPtr pack = std::move(pack_result.value());
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Fold;
                 node->loc = loc;
@@ -7815,7 +8543,9 @@ private:
                 return node;
             }
             pos_ = saved_pos;
-            ExprPtr first = parse_unary();
+            auto first_result = parse_unary();
+            if (!first_result.has_value()) return std::unexpected(std::move(first_result).error());
+            ExprPtr first = std::move(first_result.value());
             if (std::optional<BinaryOp> op = parse_fold_operator(); op.has_value() && check(TokenKind::Ellipsis)) {
                 advance(); // '...'
                 auto node = std::make_unique<Expr>();
@@ -7826,23 +8556,27 @@ private:
                 if (std::optional<BinaryOp> trailing = parse_fold_operator()) {
                     if (*trailing != *op) {
                         const Token& bad = peek();
-                        throw ParseError(bad.line, bad.column,
+                        return std::unexpected(ParseError(bad.line, bad.column,
                                           "a binary fold expression must use the same operator on both sides of "
-                                          "'...' (ch05 §5.11)");
+                                          "'...' (ch05 §5.11)"));
                     }
-                    node->rhs = parse_unary();
+                    auto rhs_result = parse_unary();
+                    if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                    node->rhs = std::move(rhs_result.value());
                 }
-                expect(TokenKind::RParen, "')'");
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 return node;
             }
             pos_ = saved_pos;
-            ExprPtr inner = parse_expr();
-            expect(TokenKind::RParen, "')'");
+            auto inner_result = parse_expr();
+            if (!inner_result.has_value()) return std::unexpected(std::move(inner_result).error());
+            ExprPtr inner = std::move(inner_result.value());
+            if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             return inner;
         }
 
-        throw ParseError(tok.line, tok.column, "expected an expression but found '" +
-                                                    std::string(tok.text) + "'");
+        return std::unexpected(ParseError(tok.line, tok.column, "expected an expression but found '" +
+                                                    std::string(tok.text) + "'"));
     }
 
     static ExprPtr make_binary(BinaryOp op, ExprPtr lhs, ExprPtr rhs) {
@@ -7876,28 +8610,35 @@ private:
 // -- via ModuleCache::resolve/resolve_partition in driver.cppm -- each
 // `--import name=path` file and same-module partition) funnels through
 // this one function, one Parser instance per file. That makes it the
-// single choke point where a ParseError, freshly thrown from anywhere
+// single choke point where a ParseError, freshly produced from anywhere
 // inside this file's own parse_program() with no file identity of its
 // own yet (see ParseError's own comment), can be stamped with *this*
 // call's file before it propagates further -- but only if it doesn't
-// already have one: a ParseError thrown while parsing an imported file
+// already have one: a ParseError produced while parsing an imported file
 // already passed through *that* file's own parse() frame (deeper in the
 // call stack, since resolving an `import` recurses into parse() before
-// this frame's own catch runs) and was stamped there already, so this
-// frame must leave it alone and simply let it keep propagating,
+// this frame's own check below runs) and was stamped there already, so
+// this frame must leave it alone and simply let it keep propagating,
 // unchanged, out to whichever file actually needed it.
-Program parse(std::vector<Token> tokens, const ModuleResolver& resolver = {},
+//
+// Returns std::expected rather than throwing (this file's own public API
+// boundary for the exception-free conversion described in ParseError's
+// comment): every caller of this function -- driver.cppm's
+// ModuleCache::resolve/resolve_partition and its own
+// emit_object_file/emit_module_artifacts/compile_to_executable, cli.cppm's
+// run_parse, and every test file that parses source directly -- now
+// checks `.has_value()` instead of using try/catch.
+[[nodiscard]] std::expected<Program, ParseError> parse(std::vector<Token> tokens, const ModuleResolver& resolver = {},
               const PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
     Parser parser(std::move(tokens), resolver, partition_resolver, std::move(source_path));
-    try {
-        return parser.parse_program();
-    } catch (ParseError& e) {
-        if (!e.loc.has_source_path()) e.loc.source_path = parser.source_path();
-        throw;
+    std::expected<Program, ParseError> result = parser.parse_program();
+    if (!result.has_value() && !result.error().loc.has_source_path()) {
+        result.error().loc.source_path = parser.source_path();
     }
+    return result;
 }
 
-Program parse(std::string_view source, const ModuleResolver& resolver = {},
+[[nodiscard]] std::expected<Program, ParseError> parse(std::string_view source, const ModuleResolver& resolver = {},
               const PartitionResolver& partition_resolver = {}, std::string source_path = {}) {
     return parse(tokenize(source), resolver, partition_resolver, std::move(source_path));
 }

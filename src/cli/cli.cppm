@@ -659,8 +659,16 @@ int run_parse(std::string_view path) {
         return 1;
     }
 
-    try {
-        scpp::Program program = scpp::parse(source);
+    scpp::Program program;
+    {
+        std::expected<scpp::Program, scpp::ParseError> parse_result = scpp::parse(source);
+        if (!parse_result.has_value()) {
+            print_diagnostic(path, source, parse_result.error().loc, parse_result.error().what());
+            return 1;
+        }
+        program = std::move(parse_result.value());
+    }
+    {
         for (const scpp::StructDef& def : program.structs) {
             std::cout << "Struct " << def.name << "\n";
             for (const scpp::StructField& field : def.fields) {
@@ -686,9 +694,6 @@ int run_parse(std::string_view path) {
                 std::cout << "(no body -- external declaration)\n";
             }
         }
-    } catch (const scpp::ParseError& e) {
-        print_diagnostic(path, source, e.loc, e.what());
-        return 1;
     }
     return 0;
 }
